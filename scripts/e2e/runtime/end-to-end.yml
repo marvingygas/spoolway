@@ -1,0 +1,153 @@
+# end-to-end — the pipeline a plan run is dispatched on.
+#
+# Installed into a throwaway project by scripts/e2e/scaffold.sh, never into this
+# one. What it is for is the half `scripts/e2e/run.sh` cannot reach: workspaces,
+# tabs, panes, focus, a gate somebody answers, a notification. Everything a
+# headless suite can decide from files and exit codes is a suite's, and nothing
+# here duplicates it.
+#
+# Every agent step names `agent: pi`, deliberately and without exception. A
+# run of this pipeline spends GPU time and nothing else, so a plan can be queued
+# as often as it takes to see what a pane does — which is the only reason these
+# runs happen at all. A cloud step here would make watching the multiplexer an
+# expense, and the first thing anyone would do about that is stop watching.
+#
+# The prompts are the shipped ones (`spoolway init` writes them), because the
+# product's own prompts driving a real run is the point of the exercise. The
+# one exception is `verifier`, which staffs the gate: nothing ships a prompt
+# for a step whose job is to stop and ask.
+#
+# `spoolway pipeline check` validates this file with no project around it, and
+# that is how it is kept honest — scaffold.sh runs it after installing.
+
+description: >-
+  The pipeline a plan run is dispatched on, in a throwaway project scaffold.sh
+  builds: every agent step on the local model, an observer at the entry, and a
+  gate a person answers. Watching the multiplexer is the point; nothing here
+  ships to users.
+
+steps:
+  # The entry, so the observer is up before the first lane is and the record
+  # starts with `implement`'s opening turn rather than after it. Every task
+  # passes through it on its way in, which is how one observer comes to be
+  # running whatever the task count is: `observe.sh` takes a lock and the second
+  # task's run exits immediately, having found it held. A backgrounded `run:`
+  # step routes nowhere on failure — `background: true` refuses `on_fail` — so a
+  # task never waits for it and never fails because of it.
+  #
+  # A command step at the entry cuts the task's worktree itself, so there is no
+  # lane it has to follow. Which also makes this the one plan-run assertion that
+  # a pipeline may open on something other than an agent step.
+  #
+  # The path is the project's own copy: scaffold.sh installs the script beside
+  # the pipeline, so this line needs no rewriting per project and the step still
+  # resolves from a task's worktree, which is where a command step runs.
+  - id: observe
+    description: Start the one observer that reads every lane's pane while this run happens.
+    run: bash "$SPOOLWAY_REPO/.spoolway/observe.sh"
+    background: true
+    # Well past a run rather than merely past a task: the default is 30m, which
+    # is shorter than any plan worth watching, and a killed observer is a gap in
+    # the record that nothing announces.
+    timeout: 6h
+    on_pass: implement
+
+  - id: implement
+    description: Write the code to satisfy the task's acceptance criteria.
+    agent: pi
+    prompt: implementer
+    model: your-local-model
+    session: true
+    on_pass: review
+    on_fail: fix
+
+  # `session: true` on both halves of the review loop, which is what the shipped
+  # `default` pipeline declares and so what a plan run has to be running if it
+  # is to be watching the product. It is also the only way a plan reaches the
+  # context-window settings with a real model behind them: a stand-in's
+  # transcript is written by the harness and sized to order, and what nothing
+  # headless can show is whether a *real* conversation crosses
+  # `agents.pi.session_reuse_ctx` percent of the window a real model was
+  # given — and what the lane does on the visit after it does.
+  # A map rather than a bare number, so a plan can watch one route run out of
+  # rounds while the others stay open — which is what `step.loop` means and
+  # what a bare number cannot show.
+  #
+  # `fix` always exits back through `review`, so this is where the lap is
+  # counted rather than on `fix` itself. Two whole laps — arrivals from
+  # `fix`, whether or not the lane that arrives resumes `session:` above's
+  # conversation. The two settings do not interact any more: what ends a
+  # review loop here is the second arrival, and what
+  # `agents.pi.session_reuse_ctx` decides along the way is a separate thing
+  # for a plan to watch, not a second way this budget gets spent.
+  #
+  # `on_loop_max: blocked` by name. The shipped `default` no longer declares
+  # it — a spent review loop there carries on down `on_pass` — but `local.yml`
+  # still does on every looped step, and the `escalation` plan's whole point
+  # is watching that road to `blocked` happen in a pane, so this fixture
+  # keeps it explicit. The `fix` step below is this fixture's own shape too:
+  # the shipped `default` retired its `fix` step and loops `review` straight
+  # back through `implement`, but `escalation.html` is written against
+  # `loop: {fix: 2}` and rewriting that plan is not a drift fix.
+  - id: review
+    description: Check the diff against the acceptance criteria and project standards.
+    agent: pi
+    prompt: reviewer
+    model: your-local-model
+    session: true
+    loop:
+      fix: 2
+    on_loop_max: blocked
+    on_pass: verify
+    on_fail: fix
+
+  - id: fix
+    description: Apply the fixes the reviewer asked for.
+    agent: pi
+    prompt: implementer
+    model: your-local-model
+    session: true
+    on_pass: review
+
+  # The gate. `gate: true` parks the task on `paused` after this step passes,
+  # and only a person answers that — `spoolway resume` or `spoolway resume
+  # --reject`. It holds on those terms whether or not the run is unattended;
+  # what a plan run needs is somebody there to answer it, not a setting that
+  # would make spoolway answer it instead. So leave `unattended.enabled` alone
+  # in a plan's config, or this step becomes the one thing it cannot show.
+  #
+  # Every task on this pipeline asks, because a pipeline runs every step it
+  # lists — there is no key that would make this one the last task's alone. Keep
+  # a plan run on this pipeline short, or expect to hold down `y`.
+  - id: verify
+    description: Ask the person watching whether what this task built is what they meant.
+    agent: pi
+    prompt: verifier
+    model: your-local-model
+    gate: true
+    on_pass: document
+
+  - id: document
+    description: Bring the domain documents in line with what this task changed.
+    agent: pi
+    prompt: archivist
+    model: your-local-model
+    on_pass: handover
+
+  - id: handover
+    description: >-
+      Commit, squash, push and open this task's pull request with git and
+      `gh` — no model, no rebase. Nothing is merged here; a person lands it.
+    run: spoolway stack
+    on_pass: done
+    on_fail: blocked
+
+  # `blocked` itself is not declared here any more: it is configured, not a
+  # step in this file. `Pipelines::assemble` materialises it from
+  # `unattended.blocked_*`, which scaffold.sh sets to `agent: pi` and this
+  # project's own local model — see docs/pipelines.md#staffing-blocked. Kept
+  # off the cloud like every other step here: watching the shipped
+  # `unblocker` against a real model must not cost more than watching the
+  # rest of the plan does. `spoolway init` writes the prompt along with the
+  # other shipped ones, so there is nothing of the harness's own to install
+  # for this one.

@@ -1,0 +1,13 @@
+# LF everywhere, including on a Windows checkout.
+#
+# Not a style preference: the assets under `assets/` are embedded with
+# `include_str!` and shipped into a project byte for byte, so a checkout that
+# rewrote them to CRLF would build a binary that installs CRLF files — and the
+# tests that read those bytes back (`install::tests`, which asserts a skill
+# opens with `---\n`) would fail on that machine and nowhere else. The shell
+# scripts under `scripts/` cannot survive CRLF at all.
+#
+# Git for Windows sets `core.autocrlf=true` system-wide, so without this file
+# the Windows CI job checks out a tree no other job sees.
+* text=auto eol=lf
+*.png binary

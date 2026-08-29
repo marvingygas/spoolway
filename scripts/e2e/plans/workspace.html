@@ -1,0 +1,701 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>workspace — plan</title>
+
+<script type="application/json" id="spoolway-plan">
+{
+  "plan": "workspace",
+  "tasks": [
+    {
+      "id": "one-pane",
+      "context": [
+        "This task is a test of spoolway: it exists so that the shared `spoolway-dispatcher` workspace, this project's own tab in it, and a pane can be opened and looked at.",
+        "Each task gets a worktree of its own under the multiplexer's worktree root, and a pane named `<task> · <step>` — a pane in the project's shared tab, not a tab of its own.",
+        "`dispatch.tear_lanes_on_stop` is true, so stopping the dispatcher ends the task's lane, closes this project's tab and takes the worktree with it, unless the task is blocked — the shared workspace itself is never closed by a stop."
+      ],
+      "goal": "Add `src/one.rs` containing a single public function `pub fn one() -> i32` that returns 1, and declare it from `src/main.rs`.",
+      "criteria": [
+        "`src/one.rs` exists and declares `pub fn one() -> i32` returning 1",
+        "`src/main.rs` declares the module"
+      ],
+      "non_goals": [
+        "Do not touch `src/two.rs` \u2014 that is the other task's file.",
+        "Do not add tests."
+      ],
+      "references": [
+        "src/main.rs \u2014 where a module is declared"
+      ],
+      "touches": [
+        "src/one.rs",
+        "src/main.rs"
+      ],
+      "e2e": [
+        "scripts/e2e/suites/flow.sh \u2014 the headless case for a task crossing every step",
+        "scripts/e2e/plans/workspace.html \u2014 the pane and the workspace it opens"
+      ],
+      "depends_on": [],
+      "pipeline": "end-to-end"
+    },
+    {
+      "id": "two-panes",
+      "context": [
+        "This task is a test of spoolway: two tasks running at once is what makes a second pane and a second worktree appear alongside the first, in the same shared tab.",
+        "It depends on nothing in the file sense and everything in the ordering sense: it is chained after `one-pane` so the pull requests stack.",
+        "The `handover` step runs `spoolway stack`, which opens the pull request against the branch this one was cut from — that is what makes the stack real rather than named."
+      ],
+      "goal": "Add `src/two.rs` containing `pub fn two() -> i32` that returns 2, and declare it from `src/main.rs`.",
+      "criteria": [
+        "`src/two.rs` exists and declares `pub fn two() -> i32` returning 2",
+        "`src/main.rs` declares both modules, not only this one"
+      ],
+      "non_goals": [
+        "Do not remove the module the previous task declared.",
+        "Do not rename anything under `src/`."
+      ],
+      "references": [
+        "src/main.rs \u2014 where both modules are declared"
+      ],
+      "touches": [
+        "src/two.rs",
+        "src/main.rs"
+      ],
+      "e2e": [
+        "scripts/e2e/suites/stacking.sh \u2014 the headless case for a stacked pull request",
+        "scripts/e2e/plans/workspace.html \u2014 the second pane, and the conflict on `src/main.rs`"
+      ],
+      "depends_on": [
+        "one-pane"
+      ],
+      "pipeline": "end-to-end"
+    }
+  ]
+}
+</script>
+
+<style>
+:root {
+  color-scheme: light dark;
+
+  /* ---- SUBJECT: re-pitch these ten, and only these ten -----------------
+     Five colours, each in a light and a dark value. Change them HERE and
+     nowhere else: every rule below reaches them through these names, and the
+     theme switch swaps which set is live rather than restating any of them.
+     A hex typed anywhere else in this file is a colour the toggle will throw
+     away. -------------------------------------------------------------- */
+  --paper:     #ecf1ec;  /* the ground                                      */
+  --surface:   #f6faf6;  /* cards, tiles, figures sitting on the ground     */
+  --ink:       #151b16;  /* body text                                       */
+  --rule:      #d2dcd4;  /* hairlines and borders                           */
+  --accent:    #2c6b43;  /* one accent, spent sparingly                     */
+
+  --paper-d:   #141311;  /* the same five, on the dark ground               */
+  --surface-d: #1e1c19;
+  --ink-d:     #efece6;
+  --rule-d:    #2f2b26;
+  --accent-d:  #d59a5c;
+
+  /* Optional: one hue per task, when a plan has a natural set of parts and
+     the colour should mean the same thing in the drawing, in a schedule and
+     on the card. Name them for the parts, set `--layer` on each card, and
+     redefine them under the dark theme below if they need lifting. Skip this
+     entirely and every card falls back to a neutral.
+       --l-<part>: #......;                                                 */
+
+  /* ---- everything below is derived or fixed --------------------------- */
+
+  /* The open-question signal, and the one colour that is NOT re-pitchable.
+     Every spoolway page marks what is still undecided in this violet, so a
+     reader learns it once and can scan any document for it. The accent moves
+     per subject; a signal that moves is not a signal. */
+  --open:     #7c3aad;
+  --open-d:   #c9a4ef;
+
+  --ink-soft: color-mix(in srgb, var(--ink) 66%, var(--paper));
+  --ink-faint:color-mix(in srgb, var(--ink) 44%, var(--paper));
+
+  --measure: 68ch;
+  --serif: ui-serif, "Iowan Old Style", "Source Serif 4", Palatino, Georgia, serif;
+  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+}
+
+/* Going dark means pointing the five names at their `-d` values — never
+   restating a colour. That is what keeps a re-pitched palette alive across the
+   theme switch: there is no second copy of it to fall out of date, and the
+   light theme needs no block at all because `:root` above already is it.
+
+   The `:not([data-theme="light"])` guard is what lets the button win against
+   the OS preference in both directions. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper:   var(--paper-d);
+    --surface: var(--surface-d);
+    --ink:     var(--ink-d);
+    --rule:    var(--rule-d);
+    --accent:  var(--accent-d);
+    --open:    var(--open-d);
+  }
+}
+:root[data-theme="dark"] {
+  --paper:   var(--paper-d);
+  --surface: var(--surface-d);
+  --ink:     var(--ink-d);
+  --rule:    var(--rule-d);
+  --accent:  var(--accent-d);
+  --open:    var(--open-d);
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--sans);
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+
+.page {
+  max-width: 74rem;
+  margin: 0 auto;
+  padding: clamp(2rem, 6vw, 4rem) clamp(1.25rem, 4vw, 2.5rem) 6rem;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 2.5rem;
+}
+@media (min-width: 64rem) {
+  .page { grid-template-columns: 15rem minmax(0, 1fr); gap: 3rem; align-items: start; }
+  .rail { position: sticky; top: clamp(2rem, 6vw, 4rem); }
+}
+
+/* ---- rail: the switch, what this is, and where to jump ---------------- */
+
+.rail { display: flex; flex-direction: column; gap: 1.5rem; }
+/* The spoolway lockup: the two shipped 1-bit PNGs themselves, inlined so the
+   page stays standalone. Both variants ship because the mark is drawn twice —
+   black ink and white ink — and swapping the drawing beats `filter: invert(1)`,
+   which inverts anti-aliasing along with the ink and leaves grey fringes on a
+   dark ground.
+   Drawn at exactly a quarter of its natural 928x256, which lands every source
+   pixel on a whole screen pixel, so `pixelated` keeps the grid crisp instead of
+   blurring it. */
+.brand { display: block; width: 232px; height: 64px; image-rendering: pixelated; }
+.brand.on-dark { display: none; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .brand.on-light { display: none; }
+  :root:not([data-theme="light"]) .brand.on-dark { display: block; }
+}
+:root[data-theme="light"] .brand.on-light { display: block; }
+:root[data-theme="light"] .brand.on-dark { display: none; }
+:root[data-theme="dark"] .brand.on-light { display: none; }
+:root[data-theme="dark"] .brand.on-dark { display: block; }
+
+.rail .slug { font: 500 1.05rem/1.3 var(--serif); margin: 0; color: var(--accent); overflow-wrap: anywhere; }
+
+.eyebrow {
+  font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.16em;
+  text-transform: uppercase; color: var(--ink-faint); margin: 0 0 0.35rem;
+}
+
+.index { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 0.45rem; }
+.index a { color: var(--ink-soft); text-decoration: none; font-size: 0.9rem; }
+.index a:hover { color: var(--accent); }
+/* The one index entry allowed to shout. Delete it with the section. */
+.index a.open-link { color: var(--open); }
+
+/* A nested list under a fixed section, for the two sections that have parts a
+   reader jumps between: the decisions, and the tasks. The rail is the only
+   navigation this page has, so a plan with four tasks and no way to reach the
+   third one without scrolling is a rail that stopped doing its job. */
+.index ul {
+  margin: 0.4rem 0 0.15rem; padding: 0 0 0 0.7rem; list-style: none;
+  display: flex; flex-direction: column; gap: 0.3rem;
+  border-left: 1px solid var(--rule);
+}
+.index ul a { font-size: 0.82rem; color: var(--ink-faint); }
+.index ul.ids a { font-family: var(--mono); font-size: 0.76rem; }
+
+.theme {
+  align-self: flex-start;
+  font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--ink-faint); background: none; border: 1px solid var(--rule);
+  border-radius: 3px; padding: 0.3rem 0.6rem; cursor: pointer;
+}
+.theme:hover { color: var(--accent); border-color: var(--accent); }
+
+/* ---- the column ------------------------------------------------------- */
+
+.doc { display: flex; flex-direction: column; gap: 2rem; min-width: 0; }
+.doc > p, .doc > h1, .doc > h2 { max-width: var(--measure); }
+
+h1 {
+  font: 600 clamp(2.25rem, 6vw, 3.75rem)/1.03 var(--serif);
+  letter-spacing: -0.035em; text-wrap: balance; margin: 0;
+}
+.standfirst {
+  font-size: clamp(1.1rem, 2vw, 1.28rem); line-height: 1.5;
+  color: var(--ink-soft); text-wrap: pretty;
+}
+h2 {
+  font: 600 clamp(1.4rem, 2.8vw, 1.8rem)/1.2 var(--serif);
+  letter-spacing: -0.02em; text-wrap: balance; margin: 1.5rem 0 -0.75rem;
+}
+p { margin: 0; }
+a { color: var(--accent); text-underline-offset: 0.2em; }
+
+/* Every criterion in a plan is meant to be a figure somebody can check, so the
+   figures are set apart from the prose that carries them. */
+.n { font-family: var(--mono); font-size: 0.9em; font-variant-numeric: tabular-nums; color: var(--accent); }
+
+/* ---- figures ---------------------------------------------------------- */
+
+figure { margin: 0; display: flex; flex-direction: column; gap: 0.75rem; }
+figcaption { font-size: 0.875rem; color: var(--ink-faint); max-width: var(--measure); }
+
+.frame { background: var(--surface); border: 1px solid var(--rule); border-radius: 5px; padding: 1rem 0.5rem; overflow-x: auto; }
+.frame svg { display: block; width: 100%; height: auto; }
+.frame svg text { font-family: var(--sans); fill: var(--ink); }
+.frame svg .sub { font-family: var(--mono); font-size: 10.5px; fill: var(--ink-faint); letter-spacing: 0.05em; }
+.frame svg .lead { stroke: var(--ink-faint); stroke-width: 1; fill: none; opacity: 0.7; }
+.frame svg .node { fill: var(--surface); stroke: var(--rule); }
+.frame svg .edge { stroke: var(--ink-faint); fill: none; }
+.frame svg .mark { stroke: var(--accent); fill: none; }
+/* An arrowhead, as a plain polygon: a <marker> inheriting `currentColor`
+   resolves it against the marker rather than the path in some engines. Every
+   figure on the page uses this, not only the ones inside a question — which is
+   why it lives here and not down in the open-questions rules. */
+.frame svg .tip { fill: var(--ink-faint); stroke: none; }
+
+/* Enough vocabulary for a schedule, since "when does this actually happen" is
+   the question a plan gets asked most. A bar with no fill of its own is time
+   nobody is present for — a build, a wait, a review sitting in a queue. */
+.frame svg .grid { stroke: var(--rule); fill: none; }
+.frame svg .wait { fill: none; stroke: var(--ink-faint); stroke-dasharray: 3 3; }
+.frame svg .tick,
+.frame svg .dur { font-family: var(--mono); font-size: 10px; fill: var(--ink-faint); font-variant-numeric: tabular-nums; letter-spacing: 0.05em; }
+.frame svg .who { font-family: var(--mono); font-size: 11px; fill: var(--ink-soft); }
+
+/* A bar's label runs to the right of it, which walks off the plot for anything
+   starting in the far half. Put `dur end` on those and anchor the text at the
+   bar's LEFT edge instead, so the label grows back into the chart. Rule of
+   thumb: past the midpoint of the axis, use `end`. */
+.frame svg .dur.end { text-anchor: end; }
+
+/* A drawing whose own colours carry meaning — a cutaway, a photograph-like
+   rendering — keeps a lit ground in both themes instead of inverting. */
+.frame.lit { background: linear-gradient(168deg, #f8f6f2 0%, #e9e5dd 100%); }
+.frame.lit svg text { fill: #241f1a; }
+.frame.lit svg .sub { fill: #877c70; }
+.frame.lit svg .lead { stroke: #b0a79b; }
+
+/* ---- mockups: the target, drawn as the thing itself -------------------- */
+
+/* A person is going to open a file, read a command's output, or look at a
+   screen once this plan lands. Show it to them here, as itself — a config file
+   set as a config file, a terminal as a terminal — because a mockup is the
+   cheapest place in the whole project to hear "not like that".
+   `.mocks` pairs them: put the thing as it is now ABOVE the thing as it will
+   be. A mockup of a replacement, shown alone, says nothing about what changed.
+
+   NEVER SIDE BY SIDE. Two panels in two columns get half the width each, and
+   half a column is narrower than the lines a config file, a diff or a terminal
+   actually contains — so every line wraps or clips, and what clips is the right
+   hand end, which is where the change usually is. Stacked, each panel gets the
+   full column and the reader compares by scrolling a few centimetres. This
+   applies to drawings too: one figure per row, always. */
+.mocks { display: flex; flex-direction: column; gap: 1rem; margin: 0; }
+.mock {
+  background: var(--surface); border: 1px solid var(--rule); border-radius: 5px;
+  overflow: hidden; display: flex; flex-direction: column; min-width: 0;
+}
+.mock > .bar {
+  display: flex; align-items: center; gap: 0.5rem;
+  padding: 0.45rem 0.8rem; border-bottom: 1px solid var(--rule);
+  background: color-mix(in srgb, var(--ink) 4%, var(--surface));
+  font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.06em; color: var(--ink-faint);
+}
+/* Three dots for a terminal, none for a file. The bar names the artifact —
+   a path, or the command that printed it — never a caption. */
+.mock > .bar .dots { display: inline-flex; gap: 0.25rem; }
+.mock > .bar .dots i { width: 0.5rem; height: 0.5rem; border-radius: 50%; background: var(--rule); display: block; }
+.mock > .bar .tag { margin-left: auto; color: var(--accent); }
+.mock pre {
+  margin: 0; padding: 0.85rem 1rem; overflow-x: auto;
+  font-family: var(--mono); font-size: 0.78rem; line-height: 1.6;
+  color: var(--ink); tab-size: 2;
+}
+/* Three marks, and only three, so a reader learns them once: a line that goes,
+   a line that arrives, and a note that is not part of the file. */
+.mock pre .gone { color: var(--ink-faint); text-decoration: line-through; text-decoration-thickness: 1px; }
+.mock pre .new { color: var(--accent); }
+.mock pre .cmt { color: var(--ink-faint); }
+.mock.was { opacity: 0.82; }
+
+/* ---- one record per decision ------------------------------------------ */
+
+/* The page is an architecture decision record: what is true today, the
+   decisions that follow from it, and what those cost. A record is a heading, a
+   line about the forces, a figure, and a line about what the figure shows. It
+   is not an essay, and it is not a walkthrough of a patch. */
+.dec { display: flex; flex-direction: column; gap: 0.9rem; min-width: 0; }
+.dec h3 {
+  font: 600 clamp(1.1rem, 2.2vw, 1.32rem)/1.25 var(--serif);
+  letter-spacing: -0.01em; text-wrap: balance; margin: 0; max-width: var(--measure);
+}
+.dec > p { max-width: var(--measure); }
+.dec .forces {
+  color: var(--ink-soft); font-size: 0.94rem;
+  border-left: 2px solid var(--rule); padding-left: 0.9rem;
+}
+
+/* Point at the file that already says it. A plan that restates how the system
+   works today goes stale the day the system changes; a path stays true. */
+.refs { margin: 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 0.25rem 1.25rem; font-size: 0.8rem; color: var(--ink-faint); }
+.refs code { font-family: var(--mono); color: var(--ink-soft); }
+
+/* What follows from the decisions above — both directions. The list of costs
+   is never the empty one: a decision with no cost was not a decision. */
+.cons { margin: 0; padding-left: 1.05rem; display: flex; flex-direction: column; gap: 0.45rem; max-width: var(--measure); }
+.cons li.cost::marker { color: var(--accent); }
+
+/* ---- one card per proposed task --------------------------------------- */
+
+/* One card per row, never a masonry of columns. A task card carries two lists,
+   a paragraph and a glob strip; squeezed into a half-width column it wraps into
+   an unreadable ladder, and the reader is here to compare tasks top to bottom
+   anyway. The two lists go side by side INSIDE the card instead, which is where
+   the horizontal room actually helps. */
+.tasks { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1rem; margin: 0; padding: 0; list-style: none; }
+
+.task {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-top: 3px solid var(--layer, var(--ink-faint));
+  border-radius: 5px;
+  padding: 0.95rem 1.15rem 1.15rem;
+  display: flex; flex-direction: column; gap: 0.7rem;
+}
+.task > header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.15rem 0.75rem; }
+.task h3 { font: 600 1.02rem/1.3 var(--mono); margin: 0; color: var(--layer, var(--ink)); overflow-wrap: anywhere; }
+.task .waits { font-family: var(--mono); font-size: 0.67rem; letter-spacing: 0.05em; color: var(--ink-faint); }
+.task > p { color: var(--ink-soft); font-size: 0.94rem; max-width: var(--measure); }
+.task .lists { display: grid; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); gap: 0.9rem 2rem; }
+.task h4 {
+  font-family: var(--mono); font-size: 0.65rem; letter-spacing: 0.14em;
+  text-transform: uppercase; color: var(--ink-faint); font-weight: 400; margin: 0 0 0.3rem;
+}
+.task ul { margin: 0; padding-left: 1.05rem; display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.9rem; }
+.task li::marker { color: var(--layer, var(--ink-faint)); }
+.task .no h4, .task .no li::marker { color: var(--accent); }
+
+.globs { display: flex; flex-wrap: wrap; gap: 0.3rem; margin: 0.1rem 0 0; padding: 0; list-style: none; }
+.globs li { font-family: var(--mono); font-size: 0.7rem; padding: 0.1rem 0.4rem; border: 1px solid var(--rule); border-radius: 3px; color: var(--ink-faint); }
+
+/* ---- tables and the closing note --------------------------------------- */
+
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 0.92rem; }
+th, td { text-align: left; padding: 0.6rem 1rem 0.6rem 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
+th { font-family: var(--mono); font-size: 0.67rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-faint); font-weight: 400; }
+td code { font-family: var(--mono); font-size: 0.85em; color: var(--accent); }
+
+/* ---- open questions ---------------------------------------------------- */
+
+/* The one thing a reader scans for. A plan with no violet on it is a plan with
+   nothing left to decide — so never soften this, never re-pitch its colour, and
+   never leave an empty `.open` block behind as a placeholder. Delete the
+   section instead. */
+.opens { display: flex; flex-direction: column; gap: 0.9rem; margin: 0; }
+.open {
+  border-left: 3px solid var(--open);
+  background: color-mix(in srgb, var(--open) 9%, var(--surface));
+  border-radius: 0 5px 5px 0;
+  padding: 0.9rem 1.15rem 1rem;
+  display: flex; flex-direction: column; gap: 0.4rem;
+  max-width: var(--measure);
+}
+.open > .eyebrow { color: var(--open); margin: 0; }
+.open figure { margin: 0.35rem 0 0; }
+/* A question's drawing marks in violet, not the accent — inside a question the
+   mark and the signal are the same thing. */
+.open .frame svg .mark { stroke: var(--open); }
+.open .frame svg text.mark { fill: var(--open); stroke: none; }
+.open .frame svg .tip.on { fill: var(--open); }
+.open h3 { font: 600 1rem/1.35 var(--sans); margin: 0; color: var(--open); }
+.open p { color: var(--ink-soft); font-size: 0.94rem; }
+
+/* An open question's answers are a ballot, not a list. Ordered best-first, the
+   first one carrying `rec`, each with a box the reader can tick — so agreeing
+   costs one click instead of a paragraph explaining which one they meant.
+   Nothing reads these ticks: the box is how the reader decides, and they tell
+   you in their next message. If none of them fits, that is also the answer,
+   and `.ballot` says so on every question so nobody has to guess. */
+.opts { list-style: none; margin: 0.1rem 0 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; }
+.opts li { margin: 0; }
+.opts label { display: flex; align-items: flex-start; gap: 0.6rem; font-size: 0.94rem; color: var(--ink-soft); cursor: pointer; }
+.opts label:hover { color: var(--ink); }
+.opts input { flex: none; margin: 0.33rem 0 0; accent-color: var(--open); cursor: pointer; }
+.opts input:checked + span { color: var(--ink); }
+.opts .rec {
+  font-family: var(--mono); font-size: 0.6rem; letter-spacing: 0.12em; text-transform: uppercase;
+  font-style: normal; color: var(--open); border: 1px solid var(--open); border-radius: 3px;
+  padding: 0.05rem 0.35rem; margin-left: 0.45rem; white-space: nowrap;
+}
+.ballot { font-size: 0.82rem; color: var(--ink-faint); margin: 0.15rem 0 0; }
+
+.close {
+  border-left: 2px solid var(--accent); padding: 0.85rem 1.1rem;
+  background: var(--surface); border-radius: 0 4px 4px 0;
+  max-width: var(--measure); display: flex; flex-direction: column; gap: 0.3rem;
+}
+
+.key { display: flex; flex-wrap: wrap; gap: 0.4rem 1.5rem; font-size: 0.8rem; color: var(--ink-soft); }
+.key span { display: inline-flex; align-items: center; gap: 0.45rem; }
+.key i { width: 1.5rem; height: 0.7rem; border-radius: 2px; display: inline-block; }
+
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
+@media print {
+  body { background: #fff; color: #000; }
+  .rail { display: none; }
+  .task { break-inside: avoid; }
+}
+</style>
+</head>
+
+<body>
+<div class="page">
+
+  <aside class="rail">
+    <img class="brand on-light" alt="spoolway"
+         src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAyAAAADgCAYAAAD7cAJBAAAFHUlEQVR4nO3ZQQ6cMBAAQRPx/y+TP8RRz1quuiMGrxfU8loAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACstdYzPQAAXOrbvN43HDjSn+kBAACAewgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAIDMOz3AWuubHuByz/QAAADcwwkIAACQESAAAEBGgAAAABkBAgAAZAQIAACQESAAAEBGgAAAABkBAgAAZAQIAACQESAAAEBGgAAAABkBAgAAZAQIAACQESAAAEBGgAAAAJl3eoC11rN5/Xf4/Xftzn+66fXfdfr+23X6/p1ef+u35/T1mzb9/Z12+vPf/v+7/fcbnd8JCAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAACZd3qAH/BtXv8M3/900+t/u+n1m/79p++/a3r+6fvvOn1+2DG9f/3/LuYEBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAIDMOz3AD3g2r//+yxT3On39d+cH4N/svv9vf39Pfz+5mBMQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADLv9AA/4Nu8/hm+/+1213/X9P7ZNb3/pp8fmDP9/px+/+2aXr9d0+t/+/4Z5QQEAADICBAAACAjQAAAgIwAAQAAMgIEAADICBAAACAjQAAAgIwAAQAAMgIEAADICBAAACAjQAAAgIwAAQAAMgIEAADICBAAACAjQAAAgMwzPcBa65se4HLTe+D03//09Zue/3TT+/f03+/29Tv9+W9//5z+/NP7b9f0+k07ev85AQEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAg80wPAGz5Nq/3DgCA8xz9/XcCAgAAZAQIAACQESAAAEBGgAAAABkBAgAAZAQIAACQESAAAEBGgAAAABkBAgAAZAQIAACQESAAAEBGgAAAABkBAgAAZAQIAACQESAAAEDmnR4AAABi3/QAm57pAXY4AQEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA2F86xDFKC/+bxQAAAABJRU5ErkJggg==">
+    <img class="brand on-dark" alt="spoolway"
+         src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAyAAAADgCAYAAAD7cAJBAAAFvUlEQVR4nO3ZQY6kMBAAQVjx/y+zf5gaZY1FxB1RbdyglO/3fS8AAIDCv+0BAACA7xAgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAACZZ3sAAPiod3j9/StTAMScgAAAABkBAgAAZAQIAACQESAAAEBGgAAAABkBAgAAZAQIAACQESAAAEBGgAAAABkBAgAAZAQIAACQESAAAEBGgAAAABkBAgAAZAQIAACQESAAAEBGgAAAABkBAgAAZAQIAACQESAAAEBGgAAAABkBAgAAZAQIAACQESAAAEBGgAAAABkBAgAAZAQIAACQESAAAEBGgAAAABkBAgAAZAQIAACQebYHuK7r3R7g4+7tAQAA+A4nIAAAQEaAAAAAGQECAABkBAgAAJARIAAAQEaAAAAAGQECAABkBAgAAJARIAAAQEaAAAAAGQECAABkBAgAAJARIAAAQEaAAAAAGQECAABknu0Bruu6h9e/h99/ajr/6bbXf+r0/Td1+v7dXn/rN3P6+m3b/v5uO/33f/3/9/Xntzq/ExAAACAjQAAAgIwAAQAAMgIEAADICBAAACAjQAAAgIwAAQAAMgIEAADICBAAACAjQAAAgIwAAQAAMgIEAADICBAAACAjQAAAgIwAAQAAMs/2AH/AO7z+Xr7/6bbX/+u212/7+W/ff2p7/u37T50+P0xs71//vw9zAgIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABA5tke4A+4h9e/vzLFd52+/tP5AfiZ6fv/6+/v7e8nH+YEBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAIDMsz3AH/AOr7+X7/910/Wf2t4/U9v7b/v3A3u235/b77+p7fWb2l7/r++fVU5AAACAjAABAAAyAgQAAMgIEAAAICNAAACAjAABAAAyAgQAAMgIEAAAICNAAACAjAABAAAyAgQAAMgIEAAAICNAAACAjAABAAAyAgQAAMg82wNc1/VuDzC0Pf/0/vevTPFz2+s3tb1+U6fPPzX9/dv7d/v5Wb9dp7//T7//6ft3e/7Tbe/fo5+fExAAACAjQAAAgIwAAQAAMgIEAADICBAAACAjQAAAgIwAAQAAMgIEAADICBAAACAjQAAAgIwAAQAAMgIEAADICBAAACAjQAAAgIwAAQAAMvf7vtszAD83/QPfvzIFAFA6+vvvBAQAAMgIEAAAICNAAACAjAABAAAyAgQAAMgIEAAAICNAAACAjAABAAAyAgQAAMgIEAAAICNAAACAjAABAAAyAgQAAMgIEAAAICNAAACAzLM9AAAAxN7tAYbu7QEmnIAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkHm2BwBG7u0BAOBAvp+LnIAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkPkP8XI3z5HYan4AAAAASUVORK5CYII=">
+    <button class="theme" type="button" data-theme-toggle>Switch theme</button>
+    <div>
+      <p class="eyebrow">Plan</p>
+      <p class="slug">workspace</p>
+    </div>
+    <nav>
+      <p class="eyebrow">On this page</p>
+      <ul class="index">
+        <li><a href="#context">Context</a></li>
+        <li><a href="#decisions">Decisions</a>
+          <ul>
+            <li><a href="#d-stop-it-halfway">Stop it halfway</a></li>
+          </ul>
+        </li>
+        <li><a href="#consequences">Consequences</a></li>
+        <li><a href="#tasks">The 2 tasks</a>
+          <ul class="ids">
+            <li><a href="#t-one-pane">one-pane</a></li>
+            <li><a href="#t-two-panes">two-panes</a></li>
+          </ul>
+        </li>
+      </ul>
+    </nav>
+  </aside>
+
+  <main class="doc">
+
+    <h1>Two lanes, two worktrees, one file between them</h1>
+    <p class="standfirst">Two chained tasks that both edit <code>src/main.rs</code>: enough to put two panes side by side in one shared workspace, and make the second task's worktree — cut from the first task's branch — start from an edit it must not clobber rather than from a clean file.</p>
+
+    <!-- WHAT THIS PLAN REACHES. Every plan under scripts/e2e/plans/ carries one,
+         and it is the block a person reads before choosing which plan to queue.
+
+         Two line kinds, both machine-read and neither a schema anybody had to
+         invent: `covers:` is what scripts/e2e/run.sh --list prints beside a
+         setting that has no headless case, and `config:` is what
+         scripts/e2e/scaffold.sh applies to the project it builds. Keep them
+         one per line and keep the setting first — that is what is matched. -->
+    <figure>
+      <div class="mock">
+        <div class="bar"><span>what this plan reaches</span><span class="tag">coverage</span></div>
+<pre>
+covers: dispatch.backend — herdr: one shared spoolway-dispatcher workspace, a tab per project, a pane per task
+covers: dispatch.worktree_root — where the two worktrees are actually cut; look before and after
+covers: dispatch.tear_lanes_on_stop — stop the dispatcher mid-run and watch the project's tab close, not the shared workspace
+covers: dispatch.auto_commit — leave a file uncommitted in a lane and see it committed at settle
+config: dispatch.tear_lanes_on_stop true
+</pre>
+      </div>
+    </figure>
+
+    <h2 id="context">Context</h2>
+
+    <p>Everything about a worktree, a workspace and a pane is decided by code with unit tests
+    behind it and asserted headlessly with a fake multiplexer. None of that says whether the
+    real one ends up with two readable panes, whether the tab is named something a person can
+    find, or whether stopping the run leaves the screen tidy. This plan is two tasks big
+    because two is the smallest number that produces a second of anything.</p>
+
+    <ul class="refs">
+      <li><code>scripts/e2e/suites/stacking.sh</code> — the same two tasks, decided from the forge rather than the screen</li>
+      <li><code>src/mux.rs</code> — what a workspace, a tab and a pane are to spoolway</li>
+    </ul>
+
+    <h2 id="decisions">Decisions</h2>
+
+    <section class="dec" id="d-stop-it-halfway">
+      <h3>The run is interrupted on purpose, once</h3>
+      <p class="forces"><code>tear_lanes_on_stop</code> is the only setting whose observable is what <em>disappears</em> from a screen, and the only way to see it is to stop a dispatcher that has work in flight. Doing that costs the run: the second task restarts from whatever its branch holds.</p>
+
+      <figure>
+        <div class="frame">
+          <svg viewBox="0 0 800 230" role="img" aria-label="A dispatcher with two lanes running in one shared tab, interrupted, leaving branches but no worktrees">
+            <rect class="node" x="24" y="94" width="130" height="46" rx="3"/>
+            <text x="89" y="114" text-anchor="middle" font-size="12.5">dispatch</text>
+            <text class="sub" x="89" y="130" text-anchor="middle">ctrl-c, halfway</text>
+
+            <path class="edge" d="M154 104 H210 V104 H252"/>
+            <polygon class="tip" points="252,99 264,104 252,109"/>
+
+            <rect class="node" x="268" y="32" width="200" height="144" rx="3"/>
+            <text x="368" y="52" text-anchor="middle" font-size="12">spoolway-dispatcher</text>
+            <text class="sub" x="368" y="68" text-anchor="middle">tab: this project</text>
+            <rect class="node" x="284" y="82" width="168" height="34" rx="3"/>
+            <text x="368" y="103" text-anchor="middle" font-size="11">pane: one-pane · implement</text>
+            <rect class="node" x="284" y="122" width="168" height="34" rx="3"/>
+            <text x="368" y="143" text-anchor="middle" font-size="11">pane: two-panes · implement</text>
+            <text class="sub" x="368" y="164" text-anchor="middle">both panes hold a worktree of their own</text>
+
+            <path class="mark" d="M468 104 H520"/>
+            <polygon class="tip on" points="520,99 532,104 520,109"/>
+
+            <rect class="node" x="536" y="66" width="240" height="78" rx="3"/>
+            <text x="656" y="92" text-anchor="middle" font-size="12.5">gone: the project's tab, both panes</text>
+            <text class="sub" x="656" y="112" text-anchor="middle">kept: the branches, their commits, the shared workspace</text>
+            <text class="sub" x="656" y="132" text-anchor="middle">a blocked task's pane is never swept</text>
+          </svg>
+        </div>
+        <figcaption>What survives an interrupted run is the part that lives nowhere else — the commits. The screen is rebuilt from them on the next pass, in the same shared workspace.</figcaption>
+      </figure>
+
+      <p>Start the dispatcher again afterwards. The point of the setting is that the next run cuts a fresh worktree on the branch it finds and carries on, and a plan that stopped there would have watched only half of it.</p>
+    </section>
+
+    <h2 id="consequences">Consequences</h2>
+    <div class="cons-groups">
+
+      <section class="cons-group" id="c-watch">
+        <h3>What you see</h3>
+        <ul class="cons">
+          <li>Two panes with two local models working in them at once, which is also the cheapest way to find out whether <code>agents.pi.concurrency</code> matches what the model server was actually started with.</li>
+          <li>The second task's worktree is cut from the first task's branch, so its copy of <code>src/main.rs</code> already declares the first module — because both tasks edit that file, that is the whole reason they both touch it.</li>
+        </ul>
+      </section>
+      <section class="cons-group" id="c-cost">
+        <h3>What it costs</h3>
+        <ul class="cons">
+          <li class="cost">Interrupting the run mid-flight throws away whatever the running lane had not committed. That is the setting working, but it is still a lost turn.</li>
+          <li class="cost">Two tasks on one file is a conflict on purpose, so a run of this plan is slower than its size suggests — the second lane spends its time not clobbering the first's edit.</li>
+        </ul>
+      </section>
+
+    </div>
+
+    <h2 id="tasks">The 2 tasks</h2>
+    <p>Each task asks a local model for a <em>behaviour</em> rather than for work. What is
+    being tested is spoolway's answer to that behaviour, not the model's answer to a
+    problem.</p>
+
+    <ol class="tasks">
+      <li class="task" id="t-one-pane" style="--layer: var(--l-plans)">
+        <header>
+          <h3>one-pane</h3>
+          <span class="waits">waits on nothing</span>
+        </header>
+        <p>Adds <code>src/one.rs</code> and declares it.</p>
+        <div class="lists">
+          <div>
+            <h4>Done when</h4>
+            <ul>
+              <li><code>one()</code> returns 1</li>
+              <li><code>main.rs</code> declares the module</li>
+            </ul>
+          </div>
+          <div class="no">
+            <h4>Never</h4>
+            <ul>
+              <li>never touches <code>src/two.rs</code></li>
+              <li>never adds tests</li>
+            </ul>
+          </div>
+        </div>
+        <ul class="globs">
+          <li>src/one.rs</li>
+          <li>src/main.rs</li>
+        </ul>
+      </li>
+      <li class="task" id="t-two-panes" style="--layer: var(--l-harness)">
+        <header>
+          <h3>two-panes</h3>
+          <span class="waits">waits on one-pane</span>
+        </header>
+        <p>Adds <code>src/two.rs</code>, and edits the same file the task below it did.</p>
+        <div class="lists">
+          <div>
+            <h4>Done when</h4>
+            <ul>
+              <li><code>two()</code> returns 2</li>
+              <li>both modules are declared</li>
+            </ul>
+          </div>
+          <div class="no">
+            <h4>Never</h4>
+            <ul>
+              <li>never removes the other module</li>
+              <li>never renames anything</li>
+            </ul>
+          </div>
+        </div>
+        <ul class="globs">
+          <li>src/two.rs</li>
+          <li>src/main.rs</li>
+        </ul>
+      </li>
+    </ol>
+
+    <div class="close">
+      <p class="eyebrow">Before anything is queued</p>
+      <p>Queue this by naming its path: <code>scripts/e2e/queue-plan.sh scripts/e2e/plans/workspace.html</code>
+      (or open <code>spoolway queue</code> and select its cards from the screen instead), from
+      the project <code>scripts/e2e/scaffold.sh --plan workspace</code> built. It is not a plan
+      for this repository and must never be queued into it.</p>
+    </div>
+
+  </main>
+</div>
+
+<script>
+// The only script in the file: a theme switch for someone reading it off disk,
+// where there is no host application to ask. Falls back to the OS preference.
+(function () {
+  var root = document.documentElement;
+  try {
+    var saved = localStorage.getItem('spoolway-plan-theme');
+    if (saved) root.setAttribute('data-theme', saved);
+  } catch (e) {}
+
+  var button = document.querySelector('[data-theme-toggle]');
+  if (!button) return;
+  button.addEventListener('click', function () {
+    var dark = root.getAttribute('data-theme')
+      ? root.getAttribute('data-theme') === 'dark'
+      : window.matchMedia('(prefers-color-scheme: dark)').matches;
+    var next = dark ? 'light' : 'dark';
+    root.setAttribute('data-theme', next);
+    try { localStorage.setItem('spoolway-plan-theme', next); } catch (e) {}
+  });
+})();
+</script>
+</body>
+</html>

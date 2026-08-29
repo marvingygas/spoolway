@@ -1,0 +1,37 @@
+[package]
+name = "spoolway"
+version = "0.1.0"
+edition = "2024"
+description = "Agent pipeline: a background dispatcher that drives worker lanes on any provider through implement -> review -> e2e -> PR -> merge"
+license = "MIT"
+readme = "README.md"
+keywords = ["agent", "pipeline", "dispatcher", "llm", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+# The maintained fork of serde_yaml, which was archived by its author
+# (RUSTSEC-2024-0320). API-identical at 0.9; the swap is the import name.
+serde_norway = "0.9"
+terminal_size = "0.4.4"
+toml = "0.8"
+toml_edit = "0.22"
+
+[profile.release]
+strip = true
+
+# For one syscall: signalling a process group. It was `Command::new("kill")`
+# until a procps that rejects a bare negative pid made `stop` a no-op on one
+# distro and not another — see `headless::kill_group`.
+[target."cfg(unix)".dependencies]
+libc = "0.2"
+
+[target."cfg(windows)".dependencies]
+# Win32_System_JobObjects: a command step's detach and its group kill —
+# see `headless::spawn_run` and `headless::kill_group`.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }

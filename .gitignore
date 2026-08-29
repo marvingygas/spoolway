@@ -1,0 +1,21 @@
+/target
+
+# npm packaging: binaries in, assembled packages out. Both are build output.
+/artifacts
+/npm/dist
+node_modules/
+
+# Copied into the wrapper package at build time from the repo root.
+/npm/spoolway/README.md
+/npm/spoolway/LICENSE
+
+# Byte-compiled output of the logo generators.
+__pycache__/
+
+# Local scratch: archived Claude artifacts, notes, anything not part of the build.
+/tmp
+
+# Session notes a run leaves behind for a person to read next. They describe one
+# run rather than the system; `docs/` is where anything worth keeping goes.
+.spoolway/e2e-notes.md
+/log.md

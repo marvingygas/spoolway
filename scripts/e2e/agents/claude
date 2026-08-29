@@ -1,0 +1,55 @@
+#!/bin/sh
+# The cloud reviewer, standing in.
+#
+# It logs its argv because one scenario asserts on the model it was handed —
+# that is the whole observable of effort escalation — and it reads a verdict
+# file so a suite can decide when a review loop ends rather than waiting for a
+# budget to run out.
+set -u
+
+E2E_SOLUTIONS=${E2E_SOLUTIONS:-}
+E2E_CTL=${E2E_CTL:-}
+SPOOLWAY=${E2E_SPOOLWAY:-spoolway}
+
+echo "stand-in argv: $*"
+
+# Sourced by an absolute path out of the environment, never off `$0`: a lane is
+# launched as `claude ...` through PATH, so `$0` is the bare name and `dirname` is
+# the *worktree* — which is where a lane's own source lives and where this file
+# will never be.
+# shellcheck source=transcript.sh
+. "$E2E_STANDIN_LIB"
+write_transcript claude "$@"
+
+# The same ctl protocol `pi` reads, for the one mode this stand-in needs from
+# it: `decline`, which reports `--block` instead of a verdict. Step-scoped
+# first, spent as it is read, then the task-level file, which persists — the
+# shape that lets `blocked`'s own unblocker decline a block round after
+# round, the same way `pi` never runs out of ways to crash.
+#
+# Named apart from `pi`'s own `bail` on purpose: a task-level ctl file is read
+# by every stand-in a task's steps run, and `loopy` already relies on `bail`
+# reaching `pi` at `implement` and *only* `pi` — a `claude`-run step reading
+# the same file the same way would turn its round-trip into a different
+# scenario by accident.
+step_ctl="$E2E_CTL/$SPOOLWAY_TASK.$SPOOLWAY_STEP"
+mode=$(cat "$step_ctl" 2>/dev/null || true)
+[ -n "$mode" ] && rm -f "$step_ctl"
+[ -n "$mode" ] || mode=$(cat "$E2E_CTL/$SPOOLWAY_TASK" 2>/dev/null || true)
+
+verdict="$E2E_SOLUTIONS/$SPOOLWAY_TASK/review.verdict"
+case "$mode" in
+  decline) "$SPOOLWAY" report --block -m "needs a credential no lane can mint" ;;
+  *)
+    case "$SPOOLWAY_TASK" in
+      loop) "$SPOOLWAY" report --fail -m "still not right" ;;
+      *)
+        if [ -n "$E2E_SOLUTIONS" ] && [ -f "$verdict" ] && grep -q fail "$verdict"; then
+          "$SPOOLWAY" report --fail -m "$(cat "$verdict")"
+        else
+          "$SPOOLWAY" report --pass -m "review ok"
+        fi
+        ;;
+    esac
+    ;;
+esac

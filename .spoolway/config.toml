@@ -1,0 +1,133 @@
+# Full reference: docs/configuration.md
+#
+# Key                                   Values                 Default                                                 Meaning
+# skills                                <names>                spoolway-plan                                           Which skills `spoolway eval` gives a block of their own; every other name is left off the table.
+# dispatch.backend                      herdr, tmux, headless  herdr                                                   Where lanes run: a real pane you can watch, or no multiplexer at all.
+# dispatch.herdr_mode                   grouped, split         grouped                                                 How a herdr run is laid out: a pane per task in its project's shared tab, or a row of its own per task.
+# dispatch.tmux_mode                    grouped, split         grouped                                                 How a tmux run is laid out: one session for the whole run, or a session per task.
+# dispatch.worktree_root                <path>                 (blank)                                                 Where a dispatched task's worktree is cut, whatever the backend; blank means `~/.spoolway/<project>/worktrees`.
+# dispatch.interval                     <duration>             10s                                                     How long the dispatcher waits between passes.
+# dispatch.lane_quiet                   <duration>             15m                                                     How long a lane may say nothing before the dispatcher reminds it to report. Not the same thing as `interval`, which is only how often a pass looks.
+# dispatch.default_pipeline             <name>                 default                                                 Which pipeline a task runs on when its own `pipeline:` is absent.
+# dispatch.auto_commit                  true, false            true                                                    Whether spoolway commits a lane's leftover work when its step settles.
+# dispatch.priority                     group, any             group                                                   Whether a free slot is filled from every ready task, or from the group already landing first.
+# dispatch.lane_child_ceiling           <duration>             1h                                                      How long a lane may be excused for a process it started that is still running before the reminder loop treats it as silent anyway.
+# dispatch.tear_lanes_on_stop           true, false            true                                                    Whether stopping the dispatcher ends the run's live lanes and takes their worktrees with them; branches and a task on `blocked` are never swept.
+# unattended.enabled                    true, false            false                                                   Whether this run stops for a person, or resumes every block itself with `max_output_tokens` as the only brake.
+# unattended.max_output_tokens          <tokens>               0                                                       Output tokens one unattended run may spend before the dispatcher stops starting work; 0 is no ceiling.
+# unattended.max_cost_usd               <dollars>              0                                                       Dollars one unattended run may spend before the dispatcher stops starting work, priced off assets/model-prices.json; 0 is no ceiling.
+# unattended.skip_blocked_lane          true, false            true                                                    Whether clearing a block carries the task past the step it blocked on, on the grounds that the unblocker did that step's work; false hands it back to that step instead.
+# unattended.blocked_agent              <profile>              claude                                                  Which `[agents.*]` profile staffs `blocked` in an unattended run, for every pipeline that does not declare its own `blocked` step.
+# unattended.blocked_model              <model>                claude-opus-5                                           The model that profile runs, staffing `blocked`. Blank refuses to start an unattended run: nobody would be able to clear a block.
+# unattended.blocked_effort             <level>                (blank)                                                 How hard that model thinks, staffing `blocked`.
+# unattended.blocked_session            true, false            true                                                    Whether the lane staffing `blocked` carries its own earlier session forward.
+# unattended.blocked_prompt             <name>                 unblocker                                               Prompt the lane staffing `blocked` runs.
+# pipeline_gen.pipeline_agent           <profile>              claude                                                  Which `[agents.*]` profile `spoolway pipeline gen` opens its session as.
+# pipeline_gen.pipeline_model           <model>                (blank)                                                 The model that session runs; blank refuses the command.
+# pipeline_gen.pipeline_effort          <level>                (blank)                                                 How hard that model thinks; blank means the kind's own default.
+# pipeline_gen.pipeline_auto            true, false            false                                                   Whether the generation procedure asks before writing, or takes its own recommendation.
+# pipeline_gen.pipeline_loop_default    <n>                    1                                                       The budget every loop a generated pipeline writes starts at.
+# pipeline_gen.pipeline_local_models    true, false            false                                                   Whether local models are involved in what gets generated — pre-answers the procedure's first question.
+# update.check                          true, false            true                                                    Whether spoolway tells a person at a keyboard that a newer release is out.
+# calibrate.window                      <duration>             14d                                                     How far back `spoolway-calibrate` reads: archived tasks finished inside the window, and the ledger entries beside them.
+# retention.days                        <days>                 30                                                      How long system-prompts/, commands/, tracking/, headless/, scratch/ and archive/ keep an entry before it is deleted; 0 keeps everything forever. queue/, pending/, worktrees/ and plans/ are never swept.
+# stack.summary.agent                   <profile>              (blank)                                                 Agent profile from `[agents.*]` that writes the pull request's title and summary before `spoolway stack` opens it. Blank alongside `model`, the whole task file is the pull request body instead.
+# stack.summary.model                   <name>                 (blank)                                                 The model that profile's kind is started with, for the summary turn. Blank alongside `agent`, the whole task file is the pull request body instead.
+# stack.summary.effort                  <string>               (blank)                                                 Passed to the agent kind's effort flag, same as a pipeline step's `effort:`. Blank means no flag is sent.
+# stack.summary.prompt                  <name>                 summariser                                              Prompt under `.spoolway/prompts/` the summary turn runs.
+# agents.<profile>.kind                 <agent kind>           one per shipped profile                                 Which agent binary this profile launches.
+# agents.<profile>.concurrency          <n>                    1 (cloud), unset elsewhere — omitted means no cap       Most lanes of this profile running at once; 0 is unlimited. A cap on the harness — a local model's own count is `models.<glob>.slots`.
+# agents.<profile>.session_reuse_ctx    1..=100                50                                                      How large a carried session may be, as a percentage of the model's context window, before a fresh one opens instead.
+# agents.<profile>.session_blocked_ctx  0, 1..=100             0                                                       Percentage of the model's context window a *running* lane's last turn may reach before the dispatcher stops it and blocks the task; 0 is off. Must be above `session_reuse_ctx`. The reading is only taken at turn boundaries, so the ceiling can be overshot.
+# agents.<profile>.permission_mode      <mode>                 the kind's own first mode (absent on a kind with none)  Which approval mode this profile's lanes are started with. Absent on a kind that has none.
+# models.<glob>.context_window          <tokens>               0 (unset)                                               What one session of this model gets to work in — used only to estimate task size when planning.
+# models.<glob>.input                   <USD per 1M tokens>    0                                                       Cost per million input tokens.
+# models.<glob>.output                  <USD per 1M tokens>    0                                                       Cost per million output tokens.
+# models.<glob>.cache_read              <USD per 1M tokens>    0                                                       Cost per million cached tokens read.
+# models.<glob>.cache_write_5m          <USD per 1M tokens>    0                                                       Cost per million tokens written to a 5-minute cache.
+# models.<glob>.cache_write_1h          <USD per 1M tokens>    0                                                       Cost per million tokens written to a 1-hour cache.
+# models.<glob>.session_reuse_idle      <duration>             (unset)                                                 How long a carried session may sit before it is refused rather than resumed. Never set it on a local model.
+# models.<glob>.slots                   <n>                    0                                                       How many lanes this model may run at once, replacing its profile's `concurrency`; 0 leaves the profile in charge.
+# models.<glob>.exclusive               true, false            false                                                   Whether this model refuses to run alongside a different `exclusive` one — one set of weights on the card at a time.
+# issue_tracking.hook                   <filename>             (blank)                                                 A bare filename, resolved inside `.spoolway/hooks/`; blank runs no hook and changes nothing about a task's `queued`, `blocked`, `paused` or `done`.
+# issue_tracking.project_key            <string>               (blank)                                                 Opaque to spoolway — `owner/repo` on github, a project key on jira — handed to the hook verbatim as `SPOOLWAY_PROJECT_KEY`.
+# issue_tracking.on_fail                ignore, pause          ignore                                                  What a non-zero hook exit does: `ignore` only records it, `pause` also holds the task — on `queued` to `paused`, on `done` out of the archive.
+
+skills = ["spoolway-plan"]
+
+[dispatch]
+backend = "herdr"
+herdr_mode = "split"
+tmux_mode = "grouped"
+worktree_root = ""
+interval = "10s"
+lane_quiet = "15m"
+default_pipeline = "impl"
+auto_commit = true
+
+[unattended]
+enabled = true
+max_output_tokens = 0
+max_cost_usd = 0.0
+skip_blocked_lane = true
+blocked_agent = "claude"
+blocked_model = "claude-opus-5"
+blocked_effort = "medium"
+blocked_session = true
+blocked_prompt = "unblocker"
+
+[pipeline_gen]
+pipeline_agent = "claude"
+pipeline_model = "claude-opus-5"
+pipeline_effort = "medium"
+pipeline_auto = false
+pipeline_loop_default = 1
+pipeline_local_models = false
+
+[update]
+check = true
+
+[calibrate]
+window = "14d"
+
+[retention]
+days = 30
+
+[stack.summary]
+agent = ""
+model = ""
+effort = ""
+prompt = "summariser"
+
+[agents.claude]
+kind = "claude"
+concurrency = 3
+session_reuse_ctx = 50
+session_blocked_ctx = 0
+permission_mode = "auto"
+
+[agents.codex]
+kind = "codex"
+session_reuse_ctx = 50
+session_blocked_ctx = 0
+permission_mode = "never"
+
+[agents.pi]
+kind = "pi"
+session_reuse_ctx = 50
+session_blocked_ctx = 0
+
+[models."*Muse-Glimmer-30B"]
+context_window = 131072
+slots = 1
+exclusive = true
+
+[models."*Qwen3.6-35B-A3B"]
+context_window = 100096
+slots = 3
+exclusive = true
+
+[issue_tracking]
+hook = ""
+project_key = ""
+on_fail = ""

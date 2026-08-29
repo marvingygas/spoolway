@@ -1,0 +1,35 @@
+#!/bin/sh
+# codex, standing in.
+#
+# The launch contract is the whole subject: what a codex lane is handed is not
+# what a pi lane is handed. The prompt rides a `-c model_instructions_file=`
+# override with the path embedded in the value, the session is pinned by
+# `CODEX_HOME` rather than named anywhere in argv, and the headless subcommand
+# lands *after* the globals. This wrapper reads the codex-shaped pieces out,
+# says what it found for a suite to assert on, and hands the turn to the `pi`
+# stand-in beside it — the behaviours (pathologies, canned patches, the
+# handover role) are one implementation, not one per kind.
+set -u
+
+# The home that pins this lane's session. Its existence is spoolway's doing —
+# `prepare_session_home` makes it before the lane starts — so this only
+# reports; a `mkdir` here would manufacture the very evidence the suite reads.
+echo "lane home: CODEX_HOME=${CODEX_HOME:-}"
+[ -n "${CODEX_HOME:-}" ] && [ -d "$CODEX_HOME" ] && echo "lane home exists"
+
+# The prompt, out of the config override codex takes it in: the value embeds
+# the path — `-c model_instructions_file=<path>` — unlike a flag that takes
+# the path as the argument after it.
+prompt=""
+next=""
+for arg in "$@"; do
+  if [ "$next" = yes ]; then
+    case "$arg" in model_instructions_file=*) prompt=${arg#model_instructions_file=} ;; esac
+    next=""
+  fi
+  case "$arg" in -c) next=yes ;; esac
+done
+
+E2E_PROMPT_FILE=$prompt
+export E2E_PROMPT_FILE
+exec pi "$@"

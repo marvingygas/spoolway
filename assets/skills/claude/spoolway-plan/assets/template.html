@@ -1,0 +1,447 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>[[plan-slug]] — plan</title>
+
+<style>
+:root {
+  color-scheme: light dark;
+
+  --paper:     #eeece7;
+  --surface:   #f7f6f3;
+  --ink:       #1a1917;
+  --rule:      #d8d5ce;
+  --accent:    #8a5a2b;
+
+  --paper-d:   #141311;
+  --surface-d: #1e1c19;
+  --ink-d:     #efece6;
+  --rule-d:    #2f2b26;
+  --accent-d:  #d59a5c;
+
+  --ink-soft: color-mix(in srgb, var(--ink) 66%, var(--paper));
+  --ink-faint:color-mix(in srgb, var(--ink) 44%, var(--paper));
+
+  --measure: 68ch;
+  --serif: ui-serif, "Iowan Old Style", "Source Serif 4", Palatino, Georgia, serif;
+  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper:   var(--paper-d);
+    --surface: var(--surface-d);
+    --ink:     var(--ink-d);
+    --rule:    var(--rule-d);
+    --accent:  var(--accent-d);
+  }
+}
+:root[data-theme="dark"] {
+  --paper:   var(--paper-d);
+  --surface: var(--surface-d);
+  --ink:     var(--ink-d);
+  --rule:    var(--rule-d);
+  --accent:  var(--accent-d);
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--sans);
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+
+.page {
+  max-width: 74rem;
+  margin: 0 auto;
+  padding: clamp(2rem, 6vw, 4rem) clamp(1.25rem, 4vw, 2.5rem) 6rem;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 2.5rem;
+}
+@media (min-width: 64rem) {
+  .page { grid-template-columns: 15rem minmax(0, 1fr); gap: 3rem; align-items: start; }
+  .rail { position: sticky; top: clamp(2rem, 6vw, 4rem); }
+}
+
+.rail { display: flex; flex-direction: column; gap: 1.5rem; }
+.brand { display: block; width: 200px; height: 56px; image-rendering: pixelated; }
+.brand.on-dark { display: none; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .brand.on-light { display: none; }
+  :root:not([data-theme="light"]) .brand.on-dark { display: block; }
+}
+:root[data-theme="light"] .brand.on-light { display: block; }
+:root[data-theme="light"] .brand.on-dark { display: none; }
+:root[data-theme="dark"] .brand.on-light { display: none; }
+:root[data-theme="dark"] .brand.on-dark { display: block; }
+
+.rail .slug { font: 500 1.05rem/1.3 var(--serif); margin: 0; color: var(--accent); overflow-wrap: anywhere; }
+
+.eyebrow {
+  font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.16em;
+  text-transform: uppercase; color: var(--ink-faint); margin: 0 0 0.35rem;
+}
+
+.index { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 0.45rem; }
+.index a { color: var(--ink-soft); text-decoration: none; font-size: 0.9rem; }
+.index a:hover { color: var(--accent); }
+
+.index ul {
+  margin: 0.4rem 0 0.15rem; padding: 0 0 0 0.7rem; list-style: none;
+  display: flex; flex-direction: column; gap: 0.3rem;
+  border-left: 1px solid var(--rule);
+}
+.index ul a { font-size: 0.82rem; color: var(--ink-faint); }
+.index ul.ids a { font-family: var(--mono); font-size: 0.76rem; }
+
+.theme {
+  align-self: flex-start;
+  font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--ink-faint); background: none; border: 1px solid var(--rule);
+  border-radius: 3px; padding: 0.3rem 0.6rem; cursor: pointer;
+}
+.theme:hover { color: var(--accent); border-color: var(--accent); }
+
+.doc { display: flex; flex-direction: column; gap: 2rem; min-width: 0; }
+.doc > p, .doc > h1, .doc > h2 { max-width: var(--measure); }
+
+h1 {
+  font: 600 clamp(2.25rem, 6vw, 3.75rem)/1.03 var(--serif);
+  letter-spacing: -0.035em; text-wrap: balance; margin: 0;
+}
+.tagline {
+  font: 500 clamp(1.15rem, 2.4vw, 1.4rem)/1.3 var(--serif);
+  margin-top: -1.1rem; color: var(--ink-soft); text-wrap: balance;
+}
+.where {
+  display: flex; flex-wrap: wrap; gap: 0.15rem 1.25rem;
+  margin-top: -0.9rem;
+  font-family: var(--mono); font-size: 0.78rem; line-height: 1.5;
+  letter-spacing: 0.02em; color: var(--ink-faint); overflow-wrap: anywhere;
+}
+.where span::before {
+  margin-right: 0.5rem;
+  letter-spacing: 0.14em; text-transform: uppercase; font-size: 0.86em;
+  opacity: 0.7;
+}
+.where .file::before { content: "file"; }
+
+.standfirst {
+  font-size: clamp(1.1rem, 2vw, 1.28rem); line-height: 1.5;
+  color: var(--ink-soft); text-wrap: pretty;
+}
+h2 {
+  font: 600 clamp(1.4rem, 2.8vw, 1.8rem)/1.2 var(--serif);
+  letter-spacing: -0.02em; text-wrap: balance; margin: 1.5rem 0 -0.75rem;
+}
+p { margin: 0; }
+a { color: var(--accent); text-underline-offset: 0.2em; }
+
+.n { font-family: var(--mono); font-size: 0.9em; font-variant-numeric: tabular-nums; color: var(--accent); }
+
+figure { margin: 0; display: flex; flex-direction: column; gap: 0.75rem; }
+figcaption { font-size: 0.875rem; color: var(--ink-faint); max-width: var(--measure); }
+
+.frame { background: var(--surface); border: 1px solid var(--rule); border-radius: 5px; padding: 1rem 0.5rem; overflow-x: auto; }
+.frame svg { display: block; width: 100%; height: auto; }
+.frame svg text { font-family: var(--sans); fill: var(--ink); }
+.frame svg .sub { font-family: var(--mono); font-size: 10.5px; fill: var(--ink-faint); letter-spacing: 0.05em; }
+.frame svg .lead { stroke: var(--ink-faint); stroke-width: 1; fill: none; opacity: 0.7; }
+.frame svg .node { fill: var(--surface); stroke: var(--rule); }
+.frame svg .edge { stroke: var(--ink-faint); fill: none; }
+.frame svg .mark { stroke: var(--accent); fill: none; }
+.frame svg .tip { fill: var(--ink-faint); stroke: none; }
+
+.frame svg .grid { stroke: var(--rule); fill: none; }
+.frame svg .wait { fill: none; stroke: var(--ink-faint); stroke-dasharray: 3 3; }
+.frame svg .tick,
+.frame svg .dur { font-family: var(--mono); font-size: 10px; fill: var(--ink-faint); font-variant-numeric: tabular-nums; letter-spacing: 0.05em; }
+.frame svg .who { font-family: var(--mono); font-size: 11px; fill: var(--ink-soft); }
+
+.frame svg .dur.end { text-anchor: end; }
+
+.frame.lit { background: linear-gradient(168deg, #f8f6f2 0%, #e9e5dd 100%); }
+.frame.lit svg text { fill: #241f1a; }
+.frame.lit svg .sub { fill: #877c70; }
+.frame.lit svg .lead { stroke: #b0a79b; }
+
+.mocks { display: flex; flex-direction: column; gap: 1rem; margin: 0; }
+.mock {
+  background: var(--surface); border: 1px solid var(--rule); border-radius: 5px;
+  overflow: hidden; display: flex; flex-direction: column; min-width: 0;
+}
+.mock > .bar {
+  display: flex; align-items: center; gap: 0.5rem;
+  padding: 0.45rem 0.8rem; border-bottom: 1px solid var(--rule);
+  background: color-mix(in srgb, var(--ink) 4%, var(--surface));
+  font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.06em; color: var(--ink-faint);
+}
+.mock > .bar .dots { display: inline-flex; gap: 0.25rem; }
+.mock > .bar .dots i { width: 0.5rem; height: 0.5rem; border-radius: 50%; background: var(--rule); display: block; }
+.mock > .bar .tag { margin-left: auto; color: var(--accent); }
+.mock pre {
+  margin: 0; padding: 0.85rem 1rem; overflow-x: auto;
+  font-family: var(--mono); font-size: 0.78rem; line-height: 1.6;
+  color: var(--ink); tab-size: 2;
+}
+.mock pre .gone { color: var(--ink-faint); text-decoration: line-through; text-decoration-thickness: 1px; }
+.mock pre .new { color: var(--accent); }
+.mock pre .cmt { color: var(--ink-faint); }
+.mock.was { opacity: 0.82; }
+
+.dec { display: flex; flex-direction: column; gap: 0.9rem; min-width: 0; }
+.dec h3 {
+  font: 600 clamp(1.1rem, 2.2vw, 1.32rem)/1.25 var(--serif);
+  letter-spacing: -0.01em; text-wrap: balance; margin: 0; max-width: var(--measure);
+}
+.dec > p { max-width: var(--measure); }
+.dec .forces {
+  color: var(--ink-soft); font-size: 0.94rem;
+  border-left: 2px solid var(--rule); padding-left: 0.9rem;
+}
+.dec .cost { color: var(--ink-soft); }
+.dec .cost::before { content: "Costs: "; color: var(--ink-faint); }
+
+.refs { margin: 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 0.25rem 1.25rem; font-size: 0.8rem; color: var(--ink-faint); }
+.refs code { font-family: var(--mono); color: var(--ink-soft); }
+
+.mockup { display: flex; flex-direction: column; gap: 2rem; margin: 0; }
+.mockup figure { gap: 0.5rem; }
+.mock-step { display: flex; flex-direction: column; gap: 0.75rem; min-width: 0; }
+.mock-step h3 {
+  font: 600 clamp(1.05rem, 2vw, 1.2rem)/1.3 var(--serif);
+  letter-spacing: -0.01em; text-wrap: balance; margin: 0; max-width: var(--measure);
+}
+.mock > .bar .step { color: var(--accent); font-variant-numeric: tabular-nums; }
+
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 0.92rem; }
+th, td { text-align: left; padding: 0.6rem 1rem 0.6rem 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
+th { font-family: var(--mono); font-size: 0.67rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-faint); font-weight: 400; }
+td code { font-family: var(--mono); font-size: 0.85em; color: var(--accent); }
+
+.close {
+  border-left: 2px solid var(--accent); padding: 0.85rem 1.1rem;
+  background: var(--surface); border-radius: 0 4px 4px 0;
+  max-width: var(--measure); display: flex; flex-direction: column; gap: 0.3rem;
+}
+
+.key { display: flex; flex-wrap: wrap; gap: 0.4rem 1.5rem; font-size: 0.8rem; color: var(--ink-soft); }
+.key span { display: inline-flex; align-items: center; gap: 0.45rem; }
+.key i { width: 1.5rem; height: 0.7rem; border-radius: 2px; display: inline-block; }
+
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
+@media print {
+  body { background: #fff; color: #000; }
+  .rail { display: none; }
+}
+</style>
+</head>
+
+<body>
+<div class="page">
+
+  <aside class="rail">
+    <img class="brand on-light" alt="spoolway"
+         src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAyAAAADgCAYAAAD7cAJBAAAFHUlEQVR4nO3ZQQ6cMBAAQRPx/y+TP8RRz1quuiMGrxfU8loAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACstdYzPQAAXOrbvN43HDjSn+kBAACAewgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAIDMOz3AWuubHuByz/QAAADcwwkIAACQESAAAEBGgAAAABkBAgAAZAQIAACQESAAAEBGgAAAABkBAgAAZAQIAACQESAAAEBGgAAAABkBAgAAZAQIAACQESAAAEBGgAAAAJl3eoC11rN5/Xf4/Xftzn+66fXfdfr+23X6/p1ef+u35/T1mzb9/Z12+vPf/v+7/fcbnd8JCAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAACZd3qAH/BtXv8M3/900+t/u+n1m/79p++/a3r+6fvvOn1+2DG9f/3/LuYEBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAIDMOz3AD3g2r//+yxT3On39d+cH4N/svv9vf39Pfz+5mBMQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADLv9AA/4Nu8/hm+/+1213/X9P7ZNb3/pp8fmDP9/px+/+2aXr9d0+t/+/4Z5QQEAADICBAAACAjQAAAgIwAAQAAMgIEAADICBAAACAjQAAAgIwAAQAAMgIEAADICBAAACAjQAAAgIwAAQAAMgIEAADICBAAACAjQAAAgMwzPcBa65se4HLTe+D03//09Zue/3TT+/f03+/29Tv9+W9//5z+/NP7b9f0+k07ev85AQEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAg80wPAGz5Nq/3DgCA8xz9/XcCAgAAZAQIAACQESAAAEBGgAAAABkBAgAAZAQIAACQESAAAEBGgAAAABkBAgAAZAQIAACQESAAAEBGgAAAABkBAgAAZAQIAACQESAAAEDmnR4AAABi3/QAm57pAXY4AQEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACA2F86xDFKC/+bxQAAAABJRU5ErkJggg==">
+    <img class="brand on-dark" alt="spoolway"
+         src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAyAAAADgCAYAAAD7cAJBAAAFvUlEQVR4nO3ZQY6kMBAAQVjx/y+zf5gaZY1FxB1RbdyglO/3fS8AAIDCv+0BAACA7xAgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAACZZ3sAAPiod3j9/StTAMScgAAAABkBAgAAZAQIAACQESAAAEBGgAAAABkBAgAAZAQIAACQESAAAEBGgAAAABkBAgAAZAQIAACQESAAAEBGgAAAABkBAgAAZAQIAACQESAAAEBGgAAAABkBAgAAZAQIAACQESAAAEBGgAAAABkBAgAAZAQIAACQESAAAEBGgAAAABkBAgAAZAQIAACQESAAAEBGgAAAABkBAgAAZAQIAACQebYHuK7r3R7g4+7tAQAA+A4nIAAAQEaAAAAAGQECAABkBAgAAJARIAAAQEaAAAAAGQECAABkBAgAAJARIAAAQEaAAAAAGQECAABkBAgAAJARIAAAQEaAAAAAGQECAABknu0Bruu6h9e/h99/ajr/6bbXf+r0/Td1+v7dXn/rN3P6+m3b/v5uO/33f/3/9/Xntzq/ExAAACAjQAAAgIwAAQAAMgIEAADICBAAACAjQAAAgIwAAQAAMgIEAADICBAAACAjQAAAgIwAAQAAMgIEAADICBAAACAjQAAAgIwAAQAAMs/2AH/AO7z+Xr7/6bbX/+u212/7+W/ff2p7/u37T50+P0xs71//vw9zAgIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABA5tke4A+4h9e/vzLFd52+/tP5AfiZ6fv/6+/v7e8nH+YEBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAICMAAEAADICBAAAyAgQAAAgI0AAAIDMsz3AH/AOr7+X7/910/Wf2t4/U9v7b/v3A3u235/b77+p7fWb2l7/r++fVU5AAACAjAABAAAyAgQAAMgIEAAAICNAAACAjAABAAAyAgQAAMgIEAAAICNAAACAjAABAAAyAgQAAMgIEAAAICNAAACAjAABAAAyAgQAAMg82wNc1/VuDzC0Pf/0/vevTPFz2+s3tb1+U6fPPzX9/dv7d/v5Wb9dp7//T7//6ft3e/7Tbe/fo5+fExAAACAjQAAAgIwAAQAAMgIEAADICBAAACAjQAAAgIwAAQAAMgIEAADICBAAACAjQAAAgIwAAQAAMgIEAADICBAAACAjQAAAgIwAAQAAMvf7vtszAD83/QPfvzIFAFA6+vvvBAQAAMgIEAAAICNAAACAjAABAAAyAgQAAMgIEAAAICNAAACAjAABAAAyAgQAAMgIEAAAICNAAACAjAABAAAyAgQAAMgIEAAAICNAAACAzLM9AAAAxN7tAYbu7QEmnIAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkHm2BwBG7u0BAOBAvp+LnIAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkBEgAABARoAAAAAZAQIAAGQECAAAkPkP8XI3z5HYan4AAAAASUVORK5CYII=">
+    <button class="theme" type="button" data-theme-toggle>Switch theme</button>
+    <div>
+      <p class="eyebrow">Plan</p>
+      <p class="slug">[[plan-slug]]</p>
+    </div>
+    <nav>
+      <p class="eyebrow">On this page</p>
+      <ul class="index">
+        <li><a href="#context">Context</a></li>
+        <li><a href="#decisions">Decisions</a>
+          <ul>
+            <li><a href="#d-[[decision-slug]]">[[Decision, in three or four words]]</a></li>
+          </ul>
+        </li>
+        <li><a href="#mockup">Mockup</a>
+          <ul>
+            <li><a href="#m-[[step-slug]]">[[What this step is, in two or three words]]</a></li>
+          </ul>
+        </li>
+      </ul>
+    </nav>
+  </aside>
+
+  <main class="doc">
+
+    <h1>[[The plan name — the branch's own name for this, not a title you invent]]</h1>
+
+    <p class="tagline">[[What is being built, in five words]]</p>
+
+    <p class="where">
+      <span class="file">[[the absolute path this page is written to]]</span>
+    </p>
+
+    <p class="standfirst">[[One sentence a person can approve or reject: what this is and
+    what the breakdown claims.]]</p>
+
+    <h2 id="context">Context</h2>
+
+    <p>[[What is true today, and the pressure on it.]]</p>
+
+    <figure>
+      <div class="frame">
+        <svg viewBox="0 0 800 300" role="img" aria-label="[[what the drawing shows, in a sentence]]">
+          [[the drawing]]
+        </svg>
+      </div>
+      <figcaption>[[What the reader should take from it.]]</figcaption>
+    </figure>
+
+    <ul class="refs">
+      <li><code>[[path]]</code> — [[what it already explains, so the page need not]]</li>
+    </ul>
+
+    <h2 id="decisions">Decisions</h2>
+    <p>[[One sentence naming what these records add up to.]]</p>
+
+    <section class="dec" id="d-[[decision-slug]]">
+      <h3>[[The decision, stated as the decision — what is chosen, not what is discussed]]</h3>
+      <p class="forces">[[What pushes each way, in one or two sentences.]]</p>
+
+      <figure>
+        <div class="frame">
+          <svg viewBox="0 0 800 260" role="img" aria-label="[[what the drawing shows, in a sentence]]">
+            [[the drawing]]
+          </svg>
+        </div>
+        <figcaption>[[What the reader should take from it.]]</figcaption>
+      </figure>
+
+      <p>[[What the figure does not show: the name, the default, the thing that would
+      otherwise be got wrong.]]</p>
+
+      <ul class="refs">
+        <li><code>[[path]]</code> — [[what it already explains]]</li>
+      </ul>
+
+      <p class="cost">[[What this decision costs, in one sentence.]]</p>
+    </section>
+
+    <section class="dec" id="d-[[decision-slug]]">
+      <h3>[[The decision]]</h3>
+      <p class="forces">[[What pushes each way.]]</p>
+
+      <figure>
+        <div class="mocks">
+          <div class="mock was">
+            <div class="bar"><span>[[path/to/the/file — today]]</span></div>
+<pre>[[the lines as they are now, with what goes marked <span class="gone">like this</span>]]</pre>
+          </div>
+          <div class="mock">
+            <div class="bar"><span>[[path/to/the/file — after]]</span><span class="tag">proposed</span></div>
+<pre>[[the same lines as they will be, with what arrives marked <span class="new">like this</span>]]</pre>
+          </div>
+        </div>
+        <figcaption>[[What to check in it: the names, the defaults, what a person still has
+        to type themselves.]]</figcaption>
+      </figure>
+
+      <p class="cost">[[What this decision costs, in one sentence.]]</p>
+    </section>
+
+    <figure>
+      <div class="mocks">
+        <div class="mock">
+          <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span>$ [[the command]]</span></div>
+<pre>[[what it prints — the real columns, the real widths, the real wording]]</pre>
+        </div>
+      </div>
+      <figcaption>[[What the reader should take from it.]]</figcaption>
+    </figure>
+
+    <h2 id="mockup">Mockup</h2>
+    <div class="mockup">
+
+      <section class="mock-step" id="m-[[step-slug]]">
+        <h3>[[What this step is, in two or three words]]</h3>
+        <figure>
+          <div class="mocks">
+            <div class="mock">
+              <div class="bar"><span class="step">1</span><span class="dots"><i></i><i></i><i></i></span><span>$ [[the first thing they run]]</span></div>
+<pre>[[what it prints — the real columns, the real widths, the real wording]]</pre>
+            </div>
+          </div>
+        </figure>
+      </section>
+
+      <section class="mock-step" id="m-[[step-slug]]">
+        <h3>[[What this step is, in two or three words]]</h3>
+        <figure>
+          <div class="mocks">
+            <div class="mock">
+              <div class="bar"><span class="step">2</span><span>[[path/to/what they open next]]</span></div>
+<pre>[[what is in it once this has landed]]</pre>
+            </div>
+          </div>
+        </figure>
+      </section>
+
+      <section class="mock-step" id="m-[[step-slug]]">
+        <h3>[[What this step is, in two or three words]]</h3>
+        <figure>
+          <div class="frame">
+            <svg viewBox="0 0 800 320" role="img" aria-label="[[what the drawing shows, in a sentence]]">
+              [[the run end to end: what triggers it, what it passes through, what it
+                writes, and where it joins what is already there]]
+            </svg>
+          </div>
+        </figure>
+      </section>
+
+    </div>
+
+
+    <div class="close">
+      <p class="eyebrow">Next step</p>
+      <p>Once this is approved, say so to cut the tasks. They are written as task
+      documents beside this page, and <code>spoolway queue</code> is what sends
+      them.</p>
+    </div>
+
+  </main>
+</div>
+
+<script>
+// The only script in the file: a theme switch for someone reading it off disk,
+// where there is no host application to ask. Falls back to the OS preference.
+(function () {
+  var root = document.documentElement;
+  try {
+    var saved = localStorage.getItem('spoolway-plan-theme');
+    if (saved) root.setAttribute('data-theme', saved);
+  } catch (e) {}
+
+  var button = document.querySelector('[data-theme-toggle]');
+  if (!button) return;
+  button.addEventListener('click', function () {
+    var dark = root.getAttribute('data-theme')
+      ? root.getAttribute('data-theme') === 'dark'
+      : window.matchMedia('(prefers-color-scheme: dark)').matches;
+    var next = dark ? 'light' : 'dark';
+    root.setAttribute('data-theme', next);
+    try { localStorage.setItem('spoolway-plan-theme', next); } catch (e) {}
+  });
+})();
+</script>
+</body>
+</html>

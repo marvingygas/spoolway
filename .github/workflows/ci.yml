@@ -1,0 +1,180 @@
+name: ci
+
+# DISABLED ON GITHUB. The triggers below are intact but no event reaches them:
+# the workflow is switched off at the repository.
+#
+#   gh workflow enable ci      turn it back on, unchanged
+#   gh workflow disable ci     turn it back off
+#
+# A disabled workflow refuses `workflow_dispatch` too, so a run by hand means
+# enabling it first.
+#
+# It was switched off to stop three jobs per push — one of them on a Windows
+# runner, billed at ten times the Linux rate — eating this account's Actions
+# minutes. **That reason has expired**: this repository is public now, and
+# public repositories get Actions free and unlimited. What keeps it off is only
+# that the laptop already covers it, and enabling it would make three sections
+# of docs/testing.md and docs/pipelines.md wrong. The argument for turning it
+# back on is a pull request from somebody who never ran the laptop gate.
+#
+# Everything below now runs on a laptop instead, and it is not optional there:
+# the `gate` step in `.spoolway/pipelines/*.yml` runs `cargo fmt --check`, the
+# advisory database, clippy, `cargo test`, the Windows target, a release build,
+# `pipeline check` and the `pr` end-to-end tier as one command, per task, before
+# a pull request exists. Only the real Windows test run — as opposed to the
+# Windows target merely compiling — still waits on the nightly routine a person
+# runs by hand. See docs/testing.md for what is checked where, and what is now
+# checked nowhere.
+#
+# Two layers, neither of which spends a model, a multiplexer or a forge:
+#
+#   cargo test                  the units, including the dispatcher's decisions
+#                               against a fake multiplexer, and the Landlock
+#                               sandbox against a real kernel
+#   scripts/e2e/run.sh --tier   the CLI end to end on real git repos, with the
+#                               agents replaced by stand-ins: `pr` on every
+#                               push and every pull request, `nightly` on
+#                               a schedule
+#
+# The half that cannot run here is the one that starts real agents against real
+# models and watches a multiplexer do something: the plans under
+# scripts/e2e/plans/, queued by hand into a project scripts/e2e/scaffold.sh
+# builds, on a machine with a model server and a screen. `scripts/e2e/run.sh
+# --list` names the settings that are covered there rather than here, and the
+# ones covered nowhere.
+#
+# Nothing below installs a dependency, and nothing below needs one: the suites
+# reach for `git`, `bash`, `curl` and `setsid`, all of which are on the runner
+# image. The four checked-in fixture projects that used to drag `python3` and
+# `node` in here are gone — a suite builds its own subject from a seed written
+# inline.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Nightly, off the hour: the tier that adds the six-task plan and the
+    # closeout, which are too slow to sit in front of a review.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: which e2e tier to run
+        type: choice
+        options: [smoke, pr, nightly]
+        default: nightly
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      # First, because it is the cheapest thing that can fail and the only one
+      # whose fix is a single command. There is no rustfmt.toml: the default
+      # style is the one nobody had a reason to disagree with.
+      - name: formatting
+        run: cargo fmt --check
+
+      # The tree is kept clippy-clean, so any warning here is new — and a
+      # warning nobody is made to look at is one that gets shipped.
+      - name: clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      # The sandbox tests assert that a denied read really is denied, so they
+      # only mean anything on a kernel with Landlock. ubuntu-latest has one;
+      # if that ever stops being true, these fail loudly rather than skipping.
+      - run: cargo test --all-targets --locked
+
+      - name: pick the e2e tier
+        id: tier
+        run: |
+          case "${{ github.event_name }}" in
+            push | pull_request) tier=pr ;;
+            schedule)          tier=nightly ;;
+            workflow_dispatch) tier="${{ inputs.tier }}" ;;
+            *)                 tier=pr ;;
+          esac
+          echo "tier=$tier" >> "$GITHUB_OUTPUT"
+
+      # KEEP leaves each suite's scratch tree behind. It costs nothing on a
+      # green run — the runner is thrown away either way — and on a red one it
+      # is the difference between debugging a failure and guessing at it.
+      - name: end to end
+        env:
+          KEEP: 1
+        run: |
+          cargo build --release
+          SPOOLWAY="$PWD/target/release/spoolway" \
+            scripts/e2e/run.sh --tier "${{ steps.tier.outputs.tier }}"
+
+      # This repo is developed with the spoolway it builds, so its own
+      # `.spoolway/` is a live control plane, not a fixture — the same tree a
+      # retired pipeline key once reached main through and stopped the
+      # dispatcher loading at all. `pipeline check` is the command for that:
+      # it reads the pipeline, its prompts and the config it names, and
+      # fails on exactly a control plane that does not load — unlike
+      # `doctor`, which also fails a runner that never had herdr or an agent
+      # binary on PATH in the first place, for reasons this workflow does
+      # not claim to cover. The build above already produced the release
+      # binary, so this costs seconds rather than a build of its own.
+      - name: check this repo's own control plane still loads
+        run: ./target/release/spoolway pipeline check
+
+      # The suites keep their trees under a mktemp root and print it; collecting
+      # the lot is simpler than parsing for it, and only happens on a failure.
+      - name: keep the wreckage
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-scratch-${{ steps.tier.outputs.tier }}
+          path: /tmp/tmp.*
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # The advisory database moves without this repo moving, so the nightly
+  # schedule matters as much here as the push: a dependency can become a
+  # vulnerability report overnight. Advisories only — licenses and duplicate
+  # versions are decisions for a person reading Cargo.lock, not a gate.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories
+
+  # Windows is a supported target, and the parts of spoolway that differ there
+  # are exactly the parts a Linux run cannot exercise: the PowerShell dialect
+  # typed at a pane, the PATHEXT lookup, the `.cmd` shim, and the process check
+  # standing in for /proc. Building it is not enough — those have to run.
+  #
+  # No e2e here: the suites are bash, and what they cover is platform-neutral.
+  # What is platform-specific is in the unit tests.
+  test-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The sandbox tests that assert a denied read really is denied are
+      # Linux-only and are not compiled here. What runs instead is every unit
+      # test whose behaviour forks on the platform.
+      - run: cargo test --all-targets --locked

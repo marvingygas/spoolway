@@ -1,0 +1,215 @@
+# Full reference: docs/pipelines.md
+
+# >>> spoolway >>>
+# Top level
+#   description       <prose>            What this pipeline is for, in a few sentences.
+#                                        Read to choose between pipelines.
+#   task_template     <name>             Task skeleton tasks queued here are written from.
+#                                        Absent: this pipeline's name, then `default`.
+#   steps             <list> <required>  The flow. The first step is the entry, and
+#                                        later steps outrank earlier ones for a slot.
+#
+# Steps
+#   id                <name> <required>  Written to the task's `stage:`.
+#   description       <one line>         Shown by `spoolway pipeline show`.
+#   agent             <profile>          Profile from config.toml. Makes an agent step.
+#   run               <command>          Shell line in the worktree. Makes a command step.
+#   end               true               Makes a terminal step: the task stops here.
+#                     false <default>    Not an ending.
+#   prompt            <name>             Prompt this step runs.
+#                                        Absent: the step id.
+#   model             <name>             Model this step runs. Required on an agent step.
+#   effort            <string>           Passed to the agent kind's effort flag.
+#                                        Absent: no flag is sent.
+#   skills            <a, b, c>          Skills invoked at the top of this step's
+#                                        opening prompt. Comma separated, leading
+#                                        slash optional, names only.
+#                                        Absent: none.
+#   session           true               Resumes this prompt's earlier conversation.
+#                     false <default>    Opens a fresh conversation every visit.
+#   slot              true <default>     Consumes one of the profile's slots.
+#                     false              Runs without taking one. A model's own
+#                                        `slots` and `exclusive` apply either way.
+#   gate              true               Holds the pass on `paused` for a person.
+#                     false <default>    The pass is acted on at once.
+#   on_pass           <step id>          Where a pass goes.
+#                     done               The task finishes.
+#                                        Absent: the task stays put.
+#   on_fail           <step id>          Where a failure goes.
+#                     blocked <default>  The task parks for a person.
+#   loop              <n>                Laps allowed, per arriving step.
+#                     <step>: <n>        The same limit, one arriving step at a time.
+#                                        Absent: unbounded.
+#   on_loop_max       <step id>          Where a spent loop sends the task.
+#                     on_pass <default>  It carries on, findings and all.
+#   timeout           <duration>         How long a command step may run, e.g. `90s`.
+#                                        Absent: 30m.
+#   background        true               The task moves on; `on_fail` is refused.
+#                     false <default>    The task waits for the command.
+#   headless          true               The command runs detached, with no pane.
+#                     false <default>    It runs in a pane of its own.
+#   last              true               Only the last task of a chain runs this
+#                                        command; the rest walk past to `on_pass`.
+#                     false <default>    Every task runs it.
+#   cleanup           true               Removes the worktree, branch and task file.
+#                     false <default>    Leaves them.
+# <<< spoolway <<<
+
+description: >-
+  A longer flow for local models: plan, prove the riskiest assumption,
+  implement, then a build-test-repair loop before two human checkpoints — one
+  ahead of a stronger model's audit, one ahead of the pull request.
+
+steps:
+  - id: plan
+    description: Read the task and write down the order the work will happen in, before any of it does.
+    agent: pi
+    prompt: planner
+    model: your-local-model
+    loop:
+      probe: 2
+    on_loop_max: blocked
+    on_pass: probe
+    on_fail: blocked
+
+  - id: probe
+    description: Prove the riskiest assumption in the plan works, in throwaway code, before anything is built on it.
+    agent: pi
+    prompt: prober
+    model: your-local-model
+    on_pass: implement
+    on_fail: plan
+
+  - id: implement
+    description: Write the code to satisfy the task's acceptance criteria, following the plan.
+    agent: pi
+    prompt: implementer
+    model: your-local-model
+    loop:
+      implement: 2
+    on_loop_max: blocked
+    on_pass: build
+    on_fail: implement
+
+  - id: build
+    description: Fail the change if the project no longer builds.
+    run: your-build-command
+    timeout: 45m
+    loop:
+      repair: 2
+    on_loop_max: blocked
+    on_pass: test
+    on_fail: repair
+
+  - id: test
+    description: Run the project's own suite.
+    run: your-test-command
+    timeout: 45m
+    on_pass: verify
+    on_fail: repair
+
+  - id: repair
+    description: Make the failing gate pass, and change nothing else.
+    agent: pi
+    prompt: repairer
+    model: your-local-model
+    session: true
+    on_pass: build
+    on_fail: blocked
+
+  - id: verify
+    description: Check the diff against the acceptance criteria one at a time. Completeness only, not quality.
+    agent: pi
+    prompt: verifier
+    model: your-review-model
+    loop:
+      test: 2
+    on_pass: review
+    on_fail: fix
+
+  - id: review
+    description: Check the diff against project standards. Quality only; completeness has already been answered.
+    agent: pi
+    prompt: reviewer
+    model: your-review-model
+    loop:
+      verify: 2
+    on_pass: checkpoint
+    on_fail: fix
+
+  - id: fix
+    description: Work the findings, and nothing else.
+    agent: pi
+    prompt: implementer
+    model: your-local-model
+    on_pass: build
+    on_fail: blocked
+
+  - id: checkpoint
+    description: Summarise where this change stands, then hold for a person before anything is spent on it.
+    agent: pi
+    prompt: checkpoint
+    model: your-local-model
+    gate: true
+    on_pass: audit
+    on_fail: blocked
+
+  - id: audit
+    description: The full review, on a stronger model, and the last word before this change goes anywhere.
+    agent: claude
+    prompt: auditor
+    model: claude-opus-5
+    effort: medium
+    session: true
+    loop:
+      retest: 2
+    on_pass: document
+    on_fail: amend
+
+  - id: amend
+    description: Answer the audit's findings, and nothing else.
+    agent: pi
+    prompt: implementer
+    model: your-local-model
+    on_pass: rebuild
+    on_fail: blocked
+
+  - id: rebuild
+    description: Fail an amended change if it no longer builds.
+    run: your-build-command
+    timeout: 45m
+    on_pass: retest
+    on_fail: repair
+
+  - id: retest
+    description: Run the suite over the amended change, then go straight back for another look.
+    run: your-test-command
+    timeout: 45m
+    on_pass: audit
+    on_fail: repair
+
+  - id: document
+    description: Bring the domain documents in line with what this task changed.
+    agent: pi
+    prompt: archivist
+    model: your-local-model
+    on_pass: sign-off
+    on_fail: blocked
+
+  - id: sign-off
+    description: Summarise the finished change, then hold for a person before a pull request exists.
+    agent: pi
+    prompt: checkpoint
+    model: your-local-model
+    gate: true
+    on_pass: handover
+    on_fail: blocked
+
+  - id: handover
+    description: >-
+      Commit, squash, push and open this task's pull request with git and
+      `gh` — no model, no rebase. Nothing is merged here; a person lands it.
+    run: ./target/debug/spoolway stack
+    headless: true
+    on_pass: done
+    on_fail: blocked

@@ -1,0 +1,31 @@
+{
+  "name": "spoolway",
+  "version": "0.1.0",
+  "description": "Agent pipeline: a background dispatcher that drives worker lanes on any provider through implement -> review -> e2e -> PR -> merge",
+  "keywords": [
+    "agent",
+    "pipeline",
+    "dispatcher",
+    "llm",
+    "cli"
+  ],
+  "license": "MIT",
+  "author": "Marvin Gygas",
+  "bin": {
+    "spoolway": "bin/spoolway.js"
+  },
+  "files": [
+    "bin"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "optionalDependencies": {
+    "@spoolway/linux-x64": "0.1.0",
+    "@spoolway/linux-arm64": "0.1.0",
+    "@spoolway/linux-x64-musl": "0.1.0",
+    "@spoolway/darwin-arm64": "0.1.0",
+    "@spoolway/darwin-x64": "0.1.0",
+    "@spoolway/win32-x64": "0.1.0"
+  }
+}

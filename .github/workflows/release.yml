@@ -1,0 +1,189 @@
+name: release
+
+# Tag a version to publish it:
+#   cargo set-version 0.2.0  (or edit Cargo.toml) && git tag v0.2.0 && git push --tags
+#
+# Run it from the Actions tab first with publish=false to build every target and
+# pack every tarball without touching the registry.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish to npm (unchecked = build and pack only)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  # npm/targets.json is the single source of truth for the platform matrix, so
+  # the build fans out from the same file the shim and build script read.
+  matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      targets: ${{ steps.read.outputs.targets }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: read
+        run: echo "targets=$(jq -c .targets npm/targets.json)" >> "$GITHUB_OUTPUT"
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The lane guardrails are a pi extension, and their parsing is tested
+      # where it lives. `cargo test` shells out to node for that one test, and
+      # skips it when node is absent — so CI has to supply it.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: cargo test --locked
+
+  # Each target names its own runner in npm/targets.json. `ubuntu-24.04-arm`,
+  # which linux-arm64 builds on, is free only on public repositories — fine
+  # here, but if this repository is ever made private again that row has to be
+  # pointed at `ubuntu-latest` and built through `cross` instead.
+  build:
+    needs: matrix
+    strategy:
+      fail-fast: true
+      matrix:
+        target: ${{ fromJSON(needs.matrix.outputs.targets) }}
+    runs-on: ${{ matrix.target.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target.triple }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target.triple }}
+
+      # Statically linked musl builds need the musl gcc wrapper for linking.
+      - if: matrix.target.libc == 'musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - run: cargo build --release --locked --target ${{ matrix.target.triple }}
+
+      # Windows is the one target whose binary carries an extension, and
+      # build-npm.mjs looks for it by that name. `if-no-files-found: error`
+      # means a wrong guess fails here rather than silently shipping a
+      # platform package with no binary in it.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target.triple }}
+          path: target/${{ matrix.target.triple }}/release/spoolway${{ matrix.target.os == 'win32' && '.exe' || '' }}
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [matrix, test, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # npm provenance
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      # Lands each target's binary at artifacts/<triple>/spoolway, which is where
+      # build-npm.mjs looks for them.
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - run: node scripts/build-npm.mjs
+
+      - name: Check the tag matches Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tagged="${GITHUB_REF_NAME#v}"
+          packaged="$(node -p "require('./npm/spoolway/package.json').version")"
+          if [ "$tagged" != "$packaged" ]; then
+            echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $packaged" >&2
+            exit 1
+          fi
+
+      # A dry run on every path, so a broken package is caught before the first
+      # irreversible publish rather than between two of them.
+      - name: Pack
+        run: |
+          for dir in npm/dist/*/*/ npm/spoolway/; do
+            echo "--- $dir"
+            ( cd "$dir" && npm pack --dry-run )
+          done
+
+      # Platform packages go first: spoolway lists them as optionalDependencies,
+      # so publishing the wrapper before them leaves a window where installing
+      # spoolway resolves nothing to run.
+      #
+      # Provenance needs a public repo to attest against. This one is public,
+      # so the check below passes -- it is kept rather than hardcoded so that a
+      # repository turned private later publishes without provenance instead of
+      # dying on an opaque OIDC error.
+      - name: Publish
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.publish
+        run: |
+          if [ "${{ github.event.repository.private }}" = "false" ]; then
+            provenance="--provenance"
+          else
+            provenance=""
+            echo "::notice::repository is private; publishing without provenance"
+          fi
+
+          for dir in npm/dist/*/*/; do
+            ( cd "$dir" && npm publish --access public $provenance )
+          done
+          ( cd npm/spoolway && npm publish --access public $provenance )
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # npm is how spoolway is meant to be installed; this is the manual path --
+  # one archive per target on the release page, for anyone who wants the binary
+  # without a package manager. It hangs off `publish` rather than `build` so the
+  # tag/Cargo.toml check gates it too, and a release is never created for a
+  # version npm refused.
+  assets:
+    needs: publish
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # creating the release
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      # Artifact downloads drop the executable bit, so the archive has to put it
+      # back -- otherwise the tarball unpacks to a file nobody can run.
+      - name: Package
+        run: |
+          mkdir -p dist
+          while read -r triple os; do
+            if [ "$os" = "win32" ]; then
+              ( cd "artifacts/$triple" && python3 -m zipfile -c "$GITHUB_WORKSPACE/dist/spoolway-$triple.zip" spoolway.exe )
+            else
+              chmod 0755 "artifacts/$triple/spoolway"
+              tar -czf "dist/spoolway-$triple.tar.gz" -C "artifacts/$triple" spoolway
+            fi
+          done < <(jq -r '.targets[] | "\(.triple) \(.os)"' npm/targets.json)
+          ( cd dist && sha256sum ./* > SHA256SUMS )
+          cat dist/SHA256SUMS
+
+      - name: Create the release
+        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
