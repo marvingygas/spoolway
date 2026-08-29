@@ -224,6 +224,41 @@ steps:
 **You do not have to write one by hand.** The `/spoolway-pipeline` skill writes a pipeline
 for you, and edits the one you already have.
 
+## Issue tracker
+
+What spoolway ships is a hook, not an integration. `[issue_tracking] hook` names one script by
+bare filename — never a path — inside `.spoolway/hooks/`, and spoolway runs it with
+`SPOOLWAY_*` variables and reads back only what it writes to `SPOOLWAY_OUT`. **spoolway never
+contacts a tracker itself**, and never parses the ids a script answers with.
+
+It runs in both directions. An issue becomes tasks: `spoolway issue show <ref>` fires `fetch`,
+the script reads that one issue back as a JSON object, and a planning skill cuts the tasks out
+of its title, body, labels and comments.
+
+Tasks report back onto an issue: `spoolway queue add` fires `open` once per document, in
+dependency order, so a task's own call already has its dependencies' ticket ids in hand.
+Whatever the script answers with is written into that document's `epic:` and `ticket:`
+frontmatter. The dispatcher fires the four task events after that.
+
+| Event | When it fires |
+|---|---|
+| `fetch` | `spoolway issue show <ref>` reads one issue out of the tracker |
+| `open` | `spoolway queue add` opens a ticket per document, before it writes any of them |
+| `queued` | A task arrives in the queue |
+| `blocked` | A task comes to rest on `blocked`, for a person to clear |
+| `paused` | A task is held on `paused` |
+| `done` | A task finishes — a group's last still-open one carries `SPOOLWAY_GROUP_LAST=1` |
+
+`fetch` and `open` run synchronously: the command blocks until the script exits. The dispatcher
+fires the other four detached, once per task per event, so no pass ever waits on a tracker.
+
+**The two shipped scripts are samples.** `spoolway init` writes `github.sh` and `jira.sh` into
+`.spoolway/hooks/` — the `.ps1` pair on a native Windows install — and `spoolway update` never
+touches one again. `github.sh` calls `gh`, and `jira.sh` calls `acli`. They are yours to edit
+or replace from that point on.
+
+See **[`[issue_tracking]`](docs/configuration.md#issue_tracking--a-hook-fired-on-four-task-events)**.
+
 ## Configurable per project
 
 - Unattended mode delegates **`blocked`** tasks to a prompt you define. It clears
