@@ -142,10 +142,32 @@ jobs:
             echo "::notice::repository is private; publishing without provenance"
           fi
 
+          # Publishing is seven separate calls to a registry that keeps whatever
+          # each one lands, so a failure half way through is a published state
+          # nobody chose -- and it happened on the first real release, where the
+          # token could write @spoolway/* but not the unscoped wrapper. Skipping
+          # a version already on the registry is what makes the rerun that fixes
+          # such a thing possible at all: without it the rerun dies on the first
+          # package that succeeded last time and never reaches the one that did
+          # not. `npm view` exits non-zero on a version that is not there, which
+          # is the whole test.
+          publish() {
+            local name version
+            name="$(node -p "require('./package.json').name")"
+            version="$(node -p "require('./package.json').version")"
+
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "::notice::$name@$version is already published; skipping"
+              return 0
+            fi
+
+            npm publish --access public $provenance
+          }
+
           for dir in npm/dist/*/*/; do
-            ( cd "$dir" && npm publish --access public $provenance )
+            ( cd "$dir" && publish )
           done
-          ( cd npm/spoolway && npm publish --access public $provenance )
+          ( cd npm/spoolway && publish )
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
