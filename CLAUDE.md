@@ -35,12 +35,11 @@ the archives. To rehearse without touching the registry, run it from the Actions
 
 Version numbers are semver, and 0.x means a minor bump may break things.
 
-**A release that changes a shipped prompt appends to `PROMPT_HISTORY` first.** That table in
-`src/assets.rs` is how `spoolway update` tells a prompt nobody has touched from one a project
-has written in, and so whether it may be rewritten or has to be migrated by hand. It holds
-fingerprints of files *earlier* releases wrote, so the row to add is for the text you are
-about to replace: add it **before** editing, and never rewrite a row. The fingerprint function
-is in `src/prompt_file.rs`.
+A release that changes a shipped prompt needs nothing extra. `spoolway update` takes a file
+back only when the project's copy is byte-for-byte what spoolway shipped, so a prompt a
+project has written in is left alone and reported rather than overwritten. The fingerprint
+machinery in `src/skeleton.rs` is for blocks inside a file a project owns the rest of, and
+`skeletons()` currently registers none.
 
 `scripts/build-npm.mjs` assembles the packages and fails loudly on the two things that would
 otherwise ship broken: the platform table the wrapper shim duplicates drifting from
