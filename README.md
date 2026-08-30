@@ -224,6 +224,24 @@ steps:
 **You do not have to write one by hand.** The `/spoolway-pipeline` skill writes a pipeline
 for you, and edits the one you already have.
 
+## Issue tracker
+
+Use event hooks to sync with project management tools. GitHub and Jira sample scripts are shipped.
+
+| Event | When it fires |
+|---|---|
+| `fetch` | `spoolway issue show <ref>` reads one issue out of the tracker |
+| `open` | `spoolway queue add` opens a ticket per document |
+| `queued` | A task arrives in the queue |
+| `blocked` | A task comes to rest on `blocked` |
+| `paused` | A task is held on `paused` |
+| `done` | A task finishes |
+
+**The two shipped scripts are samples.** `spoolway init` writes `github.sh` and `jira.sh` into
+`.spoolway/hooks/` — the `.ps1` pair on a native Windows install.
+
+See **[Issue Tracking](docs/configuration.md#issue_tracking--a-hook-fired-on-four-task-events)**.
+
 ## Configurable per project
 
 - Unattended mode delegates **`blocked`** tasks to a prompt you define. It clears
