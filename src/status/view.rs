@@ -114,7 +114,7 @@ pub(super) const DIM: &str = "\x1b[2m";
 
 const GREEN: &str = "\x1b[32m";
 
-const AMBER: &str = "\x1b[33m";
+pub(super) const AMBER: &str = "\x1b[33m";
 
 const RED: &str = "\x1b[31m";
 

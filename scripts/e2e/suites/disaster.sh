@@ -413,4 +413,30 @@ else
 fi
 forget problem-log
 
+# ------------------- an unparsable queue file no longer freezes the pass
+# `load_dir` used to return the first parse error for the whole directory, so
+# one task hand-edited and left without its closing `---` failed every pass,
+# every `spoolway report` and the board at once. Now the bad file is skipped
+# and named in the project log, and everything else still moves.
+sweep
+PROJECT_LOG="$HOME/.spoolway/logs/$(basename "$SPOOLWAY_PROJECT_HOME").log"
+rm -f "$PROJECT_LOG"
+queue_hang survivor
+printf -- '---\nid: broken\nstage: queued\n' \
+  > "$SPOOLWAY_PROJECT_HOME/queue/broken.md"
+
+BROKEN_PID=$(one_shot_start)
+SURVIVOR_PID=$(lane_pid "survivor · implement" 25)
+if [ -n "$SURVIVOR_PID" ] && wait_for_text 20 "$PROJECT_LOG" 'broken.md'; then
+  ok "a broken queue file is skipped and named, and the rest of the queue still runs"
+else
+  bad "a broken queue file is skipped and named, and the rest of the queue still runs"
+  printf '        survivor stage: %s, lane pid: %s\n' \
+    "$(stage_of survivor)" "${SURVIVOR_PID:-none}"
+  grep -i broken "$PROJECT_LOG" 2>/dev/null | sed 's/^/        log: /'
+fi
+one_shot_stop "$BROKEN_PID"
+rm -f "$SPOOLWAY_PROJECT_HOME/queue/broken.md"
+forget survivor
+
 finish

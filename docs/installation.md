@@ -192,6 +192,10 @@ thing anyone looks at is the failure count.
 other command dies on that error, including the one you would reach for to find it; `doctor`
 reports the error with the line it is on, and still runs the checks that read no settings.
 
+A pipeline file that does not parse is handled the same way. `doctor` and `spoolway pipeline
+check` report the load failure as one failed check and run everything that does not need the
+pipeline graph, rather than exiting before they can tell you which file is broken.
+
 ## Keeping a project current
 
 spoolway writes files into your repository, and a few of them carry something a machine

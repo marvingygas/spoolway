@@ -450,7 +450,7 @@ impl<'a> Dispatcher<'a> {
         let mine = crate::dispatch::our_checkouts(self.repo, &tasks);
         let owned: Vec<(String, &Lane)> = all_lanes
             .iter()
-            .filter(|lane| mine.contains(&lane.cwd))
+            .filter(|lane| crate::dispatch::owns_cwd(&mine, &lane.cwd))
             .filter_map(|lane| {
                 parse_lane_name(&lane.name, &step_ids).map(|(_, task)| (task.to_string(), lane))
             })

@@ -57,11 +57,15 @@ const SUBMIT_TIMEOUT: Duration = Duration::from_secs(5);
 const OPT_LANE: &str = "@spoolway_lane";
 const OPT_KIND: &str = "@spoolway_kind";
 
-/// The worktree path the dispatcher put this lane in, stamped at
-/// [`Tmux::split_pane`] and echoed back verbatim as [`Lane::cwd`]. Never
-/// `#{pane_current_path}`: tmux reads that from `/proc`, symlink-resolved, and
-/// the dispatcher matches `Lane::cwd` against its recorded worktree paths
-/// byte-for-byte — one symlinked `$HOME` and every lane would go invisible.
+/// The worktree path the dispatcher put this lane in, stamped on every pane
+/// spoolway opens — [`Tmux::split_pane`] for a split, [`Tmux::open_session`]
+/// and [`Tmux::task_window`] for the initial pane a task's first step runs
+/// in — and echoed back verbatim as [`Lane::cwd`]. Never
+/// `#{pane_current_path}`: tmux reads that from `/proc`, symlink-resolved,
+/// while this is the exact string the dispatcher recorded, so
+/// [`crate::dispatch::owns_cwd`] matches it without having to canonicalise.
+/// (That function does fall back to a canonical comparison, for a backend
+/// like herdr that has no such stamp.)
 const OPT_CWD: &str = "@spoolway_cwd";
 
 /// The project root this lane belongs to. The default tmux server is shared by
@@ -336,6 +340,13 @@ impl Tmux {
         // prefix keys yet.
         let _ = self.tmux(&["set-option", "-t", session, "mouse", "on"]);
         self.set_session_opt(session, OPT_OPENS, &path)?;
+        // The same stamp [`Tmux::split_pane`] puts on a split pane, on the
+        // initial pane a session opens with too: `start_lane` starts a
+        // task's *first* step directly in this pane rather than splitting a
+        // fresh one, and without the stamp that lane lists with an empty
+        // `cwd`, the dispatcher's ownership filter drops it, and the task is
+        // escalated on the next pass while its agent works. See [`OPT_CWD`].
+        self.set_pane_opt(pane, OPT_CWD, &path)?;
         Ok((session.to_string(), window.to_string(), pane.to_string()))
     }
 
@@ -360,6 +371,10 @@ impl Tmux {
         let (window, pane) = created
             .split_once('\t')
             .context("new-window printed no window and pane id")?;
+        // Stamped like a split pane's — a first step started directly in
+        // this pane is invisible to the dispatcher's ownership filter
+        // otherwise. See [`OPT_CWD`] and [`Tmux::open_session`].
+        self.set_pane_opt(pane, OPT_CWD, &path)?;
         Ok(Workspace {
             workspace_id: session.to_string(),
             pane_id: pane.to_string(),
@@ -1342,6 +1357,39 @@ done"#,
                 .unwrap()
                 .contains("got: go"),
             "the prompt arrived and was answered"
+        );
+    }
+
+    /// The initial pane a session opens with carries the cwd stamp too, not
+    /// only a split pane. A task's first step runs directly in this pane;
+    /// unstamped, it lists with an empty `cwd`, the dispatcher's ownership
+    /// filter drops it, and the task is escalated while its agent works. See
+    /// review finding 1.
+    #[test]
+    fn the_initial_pane_of_a_session_carries_the_cwd_stamp() {
+        if !tmux_available() {
+            return;
+        }
+        let f = Fixture::new("initial-pane-cwd", MuxMode::Split);
+        f.chatty_agent("pi");
+        let ws = f
+            .mux
+            .create_workspace(&f.repo, "demo", "task/demo", "main", "implementer")
+            .unwrap();
+        f.start_in(&ws.pane_id, "implement-demo", "pi", &BTreeMap::new());
+
+        let lanes = f.mux.list_lanes().unwrap();
+        let lane = lanes
+            .iter()
+            .find(|l| l.name == "implement-demo")
+            .expect("the lane is listed");
+        assert!(
+            !lane.cwd.as_os_str().is_empty(),
+            "an unstamped initial pane lists with an empty cwd"
+        );
+        assert_eq!(
+            lane.cwd, ws.checkout_path,
+            "the initial pane is stamped with the same path a split one is"
         );
     }
 

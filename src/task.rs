@@ -813,8 +813,8 @@ pub fn split_fence(raw: &str) -> Result<(&str, &str)> {
 /// task file. Task files are the pipeline's only durable state.
 ///
 /// The dispatcher and a lane's own mid-turn `spoolway report` both write the
-/// same task file from different processes — see the note at
-/// `src/dispatch.rs:1296-1300`. A temp name that is a pure function of the
+/// same task file from different processes — see [`Task::save`] and
+/// `Dispatcher::pass`. A temp name that is a pure function of the
 /// destination, as this used to be, is the same name for both of them: they
 /// share one fd, and one's `truncate`+`write` interleaves with the other's
 /// before either gets to `rename`, splicing two writers' bytes into the file
@@ -823,6 +823,14 @@ pub fn split_fence(raw: &str) -> Result<(&str, &str)> {
 /// threads of *one* process don't share it either — gives every writer its
 /// own file to write whole, so the only thing two racing writers can do to
 /// each other is have the second `rename` win outright.
+///
+/// The temp file's data is flushed to disk with `sync_all` *before* the
+/// rename, and the parent directory is synced after it on Unix. Without the
+/// first sync, a filesystem that persists the rename before the bytes it
+/// points at can, after a power loss, leave an empty `<id>.md` — which
+/// [`load_dir`] would then have to report as a parse failure for the whole
+/// queue. A rename is atomic against a crash without either sync; it is not
+/// atomic against the power going out mid-write.
 pub fn write_atomic(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
     let parent = path
         .parent()
@@ -839,18 +847,49 @@ pub fn write_atomic(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
             .and_then(|n| n.to_str())
             .unwrap_or("spoolway")
     ));
-    std::fs::write(&tmp, contents)?;
+    {
+        let mut file = std::fs::File::create(&tmp)?;
+        std::io::Write::write_all(&mut file, contents.as_ref())?;
+        file.sync_all()?;
+    }
     std::fs::rename(&tmp, path)?;
+    // The rename itself is a directory-entry change; sync the directory so it
+    // survives a power loss too. Best effort — not every platform lets a
+    // directory be opened as a file, and a failure here does not mean the
+    // rename did not land.
+    #[cfg(unix)]
+    if let Ok(dir) = std::fs::File::open(parent) {
+        let _ = dir.sync_all();
+    }
     Ok(())
 }
 
-/// Load every `*.md` task file in a directory, sorted by id for stable output.
-pub fn load_dir(dir: &Path) -> Result<Vec<Task>> {
+/// One `*.md` file in a task directory that would not load, with the reason
+/// it did not — a broken frontmatter fence, an `id:` that fails `check_id`,
+/// a stray note that is not a task at all.
+#[derive(Debug, Clone)]
+pub struct LoadProblem {
+    pub path: PathBuf,
+    pub error: String,
+}
+
+/// Load every `*.md` task file in a directory, sorted by id for stable
+/// output, alongside the list of files that would not parse.
+///
+/// One malformed `*.md` in `queue/` used to fail this call outright, and
+/// with it every dispatcher pass, every lane's `spoolway report`, every
+/// board frame and every pending listing that reads the queue — a single
+/// hand-edit left without its closing `---` froze the whole pipeline with
+/// the only trace in `~/.spoolway/logs/<project>.log`. The bad file is now
+/// skipped and returned in the second half of the pair, for the caller to
+/// name where a person will see it.
+pub fn load_dir(dir: &Path) -> Result<(Vec<Task>, Vec<LoadProblem>)> {
     let mut tasks = Vec::new();
+    let mut problems = Vec::new();
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         // An empty queue is a normal state, not an error.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(tasks),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((tasks, problems)),
         Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
     };
 
@@ -859,11 +898,18 @@ pub fn load_dir(dir: &Path) -> Result<Vec<Task>> {
         if path.extension().and_then(|e| e.to_str()) != Some("md") {
             continue;
         }
-        tasks.push(Task::load(&path)?);
+        match Task::load(&path) {
+            Ok(task) => tasks.push(task),
+            Err(e) => problems.push(LoadProblem {
+                path,
+                error: format!("{e:#}"),
+            }),
+        }
     }
 
     tasks.sort_by(|a, b| a.front.id.cmp(&b.front.id));
-    Ok(tasks)
+    problems.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok((tasks, problems))
 }
 
 /// Find one task by id across the active queue and the merged archive.
@@ -1246,6 +1292,30 @@ mod tests {
             reparsed.extra_str("ticket"),
             "https://github.com/acme/app/issues/43"
         );
+    }
+
+    /// One unparsable `*.md` in the directory is skipped and named, and every
+    /// other file still loads — the freeze this closes was `load_dir`
+    /// returning the first parse error and nothing else.
+    #[test]
+    fn load_dir_skips_the_bad_file_and_names_it() {
+        let dir = crate::scratch::root("load-dir-bad-file");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("good.md"),
+            "---\nid: good\nstage: queued\n---\n## Goal\nok\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("broken.md"), "---\nid: broken\nstage: queued\n").unwrap();
+
+        let (tasks, problems) = load_dir(&dir).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id(), "good");
+        assert_eq!(problems.len(), 1);
+        assert!(problems[0].path.ends_with("broken.md"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

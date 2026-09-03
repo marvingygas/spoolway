@@ -502,6 +502,9 @@ the warning prints under the verdict beside the gate and prompt findings:
 The overlong warning fires past 400 characters, counted in characters rather than bytes. A
 description is read to choose between pipelines, so a few sentences is the size it wants.
 
+A pipeline file that will not parse does not abort the command you ran to find it. The load
+failure is printed as the first problem and the two shipped pipelines are still validated.
+
 ### `spoolway pipeline contract`
 
 Print the pipeline format: every key a pipeline and a step may carry, one sentence each on how
@@ -800,7 +803,8 @@ case stops the files being brought forward.
 ### `spoolway doctor`
 
 Check that everything the configured pipeline needs is actually present. The one command
-that still runs when the config file does not parse. Among its checks: whether `gh` is on
+that still runs when the config file does not parse, or a pipeline file does not: the load
+failure becomes one failed check and the rest run. Among its checks: whether `gh` is on
 PATH and authenticated — what `spoolway stack` needs for everything past the push.
 
 It prints the [`checkout:` line](#the-checkout-line) once when the checkout is not the

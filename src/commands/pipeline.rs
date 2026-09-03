@@ -817,10 +817,39 @@ fn shipped_run_names_a_repo_local_path(shipped: &Pipelines) -> Vec<String> {
 /// alone for the same reason — the directory wins from the moment it exists, so
 /// nothing is lost by leaving it until its author has read what came out of it.
 /// Validate the pipelines against the config they will actually run with.
-pub fn pipeline_check(repo: &Repo, pipelines: &Pipelines, json: bool) -> Result<()> {
+pub fn pipeline_check(repo: &Repo, pipelines: Result<Pipelines>, json: bool) -> Result<()> {
     if let Some(note) = repo.checkout_note()? {
         note.print(json)?;
     }
+
+    // A pipeline file that will not load does not stop this check — it is
+    // reported as the first problem, and the shipped pipelines, a separate
+    // file, are still validated. Everything else here reads the project's
+    // own loaded set, so it is what is skipped.
+    let pipelines = match pipelines {
+        Ok(pipelines) => pipelines,
+        Err(err) => {
+            let mut problems = vec![format!("pipelines do not load: {err:#}")];
+            if let Ok(shipped) = Pipelines::shipped(&repo.config) {
+                problems.extend(
+                    step_problems(repo, &shipped)
+                        .into_iter()
+                        .map(|problem| format!("shipped pipeline {problem}")),
+                );
+                problems.extend(
+                    shipped_run_names_a_repo_local_path(&shipped)
+                        .into_iter()
+                        .map(|problem| format!("shipped pipeline {problem}")),
+                );
+            }
+            for problem in &problems {
+                println!("  problem: {problem}");
+            }
+            bail!("{} problem(s) found", problems.len());
+        }
+    };
+    let pipelines = &pipelines;
+
     pipelines.validate()?;
 
     // Gate and description warnings, gathered up front like the prompt
@@ -1360,7 +1389,7 @@ mod tests {
             pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
         };
 
-        let err = pipeline_check(&repo, &pipelines, false).unwrap_err();
+        let err = pipeline_check(&repo, Ok(pipelines), false).unwrap_err();
         assert!(err.to_string().contains("1 problem"), "{err}");
     }
 
@@ -1392,7 +1421,34 @@ mod tests {
             pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
         };
 
-        pipeline_check(&repo, &pipelines, false).expect("pi resumes, so this should pass");
+        pipeline_check(&repo, Ok(pipelines), false).expect("pi resumes, so this should pass");
+    }
+
+    /// `pipeline check` is the command you run to find out which pipeline
+    /// file does not parse, so a load failure is reported as a problem
+    /// rather than aborting the command before it starts — the shipped
+    /// pipelines, a separate file, are still validated.
+    #[test]
+    fn pipeline_check_reports_a_load_failure_instead_of_refusing_to_run() {
+        let root = crate::scratch::root("commands-pipeline-check-load-failure");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        crate::scratch::git_init(&root, &["-b", "plan/demo"]);
+        init_at(&root);
+
+        let repo = Repo {
+            home: root.join(".home"),
+            checkout: root.clone(),
+            root,
+            config: Config::default(),
+        };
+
+        let err = pipeline_check(&repo, Err(anyhow::anyhow!("unknown field priority")), false)
+            .expect_err("a pipeline that will not load is a problem");
+        assert!(
+            err.to_string().contains("problem"),
+            "the load failure is a counted problem, not a hard abort: {err}"
+        );
     }
 
     /// A gate with no `on_fail` is a warning, not a refusal: `Pipeline::validate`
@@ -1425,7 +1481,7 @@ mod tests {
             pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
         };
 
-        pipeline_check(&repo, &pipelines, false)
+        pipeline_check(&repo, Ok(pipelines), false)
             .expect("a gate with no on_fail is legal — only worth a warning");
     }
 
@@ -1460,7 +1516,7 @@ mod tests {
             pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
         };
 
-        let err = pipeline_check(&repo, &pipelines, false).unwrap_err();
+        let err = pipeline_check(&repo, Ok(pipelines), false).unwrap_err();
         assert!(err.to_string().contains("1 problem"), "{err}");
     }
 
@@ -1499,7 +1555,7 @@ mod tests {
             pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
         };
 
-        let err = pipeline_check(&repo, &pipelines, false).unwrap_err();
+        let err = pipeline_check(&repo, Ok(pipelines), false).unwrap_err();
         assert!(err.to_string().contains("1 problem"), "{err}");
     }
 
@@ -1541,7 +1597,7 @@ mod tests {
         std::fs::create_dir_all(&home).unwrap();
 
         crate::platform::test_home::with_home(&home, || {
-            pipeline_check(&repo, &pipelines, false)
+            pipeline_check(&repo, Ok(pipelines), false)
                 .expect("a skill spoolway cannot see is not a problem");
         });
     }
@@ -1585,7 +1641,7 @@ mod tests {
         std::fs::create_dir_all(repo.queue_dir()).unwrap();
         task.save().unwrap();
 
-        let err = pipeline_check(&repo, &pipelines, false).unwrap_err();
+        let err = pipeline_check(&repo, Ok(pipelines), false).unwrap_err();
         assert!(err.to_string().contains("1 problem"), "{err}");
     }
 
@@ -1732,7 +1788,7 @@ mod tests {
             config: Config::default(),
         };
         let pipelines = Pipelines::load(&repo.root, &repo.config).expect("template must load");
-        pipeline_check(&repo, &pipelines, false).expect("template must pass `pipeline check`");
+        pipeline_check(&repo, Ok(pipelines), false).expect("template must pass `pipeline check`");
     }
 
     /// Bare `pipeline contract` prints one JSON object carrying every section

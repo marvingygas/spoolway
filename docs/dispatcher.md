@@ -103,6 +103,16 @@ table, the environment a hook runs with, and what `on_fail = "pause"` holds. Tha
 is what "no issue tracking" means: a blank `hook` runs nothing here, and a pass behaves exactly
 as it does with the table absent.
 
+A pass is safe to run beside a lane. A lane's `spoolway report` writes the same task file the
+pass is working from, out of another process. Both sides take a short per-task lock around
+their own read and write, so the two cannot interleave. If a report lands after the pass has
+already read that task, the pass drops its now-stale write of that one file. The next pass
+redoes the bookkeeping against what the lane actually wrote.
+
+A queue file that will not parse does not stop a pass. The bad file is skipped, every other
+task runs as normal, and the file is named twice: once in `~/.spoolway/logs/<project>.log`,
+and again in amber under the board's table, so a person sees which file to fix.
+
 Step one re-examines a task's stage right away whenever it moves it without starting a lane —
 a step named in the task's own `skip:` (see [Trials](planning.md#trials), the one thing that
 writes it) falls through to `on_pass` on the spot rather than waiting for the next pass. That
@@ -792,9 +802,10 @@ a config that has it and is dropped on the next save. In an [unattended
 run](pipelines.md#unattended-runs) there is no person to hand it to, so it becomes a backoff
 instead: the task keeps its place and is retried on a doubling delay, capped at an hour.
 
-A dispatcher that dies between launching a lane and finishing that pass gets one extra pass of
-grace before the guard above applies. `lanes.json` is only written back at the end of a pass, so
-that crash loses the record the launch itself just wrote, and the restarted dispatcher's first
+A dispatcher killed between launching a lane and finishing that pass gets one extra pass of
+grace before the guard above applies. `lanes.json` is written back when a pass returns, its
+error paths included, but a process killed outright never reaches that write, so that crash
+loses the record the launch itself just wrote, and the restarted dispatcher's first
 pass would otherwise read the silence as a genuinely dead launch and hand the task to a person
 over a failure that never happened. Instead, the first pass that finds a launch with no
 `lanes.json` record of its own — gated on the task actually having a `launched_at`, so this
@@ -804,6 +815,10 @@ this one pass: the very next pass, whenever it lands, reads the lane as one this
 already watched, and escalates normally if it is still gone. The grace is one pass, not a
 window of time — a restart minutes or hours later gets exactly the same one chance a restart a
 second later would.
+
+A `lanes.json` that will not parse is not discarded. The pass starts from no lane records, but
+it first copies the bad file aside as `lanes.json.bad` and writes a line to the problem log
+saying so, rather than silently overwriting a hand edit or a disk error with an empty file.
 
 A settled lane whose pane ends on its own kind's usage-limit message gets the same backoff, for the same reason: more launches do not fix a spent quota either, and reminding or escalating it only spends a person's attention — or, unattended, relaunches straight back into the same wall on the very next pass — for no better result. Whether a tail *is* a limit is answered by the agent adapter (`Adapter::usage_limit` in `src/agent.rs`), a fact about one CLI's own wording, not a pattern the dispatcher keeps in sync by hand. Held rather than escalated: the task never reaches `blocked`, `attempts` is left exactly where the launch that hit the limit set it, and a `## Status Log` line names the limit and the delay.
 

@@ -314,6 +314,11 @@ spoolway queue list          # the dispatcher, and where every task is sitting
 spoolway queue show <task>   # one task file, in full
 ```
 
+A `*.md` in the queue that will not parse — a hand edit left without its closing `---`, an
+`id:` that fails validation — is skipped rather than failing the read. Every other task still
+loads. The dispatcher, the board and the pending listing all name the bad file so a person can
+fix it, and the board prints it in amber under its table.
+
 ## Expressing order
 
 Tasks of different groups are independent: separate branches, separate worktrees, nothing to

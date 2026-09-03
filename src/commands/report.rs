@@ -24,6 +24,29 @@ pub fn report(
     started_for: Option<&str>,
 ) -> Result<()> {
     let id = resolve_task_id(args.task.as_deref())?;
+
+    // Held across this whole read-modify-write, so a dispatcher pass that
+    // read this task file before the report cannot write a stale copy back
+    // after it — the lost report of review finding 2. There is no
+    // multiplexer call anywhere in `report`, so the one rule this lock has
+    // is kept here.
+    //
+    // The one slow thing under the lock is `commit_lane_work` below — a
+    // local `git add -A` + `git commit` in the lane's worktree, well inside
+    // `TaskLock::WAIT` in normal use. If it ever does run long, a waiting
+    // dispatcher's `persist` still reload-checks `last_report` once its own
+    // wait times out, so the worst case is a slower pass, not a lost report.
+    //
+    // Best effort: a lock a live process still holds after the wait is
+    // logged, and the report proceeds unlocked rather than being refused.
+    let task_lock = crate::lock::TaskLock::acquire(&repo.task_lock_file(&id));
+    if task_lock.is_err() {
+        crate::problem_log::append(
+            repo,
+            &format!("{id}: task lock still held, reporting without it"),
+        );
+    }
+
     let mut task = repo.task(&id)?;
     let pipeline = pipelines.for_task(&task)?;
     let current = task.stage().to_string();

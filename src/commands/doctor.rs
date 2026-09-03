@@ -186,6 +186,25 @@ impl Report {
     }
 }
 
+/// Print a finished report in the caller's chosen mode, and exit non-zero
+/// when it carries a problem — the tail every `doctor` path shares.
+fn finish(report: &Report, verbose: bool, json: bool) -> Result<()> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report.render_json(verbose))?
+        );
+    } else {
+        print!("{}", report.render(verbose));
+    }
+    let problems = report.problems();
+    if problems == 0 {
+        Ok(())
+    } else {
+        bail!("{problems} problem(s) — fix these before dispatching")
+    }
+}
+
 /// Check that everything the configured pipeline needs is actually present,
 /// before a dispatch pass discovers it the hard way.
 ///
@@ -197,9 +216,13 @@ impl Report {
 /// checked in full even when the project's does not. That load is what does
 /// the gating now — see the early return below — and `config_error`, when
 /// `Some`, becomes a finding of its own instead.
+///
+/// `pipelines` is handed in as a `Result` for the same reason: a pipeline
+/// file that will not parse is what this command exists to name, so its
+/// load failure is a finding, not a gate — see the second early return.
 pub fn doctor(
     repo: &Repo,
-    pipelines: &Pipelines,
+    pipelines: Result<Pipelines>,
     config_error: Option<anyhow::Error>,
     verbose: bool,
     json: bool,
@@ -213,6 +236,29 @@ pub fn doctor(
     };
 
     let mut report = Report::default();
+
+    // A pipeline file that will not parse must not stop the command you run
+    // to find out which one it is. Report the load failure as a failed row
+    // and run the checks that read no pipeline — config, issue tracking,
+    // retired keys, the multiplexer, the update check — since the graph,
+    // agent and prompt checks below all need a loaded pipeline set.
+    let pipelines = match pipelines {
+        Ok(pipelines) => pipelines,
+        Err(err) => {
+            report.check("pipelines load", Err(err));
+            report.record_all(config_checks(repo, config_error, &config));
+            report.record_all(issue_tracking_checks(repo, &config.issue_tracking));
+            report.record_all(retired_key_notes(&repo.checkout));
+            report.record(mux_check(repo));
+            doctor_update(repo, &mut report);
+            report.record(match crate::lock::Lock::holder(&repo.lock_file())? {
+                Some(pid) => Finding::Note(format!("a dispatcher is running (pid {pid})")),
+                None => Finding::NoteVerbose("no dispatcher running".into()),
+            });
+            return finish(&report, verbose, json);
+        }
+    };
+    let pipelines = &pipelines;
 
     // A task file can be hand-edited into a graph nothing can get through, and
     // the only symptom is tasks that quietly never start.
@@ -245,20 +291,7 @@ pub fn doctor(
         None => Finding::NoteVerbose("no dispatcher running".into()),
     });
 
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&report.render_json(verbose))?
-        );
-    } else {
-        print!("{}", report.render(verbose));
-    }
-    let problems = report.problems();
-    if problems == 0 {
-        Ok(())
-    } else {
-        bail!("{problems} problem(s) — fix these before dispatching")
-    }
+    finish(&report, verbose, json)
 }
 
 /// `doctor` on a checkout whose own `config.toml` does not parse — `err` is
@@ -273,7 +306,7 @@ pub fn doctor(
 /// on settings this project never wrote.
 fn doctor_unconfigured(
     repo: &Repo,
-    pipelines: &Pipelines,
+    pipelines: Result<Pipelines>,
     err: anyhow::Error,
     verbose: bool,
     json: bool,
@@ -284,8 +317,13 @@ fn doctor_unconfigured(
     report.check(
         "pipelines are valid",
         pipelines
-            .validate()
-            .map(|()| Some(format!("{:?}", pipelines.names()))),
+            .as_ref()
+            .map_err(|e| anyhow::anyhow!("{e:#}"))
+            .and_then(|pipelines| {
+                pipelines
+                    .validate()
+                    .map(|()| Some(format!("{:?}", pipelines.names())))
+            }),
     );
     report.check("on a usable branch", repo.branch().map(Some));
 
@@ -299,18 +337,7 @@ fn doctor_unconfigured(
         relative(&repo.checkout, &Config::path_in(&repo.checkout))
     ));
 
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&report.render_json(verbose))?
-        );
-    } else {
-        print!("{}", report.render(verbose));
-    }
-    bail!(
-        "{} problem(s) — fix these before dispatching",
-        report.problems()
-    )
+    finish(&report, verbose, json)
 }
 
 /// The checks that only need the checkout's own loaded `config` and whether

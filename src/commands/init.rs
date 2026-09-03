@@ -899,7 +899,7 @@ mod tests {
         // The command whose whole job is to refuse a pipeline it cannot run.
         // It probes every step's prompt and the observer's, so a lookup that
         // disagrees with `init` surfaces here as a bail rather than at dispatch.
-        pipeline_check(&repo, &pipelines, false)
+        pipeline_check(&repo, Ok(pipelines.clone()), false)
             .expect("a freshly initialised project passes its own pipeline check");
 
         // Every step a shipped pipeline runs has prose on disk after `init`.
