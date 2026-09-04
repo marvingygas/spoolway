@@ -40,6 +40,22 @@ pub(crate) fn money_plain(cost: Option<f64>) -> String {
     }
 }
 
+/// One CSV field, RFC 4180 quoted when it holds a comma, a double quote or a
+/// newline, and passed through untouched otherwise.
+///
+/// `spoolway spend --csv` and `spoolway eval --csv` join project basenames,
+/// pipeline names, version strings and skill names straight into a
+/// comma-separated line. A project directory named `foo, bar` then shifted
+/// every column after it (review finding 43). Numbers spoolway formats itself
+/// never need this; only the fields that come from a name a person chose.
+pub(crate) fn csv_field(value: &str) -> std::borrow::Cow<'_, str> {
+    if value.contains([',', '"', '\n', '\r']) {
+        std::borrow::Cow::Owned(format!("\"{}\"", value.replace('"', "\"\"")))
+    } else {
+        std::borrow::Cow::Borrowed(value)
+    }
+}
+
 /// First non-empty line, trimmed of list markers.
 pub(crate) fn first_line(text: &str) -> &str {
     text.lines()
@@ -73,6 +89,14 @@ mod tests {
         assert_eq!(money_plain(Some(45.409)), "45.41");
         assert_eq!(money_plain(Some(0.0)), "0");
         assert_eq!(money_plain(None), "—");
+    }
+
+    #[test]
+    fn csv_fields_are_quoted_only_when_a_separator_would_break_the_row() {
+        assert_eq!(csv_field("plain"), "plain");
+        assert_eq!(csv_field("foo, bar"), "\"foo, bar\"");
+        assert_eq!(csv_field("say \"hi\""), "\"say \"\"hi\"\"\"");
+        assert_eq!(csv_field("two\nlines"), "\"two\nlines\"");
     }
 
     #[test]

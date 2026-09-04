@@ -34,4 +34,6 @@ libc = "0.2"
 [target."cfg(windows)".dependencies]
 # Win32_System_JobObjects: a command step's detach and its group kill —
 # see `headless::spawn_run` and `headless::kill_group`.
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+# Win32_Security_Cryptography: `ProcessPrng`, the CSPRNG `usage::os_random`
+# fills a session or run id from where there is no `/dev/urandom` to read.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Cryptography", "Win32_System_JobObjects", "Win32_System_Threading"] }

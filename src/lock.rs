@@ -244,6 +244,87 @@ impl Drop for TaskLock {
     }
 }
 
+/// A short-lived advisory lock over the usage ledger's read-diff-append.
+///
+/// Banking an interactive session reads the ledger, works out what the
+/// transcript has spent since what is already banked, and appends the
+/// difference. With nothing between them, two `spoolway` commands run at once
+/// in the same session both read the same banked total and both append the
+/// same delta, so that session's cost is counted twice in every later
+/// `spend`/`eval` — review finding 15. The banker holds this across the whole
+/// read-diff-append, so the second one reads a ledger the first has already
+/// written to and finds nothing new to add.
+///
+/// The same `link_into_place` + [`Lock::holder`] machinery [`TaskLock`] uses,
+/// and a crashed holder's file is reaped on the first retry. `acquire`
+/// returns `Err` once a live holder has held it past [`LedgerLock::WAIT`];
+/// what a caller does with that `Err` is the caller's, and the two paths
+/// differ:
+///
+/// - A single append — [`crate::usage::bank_lane`], the headless interrupt's
+///   path — proceeds unlocked. Losing that turn's tokens is worse than a rare
+///   double-count, and one append rarely reaches the bound anyway.
+/// - A batch — [`crate::usage::sweep`], [`crate::usage::bank_ambient`] —
+///   defers instead: it holds the lock across every session's transcript read
+///   and append, so it can legitimately outlast the bound, and whoever holds
+///   the lock is running the same catch-up. A later `spend`/`eval` re-runs it.
+pub struct LedgerLock {
+    path: PathBuf,
+}
+
+impl LedgerLock {
+    /// How long a live holder is waited out before `acquire` returns `Err`.
+    /// A single append is a read, a diff and one `write_all`, so a holder
+    /// still in it this long has stalled; a batch sweep legitimately runs
+    /// longer and its callers defer rather than race — see the type doc.
+    const WAIT: Duration = Duration::from_secs(3);
+
+    pub fn acquire(path: &Path) -> Result<LedgerLock> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let pid = std::process::id();
+        let contents = format!("{pid}\n{}\n", started_at(pid).unwrap_or_default());
+        let deadline = std::time::Instant::now() + Self::WAIT;
+        loop {
+            match link_into_place(path, &contents) {
+                Ok(true) => {
+                    return Ok(LedgerLock {
+                        path: path.to_path_buf(),
+                    });
+                }
+                Ok(false) => match Lock::holder(path)? {
+                    Some(pid) => {
+                        if std::time::Instant::now() >= deadline {
+                            bail!(
+                                "ledger lock at {} is still held by pid {pid} after {:?}",
+                                path.display(),
+                                Self::WAIT
+                            );
+                        }
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    None => {
+                        let _ = std::fs::remove_file(path);
+                    }
+                },
+                Err(e) => return Err(e).with_context(|| format!("writing {}", path.display())),
+            }
+        }
+    }
+}
+
+impl Drop for LedgerLock {
+    fn drop(&mut self) {
+        // Only if it still names this process — same reasoning as [`Lock`].
+        if let Ok(Some(holder)) = Lock::holder(&self.path)
+            && holder == std::process::id()
+        {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
 /// How many consecutive starts have failed to run at all, and why the last
 /// one did — the state a caller restarting the engine in a tight loop is
 /// finally refused by.

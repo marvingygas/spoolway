@@ -18,6 +18,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use anyhow::{Context, Result, bail};
 
 use crate::cli::EvalArgs;
+use crate::fmt::csv_field;
 use crate::pipeline::Pipelines;
 use crate::repo::Repo;
 use crate::screen::{Key, PollableRead, overlay, pad_to, panel, read_key};
@@ -596,11 +597,11 @@ fn print_run_csv(rows: &[RunRow]) -> Result<()> {
     for row in rows {
         println!(
             "{},{},{},{},{},{},{},{},{},{},{},{}",
-            row.id,
-            row.task,
-            local_date(&row.ts),
-            row.version,
-            row.pipeline,
+            csv_field(&row.id),
+            csv_field(&row.task),
+            csv_field(&local_date(&row.ts)),
+            csv_field(&row.version),
+            csv_field(&row.pipeline),
             row.lanes,
             csv_fraction(row.pass_share()),
             row.blocked,
@@ -1184,7 +1185,17 @@ fn print_json(
     // the two apart by that field.
     if skills_eligible {
         for entry in skills {
-            rows.push(serde_json::to_value(entry)?);
+            // `Entry::project` is `#[serde(skip)]` — the ledger's own path says
+            // which project a line is, so it is never written to disk. But a
+            // `--all` read spans projects and fills it in, and the pipeline
+            // rows above already carry it, so a skill row that dropped it could
+            // not be attributed across two projects (review finding 46). Add it
+            // back on the way out.
+            let mut row = serde_json::to_value(entry)?;
+            if let Some(map) = row.as_object_mut() {
+                map.insert("project".to_string(), entry.project.clone().into());
+            }
+            rows.push(row);
         }
     }
 
@@ -1247,10 +1258,10 @@ fn print_csv(
             // (`lanes_per_task`) and the dollar figures carry decimal places.
             println!(
                 "{},{},{},{},{},{},{:.2},{},{},{},{},{},{},{},{},{},{},{}",
-                version.project,
-                block.name,
-                version.name,
-                version.since,
+                csv_field(&version.project),
+                csv_field(&block.name),
+                csv_field(&version.name),
+                csv_field(&version.since),
                 m.tasks,
                 m.lanes,
                 m.lanes_per_task(),
@@ -2019,10 +2030,12 @@ fn export_rows(
 fn csv_pipeline_row(project: &str, pipeline: &str, version: &Version, m: &Metrics) -> String {
     let ctx_tokens = m.ctx_peak_tokens.map_or(String::new(), |t| t.to_string());
     let ctx_pct = m.ctx_peak_pct.map_or(String::new(), |p| format!("{p:.2}"));
+    let project = csv_field(project);
+    let pipeline = csv_field(pipeline);
     format!(
         "{project},{pipeline},{},{},{},{},{:.2},{},{},{ctx_tokens},{ctx_pct},{},{},{},{},{},{},{}",
-        version.name,
-        version.since,
+        csv_field(&version.name),
+        csv_field(&version.since),
         m.tasks,
         m.lanes,
         m.lanes_per_task(),
@@ -2042,9 +2055,10 @@ fn csv_step_row(pipeline: &str, row: &StepRow) -> String {
     let m = &row.metrics;
     let ctx_tokens = m.ctx_peak_tokens.map_or(String::new(), |t| t.to_string());
     let ctx_pct = m.ctx_peak_pct.map_or(String::new(), |p| format!("{p:.2}"));
+    let pipeline = csv_field(pipeline);
     format!(
         "{pipeline},{},{},{},{},{:.2},{},{},{ctx_tokens},{ctx_pct},{},{},{},{},{},{}",
-        row.step,
+        csv_field(&row.step),
         m.tasks,
         m.lanes,
         m.lanes_per_task(),
@@ -2067,11 +2081,11 @@ fn csv_run_row(row: &RunRow) -> String {
         .map_or(String::new(), |p| format!("{p:.2}"));
     format!(
         "{},{},{},{},{},{},{},{},{ctx_tokens},{ctx_pct},{},{},{},{}",
-        row.id,
-        row.task,
-        local_date(&row.ts),
-        row.version,
-        row.pipeline,
+        csv_field(&row.id),
+        csv_field(&row.task),
+        csv_field(&local_date(&row.ts)),
+        csv_field(&row.version),
+        csv_field(&row.pipeline),
         row.lanes,
         csv_fraction(row.pass_share()),
         row.blocked,
@@ -2086,10 +2100,11 @@ fn csv_skill_row(name: &str, row: &SkillVersion) -> String {
     let per_session = row
         .per_session()
         .map_or(String::new(), |usd| format!("{usd:.2}"));
+    let name = csv_field(name);
     format!(
         "{name},{},{},{},{},{per_session},{}",
-        row.name,
-        row.since,
+        csv_field(&row.name),
+        csv_field(&row.since),
         row.sessions,
         csv_cost(row.cost, row.sessions, row.unpriced),
         row.unpriced,
@@ -2105,9 +2120,14 @@ fn evals_dir(repo: &Repo) -> std::path::PathBuf {
     repo.root.join(crate::config::STATE_DIR).join("evals")
 }
 
-/// Write the rows currently on screen to `.spoolway/evals/eval-<stamp>.csv`,
-/// and hand back the path and how many rows it holds — what the confirmation
-/// panel names.
+/// Write the rows currently on screen to
+/// `.spoolway/evals/eval-<view>-<stamp>.csv`, and hand back the path and how
+/// many rows it holds — what the confirmation panel names.
+///
+/// The stamp carries seconds and the view name, and a suffix is added rather
+/// than a file overwritten: two `e` presses in the same minute used to leave
+/// only the second file while both reported success, and tabbing between views
+/// and exporting each hit the same clash (review finding 44).
 fn export(
     repo: &Repo,
     loaded: &Loaded,
@@ -2119,8 +2139,14 @@ fn export(
     let dir = evals_dir(repo);
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
 
-    let stamp = chrono::Local::now().format("%Y-%m-%d-%H%M");
-    let path = dir.join(format!("eval-{stamp}.csv"));
+    let stamp = chrono::Local::now().format("%Y-%m-%d-%H%M%S");
+    let base = format!("eval-{}-{stamp}", view.label());
+    let mut path = dir.join(format!("{base}.csv"));
+    let mut n = 2;
+    while path.exists() {
+        path = dir.join(format!("{base}-{n}.csv"));
+        n += 1;
+    }
     let mut body = String::new();
     body.push_str(&header);
     body.push('\n');
@@ -2133,11 +2159,11 @@ fn export(
 }
 
 /// `path`, relative to `root` where it is under it — what the export
-/// confirmation names, the same way the mockup writes
-/// `.spoolway/evals/eval-2026-08-18-2031.csv` rather than the whole absolute
-/// path a real project's `repo.root` would make it. Falls back to the path
-/// as given when it is not under `root` at all, which should not happen in
-/// practice since `export` always writes under `evals_dir(repo)`.
+/// confirmation names, so it reads
+/// `.spoolway/evals/eval-pipelines-2026-08-18-203114.csv` rather than the
+/// whole absolute path a real project's `repo.root` would make it. Falls back
+/// to the path as given when it is not under `root` at all, which should not
+/// happen in practice since `export` always writes under `evals_dir(repo)`.
 fn display_relative(path: &std::path::Path, root: &std::path::Path) -> String {
     path.strip_prefix(root)
         .map(|rel| rel.display().to_string())

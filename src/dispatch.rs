@@ -298,18 +298,17 @@ impl LaneRecord {
     /// from: one from a spoolway that predates it, or a project whose `args`
     /// drop `{session_id}`. Nothing here can recover what was never written
     /// down.
-    pub(crate) fn readopted(repo: &Repo, name: &str, now: i64) -> LaneRecord {
+    pub(crate) fn readopted(name: &str, now: i64, ledger: &[crate::usage::Entry]) -> LaneRecord {
         let mut record = LaneRecord::adopted(now);
-        if let Some(entry) = crate::usage::read(repo)
-            .unwrap_or_default()
-            .into_iter()
+        if let Some(entry) = ledger
+            .iter()
             .rev()
             .find(|entry| lane_name(&entry.step, &entry.task) == name && !entry.session.is_empty())
         {
-            record.session = entry.session;
-            record.kind = entry.kind;
-            record.agent = entry.agent;
-            record.model = entry.model;
+            record.session = entry.session.clone();
+            record.kind = entry.kind.clone();
+            record.agent = entry.agent.clone();
+            record.model = entry.model.clone();
         }
         record
     }
@@ -361,19 +360,26 @@ pub struct Dispatcher<'a> {
     /// cannot make half its choices in each mode.
     unattended: bool,
     /// What each session in the usage ledger has already banked, by session
-    /// id — read at most once per pass, in [`Dispatcher::usage_banked`],
-    /// rather than once per lane in [`Dispatcher::record_usage`], which used
-    /// to re-read the whole ledger for every lane a pass tore down. Updated
-    /// in place as this pass banks more, so a second lane banked against the
-    /// same carried session within one pass still sees the first one's
-    /// totals without a second read of the file.
+    /// id — folded once per pass out of [`Dispatcher::ledger`], rather than
+    /// once per lane in [`Dispatcher::record_usage`], which used to re-read
+    /// the whole ledger for every lane a pass tore down. Updated in place as
+    /// this pass banks more, so a second lane banked against the same carried
+    /// session within one pass still sees the first one's totals without a
+    /// second read of the file.
     ///
     /// `None` until the first lane this pass actually banks — a pass that
-    /// tears nothing down, which is most of them on the 40MB ledger this
-    /// exists for, never touches the file at all. Populating it in
+    /// tears nothing down never builds it. Populating it in
     /// [`Dispatcher::new`] unconditionally was the bug: every pass paid to
     /// parse the whole ledger whether or not it had anything to bank.
     usage_banked: Option<HashMap<String, BankedTotals>>,
+    /// The whole ledger, parsed once on first use and shared for the rest of
+    /// the pass — see [`Dispatcher::ledger`]. The ceiling checks,
+    /// `carried_session`, `readopted` and `lane_session` all used to parse
+    /// `usage.jsonl` end to end on their own (review finding 33); now they
+    /// answer from this one snapshot, and `usage_banked` is folded out of it
+    /// rather than triggering a second read. `None` until something in the
+    /// pass first needs the ledger, for the same reason `usage_banked` is.
+    ledger: Option<std::sync::Arc<Vec<crate::usage::Entry>>>,
     /// Each task's `last_report.at` as this pass first read it, by task id.
     /// A lane's `spoolway report` is the only thing that ever advances that
     /// field, so a disk copy whose value is higher than this means a report
@@ -545,6 +551,7 @@ impl<'a> Dispatcher<'a> {
             // lane's own `spoolway report` answer the question the same way.
             unattended: repo.unattended(),
             usage_banked: None,
+            ledger: None,
             report_seen: HashMap::new(),
         }
     }
@@ -563,13 +570,28 @@ impl<'a> Dispatcher<'a> {
         persist_task(self.repo, task, &self.report_seen)
     }
 
-    /// This pass's own running total per session, read from the ledger on
-    /// first use and kept for the rest of the pass — see
-    /// [`Dispatcher::usage_banked`]'s own doc for why that read is deferred
-    /// rather than unconditional.
-    fn usage_banked(&mut self) -> &mut HashMap<String, BankedTotals> {
+    /// The whole usage ledger, parsed once per pass and shared thereafter.
+    /// Deferred to first use — most passes tear nothing down and never read it
+    /// — see [`Dispatcher::ledger`](Self::ledger)'s field doc.
+    pub(crate) fn ledger(&mut self) -> std::sync::Arc<Vec<crate::usage::Entry>> {
         let repo = self.repo;
-        self.usage_banked.get_or_insert_with(|| banked_totals(repo))
+        self.ledger
+            .get_or_insert_with(|| {
+                std::sync::Arc::new(crate::usage::read(repo).unwrap_or_default())
+            })
+            .clone()
+    }
+
+    /// This pass's own running total per session, folded out of
+    /// [`Dispatcher::ledger`] on first use and kept for the rest of the pass.
+    /// Updated in place as this pass banks more, so a second lane banked
+    /// against the same carried session sees the first one's totals.
+    fn usage_banked(&mut self) -> &mut HashMap<String, BankedTotals> {
+        if self.usage_banked.is_none() {
+            let ledger = self.ledger();
+            self.usage_banked = Some(banked_totals(&ledger));
+        }
+        self.usage_banked.as_mut().expect("just set")
     }
 
     /// One full reconciliation: read the queue and the multiplexer, decide
@@ -1565,10 +1587,11 @@ impl<'a> Dispatcher<'a> {
             // this free with nothing under `lane.name` still recovers what
             // the ledger remembers of it rather than banking nothing for a
             // step that finished clean — see `LaneRecord::readopted`.
+            let ledger = self.ledger();
             let record = self
                 .lanes
                 .remove(&lane.name)
-                .unwrap_or_else(|| LaneRecord::readopted(self.repo, &lane.name, now_secs()));
+                .unwrap_or_else(|| LaneRecord::readopted(&lane.name, now_secs(), &ledger));
             // A pane that is still there is the task's to hand on. `Shell` is
             // handed to the next step as it stands; `StillOccupied` is a
             // session that would not go, and is only closed once that step's
@@ -1585,15 +1608,17 @@ impl<'a> Dispatcher<'a> {
                     report,
                 );
             }
-            // A held lane was booked when it was held, and booking it again
-            // would charge one session to the ledger twice.
-            if !record.held_for_block {
-                let pipeline = current
-                    .and_then(|t| self.pipelines.for_task(t).ok())
-                    .map(|p| p.name.clone())
-                    .unwrap_or_default();
-                self.record_usage(&record, task_id, step_id, current, &pipeline);
-            }
+            // Banked whether or not the lane was held. `record_usage` diffs
+            // the transcript against what `usage_banked` says is already on
+            // the ledger, so the hold-time line is subtracted and only the
+            // rounds a person added in that pane while it was held are
+            // appended now — without this, that spend was lost entirely
+            // (review finding 34).
+            let pipeline = current
+                .and_then(|t| self.pipelines.for_task(t).ok())
+                .map(|p| p.name.clone())
+                .unwrap_or_default();
+            self.record_usage(&record, task_id, step_id, current, &pipeline);
             freed.insert(lane.name.clone());
             report.actions.push(format!("freed {}", lane.name));
         }
@@ -1644,11 +1669,11 @@ impl<'a> Dispatcher<'a> {
         }
 
         let now = now_secs();
-        let repo = self.repo;
+        let ledger = self.ledger();
         let record = self
             .lanes
             .entry(old.name.clone())
-            .or_insert_with(|| LaneRecord::readopted(repo, &old.name, now));
+            .or_insert_with(|| LaneRecord::readopted(&old.name, now, &ledger));
         let since = *record.handing_over_since.get_or_insert(now);
         if now.saturating_sub(since) < HANDOVER_WAIT.as_secs() as i64 {
             report.actions.push(format!(
@@ -1729,11 +1754,11 @@ impl<'a> Dispatcher<'a> {
         task: Option<&Task>,
         report: &mut Report,
     ) {
-        let repo = self.repo;
+        let ledger = self.ledger();
         let record = self
             .lanes
             .entry(lane.name.clone())
-            .or_insert_with(|| LaneRecord::readopted(repo, &lane.name, now_secs()));
+            .or_insert_with(|| LaneRecord::readopted(&lane.name, now_secs(), &ledger));
         record.held_for_block = true;
         // Not a lane holding a question any more: answering this pane does
         // nothing, and the board must stop offering it as somewhere to go and
@@ -1859,6 +1884,16 @@ impl<'a> Dispatcher<'a> {
     /// found, an agent whose format is not known, a ledger that will not open —
     /// none of them are worth failing a dispatch pass over, because accounting
     /// is a record of the pipeline, not a part of it.
+    ///
+    /// **Not under [`crate::lock::LedgerLock`].** The append below is
+    /// unlocked, and the diff is against this pass's [`Dispatcher::ledger`]
+    /// snapshot rather than a fresh read — criterion 3's one-read-per-pass.
+    /// The lock covers the paths that are *not* the dispatcher: `bank_ambient`,
+    /// `sweep`, and `bank_lane` (a `queue pause` or board `p`/`P` in another
+    /// process). The dispatcher is the only writer of lane lines in the common
+    /// case, so its own appends are serial. The one gap is a `bank_lane`
+    /// racing this call for the *same carried session* — a narrow window
+    /// accepted in favour of not re-reading the ledger per lane.
     pub(crate) fn record_usage(
         &mut self,
         record: &LaneRecord,
@@ -2016,13 +2051,13 @@ impl<'a> Dispatcher<'a> {
             None => Some(hash_of(&self.mux.read(&lane.name, 60).unwrap_or_default())),
         };
 
-        let repo = self.repo;
+        let ledger = self.ledger();
         let record = self
             .lanes
             .entry(lane.name.clone())
             .or_insert_with(|| LaneRecord {
                 output_hash: fallback.unwrap_or_default(),
-                ..LaneRecord::readopted(repo, &lane.name, now)
+                ..LaneRecord::readopted(&lane.name, now, &ledger)
             });
 
         match (wrote_at, fallback) {
@@ -2332,10 +2367,11 @@ impl<'a> Dispatcher<'a> {
                 return Ok(());
             }
             self.mux.stop_lane(&lane.name, &lane.pane_id)?;
+            let ledger = self.ledger();
             let record = self
                 .lanes
                 .remove(&lane.name)
-                .unwrap_or_else(|| LaneRecord::readopted(self.repo, &lane.name, now_secs()));
+                .unwrap_or_else(|| LaneRecord::readopted(&lane.name, now_secs(), &ledger));
             self.record_usage(&record, task.id(), &step.id, Some(task), &pipeline.name);
             // Read by the launch ceiling below, so the same doubling backoff
             // applies whether or not anybody is watching this run — a spent
@@ -2570,13 +2606,13 @@ impl<'a> Dispatcher<'a> {
         // Booked here rather than in `free_finished_lanes`, which never sees a
         // lane this path has already torn down — or, for a held one, sees it
         // every pass and would book it on each.
+        let ledger = self.ledger();
         let record = match hold {
             true => {
-                let repo = self.repo;
                 let record = self
                     .lanes
                     .entry(lane.name.clone())
-                    .or_insert_with(|| LaneRecord::readopted(repo, &lane.name, now_secs()));
+                    .or_insert_with(|| LaneRecord::readopted(&lane.name, now_secs(), &ledger));
                 record.held_for_block = true;
                 // See `hold_for_block`: a pane kept to be read is not a lane
                 // anybody can answer.
@@ -2586,7 +2622,7 @@ impl<'a> Dispatcher<'a> {
             false => Some(
                 self.lanes
                     .remove(&lane.name)
-                    .unwrap_or_else(|| LaneRecord::readopted(self.repo, &lane.name, now_secs())),
+                    .unwrap_or_else(|| LaneRecord::readopted(&lane.name, now_secs(), &ledger)),
             ),
         };
         if let Some(record) = &record {
@@ -2861,9 +2897,10 @@ impl<'a> Dispatcher<'a> {
                     if tasks[candidate.task_index].front.launched_at.is_some()
                         && !self.lanes.contains_key(&lane)
                     {
+                        let ledger = self.ledger();
                         self.lanes.insert(
                             lane.clone(),
-                            LaneRecord::readopted(self.repo, &lane, now_secs()),
+                            LaneRecord::readopted(&lane, now_secs(), &ledger),
                         );
                         report.actions.push(format!(
                             "{}: `{}` has been started {attempts} time(s) and left \
@@ -2999,6 +3036,11 @@ impl<'a> Dispatcher<'a> {
                 .filter(|handover| handover.ready)
                 .map(|handover| handover.pane_id.clone());
 
+            // The pass's one ledger snapshot, built on first use here and
+            // reused for every later candidate — `start_one`'s session
+            // lookups answer from it rather than each parsing `usage.jsonl`
+            // (review finding 33). A pass with no candidates never builds it.
+            let ledger = self.ledger();
             let outcome = start_one(
                 self.repo,
                 &pipeline,
@@ -3008,6 +3050,7 @@ impl<'a> Dispatcher<'a> {
                 &profile,
                 inherited.as_deref(),
                 &self.report_seen,
+                &ledger,
             );
             if let Some(stuck) = handover.filter(|handover| !handover.ready) {
                 match outcome.is_ok() {
@@ -3495,22 +3538,24 @@ impl<'a> Dispatcher<'a> {
     /// front of — who would simply start it again, having learned nothing, since
     /// their own blocked tasks were already parked in front of them.
     ///
-    /// Counted from the same ledger and over the same window as the board's
-    /// footer: entries stamped at or after the moment this run took its lock.
-    /// Reading the ledger every pass is a file read against work measured in
-    /// wall-clock minutes, and the alternative — a running total in memory —
-    /// would lose the count on a dispatcher restart and let a run that has
-    /// already spent the budget spend it again.
+    /// Counted from the pass's one [`Dispatcher::ledger`] snapshot, over the
+    /// same window as the board's footer: entries stamped at or after the
+    /// moment this run took its lock. Each ceiling check used to parse the
+    /// whole `usage.jsonl` on its own, every pass (review finding 33); now
+    /// both read the snapshot every other consumer in the pass shares. The
+    /// alternative — a running total in memory — would lose the count on a
+    /// dispatcher restart and let a run that has already spent the budget
+    /// spend it again.
     ///
     /// **Lane entries only.** The ledger also carries the operator's own
-    /// interactive session — `usage::bank_session` banks planning and
+    /// interactive session — `usage::bank_ambient` banks planning and
     /// queueing against the project, which is right, and those lines have no
     /// `task`. Summed with the rest they make the one brake an unattended run
     /// has answer to whoever is *watching* it: sit in a Claude session reading
     /// an overnight run and your own context reads stop the dispatcher starting
     /// work. The ceiling is documented as the output tokens one unattended run
     /// may spend, and a lane is the only thing that run started.
-    fn over_output_ceiling(&self) -> Option<String> {
+    fn over_output_ceiling(&mut self) -> Option<String> {
         if !self.unattended {
             return None;
         }
@@ -3519,8 +3564,8 @@ impl<'a> Dispatcher<'a> {
             return None;
         }
         let start = crate::status::run_start(self.repo);
-        let spent: u64 = crate::usage::read(self.repo)
-            .unwrap_or_default()
+        let ledger = self.ledger();
+        let spent: u64 = ledger
             .iter()
             .filter(|entry| {
                 start
@@ -3552,7 +3597,7 @@ impl<'a> Dispatcher<'a> {
     /// nothing in `[models]` either — contributes nothing to the sum rather
     /// than being estimated, the same rule `Entry::cost_usd` follows
     /// everywhere else: never invented, only read.
-    fn over_cost_ceiling(&self) -> Option<String> {
+    fn over_cost_ceiling(&mut self) -> Option<String> {
         if !self.unattended {
             return None;
         }
@@ -3561,8 +3606,8 @@ impl<'a> Dispatcher<'a> {
             return None;
         }
         let start = crate::status::run_start(self.repo);
-        let spent: f64 = crate::usage::read(self.repo)
-            .unwrap_or_default()
+        let ledger = self.ledger();
+        let spent: f64 = ledger
             .iter()
             .filter(|entry| {
                 start
@@ -3623,11 +3668,11 @@ impl<'a> Dispatcher<'a> {
 
         let now = now_secs();
         let quiet = self.repo.config.dispatch.lane_quiet;
-        let repo = self.repo;
+        let ledger = self.ledger();
         let record = self
             .lanes
             .entry(lane_name.to_string())
-            .or_insert_with(|| LaneRecord::readopted(repo, lane_name, now));
+            .or_insert_with(|| LaneRecord::readopted(lane_name, now, &ledger));
         let silent_for =
             Duration::from_secs(now.saturating_sub(record.last_progress).max(0) as u64);
         if silent_for >= quiet {
@@ -4080,6 +4125,9 @@ fn start_one(
     // backend whose pane is the agent itself.
     inherited: Option<&str>,
     report_seen: &HashMap<String, i64>,
+    // The pass's one usage-ledger snapshot, for the session lookups below —
+    // see [`Dispatcher::ledger`] and review finding 33.
+    ledger: &[crate::usage::Entry],
 ) -> Result<Started> {
     let name = lane_name(&step.id, task.id());
 
@@ -4185,14 +4233,17 @@ fn start_one(
     // here, still set at this point because `unpark` deliberately leaves it
     // for this launch to spend — see the note beside it.
     let parked = task.front.parked_from.as_deref() == Some(step.id.as_str());
-    let one_shot = resuming.then(|| lane_session(repo, &name)).flatten();
+    let one_shot = resuming
+        .then(|| lane_session_in(repo, ledger, &name))
+        .flatten();
     // `session:` is a different question from the one-shot flag, not a
     // fallback for it — a task coming back from `blocked` names an exact
     // session to continue, and a miss there says that lane's session is
     // gone, not that any prompt match will do instead. So this is only
     // tried when `resuming` is false to begin with.
     let (carried, session_miss) = match (resuming, step.session) {
-        (false, true) => match carried_session(repo, pipeline, task, step, profile, &model) {
+        (false, true) => match carried_session(repo, pipeline, task, step, profile, &model, ledger)
+        {
             Ok(found) => (Some(found), None),
             Err(reason) => (None, Some(reason.describe(step.prompt_name(), &model))),
         },
@@ -4512,7 +4563,20 @@ fn write_system_prompt(repo: &Repo, lane: &str, body: &str) -> Result<PathBuf> {
 /// attach` to reopen it. From the lane records first — the dispatcher's own
 /// bookkeeping — and the usage ledger as the fallback for a lane whose record
 /// a later pass has already retired.
+///
+/// One-shot callers (the board, `spoolway lane`) read the ledger here;
+/// [`start_one`], inside a pass, passes the pass's one snapshot to
+/// [`lane_session_in`] so the ledger is not parsed again per resume (review
+/// finding 33).
 pub fn lane_session(repo: &Repo, lane: &str) -> Option<(String, String)> {
+    lane_session_in(repo, &crate::usage::read(repo).unwrap_or_default(), lane)
+}
+
+fn lane_session_in(
+    repo: &Repo,
+    ledger: &[crate::usage::Entry],
+    lane: &str,
+) -> Option<(String, String)> {
     if let Some(record) = load_lane_records(repo).get(lane)
         && !record.session.is_empty()
         && !record.kind.is_empty()
@@ -4523,12 +4587,11 @@ pub fn lane_session(repo: &Repo, lane: &str) -> Option<(String, String)> {
     // Composed with `lane_name` rather than matched by hand, so a step id or
     // a task id holding the separator still names the same lane both here
     // and everywhere else one is built.
-    crate::usage::read(repo)
-        .ok()?
-        .into_iter()
+    ledger
+        .iter()
         .rev()
         .find(|entry| lane_name(&entry.step, &entry.task) == lane && !entry.session.is_empty())
-        .map(|entry| (entry.kind, entry.session))
+        .map(|entry| (entry.kind.clone(), entry.session.clone()))
 }
 
 /// Why a `session:` step did not carry its prompt's conversation over, said
@@ -4598,11 +4661,11 @@ fn carried_session(
     step: &Step,
     profile: &AgentProfile,
     model: &str,
+    ledger: &[crate::usage::Entry],
 ) -> std::result::Result<(String, String), SessionMiss> {
     let prompt = step.prompt_name();
-    let entry = crate::usage::read(repo)
-        .unwrap_or_default()
-        .into_iter()
+    let entry = ledger
+        .iter()
         .rev()
         .find(|entry| {
             entry.task == task.front.id
@@ -4633,7 +4696,7 @@ fn carried_session(
         }
     }
 
-    Ok((entry.kind, entry.session))
+    Ok((entry.kind.clone(), entry.session.clone()))
 }
 
 /// Whether `size` tokens is past `pct`% of a `window`-token model — the
@@ -4799,16 +4862,17 @@ pub(crate) fn save_lane_records(repo: &Repo, lanes: &HashMap<String, LaneRecord>
     crate::task::write_atomic(&lanes_path(repo), &rendered)
 }
 
-/// The usage ledger, read once and folded into a running total per session —
-/// what [`Dispatcher::record_usage`] used to recompute from scratch, by
-/// re-reading the whole file, for every lane a pass banked.
-fn banked_totals(repo: &Repo) -> HashMap<String, BankedTotals> {
+/// The usage ledger folded into a running total per session — what
+/// [`Dispatcher::record_usage`] used to recompute from scratch, by re-reading
+/// the whole file, for every lane a pass banked. Reads nothing itself now: the
+/// pass's one [`Dispatcher::ledger`] snapshot is folded here.
+fn banked_totals(ledger: &[crate::usage::Entry]) -> HashMap<String, BankedTotals> {
     let mut totals: HashMap<String, BankedTotals> = HashMap::new();
-    for entry in crate::usage::read(repo).unwrap_or_default() {
+    for entry in ledger {
         if entry.session.is_empty() {
             continue;
         }
-        let banked = totals.entry(entry.session).or_default();
+        let banked = totals.entry(entry.session.clone()).or_default();
         banked.tokens.add(&entry.tokens);
         banked.turns += entry.turns;
         banked.cost_usd += entry.cost_usd.unwrap_or(0.0);
@@ -9035,6 +9099,67 @@ mod tests {
         );
     }
 
+    /// A held pane's lane is banked when the block clears and the pane is
+    /// freed, so the rounds a person drove in it while it was held reach the
+    /// ledger. `free_finished_lanes` used to skip `record_usage` for any
+    /// `held_for_block` lane, on the belief that booking it a second time
+    /// would double-count it — but `record_usage` diffs the transcript
+    /// against what the hold-time line already banked, so only the person's
+    /// own delta is appended (review finding 34).
+    #[test]
+    fn a_held_lane_banks_the_persons_rounds_when_its_pane_is_freed() {
+        let mut repo = fixture("held-lane-banks");
+        priced(&mut repo, "priced-model");
+        let _task = reload(&add_task_with(&repo, "demo", "implement", |f| {
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+        }));
+
+        let session = "held-s34";
+        let kind = local_kind(&repo);
+        // The line banked when the lane was first held. The person's rounds
+        // since are what is missing from it.
+        write_entry(&repo, "demo", "implement", &kind, "priced-model", session);
+        {
+            let mut lanes = load_lane_records(&repo);
+            lanes.insert(
+                "demo · implement".into(),
+                LaneRecord {
+                    session: session.into(),
+                    kind: kind.clone(),
+                    agent: "pi".into(),
+                    model: "priced-model".into(),
+                    held_for_block: true,
+                    ..LaneRecord::adopted(now_secs())
+                },
+            );
+            save_lane_records(&repo, &lanes).unwrap();
+        }
+
+        // The block is cleared: the task is back on its step and its lane has
+        // gone idle, so `free_finished_lanes` frees the held pane — and banks
+        // it on the way.
+        let home = pi_home_with(session, 8_400);
+        let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]);
+        with_home(&home, || {
+            Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
+                .pass()
+                .unwrap();
+        });
+
+        let banked = crate::usage::read(&repo).unwrap();
+        let lines: Vec<_> = banked.iter().filter(|e| e.session == session).collect();
+        assert_eq!(
+            lines.len(),
+            2,
+            "the hold-time line and the freed lane's own bank: {banked:?}"
+        );
+        assert_eq!(
+            lines[1].tokens.input, 8_400,
+            "the transcript's spend since the hold, banked once the pane was freed"
+        );
+    }
+
     /// Backdate a lane's record so the clocks read as `how_long` having passed.
     /// The record is the dispatcher's own bookkeeping, so a test that wants a
     /// timeout to fire moves that rather than the wall clock.
@@ -9529,7 +9654,7 @@ mod tests {
     /// The one brake an unattended run has must measure the run, and the
     /// operator's own interactive session is not the run.
     ///
-    /// `usage::bank_session` banks planning and queueing against the
+    /// `usage::bank_ambient` banks planning and queueing against the
     /// project, correctly — it is real spend on real work. Summed into the
     /// ceiling it meant that sitting in a Claude session *watching* an overnight
     /// run stopped the dispatcher starting any: 20 of the 38 ledger entries a
@@ -9733,12 +9858,12 @@ mod tests {
         assert!(!load_lane_records(&repo).contains_key("demo · implement"));
     }
 
-    /// `usage_banked` used to be read unconditionally in `Dispatcher::new`,
-    /// so every pass parsed the whole ledger whether or not it banked
-    /// anything — a regression against the very goal this task exists for,
-    /// on the ledger it names as 40MB. An empty queue has nothing to tear
-    /// down and nothing to bank, so the field must still be `None` — never
-    /// populated — once the pass is done.
+    /// The ledger used to be parsed on hot paths every pass — the ceiling
+    /// checks, `carried_session`, `readopted`, `lane_session` — whether or not
+    /// the pass had any use for it (review findings 33 and the earlier lazy
+    /// `usage_banked` work). An empty queue has nothing to bank, nothing to
+    /// start and no attended ceiling to check, so both the ledger snapshot and
+    /// the banked-totals fold must still be `None` once the pass is done.
     #[test]
     fn a_pass_that_banks_nothing_never_reads_the_ledger() {
         let repo = fixture("lazy-usage-banked");
@@ -9747,9 +9872,10 @@ mod tests {
         let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux, false);
         dispatcher.pass().unwrap();
         assert!(
-            dispatcher.usage_banked.is_none(),
+            dispatcher.ledger.is_none(),
             "a pass with nothing to bank must never read the ledger at all"
         );
+        assert!(dispatcher.usage_banked.is_none());
     }
 
     /// A lane re-adopted across a dispatcher restart still banks its tokens.
@@ -10391,7 +10517,15 @@ mod tests {
 
         let home = pi_home_with("newer-session", 10);
         let (found_kind, session) = with_home(&home, || {
-            carried_session(&repo, pipeline, &task, step, &profile, "test-model")
+            carried_session(
+                &repo,
+                pipeline,
+                &task,
+                step,
+                &profile,
+                "test-model",
+                &crate::usage::read(&repo).unwrap(),
+            )
         })
         .expect("an earlier session for this prompt");
         std::fs::remove_dir_all(&home).ok();
@@ -10424,7 +10558,15 @@ mod tests {
         profile.session_reuse_ctx = 60;
 
         assert_eq!(
-            carried_session(&repo, pipeline, &task, step, &profile, "test-model"),
+            carried_session(
+                &repo,
+                pipeline,
+                &task,
+                step,
+                &profile,
+                "test-model",
+                &crate::usage::read(&repo).unwrap()
+            ),
             Err(SessionMiss::NotFound)
         );
 
@@ -10438,7 +10580,15 @@ mod tests {
             "carried-session",
         );
         assert_eq!(
-            carried_session(&repo, pipeline, &task, step, &profile, "test-model"),
+            carried_session(
+                &repo,
+                pipeline,
+                &task,
+                step,
+                &profile,
+                "test-model",
+                &crate::usage::read(&repo).unwrap()
+            ),
             Err(SessionMiss::WindowUnset),
             "`test-model` is priced by neither table, so there is nothing to \
              measure the transcript against"
@@ -10457,7 +10607,15 @@ mod tests {
         );
         let home = pi_home_with("oversize-session", 700);
         let result = with_home(&home, || {
-            carried_session(&repo, pipeline, &task, step, &profile, "priced-model")
+            carried_session(
+                &repo,
+                pipeline,
+                &task,
+                step,
+                &profile,
+                "priced-model",
+                &crate::usage::read(&repo).unwrap(),
+            )
         });
         std::fs::remove_dir_all(&home).ok();
         assert_eq!(
@@ -10484,7 +10642,15 @@ mod tests {
         );
         let home = claude_home_with("stale-session", 400, 10);
         let result = with_home(&home, || {
-            carried_session(&repo, pipeline, &task, step, &profile, "priced-model")
+            carried_session(
+                &repo,
+                pipeline,
+                &task,
+                step,
+                &profile,
+                "priced-model",
+                &crate::usage::read(&repo).unwrap(),
+            )
         });
         assert_eq!(result, Err(SessionMiss::Stale));
 
@@ -10496,7 +10662,15 @@ mod tests {
             .unwrap()
             .session_reuse_idle = None;
         let resumed = with_home(&home, || {
-            carried_session(&repo, pipeline, &task, step, &profile, "priced-model")
+            carried_session(
+                &repo,
+                pipeline,
+                &task,
+                step,
+                &profile,
+                "priced-model",
+                &crate::usage::read(&repo).unwrap(),
+            )
         })
         .expect("a session with no idle horizon should resume however old its store");
         std::fs::remove_dir_all(&home).ok();
@@ -11560,6 +11734,58 @@ mod tests {
         assert_eq!(mux.did("remove_workspace"), ["remove_workspace w1"]);
         assert!(!path.exists(), "task file should have left the queue");
         assert!(repo.archive_dir().join("demo.md").exists());
+    }
+
+    /// A lane still writing when its task reaches a cleaning terminal step is
+    /// skipped by `free_finished_lanes` as busy and then killed by
+    /// `clean_up`. `clean_up` used to drop its record without banking it, so
+    /// its tokens were lost (review finding 14); now it banks each owned lane
+    /// first, the way `sweep_on_stop` does.
+    #[test]
+    fn clean_up_banks_a_lane_still_running_when_the_task_reaches_done() {
+        let mut repo = fixture("cleanup-banks");
+        priced(&mut repo, "priced-model");
+        let path = add_task_with(&repo, "demo", "done", |f| {
+            f.workspace_id = Some("w1".into());
+            f.branch = Some("task/demo".into());
+        });
+
+        let session = "cleanup-s14";
+        let kind = local_kind(&repo);
+        {
+            let mut lanes = load_lane_records(&repo);
+            lanes.insert(
+                "demo · implement".into(),
+                LaneRecord {
+                    session: session.into(),
+                    kind: kind.clone(),
+                    agent: "pi".into(),
+                    model: "priced-model".into(),
+                    ..LaneRecord::adopted(now_secs())
+                },
+            );
+            save_lane_records(&repo, &lanes).unwrap();
+        }
+
+        let home = pi_home_with(session, 5_000);
+        let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Working)]);
+        with_home(&home, || {
+            Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
+                .pass()
+                .unwrap();
+        });
+
+        assert!(!path.exists(), "the task still reached the archive");
+        let banked = crate::usage::read(&repo).unwrap();
+        let line = banked
+            .iter()
+            .find(|e| e.session == session)
+            .expect("clean_up killed the lane without banking it");
+        assert_eq!(line.tokens.input, 5_000);
+        // The lane's own step, not the terminal `done` the task now sits on:
+        // `lane_name(&line.step, &line.task)` has to name a lane that existed.
+        assert_eq!(line.step, "implement");
+        assert_eq!(line.task, "demo");
     }
 
     #[test]

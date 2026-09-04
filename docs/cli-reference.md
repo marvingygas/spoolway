@@ -312,7 +312,8 @@ pipeline, its versions inside it newest first.
 Bare, with no flag at all, no `--json`, and stdout a real terminal, this opens a screen instead:
 four views — `pipelines`, `steps`, `runs`, `skills` — cycled with `tab`, a cursor over the rows
 with `↑↓`, a filter panel (`f`) over every flag below, `e` to export the rows on screen to
-`.spoolway/evals/eval-<stamp>.csv`, `r` to refresh, `q` to quit. Reads keys the same way
+`.spoolway/evals/eval-<view>-YYYY-MM-DD-HHMMSS.csv` — with a `-2`, `-3` and so on appended
+when that name is already taken — `r` to refresh, `q` to quit. Reads keys the same way
 `spoolway queue`'s own screen does, and ends the moment a piped stdin runs out rather than
 blocking. Any flag, `--json` included, or stdout not a terminal, takes the printing path below
 unchanged — so redirecting bare `spoolway eval` to a file never writes the screen's own escape

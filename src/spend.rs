@@ -9,7 +9,7 @@
 use anyhow::{Context, Result, bail};
 
 use crate::cli::{SpendArgs, SpendBy};
-use crate::fmt::{money, money_plain, tokens_human};
+use crate::fmt::{csv_field, money, money_plain, tokens_human};
 use crate::repo::Repo;
 
 /// The filters `spoolway spend` reads the ledger through.
@@ -305,7 +305,7 @@ fn elsewhere(repo: &Repo, filters: &Filters) -> Option<String> {
     let others: Vec<String> = crate::usage::registry::list()
         .into_iter()
         .filter(|root| *root != repo.root)
-        .filter(|root| !crate::usage::read_project(root).is_empty())
+        .filter(|root| crate::usage::project_has_ledger(root))
         .map(|root| crate::usage::registry::name_of(&root))
         .collect();
     if others.is_empty() {
@@ -587,10 +587,10 @@ fn print_runs_csv(entries: &[crate::usage::Entry]) -> Result<()> {
         };
         println!(
             "{},{},{},{},{},{},{}",
-            entry.ts,
-            entry.project,
-            task,
-            step,
+            csv_field(&entry.ts),
+            csv_field(&entry.project),
+            csv_field(task),
+            csv_field(step),
             entry.turns,
             entry.tokens.total(),
             entry.cost_usd.map_or(String::new(), |c| format!("{c:.2}")),
@@ -710,7 +710,7 @@ impl Totals {
         format!(
             "{},{},{},{},{},{},{},{},{},{}",
             kind,
-            key,
+            csv_field(key),
             self.lanes,
             self.sessions.len(),
             self.tokens.input,

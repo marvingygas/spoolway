@@ -316,6 +316,15 @@ impl Repo {
         self.home().join(crate::usage::LEDGER_FILE)
     }
 
+    /// The advisory lock over the usage ledger's read-diff-append — see
+    /// [`crate::lock::LedgerLock`]. Held only around banking, so two
+    /// `spoolway` commands catching the same interactive session up cannot
+    /// both diff against the same banked total and append the same delta.
+    pub fn ledger_lock_file(&self) -> PathBuf {
+        self.home()
+            .join(format!("{}.lock", crate::usage::LEDGER_FILE))
+    }
+
     /// The running dispatcher's own lock, if there is one.
     pub fn lock_file(&self) -> PathBuf {
         self.home().join(crate::lock::LOCK_FILE)

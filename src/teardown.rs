@@ -43,8 +43,9 @@ pub(crate) enum Branch {
 }
 
 impl<'a> Dispatcher<'a> {
-    /// A task reached a terminal step that cleans up: tear down its worktree
-    /// and branch, and move its file out of the active queue.
+    /// A task reached a terminal step that cleans up: bank whatever its lanes
+    /// spent, tear down its worktree and branch, and move its file out of the
+    /// active queue.
     pub(crate) fn clean_up(
         &mut self,
         task: &mut Task,
@@ -56,10 +57,34 @@ impl<'a> Dispatcher<'a> {
             return Ok(false);
         }
 
-        for (_, task_id, lane) in owned {
+        // Bank each owned lane's spend before its record goes, the way
+        // `sweep_on_stop` does. A pipeline whose last agent step routes
+        // `on_pass: done` has its lane still writing when the task reaches
+        // here; `free_finished_lanes` skipped it as busy, and without this
+        // its tokens were killed unbanked (review finding 14).
+        //
+        // The step banked is the lane's own — `owned`'s first tuple element —
+        // not `task.stage()`. By the time `clean_up` runs the task has
+        // already been moved onto its terminal step, so `task.stage()` would
+        // stamp the line `done` for tokens the previous agent step spent, and
+        // `lane_name(&entry.step, &entry.task)` — which `LaneRecord::readopted`
+        // and `dispatch::lane_session` both reconstruct — would name a lane
+        // that never existed. `sweep_on_stop` derives its lane name from the
+        // stage too, so stage and lane always agree there; here they do not.
+        let pipeline = self
+            .pipelines
+            .for_task(task)
+            .map(|p| p.name.clone())
+            .unwrap_or_default();
+        for (step_id, task_id, lane) in owned {
             if task_id == task.id() {
                 let _ = self.mux.stop_lane(&lane.name, &lane.pane_id);
-                self.lanes.remove(&lane.name);
+                let ledger = self.ledger();
+                let record = self
+                    .lanes
+                    .remove(&lane.name)
+                    .unwrap_or_else(|| LaneRecord::readopted(&lane.name, now_secs(), &ledger));
+                self.record_usage(&record, task.id(), step_id, Some(task), &pipeline);
             }
         }
 
@@ -492,10 +517,11 @@ impl<'a> Dispatcher<'a> {
             // record to begin with — see `LaneRecord::readopted`.
             // `record_usage` is a safe no-op either way, on the blank session
             // a lane the ledger has genuinely never heard from still gets.
+            let ledger = self.ledger();
             let record = self
                 .lanes
                 .remove(&name)
-                .unwrap_or_else(|| LaneRecord::readopted(self.repo, &name, now_secs()));
+                .unwrap_or_else(|| LaneRecord::readopted(&name, now_secs(), &ledger));
             let pipeline = self
                 .pipelines
                 .for_task(task)

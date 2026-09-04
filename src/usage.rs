@@ -727,20 +727,31 @@ pub fn harvest(kind: &str, session: &str) -> Option<Harvest> {
 }
 
 /// The last assistant turn a transcript records, in whichever of the two
-/// shapes this agent writes — one read and one JSON-parse of the file. See
-/// [`last_turn`], the public form built on it.
-fn last_turn_at(kind: &str, path: &Path) -> Option<Turn> {
+/// shapes this agent writes. See [`last_turn`], the public form built on it.
+///
+/// The whole file is read, but one line is parsed at a time and dropped rather
+/// than collected into a `Vec<serde_json::Value>` — a 50MB transcript on a
+/// board tick is heavy enough without also holding every record of it in
+/// memory at once (review finding 48).
+fn last_turn_at(kind_name: &str, path: &Path) -> Option<Turn> {
+    // The guard `records_at` used to apply: an unresolvable kind reads as
+    // "nothing yet" rather than as a transcript at `path`.
+    kind(kind_name)?;
+    let raw = std::fs::read_to_string(path).ok()?;
     let mut last: Option<Turn> = None;
     let mut announced = String::new();
-    for value in records_at(kind, path)? {
+    for line in raw.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
         // The same two-line dance `read_transcript` does: on a kind that names
         // its model beside the turn rather than on it, the turn alone does not
         // know what ran it.
-        if let Some(model) = turn_model(kind, &value) {
+        if let Some(model) = turn_model(kind_name, &value) {
             announced = model;
             continue;
         }
-        if let Some(mut turn) = read_turn(kind, &value) {
+        if let Some(mut turn) = read_turn(kind_name, &value) {
             if turn.model.is_empty() {
                 turn.model.clone_from(&announced);
             }
@@ -843,10 +854,34 @@ fn last_turn_aborted_in(home: &Path, kind: &str, session: &str) -> bool {
     let Some(path) = session_file_in(home, kind, session) else {
         return false;
     };
-    let Some(records) = records_at(kind, &path) else {
-        return false;
-    };
-    records.last().is_some_and(|record| marker.matches(record))
+    last_record(kind, &path).is_some_and(|record| marker.matches(&record))
+}
+
+/// The transcript's last parseable record, from a bounded read of the file's
+/// tail rather than a parse of the whole thing.
+///
+/// `last_turn_aborted_in` asks only about the final record, yet used to parse
+/// every line of a transcript that can run to tens of megabytes, on every
+/// dispatch pass (review finding 48). One record is never near the tail's
+/// size, so 64 KiB is enough; a transcript whose last 64 KiB holds no
+/// parseable line answers `None`, which reads as "not aborted" the same way an
+/// unreadable transcript already does.
+fn last_record(kind_name: &str, path: &Path) -> Option<serde_json::Value> {
+    use std::io::{Read, Seek, SeekFrom};
+    // The guard `records_at` applied: an unresolvable kind is "nothing yet".
+    kind(kind_name)?;
+    let mut file = std::fs::File::open(path).ok()?;
+    let end = file.seek(SeekFrom::End(0)).ok()?;
+    let start = end.saturating_sub(64 * 1024);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut raw = String::new();
+    file.read_to_string(&mut raw).ok()?;
+    // A tail that began mid-line has an unparseable first line, which
+    // `find_map` skips the same as any other; the last parseable line is the
+    // record wanted.
+    raw.lines()
+        .rev()
+        .find_map(|line| serde_json::from_str(line).ok())
 }
 
 /// When `session`'s transcript was last written to, in epoch seconds.
@@ -1305,9 +1340,11 @@ fn turn_model(kind_name: &str, value: &serde_json::Value) -> Option<String> {
 
 /// Every record of one session, in file order.
 ///
-/// Everything above this — [`read_transcript`], [`last_turn_at`], [`live_of`]
-/// — works on the `Vec<Value>` this returns and never learns which [`Store`]
-/// it came out of.
+/// [`read_transcript`] and [`live_of`] work on the `Vec<Value>` this returns
+/// and never learn which [`Store`] it came out of. The last-record readers —
+/// [`last_turn_at`] and [`last_record`] — do not use this: they need one
+/// record, not every one, so they stream lines or seek to the tail rather
+/// than collect the whole file (review finding 48).
 ///
 /// `None` means the store could not be read at all: no transcript yet, an
 /// agent still starting up. Absence is never an error here — see
@@ -1521,26 +1558,86 @@ fn state_root_in(home: &Path) -> PathBuf {
     home.join(".local/state").join("spoolway")
 }
 
+/// Fill `buf` from the operating system's own CSPRNG.
+///
+/// `/dev/urandom` is not the only way to ask, and on Windows it is not a way
+/// at all — so a build that could not open it used to fall straight through to
+/// a clock-and-pid stand-in, which made every Windows session id predictable
+/// and let two run ids minted in one clock tick collide (review finding 42).
+///
+/// - Linux asks `getrandom(2)` first: it needs no file descriptor, so it
+///   still answers with a full fd table or a chroot that has no `/dev`.
+/// - Windows asks `ProcessPrng`, the documented user-mode CSPRNG entry point.
+/// - Every Unix falls back to reading the device, which is what this always
+///   did.
+///
+/// `false` only when none of those worked, which leaves the caller its
+/// counter-plus-clock fallback rather than a panic on a launch path.
+fn os_random(buf: &mut [u8]) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: `getrandom` writes at most `buf.len()` bytes into `buf` and
+        // returns how many; the pointer and length describe exactly that
+        // slice. A short read or a kernel without the syscall drops through to
+        // the device read below.
+        let got = unsafe { libc::getrandom(buf.as_mut_ptr().cast(), buf.len(), 0) };
+        if got == buf.len() as isize {
+            return true;
+        }
+    }
+    #[cfg(windows)]
+    {
+        // SAFETY: `ProcessPrng` fills exactly `buf.len()` bytes at the given
+        // pointer and, per its contract, cannot fail on a supported Windows.
+        unsafe {
+            windows_sys::Win32::Security::Cryptography::ProcessPrng(buf.as_mut_ptr(), buf.len());
+        }
+        true
+    }
+    #[cfg(unix)]
+    {
+        // Exactly `buf.len()` bytes. `/dev/urandom` never reaches EOF, so
+        // reading it to the end reads until the machine runs out of memory.
+        std::fs::File::open("/dev/urandom")
+            .and_then(|mut f| std::io::Read::read_exact(&mut f, buf))
+            .is_ok()
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        false
+    }
+}
+
+/// Distinct bytes when [`os_random`] could not answer: the clock, this
+/// process's id, and a counter that advances on every call so two ids minted
+/// in one tick by one process still differ. Not unpredictable — that is
+/// [`os_random`]'s job — only distinct.
+fn distinct_fallback(buf: &mut [u8]) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0) as u64;
+    let pid = std::process::id() as u64;
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let lo = nanos ^ seq.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let hi = pid.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ seq;
+    for (i, byte) in buf.iter_mut().enumerate() {
+        let word = if i % 16 < 8 { lo } else { hi };
+        *byte = (word >> (8 * (i % 8))) as u8;
+    }
+}
+
 /// A v4-shaped UUID, which is what `claude --session-id` insists on.
 ///
-/// From the kernel's entropy, with a clock-and-pid fallback so that a machine
-/// without `/dev/urandom` still gets distinct ids rather than a hard failure on
-/// the launch path of every lane.
+/// From [`os_random`], with a [`distinct_fallback`] so that a machine whose
+/// CSPRNG cannot be reached still gets distinct ids rather than a hard failure
+/// on the launch path of every lane.
 pub fn new_session_id() -> String {
     let mut bytes = [0u8; 16];
-    // Exactly sixteen bytes. `/dev/urandom` never reaches EOF, so anything that
-    // reads to the end of it reads until the machine runs out of memory.
-    let filled = std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut bytes))
-        .is_ok();
-    if !filled {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0) as u64;
-        let pid = std::process::id() as u64;
-        bytes[..8].copy_from_slice(&nanos.to_le_bytes());
-        bytes[8..].copy_from_slice(&(pid.wrapping_mul(0x9E37_79B9_7F4A_7C15)).to_le_bytes());
+    if !os_random(&mut bytes) {
+        distinct_fallback(&mut bytes);
     }
     // Version 4, variant 1.
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
@@ -1565,21 +1662,14 @@ pub fn new_session_id() -> String {
 /// keeping it short. 64 bits of entropy instead of 20 pushes a collision
 /// (`group_by_run` would silently fold two unrelated runs into one row) from
 /// something that starts showing up within a project's lifetime to something
-/// that will not happen. From the same entropy [`new_session_id`] reads, so
-/// it costs nothing to distinguish a run from another minted the same
-/// second.
+/// that will not happen. From the same [`os_random`] [`new_session_id`] reads,
+/// so it costs nothing to distinguish a run from another minted the same
+/// second — and [`distinct_fallback`]'s counter keeps two minted in one tick
+/// apart even when the CSPRNG cannot be reached.
 pub fn new_run_id() -> String {
     let mut bytes = [0u8; 8];
-    let filled = std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut bytes))
-        .is_ok();
-    if !filled {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0) as u64;
-        let pid = std::process::id() as u64;
-        bytes = (nanos ^ pid.wrapping_mul(0x9E37_79B9_7F4A_7C15)).to_le_bytes();
+    if !os_random(&mut bytes) {
+        distinct_fallback(&mut bytes);
     }
     let value = u64::from_le_bytes(bytes);
     format!("r{value:016x}")
@@ -1640,12 +1730,39 @@ pub fn read_at(path: &Path) -> Result<Vec<Entry>> {
         .collect())
 }
 
-/// What [`read_cached`] last read: the entries it parsed, and how many bytes
-/// of the file they came from — the offset the next call resumes from.
+/// What [`read_cached`] last read: the entries it parsed, the byte offset the
+/// next call resumes from, and the file identity that offset is only valid
+/// against — the inode and the modification time. A length that did not shrink
+/// is not proof the file only grew: it can also have been rewritten in place
+/// to the same or a greater length, which leaves the cached prefix wrong
+/// (review finding 41).
 struct LedgerCache {
     path: PathBuf,
     len: u64,
+    mtime: Option<std::time::SystemTime>,
+    ino: Option<u64>,
     entries: std::sync::Arc<Vec<Entry>>,
+}
+
+/// The file's length, modification time and inode in one `stat` — `(0, None,
+/// None)` for a file that is not there, which reads as "nothing cached can
+/// match" and forces a full read.
+fn ledger_identity(path: &Path) -> (u64, Option<std::time::SystemTime>, Option<u64>) {
+    match std::fs::metadata(path) {
+        Ok(meta) => (meta.len(), meta.modified().ok(), file_ino(&meta)),
+        Err(_) => (0, None, None),
+    }
+}
+
+#[cfg(unix)]
+fn file_ino(meta: &std::fs::Metadata) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    Some(meta.ino())
+}
+
+#[cfg(not(unix))]
+fn file_ino(_meta: &std::fs::Metadata) -> Option<u64> {
+    None
 }
 
 /// [`read`], cached process-wide and refreshed only past what was already
@@ -1669,43 +1786,64 @@ struct LedgerCache {
 /// for, since a single pass wants one settled answer to diff its own writes
 /// against rather than a boundary that can move under it mid-pass.
 ///
-/// Falls back to a full read whenever the file is shorter than what is
-/// cached — rotated, truncated, or simply gone — rather than trust an
-/// offset a shrunk file can no longer support. Errors read as empty, the
-/// same as `read(..).unwrap_or_default()` every caller of this already
-/// wrote.
+/// Falls back to a full read for anything that is not a plain append: a
+/// shorter file (rotated, truncated, gone), an inode that changed under the
+/// path (rotated onto a fresh file), or a same-inode file whose length did not
+/// grow but whose mtime moved (rewritten in place — a person trimming bad
+/// lines while the board is up). Errors read as empty, the same as
+/// `read(..).unwrap_or_default()` every caller of this already wrote.
+///
+/// The one case left unguarded is a same-inode in-place rewrite that also
+/// nets *longer* — rare, since editors and `sed -i` write a new inode — and
+/// the inode check catches the common shape of it. On Windows there is no
+/// inode: [`file_ino`] returns `None`, so `ino == ino` is always true and
+/// only the length and mtime checks guard the cache there.
 pub fn read_cached(repo: &Repo) -> std::sync::Arc<Vec<Entry>> {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<LedgerCache>>> =
         std::sync::OnceLock::new();
     let cache = CACHE.get_or_init(|| std::sync::Mutex::new(None));
     let path = ledger_path(repo);
+    let (len_now, mtime_now, ino_now) = ledger_identity(&path);
 
     let Ok(mut guard) = cache.lock() else {
         return std::sync::Arc::new(read_at(&path).unwrap_or_default());
     };
     if let Some(cached) = guard.as_mut()
         && cached.path == path
-        && let Some((tail, len)) = read_tail(&path, cached.len)
+        && cached.ino == ino_now
     {
-        // Nothing new: the length did not move, so the existing `Arc` is
-        // still the right answer and cloning it costs nothing but a
-        // refcount. `read_tail` still runs — it is one `stat` plus a seek to
-        // confirm that, cheap next to a 40MB parse — so this is the common
-        // case a board sitting idle between passes actually takes.
-        if !tail.is_empty() {
-            let mut merged = (*cached.entries).clone();
-            merged.extend(tail);
-            cached.entries = std::sync::Arc::new(merged);
+        // Nothing moved: same length, same mtime. The existing `Arc` is still
+        // the right answer and cloning it costs nothing but a refcount — this
+        // is the common case a board sitting idle between passes takes.
+        if len_now == cached.len && mtime_now == cached.mtime {
+            return std::sync::Arc::clone(&cached.entries);
         }
-        cached.len = len;
-        return std::sync::Arc::clone(&cached.entries);
+        // A plain append: strictly longer, and no older than what was cached.
+        // The ledger only ever gains whole lines at its end, so every byte
+        // before `cached.len` is unchanged and the tail is all that is new.
+        if len_now > cached.len
+            && mtime_now
+                .zip(cached.mtime)
+                .is_none_or(|(now, was)| now >= was)
+            && let Some((tail, len)) = read_tail(&path, cached.len)
+        {
+            if !tail.is_empty() {
+                let mut merged = (*cached.entries).clone();
+                merged.extend(tail);
+                cached.entries = std::sync::Arc::new(merged);
+            }
+            cached.len = len;
+            cached.mtime = mtime_now;
+            return std::sync::Arc::clone(&cached.entries);
+        }
     }
 
     let entries = std::sync::Arc::new(read_at(&path).unwrap_or_default());
-    let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
     *guard = Some(LedgerCache {
         path,
-        len,
+        len: len_now,
+        mtime: mtime_now,
+        ino: ino_now,
         entries: std::sync::Arc::clone(&entries),
     });
     entries
@@ -1951,41 +2089,55 @@ fn in_lane() -> bool {
 /// also the check, and re-reading a session that is fully banked appends
 /// nothing. That is what makes this safe to call on every command and every
 /// read.
-pub fn bank_session(repo: &Repo, kind: &str, session: &str) -> Vec<Entry> {
-    let Some(path) = session_file(kind, session) else {
-        return Vec::new();
-    };
-    bank_session_at(repo, kind, session, &path)
-}
-
-/// [`bank_session`] against an explicit transcript, so the banking rules are
-/// testable without a home directory full of real sessions in them.
-fn bank_session_at(repo: &Repo, kind_name: &str, session: &str, path: &Path) -> Vec<Entry> {
+///
+/// Takes the transcript and an already-read ledger rather than looking either
+/// up, so the banking rules are testable without a home directory full of real
+/// sessions, and so [`bank_ambient`] and [`sweep`] can read the ledger once
+/// for a whole batch and hand the same copy to every session — a `spend` over
+/// hundreds of sessions then parses the file once, not once per session
+/// (review finding 17). The caller holds [`crate::lock::LedgerLock`] across
+/// that read and the appends this makes, so two commands banking one session
+/// cannot both diff against the same total and append the same delta (review
+/// finding 15).
+fn bank_session_at(
+    repo: &Repo,
+    kind_name: &str,
+    session: &str,
+    path: &Path,
+    ledger: &[Entry],
+) -> Vec<Entry> {
     let segments = read_transcript(kind_name, path).segments;
 
-    // What this session has already been banked for, per skill.
+    // What this session has already been banked for, keyed the same way the
+    // transcript's own segments are — by the raw command name. `skill_label`
+    // folds an older bare `plan` line onto `spoolway-plan` for display and
+    // grouping, but a project with its own `/plan` skill banks that segment
+    // under `plan`; keying this map by the folded name would never match it,
+    // so the whole segment would re-bank on every command — review finding 16.
     let mut banked: BTreeMap<String, (Tokens, u32, f64)> = BTreeMap::new();
     // Whether this ledger has ever heard of the session at all, which is a
     // different question from what it has been banked for: a session enrolled
     // and not yet spending has a line and no tokens on it.
     let mut enrolled = false;
-    for entry in read(repo).unwrap_or_default() {
+    for entry in ledger {
         if entry.session != session {
             continue;
         }
         enrolled = true;
-        let Some(label) = entry.skill_label() else {
+        // Not one of this session's skill lines — a lane's, or a line carried
+        // for a kind whose accounting row is gone.
+        if entry.skill_label().is_none() {
             continue;
-        };
-        if entry.skill.is_none() {
+        }
+        let Some(raw) = entry.skill.as_deref() else {
             // A line from before skills were labelled: the whole session was
             // banked under one label, so its segments cannot be told apart
             // from what is already on the ledger. Re-banking any of them would
             // count that session twice, and the old line is not rewritten —
             // leave the session alone, in full.
             return Vec::new();
-        }
-        let slot = banked.entry(label.to_string()).or_default();
+        };
+        let slot = banked.entry(raw.to_string()).or_default();
         slot.0.add(&entry.tokens);
         slot.1 += entry.turns;
         slot.2 += entry.cost_usd.unwrap_or(0.0);
@@ -2093,6 +2245,90 @@ fn bank_session_at(repo: &Repo, kind_name: &str, session: &str, path: &Path) -> 
     written
 }
 
+/// Bank one lane's spend from outside a dispatch pass, appending only what the
+/// ledger has not seen yet for its session.
+///
+/// The one caller is the headless backend's interrupt: it kills the running
+/// turn and drops the lane record with nothing left to account for it, so
+/// without this the dispatcher's own `lanes.json` entry meets no listed lane
+/// on the next pass, is pruned, and `record_usage` never runs for that turn —
+/// its tokens lost (review finding 36). The diff against the ledger is what
+/// keeps a later `record_usage` for the same carried session from
+/// double-counting: it sees this line and adds only what came after.
+///
+/// `pipeline` and `agent` are left blank — the caller has a lane name and a
+/// transcript, not a loaded pipeline — the same blanks a ledger line written
+/// before those fields existed carries. `None` when there is nothing to bank:
+/// no session, no readable transcript, or a transcript already fully banked.
+pub fn bank_lane(repo: &Repo, kind: &str, session: &str, task: &str, step: &str) -> Option<Entry> {
+    if session.is_empty() {
+        return None;
+    }
+    let harvest = harvest(kind, session)?;
+    bank_lane_from(repo, kind, session, task, step, &harvest)
+}
+
+/// [`bank_lane`] against an already-read transcript, so the diff-and-append is
+/// testable without a home directory full of sessions.
+fn bank_lane_from(
+    repo: &Repo,
+    kind: &str,
+    session: &str,
+    task: &str,
+    step: &str,
+    harvest: &Harvest,
+) -> Option<Entry> {
+    let _lock = crate::lock::LedgerLock::acquire(&repo.ledger_lock_file());
+    let ledger = read(repo).unwrap_or_default();
+    let mut banked = Tokens::default();
+    let mut banked_cost = 0.0f64;
+    let mut banked_turns = 0u32;
+    for entry in &ledger {
+        if entry.session == session {
+            banked.add(&entry.tokens);
+            banked_cost += entry.cost_usd.unwrap_or(0.0);
+            banked_turns += entry.turns;
+        }
+    }
+
+    let tokens = harvest.tokens.since(&banked);
+    if tokens.is_zero() {
+        return None;
+    }
+    let model = harvest.model.clone();
+    let cost_usd = match harvest.cost_usd {
+        Some(total) => Some((total - banked_cost).max(0.0)),
+        None => price(&repo.config.models, &model, &tokens),
+    };
+    let stamp = crate::version::stamp(repo);
+    let entry = Entry {
+        ts: chrono::Utc::now().to_rfc3339(),
+        task: task.to_string(),
+        plan: None,
+        step: step.to_string(),
+        pipeline: String::new(),
+        agent: String::new(),
+        kind: kind.to_string(),
+        model,
+        session: session.to_string(),
+        round: 0,
+        wall_s: 0,
+        turns: harvest.turns.saturating_sub(banked_turns),
+        tokens,
+        cost_usd,
+        ctx_peak: Some(harvest.ctx_peak),
+        version: Some(stamp.version),
+        commit: stamp.commit,
+        outcome: None,
+        run: None,
+        trial: None,
+        skill: None,
+        project: String::new(),
+    };
+    append(repo, &entry).ok()?;
+    Some(entry)
+}
+
 /// Enrol the session this command is running in, by banking what it has spent
 /// so far.
 ///
@@ -2104,9 +2340,27 @@ pub fn bank_ambient(repo: &Repo) -> Vec<Entry> {
     if in_lane() {
         return Vec::new();
     }
-    ambient_sessions()
+    let sessions = ambient_sessions();
+    if sessions.is_empty() {
+        return Vec::new();
+    }
+    // One lock and one read for every ambient session, held across the appends
+    // so a command racing this one banks against what it wrote — see
+    // [`bank_session_at_locked`]. A batch that cannot take the lock defers
+    // rather than reading and appending unlocked: whoever holds it is doing
+    // this same catch-up, and a later command (or [`sweep`]) picks up
+    // anything this one skipped.
+    let Ok(_lock) = crate::lock::LedgerLock::acquire(&repo.ledger_lock_file()) else {
+        return Vec::new();
+    };
+    let ledger = read(repo).unwrap_or_default();
+    sessions
         .into_iter()
-        .flat_map(|(kind, session)| bank_session(repo, kind, &session))
+        .filter_map(|(kind, session)| {
+            let path = session_file(kind, &session)?;
+            Some(bank_session_at(repo, kind, &session, &path, &ledger))
+        })
+        .flatten()
         .collect()
 }
 
@@ -2117,7 +2371,7 @@ pub fn bank_ambient(repo: &Repo) -> Vec<Entry> {
 /// first spoolway command run in it and swept by every read afterwards, so a
 /// plan that was never queued — and the hour of conversation after the last
 /// command — are still counted. Idempotent by construction, since
-/// [`bank_session`] banks only the delta.
+/// [`bank_session_at`] banks only the delta.
 ///
 /// This project's ledger only. A `--all` read spans projects, but writing to
 /// another project's ledger from a command run here is not something a read
@@ -2127,9 +2381,25 @@ pub fn sweep(repo: &Repo) -> Vec<Entry> {
         return Vec::new();
     }
 
-    let mut seen: HashSet<(String, String)> = HashSet::new();
-    let mut sessions: Vec<(String, String)> = Vec::new();
-    for entry in read(repo).unwrap_or_default() {
+    // One lock and one read for the whole sweep. `bank_session_at` used to
+    // re-read and re-parse the entire ledger once per known session, so a
+    // `spend` or `eval` on a large ledger cost O(sessions × ledger) full JSON
+    // parses — review finding 17. The lock is held across every append so a
+    // command racing this one still banks only its own delta.
+    //
+    // A sweep over many large transcripts can outlast [`LedgerLock::WAIT`]
+    // without having stalled, so this defers on a lock it cannot take rather
+    // than sweeping unlocked and risking the double-bank the lock exists to
+    // prevent: the holder is running this exact catch-up, and the next
+    // `spend`/`eval` re-runs it.
+    let Ok(_lock) = crate::lock::LedgerLock::acquire(&repo.ledger_lock_file()) else {
+        return Vec::new();
+    };
+    let ledger = read(repo).unwrap_or_default();
+
+    let mut seen: HashSet<(&str, &str)> = HashSet::new();
+    let mut sessions: Vec<(&str, &str)> = Vec::new();
+    for entry in &ledger {
         if !entry.is_skill() || entry.session.is_empty() {
             continue;
         }
@@ -2139,14 +2409,18 @@ pub fn sweep(repo: &Repo) -> Vec<Entry> {
         if kind(&entry.kind).is_none() {
             continue;
         }
-        if seen.insert((entry.kind.clone(), entry.session.clone())) {
-            sessions.push((entry.kind, entry.session));
+        if seen.insert((entry.kind.as_str(), entry.session.as_str())) {
+            sessions.push((entry.kind.as_str(), entry.session.as_str()));
         }
     }
 
     sessions
         .into_iter()
-        .flat_map(|(kind, session)| bank_session(repo, &kind, &session))
+        .filter_map(|(kind, session)| {
+            let path = session_file(kind, session)?;
+            Some(bank_session_at(repo, kind, session, &path, &ledger))
+        })
+        .flatten()
         .collect()
 }
 
@@ -2161,6 +2435,21 @@ pub fn read_project(root: &Path) -> Vec<Entry> {
     entries
 }
 
+/// Whether a project's ledger holds anything at all, from a `stat` rather than
+/// a parse.
+///
+/// `spoolway spend`'s "not shown: …" hint used to answer this by fully parsing
+/// every other registered project's ledger on every interactive run — five
+/// multi-megabyte files could make an empty local report take seconds (review
+/// finding 45). A non-empty file is the same yes this needs, at the cost of
+/// one `stat`.
+pub fn project_has_ledger(root: &Path) -> bool {
+    let path = crate::mux::project_home(root).join(LEDGER_FILE);
+    std::fs::metadata(&path)
+        .map(|m| m.len() > 0)
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2170,6 +2459,17 @@ mod tests {
     fn last_turn_size_at(kind: &str, path: &Path) -> Option<u64> {
         let tokens = last_turn_at(kind, path)?.tokens;
         Some(tokens.input + tokens.cache_read + tokens.cache_write())
+    }
+
+    /// Bank an explicit transcript under the ledger lock — read fresh, diff,
+    /// append — so a test can write more of a transcript and bank again to
+    /// see only the delta land, and so the concurrency test exercises the
+    /// real lock. Scratch paths are never contended, so this proceeds
+    /// unlocked on the (unreachable) `Err`.
+    fn bank_at(repo: &Repo, kind: &str, session: &str, path: &Path) -> Vec<Entry> {
+        let _lock = crate::lock::LedgerLock::acquire(&repo.ledger_lock_file());
+        let ledger = read(repo).unwrap_or_default();
+        bank_session_at(repo, kind, session, path, &ledger)
     }
 
     fn prices() -> BTreeMap<String, ModelPrice> {
@@ -3115,6 +3415,38 @@ mod tests {
         );
     }
 
+    /// A ledger rewritten in place to the same byte length — a person trimming
+    /// a bad line out while the board reads through the cache — is re-read
+    /// whole rather than served from the stale prefix an offset-and-length
+    /// check would still trust (review finding 41).
+    #[test]
+    fn read_cached_re_reads_a_ledger_rewritten_in_place() {
+        let (repo, _) = fixture("read-cached-rewrite");
+        append(&repo, &minimal_entry("keep")).unwrap();
+        append(&repo, &minimal_entry("drop")).unwrap();
+
+        let before = read_cached(&repo);
+        assert_eq!(before.iter().filter(|e| e.task == "drop").count(), 1);
+
+        // Same length, same inode, only the content and the mtime change. The
+        // sleep is to make the mtime move by more than the filesystem's
+        // granularity so the change is unambiguous.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let path = ledger_path(&repo);
+        let rewritten = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("\"drop\"", "\"kept\"");
+        std::fs::write(&path, &rewritten).unwrap();
+
+        let after = read_cached(&repo);
+        assert_eq!(
+            after.iter().filter(|e| e.task == "drop").count(),
+            0,
+            "the rewrite dropped `drop`, and the cache must not resurrect it"
+        );
+        assert_eq!(after.iter().filter(|e| e.task == "kept").count(), 1);
+    }
+
     /// A line written before runs existed has none, and must still parse —
     /// the whole point of the fallback key `spoolway eval` derives for it.
     #[test]
@@ -3135,6 +3467,23 @@ mod tests {
         // Not a strict guarantee — it is 64 bits of entropy — but a pair of
         // freshly minted ids colliding would be worth knowing about.
         assert_ne!(a, b);
+    }
+
+    /// The stand-in used when the CSPRNG cannot be reached still hands back
+    /// distinct bytes on two back-to-back calls in one process — review
+    /// finding 42, where two run ids minted in one clock tick used to be
+    /// identical. The counter is what breaks the tie.
+    #[test]
+    fn the_distinct_fallback_does_not_repeat_within_a_process() {
+        let mut a = [0u8; 8];
+        let mut b = [0u8; 8];
+        distinct_fallback(&mut a);
+        distinct_fallback(&mut b);
+        assert_ne!(a, b);
+
+        let mut wide = [0u8; 16];
+        distinct_fallback(&mut wide);
+        assert_ne!(&wide[..8], &wide[8..], "the two halves are seeded apart");
     }
 
     /// A wall clock reading, here, as a ledger line would carry it.
@@ -3608,7 +3957,7 @@ mod tests {
         )
         .unwrap();
 
-        let enrolled = bank_session_at(&repo, "codex", "019ffa92", &path);
+        let enrolled = bank_at(&repo, "codex", "019ffa92", &path);
         assert_eq!(enrolled.len(), 1, "the session has to be on the ledger");
         assert!(enrolled[0].tokens.is_zero(), "and it has spent nothing yet");
         assert_eq!(enrolled[0].turns, 0);
@@ -3616,12 +3965,12 @@ mod tests {
         assert!(enrolled[0].is_skill(), "it is a session, not a lane");
         // Enrolled once. A session that stays quiet does not grow a line per
         // command run in it.
-        assert!(bank_session_at(&repo, "codex", "019ffa92", &path).is_empty());
+        assert!(bank_at(&repo, "codex", "019ffa92", &path).is_empty());
 
         // And when the turn does land, it is banked in full on top — the zero
         // line consumed none of it.
         std::fs::write(&path, CODEX_TRANSCRIPT).unwrap();
-        let banked = bank_session_at(&repo, "codex", "019ffa92", &path);
+        let banked = bank_at(&repo, "codex", "019ffa92", &path);
         assert_eq!(banked.len(), 1);
         assert_eq!(banked[0].tokens.output, 76 + 42);
         assert_eq!(banked[0].turns, 2);
@@ -3635,7 +3984,7 @@ mod tests {
         let (repo, path) = fixture("delta");
         std::fs::write(&path, transcript(&[("/spoolway-plan", 100)])).unwrap();
 
-        let first = bank_session_at(&repo, "claude", "s1", &path);
+        let first = bank_at(&repo, "claude", "s1", &path);
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].skill.as_deref(), Some("spoolway-plan"));
         assert_eq!(first[0].tokens.output, 100);
@@ -3644,7 +3993,7 @@ mod tests {
         assert_eq!(first[0].cost_usd, Some(100.0 * 10.0 / 1_000_000.0));
 
         // Read again with nothing new in the transcript.
-        assert!(bank_session_at(&repo, "claude", "s1", &path).is_empty());
+        assert!(bank_at(&repo, "claude", "s1", &path).is_empty());
 
         // A new skill, and more of an old one.
         std::fs::write(
@@ -3652,7 +4001,7 @@ mod tests {
             transcript(&[("/spoolway-plan", 100), ("", 50), ("/spoolway-queue", 7)]),
         )
         .unwrap();
-        let again = bank_session_at(&repo, "claude", "s1", &path);
+        let again = bank_at(&repo, "claude", "s1", &path);
         let banked: BTreeMap<&str, u64> = again
             .iter()
             .map(|e| (e.skill.as_deref().unwrap(), e.tokens.output))
@@ -3663,6 +4012,130 @@ mod tests {
         // And the ledger totals to the transcript, not to twice it.
         let total: u64 = read(&repo).unwrap().iter().map(|e| e.tokens.output).sum();
         assert_eq!(total, 157);
+    }
+
+    /// Banking a lane from outside a pass — the headless interrupt's path —
+    /// appends only what the ledger has not already seen for its session, so a
+    /// later `record_usage` for the same carried session cannot double-count
+    /// it (review finding 36).
+    #[test]
+    fn bank_lane_appends_only_a_lanes_unbanked_delta() {
+        let (repo, _) = fixture("bank-lane");
+        let harvest = |input, output, turns| Harvest {
+            model: "claude-opus-5".to_string(),
+            tokens: Tokens {
+                input,
+                output,
+                ..Tokens::default()
+            },
+            turns,
+            cost_usd: None,
+            ctx_peak: input,
+        };
+
+        let first = bank_lane_from(
+            &repo,
+            "claude",
+            "sL",
+            "demo",
+            "implement",
+            &harvest(1_000, 200, 3),
+        )
+        .expect("a first bank");
+        assert_eq!(
+            (first.task.as_str(), first.step.as_str()),
+            ("demo", "implement")
+        );
+        assert_eq!(first.tokens.input, 1_000);
+        assert!(first.skill.is_none(), "a lane line, not a skill line");
+
+        // The turn kept running: a second bank adds only what came after.
+        let more = bank_lane_from(
+            &repo,
+            "claude",
+            "sL",
+            "demo",
+            "implement",
+            &harvest(1_600, 260, 4),
+        )
+        .expect("a second bank");
+        assert_eq!(more.tokens.input, 600);
+        assert_eq!(more.tokens.output, 60);
+        assert_eq!(more.turns, 1);
+
+        // Nothing new since — nothing appended.
+        assert!(
+            bank_lane_from(
+                &repo,
+                "claude",
+                "sL",
+                "demo",
+                "implement",
+                &harvest(1_600, 260, 4)
+            )
+            .is_none()
+        );
+
+        let banked: u64 = read(&repo)
+            .unwrap()
+            .iter()
+            .filter(|e| e.session == "sL")
+            .map(|e| e.tokens.input)
+            .sum();
+        assert_eq!(banked, 1_600, "totals to the transcript, not past it");
+    }
+
+    /// A project with its own `/plan` skill. The banked-totals map and the
+    /// transcript's segments are both keyed by the raw command name, so a
+    /// `plan` segment finds what was already banked for it and re-banks
+    /// nothing — review finding 16. Keyed through `skill_label` instead, the
+    /// lookup missed and the whole segment re-banked on every command.
+    #[test]
+    fn a_skill_literally_named_plan_is_banked_once_not_on_every_command() {
+        let (repo, path) = fixture("plan-skill");
+        std::fs::write(&path, transcript(&[("/plan", 100)])).unwrap();
+
+        let first = bank_at(&repo, "claude", "s1", &path);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].skill.as_deref(), Some("plan"));
+        assert_eq!(first[0].tokens.output, 100);
+
+        // Nothing new in the transcript, so nothing new on the ledger.
+        assert!(
+            bank_at(&repo, "claude", "s1", &path).is_empty(),
+            "the `plan` segment must not re-bank against its own earlier line"
+        );
+        let total: u64 = read(&repo).unwrap().iter().map(|e| e.tokens.output).sum();
+        assert_eq!(total, 100, "banked once, not once per command");
+    }
+
+    /// Two commands banking the same session at the same instant. The ledger
+    /// lock serialises the read-diff-append, so the session's cost lands once
+    /// rather than being counted twice — review finding 15.
+    #[test]
+    fn two_concurrent_banks_record_the_session_once() {
+        let (repo, path) = fixture("concurrent");
+        std::fs::write(&path, transcript(&[("/spoolway-plan", 1000)])).unwrap();
+
+        std::thread::scope(|scope| {
+            for _ in 0..2 {
+                scope.spawn(|| {
+                    bank_at(&repo, "claude", "s1", &path);
+                });
+            }
+        });
+
+        let lines: Vec<u64> = read(&repo)
+            .unwrap()
+            .iter()
+            .filter(|e| e.session == "s1")
+            .map(|e| e.tokens.output)
+            .collect();
+        assert_eq!(
+            lines.iter().sum::<u64>(),
+            1000,
+            "the session's 1000 output tokens, banked once across both threads: {lines:?}"
+        );
     }
 
     /// A ledger line with only the fields a test overrides left to say —
@@ -3722,7 +4195,7 @@ mod tests {
         // It reads back under the planning skill's real name even though
         // nothing wrote the field.
         assert_eq!(read(&repo).unwrap()[0].skill_label(), Some("spoolway-plan"));
-        assert!(bank_session_at(&repo, "claude", "s1", &path).is_empty());
+        assert!(bank_at(&repo, "claude", "s1", &path).is_empty());
         assert_eq!(read(&repo).unwrap().len(), 1);
     }
 
@@ -3777,7 +4250,7 @@ mod tests {
         crate::platform::remove_test_env(crate::dispatch::ENV_STEP);
         // Out of a lane, the same session banks — so what the guard turned off
         // is the lane, not the mechanism.
-        assert!(!bank_session_at(&repo, "claude", "s1", &path).is_empty());
+        assert!(!bank_at(&repo, "claude", "s1", &path).is_empty());
 
         match previous {
             Some(value) => crate::platform::set_test_env("CLAUDE_CODE_SESSION_ID", value),
