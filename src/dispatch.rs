@@ -1851,7 +1851,7 @@ impl<'a> Dispatcher<'a> {
         };
         let worktree = std::path::Path::new(&worktree);
         if let Some(note) =
-            crate::commands::auto_commit(self.repo, worktree, &started_at, task_id, step_id)
+            crate::commands::auto_commit(self.repo, worktree, &started_at, task_id, step_id).note()
         {
             task.append_to_section(
                 "## Status Log",
@@ -2647,7 +2647,9 @@ impl<'a> Dispatcher<'a> {
                 started_at,
                 task.id(),
                 &step.id,
-            ) {
+            )
+            .note()
+            {
                 task.append_to_section("## Status Log", &format!("- {note}\n"));
             }
         }
@@ -4822,7 +4824,7 @@ fn lanes_path(repo: &Repo) -> PathBuf {
     repo.lanes_file()
 }
 
-fn load_lane_records(repo: &Repo) -> HashMap<String, LaneRecord> {
+pub(crate) fn load_lane_records(repo: &Repo) -> HashMap<String, LaneRecord> {
     let path = lanes_path(repo);
     let raw = match std::fs::read_to_string(&path) {
         Ok(raw) => raw,
@@ -8151,20 +8153,25 @@ mod tests {
         let mut task = reload(&path);
         task.front.worktree_path = None;
         task.save().unwrap();
-        crate::commands::report(
-            &repo,
-            &pipelines,
-            &crate::cli::ReportArgs {
-                task: Some("demo".into()),
-                pass: true,
-                fail: false,
-                block: false,
-                pause: false,
-                message: Some("released it".into()),
-                handoff: vec![],
-            },
-            Some("release"),
-        )
+        // `report` now refuses a `--task` that disagrees with `SPOOLWAY_TASK`
+        // (review finding 10). This whole suite runs inside a real lane whose
+        // `SPOOLWAY_TASK` is its own; a report on `demo` carries `demo`.
+        crate::platform::test_env::with_env(crate::commands::TASK_ENV, "demo", || {
+            crate::commands::report(
+                &repo,
+                &pipelines,
+                &crate::cli::ReportArgs {
+                    task: Some("demo".into()),
+                    pass: true,
+                    fail: false,
+                    block: false,
+                    pause: false,
+                    message: Some("released it".into()),
+                    handoff: vec![],
+                },
+                Some("release"),
+            )
+        })
         .unwrap();
 
         let task = reload(&path);
@@ -11004,9 +11011,17 @@ mod tests {
     #[test]
     fn a_task_whose_branch_is_already_checked_out_borrows_that_checkout() {
         let repo = fixture("in-place");
+        // The task's branch is `task/<id>` and nothing else now — see
+        // `queue::RESERVED_KEYS` — so the "already checked out" case is the
+        // fixture root itself sitting on `task/plan-closeout`.
+        crate::repo::run(
+            &repo.root,
+            "git",
+            &["branch", "-m", "work", "task/plan-closeout"],
+        )
+        .unwrap();
         let path = add_task_with(&repo, "plan-closeout", crate::pipeline::QUEUED, |f| {
-            // The branch the fixture has checked out at its root.
-            f.branch = Some("work".into());
+            f.branch = Some("task/plan-closeout".into());
         });
 
         let mux = FakeMux::new(vec![]);
@@ -11716,6 +11731,66 @@ mod tests {
             repo.git(&["rev-parse", "--verify", "--quiet", "task/first"])
                 .is_err(),
             "nothing queued needs it any more"
+        );
+    }
+
+    /// A task reaching a cleanup terminal with work its worktree holds that
+    /// `auto_commit` cannot record — a rejecting `pre-commit` hook here — is
+    /// held at `blocked` rather than archived, so the worktree is not torn
+    /// down over a commit that never happened (review finding 4). This is the
+    /// road every shipped pipeline takes to `done`: a command step, not an
+    /// agent's `spoolway report`.
+    #[cfg(unix)]
+    #[test]
+    fn a_cleanup_terminal_holds_a_task_whose_work_cannot_be_committed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let repo = fixture("cleanup-uncommittable");
+        let worktree = crate::scratch::root("dispatch-cleanup-uncommittable-wt");
+        let _ = std::fs::remove_dir_all(&worktree);
+        std::fs::create_dir_all(&worktree).unwrap();
+        crate::repo::run(&worktree, "git", &["init", "-q", "-b", "task/demo"]).unwrap();
+        let hooks = worktree.join(".git/hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        std::fs::write(hooks.join("pre-commit"), "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(
+            hooks.join("pre-commit"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        std::fs::write(worktree.join("left.txt"), "work that never got recorded").unwrap();
+
+        let path = add_task_with(&repo, "demo", "done", |f| {
+            f.workspace_id = Some("w1".into());
+            f.branch = Some("task/demo".into());
+            f.worktree_path = Some(worktree.clone());
+            f.last_report = Some(crate::task::LastReport {
+                step: "implement".into(),
+                outcome: "pass".into(),
+                at: 0,
+            });
+        });
+
+        let mux = FakeMux::new(vec![]);
+        run_pass(&repo, &mux);
+
+        assert!(
+            path.exists(),
+            "the task must stay in the queue, not be archived over lost work"
+        );
+        assert!(!repo.archive_dir().join("demo.md").exists());
+        let task = reload(&path);
+        assert_eq!(task.stage(), crate::pipeline::BLOCKED);
+        assert_eq!(task.front.blocked_from.as_deref(), Some("implement"));
+        assert!(
+            mux.did("remove_workspace").is_empty(),
+            "the worktree must not be torn down"
+        );
+        assert!(
+            task.section("## Status Log")
+                .unwrap_or_default()
+                .contains("could not be committed"),
+            "the record must say why"
         );
     }
 

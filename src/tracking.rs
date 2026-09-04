@@ -68,16 +68,31 @@ pub fn hook_path_in(checkout: &Path, hook: &str) -> Option<PathBuf> {
     Some(checkout.join(".spoolway/hooks").join(named))
 }
 
-/// Whether `name` is exactly one path component — no separator, and not `.`
-/// or `..` — which is the whole of what makes `hook_path`'s join safe. A
-/// `hook` reaching here from a hand-edited `config.toml` is not
-/// `spoolway config set`'s to have validated first, so this is checked again
-/// at the one place the value is actually turned into a path rather than
-/// trusted because of where it came from. `spoolway doctor` calls this too,
-/// so a project naming something else finds out without a hook ever
-/// silently failing to run.
+/// Whether `name` is exactly one ordinary path component, which is the whole
+/// of what makes `hook_path`'s join safe. A `hook` reaching here from a
+/// hand-edited `config.toml` is not `spoolway config set`'s to have validated
+/// first, so this is checked again at the one place the value is actually
+/// turned into a path rather than trusted because of where it came from.
+/// `spoolway doctor` calls this too, so a project naming something else finds
+/// out without a hook ever silently failing to run.
+///
+/// Two checks, not one. The separator scan keeps `a\b.sh` out on every
+/// platform, since `\` is not a path separator off Windows and
+/// [`std::path::Component`] would read the whole thing as one `Normal`
+/// component. The component check is what a scan for `/`, `\`, `.` and `..`
+/// misses: `C:evil.ps1`, which `Path::join` on Windows resolves as
+/// drive-relative outside the hooks directory (review finding 56). A single
+/// `Component::Normal` is none of those — no separator, no `.`/`..`, no drive
+/// or root prefix.
 pub(crate) fn is_bare_filename(name: &str) -> bool {
-    !name.contains('/') && !name.contains('\\') && name != "." && name != ".."
+    if name.contains('/') || name.contains('\\') {
+        return false;
+    }
+    let mut components = std::path::Path::new(name).components();
+    matches!(
+        (components.next(), components.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    )
 }
 
 /// What one synchronous `open` hook call came back with.
@@ -262,6 +277,44 @@ pub enum FetchResult {
     Failed { exit_code: Option<i32> },
 }
 
+/// A filesystem-safe stem for one `fetch` run's tracking files, keyed on the
+/// issue reference rather than a task id — `spoolway issue show` runs before
+/// any document naming the issue exists, so there is no task to key on.
+///
+/// [`Runs::key`]'s `<step> · <reference>` cannot be used here: the shipped
+/// `github.sh` hook takes a URL, so a URL is the natural thing to type, and a
+/// raw `/` in it would put the `.pid` file under a directory that does not
+/// exist — the run then fails after the wait while the hook keeps going — and
+/// a `../` in it would write those files outside `tracking/` altogether
+/// (review finding 18). The reference still reaches the hook verbatim through
+/// `SPOOLWAY_REF`; only the stem is reduced, to a slug plus a hash tail so
+/// two references that slug alike (`o/r#42` and `o/r/issues/42`) keep their
+/// own files.
+fn fetch_key(reference: &str) -> String {
+    use std::hash::{Hash, Hasher};
+
+    let slug: String = reference
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let slug = slug
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    let slug: String = slug.chars().take(60).collect();
+
+    let mut hasher = std::hash::DefaultHasher::new();
+    reference.hash(&mut hasher);
+    format!("fetch-{slug}-{:x}", hasher.finish())
+}
+
 /// Run the `fetch` hook for one issue reference, synchronously, and return
 /// what it wrote to `SPOOLWAY_OUT` — `spoolway issue show`'s whole
 /// implementation, shaped after [`open_ticket`] for the same reason: there is
@@ -270,8 +323,8 @@ pub enum FetchResult {
 /// back to a caller with nothing useful to do with either.
 ///
 /// Unlike every other event this one has no task behind it at all — it runs
-/// before any document naming this issue even exists — so [`Runs::key`] is
-/// keyed on the reference itself rather than a task id, and the environment
+/// before any document naming this issue even exists — so its tracking files
+/// are keyed on the reference through [`fetch_key`], and the environment
 /// carries none of a task's own fields: no `SPOOLWAY_TASK`, no
 /// `SPOOLWAY_SOURCE`, nothing but the event, the reference and the project
 /// key every event gets.
@@ -291,7 +344,7 @@ pub fn fetch_issue(repo: &Repo, reference: &str) -> Result<FetchResult> {
 
     let dir = repo.tracking_dir();
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    let key = Runs::key("fetch", reference);
+    let key = fetch_key(reference);
     let out_path = dir.join(format!("{key}.out"));
     let _ = std::fs::remove_file(&out_path);
 
@@ -783,7 +836,9 @@ mod tests {
     }
 
     /// The whole of what makes `hook_path`'s join safe: a name holding a
-    /// separator, or naming `.` or `..`, is never one path component.
+    /// separator, or naming `.` or `..`, is never one path component. On
+    /// Windows a drive prefix is not one either — `C:evil.ps1` resolves
+    /// drive-relative, outside the hooks directory (review finding 56).
     #[test]
     fn is_bare_filename_refuses_anything_that_is_not_one_component() {
         assert!(is_bare_filename("github.sh"));
@@ -791,6 +846,29 @@ mod tests {
         for escaping in ["../evil.sh", "sub/dir.sh", "a\\b.sh", ".", ".."] {
             assert!(!is_bare_filename(escaping), "`{escaping}` is not bare");
         }
+        #[cfg(windows)]
+        for escaping in ["C:evil.ps1", "C:\\evil.ps1", "\\\\host\\share\\x"] {
+            assert!(!is_bare_filename(escaping), "`{escaping}` is not bare");
+        }
+    }
+
+    /// A reference that carries `/` or `../` — a URL is the natural thing to
+    /// type at `spoolway issue show` — is reduced to one path component before
+    /// it names any tracking file (review finding 18).
+    #[test]
+    fn fetch_key_is_always_one_safe_component() {
+        for reference in [
+            "https://github.com/o/r/issues/42",
+            "../../etc/passwd",
+            "o/r#42",
+            "PROJ-123",
+        ] {
+            let key = fetch_key(reference);
+            assert!(is_bare_filename(&key), "`{reference}` → `{key}`");
+            assert!(key.starts_with("fetch-"), "`{reference}` → `{key}`");
+        }
+        // Two references that slug alike still get their own files.
+        assert_ne!(fetch_key("o/r#42"), fetch_key("o/r/issues/42"));
     }
 
     /// A `hook` that is not a bare filename runs nothing at all — the same

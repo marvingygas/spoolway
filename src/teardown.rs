@@ -103,6 +103,61 @@ impl<'a> Dispatcher<'a> {
             runs.stop(&key);
         }
 
+        // The worktree is about to be removed. If it still holds work
+        // `auto_commit` cannot record — a git command failing, or
+        // `dispatch.auto_commit` off — tearing it down destroys that work,
+        // against this function's own contract that a cleanup terminal
+        // "cannot delete work that was never recorded" (review finding 4).
+        // Held at `blocked` instead. Residue a lane deliberately left is not
+        // this: it is snapshotted to the mirror and named in the log.
+        //
+        // `""` for `started_at`: there is no lane record to read a launch HEAD
+        // from by the time cleanup runs, and an unknown one makes `auto_commit`
+        // sweep rather than treat the leftovers as residue — the same call
+        // `spoolway stack` already makes at `handover`.
+        if let Some(worktree) = task.front.worktree_path.clone() {
+            let step = task
+                .front
+                .last_report
+                .as_ref()
+                .map(|r| r.step.clone())
+                .unwrap_or_else(|| task.stage().to_string());
+            let outcome =
+                crate::commands::auto_commit(self.repo, Path::new(&worktree), "", task.id(), &step);
+            if let Some(note) = outcome.note() {
+                task.append_to_section("## Status Log", &format!("- {note}\n"));
+            }
+            if outcome.is_unrecorded() {
+                let back = self
+                    .pipelines
+                    .for_task(task)
+                    .ok()
+                    .map(|pipeline| crate::commands::resume_target(task, pipeline))
+                    .or_else(|| task.front.last_report.as_ref().map(|r| r.step.clone()))
+                    .unwrap_or_else(|| task.stage().to_string());
+                crate::commands::set_blocked_from(task, &back);
+                task.append_to_section(
+                    "## Status Log",
+                    &format!(
+                        "- reached `{}` with work that could not be committed — held at `{}` \
+                         rather than tearing the worktree down\n",
+                        task.stage(),
+                        crate::pipeline::BLOCKED,
+                    ),
+                );
+                task.set_stage(
+                    crate::pipeline::BLOCKED,
+                    Some("uncommitted work could not be recorded before cleanup"),
+                );
+                task.save()?;
+                report.problems.push(format!(
+                    "{}: held at `blocked` — uncommitted work could not be recorded before cleanup",
+                    task.id()
+                ));
+                return Ok(false);
+            }
+        }
+
         // The last instant the branch still exists to diff against — a task
         // with no `base_commit` (a borrowed checkout, or one archived before
         // this was recorded) has nothing to measure against and is left

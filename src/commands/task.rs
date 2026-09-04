@@ -51,7 +51,6 @@ const IGNORED_KEYS: &[&str] = &[
     "blocked_from",
     "parked_from",
     "resume",
-    "branch",
     "patch",
     "skip",
     "replay_of",

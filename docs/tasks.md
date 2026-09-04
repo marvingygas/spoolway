@@ -36,7 +36,7 @@ can change with a spoolway release without a single file in your repository havi
 | `gate_at` | you, optionally | Pauses the task on `paused` once this step passes, on the same terms a step's own `gate: true` does — see [Paused is the other one, and it is not a block](#paused-is-the-other-one-and-it-is-not-a-block). Lets a document hold work for a person without giving the task a pipeline of its own |
 | `borrowed` | the dispatcher | Whether the task's checkout was already there rather than cut for it. Cleanup reads it to know the checkout and branch are not its to remove |
 | `base` | the dispatcher | The branch the group lands in, recorded at queue time from the checkout `queue add` ran in — the base of the *foot* of the stack's pull request. `spoolway stack` opens every other task's pull request against `cut_from` instead |
-| `branch` | the dispatcher | The branch created for this task |
+| `branch` | the dispatcher | The branch for this task, always `task/<id>`. spoolway derives it and a document may not set it to anything else — see [What a document may set](#what-a-document-may-set) |
 | `run` | the dispatcher | Minted once, when the task's worktree is cut, and copied onto every ledger line banked for it from then on — the id `spoolway eval --runs` gathers a run's lanes under |
 | `cut_from` | the dispatcher | What the worktree was actually cut from, and what `spoolway stack` opens its pull request against: `task/<dep>` when `depends_on` names one, `base` otherwise. A dependent's worktree is cut from its dependency's branch rather than `base`, so the two can disagree — `spoolway queue show` prints this on a line of its own, distinct from `base` |
 | `base_commit` | the dispatcher | The commit `cut_from` pointed at when the worktree was cut. `cut_from` is a branch name and branches move — by the time anyone reads it back the branch may be merged and gone; this is the fixed point recorded instead. Only written where a worktree was actually cut, never for a borrowed checkout |
@@ -79,7 +79,7 @@ document": `id`, `title`, `group`, `source`, `plan`, `touches`, `depends_on`, `p
 required — a document leaving any of them blank is refused, naming the document and the
 field, and so is one with an empty body: an agent would have nothing to work from.
 
-Five keys are spoolway's alone, over a task's whole life, and a document setting one is
+Six keys are spoolway's alone, over a task's whole life, and a document setting one is
 refused before anything is queued — the error names both the key and the document it came
 from:
 
@@ -88,11 +88,17 @@ $ spoolway queue add --from mine.md
 mine.md sets `run:`, which spoolway sets on every task itself — remove it from the document
 ```
 
-`stage`, `run`, `attempts`, `base_commit` and `cut_from` are those five. `base` is not in that
-list because it is not a document key at all: the checkout `queue add` runs in answers for it,
-whatever a document happens to say there. Every other field of `Frontmatter` the table above
-lists as "Set by the dispatcher" — `borrowed`, `branch`, `patch` and the rest — is not refused
+`stage`, `run`, `attempts`, `base_commit`, `cut_from` and `branch` are those six. `base` is not
+in that list because it is not a document key at all: the checkout `queue add` runs in answers
+for it, whatever a document happens to say there. Every other field of `Frontmatter` the table
+above lists as "Set by the dispatcher" — `borrowed`, `patch` and the rest — is not refused
 either: a document may write one, and it is simply thrown away, the same as `base` is.
+
+`branch` is refused, not thrown away, because a task body is content an agent wrote and
+`spoolway stack` force-pushes a squashed commit onto whatever `branch:` names. A document may
+not point that anywhere. The check runs every time a task file is loaded, not only at `queue
+add`, so a file dropped straight into `queue/` or one `handover adopt` pulled off a mirror
+cannot carry a `branch:` other than `task/<id>` past it.
 
 `spoolway task contract`, with no arguments, prints this whole section as JSON — the required,
 optional, refused and ignored keys, one sentence per settable key on how to fill it, and the

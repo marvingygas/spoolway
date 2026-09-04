@@ -164,6 +164,13 @@ pub(crate) fn longest_agent_step(pipeline: &crate::pipeline::Pipeline) -> &str {
 /// — it is not refused, because it is simply not read from a document at
 /// all; the checkout `queue add` runs in answers for it instead, silently
 /// overwriting whatever a document happened to say.
+///
+/// `branch` is here because a task body is content an agent wrote, and
+/// `spoolway stack` force-pushes a squashed commit onto whatever `branch:`
+/// says. spoolway derives `task/<id>` itself, `register_stack` and
+/// `ensure_workspace` hardcode that shape for a dependency, and a value
+/// starting with `-` would also reach `gh pr view` as a flag — so a document
+/// may not name a branch at all.
 pub(crate) const RESERVED_KEYS: &[&str] = &[
     "stage",
     "run",
@@ -171,6 +178,7 @@ pub(crate) const RESERVED_KEYS: &[&str] = &[
     "base_commit",
     "cut_from",
     "trial",
+    "branch",
 ];
 
 pub fn queue_add(
@@ -333,10 +341,10 @@ fn read_stdin() -> Result<String> {
 ///
 /// Reuses [`crate::task::Frontmatter`]'s own `Deserialize` rather than a
 /// parallel struct: every field a document is not meant to carry —
-/// `branch`, `worktree_path`, `prompts`, and the rest — lands in its typed
+/// `worktree_path`, `prompts`, and the rest — lands in its typed
 /// slot exactly as it would in a task already on disk, and is then
 /// overwritten below the same way `queue_add` always constructed these by
-/// hand. Only the four reserved keys need a check first, because those are
+/// hand. Only the [`RESERVED_KEYS`] need a check first, because those are
 /// wrong to accept even long enough to overwrite.
 pub(crate) fn parse_submission(name: &str, raw: &str, base: &str) -> Result<Task> {
     let (yaml, body) =
@@ -4509,6 +4517,7 @@ mod tests {
             "base_commit",
             "cut_from",
             "trial",
+            "branch",
         ] {
             let text = document("demo", &format!("group: demo\n{key}: bogus\n"), BODY);
             let err = parse_submission("mine.md", &text, "plan/demo").unwrap_err();

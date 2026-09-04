@@ -547,6 +547,24 @@ impl Task {
         // because of where it came from. See [`crate::config::check_id`].
         crate::config::check_id("task id", &front.id)?;
 
+        // `branch` is spoolway's alone — see `queue::RESERVED_KEYS`. `queue add`
+        // stamps `task/<id>` and nothing else ever should, but a hand-edited
+        // file dropped in `queue/`, or one `handover adopt` pulled off a
+        // mirror, never passes `queue add`. `spoolway stack` force-pushes a
+        // squashed commit onto whatever this says and passes it to `gh pr
+        // view` as a positional argument, so a body-authored value is refused
+        // here rather than acted on.
+        if let Some(branch) = &front.branch {
+            let expected = format!("task/{}", front.id);
+            if branch != &expected {
+                bail!(
+                    "task `{}` sets `branch: {branch}`, but spoolway owns that field — \
+                     it must be `{expected}` or absent",
+                    front.id
+                );
+            }
+        }
+
         Ok(Task { path, front, body })
     }
 

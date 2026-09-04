@@ -1277,6 +1277,13 @@ its branch were somebody else's before the task started and are still theirs aft
 task file records which it was, as `borrowed:`, because afterwards the two look identical to
 git.
 
+Cleanup commits whatever the worktree still holds before it removes anything, the same
+`wip(<task>): <step>` backstop `spoolway report` runs. If that commit cannot be made — a git
+command fails, or `dispatch.auto_commit` is off and the lane left work behind — the task is
+held at `blocked` instead of archived, with a `## Status Log` line saying why, so a person
+sees the worktree before it is gone. Residue a lane deliberately left is not this: it is on
+this machine's mirror and named in the log, and cleanup proceeds.
+
 A finished task's own branch is kept alive past that cleanup while anything still queued names
 it in `depends_on` — that branch is what the dependent's worktree gets cut from. It is freed by
 the next cleanup to run once nothing queued needs it any more.

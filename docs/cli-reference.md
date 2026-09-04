@@ -866,7 +866,9 @@ These are called by prompts. You rarely run them yourself.
 
 ### `spoolway report [<task>]`
 
-Report a step's outcome. The task defaults to the one in the lane's environment.
+Report a step's outcome. The task defaults to the one in the lane's environment. Naming a
+task other than the one this lane was started for is refused: a lane may only report on its
+own task.
 
 | Flag | Meaning |
 |---|---|
@@ -888,7 +890,10 @@ turn and takes its printed output as the whole pull request body — a blank hal
 a missing or empty `.spoolway/templates/pull-request.md`, refuses the command here, before
 anything below runs; commits what is uncommitted, squashes the branch to one commit named after
 the task's `title:` verbatim — written `feat(queue): add a --dry-run flag`, and no task id is
-prefixed onto it — pushes with `--force-with-lease`, opens the pull request against the branch
+prefixed onto it. The squash is built with `git commit-tree`, so no `commit-msg` or
+`pre-commit` hook can reject it and leave the branch half-collapsed; for the same reason a
+project that signs its commits gets an unsigned squash here. Then it pushes with
+`--force-with-lease`, opens the pull request against the branch
 the worktree was cut from (or reuses the one already open), and registers the GitHub stack. A
 GitHub stack is a single linear chain, so when this task's dependency's pull request already has
 a different pull request stacked above it — two tasks that `depends_on` the same dependency are
