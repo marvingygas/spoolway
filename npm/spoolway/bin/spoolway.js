@@ -101,8 +101,8 @@ function fail(headline, ...rest) {
 function main() {
   const binary = resolveBinary();
 
-  // 'inherit' hands over the real TTY, which the ratatui settings UI needs for
-  // raw mode and `spoolway dispatch` needs to render in its own pane.
+  // 'inherit' hands over the real TTY, which `spoolway dispatch` needs to draw
+  // its live board (raw mode) and to render inside its own pane.
   const child = spawn(binary, process.argv.slice(2), { stdio: "inherit" });
 
   // Registering these also stops Node from exiting on its own, so the Rust

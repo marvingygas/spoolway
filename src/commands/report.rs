@@ -83,6 +83,13 @@ pub fn report(
         );
     }
 
+    // The four flags share one clap `group` (see `cli::ReportArgs`), so clap
+    // refuses any command line that gives more than one of them before this
+    // runs. The ordered match is therefore dead defence, not a precedence
+    // rule anyone relies on — it is kept only so that loosening that group
+    // later fails closed on a known order rather than on a random arm. When
+    // exactly one is set the order does not matter; when none is, the last
+    // arm reports the omission.
     let outcome = match (args.pass, args.fail, args.block, args.pause) {
         (true, _, _, _) => Outcome::Pass,
         (_, true, _, _) => Outcome::Fail,

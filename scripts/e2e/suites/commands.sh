@@ -496,11 +496,12 @@ says "group list names the group a queued task declared" "live" \
   "$SPOOLWAY" group list
 says "and the task itself" "land" "$SPOOLWAY" group list
 
+# Read while the task is still moving: the archive step reclaims this log.
+records "the command's own record says it ran" "built land" \
+  "$SPOOLWAY_PROJECT_HOME/commands/land · build.log" land
+
 if drive land gone 60; then ok "a task runs straight through its command step"
 else bad "a task runs straight through its command step (stuck at \`$(stage_of land)\`)"; fi
-
-has "the command's own record says it ran" "built land" \
-  "$SPOOLWAY_PROJECT_HOME/commands/land · build.log"
 # What it wrote landed in the task's worktree and was committed with the work,
 # which is the whole claim about where a command step runs. Read off the branch
 # on the forge rather than out of the checkout: nothing merges back here any
@@ -543,10 +544,12 @@ else
   bad "and wrote nothing: the task is where it was (at \`$(stage_of opener)\`)"
 fi
 
+# Caught in flight, ahead of the archive step that reclaims this log.
+records "the entry command ran, before any lane existed" "primed opener" \
+  "$SPOOLWAY_PROJECT_HOME/commands/opener · prime.log" opener
+
 if drive opener gone 60; then ok "a task whose entry is a command step does not sit in \`queued\`"
 else bad "a task whose entry is a command step does not sit in \`queued\` (at \`$(stage_of opener)\`)"; fi
-has "the entry command ran, before any lane existed" "primed opener" \
-  "$SPOOLWAY_PROJECT_HOME/commands/opener · prime.log"
 has "and the task went on to the step behind it" "→ \`implement\`" \
   $SPOOLWAY_PROJECT_HOME/archive/opener.md
 # The worktree it wrote into is one it cut itself: no lane had run for this task
@@ -572,6 +575,12 @@ add_command_step default build "echo 'the build is broken' >&2; exit 2" review i
 
 task_doc "$LIVE/broken.md" broken "$BODY" "group: live" "touches: [notes/broken.md]"
 must "a task whose build fails" "$SPOOLWAY" queue add --from "$LIVE/broken.md"
+
+# Its stderr, read while the task is still looping — the archive step reclaims
+# this log, so a `has` after `drive broken gone` would find nothing.
+records "what the command printed is on the record" "the build is broken" \
+  "$SPOOLWAY_PROJECT_HOME/commands/broken · build.log" broken
+
 if drive broken gone 60; then ok "a task whose command fails still reaches the end"
 else bad "a task whose command fails still reaches the end (at \`$(stage_of broken)\`)"; fi
 # Counted rather than matched: every task arrives at `implement` once on its
@@ -584,8 +593,6 @@ else
   bad "and the failing exit routed it back to the step's on_fail (arrived at \`implement\` \
 $(arrivals $SPOOLWAY_PROJECT_HOME/archive/broken.md implement) time(s), wanted 2)"
 fi
-has "what the command printed is on the record" "the build is broken" \
-  "$SPOOLWAY_PROJECT_HOME/commands/broken · build.log"
 # The one that passed took no such detour, which is what makes the count above
 # evidence of the exit code rather than of the graph.
 if [ "$(arrivals $SPOOLWAY_PROJECT_HOME/archive/land.md implement)" -eq 1 ]; then
@@ -834,13 +841,17 @@ else
     bad "a command step with no headless: key runs in a pane of its own"
   fi
 
-  if drive paned gone 60; then ok "the task carries on once the command has passed"
-  else bad "the task carries on once the command has passed (at \`$(stage_of paned)\`)"; fi
-  has "the pane's own output is on the record just the same" "visible-pane-marker" \
-    "$SPOOLWAY_PROJECT_HOME/commands/paned · visible.log"
+  # Read while the task is still moving — the archive step reclaims this log.
+  # `records` keeps a `.kept` copy so the env-marker check below still has a
+  # file to read after `drive paned gone` has deleted the original.
+  records "the pane's own output is on the record just the same" "visible-pane-marker" \
+    "$SPOOLWAY_PROJECT_HOME/commands/paned · visible.log" paned
   has "a variable only the dispatcher's own environment carried reached the tmux pane" \
     "env:from-the-dispatchers-own-environment" \
-    "$SPOOLWAY_PROJECT_HOME/commands/paned · visible.log"
+    "$SPOOLWAY_PROJECT_HOME/commands/paned · visible.log.kept"
+
+  if drive paned gone 60; then ok "the task carries on once the command has passed"
+  else bad "the task carries on once the command has passed (at \`$(stage_of paned)\`)"; fi
   unset SPOOLWAY_E2E_PANE_ENV_MARKER
   if tmux -S "$SOCK" list-panes -a -F '#{pane_title}' 2>/dev/null \
       | grep -qF "paned · visible"; then
@@ -864,10 +875,12 @@ else
   task_doc "$LIVE/hiddenc.md" hiddenc "$BODY" "group: live" "touches: [notes/hiddenc.md]"
   must "a task through a headless command step" \
     "$SPOOLWAY" queue add --from "$LIVE/hiddenc.md"
+  # Caught in flight, ahead of the archive step that reclaims this log.
+  records "and its output is on the record just the same" "hidden-command-marker" \
+    "$SPOOLWAY_PROJECT_HOME/commands/hiddenc · hidden.log" hiddenc
+
   if drive hiddenc gone 60; then ok "a headless command step still routes on its exit code"
   else bad "a headless command step still routes on its exit code (at \`$(stage_of hiddenc)\`)"; fi
-  has "and its output is on the record just the same" "hidden-command-marker" \
-    "$SPOOLWAY_PROJECT_HOME/commands/hiddenc · hidden.log"
   if tmux -S "$SOCK" list-panes -a -F '#{pane_title}' 2>/dev/null \
       | grep -qF "hiddenc · hidden"; then
     bad "headless: true never opened a pane at all"

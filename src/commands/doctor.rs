@@ -674,10 +674,13 @@ fn agent_checks(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
         // agent has to name one, and finding that out here beats finding it
         // out from an agent that was handed an empty `--model`.
         let model = if steps.iter().all(|step| pipelines.step_has_model(step)) {
-            Ok(Some("set per step in pipeline.yml".into()))
+            Ok(Some(
+                "set per step in .spoolway/pipelines/<name>.yml".into(),
+            ))
         } else {
             Err(anyhow::anyhow!(
-                "some step running on `{agent}` names no model: — give it one in pipeline.yml"
+                "some step running on `{agent}` names no model: — give it one in \
+                 .spoolway/pipelines/<name>.yml"
             ))
         };
         findings.push(Finding::Check(
@@ -1055,7 +1058,6 @@ fn gh_status() -> Result<Option<String>> {
 fn doctor_update(repo: &Repo, report: &mut Report) {
     let dry = crate::cli::UpdateArgs {
         dry_run: true,
-        force_contract: false,
         replace: Vec::new(),
     };
     let Ok(outcomes) = crate::update::scan(repo, &dry) else {
@@ -1254,6 +1256,34 @@ mod tests {
 
         assert_eq!(short["checks"], 2);
         assert_eq!(short["problems"], 1);
+    }
+
+    /// `doctor`'s model messages name `.spoolway/pipelines/<name>.yml`, where a
+    /// step's `model:` actually lives — not the retired single `pipeline.yml`
+    /// that `Pipelines::load` now refuses (finding 25).
+    #[test]
+    fn the_model_check_points_at_the_pipelines_directory() {
+        let pipelines = crate::pipeline::Pipelines::builtin();
+        let config = Config::default();
+        let findings = agent_checks(&pipelines, &config);
+
+        let notes: Vec<String> = findings
+            .iter()
+            .filter_map(|f| match f {
+                Finding::Check(label, outcome) if label.ends_with("has a model") => match outcome {
+                    Ok(Some(note)) => Some(note.clone()),
+                    Err(err) => Some(format!("{err:#}")),
+                    Ok(None) => None,
+                },
+                _ => None,
+            })
+            .collect();
+
+        assert!(!notes.is_empty(), "a model check was produced");
+        for note in notes {
+            assert!(note.contains(".spoolway/pipelines/"), "{note}");
+            assert!(!note.contains(" in pipeline.yml"), "{note}");
+        }
     }
 
     #[test]

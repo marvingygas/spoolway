@@ -562,8 +562,10 @@ away.
 
 A model's context window is not a profile setting either — see
 [`[models."<glob>"]`](configuration.md#modelsglob--what-a-model-costs-and-how-big-its-window-is)
-in the configuration reference. It is a **planning number only**: nothing at runtime reads it,
-and it does not truncate, chunk or cap anything a lane does.
+in the configuration reference. Two profile settings read it at run time: `session_reuse_ctx`
+and `session_blocked_ctx` each take their percentage of it. A `session: true` step against a
+model with `context_window` unset never reuses an earlier session and never blocks on size.
+The number does not truncate, chunk or cap anything a lane writes.
 
 ## What ends a lane
 

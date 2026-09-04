@@ -4,9 +4,10 @@
 #
 # The end-to-end test is about the pipeline's plumbing — that a lane reaches the
 # forge only where the pipeline says so, that a lane reports an outcome, that the
-# dispatcher moves the task on — and none of that is GitHub's. Talking to a real forge only bought
-# the create-and-delete dance around every run, so `scripts/e2e-sandbox.sh`
-# copies this in as `$FORGE/bin/gh` and points the sandbox's own prompts at it.
+# dispatcher moves the task on — and none of that is GitHub's. Talking to a real
+# forge only bought the create-and-delete dance around every run, so
+# `scripts/e2e/fixture.sh` and `scripts/e2e/scaffold.sh` install this file at
+# `$FORGE/bin/gh` and point the run's `PATH` at it.
 #
 # It is a test double, not a `gh` implementation. Its failure policy is the
 # thing to understand: **a run must reach `done`**. Watching a task go all the
@@ -22,10 +23,10 @@
 # branch that exists nowhere at all. Both route to `blocked`, which is the
 # pipeline behaving correctly — a person is genuinely needed.
 #
-# Called by absolute path. What confines it is the kernel sandbox rather than the
-# guardrails: a forge token the project's `[sandbox]` config does not name is
-# outside every lane's ruleset, so `gh` fails there rather than being talked out
-# of it — the confinement under test is the real one.
+# Reached through `PATH`, ahead of any real `gh`. The run sets no forge token,
+# so a lane that tried a real GitHub call would fail on the missing credential
+# rather than reach the network — this double is what every `gh` in the run
+# resolves to instead.
 #
 #   $SPOOLWAY_E2E_FORGE/origin.git   the bare repo standing in for the remote
 #   $SPOOLWAY_E2E_FORGE/prs/<n>      one pull request, as key=value lines
@@ -33,7 +34,7 @@ set -euo pipefail
 
 # Installed at `$FORGE/bin/gh`, so the forge is the parent of this file's
 # directory. Locating itself rather than reading the environment is what keeps
-# this working inside a lane: a sandboxed pane gets no say in its own env, and
+# this working inside a lane: a lane's pane gets no say in its own env, and
 # `spoolway config set` has no syntax for a per-agent variable anyway.
 FORGE=${SPOOLWAY_E2E_FORGE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
 ORIGIN="$FORGE/origin.git"

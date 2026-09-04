@@ -292,14 +292,42 @@ pub struct Board {
 
 impl Board {
     pub fn new() -> Board {
+        Board::with_term(crate::platform::TermGuard::new())
+    }
+
+    fn with_term(term: crate::platform::TermGuard) -> Board {
         Board {
             stages: BTreeMap::new(),
             recent: VecDeque::new(),
             adopted: false,
-            _term: crate::platform::TermGuard::new(),
+            _term: term,
             watching: false,
             cursor: None,
             mode: BoardMode::Browsing,
+        }
+    }
+
+    /// A board whose terminal guard is inert — for tests, so parallel `Board`s
+    /// do not take the process's real terminal raw and race on restore
+    /// (finding 53).
+    #[cfg(test)]
+    pub fn for_test() -> Board {
+        Board::with_term(crate::platform::TermGuard::inert())
+    }
+
+    /// [`Board::for_test`], watching rather than driving.
+    #[cfg(test)]
+    pub fn watching_for_test() -> Board {
+        Board::watching_with_term(crate::platform::TermGuard::inert())
+    }
+
+    /// A watching board over a given terminal guard — the one place the
+    /// watching board's shape is spelled, so [`Board::watching`] and
+    /// [`Board::watching_for_test`] cannot drift.
+    fn watching_with_term(term: crate::platform::TermGuard) -> Board {
+        Board {
+            watching: true,
+            ..Board::with_term(term)
         }
     }
 
@@ -313,10 +341,7 @@ impl Board {
     /// running still on the board — the one thing a killed-rather-than-stopped
     /// run needs a person to see.
     pub fn watching() -> Board {
-        Board {
-            watching: true,
-            ..Board::new()
-        }
+        Board::watching_with_term(crate::platform::TermGuard::new())
     }
 
     /// Draw one frame over whatever is on the terminal.
@@ -2437,7 +2462,7 @@ mod tests {
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
 
-        let mut board = Board::new();
+        let mut board = Board::for_test();
         let waiting = board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
         assert!(waiting.contains("dispatcher running · "), "{waiting}");
         assert!(waiting.contains("→ review"), "{waiting}");
@@ -2461,7 +2486,7 @@ mod tests {
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
 
-        let mut driving = Board::new();
+        let mut driving = Board::for_test();
         let frame = strip(&driving.frame(&repo, &pipelines, Phase::Waiting).unwrap());
         assert!(
             frame.contains(
@@ -2470,7 +2495,7 @@ mod tests {
             "{frame}"
         );
 
-        let mut watching = Board::watching();
+        let mut watching = Board::watching_for_test();
         let frame = strip(&watching.frame(&repo, &pipelines, Phase::Waiting).unwrap());
         assert!(!frame.contains("[r/R] resume / all"), "{frame}");
     }
@@ -2921,7 +2946,7 @@ mod tests {
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
 
-        let mut board = Board::new();
+        let mut board = Board::for_test();
         let frame = strip(&board.frame(&repo, &pipelines, Phase::Passing).unwrap());
         let header = frame
             .lines()
@@ -3067,7 +3092,7 @@ mod tests {
         let pipelines = Pipelines::builtin();
         add(&repo, "steady", &[], Some("implement"));
 
-        let mut board = Board::new();
+        let mut board = Board::for_test();
         board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
         assert!(
             board.recent.is_empty(),
@@ -3276,7 +3301,7 @@ mod tests {
         task.set_stage(crate::pipeline::PAUSED, None);
         task.save().unwrap();
 
-        let mut board = Board::new();
+        let mut board = Board::for_test();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -3303,7 +3328,7 @@ mod tests {
         task.set_stage(crate::pipeline::BLOCKED, None);
         task.save().unwrap();
 
-        let mut board = Board::new();
+        let mut board = Board::for_test();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -3329,7 +3354,7 @@ mod tests {
         task.set_stage(crate::pipeline::PAUSED, None);
         task.save().unwrap();
 
-        let mut board = Board::new();
+        let mut board = Board::for_test();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -3354,7 +3379,7 @@ mod tests {
         task.set_stage(crate::pipeline::PAUSED, None);
         task.save().unwrap();
 
-        let mut board = Board::new();
+        let mut board = Board::for_test();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -3393,7 +3418,7 @@ mod tests {
         task.set_stage(crate::pipeline::PAUSED, None);
         task.save().unwrap();
 
-        let mut board = Board::new();
+        let mut board = Board::for_test();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Char('R'))
             .unwrap();
@@ -3447,7 +3472,7 @@ mod tests {
         runs.start(&key, "sleep 30", &repo.root, &BTreeMap::new())
             .unwrap();
 
-        let mut board = Board::new();
+        let mut board = Board::for_test();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Char('P'))
             .unwrap();
@@ -3496,7 +3521,7 @@ mod tests {
         runs.start(&key, "sleep 30", &repo.root, &BTreeMap::new())
             .unwrap();
 
-        let mut board = Board::new();
+        let mut board = Board::for_test();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -3538,7 +3563,7 @@ mod tests {
         let (mux, name) = live_headless_lane(&repo);
         assert!(mux.list_lanes().unwrap().iter().any(|l| l.name == name));
 
-        let mut board = Board::new();
+        let mut board = Board::for_test();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Char('P'))
             .unwrap();
@@ -3565,7 +3590,7 @@ mod tests {
         add(&repo, "login", &[], Some("implement"));
         let before = std::fs::read_to_string(repo.task("login").unwrap().path).unwrap();
 
-        let mut board = Board::new();
+        let mut board = Board::for_test();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -3598,7 +3623,7 @@ mod tests {
 
         let (_mux, _name) = live_headless_lane(&repo);
 
-        let mut board = Board::new();
+        let mut board = Board::for_test();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -3651,7 +3676,7 @@ mod tests {
         add(&repo, "chain-refusals", &[], None);
         assert_eq!(repo.task("chain-refusals").unwrap().stage(), "queued");
 
-        let mut board = Board::new();
+        let mut board = Board::for_test();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -3707,7 +3732,7 @@ mod tests {
         let pipelines = Pipelines::builtin();
         add(&repo, "solo", &[], None);
 
-        let mut board = Board::new();
+        let mut board = Board::for_test();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -3731,7 +3756,7 @@ mod tests {
         let pipelines = Pipelines::builtin();
         add(&repo, "under-way", &[], Some("implement"));
 
-        let mut board = Board::new();
+        let mut board = Board::for_test();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -3754,7 +3779,7 @@ mod tests {
         add(&repo, "drop-walk", &[], None);
         add(&repo, "chain-refusals", &["drop-walk"], None);
 
-        let mut board = Board::new();
+        let mut board = Board::for_test();
         // `drop-walk` is the dependency, so it sorts first — one `Down` from
         // no cursor at all reaches it directly.
         board
@@ -3780,7 +3805,7 @@ mod tests {
         add(&repo, "chain-refusals", &[], None);
         add(&repo, "month-instant", &[], None);
 
-        let mut board = Board::new();
+        let mut board = Board::for_test();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -3806,7 +3831,7 @@ mod tests {
         let pipelines = Pipelines::builtin();
         add(&repo, "solo", &[], None);
 
-        let mut board = Board::new();
+        let mut board = Board::for_test();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -3833,7 +3858,7 @@ mod tests {
         add(&repo, "month-instant", &[], None);
         add(&repo, "already-running", &[], Some("implement"));
 
-        let mut board = Board::new();
+        let mut board = Board::for_test();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Char('U'))
             .unwrap();
@@ -3911,7 +3936,7 @@ mod tests {
         parked.set_stage(crate::pipeline::PAUSED, None);
         parked.save().unwrap();
 
-        let mut board = Board::new();
+        let mut board = Board::for_test();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Char('R'))
             .unwrap();
@@ -3950,7 +3975,7 @@ mod tests {
         parked.set_stage(crate::pipeline::PAUSED, None);
         parked.save().unwrap();
 
-        let mut board = Board::new();
+        let mut board = Board::for_test();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Char('R'))
             .unwrap();

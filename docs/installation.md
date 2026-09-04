@@ -79,7 +79,6 @@ It creates, in one pass:
 | `.spoolway/templates/task-log.md` | What belongs under each heading spoolway appends to a task file. Yours from this moment; no update touches it |
 | `.spoolway/templates/tracking/` | The `epic.md` and `ticket.md` bodies a tracker hook renders for a new issue |
 | `.spoolway/hooks/` | The tracker hook scripts — `github.sh`/`jira.sh` on Unix, `github.ps1`/`jira.ps1` on a native Windows install — written whichever tracker you answered, or none at all. See [`[issue_tracking]`](configuration.md#issue_tracking--a-hook-fired-on-four-task-events) |
-| `docs/` | Where domain documents go |
 | `~/.spoolway/<project>/project.toml` | The pointer that claims this project's name — see below |
 | The provider's skills directory | The five pipeline skills, in the convention of whichever provider you chose. See [the pipeline skills](#the-pipeline-skills) below |
 
@@ -178,7 +177,6 @@ It checks, among other things:
 - each base branch the queue names is publishable, and whether a remote exists at all
 - each configured agent binary is on `PATH`, has a model set, and accepts the permission
   mode you asked for
-- each profile's arguments actually pass the prompt through
 - every prompt named by a step exists, and reads clean against the step that runs it
 
 Findings come in two weights. **Problems** set a non-zero exit code. **Notes** do not, because
@@ -243,14 +241,14 @@ Plan pages are not in this table at all: `init` never places a plan skeleton in 
 so there is nothing here for `update` to bring forward.
 
 It never merges anything. A block you have edited by hand stops the update on that file
-rather than being overwritten; `--force-contract` gives those edits up deliberately. The
-report says only which files were written, so a file it declined to touch is named by
-`spoolway doctor` rather than there.
+rather than being overwritten. `spoolway update --replace <path>` gives those edits up
+deliberately, saving what was there beside it first. The report says only which files were
+written, so a file it declined to touch is named by `spoolway doctor` rather than there.
 
 A pipeline's key reference is the one block that does not ask. It is not a shape you filled
 in, it is a table of what *this binary* understands — every line in it is a claim about the
 program — so an edit inside the markers is a claim that has stopped being true, and it is
-rewritten without `--force-contract`. That is `config.toml`'s bargain, one fence at a time:
+rewritten every time, edits and all. That is `config.toml`'s bargain, one fence at a time:
 see [Pipelines](pipelines.md#per-step-keys).
 
 **Prompts and task skeletons are outside this entirely.** Both are prose you own outright,

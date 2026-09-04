@@ -67,7 +67,7 @@ pub fn config_edit(checkout: &Path) -> Result<()> {
         .or_else(|_| std::env::var("EDITOR"))
         .unwrap_or_else(|_| if cfg!(windows) { "notepad" } else { "vi" }.to_string());
 
-    let status = crate::platform::shell_command(&format!("{editor} '{}'", path.display()))
+    let status = crate::platform::shell_command(&editor_command(&editor, &path))
         .status()
         .with_context(|| format!("could not start `{editor}`"))?;
     if !status.success() {
@@ -86,11 +86,37 @@ pub fn config_edit(checkout: &Path) -> Result<()> {
     }
 }
 
+/// The shell line that opens `path` in `editor`.
+///
+/// `$VISUAL`/`$EDITOR` is interpolated unquoted on purpose, so `code --wait`
+/// still splits into a program and a flag. The path is quoted through the
+/// platform's own escaper, which escapes an embedded `'` for both dialects — a
+/// plain `format!("… '{}'")` would break the quoting on a checkout path that
+/// contains one, and the editor would exit on a syntax error (finding 71).
+fn editor_command(editor: &str, path: &Path) -> String {
+    format!(
+        "{editor} {}",
+        crate::platform::Shell::CURRENT.quote(&path.display().to_string())
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
     use super::*;
+
+    #[test]
+    fn editor_command_quotes_a_path_with_a_single_quote() {
+        let line = editor_command("vi", Path::new("/home/u/it's/proj/.spoolway/config.toml"));
+        // The `'` inside the path is escaped, not left to close the quoting.
+        assert!(
+            line.contains(r"it'\''s") || line.contains("it''s"),
+            "unescaped quote in {line:?}"
+        );
+        // The editor is still its own unquoted token.
+        assert!(line.starts_with("vi "));
+    }
 
     fn git(dir: &Path, args: &[&str]) -> String {
         crate::repo::run(dir, "git", args)

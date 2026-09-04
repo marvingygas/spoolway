@@ -131,6 +131,39 @@ has() {
   else bad "$what (no \"$want\" in $file)"; sed 's/^/        /' "$file" 2>/dev/null | head -30; fi
 }
 
+# what want file task
+#
+# `has` for a command step's own log under `commands/`, which `teardown.rs`
+# reclaims the instant its task is archived — `flow.sh` asserts that reclaim
+# directly. A plain `has` after `drive <task> gone` would read a file that has
+# just been deleted, so this reads it while the task is still on its way there:
+# the log is written before the step routes on, and every pass between that and
+# the archive is a chance to catch it. Needs a dispatcher, and starts one the
+# same way `drive` does. Leaves a copy at `<file>.kept` for a caller with a
+# second assertion to make on the same log once the original is gone.
+records() {
+  local what=$1 want=$2 file=$3 task=$4 i
+  if [ -n "${E2E_DISPATCHER_PID:-}" ] && [ "$(_config_stamp)" != "$E2E_CONFIG_STAMP" ]; then
+    dispatcher_restart
+  fi
+  dispatcher_start
+  for ((i = 0; i < 600; i++)); do
+    if grep -qF -- "$want" "$file" 2>/dev/null; then
+      sleep 0.3                                  # let the rest of the line land
+      cp "$file" "$file.kept" 2>/dev/null || true
+      ok "$what"; return
+    fi
+    [ -s "$file" ] && cp "$file" "$file.kept" 2>/dev/null
+    [ -n "$(stage_of "$task")" ] || break
+    sleep 0.1
+  done
+  if grep -qF -- "$want" "$file.kept" 2>/dev/null; then ok "$what"
+  else
+    bad "$what (no \"$want\" in $file before \`$task\` was archived and its log reclaimed)"
+    sed 's/^/        /' "$file.kept" "$file" 2>/dev/null | head -30
+  fi
+}
+
 # what map route want file
 #
 # Assert one route's count inside one of a task's two counter maps. `prompts`

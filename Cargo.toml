@@ -2,7 +2,7 @@
 name = "spoolway"
 version = "0.1.0"
 edition = "2024"
-description = "Agent pipeline: a background dispatcher that drives worker lanes on any provider through implement -> review -> e2e -> PR -> merge"
+description = "Minimalistic command line state machine for turning coding agents into a pipeline you can actually reason about"
 license = "MIT"
 readme = "README.md"
 keywords = ["agent", "pipeline", "dispatcher", "llm", "cli"]

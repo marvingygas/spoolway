@@ -300,4 +300,143 @@ mod tests {
             );
         }
     }
+
+    /// Every directory under `assets/prompts/` is named by `PROMPTS`, and every
+    /// file under `assets/pipelines/` by `BUILTIN_PIPELINES`. A file named by
+    /// neither is shipped in the binary's `include_str!` closure only if a table
+    /// row references it, so an unreferenced one is dead weight: never written by
+    /// `init`, never reachable by `update --replace`, never validated. A stray
+    /// `local.yml` pipeline with a repo-local `run:` line and six orphan prompt
+    /// directories had accumulated this way before this test existed. Wire a new
+    /// asset into its table, or delete it.
+    #[test]
+    fn every_shipped_asset_is_named_by_its_table() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+
+        let prompt_dir = root.join("assets/prompts");
+        let mut orphans = Vec::new();
+        for entry in std::fs::read_dir(&prompt_dir).expect("reading assets/prompts") {
+            let path = entry.expect("prompt entry").path();
+            if !path.is_dir() {
+                continue;
+            }
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            if !PROMPTS.iter().any(|p| p.name == name) {
+                orphans.push(format!("assets/prompts/{name}"));
+            }
+        }
+
+        let pipeline_dir = root.join("assets/pipelines");
+        for entry in std::fs::read_dir(&pipeline_dir).expect("reading assets/pipelines") {
+            let path = entry.expect("pipeline entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("yml") {
+                continue;
+            }
+            let stem = path.file_stem().unwrap().to_string_lossy().to_string();
+            if !crate::pipeline::BUILTIN_PIPELINES
+                .iter()
+                .any(|(name, _)| *name == stem)
+            {
+                orphans.push(format!("assets/pipelines/{stem}.yml"));
+            }
+        }
+
+        assert!(
+            orphans.is_empty(),
+            "shipped asset(s) named by no table: {orphans:?}"
+        );
+    }
+
+    /// No shipped pipeline file names a path that only resolves inside this
+    /// repository's own build. `spoolway pipeline check` runs the same check
+    /// through `shipped_run_names_a_repo_local_path`, but only over the files
+    /// `BUILTIN_PIPELINES` loads — this one reads every `*.yml` on disk, so a
+    /// file added under `assets/pipelines/` without a table row is still held to
+    /// it. A `local.yml` that shipped `run: ./target/debug/spoolway stack`
+    /// behind the table's back is what this closes.
+    #[test]
+    fn no_shipped_pipeline_file_names_a_repo_local_path() {
+        let pipeline_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/pipelines");
+        let mut offenders = Vec::new();
+        for entry in std::fs::read_dir(&pipeline_dir).expect("reading assets/pipelines") {
+            let path = entry.expect("pipeline entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("yml") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("reading a pipeline file");
+            for (number, line) in text.lines().enumerate() {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with('#') {
+                    continue;
+                }
+                if trimmed.contains("run:") && line.contains("./target/") {
+                    offenders.push(format!(
+                        "{}:{}: {}",
+                        path.file_name().unwrap().to_string_lossy(),
+                        number + 1,
+                        trimmed
+                    ));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "shipped pipeline `run:` names a repo-local path: {offenders:?}"
+        );
+    }
+
+    /// The crate description npm and crates.io display is a sentence from the
+    /// README, not a flow (`implement -> review -> e2e -> PR -> merge`) that no
+    /// shipped pipeline runs (finding 73).
+    #[test]
+    fn the_crate_description_is_the_readme_tagline() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let cargo_toml = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
+        let readme = std::fs::read_to_string(root.join("README.md")).unwrap();
+
+        let description = cargo_toml
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("description = "))
+            .map(|value| value.trim().trim_matches('"'))
+            .expect("Cargo.toml has a description");
+
+        assert!(
+            readme.contains(description),
+            "crate description is not a phrase from README.md: {description:?}"
+        );
+        for stale in ["e2e", "-> merge", "-> PR"] {
+            assert!(
+                !description.contains(stale),
+                "crate description still names `{stale}`"
+            );
+        }
+    }
+
+    /// The shipped `spoolway-doctor` skill proposes only commands and keys this
+    /// binary accepts — no `config set agents.*.model` (retired, refused), no
+    /// "the profile's `args`" (retired), no flat `.spoolway/prompts/<name>.md`
+    /// (the shape is `<name>/PROMPT.md`), no `gates` (gone) — finding 29.
+    #[test]
+    fn the_shipped_doctor_skill_names_nothing_retired() {
+        let skill = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("assets/skills/claude/spoolway-doctor/SKILL.md"),
+        )
+        .unwrap();
+
+        for banned in [
+            "config set agents.x.model",
+            "config set agents.pi.model",
+            "the profile's `args`",
+            ".spoolway/prompts/<name>.md",
+            "`gates`",
+            "max_launches (default 1",
+        ] {
+            assert!(
+                !skill.contains(banned),
+                "spoolway-doctor skill still names `{banned}`"
+            );
+        }
+    }
 }

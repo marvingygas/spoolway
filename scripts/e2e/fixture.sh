@@ -67,9 +67,8 @@ SEED
   # suite driving a real dispatch pass to `handover` needed a binary planted
   # there to find. That is fixed now: the shipped `handover` runs
   # `spoolway stack`, resolved through PATH the same way `run.sh` already
-  # puts $SPOOLWAY on PATH for every suite. `local.yml`'s own
-  # `./target/debug/spoolway stack` is real but unshipped and unused by any
-  # suite here, so nothing plants a binary at either path any more.
+  # puts $SPOOLWAY on PATH for every suite. Nothing plants a binary at a
+  # repo-local path any more.
   must "the seed commit" git add -A
   must "the seed commit" git commit -qm "seed"
 }

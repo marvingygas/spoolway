@@ -1354,7 +1354,7 @@ mod tests {
     }
 
     /// The dispatcher and a lane's own `spoolway report` both call
-    /// `write_atomic` on the same task file — see `src/dispatch.rs:1296-1300`.
+    /// `write_atomic` on the same task file — see `Dispatcher::pass`.
     /// Real OS threads exercise the same `create`/`write`/`rename` syscalls
     /// two processes racing the same destination would; the kernel's
     /// atomicity guarantee on each is not process-specific, so this is a

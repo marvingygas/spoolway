@@ -387,7 +387,7 @@ outright, naming both keys, because a run with nobody to clear a block is a run 
 finish once one lands. `spoolway doctor` reports the same thing as a `FAIL`.
 
 spoolway ships a sample prompt for it, `unblocker` — see [Prompts](prompts.md). It reads
-the task file and the run (`queue list`, `logs`, `eval`, `doctor`, and any pane through a
+the task file and the run (`queue list`, `lane`, `eval`, `doctor`, and any pane through a
 multiplexer's own read command); whatever stands between the task and its next step is its to
 do — the code, the tests, the docs, a rebase, a broken mainline, a missing tool, a red check,
 even a rebuild and install of the binary. Three things are never its: merging or landing
@@ -406,29 +406,32 @@ for the ordinary case, `overridden in <name>.yml` where a pipeline declares its 
 
 ### The brake
 
-With nothing able to park a task, an unattended run has exactly one stop condition short of
-an empty queue or `ctrl-c`:
+With nothing able to park a task, an unattended run has two stop conditions short of an empty
+queue or `ctrl-c`: a ceiling in output tokens and a ceiling in dollars.
 
 ```toml
 [unattended]
 enabled = true
 max_output_tokens = 2_000_000
+max_cost_usd = 20.0
 ```
 
-Reaching it starts no further lane and lets whatever is live finish, then the dispatcher
-stops and says so. The tasks stay exactly where they are — parking them on `blocked` would
-put back the one thing the mode is defined by not having — and the next `spoolway dispatch`
-picks the queue up where it stands.
+Reaching either starts no further lane and lets whatever is live finish, then the dispatcher
+stops and says so. Set both and whichever is reached first stops the run; either alone is
+enough. The tasks stay exactly where they are — parking them on `blocked` would put back the
+one thing the mode is defined by not having — and the next `spoolway dispatch` picks the
+queue up where it stands.
 
-Output tokens, of the four classes, for the reason the board's own footer counts them: they
-track work done rather than context carried, and a lane re-reading the same repo on every
-pass moves `cache_read` and almost nothing else. Cost would be the better meter and cannot
-be — `[models]` ships empty on purpose, so a priced ceiling silently never fires on an
-install that never filled the table in.
+`max_output_tokens` counts output tokens, of the four classes, for the reason the board's own
+footer counts them: they track work done rather than context carried, and a lane re-reading
+the same repo on every pass moves `cache_read` and almost nothing else. `max_cost_usd` is the
+money meter: every ledger line already prices itself off the litellm table vendored into the
+binary as `assets/model-prices.json`, so this ceiling reads figures that were already being
+computed. A model neither that table nor `[models]` knows contributes nothing to the sum.
 
-`spoolway doctor` says so when `unattended` is on with no ceiling. That combination is
-legitimate — it is a run bounded only by its queue — but it is not one to arrive at by
-accident.
+`spoolway doctor` reports it when `unattended` is on with neither ceiling set. That
+combination is legitimate — it is a run bounded only by its queue — but it is not one to
+arrive at by accident.
 
 ## Command steps
 
@@ -454,8 +457,8 @@ every backend, and a named value here wins over an inherited one of the same nam
 is no report to make and no prompt to write: a command step is the one kind whose verdict is
 already a number.
 
-Everything a lane needs is refused here, because there is no lane: `agent`, `prompt`,
-`model`, `effort`, `gate` and `allow` are all rejected at load. A command step holds no
+Everything a lane needs is refused here, because there is no lane: `prompt`, `model`,
+`effort`, `session` and `gate` are all rejected at load. A command step holds no
 worker slot either — nothing is competing for the model server.
 
 ### Waiting, or not
