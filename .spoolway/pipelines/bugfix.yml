@@ -87,10 +87,10 @@ steps:
     description: >-
       Check the diff against the task and project standards. The fix should be
       no larger than the bug: flag a rewrite where a repair would do.
-    agent: claude
+    agent: codex
     prompt: reviewer
-    model: claude-opus-5
-    effort: medium
+    model: gpt-5.6-sol
+    effort: high
     session: true
     loop:
       fix: 2
