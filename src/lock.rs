@@ -156,6 +156,175 @@ impl Lock {
     }
 }
 
+/// A short-lived advisory lock over one task file's read-modify-write.
+///
+/// The dispatcher reads a task at the top of a pass, mutates the copy in
+/// memory and writes it back from many places for the rest of that pass;
+/// `spoolway report` does the same read-modify-write from another process,
+/// mid-turn. With nothing between them the later `rename` wins outright, so a
+/// pass can silently overwrite a report that landed while it was working —
+/// review finding 2. This serialises the two.
+///
+/// It is a *task* lock, not [`Lock`], the dispatcher's single-holder one:
+/// many are held at once, one per task, and — like any lock a pass takes —
+/// it must never be held across a multiplexer call. Staleness is
+/// [`Lock::holder`]'s: a holder that crashed mid-write left a file naming a
+/// dead pid (or a live pid whose start time is not the recorded one), and
+/// the next acquire reaps it.
+pub struct TaskLock {
+    path: PathBuf,
+}
+
+impl TaskLock {
+    /// How long to wait on a lock a live process holds before giving up. A
+    /// task read-modify-write is a render and a rename — a holder still in
+    /// one after this long has stalled, and the caller proceeds without the
+    /// lock rather than failing a whole dispatch pass for one task. A
+    /// *crashed* holder does not wait this out: its file is stale by
+    /// [`Lock::holder`] and is cleared on the first retry.
+    const WAIT: Duration = Duration::from_secs(3);
+
+    /// Take the lock, waiting out a live holder up to [`TaskLock::WAIT`] and
+    /// reaping a crashed holder's file on the way. Returns `Err` when a live
+    /// process still holds it after the wait — callers treat that as "the
+    /// read-modify-write is not serialised this time, proceed unlocked"
+    /// rather than an error to propagate, because failing a whole dispatch
+    /// pass for one contended task file is the worse outcome.
+    pub fn acquire(path: &Path) -> Result<TaskLock> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let pid = std::process::id();
+        let contents = format!("{pid}\n{}\n", started_at(pid).unwrap_or_default());
+        let deadline = std::time::Instant::now() + Self::WAIT;
+        loop {
+            match link_into_place(path, &contents) {
+                Ok(true) => {
+                    return Ok(TaskLock {
+                        path: path.to_path_buf(),
+                    });
+                }
+                Ok(false) => match Lock::holder(path)? {
+                    // A live holder: wait a moment and try again, up to the
+                    // deadline, then return `Err` — the caller reads that as
+                    // "proceed without the lock" (see `acquire`'s own doc).
+                    Some(pid) => {
+                        if std::time::Instant::now() >= deadline {
+                            bail!(
+                                "task lock at {} is still held by pid {pid} after {:?}",
+                                path.display(),
+                                Self::WAIT
+                            );
+                        }
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    // Stale — nothing alive holds it. Clear and retry; a
+                    // caller that loses that removal race still lands on a
+                    // fresh link on the next turn of the loop.
+                    None => {
+                        let _ = std::fs::remove_file(path);
+                    }
+                },
+                Err(e) => return Err(e).with_context(|| format!("writing {}", path.display())),
+            }
+        }
+    }
+}
+
+impl Drop for TaskLock {
+    fn drop(&mut self) {
+        // Only if it still names this process — a lock judged stale and
+        // replaced out from under a slow holder must not have that holder's
+        // own drop delete the new owner's file. Same reasoning as [`Lock`].
+        if let Ok(Some(holder)) = Lock::holder(&self.path)
+            && holder == std::process::id()
+        {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// A short-lived advisory lock over the usage ledger's read-diff-append.
+///
+/// Banking an interactive session reads the ledger, works out what the
+/// transcript has spent since what is already banked, and appends the
+/// difference. With nothing between them, two `spoolway` commands run at once
+/// in the same session both read the same banked total and both append the
+/// same delta, so that session's cost is counted twice in every later
+/// `spend`/`eval` — review finding 15. The banker holds this across the whole
+/// read-diff-append, so the second one reads a ledger the first has already
+/// written to and finds nothing new to add.
+///
+/// The same `link_into_place` + [`Lock::holder`] machinery [`TaskLock`] uses,
+/// and a crashed holder's file is reaped on the first retry. `acquire`
+/// returns `Err` once a live holder has held it past [`LedgerLock::WAIT`];
+/// what a caller does with that `Err` is the caller's, and the two paths
+/// differ:
+///
+/// - A single append — [`crate::usage::bank_lane`], the headless interrupt's
+///   path — proceeds unlocked. Losing that turn's tokens is worse than a rare
+///   double-count, and one append rarely reaches the bound anyway.
+/// - A batch — [`crate::usage::sweep`], [`crate::usage::bank_ambient`] —
+///   defers instead: it holds the lock across every session's transcript read
+///   and append, so it can legitimately outlast the bound, and whoever holds
+///   the lock is running the same catch-up. A later `spend`/`eval` re-runs it.
+pub struct LedgerLock {
+    path: PathBuf,
+}
+
+impl LedgerLock {
+    /// How long a live holder is waited out before `acquire` returns `Err`.
+    /// A single append is a read, a diff and one `write_all`, so a holder
+    /// still in it this long has stalled; a batch sweep legitimately runs
+    /// longer and its callers defer rather than race — see the type doc.
+    const WAIT: Duration = Duration::from_secs(3);
+
+    pub fn acquire(path: &Path) -> Result<LedgerLock> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let pid = std::process::id();
+        let contents = format!("{pid}\n{}\n", started_at(pid).unwrap_or_default());
+        let deadline = std::time::Instant::now() + Self::WAIT;
+        loop {
+            match link_into_place(path, &contents) {
+                Ok(true) => {
+                    return Ok(LedgerLock {
+                        path: path.to_path_buf(),
+                    });
+                }
+                Ok(false) => match Lock::holder(path)? {
+                    Some(pid) => {
+                        if std::time::Instant::now() >= deadline {
+                            bail!(
+                                "ledger lock at {} is still held by pid {pid} after {:?}",
+                                path.display(),
+                                Self::WAIT
+                            );
+                        }
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    None => {
+                        let _ = std::fs::remove_file(path);
+                    }
+                },
+                Err(e) => return Err(e).with_context(|| format!("writing {}", path.display())),
+            }
+        }
+    }
+}
+
+impl Drop for LedgerLock {
+    fn drop(&mut self) {
+        // Only if it still names this process — same reasoning as [`Lock`].
+        if let Ok(Some(holder)) = Lock::holder(&self.path)
+            && holder == std::process::id()
+        {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
 /// How many consecutive starts have failed to run at all, and why the last
 /// one did — the state a caller restarting the engine in a tight loop is
 /// finally refused by.
@@ -598,6 +767,37 @@ mod tests {
         std::fs::write(&path, "0\n").unwrap();
         assert!(Lock::holder(&path).unwrap().is_none());
         Lock::acquire(&path, false).unwrap();
+    }
+
+    /// The per-task lock releases on drop, and a second acquire then
+    /// succeeds — the read-modify-write it guards is short, and one held
+    /// forever would wedge every pass and every `spoolway report` for that
+    /// task.
+    #[test]
+    fn a_task_lock_is_taken_then_released_on_drop() {
+        let path = scratch("task-lock").with_file_name("demo.lock");
+        {
+            let _held = TaskLock::acquire(&path).unwrap();
+            assert!(Lock::holder(&path).unwrap().is_some());
+        }
+        assert!(Lock::holder(&path).unwrap().is_none());
+        // And re-takeable.
+        let _again = TaskLock::acquire(&path).unwrap();
+    }
+
+    /// A task lock file a crashed holder left behind names a dead pid, so
+    /// [`Lock::holder`] reads it as stale and the next acquire reaps it
+    /// rather than waiting the whole [`TaskLock::WAIT`] out.
+    #[test]
+    fn a_stale_task_lock_is_reaped_at_once() {
+        let path = scratch("task-lock-stale").with_file_name("demo.lock");
+        std::fs::write(&path, "0\n").unwrap();
+        let started = std::time::Instant::now();
+        let _lock = TaskLock::acquire(&path).unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "a dead holder is cleared immediately, not waited out"
+        );
     }
 
     /// [`Restarts`]' own path, beside the lock file `scratch` returns.

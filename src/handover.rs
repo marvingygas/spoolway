@@ -211,21 +211,50 @@ fn reap_adopted(repo: &Repo, who: &str) -> Result<Vec<String>> {
     };
     let still_there = listing(&theirs);
 
+    // A lane still mid-turn on a task must not have its file yanked out from
+    // under it: its own `spoolway report` would then fail with "no task" and
+    // its usage go unbanked (review finding 61). The lane name is
+    // `<task> · <step>`, so a key whose task half matches means one is live.
+    // Such a task is kept — this machine's own `mirror` re-pushes it on the
+    // same pass, so the race resolves to "the task belongs to the machine
+    // whose lane is running it" rather than to a corrupted lane record. The
+    // person who adopted in-flight work is left with a duplicate to sort out.
+    let lanes = crate::dispatch::load_lane_records(repo);
+    let a_lane_is_running = |id: &str| {
+        lanes
+            .keys()
+            .filter_map(|name| name.split_once(" · "))
+            .any(|(task, _)| task == id)
+    };
+
     let mut released = Vec::new();
     for name in listing(&ours) {
         if name.is_empty() || still_there.contains(&name) {
             continue;
         }
         let path = repo.queue_dir().join(&name);
-        if path.exists() {
-            std::fs::remove_file(&path)
-                .with_context(|| format!("letting go of {}", path.display()))?;
-            released.push(name.trim_end_matches(".md").to_string());
+        if !path.exists() {
+            continue;
         }
+        let id = name.trim_end_matches(".md");
+        if a_lane_is_running(id) {
+            crate::problem_log::append(
+                repo,
+                &format!(
+                    "{id}: adopted away elsewhere while a lane is running it here — kept, and \
+                     re-mirrored; the other machine now has a duplicate"
+                ),
+            );
+            continue;
+        }
+        std::fs::remove_file(&path).with_context(|| format!("letting go of {}", path.display()))?;
+        released.push(id.to_string());
     }
 
     // Our mirror is now what the remote says it is, so the next pass compares
-    // against the truth rather than reporting the same handover forever.
+    // against the truth rather than reporting the same handover forever. A
+    // task kept above is re-added to the ref by `mirror`'s own queue commit
+    // right after this, so it does not read as taken again next pass.
     repo.git(&["update-ref", &queue_ref(who), &theirs])?;
     Ok(released)
 }
@@ -564,10 +593,16 @@ fn prune_mirror(repo: &Repo, from: &str, taken: &[String]) -> Result<()> {
     let commit = repo.git(&["commit-tree", &tree, "-p", &parent, "-m", "spoolway adopt"])?;
     let commit = commit.trim().to_string();
     repo.git(&["update-ref", &source, &commit])?;
+    // `--force-with-lease` against the sha this rewrite was built on, not a
+    // blind `--force`: `source` is someone else's ref, and their own in-flight
+    // `handover` pushes `+queue:queue` to it too. A blind force here would
+    // overwrite that push and leave the task on both machines (review finding
+    // 59). A stale lease fails the adopt loudly instead, for the operator to
+    // retry.
     repo.git(&[
         "push",
         "--quiet",
-        "--force",
+        &format!("--force-with-lease={source}:{parent}"),
         "origin",
         &format!("{source}:{source}"),
     ])?;
@@ -614,6 +649,16 @@ pub fn handover(repo: &Repo, group: Option<&str>, reset: bool) -> Result<BTreeMa
                 pipeline.entry(),
                 Some("handed over: to be redone from the plan"),
             );
+            // "Redone from the plan" has to mean it. The branch, the point it
+            // was cut from, and the diff measured at its last cleanup all
+            // describe the abandoned attempt; left on the file, the adopter's
+            // next worktree is cut on the existing `task/<id>` on top of those
+            // commits, with no status-log line saying why (review finding 60).
+            // Cleared, the adopter cuts fresh from `base` and the branch is
+            // not mirrored below.
+            task.front.branch = None;
+            task.front.cut_from = None;
+            task.front.base_commit = None;
             task.save()?;
             outcome.insert(
                 task.id().to_string(),
@@ -839,6 +884,80 @@ mod tests {
                 .unwrap()
                 .released
                 .is_empty()
+        );
+    }
+
+    /// A task adopted away while a lane on this machine is still running it is
+    /// not yanked out from under that lane — its `spoolway report` would fail
+    /// with "no task" and its usage go unbanked (review finding 61). It is
+    /// kept and re-mirrored, so this machine holds on to the work its lane is
+    /// doing; only the untouched sibling is let go.
+    #[test]
+    fn a_task_with_a_live_lane_is_kept_when_adopted_away() {
+        let (mine, theirs) = two_machines("reap-running");
+        let one = queue(&mine, "one", "implement", None);
+        let two = queue(&mine, "two", "implement", None);
+        mirror(&mine, &[one, two]).unwrap();
+
+        let mut lanes: std::collections::HashMap<String, crate::dispatch::LaneRecord> =
+            std::collections::HashMap::new();
+        lanes.insert(
+            "one · implement".to_string(),
+            crate::dispatch::LaneRecord::readopted("one · implement", 0, &[]),
+        );
+        crate::dispatch::save_lane_records(&mine, &lanes).unwrap();
+
+        adopt(
+            &theirs,
+            "me@corp.com",
+            None,
+            &["one".to_string(), "two".to_string()],
+        )
+        .unwrap();
+
+        let pushed = mirror(&mine, &mine.tasks().unwrap()).unwrap();
+        assert_eq!(pushed.released, vec!["two".to_string()]);
+        assert!(
+            mine.queue_dir().join("one.md").exists(),
+            "a task with a live lane must not be released out from under it"
+        );
+        assert!(!mine.queue_dir().join("two.md").exists());
+
+        // And it stays: re-mirrored, it never reads as taken again.
+        assert!(
+            mirror(&mine, &mine.tasks().unwrap())
+                .unwrap()
+                .released
+                .is_empty()
+        );
+        assert!(mine.queue_dir().join("one.md").exists());
+    }
+
+    /// `handover --reset` says the task will be redone from the plan, so it
+    /// clears the abandoned attempt's `branch`, `cut_from` and `base_commit`
+    /// — otherwise the adopter's next worktree is cut on the old branch on
+    /// top of the old commits (review finding 60).
+    #[test]
+    fn reset_clears_the_abandoned_attempts_branch_and_cut_point() {
+        let (mine, _) = two_machines("reset");
+        let mut task = queue(&mine, "one", "implement", Some("task/one"));
+        task.front.cut_from = Some("task/dep".into());
+        task.front.base_commit = Some("deadbeef".into());
+        task.save().unwrap();
+        work_on(&mine, "task/one", "one.txt");
+
+        handover(&mine, None, true).unwrap();
+
+        let after = Task::load(&mine.queue_dir().join("one.md")).unwrap();
+        assert_eq!(after.front.branch, None);
+        assert_eq!(after.front.cut_from, None);
+        assert_eq!(after.front.base_commit, None);
+        assert!(
+            after
+                .section("## Status Log")
+                .unwrap_or_default()
+                .contains("redone from the plan"),
+            "the reset must leave a trace of itself"
         );
     }
 

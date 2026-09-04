@@ -253,7 +253,7 @@ of them has not started either. `ctrl-c` stops the run and leaves the last frame
 | `--interval <DURATION>` | Override the configured interval between passes, e.g. `5m` |
 | `--dry-run` | Report what one pass would do without spawning anything or writing to task files, then exit. One pass, because a dry run archives nothing: a second would report the same untouched queue |
 | `--plain` | Print a line per pass instead of drawing the board — for a pipe, a CI log, or a terminal that mangles the redraw. `--dry-run` prints lines regardless |
-| `--unattended` | Stop for nobody: on a pipeline that does not stage `blocked`, every block resumes the lane that hit it instead of parking, and `loop` stops applying. A pipeline that declares `blocked` as a step gets neither — a block starts a lane there like any other step, staffed by whatever prompt `blocked` names, with `loop` applying as usual. The launch ceiling that parks a task whose lane keeps dying backs off instead. `gate:` holds either way, and still parks a task on `paused` for a person. Overrides `unattended.enabled` for this run — see [Unattended runs](pipelines.md#unattended-runs). With neither `unattended.max_output_tokens` nor `unattended.max_cost_usd` set, this run has no ceiling at all |
+| `--unattended` | Stop for nobody: every block starts a lane on `blocked` instead of parking the task for a person. Every pipeline stages `blocked` — `Pipelines::assemble` materialises one from `[unattended]`'s `blocked_*` keys onto any pipeline that does not declare its own — so there is always a step to route to, staffed by whatever prompt `blocked` names, with `loop` applying as usual and nothing bounding how many times it round-trips. When that lane passes, `unattended.skip_blocked_lane` decides where the task lands: on by default, one step past where the block was hit; `false`, back on the step it blocked on. The launch ceiling that parks a task whose lane keeps dying backs off instead. `gate:` holds either way, and still parks a task on `paused` for a person. Overrides `unattended.enabled` for this run — see [Unattended runs](pipelines.md#unattended-runs). With neither `unattended.max_output_tokens` nor `unattended.max_cost_usd` set, this run has no ceiling at all |
 | `--attended` | Park blocked tasks in front of a person for this run, whatever `unattended.enabled` says |
 | `--force` | Start anyway, past the restart guard — see below |
 
@@ -312,7 +312,8 @@ pipeline, its versions inside it newest first.
 Bare, with no flag at all, no `--json`, and stdout a real terminal, this opens a screen instead:
 four views — `pipelines`, `steps`, `runs`, `skills` — cycled with `tab`, a cursor over the rows
 with `↑↓`, a filter panel (`f`) over every flag below, `e` to export the rows on screen to
-`.spoolway/evals/eval-<stamp>.csv`, `r` to refresh, `q` to quit. Reads keys the same way
+`.spoolway/evals/eval-<view>-YYYY-MM-DD-HHMMSS.csv` — with a `-2`, `-3` and so on appended
+when that name is already taken — `r` to refresh, `q` to quit. Reads keys the same way
 `spoolway queue`'s own screen does, and ends the moment a piped stdin runs out rather than
 blocking. Any flag, `--json` included, or stdout not a terminal, takes the printing path below
 unchanged — so redirecting bare `spoolway eval` to a file never writes the screen's own escape
@@ -417,8 +418,9 @@ is on.
 
 On a `blocked` task, this resumes where it stopped: that continues the lane's own session
 rather than opening a new one on the same step, and hands back the loop budgets out of that
-step. An [unattended run](pipelines.md#unattended-runs) does all of this for itself, the moment
-a task blocks — this command is the same operation, by hand, for a run that has you in it.
+step. An [unattended run](pipelines.md#unattended-runs) never waits for this — a task that
+blocks gets a lane started on `blocked`, and that lane's own pass routes it onward under
+`unattended.skip_blocked_lane`. This command is the by-hand path for a run that has you in it.
 
 On a `paused` task — one that finished a step declaring `gate: true`, one held by its own
 `gate_at:`, or one a staffed `blocked` step's own `--pause` (or a `--fail` or `--block` read the
@@ -501,6 +503,9 @@ the warning prints under the verdict beside the gate and prompt findings:
 
 The overlong warning fires past 400 characters, counted in characters rather than bytes. A
 description is read to choose between pipelines, so a few sentences is the size it wants.
+
+A pipeline file that will not parse does not abort the command you ran to find it. The load
+failure is printed as the first problem and the two shipped pipelines are still validated.
 
 ### `spoolway pipeline contract`
 
@@ -656,6 +661,12 @@ together.
 An unmetered kind still runs its turn under `--live`: there are no readings to take, and the
 launch, the prompt and the session pinning are exactly what nothing else can check.
 
+Each `--live` turn is bounded. A turn still running after 180 seconds has hung, so spoolway
+kills it and reports the clause as failed rather than waiting forever — `verify --live` is
+often run from CI, where a hang is a stuck job with nobody to interrupt it. The scratch tree
+`--live` works in, and the per-session agent home it creates for a kind that pins by home,
+are both removed when the command ends, whichever way it ends.
+
 `agent list` and `agent verify` both run against the whole adapter table rather than the
 profiles this project configures — that is `doctor`'s scope, and the kind you want to ask
 about is usually the one no profile names yet. Neither needs a project, so both answer the
@@ -794,13 +805,13 @@ case stops the files being brought forward.
 | Flag | Meaning |
 |---|---|
 | `--dry-run` | Print what would change and write nothing. Installs nothing either |
-| `--force-contract` | Rewrite a generated block even where you have edited it. Prompts and task skeletons have none, so this never reaches them |
 | `--replace <PATH>` | Replace one whole file with the shipped version, saving yours beside it. Repeat for each |
 
 ### `spoolway doctor`
 
 Check that everything the configured pipeline needs is actually present. The one command
-that still runs when the config file does not parse. Among its checks: whether `gh` is on
+that still runs when the config file does not parse, or a pipeline file does not: the load
+failure becomes one failed check and the rest run. Among its checks: whether `gh` is on
 PATH and authenticated — what `spoolway stack` needs for everything past the push.
 
 It prints the [`checkout:` line](#the-checkout-line) once when the checkout is not the
@@ -861,7 +872,9 @@ These are called by prompts. You rarely run them yourself.
 
 ### `spoolway report [<task>]`
 
-Report a step's outcome. The task defaults to the one in the lane's environment.
+Report a step's outcome. The task defaults to the one in the lane's environment. Naming a
+task other than the one this lane was started for is refused: a lane may only report on its
+own task.
 
 | Flag | Meaning |
 |---|---|
@@ -883,7 +896,10 @@ turn and takes its printed output as the whole pull request body — a blank hal
 a missing or empty `.spoolway/templates/pull-request.md`, refuses the command here, before
 anything below runs; commits what is uncommitted, squashes the branch to one commit named after
 the task's `title:` verbatim — written `feat(queue): add a --dry-run flag`, and no task id is
-prefixed onto it — pushes with `--force-with-lease`, opens the pull request against the branch
+prefixed onto it. The squash is built with `git commit-tree`, so no `commit-msg` or
+`pre-commit` hook can reject it and leave the branch half-collapsed; for the same reason a
+project that signs its commits gets an unsigned squash here. Then it pushes with
+`--force-with-lease`, opens the pull request against the branch
 the worktree was cut from (or reuses the one already open), and registers the GitHub stack. A
 GitHub stack is a single linear chain, so when this task's dependency's pull request already has
 a different pull request stacked above it — two tasks that `depends_on` the same dependency are

@@ -43,8 +43,9 @@ pub(crate) enum Branch {
 }
 
 impl<'a> Dispatcher<'a> {
-    /// A task reached a terminal step that cleans up: tear down its worktree
-    /// and branch, and move its file out of the active queue.
+    /// A task reached a terminal step that cleans up: bank whatever its lanes
+    /// spent, tear down its worktree and branch, and move its file out of the
+    /// active queue.
     pub(crate) fn clean_up(
         &mut self,
         task: &mut Task,
@@ -56,10 +57,42 @@ impl<'a> Dispatcher<'a> {
             return Ok(false);
         }
 
-        for (_, task_id, lane) in owned {
+        // Bank each owned lane's spend before its record goes, the way
+        // `sweep_on_stop` does. A pipeline whose last agent step routes
+        // `on_pass: done` has its lane still writing when the task reaches
+        // here; `free_finished_lanes` skipped it as busy, and without this
+        // its tokens were killed unbanked (review finding 14).
+        //
+        // The step banked is the lane's own — `owned`'s first tuple element —
+        // not `task.stage()`. By the time `clean_up` runs the task has
+        // already been moved onto its terminal step, so `task.stage()` would
+        // stamp the line `done` for tokens the previous agent step spent, and
+        // `lane_name(&entry.step, &entry.task)` — which `LaneRecord::readopted`
+        // and `dispatch::lane_session` both reconstruct — would name a lane
+        // that never existed. `sweep_on_stop` derives its lane name from the
+        // stage too, so stage and lane always agree there; here they do not.
+        let pipeline = self
+            .pipelines
+            .for_task(task)
+            .map(|p| p.name.clone())
+            .unwrap_or_default();
+
+        // The banked records are kept in hand rather than dropped: their
+        // per-session agent homes are reclaimed further down, but only once
+        // the task is actually archived. `clean_up` can still turn back below
+        // and hold the task at `blocked` (uncommitted work), and a `session:`
+        // step resuming it then would want that transcript.
+        let mut banked: Vec<LaneRecord> = Vec::new();
+        for (step_id, task_id, lane) in owned {
             if task_id == task.id() {
                 let _ = self.mux.stop_lane(&lane.name, &lane.pane_id);
-                self.lanes.remove(&lane.name);
+                let ledger = self.ledger();
+                let record = self
+                    .lanes
+                    .remove(&lane.name)
+                    .unwrap_or_else(|| LaneRecord::readopted(&lane.name, now_secs(), &ledger));
+                self.record_usage(&record, task.id(), step_id, Some(task), &pipeline);
+                banked.push(record);
             }
         }
 
@@ -76,6 +109,61 @@ impl<'a> Dispatcher<'a> {
                 runs.forget_pane(&key);
             }
             runs.stop(&key);
+        }
+
+        // The worktree is about to be removed. If it still holds work
+        // `auto_commit` cannot record — a git command failing, or
+        // `dispatch.auto_commit` off — tearing it down destroys that work,
+        // against this function's own contract that a cleanup terminal
+        // "cannot delete work that was never recorded" (review finding 4).
+        // Held at `blocked` instead. Residue a lane deliberately left is not
+        // this: it is snapshotted to the mirror and named in the log.
+        //
+        // `""` for `started_at`: there is no lane record to read a launch HEAD
+        // from by the time cleanup runs, and an unknown one makes `auto_commit`
+        // sweep rather than treat the leftovers as residue — the same call
+        // `spoolway stack` already makes at `handover`.
+        if let Some(worktree) = task.front.worktree_path.clone() {
+            let step = task
+                .front
+                .last_report
+                .as_ref()
+                .map(|r| r.step.clone())
+                .unwrap_or_else(|| task.stage().to_string());
+            let outcome =
+                crate::commands::auto_commit(self.repo, Path::new(&worktree), "", task.id(), &step);
+            if let Some(note) = outcome.note() {
+                task.append_to_section("## Status Log", &format!("- {note}\n"));
+            }
+            if outcome.is_unrecorded() {
+                let back = self
+                    .pipelines
+                    .for_task(task)
+                    .ok()
+                    .map(|pipeline| crate::commands::resume_target(task, pipeline))
+                    .or_else(|| task.front.last_report.as_ref().map(|r| r.step.clone()))
+                    .unwrap_or_else(|| task.stage().to_string());
+                crate::commands::set_blocked_from(task, &back);
+                task.append_to_section(
+                    "## Status Log",
+                    &format!(
+                        "- reached `{}` with work that could not be committed — held at `{}` \
+                         rather than tearing the worktree down\n",
+                        task.stage(),
+                        crate::pipeline::BLOCKED,
+                    ),
+                );
+                task.set_stage(
+                    crate::pipeline::BLOCKED,
+                    Some("uncommitted work could not be recorded before cleanup"),
+                );
+                task.save()?;
+                report.problems.push(format!(
+                    "{}: held at `blocked` — uncommitted work could not be recorded before cleanup",
+                    task.id()
+                ));
+                return Ok(false);
+            }
         }
 
         // The last instant the branch still exists to diff against — a task
@@ -104,6 +192,32 @@ impl<'a> Dispatcher<'a> {
         })?;
 
         self.close_project_tab_if_empty(task);
+
+        // The task has left the queue for good. Its hook and command run
+        // files under `tracking/` and `commands/` are litter now, and left
+        // in place `tracking::failure_count` would go on counting a failed
+        // hook of a task nobody can reach any more (review finding 64).
+        runs.reclaim_task(task.id());
+        crate::tracking::reclaim(self.repo, task.id());
+
+        // And now — past every early return — the per-session agent homes the
+        // task's lanes were given: the ones just banked above, plus any older
+        // lane record still held for it. A copied `auth.json` under one would
+        // otherwise outlive every credential rotation (review finding 63).
+        for record in &banked {
+            record.reclaim_session_home();
+        }
+        let stale: Vec<String> = self
+            .lanes
+            .keys()
+            .filter(|name| crate::mux::lane_task(name) == task.id())
+            .cloned()
+            .collect();
+        for name in stale {
+            if let Some(record) = self.lanes.remove(&name) {
+                record.reclaim_session_home();
+            }
+        }
 
         // `task` itself just moved to the archive, so this reread is what
         // lets a branch retained for *its* sake, earlier in the chain, be
@@ -450,7 +564,7 @@ impl<'a> Dispatcher<'a> {
         let mine = crate::dispatch::our_checkouts(self.repo, &tasks);
         let owned: Vec<(String, &Lane)> = all_lanes
             .iter()
-            .filter(|lane| mine.contains(&lane.cwd))
+            .filter(|lane| crate::dispatch::owns_cwd(&mine, &lane.cwd))
             .filter_map(|lane| {
                 parse_lane_name(&lane.name, &step_ids).map(|(_, task)| (task.to_string(), lane))
             })
@@ -492,10 +606,11 @@ impl<'a> Dispatcher<'a> {
             // record to begin with — see `LaneRecord::readopted`.
             // `record_usage` is a safe no-op either way, on the blank session
             // a lane the ledger has genuinely never heard from still gets.
+            let ledger = self.ledger();
             let record = self
                 .lanes
                 .remove(&name)
-                .unwrap_or_else(|| LaneRecord::readopted(self.repo, &name, now_secs()));
+                .unwrap_or_else(|| LaneRecord::readopted(&name, now_secs(), &ledger));
             let pipeline = self
                 .pipelines
                 .for_task(task)

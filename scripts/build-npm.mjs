@@ -179,12 +179,25 @@ function stampWrapper() {
 
   writeJson(file, manifest);
   copyDocs(wrapperDir);
+
+  // npm packs a `README.md` whichever way it is published, so the wrapper
+  // directory must never be left holding a stale hand-written one: a
+  // `npm publish` run there by hand would ship it. Fail rather than stamp a
+  // wrapper whose README is not the repo's.
+  const wrapperReadme = fs.readFileSync(path.join(wrapperDir, "README.md"), "utf8");
+  const rootReadme = fs.readFileSync(path.join(root, "README.md"), "utf8");
+  if (wrapperReadme !== rootReadme) {
+    throw new Error(
+      `${path.join(wrapperDir, "README.md")} is not the repo's README.md after stamping`,
+    );
+  }
 }
 
 function copyDocs(dir) {
   for (const name of ["README.md", "LICENSE"]) {
     const src = path.join(root, name);
-    if (fs.existsSync(src)) fs.copyFileSync(src, path.join(dir, name));
+    if (!fs.existsSync(src)) throw new Error(`missing ${src}, cannot assemble ${dir}`);
+    fs.copyFileSync(src, path.join(dir, name));
   }
 }
 

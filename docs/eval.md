@@ -102,10 +102,13 @@ On `pipeline` and `step`, `enter` still applies the whole draft at once and relo
 leaves the table exactly as it was.
 
 `e` writes the rows on screen, in whichever view they are in, to
-`.spoolway/evals/eval-YYYY-MM-DD-HHMM.csv` — the pipelines view with the same header
-`--csv` writes, the other three views with a header built from the same column names, since
-none of them has a flag-form export of its own. A panel names the path it wrote and how many
-rows. `.spoolway/evals/` is a person's own export rather than the project's setup, but
+`.spoolway/evals/eval-<view>-YYYY-MM-DD-HHMMSS.csv`. The `<view>` part is the name of the
+view the rows came from — `pipelines`, `steps`, `runs` or `skills`. The stamp runs to the
+second, and a `-2`, `-3` and so on is appended when a file of that name is already there, so
+two exports in the same second and tabbing between views to export each both keep every file.
+The pipelines view uses the same header `--csv` writes. The other three build a header from
+the same column names, since none of them has a flag-form export of its own. A panel names
+the path it wrote and how many rows. `.spoolway/evals/` is a person's own export rather than the project's setup, but
 spoolway writes no `.gitignore` rules of its own any more — the runtime state that needed them
 left the checkout for `~/.spoolway/<project>/`, `usage.jsonl` included — so keeping the
 exports out of git is the project's own line to write.
@@ -269,7 +272,9 @@ spoolway,default,b210d1a8,2026-08-15,4,19,4.75,0.74,5,91000,0.91,712400,178100,2
 
 `--csv` prints the same rows and the same order as the table it is on — blocks flatten into a
 `pipeline` column, in whichever order the blocks would have printed. Header names match the
-`--json` keys, so the two exports describe the same shape. Machine
+`--json` keys, so the two exports describe the same shape. A text field that holds a comma, a
+double quote or a newline — a project or skill name a person chose — is wrapped in double
+quotes the RFC 4180 way, so it stays in its own column. Machine
 spellings throughout: raw seconds, raw tokens, no `$`, no `k`, no colour — and every total the
 table itself divides by `RUNS`, kept here alongside the per-run figure the table shows, so
 nothing the screen stopped printing is actually lost.

@@ -56,11 +56,10 @@ REPO=$(cd "$E2E_DIR/../.." && pwd)
 # Three domains are deliberately *not* suites here, because an end-to-end run
 # is the wrong instrument for them and a hollow suite is worse than none:
 #
-#   guardrails  a mock lane does not load the agent extension that refuses a
-#               write outside the worktree, so a suite would assert nothing.
-#               Covered by
-#               assets/extensions/guardrails.test.ts and by the confinement
-#               tests in tests/sandbox_linux.rs.
+#   guardrails  each agent kind confines its own lane to the worktree, and a
+#               mock lane runs none of that, so an e2e suite would assert
+#               nothing. The argv that sets it up is built and unit-tested in
+#               src/agent.rs.
 #   backends    parity between `herdr` and `headless` needs a multiplexer, and
 #               these suites must run without one. The backend's own behaviour
 #               is unit-tested in src/headless.rs, and what a multiplexer

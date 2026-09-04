@@ -931,14 +931,35 @@ pub fn prepare_session_home(kind: &str, session: &str) -> Option<std::path::Path
         for name in seed {
             let (from, to) = (real.join(name), home.join(name));
             if from.exists() && !to.exists() {
-                #[cfg(unix)]
-                let _ = std::os::unix::fs::symlink(&from, &to);
-                #[cfg(not(unix))]
-                let _ = std::fs::copy(&from, &to);
+                link_seed(&from, &to);
             }
         }
     }
     Some(home)
+}
+
+/// Link `from` to `to`, and copy only where the platform will not make a
+/// link at all.
+///
+/// A link keeps a credential refreshed in the real home valid here; a copy
+/// goes stale the moment the token rotates, and one is left per lane (review
+/// finding 63). Unix has always had `symlink`. On Windows a symlink needs a
+/// privilege a service often lacks, so a hard link — same volume — is the
+/// fallback before a copy; on any other platform a hard link is all that is
+/// tried before copying.
+fn link_seed(from: &std::path::Path, to: &std::path::Path) {
+    #[cfg(unix)]
+    let linked = std::os::unix::fs::symlink(from, to).is_ok();
+    #[cfg(windows)]
+    let linked = std::os::windows::fs::symlink_file(from, to)
+        .or_else(|_| std::fs::hard_link(from, to))
+        .is_ok();
+    #[cfg(not(any(unix, windows)))]
+    let linked = std::fs::hard_link(from, to).is_ok();
+
+    if !linked {
+        let _ = std::fs::copy(from, to);
+    }
 }
 
 /// The home this agent keeps for *itself* — the one spoolway relocates away
@@ -1324,5 +1345,44 @@ mod tests {
         };
         let args: Vec<String> = ["--model", "m"].iter().map(|s| s.to_string()).collect();
         assert_eq!(resume.apply(&args), args);
+    }
+
+    /// A seed file is linked, not copied, so a credential rotated in the real
+    /// home — written to a temp name and renamed into place, the ordinary
+    /// shape — is still valid through the per-session home (review finding
+    /// 63). On Unix the link is a symlink; the copy fallback is only for a
+    /// platform that will not make one.
+    #[cfg(unix)]
+    #[test]
+    fn link_seed_links_so_a_rotation_stays_valid() {
+        let real = crate::scratch::root("agent-seed-real");
+        let _ = std::fs::remove_dir_all(&real);
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("auth.json"), "first").unwrap();
+
+        let session = crate::scratch::root("agent-seed-session");
+        let _ = std::fs::remove_dir_all(&session);
+        std::fs::create_dir_all(&session).unwrap();
+
+        link_seed(&real.join("auth.json"), &session.join("auth.json"));
+
+        assert!(
+            std::fs::symlink_metadata(session.join("auth.json"))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the seed was copied, not linked"
+        );
+
+        std::fs::write(real.join("auth.json.new"), "rotated").unwrap();
+        std::fs::rename(real.join("auth.json.new"), real.join("auth.json")).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(session.join("auth.json")).unwrap(),
+            "rotated",
+            "a link would follow the rotation; a stale copy would not"
+        );
+
+        let _ = std::fs::remove_dir_all(&real);
+        let _ = std::fs::remove_dir_all(&session);
     }
 }

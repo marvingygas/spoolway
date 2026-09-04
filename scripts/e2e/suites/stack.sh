@@ -425,4 +425,79 @@ else
   git -C "$WORKTREES/no-template" log --oneline "$before_sha"..HEAD | sed 's/^/        /'
 fi
 
+# Back to task-file mode for what follows — the summary model is not what
+# these cases are about, and the template was removed two cases ago.
+set_stack_summary .spoolway/config.toml "" ""
+must "back to task-file mode" git add .spoolway/config.toml
+must "back to task-file mode" git commit -qm "config: task-file summary again"
+
+# ----------------------------------- a rejecting commit-msg hook cannot break it
+# The squash is built with `git commit-tree`, which runs no hooks, and the
+# branch ref moves only once that object exists. So a `commit-msg` hook that
+# rejects every message can neither stop the squash nor leave the branch
+# collapsed onto its merge base with the work stranded in the index and the
+# reflog (finding 55).
+must "the branch, off main" git branch task/hooked main
+must "the worktree" git worktree add -q "$WORKTREES/hooked" task/hooked
+(
+  cd "$WORKTREES/hooked" || exit 1
+  mkdir -p notes
+  echo "# hooked" > notes/hooked.md
+  git add -A
+  git commit -qm "wip(hooked): implement"
+  echo "second commit" > notes/hooked-two.md
+  git add -A
+  git commit -qm "wip(hooked): fix"
+)
+queue_task hooked "touches: [notes/hooked.md, notes/hooked-two.md]" \
+  "base: main" "branch: task/hooked"
+
+HOOKDIR=$(cd "$WORKTREES/hooked" && git rev-parse --git-path hooks)
+mkdir -p "$HOOKDIR"
+printf '#!/bin/sh\necho "commit-msg hook says no" >&2\nexit 1\n' > "$HOOKDIR/commit-msg"
+chmod +x "$HOOKDIR/commit-msg"
+
+hooked_out=$(cd "$WORKTREES/hooked" && "$SPOOLWAY" stack hooked 2>&1)
+hooked_status=$?
+rm -f "$HOOKDIR/commit-msg"
+if [ "$hooked_status" -eq 0 ] \
+   && [ "$(cd "$WORKTREES/hooked" && git rev-list --count main..HEAD)" = 1 ]; then
+  ok "a rejecting commit-msg hook neither stops the squash nor leaves the branch collapsed"
+else
+  bad "a rejecting commit-msg hook neither stops the squash nor leaves the branch collapsed"
+  printf '        exit %s: %s\n' "$hooked_status" "$hooked_out"
+  git -C "$WORKTREES/hooked" log --oneline main..HEAD | sed 's/^/        /'
+fi
+if [ -f "$WORKTREES/hooked/notes/hooked.md" ] \
+   && [ -f "$WORKTREES/hooked/notes/hooked-two.md" ] \
+   && git -C "$WORKTREES/hooked" diff --quiet; then
+  ok "the squashed commit carries every changed file and leaves a clean tree"
+else
+  bad "the squashed commit carries every changed file and leaves a clean tree"
+  git -C "$WORKTREES/hooked" status --porcelain | sed 's/^/        /'
+fi
+
+# ------------------------------------------- a task may not name its own branch
+# `branch:` is spoolway's field outright. A task document that sets it to
+# anything but `task/<id>` is refused when the task file is loaded, well
+# before `spoolway stack` could force-push a squashed commit onto it or hand
+# a `-`-led value to `gh pr view` (findings 11, 12).
+main_local_before=$(git rev-parse main)
+main_remote_before=$(git rev-parse origin/main)
+queue_task claimed "touches: [notes/claimed.md]" "base: main" "branch: main"
+claimed_out=$(cd "$WORKTREES/base" && "$SPOOLWAY" stack claimed 2>&1)
+claimed_status=$?
+if [ "$claimed_status" -ne 0 ] && grep -qF "spoolway owns that field" <<<"$claimed_out"; then
+  ok "a task whose \`branch:\` is not \`task/<id>\` is refused at load"
+else
+  bad "a task whose \`branch:\` is not \`task/<id>\` is refused at load"
+  printf '        exit %s: %s\n' "$claimed_status" "$claimed_out"
+fi
+if [ "$(git rev-parse main)" = "$main_local_before" ] \
+   && [ "$(git rev-parse origin/main)" = "$main_remote_before" ]; then
+  ok "and nothing was force-pushed onto \`main\`"
+else
+  bad "and nothing was force-pushed onto \`main\`"
+fi
+
 finish

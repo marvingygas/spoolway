@@ -676,9 +676,12 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     // questions should not be handed the same three back as a list.
     println!("Next:");
     if answers.model.is_none() {
+        // The placeholder is written into the pipeline files, not `config.toml`
+        // — `agents.*.model` is retired and `config set` refuses it. Point at
+        // the files that actually carry it.
         println!(
-            "  spoolway config edit        # and name a model: every local step still says \
-             `{}`",
+            "  edit .spoolway/pipelines/*.yml   # name a model: every local step's `model:` \
+             still says `{}` (`spoolway pipeline show` lists them)",
             crate::models::PLACEHOLDER
         );
     } else {
@@ -899,7 +902,7 @@ mod tests {
         // The command whose whole job is to refuse a pipeline it cannot run.
         // It probes every step's prompt and the observer's, so a lookup that
         // disagrees with `init` surfaces here as a bail rather than at dispatch.
-        pipeline_check(&repo, &pipelines, false)
+        pipeline_check(&repo, Ok(pipelines.clone()), false)
             .expect("a freshly initialised project passes its own pipeline check");
 
         // Every step a shipped pipeline runs has prose on disk after `init`.
@@ -1165,7 +1168,6 @@ mod tests {
             &repo,
             &crate::cli::UpdateArgs {
                 dry_run: false,
-                force_contract: false,
                 replace: Vec::new(),
             },
         )

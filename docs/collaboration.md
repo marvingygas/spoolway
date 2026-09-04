@@ -22,8 +22,10 @@ refs/spoolway/<your git user.email>/queue
 
 Alongside it, under the same `refs/spoolway/<your git user.email>/` namespace, sit the task
 branches those files name (`/branch/<branch>`) and a snapshot of anything a lane has not
-committed yet (`/wip/<branch>`). Refs of their own rather than more of the queue ref, because
-git refuses a ref that is a prefix of another.
+committed yet (`/wip/<branch>`). The snapshot is taken with `git add -A` through an index of
+its own, so it carries untracked files too, not only modified ones — everything except what
+`.gitignore` excludes. Refs of their own rather than more of the queue ref, because git
+refuses a ref that is a prefix of another.
 
 **None of your project's code is on that ref.** The code lives on ordinary branches, pushed by
 the `handover` step, exactly as before.
@@ -44,7 +46,10 @@ or to have done anything.
 It is a **move**, not a copy:
 
 - The task files leave their mirror and arrive in your queue.
-- Their next `spoolway handover` notices and lets go of them locally.
+- Their next `spoolway handover` notices and lets go of them locally — except a task whose lane
+  is still running on that machine, which it keeps and re-mirrors. Yanking the file would break
+  that lane's own `spoolway report`. The task stays with the machine doing the work, and you
+  are left holding a duplicate to delete.
 - The task branches are fetched and created here — **with the work on them**, which a worktree
   cut for a branch that exists only as a remote-tracking ref would silently not have.
 
@@ -52,8 +57,10 @@ It is a **move**, not a copy:
 of a task file that is about a machine rather than about the work, and it is cut fresh on
 whichever machine picks the task up.
 
-Nothing has to be edited by hand, and two dispatchers can never run one task, because a task
-file exists in exactly one queue.
+Nothing has to be edited by hand. In the ordinary case a task file exists in exactly one
+queue, so two dispatchers never run one task. Adopting a task whose lane is still live
+elsewhere is the exception above: for as long as the duplicate sits in your queue unresolved,
+both machines could start it.
 
 ## Handing work over deliberately
 
@@ -70,7 +77,9 @@ this machine notices what they took and lets go of it locally.
 `--reset-unpublished` sends tasks that never reached `handover` back to the start of their
 pipeline. Their commits are on your machine and nowhere else, so a colleague cannot have
 them — and a task file's goal and acceptance criteria are a better thing to inherit than a
-half-finished worktree.
+half-finished worktree. It also clears the task's `branch`, `cut_from` and `base_commit`, so
+whoever adopts it cuts a fresh worktree from `base` rather than landing back on the abandoned
+attempt's branch and commits.
 
 Which tasks those are is asked of the remote — `git ls-remote` on the task's own branch —
 rather than inferred from the step it is sitting on: step ids are a project's to rename, and a

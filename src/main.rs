@@ -136,12 +136,16 @@ fn run() -> Result<()> {
         // checks what it can without it.
         Command::Doctor(args) => {
             let (repo, config_error) = Repo::discover_lenient(&cwd)?;
-            let pipelines = Pipelines::load(&repo.checkout, &repo.config)?;
+            // Loaded here rather than with `?`: a pipeline file that does not
+            // parse is exactly what `doctor` exists to name, so the load
+            // failure is handed in as a finding, the same way `config_error`
+            // is, rather than aborting the command on it.
+            let pipelines = Pipelines::load(&repo.checkout, &repo.config);
             // `config_error` is about `repo.root`'s file — the one
             // `discover_lenient` reads. `doctor` loads `repo.checkout`'s own
             // copy again for everything it checks, and folds this one in as
             // a finding of its own rather than a gate — see its own doc.
-            commands::doctor(&repo, &pipelines, config_error, args.verbose, cli.json)
+            commands::doctor(&repo, pipelines, config_error, args.verbose, cli.json)
         }
 
         // Before a project is discovered, and deliberately: what spoolway can
@@ -341,8 +345,11 @@ fn run() -> Result<()> {
                     commands::pipeline_show(&repo, &read, cli.json)
                 }
                 Command::Pipeline(PipelineCommand::Check) => {
-                    let read = Pipelines::load(&repo.checkout, &repo.config)?;
-                    commands::pipeline_check(&repo, &read, cli.json)
+                    // Not `?`: `pipeline check` is the command that names a
+                    // pipeline file that will not parse, so the load failure
+                    // is handed in and reported rather than aborting it.
+                    let read = Pipelines::load(&repo.checkout, &repo.config);
+                    commands::pipeline_check(&repo, read, cli.json)
                 }
                 Command::Pipeline(PipelineCommand::List) => {
                     let read = Pipelines::load(&repo.checkout, &repo.config)?;

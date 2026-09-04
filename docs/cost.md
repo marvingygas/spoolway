@@ -106,7 +106,9 @@ about.
 Under the global `--json`, `spoolway spend` does not honour the cut at all: it dumps the
 matching ledger entries themselves, raw and ungrouped, whatever cut was named. A script wanting
 the grouped figures reads the plain table, or `--csv`, instead — `--json` and `--csv` are
-refused together, since they are two different exports of the same rows.
+refused together, since they are two different exports of the same rows. In `--csv`, a name
+that holds a comma, a double quote or a newline is double-quoted the RFC 4180 way, so a
+project directory called `foo, bar` does not shift every column after it.
 
 ### Skill sessions
 

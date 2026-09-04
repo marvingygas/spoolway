@@ -82,10 +82,9 @@ steps:
   # for a plan to watch, not a second way this budget gets spent.
   #
   # `on_loop_max: blocked` by name. The shipped `default` no longer declares
-  # it — a spent review loop there carries on down `on_pass` — but `local.yml`
-  # still does on every looped step, and the `escalation` plan's whole point
-  # is watching that road to `blocked` happen in a pane, so this fixture
-  # keeps it explicit. The `fix` step below is this fixture's own shape too:
+  # it — a spent review loop there carries on down `on_pass` — but the
+  # `escalation` plan's whole point is watching that road to `blocked` happen
+  # in a pane, so this fixture keeps it explicit. The `fix` step below is this fixture's own shape too:
   # the shipped `default` retired its `fix` step and loops `review` straight
   # back through `implement`, but `escalation.html` is written against
   # `loop: {fix: 2}` and rewriting that plan is not a drift fix.

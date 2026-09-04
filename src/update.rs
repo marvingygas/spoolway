@@ -98,7 +98,7 @@ pub fn run(repo: &Repo, args: &UpdateArgs) -> Result<()> {
     // by replacing the executable would be the least expected thing this
     // command could do.
     if !args.dry_run
-        && let Some(status) = install(repo, args)?
+        && let Some(status) = install(repo)?
     {
         // The new binary did the file work, and its exit code is the one
         // that means anything — this process has nothing left to say.
@@ -135,7 +135,7 @@ pub fn run(repo: &Repo, args: &UpdateArgs) -> Result<()> {
 /// place and its exit status is the one that matters. `None` means carry on
 /// here — nothing newer, nothing installable, or a dispatcher that must not
 /// have its binary rewritten under it.
-fn install(repo: &Repo, args: &UpdateArgs) -> Result<Option<std::process::ExitStatus>> {
+fn install(repo: &Repo) -> Result<Option<std::process::ExitStatus>> {
     use crate::release::Upgrade;
 
     match crate::release::upgrade(&repo.lock_file()) {
@@ -148,7 +148,7 @@ fn install(repo: &Repo, args: &UpdateArgs) -> Result<Option<std::process::ExitSt
                 crate::release::PACKAGE
             );
             println!();
-            Ok(Some(crate::release::hand_over(&relaunch(repo, args))?))
+            Ok(Some(crate::release::hand_over(&relaunch(repo), &version)?))
         }
 
         // The whole reason a channel is resolved before anything is said: an
@@ -175,23 +175,16 @@ fn install(repo: &Repo, args: &UpdateArgs) -> Result<Option<std::process::ExitSt
 
 /// This command, as the new binary should run it.
 ///
-/// Every flag is passed through: somebody who typed `--force-contract` meant
-/// it for the file work, which is the half that happens after the handover.
-///
 /// `-C` is passed whether or not it was typed, and that is the point: the
 /// child inherits a working directory, not a discovery. A `spoolway -C /elsewhere
 /// update` that handed over without it would upgrade the binary and then update
 /// whichever project the terminal happened to be sitting in.
-fn relaunch(repo: &Repo, args: &UpdateArgs) -> Vec<String> {
-    let mut argv = vec![
+fn relaunch(repo: &Repo) -> Vec<String> {
+    vec![
         "-C".to_string(),
         repo.root.display().to_string(),
         "update".to_string(),
-    ];
-    if args.force_contract {
-        argv.push("--force-contract".to_string());
-    }
-    argv
+    ]
 }
 
 /// Every file spoolway owns here, and what would happen to it.
@@ -399,25 +392,15 @@ fn templates(repo: &Repo, args: &UpdateArgs, outcomes: &mut Vec<Outcome>) -> Res
 
             // The project changed the part a machine reads. Their styling is
             // theirs and always was; this is the half that has to agree with
-            // the binary, so say so rather than choosing for them.
-            BlockState::HandEdited if args.force_contract => {
-                write_block(
-                    &path,
-                    &shown,
-                    &on_disk,
-                    &skeleton,
-                    args,
-                    outcomes,
-                    "block, discarding your edits to it",
-                )?;
-            }
+            // the binary, so say so rather than choosing for them. `--replace`
+            // is the deliberate way to take the whole shipped file back.
             BlockState::HandEdited => outcomes.push(Outcome::blocked(
                 &shown,
                 // Named as "the file" rather than by path: `shown` has
                 // already printed it.
                 "its machine-readable block was edited by hand, so it was left alone — but that \
                  block is what the file is read for, and the styling around it was never ours to \
-                 keep current. `spoolway update --force-contract` takes ours back",
+                 keep current. `spoolway update --replace <path>` takes the shipped file back",
             )),
 
             // Restyled past recognition. Writing a block into a file we cannot
@@ -455,9 +438,10 @@ fn write_block(
 /// `--replace`: the whole shipped file, over whatever is there.
 ///
 /// The way back from a file so far from the shape we know that no region can be
-/// found in it — where `--force-contract` is no help, because it needs a block
-/// to force. Everything about it is deliberately blunt: named paths only, the
-/// old contents saved beside the new, and a count of what is being discarded.
+/// found in it, or one whose machine-readable block was hand-edited and so is
+/// left alone by the in-place rewrite. Everything about it is deliberately
+/// blunt: named paths only, the old contents saved beside the new, and a count
+/// of what is being discarded.
 fn replace(repo: &Repo, args: &UpdateArgs) -> Result<()> {
     let mut failed = 0;
     for name in &args.replace {
@@ -466,6 +450,24 @@ fn replace(repo: &Repo, args: &UpdateArgs) -> Result<()> {
             false => repo.root.join(name),
         };
         let shown = crate::platform::relative(&repo.root, &path);
+
+        // A flat `<name>.md` whose directory-shaped `<name>/PROMPT.md` exists is
+        // a file this project no longer reads — `prompt::path_for` prefers the
+        // directory. Name that path instead of writing a dead file (finding 67).
+        if let Ok(rest) = path.strip_prefix(repo.prompts_dir())
+            && rest.components().count() == 1
+            && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+        {
+            let nested = crate::prompt::directory_form(repo, stem);
+            if nested.is_file() {
+                println!(
+                    "  ! {shown}: this project keeps its prompts as `<name>/PROMPT.md` — replace {} instead",
+                    crate::platform::relative(&repo.root, &nested)
+                );
+                failed += 1;
+                continue;
+            }
+        }
 
         let Some(shipped) = shipped_for(repo, &path) else {
             println!(
@@ -536,8 +538,14 @@ fn shipped_for(repo: &Repo, path: &Path) -> Option<String> {
         let rest = parts.as_path();
 
         // The flat `<name>.md` a project had before prompts gained a
-        // directory. Still readable, so still replaceable.
+        // directory. Still replaceable — but only while it is still the file
+        // this project reads. Once `<name>/PROMPT.md` exists, `prompt::path_for`
+        // prefers it and the flat path is dead: writing it would leave a new
+        // dead file beside the one that runs (finding 67).
         if rest.as_os_str().is_empty() {
+            if crate::prompt::directory_form(repo, stem).is_file() {
+                return None;
+            }
             return crate::assets::prompt(stem).map(|prompt| prompt.body.to_string());
         }
 
@@ -586,8 +594,14 @@ fn shipped_for(repo: &Repo, path: &Path) -> Option<String> {
 /// Skills carry no local edits by design, so they are rewritten — but only where
 /// a project installed them. Writing them into a project that never ran
 /// `install` would be this command choosing an agent on someone's behalf.
+///
+/// Every provider, not just `claude`: `init` and `install` write the same
+/// skills under `.codex/skills/` and `.pi/skills/` too, and a codex or pi
+/// project that never sees them refreshed keeps stale skills after every
+/// update. The `planned.path.exists()` check below still limits the writes to
+/// providers a project actually installed.
 fn skills(repo: &Repo, args: &UpdateArgs, outcomes: &mut Vec<Outcome>) -> Result<()> {
-    for provider in [crate::cli::Provider::Claude] {
+    for provider in <crate::cli::Provider as clap::ValueEnum>::value_variants() {
         for planned in provider.plan(&repo.root) {
             if !planned.path.exists() {
                 continue;
@@ -618,9 +632,9 @@ fn skills(repo: &Repo, args: &UpdateArgs, outcomes: &mut Vec<Outcome>) -> Result
 ///
 /// Two departures from the rule the module doc states, both deliberate:
 ///
-/// - An edit inside the markers is discarded without `--force-contract`. This
-///   is `config.toml`'s bargain, not a skeleton's: there is nothing in here for
-///   a project to have meant, because every sentence is a claim about what the
+/// - An edit inside the markers is discarded, not refused. This is
+///   `config.toml`'s bargain, not a skeleton's: there is nothing in here for a
+///   project to have meant, because every sentence is a claim about what the
 ///   binary does. A hand-edited one is a claim that has stopped being true.
 /// - A file with no markers is left completely alone and not reported. Writing
 ///   a block into a pipeline somebody wrote themselves would be this command
@@ -747,7 +761,6 @@ mod tests {
     fn args() -> UpdateArgs {
         UpdateArgs {
             dry_run: false,
-            force_contract: false,
             replace: Vec::new(),
         }
     }
@@ -1038,7 +1051,7 @@ mod tests {
     /// discarded rather than refused. There is nothing in there for a project
     /// to have meant — every line is a claim about what this binary does.
     #[test]
-    fn an_edit_inside_the_markers_is_discarded_without_force_contract() {
+    fn an_edit_inside_the_markers_is_discarded_not_refused() {
         let repo = fixture("pipeline-edited");
         let edited =
             crate::pipeline::key_block().replace("Absent: 30m.", "Absent: however long you like.");
@@ -1054,7 +1067,7 @@ mod tests {
             !outcome_lines(&outcomes)
                 .iter()
                 .any(|line| line.starts_with("blocked")),
-            "no --force-contract is asked for: {:?}",
+            "a differing key block is rewritten, not reported: {:?}",
             outcome_lines(&outcomes)
         );
     }
@@ -1170,5 +1183,54 @@ mod tests {
         // own old block from it, and `--replace` writes whole files.
         assert!(shipped_for(&repo, &repo.root.join("src/main.rs")).is_none());
         assert!(shipped_for(&repo, &crate::gitignore::file(&repo.root)).is_none());
+    }
+
+    /// The flat `.spoolway/prompts/<name>.md` is not replaceable once the
+    /// directory-shaped `<name>/PROMPT.md` exists — `prompt::path_for` reads the
+    /// directory, so a flat write would land in a file nothing runs (finding
+    /// 67).
+    #[test]
+    fn a_flat_prompt_shadowed_by_its_directory_is_not_shipped_for() {
+        let repo = fixture("prompt-shadowed");
+        let prompts = repo.prompts_dir();
+        let flat = prompts.join("reviewer.md");
+
+        // While only the flat file could exist, it is replaceable.
+        assert!(shipped_for(&repo, &flat).is_some());
+
+        // Once the directory shape is on disk, the flat path is dead.
+        let nested = crate::prompt::directory_form(&repo, "reviewer");
+        std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
+        std::fs::write(&nested, "# reviewer\n").unwrap();
+        assert!(shipped_for(&repo, &flat).is_none());
+        assert!(shipped_for(&repo, &nested).is_some());
+    }
+
+    /// `update::skills` refreshes every installed provider, not `claude` alone —
+    /// a codex or pi project kept stale skills after every update otherwise
+    /// (finding 27). The `path.exists()` guard still limits it to providers the
+    /// project actually installed.
+    #[test]
+    fn skills_refreshes_every_installed_provider() {
+        let repo = fixture("skills-providers");
+
+        for provider in [crate::cli::Provider::Codex, crate::cli::Provider::Pi] {
+            let first = provider.plan(&repo.root).into_iter().next().unwrap();
+            std::fs::create_dir_all(first.path.parent().unwrap()).unwrap();
+            std::fs::write(&first.path, "stale, from an older release\n").unwrap();
+        }
+
+        let mut outcomes = Vec::new();
+        skills(&repo, &args(), &mut outcomes).unwrap();
+        let lines = outcome_lines(&outcomes);
+
+        for provider_dir in [".codex", ".pi"] {
+            assert!(
+                lines
+                    .iter()
+                    .any(|l| l.starts_with("wrote") && l.contains(provider_dir)),
+                "{provider_dir} skills not refreshed: {lines:?}"
+            );
+        }
     }
 }

@@ -13,7 +13,7 @@
 //! terminal output — the table, the footer, the ticker, the masthead — and
 //! nothing in it reads a task file or a lane list of its own.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -33,9 +33,9 @@ pub(crate) use view::human_secs;
 pub use view::{banner, plain_table};
 
 use view::{
-    DIM, GUTTER, RESET, RecentEvent, Style, Verdict, clamp_rows, footer, group_totals, masthead,
-    pane_height, pane_width, pause_confirm_panel, resume_confirm_panel, spool_frame, strip_ansi,
-    table, ticker, unqueue_all_confirm_panel, unqueue_confirm_panel,
+    AMBER, DIM, GUTTER, RESET, RecentEvent, Style, Verdict, clamp_rows, footer, group_totals,
+    masthead, pane_height, pane_width, pause_confirm_panel, resume_confirm_panel, spool_frame,
+    strip_ansi, table, ticker, unqueue_all_confirm_panel, unqueue_confirm_panel,
 };
 
 /// How often the board re-reads the state while it waits for the next pass.
@@ -292,14 +292,42 @@ pub struct Board {
 
 impl Board {
     pub fn new() -> Board {
+        Board::with_term(crate::platform::TermGuard::new())
+    }
+
+    fn with_term(term: crate::platform::TermGuard) -> Board {
         Board {
             stages: BTreeMap::new(),
             recent: VecDeque::new(),
             adopted: false,
-            _term: crate::platform::TermGuard::new(),
+            _term: term,
             watching: false,
             cursor: None,
             mode: BoardMode::Browsing,
+        }
+    }
+
+    /// A board whose terminal guard is inert — for tests, so parallel `Board`s
+    /// do not take the process's real terminal raw and race on restore
+    /// (finding 53).
+    #[cfg(test)]
+    pub fn for_test() -> Board {
+        Board::with_term(crate::platform::TermGuard::inert())
+    }
+
+    /// [`Board::for_test`], watching rather than driving.
+    #[cfg(test)]
+    pub fn watching_for_test() -> Board {
+        Board::watching_with_term(crate::platform::TermGuard::inert())
+    }
+
+    /// A watching board over a given terminal guard — the one place the
+    /// watching board's shape is spelled, so [`Board::watching`] and
+    /// [`Board::watching_for_test`] cannot drift.
+    fn watching_with_term(term: crate::platform::TermGuard) -> Board {
+        Board {
+            watching: true,
+            ..Board::with_term(term)
         }
     }
 
@@ -313,10 +341,7 @@ impl Board {
     /// running still on the board — the one thing a killed-rather-than-stopped
     /// run needs a person to see.
     pub fn watching() -> Board {
-        Board {
-            watching: true,
-            ..Board::new()
-        }
+        Board::watching_with_term(crate::platform::TermGuard::new())
     }
 
     /// Draw one frame over whatever is on the terminal.
@@ -947,10 +972,28 @@ fn depended_on_by_queued(tasks: &[crate::task::Task], id: &str) -> bool {
 /// exactly where it is rather than risk carrying an archived document back
 /// to pending.
 fn unqueue_task(repo: &Repo, id: &str) -> Result<()> {
+    // The same per-task lock the dispatcher and `spoolway report` take, so
+    // this rename cannot land in the middle of one of their read-modify-
+    // writes. See [`crate::lock::TaskLock`] and review finding 49.
+    let _task_lock = crate::lock::TaskLock::acquire(&repo.task_lock_file(id));
+
     let Ok(task) = repo.task(id) else {
         return Ok(());
     };
     if !not_started(&task) {
+        return Ok(());
+    }
+    let dest = repo.pending_dir().join(format!("{id}.md"));
+    // A document already sitting in `pending/` is a newer draft — a producer
+    // re-ran over work already submitted — and putting the queued copy back
+    // on top of it would silently lose that draft. Leave everything where it
+    // is: the row stays queued, and the reason goes to the problem log
+    // rather than breaking the board loop this runs inside.
+    if dest.exists() {
+        crate::problem_log::append(
+            repo,
+            &format!("did not unqueue `{id}`: a newer draft is already in the pending directory"),
+        );
         return Ok(());
     }
     let mut front = serde_norway::to_value(&task.front)
@@ -963,9 +1006,11 @@ fn unqueue_task(repo: &Repo, id: &str) -> Result<()> {
     let yaml =
         serde_norway::to_string(&front).with_context(|| format!("rendering {id}'s frontmatter"))?;
     let rendered = format!("---\n{yaml}---\n{}", task.body);
-    let dest = repo.pending_dir().join(format!("{id}.md"));
     crate::task::write_atomic(&dest, &rendered)
         .with_context(|| format!("writing {}", dest.display()))?;
+    // Only once the pending copy is safely on disk — a crash before this
+    // leaves the queue file in place, so the task is still queued rather
+    // than lost between the two directories.
     std::fs::remove_file(&task.path)
         .with_context(|| format!("removing {}", task.path.display()))?;
     Ok(())
@@ -1029,7 +1074,7 @@ pub(crate) fn live_agent_lane_tasks(
         let name = crate::mux::lane_name(task.stage(), task.id());
         if lanes
             .iter()
-            .any(|l| l.name == name && mine.contains(&l.cwd))
+            .any(|l| l.name == name && crate::dispatch::owns_cwd(&mine, &l.cwd))
         {
             out.push(i);
         }
@@ -1126,7 +1171,7 @@ fn render(
     recent: &mut VecDeque<RecentEvent>,
     cursor: Option<&str>,
 ) -> Result<String> {
-    let tasks = repo.tasks()?;
+    let (tasks, load_problems) = repo.tasks_and_problems()?;
     let graph = Graph::build_for_run(&tasks, pipelines, &repo.archive_dir(), repo.unattended());
     let waiting = crate::dispatch::lanes_awaiting_a_person(repo);
     let mux = crate::mux::backend(repo);
@@ -1233,6 +1278,20 @@ fn render(
         frame.push_str(&table(&rows, Style::board(pane), &totals, cursor));
     }
 
+    // A queue file that would not parse is skipped rather than freezing the
+    // board — see [`crate::task::load_dir`] — and named here so the fix is
+    // visible on the frame itself, not only in the log.
+    for problem in &load_problems {
+        let name = problem
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("a queue file");
+        frame.push_str(&format!(
+            " {AMBER}⚠ {name} does not parse and was skipped{RESET}\n"
+        ));
+    }
+
     // Built before the ticker although it is printed after it, because how
     // many rows are left for the ticker is what is left once this is counted.
     let mut tail = String::new();
@@ -1303,7 +1362,7 @@ fn slots_used<'a>(
     let mine = crate::dispatch::our_checkouts(repo, tasks);
     let mut out = SlotsUsed::default();
     for lane in lanes {
-        if !mine.contains(&lane.cwd) {
+        if !crate::dispatch::owns_cwd(&mine, &lane.cwd) {
             continue;
         }
         let Some((step_id, task_id)) = crate::mux::parse_lane_name(&lane.name, &step_ids) else {
@@ -1442,6 +1501,12 @@ fn build_rows(
     // into the step and task it belongs to — the same lookup `slots_used`
     // and `spoolway resume` both already do, needed here for `lane_busy`.
     let step_ids = pipelines.all_step_ids();
+    // Every session a live lane still backs this frame. `live_session` caches
+    // one transcript reading per session process-wide, and nothing ever
+    // dropped an entry once the lane behind it was gone — a dispatcher up for
+    // weeks held thousands of dead ones (review finding 54). The set collected
+    // here prunes the cache at the end of the render.
+    let mut live_sessions: HashSet<String> = HashSet::new();
     let mut rows: Vec<Row> = Vec::new();
     for task in tasks {
         let pipeline = pipelines.for_task(task)?;
@@ -1464,7 +1529,9 @@ fn build_rows(
         let live_lane = lanes.iter().find(|l| l.name == lane);
         let live = live_lane.is_some();
         // One read of the transcript, for the three figures that come off it.
-        let session = live.then(|| live_session(repo, ledger, &lane)).flatten();
+        let session = live
+            .then(|| live_session(repo, ledger, &lane, &mut live_sessions))
+            .flatten();
 
         // A command step's run is not a lane. It is a detached process the
         // dispatcher tracks under the project's own `commands/`, and the
@@ -1680,6 +1747,7 @@ fn build_rows(
     }
     rows.sort_by(|a, b| a.key().cmp(&b.key()));
 
+    forget_dead_live_sessions(&live_sessions);
     Ok(rows)
 }
 
@@ -1739,7 +1807,7 @@ fn cached_archive(dir: &Path) -> Result<Arc<Vec<crate::task::Task>>> {
         {
             return Ok(Arc::clone(&cached.tasks));
         }
-        let tasks = Arc::new(crate::task::load_dir(dir)?);
+        let tasks = Arc::new(crate::task::load_dir(dir)?.0);
         if let Some(dir_mtime) = dir_mtime {
             *guard = Some(ArchiveCache {
                 dir: dir.to_path_buf(),
@@ -1749,7 +1817,7 @@ fn cached_archive(dir: &Path) -> Result<Arc<Vec<crate::task::Task>>> {
         }
         return Ok(tasks);
     }
-    Ok(Arc::new(crate::task::load_dir(dir)?))
+    Ok(Arc::new(crate::task::load_dir(dir)?.0))
 }
 
 /// Every task whose file has moved to the project's own `archive/`, as
@@ -1965,10 +2033,22 @@ struct Cached {
 /// command reads once and drops it with the process. A frame is drawn every
 /// second and a transcript runs to megabytes; without this the board
 /// would be the most expensive thing in a run that decides nothing.
-fn live_session(repo: &Repo, ledger: &[crate::usage::Entry], lane: &str) -> Option<Reading> {
-    static CACHE: OnceLock<Mutex<HashMap<String, Cached>>> = OnceLock::new();
+///
+/// `touched` collects every session id this frame still has a live lane for,
+/// so [`forget_dead_live_sessions`] can drop the rest — a long-lived
+/// dispatcher used to keep an entry for every lane it had ever seen (review
+/// finding 54).
+static LIVE_SESSION_CACHE: OnceLock<Mutex<HashMap<String, Cached>>> = OnceLock::new();
+
+fn live_session(
+    repo: &Repo,
+    ledger: &[crate::usage::Entry],
+    lane: &str,
+    touched: &mut HashSet<String>,
+) -> Option<Reading> {
     let (kind, session) = crate::dispatch::lane_session(repo, lane)?;
-    let cache = CACHE.get_or_init(Mutex::default);
+    touched.insert(session.clone());
+    let cache = LIVE_SESSION_CACHE.get_or_init(Mutex::default);
     let mut cache = cache.lock().ok()?;
 
     let cached = cache.entry(session.clone()).or_insert_with(|| Cached {
@@ -2004,6 +2084,18 @@ fn live_session(repo: &Repo, ledger: &[crate::usage::Entry], lane: &str) -> Opti
         }
     });
     cached.reading
+}
+
+/// Drop every [`live_session`] cache entry whose session no longer backs a
+/// live lane, called once at the end of each render. Entries are small, but
+/// nothing else ever removed one, so a dispatcher left up for weeks
+/// accumulated one per lane it had ever drawn (review finding 54).
+fn forget_dead_live_sessions(live: &HashSet<String>) {
+    if let Some(cache) = LIVE_SESSION_CACHE.get()
+        && let Ok(mut cache) = cache.lock()
+    {
+        cache.retain(|session, _| live.contains(session));
+    }
 }
 
 /// A RECENT event for a task that just moved from `was` to `stage`.
@@ -2370,7 +2462,7 @@ mod tests {
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
 
-        let mut board = Board::new();
+        let mut board = Board::for_test();
         let waiting = board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
         assert!(waiting.contains("dispatcher running · "), "{waiting}");
         assert!(waiting.contains("→ review"), "{waiting}");
@@ -2394,7 +2486,7 @@ mod tests {
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
 
-        let mut driving = Board::new();
+        let mut driving = Board::for_test();
         let frame = strip(&driving.frame(&repo, &pipelines, Phase::Waiting).unwrap());
         assert!(
             frame.contains(
@@ -2403,7 +2495,7 @@ mod tests {
             "{frame}"
         );
 
-        let mut watching = Board::watching();
+        let mut watching = Board::watching_for_test();
         let frame = strip(&watching.frame(&repo, &pipelines, Phase::Waiting).unwrap());
         assert!(!frame.contains("[r/R] resume / all"), "{frame}");
     }
@@ -2854,7 +2946,7 @@ mod tests {
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
 
-        let mut board = Board::new();
+        let mut board = Board::for_test();
         let frame = strip(&board.frame(&repo, &pipelines, Phase::Passing).unwrap());
         let header = frame
             .lines()
@@ -3000,7 +3092,7 @@ mod tests {
         let pipelines = Pipelines::builtin();
         add(&repo, "steady", &[], Some("implement"));
 
-        let mut board = Board::new();
+        let mut board = Board::for_test();
         board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
         assert!(
             board.recent.is_empty(),
@@ -3209,7 +3301,7 @@ mod tests {
         task.set_stage(crate::pipeline::PAUSED, None);
         task.save().unwrap();
 
-        let mut board = Board::new();
+        let mut board = Board::for_test();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -3236,7 +3328,7 @@ mod tests {
         task.set_stage(crate::pipeline::BLOCKED, None);
         task.save().unwrap();
 
-        let mut board = Board::new();
+        let mut board = Board::for_test();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -3262,7 +3354,7 @@ mod tests {
         task.set_stage(crate::pipeline::PAUSED, None);
         task.save().unwrap();
 
-        let mut board = Board::new();
+        let mut board = Board::for_test();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -3287,7 +3379,7 @@ mod tests {
         task.set_stage(crate::pipeline::PAUSED, None);
         task.save().unwrap();
 
-        let mut board = Board::new();
+        let mut board = Board::for_test();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -3326,7 +3418,7 @@ mod tests {
         task.set_stage(crate::pipeline::PAUSED, None);
         task.save().unwrap();
 
-        let mut board = Board::new();
+        let mut board = Board::for_test();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Char('R'))
             .unwrap();
@@ -3380,7 +3472,7 @@ mod tests {
         runs.start(&key, "sleep 30", &repo.root, &BTreeMap::new())
             .unwrap();
 
-        let mut board = Board::new();
+        let mut board = Board::for_test();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Char('P'))
             .unwrap();
@@ -3429,7 +3521,7 @@ mod tests {
         runs.start(&key, "sleep 30", &repo.root, &BTreeMap::new())
             .unwrap();
 
-        let mut board = Board::new();
+        let mut board = Board::for_test();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -3471,7 +3563,7 @@ mod tests {
         let (mux, name) = live_headless_lane(&repo);
         assert!(mux.list_lanes().unwrap().iter().any(|l| l.name == name));
 
-        let mut board = Board::new();
+        let mut board = Board::for_test();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Char('P'))
             .unwrap();
@@ -3498,7 +3590,7 @@ mod tests {
         add(&repo, "login", &[], Some("implement"));
         let before = std::fs::read_to_string(repo.task("login").unwrap().path).unwrap();
 
-        let mut board = Board::new();
+        let mut board = Board::for_test();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -3531,7 +3623,7 @@ mod tests {
 
         let (_mux, _name) = live_headless_lane(&repo);
 
-        let mut board = Board::new();
+        let mut board = Board::for_test();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -3584,7 +3676,7 @@ mod tests {
         add(&repo, "chain-refusals", &[], None);
         assert_eq!(repo.task("chain-refusals").unwrap().stage(), "queued");
 
-        let mut board = Board::new();
+        let mut board = Board::for_test();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -3640,7 +3732,7 @@ mod tests {
         let pipelines = Pipelines::builtin();
         add(&repo, "solo", &[], None);
 
-        let mut board = Board::new();
+        let mut board = Board::for_test();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -3664,7 +3756,7 @@ mod tests {
         let pipelines = Pipelines::builtin();
         add(&repo, "under-way", &[], Some("implement"));
 
-        let mut board = Board::new();
+        let mut board = Board::for_test();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -3687,7 +3779,7 @@ mod tests {
         add(&repo, "drop-walk", &[], None);
         add(&repo, "chain-refusals", &["drop-walk"], None);
 
-        let mut board = Board::new();
+        let mut board = Board::for_test();
         // `drop-walk` is the dependency, so it sorts first — one `Down` from
         // no cursor at all reaches it directly.
         board
@@ -3713,7 +3805,7 @@ mod tests {
         add(&repo, "chain-refusals", &[], None);
         add(&repo, "month-instant", &[], None);
 
-        let mut board = Board::new();
+        let mut board = Board::for_test();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -3739,7 +3831,7 @@ mod tests {
         let pipelines = Pipelines::builtin();
         add(&repo, "solo", &[], None);
 
-        let mut board = Board::new();
+        let mut board = Board::for_test();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -3766,7 +3858,7 @@ mod tests {
         add(&repo, "month-instant", &[], None);
         add(&repo, "already-running", &[], Some("implement"));
 
-        let mut board = Board::new();
+        let mut board = Board::for_test();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Char('U'))
             .unwrap();
@@ -3794,6 +3886,36 @@ mod tests {
         assert_eq!(repo.task("already-running").unwrap().stage(), "implement");
     }
 
+    /// Unqueuing a row whose pending draft has been rewritten since it was
+    /// queued leaves both files where they are, rather than dropping the
+    /// stale queued copy on top of the newer draft. See review finding 49.
+    #[test]
+    fn unqueue_does_not_overwrite_a_newer_pending_draft() {
+        let repo = fixture("unqueue-keeps-newer-draft");
+        add(&repo, "solo", &[], None);
+
+        let draft = repo.pending_dir().join("solo.md");
+        std::fs::create_dir_all(draft.parent().unwrap()).unwrap();
+        std::fs::write(
+            &draft,
+            "---\nid: solo\nstage: queued\ngroup: demo\n---\n## Goal\n\nthe newer draft\n",
+        )
+        .unwrap();
+
+        unqueue_task(&repo, "solo").unwrap();
+
+        assert!(
+            repo.queue_dir().join("solo.md").exists(),
+            "the queued copy is left in place"
+        );
+        assert!(
+            std::fs::read_to_string(&draft)
+                .unwrap()
+                .contains("the newer draft"),
+            "the pending draft is untouched"
+        );
+    }
+
     /// `R` resumes every paused task, but only after a panel naming the
     /// gated ones among them whenever there is at least one — a plain park
     /// left by `p`, or an interrupt, carries no `paused_at` and never holds
@@ -3814,7 +3936,7 @@ mod tests {
         parked.set_stage(crate::pipeline::PAUSED, None);
         parked.save().unwrap();
 
-        let mut board = Board::new();
+        let mut board = Board::for_test();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Char('R'))
             .unwrap();
@@ -3853,7 +3975,7 @@ mod tests {
         parked.set_stage(crate::pipeline::PAUSED, None);
         parked.save().unwrap();
 
-        let mut board = Board::new();
+        let mut board = Board::for_test();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Char('R'))
             .unwrap();

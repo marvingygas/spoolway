@@ -1845,6 +1845,21 @@ pub fn parse_lane_name<'a>(name: &'a str, steps: &[&str]) -> Option<(&'a str, &'
     Some((step, task))
 }
 
+/// The task id half of a `<task> · <step>` name — everything before the
+/// separator, or the whole string when there is none.
+///
+/// Unlike [`parse_lane_name`] this needs no list of valid steps: the callers
+/// that reach for it — [`crate::retain`]'s sweep and
+/// [`crate::tracking::failure_count`] — only want to know *which task* a
+/// scratch directory, headless record or hook run file belongs to, and do
+/// not care whether the step half is one a pipeline still defines. A scratch
+/// entry carries no separator at all and is named for its task outright, so
+/// the whole name is the id there. A task id holds no spaces (see
+/// [`crate::config::check_id`]), so `" · "` stays unambiguous.
+pub fn lane_task(name: &str) -> &str {
+    name.split_once(" · ").map_or(name, |(task, _)| task)
+}
+
 /// The label a lane's own name is built from: task first, since a lane's pane
 /// sits in its project's tab, where the task is what tells one apart from
 /// another and the step is what changes as it moves.

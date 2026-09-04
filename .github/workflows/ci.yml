@@ -29,8 +29,7 @@ name: ci
 # Two layers, neither of which spends a model, a multiplexer or a forge:
 #
 #   cargo test                  the units, including the dispatcher's decisions
-#                               against a fake multiplexer, and the Landlock
-#                               sandbox against a real kernel
+#                               against a fake multiplexer
 #   scripts/e2e/run.sh --tier   the CLI end to end on real git repos, with the
 #                               agents replaced by stand-ins: `pr` on every
 #                               push and every pull request, `nightly` on
@@ -94,9 +93,6 @@ jobs:
       - name: clippy
         run: cargo clippy --all-targets --locked -- -D warnings
 
-      # The sandbox tests assert that a denied read really is denied, so they
-      # only mean anything on a kernel with Landlock. ubuntu-latest has one;
-      # if that ever stops being true, these fail loudly rather than skipping.
       - run: cargo test --all-targets --locked
 
       - name: pick the e2e tier
@@ -174,7 +170,6 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # The sandbox tests that assert a denied read really is denied are
-      # Linux-only and are not compiled here. What runs instead is every unit
-      # test whose behaviour forks on the platform.
+      # Every unit test whose behaviour forks on the platform — the PowerShell
+      # dialect, the PATHEXT lookup, the `.cmd` shim, the process check.
       - run: cargo test --all-targets --locked

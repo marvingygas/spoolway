@@ -316,9 +316,28 @@ impl Repo {
         self.home().join(crate::usage::LEDGER_FILE)
     }
 
+    /// The advisory lock over the usage ledger's read-diff-append — see
+    /// [`crate::lock::LedgerLock`]. Held only around banking, so two
+    /// `spoolway` commands catching the same interactive session up cannot
+    /// both diff against the same banked total and append the same delta.
+    pub fn ledger_lock_file(&self) -> PathBuf {
+        self.home()
+            .join(format!("{}.lock", crate::usage::LEDGER_FILE))
+    }
+
     /// The running dispatcher's own lock, if there is one.
     pub fn lock_file(&self) -> PathBuf {
         self.home().join(crate::lock::LOCK_FILE)
+    }
+
+    /// The advisory lock over one task file's read-modify-write, shared by
+    /// the dispatcher and that task's own `spoolway report` — see
+    /// [`crate::lock::TaskLock`]. The caller is responsible for `id` being a
+    /// safe single path segment: the dispatcher only ever passes an id that
+    /// has already been through `check_id`, and `spoolway report --task`
+    /// joins the same unvalidated id here that `Repo::task` already joins.
+    pub fn task_lock_file(&self, id: &str) -> PathBuf {
+        self.home().join("task-locks").join(format!("{id}.lock"))
     }
 
     /// How many starts in a row could not run at all, and since when — see
@@ -340,8 +359,45 @@ impl Repo {
     }
 
     /// Every active task, in id order.
+    ///
+    /// A `*.md` in the queue that will not parse is skipped rather than
+    /// failing the whole read — see [`task::load_dir`]. Callers that want to
+    /// name the bad file reach for [`Repo::tasks_and_problems`] instead.
     pub fn tasks(&self) -> Result<Vec<Task>> {
+        Ok(task::load_dir(&self.queue_dir())?.0)
+    }
+
+    /// Every active task in id order, together with the queue files that
+    /// would not parse — for the dispatcher pass and the board, which name
+    /// the bad file where a person will see it rather than leaving it only
+    /// in the log.
+    pub fn tasks_and_problems(&self) -> Result<(Vec<Task>, Vec<task::LoadProblem>)> {
         task::load_dir(&self.queue_dir())
+    }
+
+    /// The id of every task file currently in `queue/`, read from the file
+    /// names alone rather than by parsing each one.
+    ///
+    /// Two callers want exactly this, cheaply and without a parse skipping a
+    /// task whose file happens not to load: [`crate::retain`]'s sweep, so it
+    /// never ages out the scratch directory or headless record of a task
+    /// still in flight — `paused` and `blocked` are stages a task can sit on
+    /// for longer than `retention.days` — and [`crate::tracking::failure_count`],
+    /// so the board stops counting a hook failure once its task is archived.
+    pub fn queued_ids(&self) -> std::collections::BTreeSet<String> {
+        let mut ids = std::collections::BTreeSet::new();
+        let Ok(entries) = std::fs::read_dir(self.queue_dir()) else {
+            return ids;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) == Some("md")
+                && let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
+            {
+                ids.insert(stem.to_string());
+            }
+        }
+        ids
     }
 
     /// Find a task by id in the queue, then in the archive.

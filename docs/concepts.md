@@ -98,16 +98,17 @@ The step's id is written into the task's `stage:` field, so **renaming a step re
 stage**. There is no `kind:` key: the keys already partition, so they are the discriminator.
 
 Four stages belong to the dispatcher rather than to any pipeline, and no step may be named
-after `queued`, `done` or `paused`. `blocked` is the fourth, and the one exception: a pipeline
-may declare it as an ordinary step, to have it staffed rather than parked — see [Staffing
-`blocked`](pipelines.md#staffing-blocked).
+after `queued`, `done` or `paused`. `blocked` is the fourth, and the one exception: every
+pipeline gets a `blocked` step, materialised from `[unattended]`'s `blocked_*` keys where the
+pipeline declares none of its own, and a pipeline may declare it to override five of those
+keys — see [Staffing `blocked`](pipelines.md#staffing-blocked).
 
 | Stage | What it is |
 |---|---|
 | `queued` | Where every task starts. It waits here for its dependencies and a worker slot |
 | `done` | Finished. The worktree is removed, the local branch deleted, the file archived |
 | `paused` | A gate's pass, held for a person. `spoolway resume <task>` sends it on, `spoolway resume --reject` sends it back — see [Gate](#gate) |
-| `blocked` | Needs help. `spoolway resume <task>` resumes it. An [unattended run](pipelines.md#unattended-runs) on a pipeline with no `blocked` step of its own never puts a task here — it resumes the lane that stopped instead. One that declares `blocked` gets a lane started there, exactly like any other step |
+| `blocked` | Needs help. Attended, `spoolway resume <task>` resumes it at the step it stopped on. In an [unattended run](pipelines.md#unattended-runs) a lane is started here instead — every pipeline stages `blocked`, and that lane's pass carries the task on under `unattended.skip_blocked_lane` |
 
 A step says where a task goes next with `on_pass` and `on_fail`. Prompts never learn this
 routing: they report an outcome, and the pipeline resolves the destination.

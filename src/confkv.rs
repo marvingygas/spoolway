@@ -317,8 +317,9 @@ pub const REFERENCE: &[Reference] = &[
         key: "models.<glob>.context_window",
         values: "<tokens>",
         default: "0 (unset)",
-        sentence: "What one session of this model gets to work in — used only to \
-                    estimate task size when planning.",
+        sentence: "What one session of this model gets to work in. `session_reuse_ctx` and \
+                    `session_blocked_ctx` take their percentage of it, so a session step \
+                    against a model with this unset never reuses or blocks on size.",
     },
     Reference {
         key: "models.<glob>.input",
@@ -1267,7 +1268,11 @@ mod tests {
         let entry = |key: &str| entries.iter().find(|e| e.key == key).unwrap();
 
         let window = entry("models.claude-opus-5.context_window");
-        assert!(window.note.unwrap().contains("estimate task size"));
+        // The window is what `session_reuse_ctx`/`session_blocked_ctx` take a
+        // percentage of — not a planning-only number (finding 26).
+        let window_note = window.note.unwrap();
+        assert!(window_note.contains("session_reuse_ctx"));
+        assert!(!window_note.contains("planning"));
         let input = entry("models.claude-opus-5.input");
         assert!(input.note.unwrap().contains("input tokens"));
         assert_ne!(window.note, input.note);

@@ -80,7 +80,7 @@ pub fn stack(repo: &Repo, args: &StackArgs) -> Result<()> {
     // this worktree is torn down at `done`. Handover is the last stop before
     // that, so sweeping it into the pull request is what keeps it at all.
     let started_at = std::env::var("SPOOLWAY_HEAD").unwrap_or_default();
-    match auto_commit(repo, &worktree, &started_at, &id, &step) {
+    match auto_commit(repo, &worktree, &started_at, &id, &step).note() {
         Some(note) => report_line("commit", note),
         None => report_line("commit", "nothing uncommitted"),
     }
@@ -161,10 +161,28 @@ pub fn stack(repo: &Repo, args: &StackArgs) -> Result<()> {
     )
     .map(|out| out.trim().to_string())
     .unwrap_or_default();
-    crate::repo::run(&worktree, "git", &["reset", "--soft", &merge_base])
-        .context("squashing the branch onto one commit")?;
-    crate::repo::run(&worktree, "git", &["commit", "-q", "-m", &subject])
-        .context("committing the squashed change")?;
+    // Built with `commit-tree`, not `reset --soft` + `commit`: the branch ref
+    // moves only once the commit object exists, so a `commit-msg` hook that
+    // rejects the subject cannot leave the branch collapsed onto its merge
+    // base with the work only in the index and the reflog (review finding
+    // 55). `commit-tree` is plumbing and runs no hooks, which is the point —
+    // it also does not read `commit.gpgsign`, so a project that signs its
+    // commits gets an unsigned squash here; `-S` would restore that if branch
+    // protection ever needs it.
+    let head_tree = crate::repo::run(&worktree, "git", &["rev-parse", "HEAD^{tree}"])
+        .context("reading the tree to squash")?
+        .trim()
+        .to_string();
+    let squashed = crate::repo::run(
+        &worktree,
+        "git",
+        &["commit-tree", &head_tree, "-p", &merge_base, "-m", &subject],
+    )
+    .context("building the squashed commit")?
+    .trim()
+    .to_string();
+    crate::repo::run(&worktree, "git", &["reset", "--soft", &squashed])
+        .context("moving the branch onto the squashed commit")?;
     report_line("squash", format!("{commit_count} commits → 1   {subject}"));
 
     if let Err(err) = crate::repo::run(
@@ -565,7 +583,7 @@ fn open_or_reuse_pr(
         return Ok((existing.number, existing.url));
     }
 
-    let body_path = write_temp_body(body)?;
+    let body_path = write_temp_body(worktree, body)?;
     let create = Command::new(&gh)
         .args([
             "pr", "create", "--base", base, "--head", branch, "--title", title,
@@ -641,9 +659,28 @@ fn parse_pr_view(stdout: &[u8]) -> Result<Option<Pr>> {
     Ok(Some(Pr { number, url, state }))
 }
 
-fn write_temp_body(body: &str) -> Result<PathBuf> {
-    let path = std::env::temp_dir().join(format!("spoolway-stack-body-{}.md", std::process::id()));
-    std::fs::write(&path, body).context("writing the pull request body to a temp file")?;
+/// A file holding the pull request body, for `gh pr create --body-file`.
+///
+/// Written inside the worktree's own git directory, not `temp_dir()`: on a
+/// shared host another user can pre-create a predictable
+/// `spoolway-stack-body-<pid>.md` under the world-writable temp directory as
+/// a symlink and redirect this write anywhere (review finding 52). The git
+/// directory is private to this checkout and on the same filesystem, and
+/// `create_new` refuses to follow a symlink planted there even so.
+fn write_temp_body(worktree: &Path, body: &str) -> Result<PathBuf> {
+    let git_dir = crate::repo::run(worktree, "git", &["rev-parse", "--git-dir"])
+        .context("locating the worktree's git directory for the pull request body")?
+        .trim()
+        .to_string();
+    let path = worktree.join(git_dir).join("spoolway-stack-body.md");
+    let _ = std::fs::remove_file(&path);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .with_context(|| format!("creating {}", path.display()))?;
+    file.write_all(body.as_bytes())
+        .context("writing the pull request body")?;
     Ok(path)
 }
 
@@ -892,11 +929,12 @@ mod tests {
         assert_eq!(parse_owner_repo("https://gitlab.com/a/b"), None);
     }
 
-    /// A `parallel: true` task whose `branch:` was written at queue time but
+    /// A `parallel: true` task whose `branch:` was stamped at queue time but
     /// never actually cut is not a conflict — it is a ref `git merge-tree`
     /// cannot even resolve, and that failure exits 1 the same way a real
     /// conflict does, so `parallel_conflicts` must not trust the exit code
-    /// alone.
+    /// alone. `queue_add` writes `task/<id>` for every task; this one is
+    /// simply never cut.
     #[test]
     fn a_queued_task_with_no_branch_yet_is_not_a_predicted_conflict() {
         let repo = crate::commands::testutil::fixture("parallel-conflicts-no-ref");
@@ -905,7 +943,7 @@ mod tests {
         crate::repo::run(&repo.root, "git", &["commit", "-q", "-m", "seed"]).unwrap();
 
         let doc = "---\nid: other\ntitle: other, done\ngroup: demo\nparallel: true\n\
-                   branch: task/other\n---\n## Goal\n\nDo the thing.\n";
+                   ---\n## Goal\n\nDo the thing.\n";
         let path = repo.root.join(".other-doc.md");
         std::fs::write(&path, doc).unwrap();
         queue_add(

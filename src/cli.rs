@@ -54,6 +54,20 @@ pub enum Command {
     Init(InitArgs),
 
     /// Take what a newer spoolway writes, without touching what you wrote.
+    #[command(
+        long_about = "Take what a newer spoolway writes, without touching what you wrote.\n\n\
+        Three things are brought forward. `config.toml` keeps your values and has every \
+        comment and the list of written-down settings around them rewritten. Each pipeline \
+        file's fenced key reference — documentation of this binary's contract, not anything \
+        you meant — is refreshed in place, with every other line copied through unread. The \
+        old `.gitignore` block spoolway used to manage is removed. Skills for every provider \
+        you have installed are refreshed too.\n\n\
+        Prompts, their assets, and task skeletons are not touched, ever. They are prose a \
+        project owns outright, with nothing generated inside them; `spoolway prompt check` \
+        is what tells you when one has fallen behind the CLI, and `--replace` is how to take \
+        a shipped one back on purpose.\n\n\
+        `init` is still how a project starts. This is how one keeps up."
+    )]
     Update(UpdateArgs),
 
     /// Refresh the cached "latest published version" answer, and print nothing.
@@ -734,15 +748,20 @@ pub struct DispatchArgs {
     #[arg(long)]
     pub plain: bool,
 
-    /// Stop for nobody: on a pipeline that does not stage `blocked`, every
-    /// block resumes the lane that hit it instead of parking, and a `loop`
-    /// whose exit resolves to `blocked` stops applying. A step's `gate:` is
-    /// not one of the things this lifts — a gate is a person's decision by
-    /// design, so a gated pass still parks on `paused` and still waits for
-    /// `spoolway resume`. A pipeline that declares `blocked` as a step gets
-    /// no resume: a block starts a lane there like any other step, staffed
-    /// by whatever prompt `blocked` names, with `loop` applying to it as
-    /// usual and no bound of any kind on how many times it round-trips.
+    /// Stop for nobody: a block starts a lane on `blocked` instead of parking
+    /// the task in front of a person. Every pipeline stages `blocked` —
+    /// `Pipelines::assemble` materialises one from `[unattended]`'s `blocked_*`
+    /// keys onto any pipeline that does not declare its own — so this always has
+    /// a step to route to. The lane is staffed by `unattended.blocked_agent` and
+    /// its four companion keys (or by the five keys a declared `blocked` step
+    /// overrides), `loop` applies to it as usual, and nothing bounds how many
+    /// times it round-trips. When that lane passes, `unattended.skip_blocked_lane`
+    /// decides where the task lands: on by default, it carries one step past
+    /// where the block was hit, on the unblocker's word that the work is done;
+    /// set `false`, it hands the task back to the step it blocked on to run
+    /// again. A step's `gate:` is not one of the things this lifts — a gate is a
+    /// person's decision by design, so a gated pass still parks on `paused` and
+    /// still waits for `spoolway resume`.
     ///
     /// Overrides `unattended.enabled` for this run only, which is the shape
     /// the setting wants — the overnight run and the one you sit with are the
@@ -1169,38 +1188,19 @@ pub enum PromptCommand {
 }
 
 #[derive(Debug, Args)]
-#[command(
-    long_about = "Take what a newer spoolway writes, without touching what you wrote.\n\n\
-        Task skeletons and page templates carry a small generated block that has to agree \
-        with this binary. This replaces those blocks and copies every other byte through \
-        without reading it. Nothing is ever merged — a block you have edited by hand is \
-        reported and left exactly as it is.\n\n\
-        Prompts are not touched, ever. They are prose about a role, with nothing generated \
-        in them; `spoolway prompt check` is what tells you when one has fallen behind the \
-        CLI, and `--replace` is how to take a shipped one back on purpose.\n\n\
-        `init` is still how a project starts. This is how one keeps up.",
-    after_long_help = "\x1b[1mExamples:\x1b[0m\n  \
+#[command(after_long_help = "\x1b[1mExamples:\x1b[0m\n  \
         spoolway update --dry-run     what it would change, and nothing else\n  \
-        spoolway update               take it\n  \
-        spoolway update --force-contract\n                                give up your edits to \
-        spoolway's half\n\n\
-        Everything spoolway writes is tracked in git, so `git diff` is the review."
-)]
+        spoolway update               take it\n\n\
+        Everything spoolway writes is tracked in git, so `git diff` is the review.")]
 pub struct UpdateArgs {
     /// Print what would change and write nothing.
     #[arg(long)]
     pub dry_run: bool,
 
-    /// Rewrite spoolway's half even where you have edited it, discarding those
-    /// edits. Never touches your own region.
-    #[arg(long)]
-    pub force_contract: bool,
-
     /// Replace this whole file with the one spoolway ships. Your version is
     /// saved beside it as a `.bak` first, so nothing you wrote is lost, only
     /// displaced. Repeat for each. The way back for a file so far from the
-    /// shape we know that no region can be found in it — `--force-contract`
-    /// cannot help there, because there is no block left to force.
+    /// shape we know that no region can be found in it.
     ///
     /// Paths are named one at a time on purpose: losing a file you asked for is
     /// a decision, losing eleven you forgot about is an accident.
@@ -1547,5 +1547,46 @@ mod tests {
             names,
             vec!["queue", "group", "issue", "dispatch", "eval", "spend"]
         );
+    }
+
+    /// What `spoolway <name> --help` prints, rendered from the built `Command`
+    /// rather than re-stated here.
+    fn subcommand_long_help(name: &str) -> String {
+        use clap::CommandFactory;
+        Cli::command()
+            .find_subcommand_mut(name)
+            .unwrap_or_else(|| panic!("no `{name}` subcommand"))
+            .render_long_help()
+            .to_string()
+    }
+
+    /// `--unattended` help describes the assembled-`blocked` behaviour, not the
+    /// "pipeline that does not stage `blocked`" a real binary never has any
+    /// more — `Pipelines::assemble` materialises one onto every pipeline
+    /// (finding 23).
+    #[test]
+    fn unattended_help_matches_assembled_blocked() {
+        let help = subcommand_long_help("dispatch");
+        assert!(
+            !help.contains("does not stage `blocked`"),
+            "stale two-branch description is back: {help}"
+        );
+        assert!(help.contains("skip_blocked_lane"), "{help}");
+        assert!(help.contains("materialises"), "{help}");
+    }
+
+    /// `update --help` describes what `src/update.rs` does — config values kept,
+    /// pipeline key reference refreshed, `.gitignore` block removed, prompts and
+    /// skeletons untouched — and no longer promises a task-skeleton block or the
+    /// dead `--force-contract` flag (finding 24).
+    #[test]
+    fn update_help_matches_what_update_does() {
+        let help = subcommand_long_help("update");
+        assert!(!help.contains("force-contract"), "{help}");
+        assert!(
+            !help.contains("Task skeletons and page templates carry"),
+            "{help}"
+        );
+        assert!(help.contains("key reference"), "{help}");
     }
 }

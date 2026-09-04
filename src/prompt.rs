@@ -429,16 +429,29 @@ fn prompt_flag(profile: &crate::config::AgentProfile) -> Option<String> {
 /// When neither exists this names the directory shape, so an error points at
 /// where a prompt belongs rather than where it used to.
 pub fn path_for(repo: &Repo, name: &str) -> PathBuf {
-    let dir = repo.prompts_dir();
-    let nested = dir.join(name).join(crate::assets::PROMPT_FILE);
+    let nested = directory_form(repo, name);
     if nested.is_file() {
         return nested;
     }
-    let flat = dir.join(format!("{name}.md"));
+    let flat = repo.prompts_dir().join(format!("{name}.md"));
     if flat.is_file() {
         return flat;
     }
     nested
+}
+
+/// The directory shape of a prompt's file — `<prompts>/<name>/PROMPT.md` —
+/// whether or not it exists on disk.
+///
+/// [`path_for`] prefers this over the legacy flat `<name>.md` whenever it is
+/// present, so a caller that means to replace the flat file needs this to tell
+/// when the flat path has become one nothing reads. Joining onto the prompts
+/// directory is this module's alone (see `commands::tests`), so callers reach
+/// for this rather than building the path themselves.
+pub fn directory_form(repo: &Repo, name: &str) -> PathBuf {
+    repo.prompts_dir()
+        .join(name)
+        .join(crate::assets::PROMPT_FILE)
 }
 
 /// Every prompt file this project has, with where it came from.

@@ -523,12 +523,11 @@ pub struct DispatchConfig {
     /// bought less patience, which is not a trade anybody asked for.
     ///
     /// Ten seconds is not a stuck lane; it is a lane thinking. The case that
-    /// forced this apart is a step whose prompt runs the end-to-end `pr`
-    /// tier — `assets/prompts/e2e` requires it, and the shipped `suite` step
-    /// allows it 45 minutes — during which the agent ends its turn and waits
-    /// on a background job. A settled lane and a lane that forgot to report
-    /// look identical from outside, so the only honest answer is to wait long
-    /// enough that silence means something.
+    /// forced this apart is an agent step that ends its turn and waits minutes
+    /// on a background job — a build, a suite, a `gh pr checks --watch` like the
+    /// shipped `checks` step's 45-minute one. A settled lane and a lane that
+    /// forgot to report look identical from outside, so the only honest answer
+    /// is to wait long enough that silence means something.
     ///
     /// This bounds the wait before *each* reminder, not the whole round trip:
     /// `MAX_REMINDERS` still caps it at three, so a genuinely dead lane is
@@ -705,9 +704,10 @@ impl Default for DispatchConfig {
             herdr_mode: MuxMode::default(),
             tmux_mode: MuxMode::default(),
             interval: Duration::from_secs(10),
-            // Comfortably longer than the 45 minutes the shipped `suite` step
-            // allows its own run, so a lane waiting on the `pr` tier is never
-            // the thing this catches; a lane that is really dead still
+            // Four of these (`MAX_REMINDERS` + 1) comfortably outlast the 45
+            // minutes the shipped `checks` step waits on `gh pr checks
+            // --watch`, so an agent step parked behind a long background job is
+            // never the thing this catches; a lane that is really dead still
             // escalates, four of these later.
             lane_quiet: Duration::from_secs(15 * 60),
             lane_child_ceiling: Duration::from_secs(3600),
@@ -1568,9 +1568,10 @@ impl Config {
                 if !config.criteria.is_empty() {
                     eprintln!(
                         "note: [criteria] in {} is no longer read — a project's review standards \
-                         live at the bottom of {PROMPTS_DIR}/reviewer.md, where they can be \
+                         live at the bottom of {PROMPTS_DIR}/reviewer/{}, where they can be \
                          edited as prose. Move them across and delete the table.",
                         path.display(),
+                        crate::assets::PROMPT_FILE,
                     );
                 }
                 // Only where a value was somebody's decision: an untouched
@@ -1890,16 +1891,27 @@ pub(crate) mod human_duration {
                     ));
                 }
             };
-            total += value * multiplier;
+            // `checked_*`, because a `strip = true` release build wraps rather
+            // than panics: `213503982334602d` would otherwise be stored as a
+            // near-zero duration and set the dispatcher polling every few
+            // seconds instead of being refused.
+            let seconds = value
+                .checked_mul(multiplier)
+                .and_then(|s| total.checked_add(s))
+                .ok_or_else(|| std::format!("`{raw}`: too large"))?;
+            total = seconds;
             digits.clear();
             saw_unit = true;
         }
 
         if !digits.is_empty() {
             // A bare number means seconds.
-            total += digits
+            let value = digits
                 .parse::<u64>()
                 .map_err(|_| std::format!("`{raw}`: not a number"))?;
+            total = total
+                .checked_add(value)
+                .ok_or_else(|| std::format!("`{raw}`: too large"))?;
         } else if !saw_unit {
             return Err(std::format!("`{raw}`: not a duration"));
         }
@@ -1942,6 +1954,24 @@ mod tests {
         assert_eq!(parse_duration("45").unwrap(), Duration::from_secs(45));
         assert!(parse_duration("10x").is_err());
         assert!(parse_duration("").is_err());
+    }
+
+    /// A value that would overflow `u64` seconds is refused, not wrapped —
+    /// `strip = true` release builds wrap plain arithmetic silently, which
+    /// turned `213503982334602d` into a near-zero poll interval (finding 70).
+    #[test]
+    fn an_overflowing_duration_is_refused() {
+        // `value * multiplier` overflows.
+        let err = parse_duration(&format!("{}d", u64::MAX / 86_400 + 1)).unwrap_err();
+        assert!(err.contains("too large"), "{err}");
+
+        // `total += ...` overflows across two terms.
+        let err = parse_duration(&format!("{}s{}s", u64::MAX, u64::MAX)).unwrap_err();
+        assert!(err.contains("too large"), "{err}");
+
+        // A term with a trailing bare number overflows on the final add.
+        let err = parse_duration(&format!("{}s{}", u64::MAX, u64::MAX)).unwrap_err();
+        assert!(err.contains("too large"), "{err}");
     }
 
     #[test]

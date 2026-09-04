@@ -553,15 +553,32 @@ const LIVE_PROMPT: &str = "Say hello, in one short line.";
 /// rather than a replay of the first.
 const RESUME_PROMPT: &str = "Say goodbye, in one short line.";
 
+/// How long one live turn is given before it is killed.
+///
+/// A real turn of a small model is seconds; a turn still going after several
+/// minutes has hung, and `verify --live` is often run from CI where a hang
+/// is a stuck job with nobody to Ctrl-C it (review finding 62). Generous
+/// enough that a slow-but-working turn still finishes on its own.
+const LIVE_TURN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+
 /// One real turn of a live check, read back the way a lane's own turn is.
 struct LiveTurn {
     status: std::process::ExitStatus,
     stdout: String,
     stderr: String,
+    /// Whether the turn was killed for running past [`LIVE_TURN_TIMEOUT`]
+    /// rather than exiting on its own.
+    timed_out: bool,
 }
 
-/// Run one turn of `program`, capturing its output the way
-/// `std::process::Command::output` does.
+/// Run one turn of `program`, capturing both streams the way
+/// `std::process::Command::output` does — but bounded by
+/// [`LIVE_TURN_TIMEOUT`], so a hung agent is killed rather than waited on
+/// forever (review finding 62).
+///
+/// The two streams are drained by threads of their own so a turn that fills
+/// a pipe buffer cannot deadlock the wait, the same shape
+/// `Command::output` uses internally.
 fn run_live_turn(
     program: &str,
     argv: &[String],
@@ -569,19 +586,63 @@ fn run_live_turn(
     dir: &Path,
     env: Vec<(String, String)>,
 ) -> Result<LiveTurn> {
-    let output = std::process::Command::new(program)
+    use std::io::Read;
+
+    let mut child = std::process::Command::new(program)
         .args(argv)
         .arg(prompt)
         .current_dir(dir)
         .envs(env)
         .stdin(std::process::Stdio::null())
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .with_context(|| format!("running `{program}`"))?;
 
+    let mut out = child.stdout.take().expect("stdout was piped");
+    let mut err = child.stderr.take().expect("stderr was piped");
+    let out_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = out.read_to_end(&mut buf);
+        buf
+    });
+    let err_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = err.read_to_end(&mut buf);
+        buf
+    });
+
+    let deadline = std::time::Instant::now() + LIVE_TURN_TIMEOUT;
+    let mut timed_out = false;
+    let status = loop {
+        if let Some(status) = child
+            .try_wait()
+            .with_context(|| format!("waiting on `{program}`"))?
+        {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            // `kill` reaches the child spoolway spawned, not a process group —
+            // a stray grandchild it left holding a pipe open can still delay
+            // the `join` below. Bounded enough for a diagnostic command: the
+            // wait that used to be unbounded was on the child's own idle turn.
+            let _ = child.kill();
+            timed_out = true;
+            break child
+                .wait()
+                .with_context(|| format!("waiting on `{program}` after the deadline"))?;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+
+    let stdout = String::from_utf8_lossy(&out_reader.join().unwrap_or_default()).into_owned();
+    let stderr = String::from_utf8_lossy(&err_reader.join().unwrap_or_default()).into_owned();
+
     Ok(LiveTurn {
-        status: output.status,
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        status,
+        stdout,
+        stderr,
+        timed_out,
     })
 }
 
@@ -598,17 +659,29 @@ fn run_live_turn(
 /// Unlike everything above it, a reading that fails here **does** fail the
 /// command: an absent accounting row is a legal state, but a declared one that
 /// does not read back is a wrong row.
-/// A scratch tree that goes when it falls out of scope.
+/// A scratch tree — and the per-session agent home the check makes it — that
+/// go when it falls out of scope.
 ///
 /// A guard rather than a `remove_dir_all` at the end of the check, because the
 /// check has a dozen ways out: every `?` on a spawn that would not start, the
 /// `bail!` on a reading that did not match, and the ordinary pass. An end-of-
 /// function call would clean up after exactly the run that needed it least.
-struct ScratchTree(std::path::PathBuf);
+///
+/// `home` is the state directory `prepare_session_home` makes for a kind that
+/// mints its own session id — `None` for every other kind. It was never
+/// reclaimed before, so CI running `verify --live` per push left one behind
+/// on every run (review finding 62).
+struct ScratchTree {
+    dir: std::path::PathBuf,
+    home: Option<std::path::PathBuf>,
+}
 
 impl Drop for ScratchTree {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        let _ = std::fs::remove_dir_all(&self.dir);
+        if let Some(home) = &self.home {
+            let _ = std::fs::remove_dir_all(home);
+        }
     }
 }
 
@@ -666,7 +739,12 @@ fn agent_verify_live(
     // name never repeats, so nothing would ever have reused or reclaimed one,
     // and a check that is run often enough to be useful is run often enough to
     // matter: one machine held 531 of these trees, the oldest two weeks old.
-    let _scratch = ScratchTree(dir.clone());
+    // The per-session agent home, if this kind gets one, is added below once
+    // its path is known.
+    let mut scratch = ScratchTree {
+        dir: dir.clone(),
+        home: None,
+    };
     // A repo, because a lane's worktree is one and at least one kind checks:
     // codex refuses to start outside a git repo with "Not inside a trusted
     // directory". A scratch tree that is not a repo would fail this kind on the
@@ -707,8 +785,10 @@ fn agent_verify_live(
         .context("this kind has no headless row")?;
 
     // The same home a lane of this kind would be given, made the same way. For
-    // a kind that pins by id this is empty and nothing below changes.
-    crate::agent::prepare_session_home(&args.kind, &session);
+    // a kind that pins by id this is `None` and nothing below changes; for one
+    // that pins by home, the guard now owns it and takes it back on the way
+    // out however the check ends (review finding 62).
+    scratch.home = crate::agent::prepare_session_home(&args.kind, &session);
     let env: Vec<(String, String)> = adapter.session_env(&session);
 
     println!(
@@ -729,9 +809,14 @@ fn agent_verify_live(
 
     report(
         "the turn ran",
-        match output.status.success() {
-            true => Clause::Ok(first_line(&output.stdout).to_string()),
-            false => Clause::Fail(format!(
+        match (output.status.success(), output.timed_out) {
+            (true, _) => Clause::Ok(first_line(&output.stdout).to_string()),
+            (false, true) => Clause::Fail(format!(
+                "`{}` was killed after {}s — it never finished a turn",
+                args.kind,
+                LIVE_TURN_TIMEOUT.as_secs()
+            )),
+            (false, false) => Clause::Fail(format!(
                 "`{}` exited {} — {}",
                 args.kind,
                 output.status,
@@ -926,9 +1011,14 @@ fn agent_verify_live(
 
     report(
         "a resumed turn ran",
-        match resumed.status.success() {
-            true => Clause::Ok(first_line(&resumed.stdout).to_string()),
-            false => Clause::Fail(format!(
+        match (resumed.status.success(), resumed.timed_out) {
+            (true, _) => Clause::Ok(first_line(&resumed.stdout).to_string()),
+            (false, true) => Clause::Fail(format!(
+                "`{}` was killed after {}s on the resume spelling",
+                args.kind,
+                LIVE_TURN_TIMEOUT.as_secs()
+            )),
+            (false, false) => Clause::Fail(format!(
                 "`{}` exited {} on the resume spelling — {}",
                 args.kind,
                 resumed.status,
@@ -1059,9 +1149,17 @@ mod tests {
         let dir = crate::scratch::root("agent-verify-scratch");
         std::fs::create_dir_all(dir.join("deep")).unwrap();
         std::fs::write(dir.join("deep/prompt.md"), "You are answering").unwrap();
+        // The per-session agent home a kind that pins by home would get —
+        // the guard has to take this back too (review finding 62).
+        let home = crate::scratch::root("agent-verify-scratch-home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("auth.json"), "{}").unwrap();
 
         {
-            let _scratch = ScratchTree(dir.clone());
+            let _scratch = ScratchTree {
+                dir: dir.clone(),
+                home: Some(home.clone()),
+            };
             assert!(dir.exists(), "the guard must not delete it early");
         }
 
@@ -1069,6 +1167,11 @@ mod tests {
             !dir.exists(),
             "the scratch tree outlived its guard: {}",
             dir.display()
+        );
+        assert!(
+            !home.exists(),
+            "the per-session home outlived its guard: {}",
+            home.display()
         );
     }
 
@@ -1080,7 +1183,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         fn bails(dir: &std::path::Path) -> Result<()> {
-            let _scratch = ScratchTree(dir.to_path_buf());
+            let _scratch = ScratchTree {
+                dir: dir.to_path_buf(),
+                home: None,
+            };
             bail!("the reading did not match its row")
         }
 

@@ -36,12 +36,6 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # The lane guardrails are a pi extension, and their parsing is tested
-      # where it lives. `cargo test` shells out to node for that one test, and
-      # skips it when node is absent — so CI has to supply it.
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
       - run: cargo test --locked
 
   # Each target names its own runner in npm/targets.json. `ubuntu-24.04-arm`,
@@ -132,8 +126,13 @@ jobs:
       # so the check below passes -- it is kept rather than hardcoded so that a
       # repository turned private later publishes without provenance instead of
       # dying on an opaque OIDC error.
+      # A `v` tag is required either way — a `workflow_dispatch` publishes only
+      # when it was dispatched against a `v` tag *and* the box was ticked, so a
+      # dispatch from `main` can never publish an untagged `Cargo.toml` version
+      # past the `Check the tag matches Cargo.toml` step above (gated on the
+      # same tag).
       - name: Publish
-        if: startsWith(github.ref, 'refs/tags/v') || inputs.publish
+        if: startsWith(github.ref, 'refs/tags/v') && (github.event_name != 'workflow_dispatch' || inputs.publish)
         run: |
           if [ "${{ github.event.repository.private }}" = "false" ]; then
             provenance="--provenance"

@@ -526,6 +526,11 @@ pub mod stop {
 pub struct TermGuard {
     #[cfg(unix)]
     original: Option<libc::termios>,
+    /// An inert guard hides nothing and restores nothing. Test-only: a `Board`
+    /// built in a test must not take the process's real terminal raw —
+    /// parallel tests each restore in their own order, and the last one to run
+    /// decides whether the developer's shell is left without echo (finding 53).
+    inert: bool,
 }
 
 impl TermGuard {
@@ -548,6 +553,9 @@ impl Default for TermGuard {
 
 impl Drop for TermGuard {
     fn drop(&mut self) {
+        if self.inert {
+            return;
+        }
         // Drained before the mode is restored: anything typed while the tty
         // was deaf is not a command waiting for the shell prompt that lands
         // under the last frame the moment this returns it.
@@ -557,11 +565,24 @@ impl Drop for TermGuard {
     }
 }
 
+impl TermGuard {
+    /// A guard that touches nothing. See the `inert` field.
+    #[cfg(test)]
+    pub fn inert() -> TermGuard {
+        TermGuard {
+            #[cfg(unix)]
+            original: None,
+            inert: true,
+        }
+    }
+}
+
 #[cfg(unix)]
 impl TermGuard {
     fn take() -> TermGuard {
         TermGuard {
             original: raw_mode(),
+            inert: false,
         }
     }
 
@@ -580,7 +601,7 @@ impl TermGuard {
 #[cfg(not(unix))]
 impl TermGuard {
     fn take() -> TermGuard {
-        TermGuard {}
+        TermGuard { inert: false }
     }
 
     fn restore(&self) {}

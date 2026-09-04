@@ -103,6 +103,16 @@ table, the environment a hook runs with, and what `on_fail = "pause"` holds. Tha
 is what "no issue tracking" means: a blank `hook` runs nothing here, and a pass behaves exactly
 as it does with the table absent.
 
+A pass is safe to run beside a lane. A lane's `spoolway report` writes the same task file the
+pass is working from, out of another process. Both sides take a short per-task lock around
+their own read and write, so the two cannot interleave. If a report lands after the pass has
+already read that task, the pass drops its now-stale write of that one file. The next pass
+redoes the bookkeeping against what the lane actually wrote.
+
+A queue file that will not parse does not stop a pass. The bad file is skipped, every other
+task runs as normal, and the file is named twice: once in `~/.spoolway/logs/<project>.log`,
+and again in amber under the board's table, so a person sees which file to fix.
+
 Step one re-examines a task's stage right away whenever it moves it without starting a lane —
 a step named in the task's own `skip:` (see [Trials](planning.md#trials), the one thing that
 writes it) falls through to `on_pass` on the spot rather than waiting for the next pass. That
@@ -481,7 +491,10 @@ own total line, rather than summed once across every group at the foot of the fr
 
 One more line joins the footer whenever an `[issue_tracking]` hook has failed:
 `issue_tracking: N hook failures — see tracking/`, counting every failing task-and-event pair
-whether `on_fail` is `"ignore"` or `"pause"`. It is absent entirely while nothing has failed.
+whose task is still in the queue, whether `on_fail` is `"ignore"` or `"pause"`. A pair whose
+task has been archived does not count, so a stale failure stops showing once the task is
+gone. A failed `fetch` run is keyed on an issue reference rather than a task and always
+counts. The line is absent entirely while nothing has failed.
 
 The header says whose process this is and how long it has been going, and nothing about
 when the next pass is due: `up` moves on every redraw, which is all a board needs to show it
@@ -756,7 +769,7 @@ Three different limits, and they bound three different things:
 | Setting | Bounds | Zeroed by |
 |---|---|---|
 | The launch guard | How many times a lane may be **launched** at the step a task is on | Every transition |
-| A step's `loop` | How many times a task may **arrive** at that step **from a given step** before escalating — a lap of the loop | A resume, for the loops the step it resumes at can spend. Skipped in an [unattended run](pipelines.md#unattended-runs) when the step's exit resolves to `blocked` and the pipeline does not stage `blocked` itself. `blocked` itself never spends this: see [Escalation](#escalation) — a report from `blocked` always moves the task off it, so it never arrives there from itself |
+| A step's `loop` | How many times a task may **arrive** at that step **from a given step** before escalating — a lap of the loop | A resume, for the loops the step it resumes at can spend. Binds the same in an [unattended run](pipelines.md#unattended-runs): every pipeline stages `blocked`, so an exit that resolves there spends the budget exactly as an attended run's would. `blocked` itself never spends this: see [Escalation](#escalation) — a report from `blocked` always moves the task off it, so it never arrives there from itself |
 | The reminder loop | How many times a settled lane's **transcript** may go unwritten since its last reminder before it is blocked | Anything the lane writes to its transcript |
 | The live-child ceiling | How long a lane may be excused the reminder loop for holding open a process it started before it is escalated anyway | The process exiting, or a backend with no way to check it in the first place |
 
@@ -792,9 +805,10 @@ a config that has it and is dropped on the next save. In an [unattended
 run](pipelines.md#unattended-runs) there is no person to hand it to, so it becomes a backoff
 instead: the task keeps its place and is retried on a doubling delay, capped at an hour.
 
-A dispatcher that dies between launching a lane and finishing that pass gets one extra pass of
-grace before the guard above applies. `lanes.json` is only written back at the end of a pass, so
-that crash loses the record the launch itself just wrote, and the restarted dispatcher's first
+A dispatcher killed between launching a lane and finishing that pass gets one extra pass of
+grace before the guard above applies. `lanes.json` is written back when a pass returns, its
+error paths included, but a process killed outright never reaches that write, so that crash
+loses the record the launch itself just wrote, and the restarted dispatcher's first
 pass would otherwise read the silence as a genuinely dead launch and hand the task to a person
 over a failure that never happened. Instead, the first pass that finds a launch with no
 `lanes.json` record of its own — gated on the task actually having a `launched_at`, so this
@@ -804,6 +818,10 @@ this one pass: the very next pass, whenever it lands, reads the lane as one this
 already watched, and escalates normally if it is still gone. The grace is one pass, not a
 window of time — a restart minutes or hours later gets exactly the same one chance a restart a
 second later would.
+
+A `lanes.json` that will not parse is not discarded. The pass starts from no lane records, but
+it first copies the bad file aside as `lanes.json.bad` and writes a line to the problem log
+saying so, rather than silently overwriting a hand edit or a disk error with an empty file.
 
 A settled lane whose pane ends on its own kind's usage-limit message gets the same backoff, for the same reason: more launches do not fix a spent quota either, and reminding or escalating it only spends a person's attention — or, unattended, relaunches straight back into the same wall on the very next pass — for no better result. Whether a tail *is* a limit is answered by the agent adapter (`Adapter::usage_limit` in `src/agent.rs`), a fact about one CLI's own wording, not a pattern the dispatcher keeps in sync by hand. Held rather than escalated: the task never reaches `blocked`, `attempts` is left exactly where the launch that hit the limit set it, and a `## Status Log` line names the limit and the delay.
 
@@ -820,13 +838,14 @@ a licence. `resume` prints each budget it returns.
 
 ## Escalation
 
-An escalation parks the task in the built-in `blocked` state and tells you about it — unless
-the run is [unattended](pipelines.md#unattended-runs) *and* the pipeline does not declare
-`blocked` as a step of its own, in which case there is nobody to tell and the task goes back
-to the step it stopped at to have another go, in the same lane, with its loop budgets handed
-back. That covers every road to `blocked`, not only a lane's own `--block`: a `fail` with
-nowhere left to route, a silent lane, a dead launch, a live lane stopped for reading over its
-profile's `session_blocked_ctx` ceiling. They are ways of writing down one fact —
+An escalation parks the task in the built-in `blocked` state. Attended, it tells you and waits
+for `spoolway resume`. In an [unattended run](pipelines.md#unattended-runs) there is nobody to
+tell, so a lane is started on `blocked` instead — every pipeline stages it, declared or
+materialised from `[unattended]`'s `blocked_*` keys — and that lane's pass carries the task on
+under `unattended.skip_blocked_lane`. That covers every road to `blocked`, not only a lane's
+own `--block`: a `fail` with nowhere left to route, a silent lane, a dead launch, a live lane
+stopped for reading over its profile's `session_blocked_ctx` ceiling. They are ways of writing
+down one fact —
 this task is not moving without help — and which of them it was is not something anybody
 remembers when the notification arrives.
 
@@ -841,23 +860,18 @@ way reaches exactly the destination a pass from `blocked` would have.
 
 A spent `loop` is not one of those roads. It takes the step's exit — `on_loop_max` if it
 names one, `on_pass` otherwise — a destination the pipeline named rather than a request for a
-person, and an unattended run follows it exactly as an attended one does. The single
-exception is an exit that resolves to `blocked` on a pipeline that does not stage it: that
-one *is* a request for a person, so in an unattended run the budget is skipped outright
-rather than spent and immediately handed back by the resume. A pipeline that does stage
-`blocked` gets no exception — the budget binds there exactly as it would in an attended run,
-because `blocked` is a lane now, not a person.
+person, and an unattended run follows it exactly as an attended one does. An exit that
+resolves to `blocked` is no exception: every pipeline stages `blocked`, so the budget binds
+there exactly as it would in an attended run, because `blocked` is a lane now, not a person.
 
 **A task that reaches `blocked` keeps its pane — unless a lane is about to start there.** The
 lane that stopped is over — its slot is given back and what it spent is booked — but the pane
 it ran in is left open and focused, because the session as it stood when it stopped is the
 only real account of what went wrong, and it is not in the task file. It is closed on the pass
 after the task is unblocked, just before the step it stopped on is started again. An
-unattended run keeps no pane for this: nothing is being held for anybody to read, whether the
-task is about to resume the lane that blocked (see above) or a fresh lane is about to start on
-a staffed `blocked` step (see [Staffing `blocked`](pipelines.md#staffing-blocked) in
-pipelines.md) — either way, somebody or something is about to be working on it, not waiting to
-be read.
+unattended run keeps no pane for this: a fresh lane is about to start on the staffed `blocked`
+step (see [Staffing `blocked`](pipelines.md#staffing-blocked) in pipelines.md), so something
+is about to be working on the task, not waiting to be read.
 
 When a task needs a person — an escalation, or a gated step waiting for an answer — the
 board says so: the row is marked amber, once rather than once per pass, with the pane to
@@ -1262,6 +1276,22 @@ its branch were somebody else's before the task started and are still theirs aft
 task file records which it was, as `borrowed:`, because afterwards the two look identical to
 git.
 
+Cleanup commits whatever the worktree still holds before it removes anything, the same
+`wip(<task>): <step>` backstop `spoolway report` runs. If that commit cannot be made — a git
+command fails, or `dispatch.auto_commit` is off and the lane left work behind — the task is
+held at `blocked` instead of archived, with a `## Status Log` line saying why, so a person
+sees the worktree before it is gone. Residue a lane deliberately left is not this: it is on
+this machine's mirror and named in the log, and cleanup proceeds.
+
 A finished task's own branch is kept alive past that cleanup while anything still queued names
 it in `depends_on` — that branch is what the dependent's worktree gets cut from. It is freed by
 the next cleanup to run once nothing queued needs it any more.
+
+Archiving a task also reclaims the run files and session state named for it. Its hook run
+files under `tracking/` and its command-step run files under `commands/` are deleted, matched
+on the `<task> · ` filename prefix so another task's files are left alone. The per-session
+agent home each of its lanes was given is removed too — both the lanes just banked by this
+cleanup and any older lane record still held for the task. All of this runs only after the
+task file has moved into `archive/`, past the point where cleanup can still turn back and
+hold the task at `blocked`, so a held task keeps its scratch tree, its run files and its
+session homes for `spoolway resume`.

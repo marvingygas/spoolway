@@ -24,6 +24,29 @@ pub fn report(
     started_for: Option<&str>,
 ) -> Result<()> {
     let id = resolve_task_id(args.task.as_deref())?;
+
+    // Held across this whole read-modify-write, so a dispatcher pass that
+    // read this task file before the report cannot write a stale copy back
+    // after it — the lost report of review finding 2. There is no
+    // multiplexer call anywhere in `report`, so the one rule this lock has
+    // is kept here.
+    //
+    // The one slow thing under the lock is `commit_lane_work` below — a
+    // local `git add -A` + `git commit` in the lane's worktree, well inside
+    // `TaskLock::WAIT` in normal use. If it ever does run long, a waiting
+    // dispatcher's `persist` still reload-checks `last_report` once its own
+    // wait times out, so the worst case is a slower pass, not a lost report.
+    //
+    // Best effort: a lock a live process still holds after the wait is
+    // logged, and the report proceeds unlocked rather than being refused.
+    let task_lock = crate::lock::TaskLock::acquire(&repo.task_lock_file(&id));
+    if task_lock.is_err() {
+        crate::problem_log::append(
+            repo,
+            &format!("{id}: task lock still held, reporting without it"),
+        );
+    }
+
     let mut task = repo.task(&id)?;
     let pipeline = pipelines.for_task(&task)?;
     let current = task.stage().to_string();
@@ -60,6 +83,13 @@ pub fn report(
         );
     }
 
+    // The four flags share one clap `group` (see `cli::ReportArgs`), so clap
+    // refuses any command line that gives more than one of them before this
+    // runs. The ordered match is therefore dead defence, not a precedence
+    // rule anyone relies on — it is kept only so that loosening that group
+    // later fails closed on a known order rather than on a random arm. When
+    // exactly one is set the order does not matter; when none is, the last
+    // arm reports the omission.
     let outcome = match (args.pass, args.fail, args.block, args.pause) {
         (true, _, _, _) => Outcome::Pass,
         (_, true, _, _) => Outcome::Fail,
@@ -252,9 +282,40 @@ pub fn report(
     // file. A hook on the editing tools would miss everything Bash does,
     // and a hook at end of turn would have to be written once per agent
     // kind.
-    if let Some(note) = commit_lane_work(repo, &id, &current) {
+    let commit_note = commit_lane_work(repo, &id, &current);
+    if let Some(note) = commit_note.as_ref().and_then(AutoCommit::note) {
         task.append_to_section("## Status Log", &format!("- {note}\n"));
-        println!("{note}");
+    }
+
+    // Reaching a cleanup terminal tears the worktree down on arrival — the
+    // reserved `done` always, a declared terminal when it sets `cleanup:` (see
+    // `dispatch::route_reserved_stage`). It must not run while the tree holds
+    // work `auto_commit` above could not record: that terminal "cannot delete
+    // work that was never recorded" (review finding 4), and a git failure
+    // leaves exactly that. Held at `blocked` instead, so a person sees the
+    // worktree before it is gone.
+    //
+    // Only `Unrecorded` — not residue a lane deliberately left, which is on
+    // the mirror and named in the log. `dispatch::Dispatcher::clean_up` makes
+    // the same check for the road every shipped pipeline actually takes to
+    // `done`, from a command step rather than from this report; this covers a
+    // pipeline whose agent step routes `on_pass: done` directly.
+    let routes_to_cleanup = destination == crate::pipeline::DONE
+        || pipeline.step(&destination).is_some_and(|step| step.cleanup);
+    let held_dirty =
+        routes_to_cleanup && commit_note.as_ref().is_some_and(AutoCommit::is_unrecorded);
+    if held_dirty {
+        task.append_to_section(
+            "## Status Log",
+            &format!(
+                "- `{current}` reported `{outcome}`, but the worktree holds work that could \
+                 not be committed — holding at `{}` rather than letting `{destination}` tear \
+                 it down\n",
+                crate::pipeline::BLOCKED,
+            ),
+        );
+        destination = crate::pipeline::BLOCKED.to_string();
+        set_blocked_from(&mut task, &current);
     }
 
     // Left for the dispatcher to bank into this lane's ledger line. Recorded
@@ -268,6 +329,13 @@ pub fn report(
 
     task.set_stage(&destination, args.message.as_deref());
     task.save()?;
+
+    // Printed only now the task file is on disk: a note about a commit that
+    // was made, next to a save that then failed, would be a lie in the log
+    // (review finding 40).
+    if let Some(note) = commit_note.as_ref().and_then(AutoCommit::note) {
+        println!("{note}");
+    }
 
     match &resumed {
         // Named for what it is, rather than printed as an ordinary transition.
@@ -299,6 +367,13 @@ pub fn report(
             "{id}: {current} --{outcome}--> {} — nothing here could clear it: \
              `spoolway resume {id}`",
             crate::pipeline::PAUSED
+        ),
+        // The routed destination was a cleanup terminal, and the worktree
+        // still has uncommitted work in it — see `held_dirty` above.
+        None if held_dirty => println!(
+            "{id}: {current} --{outcome}--> {} — the worktree still has uncommitted work; \
+             a person should look before it is cleaned up",
+            crate::pipeline::BLOCKED
         ),
         None => println!("{id}: {current} --{outcome}--> {destination}"),
     }
@@ -408,20 +483,65 @@ pub fn handover(repo: &Repo, args: &crate::cli::HandoverArgs) -> Result<()> {
 /// Only ever inside a lane: `SPOOLWAY_WORKTREE` is set by the dispatcher when it
 /// starts one and by nothing else, so a person running `spoolway report` by hand
 /// in their own checkout never has their working tree swept into a commit.
-fn commit_lane_work(repo: &Repo, task: &str, step: &str) -> Option<String> {
+///
+/// `None` when there is no lane worktree to act on. Otherwise the [`AutoCommit`]
+/// says what happened.
+fn commit_lane_work(repo: &Repo, task: &str, step: &str) -> Option<AutoCommit> {
     let worktree = std::path::PathBuf::from(crate::platform::env_var("SPOOLWAY_WORKTREE").ok()?);
     let head = crate::platform::env_var("SPOOLWAY_HEAD").unwrap_or_default();
-    auto_commit(repo, &worktree, &head, task, step)
+    Some(auto_commit(repo, &worktree, &head, task, step))
+}
+
+/// What [`auto_commit`] did, or could not do — the difference a caller about to
+/// tear a worktree down has to be able to tell.
+#[derive(Debug)]
+pub enum AutoCommit {
+    /// The tree was clean. Nothing to record, nothing to say.
+    Clean,
+    /// The lane's leftovers are now in a `wip(...)` commit on its branch.
+    Committed(String),
+    /// Leftovers remain, and this lane recorded no work of its own: a git
+    /// command failed, or `dispatch.auto_commit` is off. Tearing the worktree
+    /// down now destroys this — see [`AutoCommit::is_unrecorded`].
+    Unrecorded(String),
+    /// Leftovers remain, but this lane did commit its own work — these are
+    /// residue (a generated lockfile, a build artefact no `.gitignore`
+    /// covers). Left uncommitted on purpose: sweeping it into a commit the
+    /// lane did not intend gets the change failed in review for touching
+    /// files the task's non-goals forbid. It is snapshotted to the mirror and
+    /// named in the log, so nothing is lost by leaving it.
+    Residue(String),
+}
+
+impl AutoCommit {
+    /// The line for `## Status Log`, if there is anything worth saying.
+    pub fn note(&self) -> Option<&str> {
+        match self {
+            AutoCommit::Clean => None,
+            AutoCommit::Committed(s) | AutoCommit::Unrecorded(s) | AutoCommit::Residue(s) => {
+                Some(s)
+            }
+        }
+    }
+
+    /// Whether uncommitted work would be lost if the worktree were torn down
+    /// now. `Residue` is not this: it is on the mirror and in the log, and
+    /// blocking a cleanup terminal for it would strand every task that leaves
+    /// a lockfile behind.
+    pub fn is_unrecorded(&self) -> bool {
+        matches!(self, AutoCommit::Unrecorded(_))
+    }
 }
 
 /// The one git verb spoolway runs of its own accord: commit the lane's worktree
-/// when its step settles, so that a `cleanup: true` terminal cannot delete work
+/// when its step settles, so that a cleanup terminal cannot delete work
 /// that was never recorded anywhere.
 ///
 /// Called from both ends of a step — `spoolway report`, which is how a lane that
-/// finished settles, and the dispatcher's escalation, which is how one that died
-/// mid-run does. Both need the same behaviour, and a lane that dies is the case
-/// where the work is least likely to have been committed by hand.
+/// finished settles, and the dispatcher's escalation and cleanup, which is how
+/// one that died mid-run does. Both need the same behaviour, and a lane that
+/// dies is the case where the work is least likely to have been committed by
+/// hand.
 ///
 /// `git add -A` honours `.gitignore`, so properly-ignored build output stays
 /// out; anything else a step leaves behind is committed and visible in the diff,
@@ -430,21 +550,41 @@ fn commit_lane_work(repo: &Repo, task: &str, step: &str) -> Option<String> {
 /// `started_at` is where the branch stood when the lane began; an empty one means
 /// nobody recorded it, and the backstop then commits, because "I do not know"
 /// must not mean "throw the work away".
+///
+/// The [`AutoCommit`] return is what a caller about to tear the worktree down
+/// reads: only [`AutoCommit::Unrecorded`] is work that would be lost, and
+/// [`report`] and [`crate::dispatch::Dispatcher::clean_up`] both hold the task
+/// at `blocked` rather than clean up when they see it.
 pub fn auto_commit(
     repo: &Repo,
     worktree: &std::path::Path,
     started_at: &str,
     task: &str,
     step: &str,
-) -> Option<String> {
-    if !worktree.is_dir() {
-        return None;
+) -> AutoCommit {
+    // Not a git worktree at all — an empty or already-gone borrowed checkout,
+    // say. There is nothing git-tracked here to lose, so this is `Clean`, not
+    // a git failure. The check below is for a real worktree that git then
+    // refuses to act on.
+    if !worktree.is_dir() || !worktree.join(".git").exists() {
+        return AutoCommit::Clean;
     }
 
-    let dirty = crate::repo::run(worktree, "git", &["status", "--porcelain"]).ok()?;
+    // A git that will not answer is not a clean tree. Swallowed as "nothing to
+    // commit" — the way `.ok()?` did — it means no status-log line, and a
+    // cleanup terminal then deletes a worktree whose work was never recorded
+    // (review finding 4). So a failure here is `Unrecorded`, not `Clean`.
+    let dirty = match crate::repo::run(worktree, "git", &["status", "--porcelain"]) {
+        Ok(out) => out,
+        Err(e) => {
+            return AutoCommit::Unrecorded(format!(
+                "could not check `{step}`'s worktree for uncommitted work: {e}"
+            ));
+        }
+    };
     let files = dirty.lines().filter(|l| !l.trim().is_empty()).count();
     if files == 0 {
-        return None;
+        return AutoCommit::Clean;
     }
 
     // A real lane's `SPOOLWAY_TASK` names the task it was actually started
@@ -474,7 +614,7 @@ pub fn auto_commit(
         && crate::platform::env_var("SPOOLWAY_WORKTREE")
             .is_ok_and(|w| std::path::Path::new(&w) == worktree)
     {
-        return Some(format!(
+        return AutoCommit::Unrecorded(format!(
             "left {files} uncommitted file(s) behind — not committed, because this process's \
              `{}` names `{env_task}`, not `{task}`",
             crate::commands::TASK_ENV,
@@ -482,7 +622,7 @@ pub fn auto_commit(
     }
 
     if !repo.config.dispatch.auto_commit {
-        return Some(format!(
+        return AutoCommit::Unrecorded(format!(
             "left {files} uncommitted file(s) behind — not committed, because \
              `dispatch.auto_commit` is off"
         ));
@@ -500,23 +640,42 @@ pub fn auto_commit(
     // a loop nothing downstream can break. Observed doing exactly that.
     //
     // Nothing is lost either way: uncommitted residue is still snapshotted onto
-    // this machine's mirror, and the status log says it is there.
-    let now = crate::repo::run(worktree, "git", &["rev-parse", "HEAD"]).ok()?;
+    // this machine's mirror, and the status log says it is there. So residue
+    // comes back as [`AutoCommit::Residue`], not `Unrecorded`, and a cleanup
+    // terminal is not held for it — holding every task that leaves a lockfile
+    // behind would be its own loop.
+    let now = match crate::repo::run(worktree, "git", &["rev-parse", "HEAD"]) {
+        Ok(out) => out,
+        Err(e) => {
+            return AutoCommit::Unrecorded(format!(
+                "could not commit {files} file(s) the `{step}` step left — \
+                 `git rev-parse HEAD` failed: {e}"
+            ));
+        }
+    };
     if lane_committed(started_at, now.trim()) {
-        return Some(format!(
+        return AutoCommit::Residue(format!(
             "left {files} uncommitted file(s) behind — not committed, because `{step}` \
              made its own commits and these were not among them"
         ));
     }
 
-    crate::repo::run(worktree, "git", &["add", "-A"]).ok()?;
+    if let Err(e) = crate::repo::run(worktree, "git", &["add", "-A"]) {
+        return AutoCommit::Unrecorded(format!(
+            "could not commit {files} file(s) the `{step}` step left: {e}"
+        ));
+    }
     // `wip(<task>): <step>` — shaped so that a reader scanning a stacked pull
     // request can tell spoolway's backstop commits from the ones a lane wrote on
     // purpose, and so `spoolway stack` can squash them without reading each one.
     let message = format!("wip({task}): {step}");
-    crate::repo::run(worktree, "git", &["commit", "-q", "-m", &message]).ok()?;
+    if let Err(e) = crate::repo::run(worktree, "git", &["commit", "-q", "-m", &message]) {
+        return AutoCommit::Unrecorded(format!(
+            "could not commit {files} file(s) the `{step}` step left: {e}"
+        ));
+    }
 
-    Some(format!(
+    AutoCommit::Committed(format!(
         "committed {files} file(s) the `{step}` step left uncommitted"
     ))
 }
@@ -916,13 +1075,34 @@ fn past_the_gate(
 }
 
 /// A task id from the argument, or from the environment every lane is given.
+///
+/// `report` is meant to run from inside a lane, so it cannot refuse a lane
+/// environment wholesale the way `resume` and `queue add` do. But a `--task`
+/// that names a *different* task than `SPOOLWAY_TASK` is a lane reporting on a
+/// sibling's step — crediting it with a pass that never ran there (review
+/// finding 10) — and is refused here, the same class of refusal as
+/// [`crate::commands::refuse_from_lane`].
+///
+/// Whatever the id's source, it is run through [`crate::config::check_id`]
+/// before it is handed on: `--task ../../other/queue/x` would otherwise be
+/// joined into a path and the file outside the queue read and rewritten.
 fn resolve_task_id(explicit: Option<&str>) -> Result<String> {
-    if let Some(id) = explicit {
-        return Ok(id.to_string());
-    }
-    std::env::var(TASK_ENV).map_err(|_| {
-        anyhow::anyhow!("no task given and ${TASK_ENV} is not set — pass the task id explicitly")
-    })
+    let from_env = crate::platform::env_var(TASK_ENV)
+        .ok()
+        .filter(|v| !v.is_empty());
+    let id = match (explicit, from_env.as_deref()) {
+        (Some(explicit), Some(env)) if explicit != env => bail!(
+            "this lane was started for `{env}`, but `--task {explicit}` names another task — \
+             a lane may only report on its own task. Ask the person watching the board."
+        ),
+        (Some(explicit), _) => explicit.to_string(),
+        (None, Some(env)) => env.to_string(),
+        (None, None) => {
+            bail!("no task given and ${TASK_ENV} is not set — pass the task id explicitly")
+        }
+    };
+    crate::config::check_id("task id", &id)?;
+    Ok(id)
 }
 
 #[cfg(test)]
@@ -989,28 +1169,33 @@ mod tests {
         let head = head.trim().to_string();
 
         std::fs::write(repo.root.join("work"), "what the lane did").unwrap();
-        let note = auto_commit(&repo, &repo.root, &head, "task-1", "implement")
-            .expect("an uncommitted file is something to say");
-        assert!(note.contains("committed 1 file"), "{note}");
+        let outcome = auto_commit(&repo, &repo.root, &head, "task-1", "implement");
+        assert!(matches!(outcome, AutoCommit::Committed(_)), "{outcome:?}");
+        assert!(
+            outcome.note().unwrap().contains("committed 1 file"),
+            "{outcome:?}"
+        );
 
         let subject = crate::repo::run(&repo.root, "git", &["log", "-1", "--format=%s"]).unwrap();
         assert_eq!(subject.trim(), "wip(task-1): implement");
 
         // Nothing left to pick up, so nothing to report.
         let head = crate::repo::run(&repo.root, "git", &["rev-parse", "HEAD"]).unwrap();
-        assert!(auto_commit(&repo, &repo.root, head.trim(), "task-1", "review").is_none());
+        assert!(matches!(
+            auto_commit(&repo, &repo.root, head.trim(), "task-1", "review"),
+            AutoCommit::Clean
+        ));
     }
 
-    /// The failure this task actually fixes: `cargo test` runs inside a real
-    /// lane's own worktree, so `SPOOLWAY_TASK` and `SPOOLWAY_WORKTREE` are
-    /// already set to *that* lane's real task when `report()` runs from a
-    /// test using a fixture id. `SPOOLWAY_WORKTREE` here points at this
-    /// fixture's own checkout — standing in for the real lane's worktree —
-    /// while `SPOOLWAY_TASK` names a different task entirely, `stuck`, the
-    /// way it would if this process really were another lane's. The
-    /// worktree is left dirty on purpose: nothing at all should touch it.
+    /// A lane may only report on its own task. `cargo test` runs inside a real
+    /// lane's own environment, so `SPOOLWAY_TASK` is already set to *that*
+    /// lane's task when `report()` runs from a test using a fixture id —
+    /// standing in here for a lane at `implement` for `stuck` that calls
+    /// `spoolway report --task task-1 --pass` to credit a sibling with a step
+    /// that never ran on it (review finding 10). The report is refused
+    /// outright, and nothing about `task-1` moves.
     #[test]
-    fn a_report_leaves_the_worktree_untouched_when_spoolway_task_names_a_different_task() {
+    fn a_report_is_refused_when_task_differs_from_spoolway_task() {
         clear_lane_env();
         let repo = fixture("report-wrong-task");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
@@ -1022,55 +1207,36 @@ mod tests {
         task.set_stage("implement", None);
         task.save().unwrap();
 
-        std::fs::write(repo.root.join("work"), "somebody else's lane's work").unwrap();
-        let before = crate::repo::run(&repo.root, "git", &["rev-parse", "HEAD"]).unwrap();
-
-        // Thread-local, not `set_test_env`: `SPOOLWAY_WORKTREE` and
-        // `SPOOLWAY_TASK` are read on every `report()` call, in a module
-        // whose own tests call `report()` from dozens of other threads at
-        // once — a process-global set here would hand a neighbour's call a
-        // worktree and a task id it never asked for. See
+        // Thread-local, not `set_test_env`: `SPOOLWAY_TASK` is read on every
+        // `report()` call, in a module whose own tests call `report()` from
+        // dozens of other threads at once — a process-global set here would
+        // hand a neighbour's call a task id it never asked for. See
         // `crate::platform::env_var`.
-        let worktree = repo.root.to_str().unwrap().to_string();
-        let outcome = crate::platform::test_env::with_env("SPOOLWAY_WORKTREE", &worktree, || {
-            crate::platform::test_env::with_env(TASK_ENV, "stuck", || {
-                report(
-                    &repo,
-                    &Pipelines::builtin(),
-                    &ReportArgs {
-                        task: Some("task-1".into()),
-                        pass: true,
-                        fail: false,
-                        block: false,
-                        pause: false,
-                        message: None,
-                        handoff: vec![],
-                    },
-                    None,
-                )
-            })
-        });
-        outcome.unwrap();
+        let err = crate::platform::test_env::with_env(TASK_ENV, "stuck", || {
+            report(
+                &repo,
+                &Pipelines::builtin(),
+                &ReportArgs {
+                    task: Some("task-1".into()),
+                    pass: true,
+                    fail: false,
+                    block: false,
+                    pause: false,
+                    message: None,
+                    handoff: vec![],
+                },
+                None,
+            )
+        })
+        .unwrap_err();
+        let err = format!("{err:#}");
+        assert!(err.contains("stuck") && err.contains("task-1"), "{err}");
 
-        assert_eq!(
-            crate::repo::run(&repo.root, "git", &["rev-parse", "HEAD"])
-                .unwrap()
-                .trim(),
-            before.trim(),
-            "SPOOLWAY_TASK naming a different task must stop the sweep"
-        );
-        let status = crate::repo::run(&repo.root, "git", &["status", "--porcelain"]).unwrap();
-        assert!(
-            !status.trim().is_empty(),
-            "the dirty file must still be sitting there, uncommitted"
-        );
+        // And `task-1` is exactly where it was: still at `implement`, no
+        // report recorded.
         let task = queued(&repo, "task-1");
-        assert!(
-            task.section("## Status Log")
-                .unwrap_or_default()
-                .contains("SPOOLWAY_TASK"),
-            "the refusal belongs in the record, the same as any other backstop outcome"
-        );
+        assert_eq!(task.stage(), "implement");
+        assert!(task.front.last_report.is_none());
     }
 
     /// Off, the residue is still named — the point of the setting is to stop
@@ -1089,7 +1255,10 @@ mod tests {
         let head = crate::repo::run(&repo.root, "git", &["rev-parse", "HEAD"]).unwrap();
 
         std::fs::write(repo.root.join("work"), "what the lane did").unwrap();
-        let note = auto_commit(&repo, &repo.root, head.trim(), "task-1", "implement")
+        let outcome = auto_commit(&repo, &repo.root, head.trim(), "task-1", "implement");
+        assert!(outcome.is_unrecorded(), "{outcome:?}");
+        let note = outcome
+            .note()
             .expect("the leftovers are still worth naming");
         assert!(note.contains("auto_commit` is off"), "{note}");
         assert_eq!(
@@ -1401,6 +1570,63 @@ mod tests {
         task.save().unwrap();
         report_outcome(&repo, &pipelines, "stale", Outcome::Pass);
         assert_eq!(queued(&repo, "stale").stage(), "done");
+    }
+
+    /// A pass that would route to a cleanup terminal is held at `blocked`
+    /// while the lane's worktree still has uncommitted work in it —
+    /// `auto_commit` off here, standing in for the git failure it now reports
+    /// rather than swallows — so a `done` teardown cannot delete work that was
+    /// never recorded (review finding 4).
+    #[test]
+    fn a_pass_to_a_cleanup_terminal_is_held_while_the_worktree_is_dirty() {
+        clear_lane_env();
+        let mut repo = fixture("held-dirty");
+        repo.config.dispatch.auto_commit = false;
+        let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+        add(&repo, "dirtywork", &[]);
+        let pipelines = work_pipelines();
+
+        let mut task = queued(&repo, "dirtywork");
+        task.set_stage("work", None);
+        task.save().unwrap();
+
+        std::fs::write(repo.root.join("left-behind"), "uncommitted").unwrap();
+        let worktree = repo.root.to_str().unwrap().to_string();
+
+        crate::platform::test_env::with_env("SPOOLWAY_WORKTREE", &worktree, || {
+            report(
+                &repo,
+                &pipelines,
+                &ReportArgs {
+                    task: Some("dirtywork".into()),
+                    pass: true,
+                    fail: false,
+                    block: false,
+                    pause: false,
+                    message: None,
+                    handoff: vec![],
+                },
+                Some("work"),
+            )
+        })
+        .unwrap();
+
+        let task = queued(&repo, "dirtywork");
+        assert_eq!(
+            task.stage(),
+            crate::pipeline::BLOCKED,
+            "a dirty worktree must not reach a cleanup terminal"
+        );
+        assert_eq!(task.front.blocked_from.as_deref(), Some("work"));
+        assert!(
+            task.section("## Status Log")
+                .unwrap_or_default()
+                .contains("could not be committed"),
+            "the record must say why the pass did not land"
+        );
     }
 
     /// The whole unattended round trip through `report`: a block does not park

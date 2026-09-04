@@ -219,8 +219,14 @@ pub(crate) fn list_groups(repo: &Repo) -> Result<Vec<Group>> {
     let mut spoken_for: std::collections::BTreeSet<String> = Default::default();
 
     for path in md_files(&dir)? {
-        let doc = std::fs::read_to_string(&path)
-            .with_context(|| format!("reading {}", path.display()))?;
+        // A file that will not read — held open under an exclusive lock on
+        // Windows, a broken symlink — is skipped like an unparsable one, not
+        // propagated: one bad document must not fail the whole listing. The
+        // same file is found again and named by [`unreadable`], which is
+        // what the opening message reports it through.
+        let Ok(doc) = std::fs::read_to_string(&path) else {
+            continue;
+        };
         let Ok((yaml, _)) = crate::task::split_fence(&doc) else {
             continue;
         };

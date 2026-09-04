@@ -165,7 +165,14 @@ reads out of one — a `FileShape::OwnHome` transcript — must have one to look
 Seeding matters for the home that moves everything: `CODEX_HOME` takes the credentials and
 provider config with it, so spoolway links `config.toml` and `auth.json` back to the real home
 rather than copying them. A login refreshed in the real home stays good, and nothing spoolway
-made holds a stale token.
+made holds a stale token. The link is a symlink on Unix and a symlink or same-volume hard
+link on Windows. A plain copy is the fallback only on a platform that will make neither, and
+there a rotated token does go stale in the session home.
+
+The per-session home itself does not outlive the lane. Once a lane has been banked and its
+task archived, the dispatcher removes the home it made, so seed links and any copies go with
+it. A lane held at `blocked` keeps its home, since `spoolway resume` still needs the
+transcript inside it.
 
 **And the session nobody pinned.** All of the above is a *lane's* session. Your own — the one
 you plan in — was already running when spoolway was invoked inside it, so there is no home
@@ -555,8 +562,10 @@ away.
 
 A model's context window is not a profile setting either — see
 [`[models."<glob>"]`](configuration.md#modelsglob--what-a-model-costs-and-how-big-its-window-is)
-in the configuration reference. It is a **planning number only**: nothing at runtime reads it,
-and it does not truncate, chunk or cap anything a lane does.
+in the configuration reference. Two profile settings read it at run time: `session_reuse_ctx`
+and `session_blocked_ctx` each take their percentage of it. A `session: true` step against a
+model with `context_window` unset never reuses an earlier session and never blocks on size.
+The number does not truncate, chunk or cap anything a lane writes.
 
 ## What ends a lane
 

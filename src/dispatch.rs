@@ -282,10 +282,12 @@ impl LaneRecord {
     /// `name` recovered into it where one exists.
     ///
     /// `lanes.json` is only written back at the end of a pass — see
-    /// `Dispatcher::pass` — so a dispatcher that dies between launching a
-    /// lane and finishing that pass loses the in-memory record the very same
-    /// launch just built, and the next pass re-adopts the lane with nothing
-    /// to attribute its usage to. Blank fields there used to mean
+    /// `Dispatcher::pass`, which now writes it on the error paths too but
+    /// still not if the process is killed outright — so a dispatcher that
+    /// dies between launching a lane and finishing that pass loses the
+    /// in-memory record the very same launch just built, and the next pass
+    /// re-adopts the lane with nothing to attribute its usage to. Blank
+    /// fields there used to mean
     /// `record_usage` quietly banked nothing for it — inverting the one
     /// promise the ledger makes, that the runs which went wrong are the ones
     /// it remembers best. The ledger itself still has the lane's `session`,
@@ -296,20 +298,38 @@ impl LaneRecord {
     /// from: one from a spoolway that predates it, or a project whose `args`
     /// drop `{session_id}`. Nothing here can recover what was never written
     /// down.
-    pub(crate) fn readopted(repo: &Repo, name: &str, now: i64) -> LaneRecord {
+    pub(crate) fn readopted(name: &str, now: i64, ledger: &[crate::usage::Entry]) -> LaneRecord {
         let mut record = LaneRecord::adopted(now);
-        if let Some(entry) = crate::usage::read(repo)
-            .unwrap_or_default()
-            .into_iter()
+        if let Some(entry) = ledger
+            .iter()
             .rev()
             .find(|entry| lane_name(&entry.step, &entry.task) == name && !entry.session.is_empty())
         {
-            record.session = entry.session;
-            record.kind = entry.kind;
-            record.agent = entry.agent;
-            record.model = entry.model;
+            record.session = entry.session.clone();
+            record.kind = entry.kind.clone();
+            record.agent = entry.agent.clone();
+            record.model = entry.model.clone();
         }
         record
+    }
+
+    /// Remove the per-session agent home spoolway made for this lane, once
+    /// the lane has been banked and its task archived.
+    ///
+    /// Only a kind that mints its own session id and will not take one —
+    /// codex today — is handed a home of its own (see [`crate::agent::Home`]);
+    /// for every other kind [`crate::agent::session_home`] answers `None` and
+    /// this is a no-op. Left behind, that home holds a link — or, on a
+    /// platform that will not make one, a full copy — of `auth.json` per
+    /// lane, which after a credential rotation is so much stale litter
+    /// (review finding 63).
+    pub(crate) fn reclaim_session_home(&self) {
+        if self.session.is_empty() || self.kind.is_empty() {
+            return;
+        }
+        if let Some(home) = crate::agent::session_home(&self.kind, &self.session) {
+            let _ = std::fs::remove_dir_all(home);
+        }
     }
 
     /// A stub record carrying nothing but the pane [`Dispatcher::retire`]
@@ -359,19 +379,33 @@ pub struct Dispatcher<'a> {
     /// cannot make half its choices in each mode.
     unattended: bool,
     /// What each session in the usage ledger has already banked, by session
-    /// id — read at most once per pass, in [`Dispatcher::usage_banked`],
-    /// rather than once per lane in [`Dispatcher::record_usage`], which used
-    /// to re-read the whole ledger for every lane a pass tore down. Updated
-    /// in place as this pass banks more, so a second lane banked against the
-    /// same carried session within one pass still sees the first one's
-    /// totals without a second read of the file.
+    /// id — folded once per pass out of [`Dispatcher::ledger`], rather than
+    /// once per lane in [`Dispatcher::record_usage`], which used to re-read
+    /// the whole ledger for every lane a pass tore down. Updated in place as
+    /// this pass banks more, so a second lane banked against the same carried
+    /// session within one pass still sees the first one's totals without a
+    /// second read of the file.
     ///
     /// `None` until the first lane this pass actually banks — a pass that
-    /// tears nothing down, which is most of them on the 40MB ledger this
-    /// exists for, never touches the file at all. Populating it in
+    /// tears nothing down never builds it. Populating it in
     /// [`Dispatcher::new`] unconditionally was the bug: every pass paid to
     /// parse the whole ledger whether or not it had anything to bank.
     usage_banked: Option<HashMap<String, BankedTotals>>,
+    /// The whole ledger, parsed once on first use and shared for the rest of
+    /// the pass — see [`Dispatcher::ledger`]. The ceiling checks,
+    /// `carried_session`, `readopted` and `lane_session` all used to parse
+    /// `usage.jsonl` end to end on their own (review finding 33); now they
+    /// answer from this one snapshot, and `usage_banked` is folded out of it
+    /// rather than triggering a second read. `None` until something in the
+    /// pass first needs the ledger, for the same reason `usage_banked` is.
+    ledger: Option<std::sync::Arc<Vec<crate::usage::Entry>>>,
+    /// Each task's `last_report.at` as this pass first read it, by task id.
+    /// A lane's `spoolway report` is the only thing that ever advances that
+    /// field, so a disk copy whose value is higher than this means a report
+    /// landed mid-pass — and [`Dispatcher::persist`] must not then write the
+    /// pass's stale in-memory copy over it. Rebuilt at the top of every
+    /// [`Dispatcher::run_pass`]. See review finding 2.
+    report_seen: HashMap<String, i64>,
 }
 
 /// What one session has banked to the usage ledger so far — the running
@@ -536,16 +570,47 @@ impl<'a> Dispatcher<'a> {
             // lane's own `spoolway report` answer the question the same way.
             unattended: repo.unattended(),
             usage_banked: None,
+            ledger: None,
+            report_seen: HashMap::new(),
         }
     }
 
-    /// This pass's own running total per session, read from the ledger on
-    /// first use and kept for the rest of the pass — see
-    /// [`Dispatcher::usage_banked`]'s own doc for why that read is deferred
-    /// rather than unconditional.
-    fn usage_banked(&mut self) -> &mut HashMap<String, BankedTotals> {
+    /// Save `task`, but only under its per-task lock and only if no lane's
+    /// `spoolway report` has landed on the file since this pass read it —
+    /// see [`Dispatcher::report_seen`] and review finding 2. When a report
+    /// has landed, the pass's in-memory copy is stale: the write is dropped
+    /// and the next pass redoes this pass's bookkeeping against what the
+    /// lane actually wrote.
+    ///
+    /// The lock is held only around the reload check and the write — never
+    /// across a multiplexer call, which every caller already sequences
+    /// before or after its own `persist`.
+    fn persist(&self, task: &mut Task) -> Result<()> {
+        persist_task(self.repo, task, &self.report_seen)
+    }
+
+    /// The whole usage ledger, parsed once per pass and shared thereafter.
+    /// Deferred to first use — most passes tear nothing down and never read it
+    /// — see [`Dispatcher::ledger`](Self::ledger)'s field doc.
+    pub(crate) fn ledger(&mut self) -> std::sync::Arc<Vec<crate::usage::Entry>> {
         let repo = self.repo;
-        self.usage_banked.get_or_insert_with(|| banked_totals(repo))
+        self.ledger
+            .get_or_insert_with(|| {
+                std::sync::Arc::new(crate::usage::read(repo).unwrap_or_default())
+            })
+            .clone()
+    }
+
+    /// This pass's own running total per session, folded out of
+    /// [`Dispatcher::ledger`] on first use and kept for the rest of the pass.
+    /// Updated in place as this pass banks more, so a second lane banked
+    /// against the same carried session sees the first one's totals.
+    fn usage_banked(&mut self) -> &mut HashMap<String, BankedTotals> {
+        if self.usage_banked.is_none() {
+            let ledger = self.ledger();
+            self.usage_banked = Some(banked_totals(&ledger));
+        }
+        self.usage_banked.as_mut().expect("just set")
     }
 
     /// One full reconciliation: read the queue and the multiplexer, decide
@@ -558,11 +623,55 @@ impl<'a> Dispatcher<'a> {
     /// start a lane, and [`Dispatcher::rank_candidates`], which turns that
     /// raw list into the order `start_lanes` spends its budget in.
     pub fn pass(&mut self) -> Result<Report> {
+        let outcome = self.run_pass();
+        // `lanes.json` is written whatever came of the pass — error paths
+        // included. A `?` partway through `run_pass` used to return before
+        // its final save, discarding every lane record built earlier in the
+        // same pass: the next pass re-adopted those lanes with a stale or
+        // blank session, and their spend was never banked. See review
+        // finding 8.
+        if let Err(err) = save_lane_records(self.repo, &self.lanes) {
+            crate::problem_log::append(
+                self.repo,
+                &format!("could not write lanes.json after this pass: {err}"),
+            );
+        }
+        outcome
+    }
+
+    fn run_pass(&mut self) -> Result<Report> {
         let mut report = Report::default();
         let step_ids = self.pipelines.all_step_ids();
         let all_lanes = self.mux.list_lanes()?;
 
-        let mut tasks = self.repo.tasks()?;
+        let (mut tasks, load_problems) = self.repo.tasks_and_problems()?;
+
+        // What each task's `last_report` reads as right now, so a `persist`
+        // later this pass can tell a report that landed while the pass was
+        // working from the pass's own stale copy. See [`Dispatcher::persist`].
+        self.report_seen = tasks
+            .iter()
+            .map(|task| {
+                (
+                    task.id().to_string(),
+                    task.front
+                        .last_report
+                        .as_ref()
+                        .map_or(0, |report| report.at),
+                )
+            })
+            .collect();
+        // A queue file that will not parse no longer fails the pass — it is
+        // skipped and named here, so a person sees which file to fix rather
+        // than a board that has silently stopped moving. See
+        // [`crate::task::load_dir`].
+        for problem in &load_problems {
+            report.problems.push(format!(
+                "{} did not parse and was skipped: {}",
+                problem.path.display(),
+                problem.error
+            ));
+        }
 
         // A task queued before bases were recorded has none. The branch this
         // dispatcher's own checkout is on is what it would have been given, so
@@ -581,7 +690,7 @@ impl<'a> Dispatcher<'a> {
         // project, and is never counted, prompted, or torn down.
         let mut owned: Vec<(String, String, &Lane)> = all_lanes
             .iter()
-            .filter(|lane| mine.contains(&lane.cwd))
+            .filter(|lane| owns_cwd(&mine, &lane.cwd))
             .filter_map(|lane| {
                 parse_lane_name(&lane.name, &step_ids)
                     .map(|(step, task)| (step.to_string(), task.to_string(), lane))
@@ -650,7 +759,8 @@ impl<'a> Dispatcher<'a> {
         report.quiet = report.actions.is_empty() && owned.is_empty();
         report.lanes_live = !owned.is_empty();
         self.prune_stale_lane_records(&tasks, &step_ids);
-        save_lane_records(self.repo, &self.lanes)?;
+        // The write itself is `pass`'s, so an early `?` above still leaves
+        // the lane records it built on disk — see [`Dispatcher::pass`].
 
         Ok(report)
     }
@@ -755,7 +865,7 @@ impl<'a> Dispatcher<'a> {
                             this_step.id,
                         ));
                         tasks[index].set_stage(&destination, None);
-                        tasks[index].save()?;
+                        self.persist(&mut tasks[index])?;
                         continue;
                     }
                 }
@@ -834,7 +944,7 @@ impl<'a> Dispatcher<'a> {
                         }),
                         false => {
                             tasks[index].set_stage(&destination, None);
-                            tasks[index].save()?;
+                            self.persist(&mut tasks[index])?;
                             let cleans = pipeline
                                 .step(&destination)
                                 .is_some_and(|s| s.kind() == StepKind::Terminal && s.cleanup);
@@ -911,7 +1021,7 @@ impl<'a> Dispatcher<'a> {
                     // movement.
                     let running = lane.is_some_and(|lane| lane.status.is_busy());
                     if running && !self.dry_run && tasks[index].launch_landed() {
-                        tasks[index].save()?;
+                        self.persist(&mut tasks[index])?;
                     }
                     match lane {
                         // A busy lane is working. There is nothing to *decide*
@@ -1124,7 +1234,7 @@ impl<'a> Dispatcher<'a> {
                              tracking/{key}"
                         )),
                     );
-                    task.save()?;
+                    self.persist(task)?;
                     return Ok(Routed::NextTask);
                 }
                 TrackingGate::Pending => return Ok(Routed::NextTask),
@@ -1163,7 +1273,7 @@ impl<'a> Dispatcher<'a> {
                         .push(format!("would start `{next}` for {id}")),
                     _ => {
                         task.set_stage(&next, None);
-                        task.save()?;
+                        self.persist(task)?;
                         // Round the inner loop rather than the outer
                         // one, so the command runs on the pass this
                         // task's dependencies came in rather than the
@@ -1496,10 +1606,11 @@ impl<'a> Dispatcher<'a> {
             // this free with nothing under `lane.name` still recovers what
             // the ledger remembers of it rather than banking nothing for a
             // step that finished clean — see `LaneRecord::readopted`.
+            let ledger = self.ledger();
             let record = self
                 .lanes
                 .remove(&lane.name)
-                .unwrap_or_else(|| LaneRecord::readopted(self.repo, &lane.name, now_secs()));
+                .unwrap_or_else(|| LaneRecord::readopted(&lane.name, now_secs(), &ledger));
             // A pane that is still there is the task's to hand on. `Shell` is
             // handed to the next step as it stands; `StillOccupied` is a
             // session that would not go, and is only closed once that step's
@@ -1516,15 +1627,17 @@ impl<'a> Dispatcher<'a> {
                     report,
                 );
             }
-            // A held lane was booked when it was held, and booking it again
-            // would charge one session to the ledger twice.
-            if !record.held_for_block {
-                let pipeline = current
-                    .and_then(|t| self.pipelines.for_task(t).ok())
-                    .map(|p| p.name.clone())
-                    .unwrap_or_default();
-                self.record_usage(&record, task_id, step_id, current, &pipeline);
-            }
+            // Banked whether or not the lane was held. `record_usage` diffs
+            // the transcript against what `usage_banked` says is already on
+            // the ledger, so the hold-time line is subtracted and only the
+            // rounds a person added in that pane while it was held are
+            // appended now — without this, that spend was lost entirely
+            // (review finding 34).
+            let pipeline = current
+                .and_then(|t| self.pipelines.for_task(t).ok())
+                .map(|p| p.name.clone())
+                .unwrap_or_default();
+            self.record_usage(&record, task_id, step_id, current, &pipeline);
             freed.insert(lane.name.clone());
             report.actions.push(format!("freed {}", lane.name));
         }
@@ -1575,11 +1688,11 @@ impl<'a> Dispatcher<'a> {
         }
 
         let now = now_secs();
-        let repo = self.repo;
+        let ledger = self.ledger();
         let record = self
             .lanes
             .entry(old.name.clone())
-            .or_insert_with(|| LaneRecord::readopted(repo, &old.name, now));
+            .or_insert_with(|| LaneRecord::readopted(&old.name, now, &ledger));
         let since = *record.handing_over_since.get_or_insert(now);
         if now.saturating_sub(since) < HANDOVER_WAIT.as_secs() as i64 {
             report.actions.push(format!(
@@ -1660,11 +1773,11 @@ impl<'a> Dispatcher<'a> {
         task: Option<&Task>,
         report: &mut Report,
     ) {
-        let repo = self.repo;
+        let ledger = self.ledger();
         let record = self
             .lanes
             .entry(lane.name.clone())
-            .or_insert_with(|| LaneRecord::readopted(repo, &lane.name, now_secs()));
+            .or_insert_with(|| LaneRecord::readopted(&lane.name, now_secs(), &ledger));
         record.held_for_block = true;
         // Not a lane holding a question any more: answering this pane does
         // nothing, and the board must stop offering it as somewhere to go and
@@ -1757,13 +1870,13 @@ impl<'a> Dispatcher<'a> {
         };
         let worktree = std::path::Path::new(&worktree);
         if let Some(note) =
-            crate::commands::auto_commit(self.repo, worktree, &started_at, task_id, step_id)
+            crate::commands::auto_commit(self.repo, worktree, &started_at, task_id, step_id).note()
         {
             task.append_to_section(
                 "## Status Log",
                 &format!("- a person's round in the held pane — {note}\n"),
             );
-            task.save()?;
+            self.persist(task)?;
             report.actions.push(format!(
                 "{task_id}: committed a person's round in `{}`",
                 lane.name
@@ -1790,6 +1903,16 @@ impl<'a> Dispatcher<'a> {
     /// found, an agent whose format is not known, a ledger that will not open —
     /// none of them are worth failing a dispatch pass over, because accounting
     /// is a record of the pipeline, not a part of it.
+    ///
+    /// **Not under [`crate::lock::LedgerLock`].** The append below is
+    /// unlocked, and the diff is against this pass's [`Dispatcher::ledger`]
+    /// snapshot rather than a fresh read — criterion 3's one-read-per-pass.
+    /// The lock covers the paths that are *not* the dispatcher: `bank_ambient`,
+    /// `sweep`, and `bank_lane` (a `queue pause` or board `p`/`P` in another
+    /// process). The dispatcher is the only writer of lane lines in the common
+    /// case, so its own appends are serial. The one gap is a `bank_lane`
+    /// racing this call for the *same carried session* — a narrow window
+    /// accepted in favour of not re-reading the ledger per lane.
     pub(crate) fn record_usage(
         &mut self,
         record: &LaneRecord,
@@ -1947,13 +2070,13 @@ impl<'a> Dispatcher<'a> {
             None => Some(hash_of(&self.mux.read(&lane.name, 60).unwrap_or_default())),
         };
 
-        let repo = self.repo;
+        let ledger = self.ledger();
         let record = self
             .lanes
             .entry(lane.name.clone())
             .or_insert_with(|| LaneRecord {
                 output_hash: fallback.unwrap_or_default(),
-                ..LaneRecord::readopted(repo, &lane.name, now)
+                ..LaneRecord::readopted(&lane.name, now, &ledger)
             });
 
         match (wrote_at, fallback) {
@@ -2161,7 +2284,7 @@ impl<'a> Dispatcher<'a> {
             task,
             &format!("`{}` ended its turn on a person's own Escape", step.id),
         );
-        task.save()?;
+        self.persist(task)?;
         report.actions.push(format!(
             "{}: parked at `{}` — its own Escape ended the turn",
             task.id(),
@@ -2192,7 +2315,7 @@ impl<'a> Dispatcher<'a> {
         }
         task.front.parked_from = None;
         task.front.resume = None;
-        task.save()?;
+        self.persist(task)?;
         report.actions.push(format!(
             "{}: un-parked `{}` — its lane was already busy, so nothing was sent",
             task.id(),
@@ -2263,17 +2386,18 @@ impl<'a> Dispatcher<'a> {
                 return Ok(());
             }
             self.mux.stop_lane(&lane.name, &lane.pane_id)?;
+            let ledger = self.ledger();
             let record = self
                 .lanes
                 .remove(&lane.name)
-                .unwrap_or_else(|| LaneRecord::readopted(self.repo, &lane.name, now_secs()));
+                .unwrap_or_else(|| LaneRecord::readopted(&lane.name, now_secs(), &ledger));
             self.record_usage(&record, task.id(), &step.id, Some(task), &pipeline.name);
             // Read by the launch ceiling below, so the same doubling backoff
             // applies whether or not anybody is watching this run — a spent
             // quota is not a question for a person the way a dead launch is.
             task.front.usage_limit_hold = true;
             task.append_to_section("## Status Log", &format!("- {reason}\n"));
-            task.save()?;
+            self.persist(task)?;
             report.actions.push(format!("{}: {reason}", task.id()));
             return Ok(());
         }
@@ -2501,13 +2625,13 @@ impl<'a> Dispatcher<'a> {
         // Booked here rather than in `free_finished_lanes`, which never sees a
         // lane this path has already torn down — or, for a held one, sees it
         // every pass and would book it on each.
+        let ledger = self.ledger();
         let record = match hold {
             true => {
-                let repo = self.repo;
                 let record = self
                     .lanes
                     .entry(lane.name.clone())
-                    .or_insert_with(|| LaneRecord::readopted(repo, &lane.name, now_secs()));
+                    .or_insert_with(|| LaneRecord::readopted(&lane.name, now_secs(), &ledger));
                 record.held_for_block = true;
                 // See `hold_for_block`: a pane kept to be read is not a lane
                 // anybody can answer.
@@ -2517,7 +2641,7 @@ impl<'a> Dispatcher<'a> {
             false => Some(
                 self.lanes
                     .remove(&lane.name)
-                    .unwrap_or_else(|| LaneRecord::readopted(self.repo, &lane.name, now_secs())),
+                    .unwrap_or_else(|| LaneRecord::readopted(&lane.name, now_secs(), &ledger)),
             ),
         };
         if let Some(record) = &record {
@@ -2542,7 +2666,9 @@ impl<'a> Dispatcher<'a> {
                 started_at,
                 task.id(),
                 &step.id,
-            ) {
+            )
+            .note()
+            {
                 task.append_to_section("## Status Log", &format!("- {note}\n"));
             }
         }
@@ -2665,7 +2791,25 @@ impl<'a> Dispatcher<'a> {
                 ));
                 continue;
             };
-            let profile = self.repo.config.agent(&agent_name)?.clone();
+            // A missing profile is a per-candidate problem, the same as a
+            // missing `agent:` above — never a `?`. A pipeline edited to
+            // name a profile config does not define would otherwise fail
+            // the whole pass here, after higher-ranked candidates were
+            // already started, discarding every lane record built this pass
+            // (`save_lane_records` is the pass's last line). See review
+            // finding 8.
+            let profile = match self.repo.config.agent(&agent_name) {
+                Ok(profile) => profile.clone(),
+                Err(err) => {
+                    report.problems.push(format!(
+                        "{}: `{}` names agent profile `{agent_name}`, which config does not \
+                         define ({err})",
+                        tasks[candidate.task_index].id(),
+                        step.id
+                    ));
+                    continue;
+                }
+            };
 
             // Checked before the candidate takes a slot, because a task that has
             // used up its budget must not also take a lane away from one that
@@ -2774,9 +2918,10 @@ impl<'a> Dispatcher<'a> {
                     if tasks[candidate.task_index].front.launched_at.is_some()
                         && !self.lanes.contains_key(&lane)
                     {
+                        let ledger = self.ledger();
                         self.lanes.insert(
                             lane.clone(),
-                            LaneRecord::readopted(self.repo, &lane, now_secs()),
+                            LaneRecord::readopted(&lane, now_secs(), &ledger),
                         );
                         report.actions.push(format!(
                             "{}: `{}` has been started {attempts} time(s) and left \
@@ -2912,6 +3057,11 @@ impl<'a> Dispatcher<'a> {
                 .filter(|handover| handover.ready)
                 .map(|handover| handover.pane_id.clone());
 
+            // The pass's one ledger snapshot, built on first use here and
+            // reused for every later candidate — `start_one`'s session
+            // lookups answer from it rather than each parsing `usage.jsonl`
+            // (review finding 33). A pass with no candidates never builds it.
+            let ledger = self.ledger();
             let outcome = start_one(
                 self.repo,
                 &pipeline,
@@ -2920,6 +3070,8 @@ impl<'a> Dispatcher<'a> {
                 &step,
                 &profile,
                 inherited.as_deref(),
+                &self.report_seen,
+                &ledger,
             );
             if let Some(stuck) = handover.filter(|handover| !handover.ready) {
                 match outcome.is_ok() {
@@ -3140,7 +3292,7 @@ impl<'a> Dispatcher<'a> {
                     return Ok(None);
                 }
 
-                let (worktree, _) = ensure_workspace(self.repo, self.mux, task)?;
+                let (worktree, _) = ensure_workspace(self.repo, self.mux, task, &self.report_seen)?;
                 let env = BTreeMap::from([
                     (crate::commands::TASK_ENV.to_string(), id.clone()),
                     (ENV_STEP.to_string(), step.id.clone()),
@@ -3382,7 +3534,7 @@ impl<'a> Dispatcher<'a> {
                 .unwrap_or_else(|| crate::commands::resume_target(task, pipeline));
             task.front.paused_at = Some(origin);
             task.set_stage(crate::pipeline::PAUSED, Some(reason));
-            task.save()?;
+            self.persist(task)?;
             return Ok(());
         }
 
@@ -3390,12 +3542,12 @@ impl<'a> Dispatcher<'a> {
             let target = crate::commands::resume_target(task, pipeline);
             crate::commands::resume_at(task, pipeline, &target);
             task.set_stage(&target, Some(reason));
-            task.save()?;
+            self.persist(task)?;
             return Ok(());
         }
 
         task.set_stage(crate::pipeline::BLOCKED, Some(reason));
-        task.save()?;
+        self.persist(task)?;
         Ok(())
     }
 
@@ -3407,22 +3559,24 @@ impl<'a> Dispatcher<'a> {
     /// front of — who would simply start it again, having learned nothing, since
     /// their own blocked tasks were already parked in front of them.
     ///
-    /// Counted from the same ledger and over the same window as the board's
-    /// footer: entries stamped at or after the moment this run took its lock.
-    /// Reading the ledger every pass is a file read against work measured in
-    /// wall-clock minutes, and the alternative — a running total in memory —
-    /// would lose the count on a dispatcher restart and let a run that has
-    /// already spent the budget spend it again.
+    /// Counted from the pass's one [`Dispatcher::ledger`] snapshot, over the
+    /// same window as the board's footer: entries stamped at or after the
+    /// moment this run took its lock. Each ceiling check used to parse the
+    /// whole `usage.jsonl` on its own, every pass (review finding 33); now
+    /// both read the snapshot every other consumer in the pass shares. The
+    /// alternative — a running total in memory — would lose the count on a
+    /// dispatcher restart and let a run that has already spent the budget
+    /// spend it again.
     ///
     /// **Lane entries only.** The ledger also carries the operator's own
-    /// interactive session — `usage::bank_session` banks planning and
+    /// interactive session — `usage::bank_ambient` banks planning and
     /// queueing against the project, which is right, and those lines have no
     /// `task`. Summed with the rest they make the one brake an unattended run
     /// has answer to whoever is *watching* it: sit in a Claude session reading
     /// an overnight run and your own context reads stop the dispatcher starting
     /// work. The ceiling is documented as the output tokens one unattended run
     /// may spend, and a lane is the only thing that run started.
-    fn over_output_ceiling(&self) -> Option<String> {
+    fn over_output_ceiling(&mut self) -> Option<String> {
         if !self.unattended {
             return None;
         }
@@ -3431,8 +3585,8 @@ impl<'a> Dispatcher<'a> {
             return None;
         }
         let start = crate::status::run_start(self.repo);
-        let spent: u64 = crate::usage::read(self.repo)
-            .unwrap_or_default()
+        let ledger = self.ledger();
+        let spent: u64 = ledger
             .iter()
             .filter(|entry| {
                 start
@@ -3464,7 +3618,7 @@ impl<'a> Dispatcher<'a> {
     /// nothing in `[models]` either — contributes nothing to the sum rather
     /// than being estimated, the same rule `Entry::cost_usd` follows
     /// everywhere else: never invented, only read.
-    fn over_cost_ceiling(&self) -> Option<String> {
+    fn over_cost_ceiling(&mut self) -> Option<String> {
         if !self.unattended {
             return None;
         }
@@ -3473,8 +3627,8 @@ impl<'a> Dispatcher<'a> {
             return None;
         }
         let start = crate::status::run_start(self.repo);
-        let spent: f64 = crate::usage::read(self.repo)
-            .unwrap_or_default()
+        let ledger = self.ledger();
+        let spent: f64 = ledger
             .iter()
             .filter(|entry| {
                 start
@@ -3535,11 +3689,11 @@ impl<'a> Dispatcher<'a> {
 
         let now = now_secs();
         let quiet = self.repo.config.dispatch.lane_quiet;
-        let repo = self.repo;
+        let ledger = self.ledger();
         let record = self
             .lanes
             .entry(lane_name.to_string())
-            .or_insert_with(|| LaneRecord::readopted(repo, lane_name, now));
+            .or_insert_with(|| LaneRecord::readopted(lane_name, now, &ledger));
         let silent_for =
             Duration::from_secs(now.saturating_sub(record.last_progress).max(0) as u64);
         if silent_for >= quiet {
@@ -3623,6 +3777,35 @@ pub const ENV_STEP: &str = "SPOOLWAY_STEP";
 /// future kind that needs it some other way costs no new plumbing.
 pub const ENV_SESSION: &str = "SPOOLWAY_SESSION";
 
+/// [`Dispatcher::persist`] for the free functions in the launch path, which
+/// have no `self` to reach the pass's `report_seen` through. Same rule: take
+/// the task's per-task lock, and skip the write when a lane's `spoolway
+/// report` has advanced `last_report` past what this pass first read — the
+/// lost-update review finding 2 guards against.
+fn persist_task(repo: &Repo, task: &mut Task, report_seen: &HashMap<String, i64>) -> Result<()> {
+    // Bound to a name, not discarded: an `Ok` holds the lock in it until
+    // this function returns, which is what keeps the reload check and the
+    // write below atomic against a lane's `spoolway report`.
+    let lock = crate::lock::TaskLock::acquire(&repo.task_lock_file(task.id()));
+    if lock.is_err() {
+        // A live holder that never let go in three seconds. Rare enough to
+        // log and press on unlocked rather than fail a whole pass for one
+        // task.
+        crate::problem_log::append(
+            repo,
+            &format!("{}: task lock still held, saving without it", task.id()),
+        );
+    }
+    let disk_at = Task::load(&task.path)
+        .ok()
+        .and_then(|disk| disk.front.last_report.map(|report| report.at))
+        .unwrap_or(0);
+    if disk_at > report_seen.get(task.id()).copied().unwrap_or(0) {
+        return Ok(());
+    }
+    task.save()
+}
+
 /// Create the task's worktree if it has none, start its agent in that pane,
 /// label everything, and send the opening prompt.
 /// The checkout this task's work happens in, cut or borrowed on first need.
@@ -3634,6 +3817,7 @@ fn ensure_workspace(
     repo: &Repo,
     mux: &dyn Mux,
     task: &mut Task,
+    report_seen: &HashMap<String, i64>,
 ) -> Result<(PathBuf, Option<String>)> {
     // Where a task's lane sits — its worktree, workspace and panes — is a fact
     // about one machine, and the only part of a task file that is. A task file
@@ -3651,7 +3835,7 @@ fn ensure_workspace(
         task.front.workspace_id = None;
         task.front.pane_id = None;
         task.front.tab_id = None;
-        task.save()?;
+        persist_task(repo, task, report_seen)?;
     }
 
     // The directory can survive a restart of the multiplexer fronting it even
@@ -3722,7 +3906,7 @@ fn ensure_workspace(
                 fresh_pane = tab.opened_pane;
             }
         }
-        task.save()?;
+        persist_task(repo, task, report_seen)?;
     }
 
     let base = match &task.front.base {
@@ -3785,7 +3969,7 @@ fn ensure_workspace(
                 // touched it, at a moment nothing here witnessed, so there is
                 // no honest commit to pin.
                 task.front.run = Some(crate::usage::new_run_id());
-                task.save()?;
+                persist_task(repo, task, report_seen)?;
             }
             // Cut. One worktree per task, created once and reused by every
             // later step.
@@ -3854,7 +4038,7 @@ fn ensure_workspace(
                 task.front.cut_from = Some(cut_from);
                 task.front.base_commit = base_commit;
                 task.front.run = Some(crate::usage::new_run_id());
-                task.save()?;
+                persist_task(repo, task, report_seen)?;
             }
         }
     }
@@ -3948,6 +4132,7 @@ pub struct ProjectTab {
     pub opened_pane: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn start_one(
     repo: &Repo,
     pipeline: &Pipeline,
@@ -3960,6 +4145,10 @@ fn start_one(
     // step of a task, on a kind with no way to leave a pane behind, and on a
     // backend whose pane is the agent itself.
     inherited: Option<&str>,
+    report_seen: &HashMap<String, i64>,
+    // The pass's one usage-ledger snapshot, for the session lookups below —
+    // see [`Dispatcher::ledger`] and review finding 33.
+    ledger: &[crate::usage::Entry],
 ) -> Result<Started> {
     let name = lane_name(&step.id, task.id());
 
@@ -3969,7 +4158,7 @@ fn start_one(
     // has just been replaced, the pane id names something in a workspace that
     // is gone, and splitting a fresh one is the only correct answer.
     let placement = task.front.workspace_id.clone();
-    let (_, fresh_pane) = ensure_workspace(repo, mux, task)?;
+    let (_, fresh_pane) = ensure_workspace(repo, mux, task, report_seen)?;
     let inherited: Option<String> = inherited
         .filter(|_| placement.is_some() && placement == task.front.workspace_id)
         .map(str::to_string)
@@ -4065,14 +4254,17 @@ fn start_one(
     // here, still set at this point because `unpark` deliberately leaves it
     // for this launch to spend — see the note beside it.
     let parked = task.front.parked_from.as_deref() == Some(step.id.as_str());
-    let one_shot = resuming.then(|| lane_session(repo, &name)).flatten();
+    let one_shot = resuming
+        .then(|| lane_session_in(repo, ledger, &name))
+        .flatten();
     // `session:` is a different question from the one-shot flag, not a
     // fallback for it — a task coming back from `blocked` names an exact
     // session to continue, and a miss there says that lane's session is
     // gone, not that any prompt match will do instead. So this is only
     // tried when `resuming` is false to begin with.
     let (carried, session_miss) = match (resuming, step.session) {
-        (false, true) => match carried_session(repo, pipeline, task, step, profile, &model) {
+        (false, true) => match carried_session(repo, pipeline, task, step, profile, &model, ledger)
+        {
             Ok(found) => (Some(found), None),
             Err(reason) => (None, Some(reason.describe(step.prompt_name(), &model))),
         },
@@ -4198,7 +4390,7 @@ fn start_one(
                 task.front.workspace_id = None;
                 task.front.pane_id = None;
                 task.front.tab_id = None;
-                task.save()?;
+                persist_task(repo, task, report_seen)?;
                 return Err(err.context(format!(
                     "tab `{tab}` is not in this multiplexer; the task's placement has \
                      been cleared and the next pass will cut it a workspace of its own"
@@ -4292,7 +4484,7 @@ fn start_one(
     if let Some(note) = &session_miss {
         task.append_to_section("## Status Log", &format!("- `{}`: {note}\n", step.id));
     }
-    task.save()?;
+    persist_task(repo, task, report_seen)?;
 
     // `parked` takes the match before `via_session` gets a say: `resuming` is
     // always true for a park (see the note beside it above), so without this
@@ -4392,7 +4584,20 @@ fn write_system_prompt(repo: &Repo, lane: &str, body: &str) -> Result<PathBuf> {
 /// attach` to reopen it. From the lane records first — the dispatcher's own
 /// bookkeeping — and the usage ledger as the fallback for a lane whose record
 /// a later pass has already retired.
+///
+/// One-shot callers (the board, `spoolway lane`) read the ledger here;
+/// [`start_one`], inside a pass, passes the pass's one snapshot to
+/// [`lane_session_in`] so the ledger is not parsed again per resume (review
+/// finding 33).
 pub fn lane_session(repo: &Repo, lane: &str) -> Option<(String, String)> {
+    lane_session_in(repo, &crate::usage::read(repo).unwrap_or_default(), lane)
+}
+
+fn lane_session_in(
+    repo: &Repo,
+    ledger: &[crate::usage::Entry],
+    lane: &str,
+) -> Option<(String, String)> {
     if let Some(record) = load_lane_records(repo).get(lane)
         && !record.session.is_empty()
         && !record.kind.is_empty()
@@ -4403,12 +4608,11 @@ pub fn lane_session(repo: &Repo, lane: &str) -> Option<(String, String)> {
     // Composed with `lane_name` rather than matched by hand, so a step id or
     // a task id holding the separator still names the same lane both here
     // and everywhere else one is built.
-    crate::usage::read(repo)
-        .ok()?
-        .into_iter()
+    ledger
+        .iter()
         .rev()
         .find(|entry| lane_name(&entry.step, &entry.task) == lane && !entry.session.is_empty())
-        .map(|entry| (entry.kind, entry.session))
+        .map(|entry| (entry.kind.clone(), entry.session.clone()))
 }
 
 /// Why a `session:` step did not carry its prompt's conversation over, said
@@ -4478,11 +4682,11 @@ fn carried_session(
     step: &Step,
     profile: &AgentProfile,
     model: &str,
+    ledger: &[crate::usage::Entry],
 ) -> std::result::Result<(String, String), SessionMiss> {
     let prompt = step.prompt_name();
-    let entry = crate::usage::read(repo)
-        .unwrap_or_default()
-        .into_iter()
+    let entry = ledger
+        .iter()
         .rev()
         .find(|entry| {
             entry.task == task.front.id
@@ -4513,7 +4717,7 @@ fn carried_session(
         }
     }
 
-    Ok((entry.kind, entry.session))
+    Ok((entry.kind.clone(), entry.session.clone()))
 }
 
 /// Whether `size` tokens is past `pct`% of a `window`-token model — the
@@ -4539,9 +4743,36 @@ fn exceeds_percent(window: usize, pct: u8, size: u64) -> bool {
 /// differently is the same bug twice: the board said `3/5` while the dispatcher
 /// had one lane in flight and four slots free.
 pub fn our_checkouts(repo: &Repo, tasks: &[Task]) -> HashSet<PathBuf> {
-    std::iter::once(repo.root.clone())
+    let mut out = HashSet::new();
+    for path in std::iter::once(repo.root.clone())
         .chain(tasks.iter().filter_map(|t| t.front.worktree_path.clone()))
-        .collect()
+    {
+        // Both spellings: the path as recorded, and its canonical form. A
+        // backend that resolves symlinks when it reports a lane's `cwd`
+        // (herdr, or tmux's `pane_current_path`) hands back the same
+        // directory under a different name, and [`owns_cwd`] checks against
+        // whichever this set happens to hold.
+        if let Ok(canon) = std::fs::canonicalize(&path) {
+            out.insert(canon);
+        }
+        out.insert(path);
+    }
+    out
+}
+
+/// Whether `cwd` — a lane's own working directory, as the multiplexer
+/// reported it — is one of `mine`.
+///
+/// A plain set membership first, then the same test on the canonicalised
+/// path. tmux stamps [`crate::tmux`]'s `OPT_CWD` with the exact string the
+/// dispatcher recorded, so the first test is normally enough; the fallback
+/// is for a backend that canonicalises, where byte-equality alone dropped
+/// every lane and escalated every task. See review finding 38.
+pub fn owns_cwd(mine: &HashSet<PathBuf>, cwd: &std::path::Path) -> bool {
+    mine.contains(cwd)
+        || std::fs::canonicalize(cwd)
+            .map(|canon| mine.contains(&canon))
+            .unwrap_or(false)
 }
 
 /// Whether `task` cannot move without a person: parked on `paused`, or on an
@@ -4612,11 +4843,39 @@ fn lanes_path(repo: &Repo) -> PathBuf {
     repo.lanes_file()
 }
 
-fn load_lane_records(repo: &Repo) -> HashMap<String, LaneRecord> {
-    std::fs::read_to_string(lanes_path(repo))
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default()
+pub(crate) fn load_lane_records(repo: &Repo) -> HashMap<String, LaneRecord> {
+    let path = lanes_path(repo);
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        // Absent or unreadable is the ordinary empty state — no dispatcher
+        // has run for this project yet, or none since it was cleaned.
+        Err(_) => return HashMap::new(),
+    };
+    match serde_json::from_str(&raw) {
+        Ok(records) => records,
+        Err(err) => {
+            // A corrupt `lanes.json` — one bad byte from a hand edit or a
+            // disk error — used to map to an empty map that the pass then
+            // saved back over, dropping every lane's session id, reminder
+            // count, `held_for_block` and `retired_pane` at once with no
+            // message. Keep the bytes as a `.bad` copy and say so in the
+            // problem log before the pass overwrites the file. See review
+            // finding 31.
+            let bad = path.with_extension("json.bad");
+            let kept = std::fs::write(&bad, &raw).is_ok();
+            crate::problem_log::append(
+                repo,
+                &format!(
+                    "lanes.json did not parse ({err}) — {}; starting this pass from no lane records",
+                    match kept {
+                        true => format!("kept a copy at {}", bad.display()),
+                        false => "could not keep a copy".to_string(),
+                    }
+                ),
+            );
+            HashMap::new()
+        }
+    }
 }
 
 pub(crate) fn save_lane_records(repo: &Repo, lanes: &HashMap<String, LaneRecord>) -> Result<()> {
@@ -4624,16 +4883,17 @@ pub(crate) fn save_lane_records(repo: &Repo, lanes: &HashMap<String, LaneRecord>
     crate::task::write_atomic(&lanes_path(repo), &rendered)
 }
 
-/// The usage ledger, read once and folded into a running total per session —
-/// what [`Dispatcher::record_usage`] used to recompute from scratch, by
-/// re-reading the whole file, for every lane a pass banked.
-fn banked_totals(repo: &Repo) -> HashMap<String, BankedTotals> {
+/// The usage ledger folded into a running total per session — what
+/// [`Dispatcher::record_usage`] used to recompute from scratch, by re-reading
+/// the whole file, for every lane a pass banked. Reads nothing itself now: the
+/// pass's one [`Dispatcher::ledger`] snapshot is folded here.
+fn banked_totals(ledger: &[crate::usage::Entry]) -> HashMap<String, BankedTotals> {
     let mut totals: HashMap<String, BankedTotals> = HashMap::new();
-    for entry in crate::usage::read(repo).unwrap_or_default() {
+    for entry in ledger {
         if entry.session.is_empty() {
             continue;
         }
-        let banked = totals.entry(entry.session).or_default();
+        let banked = totals.entry(entry.session.clone()).or_default();
         banked.tokens.add(&entry.tokens);
         banked.turns += entry.turns;
         banked.cost_usd += entry.cost_usd.unwrap_or(0.0);
@@ -6578,6 +6838,144 @@ mod tests {
         );
     }
 
+    /// A pipeline step naming an agent profile config does not define is a
+    /// per-candidate problem, not a `?` that aborts the whole pass — which
+    /// used to discard every lane record built earlier in the same pass and
+    /// fill the problem log with the same line every interval. See review
+    /// finding 8.
+    #[test]
+    fn a_step_naming_an_undefined_agent_profile_is_a_problem_not_a_pass_abort() {
+        let repo = fixture("undefined-agent");
+        let mut pipeline = Pipelines::builtin().get("default").unwrap().clone();
+        pipeline
+            .steps
+            .iter_mut()
+            .find(|s| s.id == "implement")
+            .unwrap()
+            .agent = Some("ghost".into());
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert("default".into(), pipeline);
+
+        add_task(&repo, "demo", "implement");
+
+        let mux = FakeMux::new(vec![]);
+        let report = Dispatcher::new(&repo, &pipelines, &mux, false)
+            .pass()
+            .expect("an undefined profile does not abort the pass");
+
+        assert!(mux.did("start").is_empty(), "no lane should have started");
+        assert!(
+            report.problems.iter().any(|p| p.contains("ghost")),
+            "the problem names the missing profile: {:?}",
+            report.problems
+        );
+    }
+
+    /// The lost-update review finding 2: a lane's `spoolway report` lands
+    /// while the pass holds a stale in-memory copy, and the pass's next
+    /// save must not overwrite the report. `persist_task` reloads under the
+    /// per-task lock and drops its write when `last_report` has moved past
+    /// what the pass first read.
+    #[test]
+    fn persist_task_does_not_overwrite_a_report_that_landed_mid_pass() {
+        let repo = fixture("persist-guards-a-report");
+        let path = add_task(&repo, "demo", "implement");
+
+        // What the pass read: no report yet.
+        let mut stale = Task::load(&path).unwrap();
+        let seen: HashMap<String, i64> = [("demo".to_string(), 0)].into_iter().collect();
+
+        // A lane reports: `last_report` is stamped and the stage moves.
+        let mut reported = Task::load(&path).unwrap();
+        reported.front.last_report = Some(crate::task::LastReport {
+            step: "implement".into(),
+            outcome: "pass".into(),
+            at: 5_000,
+        });
+        reported.set_stage("review", Some("done"));
+        reported.save().unwrap();
+
+        // The pass now writes its stale copy back — an escalation for a step
+        // the task has already left.
+        stale.set_stage(crate::pipeline::BLOCKED, Some("stale escalation"));
+        persist_task(&repo, &mut stale, &seen).unwrap();
+
+        let on_disk = Task::load(&path).unwrap();
+        assert_eq!(
+            on_disk.stage(),
+            "review",
+            "the report's move stands, not the pass's stale one"
+        );
+        assert_eq!(on_disk.front.last_report.unwrap().at, 5_000);
+    }
+
+    /// Review finding 38: a backend that reports a lane's `cwd` with its
+    /// symlinks resolved must still be recognised as ours. `our_checkouts`
+    /// records both spellings of every worktree path, and `owns_cwd` falls
+    /// back to a canonical comparison — either half alone closes this, and
+    /// the test exercises both.
+    #[cfg(unix)]
+    #[test]
+    fn owns_cwd_matches_a_worktree_path_the_backend_canonicalised() {
+        let repo = fixture("owns-cwd-symlink");
+        let base = repo.root.join("wt");
+        let real = base.join("real-worktree");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = base.join("linked-worktree");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let resolved = std::fs::canonicalize(&link).unwrap();
+        assert_ne!(
+            link, resolved,
+            "the symlink and its target spell differently"
+        );
+
+        // The task recorded the symlink spelling; the backend reports the
+        // resolved one.
+        add_task_with(&repo, "demo", "implement", |front| {
+            front.worktree_path = Some(link.clone());
+        });
+        let tasks = repo.tasks().unwrap();
+        let mine = our_checkouts(&repo, &tasks);
+        assert!(
+            owns_cwd(&mine, &resolved),
+            "a lane whose cwd is the resolved path is still ours"
+        );
+        assert!(
+            !owns_cwd(&mine, &base.join("someone-elses")),
+            "an unrelated path is not"
+        );
+
+        // And the other way round: `owns_cwd`'s own fallback, with only the
+        // resolved spelling in the set and the symlink spelling as the cwd.
+        let only_resolved: HashSet<PathBuf> = std::iter::once(resolved).collect();
+        assert!(owns_cwd(&only_resolved, &link));
+    }
+
+    /// A corrupt `lanes.json` is kept as a `.bad` copy rather than silently
+    /// discarded and overwritten, and the pass still runs. See review
+    /// finding 31.
+    #[test]
+    fn a_corrupt_lanes_json_is_kept_as_a_bad_copy() {
+        let repo = fixture("corrupt-lanes");
+        add_task(&repo, "demo", "queued");
+        let lanes = repo.lanes_file();
+        std::fs::create_dir_all(lanes.parent().unwrap()).unwrap();
+        std::fs::write(&lanes, "{ this is not json").unwrap();
+
+        let mux = FakeMux::new(vec![]);
+        Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
+            .pass()
+            .expect("a corrupt lanes.json does not fail the pass");
+
+        let bad = lanes.with_extension("json.bad");
+        assert_eq!(
+            std::fs::read_to_string(&bad).unwrap(),
+            "{ this is not json",
+            "the original bytes are kept for a person to look at"
+        );
+    }
+
     /// A model's own `slots` replaces its profile's `concurrency` when set —
     /// swapping a local model to a smaller one shrinks the pool without
     /// anybody touching `[agents.pi]`.
@@ -7774,20 +8172,25 @@ mod tests {
         let mut task = reload(&path);
         task.front.worktree_path = None;
         task.save().unwrap();
-        crate::commands::report(
-            &repo,
-            &pipelines,
-            &crate::cli::ReportArgs {
-                task: Some("demo".into()),
-                pass: true,
-                fail: false,
-                block: false,
-                pause: false,
-                message: Some("released it".into()),
-                handoff: vec![],
-            },
-            Some("release"),
-        )
+        // `report` now refuses a `--task` that disagrees with `SPOOLWAY_TASK`
+        // (review finding 10). This whole suite runs inside a real lane whose
+        // `SPOOLWAY_TASK` is its own; a report on `demo` carries `demo`.
+        crate::platform::test_env::with_env(crate::commands::TASK_ENV, "demo", || {
+            crate::commands::report(
+                &repo,
+                &pipelines,
+                &crate::cli::ReportArgs {
+                    task: Some("demo".into()),
+                    pass: true,
+                    fail: false,
+                    block: false,
+                    pause: false,
+                    message: Some("released it".into()),
+                    handoff: vec![],
+                },
+                Some("release"),
+            )
+        })
         .unwrap();
 
         let task = reload(&path);
@@ -8722,6 +9125,67 @@ mod tests {
         );
     }
 
+    /// A held pane's lane is banked when the block clears and the pane is
+    /// freed, so the rounds a person drove in it while it was held reach the
+    /// ledger. `free_finished_lanes` used to skip `record_usage` for any
+    /// `held_for_block` lane, on the belief that booking it a second time
+    /// would double-count it — but `record_usage` diffs the transcript
+    /// against what the hold-time line already banked, so only the person's
+    /// own delta is appended (review finding 34).
+    #[test]
+    fn a_held_lane_banks_the_persons_rounds_when_its_pane_is_freed() {
+        let mut repo = fixture("held-lane-banks");
+        priced(&mut repo, "priced-model");
+        let _task = reload(&add_task_with(&repo, "demo", "implement", |f| {
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+        }));
+
+        let session = "held-s34";
+        let kind = local_kind(&repo);
+        // The line banked when the lane was first held. The person's rounds
+        // since are what is missing from it.
+        write_entry(&repo, "demo", "implement", &kind, "priced-model", session);
+        {
+            let mut lanes = load_lane_records(&repo);
+            lanes.insert(
+                "demo · implement".into(),
+                LaneRecord {
+                    session: session.into(),
+                    kind: kind.clone(),
+                    agent: "pi".into(),
+                    model: "priced-model".into(),
+                    held_for_block: true,
+                    ..LaneRecord::adopted(now_secs())
+                },
+            );
+            save_lane_records(&repo, &lanes).unwrap();
+        }
+
+        // The block is cleared: the task is back on its step and its lane has
+        // gone idle, so `free_finished_lanes` frees the held pane — and banks
+        // it on the way.
+        let home = pi_home_with(session, 8_400);
+        let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]);
+        with_home(&home, || {
+            Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
+                .pass()
+                .unwrap();
+        });
+
+        let banked = crate::usage::read(&repo).unwrap();
+        let lines: Vec<_> = banked.iter().filter(|e| e.session == session).collect();
+        assert_eq!(
+            lines.len(),
+            2,
+            "the hold-time line and the freed lane's own bank: {banked:?}"
+        );
+        assert_eq!(
+            lines[1].tokens.input, 8_400,
+            "the transcript's spend since the hold, banked once the pane was freed"
+        );
+    }
+
     /// Backdate a lane's record so the clocks read as `how_long` having passed.
     /// The record is the dispatcher's own bookkeeping, so a test that wants a
     /// timeout to fire moves that rather than the wall clock.
@@ -9216,7 +9680,7 @@ mod tests {
     /// The one brake an unattended run has must measure the run, and the
     /// operator's own interactive session is not the run.
     ///
-    /// `usage::bank_session` banks planning and queueing against the
+    /// `usage::bank_ambient` banks planning and queueing against the
     /// project, correctly — it is real spend on real work. Summed into the
     /// ceiling it meant that sitting in a Claude session *watching* an overnight
     /// run stopped the dispatcher starting any: 20 of the 38 ledger entries a
@@ -9420,12 +9884,12 @@ mod tests {
         assert!(!load_lane_records(&repo).contains_key("demo · implement"));
     }
 
-    /// `usage_banked` used to be read unconditionally in `Dispatcher::new`,
-    /// so every pass parsed the whole ledger whether or not it banked
-    /// anything — a regression against the very goal this task exists for,
-    /// on the ledger it names as 40MB. An empty queue has nothing to tear
-    /// down and nothing to bank, so the field must still be `None` — never
-    /// populated — once the pass is done.
+    /// The ledger used to be parsed on hot paths every pass — the ceiling
+    /// checks, `carried_session`, `readopted`, `lane_session` — whether or not
+    /// the pass had any use for it (review findings 33 and the earlier lazy
+    /// `usage_banked` work). An empty queue has nothing to bank, nothing to
+    /// start and no attended ceiling to check, so both the ledger snapshot and
+    /// the banked-totals fold must still be `None` once the pass is done.
     #[test]
     fn a_pass_that_banks_nothing_never_reads_the_ledger() {
         let repo = fixture("lazy-usage-banked");
@@ -9434,9 +9898,10 @@ mod tests {
         let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux, false);
         dispatcher.pass().unwrap();
         assert!(
-            dispatcher.usage_banked.is_none(),
+            dispatcher.ledger.is_none(),
             "a pass with nothing to bank must never read the ledger at all"
         );
+        assert!(dispatcher.usage_banked.is_none());
     }
 
     /// A lane re-adopted across a dispatcher restart still banks its tokens.
@@ -10078,7 +10543,15 @@ mod tests {
 
         let home = pi_home_with("newer-session", 10);
         let (found_kind, session) = with_home(&home, || {
-            carried_session(&repo, pipeline, &task, step, &profile, "test-model")
+            carried_session(
+                &repo,
+                pipeline,
+                &task,
+                step,
+                &profile,
+                "test-model",
+                &crate::usage::read(&repo).unwrap(),
+            )
         })
         .expect("an earlier session for this prompt");
         std::fs::remove_dir_all(&home).ok();
@@ -10111,7 +10584,15 @@ mod tests {
         profile.session_reuse_ctx = 60;
 
         assert_eq!(
-            carried_session(&repo, pipeline, &task, step, &profile, "test-model"),
+            carried_session(
+                &repo,
+                pipeline,
+                &task,
+                step,
+                &profile,
+                "test-model",
+                &crate::usage::read(&repo).unwrap()
+            ),
             Err(SessionMiss::NotFound)
         );
 
@@ -10125,7 +10606,15 @@ mod tests {
             "carried-session",
         );
         assert_eq!(
-            carried_session(&repo, pipeline, &task, step, &profile, "test-model"),
+            carried_session(
+                &repo,
+                pipeline,
+                &task,
+                step,
+                &profile,
+                "test-model",
+                &crate::usage::read(&repo).unwrap()
+            ),
             Err(SessionMiss::WindowUnset),
             "`test-model` is priced by neither table, so there is nothing to \
              measure the transcript against"
@@ -10144,7 +10633,15 @@ mod tests {
         );
         let home = pi_home_with("oversize-session", 700);
         let result = with_home(&home, || {
-            carried_session(&repo, pipeline, &task, step, &profile, "priced-model")
+            carried_session(
+                &repo,
+                pipeline,
+                &task,
+                step,
+                &profile,
+                "priced-model",
+                &crate::usage::read(&repo).unwrap(),
+            )
         });
         std::fs::remove_dir_all(&home).ok();
         assert_eq!(
@@ -10171,7 +10668,15 @@ mod tests {
         );
         let home = claude_home_with("stale-session", 400, 10);
         let result = with_home(&home, || {
-            carried_session(&repo, pipeline, &task, step, &profile, "priced-model")
+            carried_session(
+                &repo,
+                pipeline,
+                &task,
+                step,
+                &profile,
+                "priced-model",
+                &crate::usage::read(&repo).unwrap(),
+            )
         });
         assert_eq!(result, Err(SessionMiss::Stale));
 
@@ -10183,7 +10688,15 @@ mod tests {
             .unwrap()
             .session_reuse_idle = None;
         let resumed = with_home(&home, || {
-            carried_session(&repo, pipeline, &task, step, &profile, "priced-model")
+            carried_session(
+                &repo,
+                pipeline,
+                &task,
+                step,
+                &profile,
+                "priced-model",
+                &crate::usage::read(&repo).unwrap(),
+            )
         })
         .expect("a session with no idle horizon should resume however old its store");
         std::fs::remove_dir_all(&home).ok();
@@ -10517,9 +11030,17 @@ mod tests {
     #[test]
     fn a_task_whose_branch_is_already_checked_out_borrows_that_checkout() {
         let repo = fixture("in-place");
+        // The task's branch is `task/<id>` and nothing else now — see
+        // `queue::RESERVED_KEYS` — so the "already checked out" case is the
+        // fixture root itself sitting on `task/plan-closeout`.
+        crate::repo::run(
+            &repo.root,
+            "git",
+            &["branch", "-m", "work", "task/plan-closeout"],
+        )
+        .unwrap();
         let path = add_task_with(&repo, "plan-closeout", crate::pipeline::QUEUED, |f| {
-            // The branch the fixture has checked out at its root.
-            f.branch = Some("work".into());
+            f.branch = Some("task/plan-closeout".into());
         });
 
         let mux = FakeMux::new(vec![]);
@@ -10823,7 +11344,7 @@ mod tests {
         let mut task = reload(&add_task(&repo, "demo", "implement"));
         let mux = FakeMux::new(vec![]);
 
-        ensure_workspace(&repo, &mux, &mut task).unwrap();
+        ensure_workspace(&repo, &mux, &mut task, &Default::default()).unwrap();
 
         assert!(
             task.front.run.is_some(),
@@ -10851,7 +11372,7 @@ mod tests {
         let mut task = reload(&add_task(&repo, "demo", "implement"));
         let mux = FakeMux::new(vec![]);
 
-        ensure_workspace(&repo, &mux, &mut task).unwrap();
+        ensure_workspace(&repo, &mux, &mut task, &Default::default()).unwrap();
 
         assert!(task.front.borrowed);
         assert!(
@@ -10891,7 +11412,7 @@ mod tests {
         // answer `false` off the workspace half alone.
         let mux = FakeMux::new(vec![]).forgetting("w1");
 
-        ensure_workspace(&repo, &mux, &mut task).unwrap();
+        ensure_workspace(&repo, &mux, &mut task, &Default::default()).unwrap();
 
         assert_eq!(
             task.front.worktree_path,
@@ -10943,7 +11464,7 @@ mod tests {
         }));
         let mux = FakeMux::new(vec![]);
 
-        ensure_workspace(&repo, &mux, &mut task).unwrap();
+        ensure_workspace(&repo, &mux, &mut task, &Default::default()).unwrap();
 
         assert_eq!(task.front.workspace_id.as_deref(), Some("w1"));
         assert_eq!(task.front.pane_id.as_deref(), Some("w1:p1"));
@@ -11107,7 +11628,7 @@ mod tests {
         // the point here is what the worktree actually contains.
         let mux = FakeMux::new(vec![]).tabs_in_one_workspace();
 
-        ensure_workspace(&repo, &mux, &mut task).unwrap();
+        ensure_workspace(&repo, &mux, &mut task, &Default::default()).unwrap();
 
         assert_eq!(task.front.cut_from.as_deref(), Some("task/first"));
         assert_eq!(
@@ -11142,7 +11663,7 @@ mod tests {
         let mut task = reload(&add_task(&repo, "demo", "implement"));
         let mux = FakeMux::new(vec![]);
 
-        ensure_workspace(&repo, &mux, &mut task).unwrap();
+        ensure_workspace(&repo, &mux, &mut task, &Default::default()).unwrap();
 
         assert_eq!(task.front.cut_from.as_deref(), Some("work"));
         assert_eq!(task.front.base.as_deref(), Some("work"));
@@ -11232,6 +11753,66 @@ mod tests {
         );
     }
 
+    /// A task reaching a cleanup terminal with work its worktree holds that
+    /// `auto_commit` cannot record — a rejecting `pre-commit` hook here — is
+    /// held at `blocked` rather than archived, so the worktree is not torn
+    /// down over a commit that never happened (review finding 4). This is the
+    /// road every shipped pipeline takes to `done`: a command step, not an
+    /// agent's `spoolway report`.
+    #[cfg(unix)]
+    #[test]
+    fn a_cleanup_terminal_holds_a_task_whose_work_cannot_be_committed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let repo = fixture("cleanup-uncommittable");
+        let worktree = crate::scratch::root("dispatch-cleanup-uncommittable-wt");
+        let _ = std::fs::remove_dir_all(&worktree);
+        std::fs::create_dir_all(&worktree).unwrap();
+        crate::repo::run(&worktree, "git", &["init", "-q", "-b", "task/demo"]).unwrap();
+        let hooks = worktree.join(".git/hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        std::fs::write(hooks.join("pre-commit"), "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(
+            hooks.join("pre-commit"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        std::fs::write(worktree.join("left.txt"), "work that never got recorded").unwrap();
+
+        let path = add_task_with(&repo, "demo", "done", |f| {
+            f.workspace_id = Some("w1".into());
+            f.branch = Some("task/demo".into());
+            f.worktree_path = Some(worktree.clone());
+            f.last_report = Some(crate::task::LastReport {
+                step: "implement".into(),
+                outcome: "pass".into(),
+                at: 0,
+            });
+        });
+
+        let mux = FakeMux::new(vec![]);
+        run_pass(&repo, &mux);
+
+        assert!(
+            path.exists(),
+            "the task must stay in the queue, not be archived over lost work"
+        );
+        assert!(!repo.archive_dir().join("demo.md").exists());
+        let task = reload(&path);
+        assert_eq!(task.stage(), crate::pipeline::BLOCKED);
+        assert_eq!(task.front.blocked_from.as_deref(), Some("implement"));
+        assert!(
+            mux.did("remove_workspace").is_empty(),
+            "the worktree must not be torn down"
+        );
+        assert!(
+            task.section("## Status Log")
+                .unwrap_or_default()
+                .contains("could not be committed"),
+            "the record must say why"
+        );
+    }
+
     // covers: step.cleanup — a terminal step that cleans up takes the worktree, the branch and the task file
     #[test]
     fn reaching_a_cleanup_step_tears_down_and_archives() {
@@ -11247,6 +11828,198 @@ mod tests {
         assert_eq!(mux.did("remove_workspace"), ["remove_workspace w1"]);
         assert!(!path.exists(), "task file should have left the queue");
         assert!(repo.archive_dir().join("demo.md").exists());
+    }
+
+    /// Archiving a task takes its hook and command run files with it, so
+    /// `tracking::failure_count` stops counting a long-gone task's failed
+    /// hook (review finding 64). Another task's files are left untouched.
+    #[test]
+    fn cleanup_reclaims_a_tasks_tracking_and_command_run_files() {
+        let repo = fixture("cleanup-reclaim");
+        let path = add_task_with(&repo, "demo", "done", |f| {
+            f.workspace_id = Some("w1".into());
+            f.branch = Some("task/demo".into());
+        });
+
+        std::fs::create_dir_all(repo.tracking_dir()).unwrap();
+        std::fs::create_dir_all(repo.commands_dir()).unwrap();
+        std::fs::write(repo.tracking_dir().join("demo · queued.exit"), "1").unwrap();
+        std::fs::write(repo.tracking_dir().join("demo · queued.log"), "boom").unwrap();
+        std::fs::write(repo.commands_dir().join("demo · e2e.log"), "output").unwrap();
+        std::fs::write(repo.tracking_dir().join("other · queued.exit"), "1").unwrap();
+
+        let mux = FakeMux::new(vec![]);
+        run_pass(&repo, &mux);
+
+        assert!(!path.exists(), "task file should have left the queue");
+        assert!(!repo.tracking_dir().join("demo · queued.exit").exists());
+        assert!(!repo.tracking_dir().join("demo · queued.log").exists());
+        assert!(!repo.commands_dir().join("demo · e2e.log").exists());
+        assert!(
+            repo.tracking_dir().join("other · queued.exit").exists(),
+            "another task's run files must be left alone"
+        );
+    }
+
+    /// The per-session agent home a self-id'ing kind was given is reclaimed
+    /// once the lane is banked and the task archived (review finding 63) — a
+    /// no-op for a kind that takes the id spoolway minted.
+    #[test]
+    fn reclaim_session_home_removes_a_self_id_kinds_home() {
+        let home = crate::scratch::root("dispatch-session-home");
+        let _ = std::fs::remove_dir_all(&home);
+        crate::platform::test_home::with_home(&home, || {
+            let session = "reclaim-sh-1";
+            let dir = crate::agent::session_home("codex", session)
+                .expect("codex pins by home, so it has one");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("auth.json"), "{}").unwrap();
+
+            let record = LaneRecord {
+                session: session.into(),
+                kind: "codex".into(),
+                ..LaneRecord::adopted(now_secs())
+            };
+            record.reclaim_session_home();
+            assert!(!dir.exists(), "the per-session home was left behind");
+
+            // A kind that takes the minted id has no home, so this does
+            // nothing and cannot panic.
+            LaneRecord {
+                session: "s".into(),
+                kind: "claude".into(),
+                ..LaneRecord::adopted(now_secs())
+            }
+            .reclaim_session_home();
+        });
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// `clean_up` can still turn back and hold the task at `blocked` when the
+    /// worktree holds work `auto_commit` could not record. The per-session
+    /// agent home must survive that: the task stays in the queue, and a
+    /// `session:` step resuming it wants its transcript. Reclamation only
+    /// runs after the archive rename, past every early return.
+    #[test]
+    fn a_cleanup_held_at_blocked_keeps_the_lanes_session_home() {
+        let mut repo = fixture("cleanup-blocked-keeps-home");
+        repo.config.dispatch.auto_commit = false;
+
+        let worktree = crate::scratch::root("dispatch-cleanup-blocked-wt");
+        let _ = std::fs::remove_dir_all(&worktree);
+        repo.git(&[
+            "worktree",
+            "add",
+            "-b",
+            "task/demo",
+            worktree.to_str().unwrap(),
+        ])
+        .unwrap();
+        // Uncommitted work in the tree — with `auto_commit` off this is
+        // `AutoCommit::Unrecorded`, which holds the cleanup at `blocked`.
+        std::fs::write(worktree.join("scratch.txt"), "unsaved\n").unwrap();
+
+        let path = add_task_with(&repo, "demo", "done", |f| {
+            f.workspace_id = Some("w1".into());
+            f.branch = Some("task/demo".into());
+            f.worktree_path = Some(worktree.clone());
+        });
+
+        let home = crate::scratch::root("dispatch-cleanup-blocked-home");
+        let _ = std::fs::remove_dir_all(&home);
+        crate::platform::test_home::with_home(&home, || {
+            let session = "cleanup-blocked-s1";
+            let session_home = crate::agent::session_home("codex", session).unwrap();
+            std::fs::create_dir_all(&session_home).unwrap();
+            std::fs::write(session_home.join("auth.json"), "{}").unwrap();
+
+            let mux = FakeMux::new(vec![]);
+            let pipelines = Pipelines::builtin();
+            let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux, false);
+            dispatcher.lanes.insert(
+                "demo · implement".into(),
+                LaneRecord {
+                    session: session.into(),
+                    kind: "codex".into(),
+                    ..LaneRecord::adopted(now_secs())
+                },
+            );
+
+            // A live owned lane for the task — the path the reclaim used to
+            // run on before the early return.
+            let owned_lane = lane(&repo, "demo · implement", LaneStatus::Working);
+            let owned: Vec<(String, String, &Lane)> =
+                vec![("implement".into(), "demo".into(), &owned_lane)];
+            let mut report = Report::default();
+            let archived = dispatcher
+                .clean_up(&mut reload(&path), &owned, &mut report)
+                .unwrap();
+
+            assert!(!archived, "cleanup should have turned back to `blocked`");
+            assert!(
+                session_home.join("auth.json").exists(),
+                "the owned lane's session home was reclaimed on a path that never archived the task"
+            );
+        });
+
+        assert!(path.exists(), "a held task stays in the queue");
+        assert_eq!(reload(&path).stage(), crate::pipeline::BLOCKED);
+
+        repo.git(&["worktree", "remove", "--force", worktree.to_str().unwrap()])
+            .ok();
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A lane still writing when its task reaches a cleaning terminal step is
+    /// skipped by `free_finished_lanes` as busy and then killed by
+    /// `clean_up`. `clean_up` used to drop its record without banking it, so
+    /// its tokens were lost (review finding 14); now it banks each owned lane
+    /// first, the way `sweep_on_stop` does.
+    #[test]
+    fn clean_up_banks_a_lane_still_running_when_the_task_reaches_done() {
+        let mut repo = fixture("cleanup-banks");
+        priced(&mut repo, "priced-model");
+        let path = add_task_with(&repo, "demo", "done", |f| {
+            f.workspace_id = Some("w1".into());
+            f.branch = Some("task/demo".into());
+        });
+
+        let session = "cleanup-s14";
+        let kind = local_kind(&repo);
+        {
+            let mut lanes = load_lane_records(&repo);
+            lanes.insert(
+                "demo · implement".into(),
+                LaneRecord {
+                    session: session.into(),
+                    kind: kind.clone(),
+                    agent: "pi".into(),
+                    model: "priced-model".into(),
+                    ..LaneRecord::adopted(now_secs())
+                },
+            );
+            save_lane_records(&repo, &lanes).unwrap();
+        }
+
+        let home = pi_home_with(session, 5_000);
+        let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Working)]);
+        with_home(&home, || {
+            Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
+                .pass()
+                .unwrap();
+        });
+
+        assert!(!path.exists(), "the task still reached the archive");
+        let banked = crate::usage::read(&repo).unwrap();
+        let line = banked
+            .iter()
+            .find(|e| e.session == session)
+            .expect("clean_up killed the lane without banking it");
+        assert_eq!(line.tokens.input, 5_000);
+        // The lane's own step, not the terminal `done` the task now sits on:
+        // `lane_name(&line.step, &line.task)` has to name a lane that existed.
+        assert_eq!(line.step, "implement");
+        assert_eq!(line.task, "demo");
     }
 
     #[test]

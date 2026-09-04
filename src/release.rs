@@ -93,9 +93,28 @@ impl Channel {
 
     /// The same decision, against a path handed in. Split out so it is
     /// testable without an npm install to run under.
+    ///
+    /// `Npm` means a *global* install — the one layout `npm install -g
+    /// spoolway@<v>` can actually replace. A bare `node_modules` component is
+    /// not enough: a project-local `npm install spoolway`, an `npx` run, or a
+    /// pnpm/yarn layout all have one, and for those `upgrade()` would install a
+    /// global copy the project never sees while the terminal says a new version
+    /// landed. A global npm prefix always puts its packages under
+    /// `<prefix>/lib/node_modules/` (Unix, including nvm and Homebrew) or
+    /// `<prefix>/npm/node_modules/` (the Windows `%AppData%\npm` prefix), so the
+    /// signal is a `node_modules` component immediately preceded by `lib` or
+    /// `npm`. A project directory happening to be named exactly `lib` or `npm`
+    /// is the one false positive, and it is a fine one: such a checkout really
+    /// is one `npm install -g` can stand in for.
     pub fn of(exe: &Path) -> Channel {
-        let mut components = exe.components().map(|c| c.as_os_str().to_string_lossy());
-        match components.any(|part| part == "node_modules") {
+        let parts: Vec<String> = exe
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().to_string())
+            .collect();
+        let global = parts
+            .windows(2)
+            .any(|pair| pair[1] == "node_modules" && (pair[0] == "lib" || pair[0] == "npm"));
+        match global {
             true => Channel::Npm,
             false => Channel::Other,
         }
@@ -163,10 +182,15 @@ fn now() -> u64 {
 
 /// Is `latest` a version after `running`?
 ///
-/// Numeric dotted components, compared left to right, with anything after a
-/// `-` or `+` ignored: a pre-release is not offered as an upgrade, and a build
-/// suffix is not a difference. Anything that does not parse is not newer —
-/// this decides whether to nag somebody, so the ambiguous answer is silence.
+/// Numeric dotted components, compared left to right. A build suffix (`+…`) on
+/// either side is not a difference and is dropped. A pre-release suffix (`-…`)
+/// on `latest` is not offered as an upgrade at all: `0.2.0-beta.1` is not a
+/// release, so this returns `false` for it even against an older `running`.
+/// `npm view spoolway version` returns the `latest` dist-tag today, so this
+/// only bites if a pre-release is ever published without `--tag` — but then it
+/// is `npm install -g` on every user's machine, so the guard belongs here and
+/// not only in the comment. Anything that does not parse is not newer — this
+/// decides whether to nag somebody, so the ambiguous answer is silence.
 pub fn is_newer(latest: &str, running: &str) -> bool {
     let parts = |v: &str| -> Option<Vec<u64>> {
         let core = v.trim().trim_start_matches('v');
@@ -180,6 +204,20 @@ pub fn is_newer(latest: &str, running: &str) -> bool {
             false => Some(parsed),
         }
     };
+
+    // A pre-release `latest` is never an upgrade, whatever its core compares
+    // to. Build metadata (`+…`) is dropped first so a `+`-only suffix is not
+    // mistaken for one.
+    if latest
+        .trim()
+        .trim_start_matches('v')
+        .split('+')
+        .next()
+        .unwrap_or_default()
+        .contains('-')
+    {
+        return false;
+    }
 
     let (Some(latest), Some(running)) = (parts(latest), parts(running)) else {
         return false;
@@ -465,12 +503,43 @@ pub fn upgrade(lock_file: &Path) -> Upgrade {
 /// Resolved through `PATH` rather than through `current_exe`, because
 /// `current_exe` on Unix is the *inode* this process is executing and npm has
 /// just written a different file at the name.
-pub fn hand_over(args: &[String]) -> Result<std::process::ExitStatus> {
+///
+/// `expect_version` is what the install just put down. `PATH` is not proof that
+/// the name now resolves to it — under `npx` or `node_modules/.bin` the first
+/// `spoolway` on `PATH` is still the old binary, which would run the file work
+/// with the old `include_str!` tables and exit 0. So the resolved binary is
+/// asked its version *before* it is handed the work: a mismatch refuses here,
+/// rather than letting the wrong binary rewrite the project's files and only
+/// then reporting the handover went astray.
+pub fn hand_over(args: &[String], expect_version: &str) -> Result<std::process::ExitStatus> {
     let program = std::env::var_os("PATH")
         .and_then(|path| crate::platform::which(PACKAGE, &path))
         .unwrap_or_else(|| PathBuf::from(PACKAGE));
 
-    Ok(Command::new(program)
+    let reported = Command::new(&program)
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string());
+    match reported {
+        // `spoolway --version` prints `spoolway <version>`; match on the
+        // version token anywhere in the line rather than the whole string.
+        Some(line) if line.split_whitespace().any(|word| word == expect_version) => {}
+        Some(line) => anyhow::bail!(
+            "the `spoolway` on PATH resolves to `{}`, which reports `{line}` rather than the \
+             installed {expect_version} — a different install (an `npx` or project-local \
+             copy); install spoolway {expect_version} the way this one was installed",
+            program.display()
+        ),
+        None => anyhow::bail!(
+            "the `spoolway` on PATH (`{}`) did not report a version — cannot confirm the \
+             installed {expect_version} is what the file work would run",
+            program.display()
+        ),
+    }
+
+    Ok(Command::new(&program)
         .args(args)
         .env(ENV_UPGRADED, "1")
         .status()?)
@@ -488,16 +557,38 @@ mod tests {
         let npm = Path::new(
             "/home/x/.nvm/versions/node/v20.0.0/lib/node_modules/@spoolway/linux-x64/bin/spoolway",
         );
+        // The Windows global prefix is `%AppData%\npm`, so `npm/node_modules`
+        // stands in for `lib/node_modules` there. Built from components rather
+        // than a `\`-separated literal, which `Path` does not split on Unix.
+        let npm_win: PathBuf = [
+            "npm",
+            "node_modules",
+            "@spoolway",
+            "win32-x64",
+            "bin",
+            "spoolway.exe",
+        ]
+        .iter()
+        .collect();
         let hand = Path::new("/home/x/.local/bin/spoolway");
         let nix = Path::new("/nix/store/abc123-spoolway-0.1.0/bin/spoolway");
+        // A project-local install and an `npx` run each have a `node_modules`
+        // component, but neither is what `npm install -g` replaces — finding 19.
+        let local = Path::new("/home/x/webshop/node_modules/@spoolway/linux-x64/bin/spoolway");
+        let local_bin = Path::new("/home/x/webshop/node_modules/.bin/spoolway");
+        let npx = Path::new("/home/x/.npm/_npx/abc/node_modules/@spoolway/linux-x64/bin/spoolway");
 
         assert_eq!(Channel::of(npm), Channel::Npm);
+        assert_eq!(Channel::of(&npm_win), Channel::Npm);
         assert_eq!(Channel::of(hand), Channel::Other);
         assert_eq!(Channel::of(nix), Channel::Other);
+        assert_eq!(Channel::of(local), Channel::Other);
+        assert_eq!(Channel::of(local_bin), Channel::Other);
+        assert_eq!(Channel::of(npx), Channel::Other);
 
         // And what each is told matches what each can do.
         assert!(line("0.2.0", Channel::of(npm)).contains("Run \"spoolway update\""));
-        for outside in [hand, nix] {
+        for outside in [hand, nix, local, npx] {
             let said = line("0.2.0", Channel::of(outside));
             assert!(
                 !said.contains("spoolway update"),
@@ -531,6 +622,20 @@ mod tests {
             !is_newer("0.1.0+build", "0.1.0"),
             "a build suffix is not a release"
         );
+    }
+
+    /// A pre-release is never offered as an upgrade, however its core compares —
+    /// its own doc comment said so while the code stripped the `-` and compared
+    /// anyway (finding 68).
+    #[test]
+    fn a_pre_release_latest_is_not_an_upgrade() {
+        assert!(!is_newer("0.2.0-beta.1", "0.1.0"));
+        assert!(!is_newer("1.0.0-rc.1", "0.9.0"));
+        assert!(!is_newer("v0.2.0-alpha", "0.1.0"));
+        // A pre-release of the same core is not one either.
+        assert!(!is_newer("0.1.0-beta", "0.1.0"));
+        // Build metadata on its own still compares by core.
+        assert!(is_newer("0.2.0+build.7", "0.1.0"));
     }
 
     /// Whatever npm prints that is not a version, nobody is nagged about. This
