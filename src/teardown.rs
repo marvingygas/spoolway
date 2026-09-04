@@ -76,6 +76,13 @@ impl<'a> Dispatcher<'a> {
             .for_task(task)
             .map(|p| p.name.clone())
             .unwrap_or_default();
+
+        // The banked records are kept in hand rather than dropped: their
+        // per-session agent homes are reclaimed further down, but only once
+        // the task is actually archived. `clean_up` can still turn back below
+        // and hold the task at `blocked` (uncommitted work), and a `session:`
+        // step resuming it then would want that transcript.
+        let mut banked: Vec<LaneRecord> = Vec::new();
         for (step_id, task_id, lane) in owned {
             if task_id == task.id() {
                 let _ = self.mux.stop_lane(&lane.name, &lane.pane_id);
@@ -85,6 +92,7 @@ impl<'a> Dispatcher<'a> {
                     .remove(&lane.name)
                     .unwrap_or_else(|| LaneRecord::readopted(&lane.name, now_secs(), &ledger));
                 self.record_usage(&record, task.id(), step_id, Some(task), &pipeline);
+                banked.push(record);
             }
         }
 
@@ -184,6 +192,32 @@ impl<'a> Dispatcher<'a> {
         })?;
 
         self.close_project_tab_if_empty(task);
+
+        // The task has left the queue for good. Its hook and command run
+        // files under `tracking/` and `commands/` are litter now, and left
+        // in place `tracking::failure_count` would go on counting a failed
+        // hook of a task nobody can reach any more (review finding 64).
+        runs.reclaim_task(task.id());
+        crate::tracking::reclaim(self.repo, task.id());
+
+        // And now — past every early return — the per-session agent homes the
+        // task's lanes were given: the ones just banked above, plus any older
+        // lane record still held for it. A copied `auth.json` under one would
+        // otherwise outlive every credential rotation (review finding 63).
+        for record in &banked {
+            record.reclaim_session_home();
+        }
+        let stale: Vec<String> = self
+            .lanes
+            .keys()
+            .filter(|name| crate::mux::lane_task(name) == task.id())
+            .cloned()
+            .collect();
+        for name in stale {
+            if let Some(record) = self.lanes.remove(&name) {
+                record.reclaim_session_home();
+            }
+        }
 
         // `task` itself just moved to the archive, so this reread is what
         // lets a branch retained for *its* sake, earlier in the chain, be

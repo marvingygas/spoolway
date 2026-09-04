@@ -439,4 +439,47 @@ one_shot_stop "$BROKEN_PID"
 rm -f "$SPOOLWAY_PROJECT_HOME/queue/broken.md"
 forget survivor
 
+# --------- the retention sweep spares a queued task's scratch and headless state
+# `retain::sweep_now` runs on every command's startup and deletes byproduct
+# entries older than `retention.days`. `scratch/<id>` is what a lane is handed
+# as `$SPOOLWAY_SCRATCH` — planner output and all — and `headless/` holds the
+# record a running lane is read back through. An entry in either must survive
+# for as long as its task is still in the queue, whatever stage it sits on, or
+# `spoolway resume` comes back to a lane with nothing under it.
+sweep
+must "a short retention window" "$SPOOLWAY" config set retention.days 1
+HOME_DIR=$SPOOLWAY_PROJECT_HOME
+queue_hang retained
+mkdir -p "$HOME_DIR/scratch/retained" "$HOME_DIR/headless"
+echo 'planner output' > "$HOME_DIR/scratch/retained/plan.md"
+echo '{}' > "$HOME_DIR/headless/retained · implement.json"
+# Backdated well past the window — a directory's own mtime does not move while
+# a lane only writes files into it, which is the whole trap.
+touch -d '3 days ago' \
+  "$HOME_DIR/scratch/retained" "$HOME_DIR/scratch/retained/plan.md" \
+  "$HOME_DIR/headless/retained · implement.json"
+"$SPOOLWAY" queue list >/dev/null 2>&1 || true
+if [ -f "$HOME_DIR/scratch/retained/plan.md" ] \
+   && [ -f "$HOME_DIR/headless/retained · implement.json" ]; then
+  ok "the sweep spares a queued task's scratch and headless state"
+else
+  bad "the sweep spares a queued task's scratch and headless state"
+  printf '        scratch: %s, headless: %s\n' \
+    "$([ -f "$HOME_DIR/scratch/retained/plan.md" ] && echo present || echo gone)" \
+    "$([ -f "$HOME_DIR/headless/retained · implement.json" ] && echo present || echo gone)"
+fi
+# Once the task leaves the queue the same aged entries do age out.
+forget retained
+"$SPOOLWAY" queue list >/dev/null 2>&1 || true
+if [ ! -e "$HOME_DIR/scratch/retained" ] \
+   && [ ! -e "$HOME_DIR/headless/retained · implement.json" ]; then
+  ok "and once its task is gone from the queue they age out as before"
+else
+  bad "and once its task is gone from the queue they age out as before"
+  printf '        scratch: %s, headless: %s\n' \
+    "$([ -e "$HOME_DIR/scratch/retained" ] && echo present || echo gone)" \
+    "$([ -e "$HOME_DIR/headless/retained · implement.json" ] && echo present || echo gone)"
+fi
+must "retention back to the default" "$SPOOLWAY" config set retention.days 30
+
 finish

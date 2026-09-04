@@ -2288,6 +2288,13 @@ mod tests {
             "{empty:#?}"
         );
 
+        // `failure_count` only counts a key whose task is still in the queue.
+        std::fs::create_dir_all(repo.queue_dir()).unwrap();
+        std::fs::write(
+            repo.queue_dir().join("demo.md"),
+            "---\nid: demo\nstage: queued\n---\n",
+        )
+        .unwrap();
         std::fs::create_dir_all(repo.tracking_dir()).unwrap();
         std::fs::write(repo.tracking_dir().join("demo · queued.exit"), "1\n").unwrap();
         std::fs::write(repo.tracking_dir().join("other · done.exit"), "0\n").unwrap();

@@ -313,6 +313,25 @@ impl LaneRecord {
         record
     }
 
+    /// Remove the per-session agent home spoolway made for this lane, once
+    /// the lane has been banked and its task archived.
+    ///
+    /// Only a kind that mints its own session id and will not take one —
+    /// codex today — is handed a home of its own (see [`crate::agent::Home`]);
+    /// for every other kind [`crate::agent::session_home`] answers `None` and
+    /// this is a no-op. Left behind, that home holds a link — or, on a
+    /// platform that will not make one, a full copy — of `auth.json` per
+    /// lane, which after a credential rotation is so much stale litter
+    /// (review finding 63).
+    pub(crate) fn reclaim_session_home(&self) {
+        if self.session.is_empty() || self.kind.is_empty() {
+            return;
+        }
+        if let Some(home) = crate::agent::session_home(&self.kind, &self.session) {
+            let _ = std::fs::remove_dir_all(home);
+        }
+    }
+
     /// A stub record carrying nothing but the pane [`Dispatcher::retire`]
     /// left standing. Its usage fields are blank like [`LaneRecord::adopted`]'s
     /// — `record_usage` is a no-op on an empty `session`, so a stale caller
@@ -11809,6 +11828,146 @@ mod tests {
         assert_eq!(mux.did("remove_workspace"), ["remove_workspace w1"]);
         assert!(!path.exists(), "task file should have left the queue");
         assert!(repo.archive_dir().join("demo.md").exists());
+    }
+
+    /// Archiving a task takes its hook and command run files with it, so
+    /// `tracking::failure_count` stops counting a long-gone task's failed
+    /// hook (review finding 64). Another task's files are left untouched.
+    #[test]
+    fn cleanup_reclaims_a_tasks_tracking_and_command_run_files() {
+        let repo = fixture("cleanup-reclaim");
+        let path = add_task_with(&repo, "demo", "done", |f| {
+            f.workspace_id = Some("w1".into());
+            f.branch = Some("task/demo".into());
+        });
+
+        std::fs::create_dir_all(repo.tracking_dir()).unwrap();
+        std::fs::create_dir_all(repo.commands_dir()).unwrap();
+        std::fs::write(repo.tracking_dir().join("demo · queued.exit"), "1").unwrap();
+        std::fs::write(repo.tracking_dir().join("demo · queued.log"), "boom").unwrap();
+        std::fs::write(repo.commands_dir().join("demo · e2e.log"), "output").unwrap();
+        std::fs::write(repo.tracking_dir().join("other · queued.exit"), "1").unwrap();
+
+        let mux = FakeMux::new(vec![]);
+        run_pass(&repo, &mux);
+
+        assert!(!path.exists(), "task file should have left the queue");
+        assert!(!repo.tracking_dir().join("demo · queued.exit").exists());
+        assert!(!repo.tracking_dir().join("demo · queued.log").exists());
+        assert!(!repo.commands_dir().join("demo · e2e.log").exists());
+        assert!(
+            repo.tracking_dir().join("other · queued.exit").exists(),
+            "another task's run files must be left alone"
+        );
+    }
+
+    /// The per-session agent home a self-id'ing kind was given is reclaimed
+    /// once the lane is banked and the task archived (review finding 63) — a
+    /// no-op for a kind that takes the id spoolway minted.
+    #[test]
+    fn reclaim_session_home_removes_a_self_id_kinds_home() {
+        let home = crate::scratch::root("dispatch-session-home");
+        let _ = std::fs::remove_dir_all(&home);
+        crate::platform::test_home::with_home(&home, || {
+            let session = "reclaim-sh-1";
+            let dir = crate::agent::session_home("codex", session)
+                .expect("codex pins by home, so it has one");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("auth.json"), "{}").unwrap();
+
+            let record = LaneRecord {
+                session: session.into(),
+                kind: "codex".into(),
+                ..LaneRecord::adopted(now_secs())
+            };
+            record.reclaim_session_home();
+            assert!(!dir.exists(), "the per-session home was left behind");
+
+            // A kind that takes the minted id has no home, so this does
+            // nothing and cannot panic.
+            LaneRecord {
+                session: "s".into(),
+                kind: "claude".into(),
+                ..LaneRecord::adopted(now_secs())
+            }
+            .reclaim_session_home();
+        });
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// `clean_up` can still turn back and hold the task at `blocked` when the
+    /// worktree holds work `auto_commit` could not record. The per-session
+    /// agent home must survive that: the task stays in the queue, and a
+    /// `session:` step resuming it wants its transcript. Reclamation only
+    /// runs after the archive rename, past every early return.
+    #[test]
+    fn a_cleanup_held_at_blocked_keeps_the_lanes_session_home() {
+        let mut repo = fixture("cleanup-blocked-keeps-home");
+        repo.config.dispatch.auto_commit = false;
+
+        let worktree = crate::scratch::root("dispatch-cleanup-blocked-wt");
+        let _ = std::fs::remove_dir_all(&worktree);
+        repo.git(&[
+            "worktree",
+            "add",
+            "-b",
+            "task/demo",
+            worktree.to_str().unwrap(),
+        ])
+        .unwrap();
+        // Uncommitted work in the tree — with `auto_commit` off this is
+        // `AutoCommit::Unrecorded`, which holds the cleanup at `blocked`.
+        std::fs::write(worktree.join("scratch.txt"), "unsaved\n").unwrap();
+
+        let path = add_task_with(&repo, "demo", "done", |f| {
+            f.workspace_id = Some("w1".into());
+            f.branch = Some("task/demo".into());
+            f.worktree_path = Some(worktree.clone());
+        });
+
+        let home = crate::scratch::root("dispatch-cleanup-blocked-home");
+        let _ = std::fs::remove_dir_all(&home);
+        crate::platform::test_home::with_home(&home, || {
+            let session = "cleanup-blocked-s1";
+            let session_home = crate::agent::session_home("codex", session).unwrap();
+            std::fs::create_dir_all(&session_home).unwrap();
+            std::fs::write(session_home.join("auth.json"), "{}").unwrap();
+
+            let mux = FakeMux::new(vec![]);
+            let pipelines = Pipelines::builtin();
+            let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux, false);
+            dispatcher.lanes.insert(
+                "demo · implement".into(),
+                LaneRecord {
+                    session: session.into(),
+                    kind: "codex".into(),
+                    ..LaneRecord::adopted(now_secs())
+                },
+            );
+
+            // A live owned lane for the task — the path the reclaim used to
+            // run on before the early return.
+            let owned_lane = lane(&repo, "demo · implement", LaneStatus::Working);
+            let owned: Vec<(String, String, &Lane)> =
+                vec![("implement".into(), "demo".into(), &owned_lane)];
+            let mut report = Report::default();
+            let archived = dispatcher
+                .clean_up(&mut reload(&path), &owned, &mut report)
+                .unwrap();
+
+            assert!(!archived, "cleanup should have turned back to `blocked`");
+            assert!(
+                session_home.join("auth.json").exists(),
+                "the owned lane's session home was reclaimed on a path that never archived the task"
+            );
+        });
+
+        assert!(path.exists(), "a held task stays in the queue");
+        assert_eq!(reload(&path).stage(), crate::pipeline::BLOCKED);
+
+        repo.git(&["worktree", "remove", "--force", worktree.to_str().unwrap()])
+            .ok();
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// A lane still writing when its task reaches a cleaning terminal step is

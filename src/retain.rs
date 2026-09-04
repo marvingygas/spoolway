@@ -7,11 +7,22 @@
 //! `scratch/` and `archive/` hold what a pass left behind — a composed prompt, a
 //! command step's log, a hook run, a headless lane's record, a rebase's
 //! scratch worktree, a task that has already reached `done`. Nobody reads
-//! any of those once the run they belong to has settled, and nothing this
-//! binary does depends on them still being there. This module ages the
+//! any of those once the task they belong to has left the queue, and nothing
+//! this binary does depends on them still being there. This module ages the
 //! second kind out; the first kind this never touches, whatever its age —
 //! see [`crate::repo::Repo::byproduct_dirs`] for the one place that split is
 //! written down.
+//!
+//! Two of those six carry state a task still in the queue needs.
+//! `scratch/<id>` is what a lane is handed as `$SPOOLWAY_SCRATCH` — planner
+//! output and all — and `headless/` holds the records a running lane is read
+//! back through. An entry in either is spared for as long as its leading
+//! task id names a file still in `queue/`, whatever stage that file sits on:
+//! `paused` and `blocked` are stages a task rests on for longer than
+//! `retention.days`, and a directory's own modification time does not move
+//! while it only has files written *into* it. Only once the task is archived
+//! do its scratch directory and its headless record age out like anything
+//! else. See [`sweep_now`], which loads the queue once for this.
 //!
 //! `.spoolway/prompts/` in the checkout is not the `system-prompts/`
 //! directory above, however alike the two names read. It holds the
@@ -37,6 +48,7 @@
 //! see [`crate::commands::queue::check_dependencies_set`], which says so
 //! when it refuses one.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Once;
 use std::time::{Duration, SystemTime};
@@ -81,12 +93,22 @@ fn sweep_now(repo: &Repo) {
     // multiply would panic on in a debug build or silently produce in a
     // release one.
     let max_age = Duration::from_secs(repo.config.retention.days.saturating_mul(SECS_PER_DAY));
+
+    // `scratch/` and `headless/` hold a queued task's live state — see this
+    // module's own doc. Read the queue once, here, and pass it only to those
+    // two directories: an entry whose leading task id is still in the queue
+    // is spared, whatever its age.
+    let queued = repo.queued_ids();
+    let scratch = repo.scratch_dir();
+    let headless = repo.headless_dir();
+
     let mut budget = SWEEP_LIMIT;
     for dir in repo.byproduct_dirs() {
         if budget == 0 {
             break;
         }
-        budget -= sweep_dir(&dir, max_age, budget);
+        let guard = (dir == scratch || dir == headless).then_some(&queued);
+        budget -= sweep_dir(&dir, max_age, budget, guard);
     }
 }
 
@@ -96,10 +118,19 @@ fn sweep_now(repo: &Repo) {
 /// ceiling hold and lets [`sweep_now`] divide one budget across six
 /// directories.
 ///
+/// `queued` is `Some` only for `scratch/` and `headless/` — an entry whose
+/// leading task id ([`crate::mux::lane_task`]) is in that set is a live
+/// task's and is never swept, however old it reads. `None` everywhere else.
+///
 /// Not gated by `days == 0` itself — that check belongs to the one caller
 /// that means it as "retention is off"; a test driving this directly passes
 /// whatever age it wants to see swept.
-fn sweep_dir(dir: &Path, max_age: Duration, limit: usize) -> usize {
+fn sweep_dir(
+    dir: &Path,
+    max_age: Duration,
+    limit: usize,
+    queued: Option<&BTreeSet<String>>,
+) -> usize {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return 0;
     };
@@ -108,6 +139,17 @@ fn sweep_dir(dir: &Path, max_age: Duration, limit: usize) -> usize {
     for entry in entries.flatten() {
         if removed >= limit {
             break;
+        }
+        // A scratch directory or headless record whose task is still in the
+        // queue is spared before its age is ever looked at — `spoolway
+        // resume` continues a lane whose bookkeeping this would otherwise
+        // have deleted.
+        if let Some(queued) = queued
+            && queued.contains(crate::mux::lane_task(
+                entry.file_name().to_string_lossy().as_ref(),
+            ))
+        {
+            continue;
         }
         let Ok(metadata) = entry.metadata() else {
             continue;
@@ -168,7 +210,12 @@ mod tests {
         std::fs::write(&fresh, "still warm").unwrap();
         age(&fresh, 2 * SECS_PER_DAY);
 
-        let removed = sweep_dir(&dir, Duration::from_secs(30 * SECS_PER_DAY), SWEEP_LIMIT);
+        let removed = sweep_dir(
+            &dir,
+            Duration::from_secs(30 * SECS_PER_DAY),
+            SWEEP_LIMIT,
+            None,
+        );
 
         assert_eq!(removed, 1);
         assert!(!old.exists(), "an entry past the age was kept");
@@ -222,18 +269,86 @@ mod tests {
         }
 
         let max_age = Duration::from_secs(30 * SECS_PER_DAY);
-        assert_eq!(sweep_dir(&dir, max_age, 2), 2, "a pass ignored its ceiling");
+        assert_eq!(
+            sweep_dir(&dir, max_age, 2, None),
+            2,
+            "a pass ignored its ceiling"
+        );
         assert_eq!(count(&dir), 3, "3 of 5 should remain");
 
-        assert_eq!(sweep_dir(&dir, max_age, 2), 2);
+        assert_eq!(sweep_dir(&dir, max_age, 2, None), 2);
         assert_eq!(
-            sweep_dir(&dir, max_age, 2),
+            sweep_dir(&dir, max_age, 2, None),
             1,
             "the last one is all that was left"
         );
-        assert_eq!(sweep_dir(&dir, max_age, 2), 0, "nothing left to take");
+        assert_eq!(sweep_dir(&dir, max_age, 2, None), 0, "nothing left to take");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A task paused or blocked for longer than `retention.days` keeps its
+    /// scratch directory and its headless record, so `spoolway resume`
+    /// continues a lane whose planner output and bookkeeping are intact. An
+    /// entry whose task has left the queue ages out exactly as before.
+    #[test]
+    fn the_sweep_spares_a_queued_tasks_scratch_and_headless_state() {
+        let base = crate::scratch::root("retain-live-task");
+        let _ = std::fs::remove_dir_all(&base);
+        let mut config = crate::config::Config::default();
+        config.retention.days = 30;
+        let repo = Repo {
+            checkout: base.clone(),
+            root: base.clone(),
+            config,
+            home: base.join(".home"),
+        };
+
+        // `held` is still in the queue — the stage on its file does not
+        // matter to the sweep. `gone` was archived long ago and only its
+        // leftovers are left on disk.
+        std::fs::create_dir_all(repo.queue_dir()).unwrap();
+        std::fs::write(
+            repo.queue_dir().join("held.md"),
+            "---\nid: held\nstage: paused\n---\n",
+        )
+        .unwrap();
+
+        let held_scratch = repo.scratch_dir().join("held");
+        std::fs::create_dir_all(&held_scratch).unwrap();
+        std::fs::write(held_scratch.join("plan.md"), "planner output").unwrap();
+        let held_record = repo.headless_dir().join("held · implement.json");
+        std::fs::write(&held_record, "{}").unwrap();
+
+        let gone_scratch = repo.scratch_dir().join("gone");
+        std::fs::create_dir_all(&gone_scratch).unwrap();
+        let gone_record = repo.headless_dir().join("gone · implement.json");
+        std::fs::write(&gone_record, "{}").unwrap();
+
+        for path in [&held_scratch, &held_record, &gone_scratch, &gone_record] {
+            age(path, 60 * SECS_PER_DAY);
+        }
+
+        sweep_now(&repo);
+
+        assert!(
+            held_scratch.join("plan.md").exists(),
+            "a queued task's scratch space was swept"
+        );
+        assert!(
+            held_record.exists(),
+            "a queued task's headless record was swept"
+        );
+        assert!(
+            !gone_scratch.exists(),
+            "an archived task's scratch space should have gone"
+        );
+        assert!(
+            !gone_record.exists(),
+            "an archived task's headless record should have gone"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
     }
 
     /// The sweep reaches the composed prompt a lane was handed and never the

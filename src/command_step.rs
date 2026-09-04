@@ -460,6 +460,29 @@ impl Runs {
             .collect();
         keys.into_iter().collect()
     }
+
+    /// Delete every run file this directory holds for `task`, across every
+    /// step and whatever extension — logs, pids, exit codes, pane records and
+    /// a hook's `.out`/`.failed` markers alike.
+    ///
+    /// Called when a task is archived. Nothing routes on a run of a task that
+    /// has left the queue, and left in place these files accumulate for the
+    /// life of the project — for `tracking/` that also means
+    /// [`crate::tracking::failure_count`] goes on counting a long-archived
+    /// task's failed hook (review finding 64). Matched on the full file name
+    /// against the `<task> · ` prefix, so `"demo-two · x.log"` is never taken
+    /// for `"demo"`'s.
+    pub fn reclaim_task(&self, task: &str) {
+        let prefix = format!("{task} · ");
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
 }
 
 /// Spawn a wrapper script detached, so it outlives the pass that started it.

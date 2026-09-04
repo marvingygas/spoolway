@@ -491,7 +491,10 @@ own total line, rather than summed once across every group at the foot of the fr
 
 One more line joins the footer whenever an `[issue_tracking]` hook has failed:
 `issue_tracking: N hook failures — see tracking/`, counting every failing task-and-event pair
-whether `on_fail` is `"ignore"` or `"pause"`. It is absent entirely while nothing has failed.
+whose task is still in the queue, whether `on_fail` is `"ignore"` or `"pause"`. A pair whose
+task has been archived does not count, so a stale failure stops showing once the task is
+gone. A failed `fetch` run is keyed on an issue reference rather than a task and always
+counts. The line is absent entirely while nothing has failed.
 
 The header says whose process this is and how long it has been going, and nothing about
 when the next pass is due: `up` moves on every redraw, which is all a board needs to show it
@@ -1287,3 +1290,12 @@ this machine's mirror and named in the log, and cleanup proceeds.
 A finished task's own branch is kept alive past that cleanup while anything still queued names
 it in `depends_on` — that branch is what the dependent's worktree gets cut from. It is freed by
 the next cleanup to run once nothing queued needs it any more.
+
+Archiving a task also reclaims the run files and session state named for it. Its hook run
+files under `tracking/` and its command-step run files under `commands/` are deleted, matched
+on the `<task> · ` filename prefix so another task's files are left alone. The per-session
+agent home each of its lanes was given is removed too — both the lanes just banked by this
+cleanup and any older lane record still held for the task. All of this runs only after the
+task file has moved into `archive/`, past the point where cleanup can still turn back and
+hold the task at `blocked`, so a held task keeps its scratch tree, its run files and its
+session homes for `spoolway resume`.

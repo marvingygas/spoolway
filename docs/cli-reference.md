@@ -660,6 +660,12 @@ together.
 An unmetered kind still runs its turn under `--live`: there are no readings to take, and the
 launch, the prompt and the session pinning are exactly what nothing else can check.
 
+Each `--live` turn is bounded. A turn still running after 180 seconds has hung, so spoolway
+kills it and reports the clause as failed rather than waiting forever — `verify --live` is
+often run from CI, where a hang is a stuck job with nobody to interrupt it. The scratch tree
+`--live` works in, and the per-session agent home it creates for a kind that pins by home,
+are both removed when the command ends, whichever way it ends.
+
 `agent list` and `agent verify` both run against the whole adapter table rather than the
 profiles this project configures — that is `doctor`'s scope, and the kind you want to ask
 about is usually the one no profile names yet. Neither needs a project, so both answer the

@@ -260,6 +260,24 @@ configurable per directory: `system-prompts/`, `commands/`, `tracking/`, `headle
 `scratch/` and `archive/` are swept once an entry passes `days`; `queue/`, `pending/`,
 `worktrees/` and `plans/` hold work in flight and are never swept, at any age.
 
+`scratch/` and `headless/` are the exception inside that first group. An entry there is
+named for a task, and the sweep loads the queue once and spares any entry whose leading
+task id still names a file in `queue/`. This holds whatever stage the task sits on,
+`paused` and `blocked` included, since those are the stages a task can rest on for longer
+than `days`. So `spoolway resume` always finds a paused or blocked lane's scratch tree and
+headless record intact. Only once the task is archived do its scratch directory and its
+headless record age out like anything else.
+
+Archiving a task also reclaims its leftovers straight away, without waiting for `days`.
+Its hook run files under `tracking/`, its command-step run files under `commands/`, and the
+per-session home an agent that mints its own session id was given are all removed when the
+task moves to `archive/`. One consequence is on the board: `failure_count` only counts a
+`<task> · <event>` key whose task is still in the queue, so a failed hook from an archived
+task stops showing as "N hook failures" even on a home where an older build archived that
+task without reclaiming its files. A `fetch` run file is keyed on an issue reference rather
+than a task id, so nothing reclaims it and it only ages out; a failed `spoolway issue show`
+still counts on the board.
+
 Only directories under `~/.spoolway/<project>/` are ever swept. `.spoolway/prompts/` in the
 checkout holds the project's tracked prompt templates, and nothing here touches it, however
 old a template file is.

@@ -375,6 +375,31 @@ impl Repo {
         task::load_dir(&self.queue_dir())
     }
 
+    /// The id of every task file currently in `queue/`, read from the file
+    /// names alone rather than by parsing each one.
+    ///
+    /// Two callers want exactly this, cheaply and without a parse skipping a
+    /// task whose file happens not to load: [`crate::retain`]'s sweep, so it
+    /// never ages out the scratch directory or headless record of a task
+    /// still in flight — `paused` and `blocked` are stages a task can sit on
+    /// for longer than `retention.days` — and [`crate::tracking::failure_count`],
+    /// so the board stops counting a hook failure once its task is archived.
+    pub fn queued_ids(&self) -> std::collections::BTreeSet<String> {
+        let mut ids = std::collections::BTreeSet::new();
+        let Ok(entries) = std::fs::read_dir(self.queue_dir()) else {
+            return ids;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) == Some("md")
+                && let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
+            {
+                ids.insert(stem.to_string());
+            }
+        }
+        ids
+    }
+
     /// Find a task by id in the queue, then in the archive.
     pub fn task(&self, id: &str) -> Result<Task> {
         let queue = self.queue_dir();
