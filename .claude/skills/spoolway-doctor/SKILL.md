@@ -106,7 +106,7 @@ turning each into a fix concrete enough to approve.
 
 | Reported | What it costs | Fix | Class |
 |---|---|---|---|
-| ``agent `x` has a model: no model set`` | lanes on that profile start with an empty model | `spoolway config set agents.x.model <model>` | decision — the model is theirs |
+| ``agent `x` has a model: no model set`` | lanes on that profile start with an empty model | name a `model:` on each step that runs on `x`, in `.spoolway/pipelines/<name>.yml` (`agents.*.model` is retired) | decision — the model is theirs |
 | ``agent `x`: `pi` is not on PATH`` | every step on that profile refuses to start | install the CLI, or point the profile at one that is installed | outside |
 | ``agent `x` permission mode: … is not a mode`` | the lane dies on an unrecognised flag, passes into a run | `spoolway config set agents.x.permission_mode <one it lists>` | mechanical |
 | ``prompt for `step` is missing`` | that step cannot start a lane | `spoolway init` | mechanical |
@@ -114,10 +114,10 @@ turning each into a fix concrete enough to approve.
 | ``pipelines are valid`` fails | nothing dispatches | edit `.spoolway/pipelines/`, confirm with `spoolway pipeline check` | decision |
 | ``task dependency graph`` fails | a cycle or an unknown `depends_on`; those tasks never start | edit the task's frontmatter in the project's own `queue/` | decision |
 | note: no git remote | nothing can be handed over: every task's change goes out as a pull request | add the remote | outside |
-| note: ``never uses `{prompt_file}` `` | every step on that profile runs with no prompt | add the placeholder to the profile's `args` | decision |
-| note: `dispatch.max_attempts` renamed | the old name still parses, but it never was a retry budget | confirm they want `max_launches` (default 1: launched once, then a person) | decision |
+| ``prompt contract``: ``profile `x` never uses `{prompt_file}` `` | the prompt file is written but never handed to the agent | point the profile at a `kind` spoolway knows (the argv per kind is fixed in the binary; `args` is retired) | decision — the kind is theirs |
+| note: `dispatch.max_launches` / `max_attempts` retired | the launch guard it sized is a constant now (one launch, then a person) | nothing to set — the key is dropped on the next `config` save | mechanical |
 | note: `n prompt finding(s)` | prose a lane will act on that its step does not permit, or a command this spoolway does not have | report what `spoolway prompt check` printed, not the count | decision |
-| ``prompt names `spoolway <verb>` `` | that lane runs a command this release does not have, and finds out mid-run | fix the prose, or `spoolway update --replace .spoolway/prompts/<name>.md` to take the shipped one | decision — it is their text |
+| ``prompt names `spoolway <verb>` `` | that lane runs a command this release does not have, and finds out mid-run | fix the prose, or `spoolway update --replace .spoolway/prompts/<name>/PROMPT.md` to take the shipped one | decision — it is their text |
 | `queue list --json`: `"state": "blocked"` | it is out of the pipeline until someone puts it back | address the blocker it names, then `spoolway resume <task>` | decision |
 | `queue list --json`: `"state": "waiting_on_you"` | a lane asked a question and is holding its pane | answer it in the pane | theirs |
 | `queue list --json`: `"laps"` non-null | a task looping between two steps | say how many rounds and on which step; the cause is in the lane's log | decision |
@@ -134,8 +134,9 @@ turning each into a fix concrete enough to approve.
   a prompt at all.
 - Never start a dispatcher from here. `--dry-run` is a check; `spoolway dispatch` is
   the pipeline running, and that is a human's call.
-- Never silence a finding by lowering the bar it failed. `gates` make a failure disappear
-  without changing anything it was reporting.
+- Never silence a finding by lowering the bar it failed — loosening a review standard,
+  widening a `touches`, dropping a `depends_on`. That makes the failure disappear without
+  changing anything it was reporting.
 - Never guess a model name, a branch name, or a value doctor did not print.
 - Never call it clean on doctor's exit code. Notes do not count toward it, and blocked
   tasks, `touches` conflicts and unpriced models are not doctor's checks at all.
