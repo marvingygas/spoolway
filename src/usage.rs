@@ -1498,7 +1498,11 @@ fn session_file_in(home: &Path, kind_name: &str, session: &str) -> Option<PathBu
 /// A walk rather than a glob because the shape of the tree below a session's
 /// own home is the agent's business, not spoolway's — codex shards by date
 /// today, and a version that shards by something else would still land here.
-fn newest_transcript(root: &Path) -> Option<PathBuf> {
+///
+/// `pub(crate)` rather than private: [`crate::quota::read`]'s codex row has
+/// no session id to look up by — it wants whichever rollout is newest under
+/// a home, the same question this answers for one session's own transcript.
+pub(crate) fn newest_transcript(root: &Path) -> Option<PathBuf> {
     newest_matching(root, |_| true)
 }
 

@@ -416,8 +416,8 @@ that profile, and the run still proceeds.
 **`quota_ceiling`** is the ceiling on how much of its kind's *account-wide* quota this profile
 may have spent before a pass will start another lane of it. It is a percentage, 1..=100, and
 `0` — the default on every shipped profile — is off: no reading is taken and no task is ever
-parked for it. It is not a size at all, unlike the two settings above; it is read from the file
-the agent itself writes its usage percentage into, which today means `claude` alone — see
+parked for it. It is not a size at all, unlike the two settings above; it is read from whatever
+the agent itself writes its usage percentage into, which today means `claude` and `codex` — see
 [Reading a kind's quota before a lane
 starts](agents.md#reading-a-kinds-quota-before-a-lane-starts).
 
@@ -429,9 +429,9 @@ a second dispatcher started from cold honours it without taking any reading of i
 whose step names a different profile are staffed in the same pass.
 
 The gate fails open in every case where the reading is not trustworthy, because the pane-phrase
-hold is still behind it. A kind with no quota probe, a file that cannot be read, a file that
-does not parse, a reading older than five hours, and a window whose own reset has already
-passed each leave the ceiling inert.
+hold is still behind it. A kind with no quota probe, a reading that cannot be read, one that
+does not parse, one that parses but carries no figure at all, a reading older than five hours,
+and a window whose own reset has already passed each leave the ceiling inert.
 
 ```
 $ spoolway config set agents.claude.quota_ceiling 101

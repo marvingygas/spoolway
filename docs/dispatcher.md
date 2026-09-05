@@ -860,12 +860,12 @@ wording, not a pattern the dispatcher keeps in sync by hand.
 
 The check above catches a limit that has already landed. `agents.<profile>.quota_ceiling`
 catches one before it does. Ahead of starting a lane, a pass reads the profile's kind's own
-cached usage percentage — a file the agent wrote, never a network call — and at or above the
-ceiling on either window it starts no new lane of that profile at all. Every candidate task of
+cached usage percentage — something the agent wrote to disk, never a network call — and at or
+above the ceiling on either window it starts no new lane of that profile at all. Every candidate task of
 that profile gets `parked_until:` written from the tripped window's own `resets_at`. Tasks
 whose step names a different profile are staffed in the same pass. See [Reading a kind's quota
 before a lane starts](agents.md#reading-a-kinds-quota-before-a-lane-starts) for where the
-reading comes from and the five ways it fails open.
+reading comes from and the six ways it fails open.
 
     pass 41
       wire-up: `implement` parked until 14:00 — claude at 88% of its

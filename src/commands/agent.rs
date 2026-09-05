@@ -525,11 +525,18 @@ fn transcript_dir_clause(adapter: &crate::agent::Adapter) -> Clause {
 
 /// Where this kind's own cached usage percentage comes from, and what it
 /// currently reads — see [`crate::agent::Adapter::quota`] and
-/// [`crate::quota`]. Never a [`Clause::Fail`]: every one of the three ways
-/// this can come up short — no probe, an unreadable or unparseable file, a
-/// reading judged stale — is exactly the fail-open case `dispatch.rs`'s own
-/// gates already degrade past, so it is reported here and never blocks the
-/// command.
+/// [`crate::quota`]. Never a [`Clause::Fail`]: every one of the four ways
+/// this can come up short — no probe, an unreadable or unparseable source, a
+/// reading judged stale, or (codex only) a reading with nothing behind it —
+/// is exactly the fail-open case `dispatch.rs`'s own gates already degrade
+/// past, so it is reported here and never blocks the command.
+///
+/// The two established rows read a different shape off a different place, so
+/// this branches on [`crate::agent::Accounting::format`] rather than
+/// assuming `claude`'s file-and-clock-time display is universal — codex has
+/// no single cache file to name, and its own mockup reads the reset as a
+/// countdown rather than a clock, since the account it describes may not be
+/// signed in from this machine's own timezone at all.
 fn quota_clause(adapter: &crate::agent::Adapter) -> Clause {
     let Some(rel) = adapter.quota else {
         // The embedded `\n` is the mockup's own line break, not a wrap this
@@ -542,45 +549,86 @@ fn quota_clause(adapter: &crate::agent::Adapter) -> Clause {
             Vec::new(),
         );
     };
+    let is_codex = matches!(
+        adapter.accounting.as_ref().map(|a| a.format),
+        Some(crate::usage::Format::Codex)
+    );
+    // The mockup's own two-line source description for codex, split the same
+    // way a two-window `Ok` case splits its lines — `render_quota_row`
+    // indents every one of them to the note's own column.
+    let source = match is_codex {
+        true => "newest rollout under the lane's CODEX_HOME,\nlast token_count event's rate_limits"
+            .to_string(),
+        false => format!("~/{rel} cachedUsageUtilization"),
+    };
     match crate::quota::read(adapter.kind) {
         Err(crate::quota::Miss::NoProbe) => unreachable!("adapter.quota was just Some"),
         Err(crate::quota::Miss::Unreadable(why)) => {
-            Clause::Warn(format!("~/{rel} could not be read: {why}"), Vec::new())
+            Clause::Warn(format!("{source} could not be read: {why}"), Vec::new())
         }
         Err(crate::quota::Miss::Unparseable(why)) => {
-            Clause::Warn(format!("~/{rel} did not parse: {why}"), Vec::new())
+            Clause::Warn(format!("{source} did not parse: {why}"), Vec::new())
+        }
+        // codex's own negative case — a rollout that parsed cleanly and
+        // carries nothing to act on, never a malformed file.
+        Err(crate::quota::Miss::NoReading(why)) => {
+            Clause::Warn(format!("{source}\n{why}"), Vec::new())
         }
         Ok(reading) if reading.stale(chrono::Utc::now()) => Clause::Warn(
-            format!(
-                "~/{rel} cachedUsageUtilization is stale — fetched too long ago to trust; \
-                 treated as absent"
-            ),
+            format!("{source} is stale — fetched too long ago to trust; treated as absent"),
             Vec::new(),
         ),
         Ok(reading) => {
-            // A reset today reads as a bare clock the same way the board and
-            // the dispatcher's own reports do; a reset on another day is
-            // named `MM-DD HH:MM` rather than either of `format_instant`'s
-            // own shapes — this line already carries "resets", so a year
-            // nobody asked about would only crowd it, and this display
-            // names no park for `parked_window` to pin a longer one against.
-            let window = |w: &crate::quota::WindowReading| {
-                let (target, same_day) = crate::task::local_instant(
-                    w.resets_at.timestamp(),
-                    chrono::Utc::now().timestamp(),
-                );
-                let resets = match same_day {
-                    true => target.format("%H:%M").to_string(),
-                    false => target.format("%m-%d %H:%M").to_string(),
-                };
-                format!("{} {}% resets {resets}", w.window.key(), w.utilization)
+            let now = chrono::Utc::now();
+            let window = |w: &crate::quota::WindowReading| match is_codex {
+                // codex's own two windows are `primary`/`secondary` on the
+                // wire, not `five_hour`/`seven_day` — those labels are
+                // claude's own key names, kept for the reading's internal
+                // bookkeeping (`Window::SevenDay` still decides the park's
+                // own date shape in `dispatch.rs`) but not what a person
+                // reading `agent verify`'s codex row should see.
+                //
+                // And the reset itself reads as a countdown rather than a
+                // clock: the account behind this reading is not necessarily
+                // this machine's own local time, where claude's cache always
+                // is.
+                true => {
+                    let label = match w.window {
+                        crate::quota::Window::FiveHour => "primary",
+                        crate::quota::Window::SevenDay => "secondary",
+                    };
+                    let remaining = (w.resets_at.timestamp() - now.timestamp()).max(0) as u64;
+                    format!(
+                        "{label} {}% resets in {}",
+                        w.utilization,
+                        crate::config::human_duration::format(std::time::Duration::from_secs(
+                            remaining
+                        )),
+                    )
+                }
+                // A reset today reads as a bare clock the same way the board
+                // and the dispatcher's own reports do; a reset on another day
+                // is named `MM-DD HH:MM` rather than either of
+                // `format_instant`'s own shapes — this line already carries
+                // "resets", so a year nobody asked about would only crowd
+                // it, and this display names no park for `parked_window` to
+                // pin a longer one against.
+                false => {
+                    let (target, same_day) =
+                        crate::task::local_instant(w.resets_at.timestamp(), now.timestamp());
+                    let resets = match same_day {
+                        true => target.format("%H:%M").to_string(),
+                        false => target.format("%m-%d %H:%M").to_string(),
+                    };
+                    format!("{} {}% resets {resets}", w.window.key(), w.utilization)
+                }
             };
             // No indent baked in here — this note is also `--json`'s own
             // payload, which has no notion of a printed column to align to.
             // `print_quota_row` is what indents a continuation line, to
             // whatever width its own kind-name column comes out to.
             Clause::Ok(format!(
-                "~/{rel} cachedUsageUtilization\n{} · {}",
+                "{source}\n{} · {}",
                 window(&reading.five_hour),
                 window(&reading.seven_day),
             ))
@@ -1461,6 +1509,132 @@ mod tests {
                     assert!(!note.contains("2099-"), "must not carry a year: {note}");
                 }
                 _ => panic!("a fresh reading must report ok with both windows"),
+            }
+        });
+    }
+
+    /// A rollout under the managed lane home `spoolway agent verify`'s codex
+    /// quota clause actually reads —
+    /// `<home>/.local/state/spoolway/codex/<session>/sessions/**` — never
+    /// `~/.codex`. See `crate::quota::tests::write_managed_codex_rollout`,
+    /// this command's own copy of the same fixture shape.
+    fn write_codex_rollout(home: &std::path::Path, timestamp: &str, rate_limits: &str) {
+        let dir = home.join(".local/state/spoolway/codex/fixture-session/sessions/2026/09/05");
+        std::fs::create_dir_all(&dir).unwrap();
+        let line = format!(
+            r#"{{"timestamp":"{timestamp}","type":"event_msg","payload":{{"type":"token_count","info":{{}},"rate_limits":{rate_limits}}}}}"#
+        );
+        // One record per physical line, the way a real rollout is — the
+        // multi-line `rate_limits` constants below are kept readable, not
+        // written that way for real, so their embedded newlines are folded
+        // out first.
+        std::fs::write(dir.join("rollout-fixture.jsonl"), line.replace('\n', "")).unwrap();
+    }
+
+    const REAL_SHAPED_RATE_LIMITS: &str = r#"{"limit_id":"codex","limit_name":null,
+        "primary":{"used_percent":5.0,"window_minutes":300,"resets_at":1788611977},
+        "secondary":{"used_percent":2.0,"window_minutes":10080,"resets_at":1789151593},
+        "credits":{"has_credits":false,"unlimited":false,"balance":"0"},
+        "individual_limit":null,"spend_control_reached":null,"plan_type":"plus",
+        "rate_limit_reached_type":null}"#;
+
+    const NULL_RATE_LIMITS: &str = r#"{"limit_id":"codex","limit_name":null,"primary":null,
+        "secondary":null,"credits":null,"individual_limit":null,
+        "spend_control_reached":null,"plan_type":null,"rate_limit_reached_type":null}"#;
+
+    /// codex's own row, once signed in with ChatGPT: `primary`/`secondary`,
+    /// not claude's `five_hour`/`seven_day` labels, and a countdown rather
+    /// than a clock — the mockup's own `resets in 2h11m` shape. The
+    /// `timestamp` itself is `Utc::now()`, so this stays fresh however long
+    /// after that real capture the suite happens to run.
+    #[test]
+    fn quota_clause_on_a_fresh_codex_reading_reports_primary_and_secondary() {
+        let home = crate::scratch::root("agent-verify-quota-codex-fresh");
+        std::fs::create_dir_all(&home).unwrap();
+        write_codex_rollout(
+            &home,
+            &chrono::Utc::now().to_rfc3339(),
+            REAL_SHAPED_RATE_LIMITS,
+        );
+        crate::platform::test_home::with_home(&home, || {
+            let adapter = crate::agent::adapter("codex").expect("codex is a real adapter");
+            match quota_clause(adapter) {
+                Clause::Ok(note) => {
+                    assert!(
+                        note.contains("primary 5% resets in"),
+                        "unexpected note: {note}"
+                    );
+                    assert!(
+                        note.contains("secondary 2% resets in"),
+                        "unexpected note: {note}"
+                    );
+                    assert!(
+                        note.contains("newest rollout under the lane's CODEX_HOME"),
+                        "unexpected note: {note}"
+                    );
+                    assert!(
+                        !note.contains("five_hour") && !note.contains("seven_day"),
+                        "codex's row must not borrow claude's window labels: {note}"
+                    );
+                }
+                _ => panic!("a fresh codex reading must report ok with both windows"),
+            }
+        });
+    }
+
+    /// The mockup's own codex row, pinned exactly rather than by substring —
+    /// `render_quota_row` is what `spoolway agent verify` actually prints, so
+    /// this is the line a person reading the command's output really sees.
+    /// Reset times are relative durations, not a clock, so only their
+    /// `resets in <duration>` shape is checked — the exact figure depends on
+    /// how much of the fixed window has run out by the time this executes.
+    #[test]
+    fn agent_verify_prints_codexs_quota_row_exactly_as_the_mockup_draws_it() {
+        let home = crate::scratch::root("agent-verify-quota-codex-exact");
+        std::fs::create_dir_all(&home).unwrap();
+        write_codex_rollout(
+            &home,
+            &chrono::Utc::now().to_rfc3339(),
+            REAL_SHAPED_RATE_LIMITS,
+        );
+        crate::platform::test_home::with_home(&home, || {
+            let adapter = crate::agent::adapter("codex").expect("codex is a real adapter");
+            let clause = quota_clause(adapter);
+            let rendered = render_quota_row("codex", &clause);
+            let mut lines = rendered.lines();
+            assert_eq!(
+                lines.next().unwrap(),
+                "codex    quota  newest rollout under the lane's CODEX_HOME,"
+            );
+            assert_eq!(
+                lines.next().unwrap(),
+                "                last token_count event's rate_limits"
+            );
+            let third = lines.next().unwrap();
+            assert!(
+                third.starts_with("                primary 5% resets in ")
+                    && third.contains(" · secondary 2% resets in "),
+                "unexpected third line: {third}"
+            );
+        });
+    }
+
+    /// codex's own negative case — a session settled against a local
+    /// endpoint or a bare API key — is reported rather than misread as a
+    /// parse failure, and never fails the command.
+    #[test]
+    fn quota_clause_on_a_codex_session_with_null_rate_limits_warns_not_signed_in() {
+        let home = crate::scratch::root("agent-verify-quota-codex-null");
+        std::fs::create_dir_all(&home).unwrap();
+        write_codex_rollout(&home, "2026-09-05T07:51:22.019Z", NULL_RATE_LIMITS);
+        crate::platform::test_home::with_home(&home, || {
+            let adapter = crate::agent::adapter("codex").expect("codex is a real adapter");
+            match quota_clause(adapter) {
+                Clause::Warn(note, _) => assert!(
+                    note.contains("not signed in with ChatGPT"),
+                    "unexpected note: {note}"
+                ),
+                _ => panic!("a null codex reading must warn, not ok or fail"),
             }
         });
     }
