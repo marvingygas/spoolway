@@ -788,7 +788,7 @@ fn agent_verify_live(
     // a kind that pins by id this is `None` and nothing below changes; for one
     // that pins by home, the guard now owns it and takes it back on the way
     // out however the check ends (review finding 62).
-    scratch.home = crate::agent::prepare_session_home(&args.kind, &session);
+    scratch.home = crate::agent::prepare_session_home(&args.kind, &session, &dir);
     let env: Vec<(String, String)> = adapter.session_env(&session);
 
     println!(

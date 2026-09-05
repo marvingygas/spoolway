@@ -4324,7 +4324,7 @@ fn start_one(
     // branch on `kind`.
     let mut env: BTreeMap<String, String> = BTreeMap::new();
     if let Some(adapter) = adapter {
-        crate::agent::prepare_session_home(&profile.kind, &session);
+        crate::agent::prepare_session_home(&profile.kind, &session, &worktree);
         env.extend(adapter.session_env(&session));
     }
     env.insert(crate::commands::TASK_ENV.to_string(), task.front.id.clone());

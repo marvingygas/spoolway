@@ -534,7 +534,7 @@ fn run_summary(repo: &Repo, task: &Task) -> Result<Option<(String, String)>> {
     let argv = adapter
         .headless_args(&rendered, false)
         .context("this agent kind has no headless row to run one turn with")?;
-    crate::agent::prepare_session_home(&profile.kind, &session);
+    crate::agent::prepare_session_home(&profile.kind, &session, &repo.root);
     let env = adapter.session_env(&session);
 
     let message = format!(
