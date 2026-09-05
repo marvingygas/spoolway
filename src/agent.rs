@@ -228,7 +228,7 @@ pub struct Home {
     /// The variable that path is handed to.
     pub env: &'static str,
 
-    /// What is linked back from the agent's real home so a relocated lane is
+    /// What is brought over from the agent's real home so a relocated lane is
     /// still logged in.
     ///
     /// Only for a home that moves everything: `CODEX_HOME` takes the
@@ -237,7 +237,59 @@ pub struct Home {
     /// than copied, so a login refreshed in the real home stays good and
     /// nothing spoolway made holds a stale token. Empty for a home that moves
     /// one file, which takes nothing with it.
+    ///
+    /// One name here is the exception, and it is the one [`Trust::file`]
+    /// gives: that file is copied and then written into, because the lane
+    /// needs a line in it that the person's own home must not gain.
     pub seed: &'static [&'static str],
+
+    /// How this kind is told, in its own config, that a lane's working
+    /// directory may be worked in without asking a person first. `None` for a
+    /// kind that never asks.
+    pub trust: Option<Trust>,
+}
+
+/// The entry that answers an agent's "do you trust this directory?" question
+/// before it is asked.
+///
+/// codex refuses to start in a directory it has not been told about: its
+/// interactive frontend opens on `Do you trust the contents of this
+/// directory?` and waits for a keypress. A lane's worktree is a path nobody
+/// has ever answered for, so every codex lane under a multiplexer stalled on
+/// that question with nobody there to press a key.
+///
+/// Settled by running codex-cli 0.153.2 rather than reasoned about, and three
+/// things came out of it. The answer is read from the config file on disk, and
+/// only from there — the same table passed as `-c
+/// projects."<dir>".trust_level=trusted` is parsed and ignored, so the flag
+/// route does not exist. Only the working directory is asked about; the
+/// directories granted with `--add-dir` are not. And `codex exec` never asks
+/// at all, which is why every headless check spoolway already runs came back
+/// green while the lanes a person actually watches did not.
+pub struct Trust {
+    /// The file the entry is written into, named among [`Home::seed`]. It is
+    /// spoolway's own copy of the real one rather than the link the other
+    /// seeds get: the entry is about a worktree that exists for one lane, and
+    /// writing it through a link would put it in the person's own home.
+    pub file: &'static str,
+
+    /// The key that is set, segment by segment rather than as one dotted
+    /// path. A segment is a directory, and a directory holds dots — and
+    /// backslashes, and on a bad day a quote. `{dir}` is substituted for the
+    /// directory being trusted.
+    ///
+    /// A key rather than a line of text because the file is a person's, and
+    /// it may already say something about this directory. `codex exec` writes
+    /// a `[projects."<dir>"]` table of its own for every directory it runs
+    /// in, so a project root that has ever had a headless turn in it already
+    /// has one. Appending a second table with the same name is a *duplicate
+    /// key*, which codex reports as `duplicate key` and then refuses to load
+    /// the config at all — a lane worse off than the one that only had a
+    /// question to answer. Setting the key overwrites whatever was there.
+    pub key: &'static [&'static str],
+
+    /// What that key is set to.
+    pub value: &'static str,
 }
 
 /// How a kind is asked to end its session and hand its pane back.
@@ -697,6 +749,31 @@ pub const ADAPTERS: &[Adapter] = &[
             "{state_dir}",
             "--add-dir",
             "{project_home}",
+            // codex checks for a newer release of itself on startup, and a
+            // newer one stops the lane dead: `✨ Update available! 0.153.4 ->
+            // 0.153.6`, then `1. Update now (runs npm install -g
+            // @openai/codex)`, `2. Skip`, `3. Skip until next version`, and
+            // `Press enter to continue`. Nobody is there to press it, so the
+            // lane never reaches `working` and the launch is reported failed —
+            // and worse if somebody does, because option 1 swaps the binary
+            // every *other* live lane is running out from under them. It is
+            // the hazard `CLAUDE.md` states about spoolway's own binary,
+            // arriving through codex instead.
+            //
+            // Established by running it: with the check left on and a home
+            // whose `version.json` named a newer release, the dialog came up
+            // and held the screen; with this override it did not. Unlike the
+            // trust table beside it, this key really is read from the merged
+            // config, so it is a flag here rather than something written into
+            // the lane's file. It is accepted under `--strict-config`, and a
+            // near miss — `check_for_update_on_startupp` — is refused, so the
+            // name is the binary's and not a guess.
+            //
+            // Only the lane's own copy of codex stops asking. A person's own
+            // codex is a different process reading a config spoolway never
+            // touched, and still tells them.
+            "-c",
+            "check_for_update_on_startup=false",
         ],
         // `CODEX_HOME` relocates the whole state tree, so the lane gets a codex
         // home of its own named after the id spoolway minted — which is what
@@ -711,6 +788,13 @@ pub const ADAPTERS: &[Adapter] = &[
             // a lane that arrived in an empty home would be logged out and
             // pointed at nothing.
             seed: &["config.toml", "auth.json"],
+            // See [`Trust`] for what was run to establish this, and why the
+            // route is a file rather than a flag.
+            trust: Some(Trust {
+                file: "config.toml",
+                key: &["projects", "{dir}", "trust_level"],
+                value: "trusted",
+            }),
         }),
         // codex records per-turn usage as an `event_msg` of type `token_count`,
         // one per `task_started`, under
@@ -979,26 +1063,108 @@ pub fn session_home(kind: &str, session: &str) -> Option<std::path::PathBuf> {
 /// here, and nothing spoolway made holds a stale copy of a token. A home that
 /// relocates one file seeds nothing, because it moved nothing away.
 ///
+/// `cwd` is the directory the lane will be started in — its worktree. A kind
+/// with a [`Trust`] row is told in its own config that this directory is one it
+/// may work in, which is what keeps it from opening on a question nobody is
+/// there to answer.
+///
 /// Best-effort, and deliberately not a failure: the worst case is a lane that
 /// cannot authenticate, which is the lane's own error to report, and it is a
 /// worse outcome to refuse to start one over a symlink.
-pub fn prepare_session_home(kind: &str, session: &str) -> Option<std::path::PathBuf> {
+pub fn prepare_session_home(
+    kind: &str,
+    session: &str,
+    cwd: &std::path::Path,
+) -> Option<std::path::PathBuf> {
     let home = session_home(kind, session)?;
     std::fs::create_dir_all(&home).ok()?;
 
-    let seed = adapter(kind).and_then(|a| a.home.as_ref()).map(|h| h.seed);
+    let relocates = adapter(kind).and_then(|a| a.home.as_ref());
+    let trust = relocates.and_then(|h| h.trust.as_ref());
+    let seed = relocates.map(|h| h.seed);
     // Only what a lane cannot run without. Everything else in an agent's home
     // is state it will rebuild on its own, and linking it would be sharing
     // mutable state between concurrent lanes.
-    if let (Some(seed), Some(real)) = (seed.filter(|s| !s.is_empty()), own_home(kind)) {
+    let real = own_home(kind);
+    if let (Some(seed), Some(real)) = (seed.filter(|s| !s.is_empty()), real.as_deref()) {
         for name in seed {
+            // The trust file is written below rather than linked, so the entry
+            // lands in this lane's copy and not in the person's own home.
+            if trust.is_some_and(|t| t.file == *name) {
+                continue;
+            }
             let (from, to) = (real.join(name), home.join(name));
             if from.exists() && !to.exists() {
                 link_seed(&from, &to);
             }
         }
     }
+    if let Some(trust) = trust {
+        write_trust(trust, real.as_deref(), &home, cwd);
+    }
     Some(home)
+}
+
+/// Write the lane's copy of the kind's config, with `cwd` trusted in it.
+///
+/// The person's own file first, so the lane keeps the provider config and
+/// everything else they set, then the one key set on top of it. Edited as TOML
+/// rather than appended to as text, for two reasons. The file may already say
+/// something about this directory — `codex exec` writes a `projects` table for
+/// every directory it runs in — and a second table with the same name is a
+/// duplicate key that costs the lane the whole config. And a directory is not
+/// a safe thing to splice into a line: it holds dots, backslashes, and on
+/// Windows both at once.
+///
+/// A real file that does not parse is passed through untouched. The lane then
+/// gets the agent's own complaint about the person's config, which is the one
+/// they need to see, rather than a truncated config spoolway invented and a
+/// lane quietly running against no provider at all.
+///
+/// Best-effort, the same as the links beside it. A lane whose config could not
+/// be written asks its question and stalls, which is the state this is fixing,
+/// not a worse one.
+fn write_trust(
+    trust: &Trust,
+    real: Option<&std::path::Path>,
+    home: &std::path::Path,
+    cwd: &std::path::Path,
+) {
+    let to = home.join(trust.file);
+    if to.exists() {
+        return;
+    }
+    let text = real
+        .map(|real| real.join(trust.file))
+        .and_then(|from| std::fs::read_to_string(from).ok())
+        .unwrap_or_default();
+    let Ok(mut doc) = text.parse::<toml_edit::DocumentMut>() else {
+        let _ = std::fs::write(to, text);
+        return;
+    };
+    if set_key(&mut doc, trust, cwd).is_some() {
+        let _ = std::fs::write(to, doc.to_string());
+    }
+}
+
+/// Set `trust.key` in `doc`, making the tables on the way down.
+///
+/// `None` when a segment names something that is already there and is not a
+/// table — a person who wrote `projects = "yes"` has a config spoolway has no
+/// business rearranging, and the caller leaves their file alone.
+fn set_key(doc: &mut toml_edit::DocumentMut, trust: &Trust, cwd: &std::path::Path) -> Option<()> {
+    let dir = cwd.display().to_string();
+    let (last, tables) = trust.key.split_last()?;
+    let mut at = doc.as_table_mut();
+    for segment in tables {
+        let segment = segment.replace("{dir}", &dir);
+        at = at
+            .entry(&segment)
+            .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
+            .as_table_mut()?;
+    }
+    at[&last.replace("{dir}", &dir)] = toml_edit::value(trust.value);
+    Some(())
 }
 
 /// Link `from` to `to`, and copy only where the platform will not make a
@@ -1426,6 +1592,194 @@ mod tests {
         };
         let args: Vec<String> = ["--model", "m"].iter().map(|s| s.to_string()).collect();
         assert_eq!(resume.apply(&args), args);
+    }
+
+    /// A kind that has to be told a directory is trusted is told in a file it
+    /// also seeds, or the entry would be written into a home the lane never
+    /// reads.
+    #[test]
+    fn a_trust_file_is_one_of_the_seeds() {
+        for adapter in ADAPTERS {
+            let Some(home) = adapter.home.as_ref() else {
+                continue;
+            };
+            let Some(trust) = home.trust.as_ref() else {
+                continue;
+            };
+            assert!(
+                home.seed.contains(&trust.file),
+                "`{}` trusts through `{}`, which it does not seed",
+                adapter.kind,
+                trust.file
+            );
+            assert!(
+                trust.key.iter().any(|segment| segment.contains("{dir}")),
+                "`{}`'s trust key names no directory: {:?}",
+                adapter.kind,
+                trust.key
+            );
+        }
+    }
+
+    /// The lane's copy carries what the person configured *and* the entry, and
+    /// is a real file — writing through a link would put a lane's worktree in
+    /// the person's own config, which the next lane would inherit along with
+    /// every worktree before it.
+    #[test]
+    fn trust_is_written_into_the_lanes_own_copy() {
+        let real = crate::scratch::root("agent-trust-real");
+        std::fs::create_dir_all(&real).unwrap();
+        let before = "model_reasoning_effort = \"high\"\n";
+        std::fs::write(real.join("config.toml"), before).unwrap();
+
+        let home = crate::scratch::root("agent-trust-home");
+        std::fs::create_dir_all(&home).unwrap();
+
+        let cwd = std::path::Path::new("/worktrees/some-task");
+        write_trust(&codex_trust(), Some(&real), &home, cwd);
+
+        let written = read_lane_config(&home);
+        assert_eq!(
+            written["model_reasoning_effort"].as_str(),
+            Some("high"),
+            "the person's own config was dropped"
+        );
+        assert_eq!(
+            written["projects"]["/worktrees/some-task"]["trust_level"].as_str(),
+            Some("trusted"),
+            "the worktree was not trusted: {written}"
+        );
+        assert!(
+            !std::fs::symlink_metadata(home.join("config.toml"))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the lane's config is a link, so the entry went into the real home"
+        );
+        assert_eq!(
+            std::fs::read_to_string(real.join("config.toml")).unwrap(),
+            before,
+            "the real config was written to"
+        );
+
+        let _ = std::fs::remove_dir_all(&real);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A directory the person's config already speaks about is *set*, not
+    /// appended to. `codex exec` writes a `projects` table for every directory
+    /// it runs in, so this is the ordinary case for a project root, not a rare
+    /// one — and a second table of the same name is a duplicate key that costs
+    /// the lane the whole config rather than only the answer.
+    #[test]
+    fn a_directory_already_in_the_config_is_not_written_twice() {
+        let real = crate::scratch::root("agent-trust-dup-real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(
+            real.join("config.toml"),
+            "[projects.\"/worktrees/some-task\"]\ntrust_level = \"untrusted\"\n",
+        )
+        .unwrap();
+
+        let home = crate::scratch::root("agent-trust-dup-home");
+        std::fs::create_dir_all(&home).unwrap();
+
+        let cwd = std::path::Path::new("/worktrees/some-task");
+        write_trust(&codex_trust(), Some(&real), &home, cwd);
+
+        let text = std::fs::read_to_string(home.join("config.toml")).unwrap();
+        assert!(
+            text.parse::<toml::Table>().is_ok(),
+            "the lane's config does not parse, so codex would refuse it outright: {text}"
+        );
+        let written = read_lane_config(&home);
+        assert_eq!(
+            written["projects"]["/worktrees/some-task"]["trust_level"].as_str(),
+            Some("trusted"),
+            "an existing answer for this directory was left standing: {text}"
+        );
+
+        let _ = std::fs::remove_dir_all(&real);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A path is a key, not a line of text: dots do not split it into tables,
+    /// and a backslash is not an escape. Windows brings both at once.
+    #[test]
+    fn a_path_with_dots_and_backslashes_stays_one_key() {
+        let home = crate::scratch::root("agent-trust-path-home");
+        std::fs::create_dir_all(&home).unwrap();
+
+        let cwd = std::path::Path::new(r"C:\Users\marvin\wt\v0.2.0");
+        write_trust(&codex_trust(), None, &home, cwd);
+
+        let written = read_lane_config(&home);
+        assert_eq!(
+            written["projects"][r"C:\Users\marvin\wt\v0.2.0"]["trust_level"].as_str(),
+            Some("trusted"),
+            "the path was split or unescaped: {written}"
+        );
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A config spoolway cannot read is handed on as it stands. The lane then
+    /// gets the agent's own complaint about it, rather than running against a
+    /// config spoolway invented with no provider in it.
+    #[test]
+    fn a_config_that_does_not_parse_is_passed_through_untouched() {
+        let real = crate::scratch::root("agent-trust-bad-real");
+        std::fs::create_dir_all(&real).unwrap();
+        let broken = "this is not = = toml\n";
+        std::fs::write(real.join("config.toml"), broken).unwrap();
+
+        let home = crate::scratch::root("agent-trust-bad-home");
+        std::fs::create_dir_all(&home).unwrap();
+
+        write_trust(
+            &codex_trust(),
+            Some(&real),
+            &home,
+            std::path::Path::new("/worktrees/some-task"),
+        );
+
+        assert_eq!(
+            std::fs::read_to_string(home.join("config.toml")).unwrap(),
+            broken,
+            "a config spoolway could not read was rewritten anyway"
+        );
+
+        let _ = std::fs::remove_dir_all(&real);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// codex asks about a newer release of itself on startup and holds the
+    /// screen until somebody answers, so a lane is launched with the check
+    /// off. Held here because the lane that gets this wrong does not fail —
+    /// it stalls, and the launch is only reported as a timeout.
+    #[test]
+    fn a_codex_lane_is_launched_with_the_update_check_off() {
+        let codex = adapter("codex").unwrap();
+        let args = codex.args.join(" ");
+        assert!(
+            args.contains("check_for_update_on_startup=false"),
+            "a codex lane would stop on the update dialog: {args}"
+        );
+    }
+
+    fn codex_trust() -> Trust {
+        Trust {
+            file: "config.toml",
+            key: &["projects", "{dir}", "trust_level"],
+            value: "trusted",
+        }
+    }
+
+    fn read_lane_config(home: &std::path::Path) -> toml::Value {
+        std::fs::read_to_string(home.join("config.toml"))
+            .unwrap()
+            .parse()
+            .unwrap()
     }
 
     /// A seed file is linked, not copied, so a credential rotated in the real

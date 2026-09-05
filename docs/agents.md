@@ -224,7 +224,7 @@ names:
 
 | Kind | Variable | What it moves | Seeded with |
 |---|---|---|---|
-| `codex` | `$CODEX_HOME` | the whole state tree — transcripts, credentials, provider config | `config.toml`, `auth.json`, symlinked back to the real home |
+| `codex` | `$CODEX_HOME` | the whole state tree — transcripts, credentials, provider config | `auth.json`, symlinked back to the real home; `config.toml`, copied and then written into |
 
 The clause sits on the *adapter*, not on the accounting row, because pinning a session and
 reading its spend are separate things and a kind may need the first without the second — a
@@ -238,11 +238,68 @@ together: a kind that resumes without naming a session must declare a home, and 
 reads out of one — a `FileShape::OwnHome` transcript — must have one to look in.
 
 Seeding matters for the home that moves everything: `CODEX_HOME` takes the credentials and
-provider config with it, so spoolway links `config.toml` and `auth.json` back to the real home
-rather than copying them. A login refreshed in the real home stays good, and nothing spoolway
-made holds a stale token. The link is a symlink on Unix and a symlink or same-volume hard
-link on Windows. A plain copy is the fallback only on a platform that will make neither, and
-there a rotated token does go stale in the session home.
+provider config with it, so spoolway links them back to the real home rather than copying
+them. A login refreshed in the real home stays good, and nothing spoolway made holds a stale
+token. The link is a symlink on Unix and a symlink or same-volume hard link on Windows. A
+plain copy is the fallback only on a platform that will make neither, and there a rotated
+token does go stale in the session home.
+
+One seed is the exception, and it is the `trust` clause beside `seed`. codex will not start
+in a directory nobody has said it may work in. Its interactive frontend opens on *Do you
+trust the contents of this directory?* and waits for a keypress, which under a multiplexer
+is a lane stalled on a question with nobody there to answer it. The answer lives in
+`config.toml`, so spoolway writes that file rather than linking it: the real one's contents
+first, then a `[projects."<worktree>"]` table saying `trust_level = "trusted"`. Appending
+through a link would write a lane's worktree into the person's own config, and every
+worktree after it too.
+
+Three things about that were settled by running codex-cli 0.153.2. The entry is read from
+the file on disk and only from there — the same table passed as `-c
+projects."<dir>".trust_level=trusted` is parsed and ignored, so there is no flag route. Only
+the working directory is asked about, not the directories granted with `--add-dir`. And
+`codex exec` never asks at all, which is why the headless checks spoolway already runs came
+back green while the lanes a person watches did not — see [Asking whether a kind actually
+works](#asking-whether-a-kind-actually-works).
+
+The entry is a key that gets *set*, not a table appended to the end of the file. The file may
+already speak about the directory: `codex exec` writes a `projects` table for every directory
+it runs in, so any project root that has ever had a headless turn in it already has one. A
+second table with the same name is a duplicate key, and codex answers that by refusing to load
+the config at all — a lane worse off than one that only had a question to answer. A path is
+also a poor thing to splice into a line, since it holds dots and, on Windows, backslashes.
+
+A config spoolway cannot parse is copied through untouched. The lane then reports codex's own
+complaint about the person's file, which is the thing they need to see, rather than running
+against a config spoolway invented with no provider in it.
+
+### codex asks about its own updates too
+
+On startup codex checks for a newer release of itself, and a newer one stops a lane dead:
+
+```
+✨ Update available!
+0.153.4 -> 0.153.6
+› 1. Update now (runs `npm install -g @openai/codex`)
+  2. Skip
+  3. Skip until next version
+Press enter to continue
+```
+
+Nobody is there to press it, so the lane never reaches `working` and the launch is reported
+as a failure — `agent is no longer running in the target pane`. The dispatcher retries on the
+next pass, so a run survives this, but it costs a lane.
+
+Somebody pressing it is the worse outcome. Option 1 replaces the codex binary while other
+lanes are running it, which is the hazard `CLAUDE.md` states about spoolway's own binary,
+arriving through codex instead.
+
+So a lane is launched with `-c check_for_update_on_startup=false`. Unlike the trust table,
+this key really is read from the merged config, so it is a flag rather than something written
+into the lane's file — established by running it, with a home whose `version.json` named a
+newer release. The dialog came up with the check on and did not with it off. The key is
+accepted under `--strict-config` and a near miss, `check_for_update_on_startupp`, is refused,
+so the name is the binary's rather than a guess. Only the lane's copy of codex stops asking;
+a person's own codex reads a config spoolway never touched and still tells them.
 
 The per-session home itself does not outlive the lane. Once a lane has been banked and its
 task archived, the dispatcher removes the home it made, so seed links and any copies go with
@@ -405,6 +462,8 @@ right, and both reversals are worth keeping.
 | Resume | `codex exec resume --last` under a per-session home recalled the first turn's answer and appended to the *same* rollout, which stayed the only one in the tree |
 | Prompt | `-c model_instructions_file=<path>`. It *replaces* codex's base instructions rather than appending — the same prompt cost 7,503 input tokens without it and 3,055 with it — and a turn run that way still used its shell tool and wrote the file it was asked to |
 | Approval | `--ask-for-approval` with `untrusted`, `on-request`, `never`. It is a *global* flag, and codex accepts globals before the subcommand, so `codex --ask-for-approval never … exec "<prompt>"` parses — one rendered args row serves both backends |
+| Trust | The interactive frontend refuses to start in a directory that is not trusted, asking *Do you trust the contents of this directory?* and waiting for a keypress. The answer is a `[projects."<dir>"]` table with `trust_level = "trusted"` in `config.toml`, read from disk only — the same table passed as `-c projects."<dir>".trust_level=trusted` is parsed and ignored. Only the working directory is asked about; `--add-dir` paths are not. `codex exec` never asks (0.153.2) |
+| Updates | The interactive frontend checks for a newer release on startup and holds the screen on `✨ Update available!` until somebody answers — option 1 being `npm install -g @openai/codex`, which swaps the binary other lanes are running. `-c check_for_update_on_startup=false` suppresses it: accepted under `--strict-config`, refused as `check_for_update_on_startupp`, and confirmed off against a home whose `version.json` named a newer release (0.153.4) |
 | Git | Refuses to start outside a git repo: "Not inside a trusted directory and --skip-git-repo-check was not specified". A lane's worktree is a repo, so this only ever bites a scratch directory — which is why `verify --live` makes one |
 | Effort | No flag; a config override, `-c model_reasoning_effort=<level>`. Accepted under `--strict-config`, and it reaches the turn — it lands in the rollout's `turn_context` as `effort: "high"`. `minimal`, `low` and `medium` arrive verbatim too, and so does a nonsense level: codex validates nothing here and hands the value to the provider |
 
