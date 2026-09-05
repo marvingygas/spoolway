@@ -350,12 +350,29 @@ pub struct ModelPrice {
     /// of the profile's slot budget does not change.
     #[serde(skip_serializing_if = "not_exclusive")]
     pub exclusive: bool,
+
+    /// This model runs on hardware you own rather than a metered API.
+    ///
+    /// Purely informational: it sizes nothing, caps nothing and never reaches
+    /// the scheduler — a run takes exactly the same decisions whether this is
+    /// `true` or absent. Its one effect is a standing line on the dispatcher's
+    /// board when a queued task routes through a step naming this model,
+    /// asking a person not to open their own sessions against the same server
+    /// while the run lasts. spoolway never infers it: a model carrying
+    /// `slots` or `exclusive` is describing the same kind of hardware, but so
+    /// is a local model nobody has sized, and a mistyped hosted model name
+    /// reads as unpriced the way a free local one does — so `spoolway doctor`
+    /// notes a `slots`/`exclusive` model that has not set this rather than
+    /// assuming either way.
+    #[serde(skip_serializing_if = "not_local")]
+    pub local: bool,
 }
 
 /// A zero in `[models]` is *unset*, and unset is written by leaving the key
 /// out. Every rate in this table is zero for a local model, and eight lines
-/// saying a free model is free is noise around the two fields that carry the
-/// answer. See [`ModelPrice::probe`] for the one thing this costs.
+/// saying a free model is free is noise around the three fields that carry
+/// the answer — `slots`, `exclusive` and `local`. See [`ModelPrice::probe`]
+/// for the one thing this costs.
 fn unset_usize(n: &usize) -> bool {
     *n == 0
 }
@@ -370,6 +387,10 @@ fn unset_slots(slots: &u32) -> bool {
 
 fn not_exclusive(exclusive: &bool) -> bool {
     !*exclusive
+}
+
+fn not_local(local: &bool) -> bool {
+    !*local
 }
 
 impl ModelPrice {
@@ -395,6 +416,7 @@ impl ModelPrice {
             session_reuse_idle: Some(std::time::Duration::from_secs(1)),
             slots: 1,
             exclusive: true,
+            local: true,
         }
     }
 
@@ -2490,6 +2512,7 @@ mod tests {
                     session_reuse_idle: None,
                     slots: 0,
                     exclusive: false,
+                    local: false,
                 },
             ),
             (
@@ -2504,6 +2527,7 @@ mod tests {
                     session_reuse_idle: None,
                     slots: 0,
                     exclusive: false,
+                    local: false,
                 },
             ),
         ])
@@ -2609,6 +2633,7 @@ mod tests {
                 session_reuse_idle: None,
                 slots: 0,
                 exclusive: false,
+                local: false,
             },
         )]);
         let hour = Tokens {

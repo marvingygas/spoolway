@@ -49,6 +49,7 @@
 # models.<glob>.session_reuse_idle      <duration>             (unset)                                                 How long a carried session may sit before it is refused rather than resumed. Never set it on a local model.
 # models.<glob>.slots                   <n>                    0                                                       How many lanes this model may run at once, replacing its profile's `concurrency`; 0 leaves the profile in charge.
 # models.<glob>.exclusive               true, false            false                                                   Whether this model refuses to run alongside a different `exclusive` one — one set of weights on the card at a time.
+# models.<glob>.local                   true, false            false                                                   Whether this model runs on hardware you own — a board line asks others off the card when a queued task routes to it, and it changes nothing else.
 # issue_tracking.hook                   <filename>             (blank)                                                 A bare filename, resolved inside `.spoolway/hooks/`; blank runs no hook and changes nothing about a task's `queued`, `blocked`, `paused` or `done`.
 # issue_tracking.project_key            <string>               (blank)                                                 Opaque to spoolway — `owner/repo` on github, a project key on jira — handed to the hook verbatim as `SPOOLWAY_PROJECT_KEY`.
 # issue_tracking.on_fail                ignore, pause          ignore                                                  What a non-zero hook exit does: `ignore` only records it, `pause` also holds the task — on `queued` to `paused`, on `done` out of the archive.
@@ -118,15 +119,16 @@ kind = "pi"
 session_reuse_ctx = 50
 session_blocked_ctx = 0
 
-[models."*Muse-Glimmer-30B"]
-context_window = 131072
-slots = 1
-exclusive = true
-
 [models."*Qwen3.6-35B-A3B"]
 context_window = 100096
 slots = 3
 exclusive = true
+
+[models."*Ornith-1.5-35B-A3B"]
+context_window = 100096
+slots = 3
+exclusive = true
+local = true
 
 [issue_tracking]
 hook = ""

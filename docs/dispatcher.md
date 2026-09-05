@@ -511,6 +511,21 @@ task has been archived does not count, so a stale failure stops showing once the
 gone. A failed `fetch` run is keyed on an issue reference rather than a task and always
 counts. The line is absent entirely while nothing has failed.
 
+One more line joins the footer for each `local` model a task in the queue will run. It sits
+below the whole slots block, after a blank line, and is never folded into a slots line. The
+trigger is any agent step of that task's pipeline that names a model whose `[models]` entry
+sets `local = true`. The step the task currently sits on does not matter, and neither does
+its state — a queued, paused or blocked task all count.
+
+The line reads `local   <model> — manually started sessions are not considered by the slots
+pool`. The word `local` is bold and column-aligned under the slot names above it. The slot
+figures count only the lanes spoolway started. A person can load the same server from another
+terminal, and this line is the standing reminder of that gap.
+
+The line is absent when nothing in the queue names a `local` model. It is also absent under
+`--plain` and in a pipe, where no board is drawn. Every pipeline this project ships names
+cloud models, so its own board never carries the line.
+
 The header says whose process this is and how long it has been going, and nothing about
 when the next pass is due: `up` moves on every redraw, which is all a board needs to show it
 is alive, and a pass is not something a person watching can bring forward. Every frame is

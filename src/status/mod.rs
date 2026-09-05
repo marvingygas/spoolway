@@ -1310,7 +1310,15 @@ fn render(
     // that wraps is two rules, and the second one lands where the footer goes.
     let rule = "─".repeat(60.min(pane.saturating_sub(1)));
     tail.push_str(&format!("\n {DIM}{rule}{RESET}\n"));
-    for line in footer(repo, pipelines, &used, &model_used, &agent_model) {
+    let local_notice = queued_local_models(repo, &tasks, pipelines);
+    for line in footer(
+        repo,
+        pipelines,
+        &used,
+        &model_used,
+        &agent_model,
+        &local_notice,
+    ) {
         tail.push_str(&format!(" {line}\n"));
     }
     // The key hint, last of all — only for a board actually driving a run:
@@ -1406,6 +1414,44 @@ fn slots_used<'a>(
         }
     }
     out
+}
+
+/// The `local` models a task in the queue will run: any model an agent step
+/// of a queued task's pipeline names and that `[models]` flags `local =
+/// true`, deduped and in name order.
+///
+/// The whole pipeline's steps, not only the one a task sits on: a task that
+/// will reach a local step later is already a reason to keep the card clear.
+/// The footer draws one line per name this returns — the plain's own
+/// `d-notice-not-gate`. A model configured `local` but named by no queued
+/// task yields nothing here, which is why this project's board carries no
+/// such line: every pipeline it ships names cloud models.
+fn queued_local_models(
+    repo: &Repo,
+    tasks: &[crate::task::Task],
+    pipelines: &Pipelines,
+) -> Vec<String> {
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    for task in tasks {
+        let Ok(pipeline) = pipelines.for_task(task) else {
+            continue;
+        };
+        for step in &pipeline.steps {
+            if step.kind() != crate::pipeline::StepKind::Agent {
+                continue;
+            }
+            let Some(model) = step.model.as_deref().filter(|m| !m.trim().is_empty()) else {
+                continue;
+            };
+            if crate::models::resolve(&repo.config.models, model)
+                .price
+                .is_some_and(|price| price.local)
+            {
+                seen.insert(model.to_string());
+            }
+        }
+    }
+    seen.into_iter().collect()
 }
 
 /// What the run's live lanes are consuming, counted two ways.
@@ -2296,6 +2342,43 @@ mod tests {
         assert_eq!(used.agents.get("pi").copied(), None, "{used:#?}");
     }
 
+    /// A queued task whose pipeline names a `local` model puts that model's
+    /// name on the list the footer draws a line from; a model in `[models]`
+    /// that has not set `local` puts nothing there, however it is sized.
+    #[test]
+    fn queued_local_models_names_a_local_model_a_queued_task_will_run() {
+        let mut repo = fixture("queued-local-models");
+        add(&repo, "login", &[], Some("implement"));
+        let pipelines = Pipelines::builtin();
+        let tasks = repo.tasks().unwrap();
+
+        // The shipped `default` pipeline's local steps carry the placeholder,
+        // so flagging that name `local` is the whole of what a real project's
+        // own model name would do here.
+        repo.config.models.insert(
+            crate::models::PLACEHOLDER.to_string(),
+            crate::usage::ModelPrice {
+                local: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            queued_local_models(&repo, &tasks, &pipelines),
+            vec![crate::models::PLACEHOLDER.to_string()]
+        );
+
+        // Sized but silent on `local`: nothing to warn about.
+        repo.config.models.insert(
+            crate::models::PLACEHOLDER.to_string(),
+            crate::usage::ModelPrice {
+                slots: 3,
+                exclusive: true,
+                ..Default::default()
+            },
+        );
+        assert!(queued_local_models(&repo, &tasks, &pipelines).is_empty());
+    }
+
     /// A parked task's pane is kept open for a person to read, and the
     /// dispatcher hands the slot back the moment it does that. Counted here it
     /// would read as a profile with nothing running in it — the board saying no
@@ -2978,6 +3061,7 @@ mod tests {
                 session_reuse_idle: None,
                 slots: 0,
                 exclusive: false,
+                local: false,
             },
         )]);
 

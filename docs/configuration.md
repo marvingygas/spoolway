@@ -613,7 +613,7 @@ name, matched by the same most-literal-wins rule as everywhere else spoolway mat
 `claude-opus-5` beats `claude-*` for that one model.
 
 **A zero is written by leaving the key out.** Only the fields you have actually set appear, so
-a local model reads as the two or three lines that say something rather than as nine, five of
+a local model reads as the few lines that say something rather than as nine, five of
 which would be rates saying a free model is free:
 
 ```toml
@@ -635,13 +635,15 @@ dispatcher acts on. Renamed from `cache_ttl`: a serde alias keeps an existing co
 and the rename is written back on the next save. See [Cache warmth is a model's
 fact](agents.md#cache-warmth-is-a-models-fact).
 
-Two more fields on the same row are not prices either — how many lanes the model itself may
-run at once, and whether it shares a card with another model like it:
+Three more fields on the same row are not prices either — how many lanes the model itself may
+run at once, whether it shares a card with another model like it, and whether it runs on
+hardware you own:
 
 ```toml
 [models."your-local-model"]
 slots = 1
 exclusive = true
+local = true
 ```
 
 **`slots`** replaces its profile's `agents.<profile>.concurrency` for a step naming this model,
@@ -666,8 +668,22 @@ resident model. Set `slots` on an `exclusive` model too, or it falls back to its
 `concurrency` for how many of *itself* may run at once — which on a local profile is no cap at
 all. `spoolway doctor` reports a model carrying `exclusive = true` with no `slots`.
 
-`spoolway config set models.'<glob>'.slots 3` writes either field the same way any other
-`[models]` key is set.
+**`local`** marks a model as running on hardware you own rather than a metered API. It sizes
+nothing and caps nothing. It never reaches the scheduler, so a run takes the same decisions
+whether it is set or absent.
+
+Its one effect is on the dispatcher's board. When a task in the queue routes through a step
+naming this model, the footer carries a standing line below the slots block. The line names
+the model and reminds a person that sessions they start by hand are not counted against the
+slot pool. It stands in for a slot count that cannot see those sessions.
+
+spoolway never infers `local`. A model that sets `slots` or `exclusive` describes the same
+kind of hardware, but so does a local model nobody has sized. So `spoolway doctor` only notes
+a `slots` or `exclusive` model that has not set `local`, rather than assuming either way. The
+board line is drawn nowhere else — not under `--plain`, and not into a pipe.
+
+`spoolway config set models.'<glob>'.slots 3` writes any of these fields the same way any
+other `[models]` key is set.
 
 `context_window` is what `agents.<profile>.session_reuse_ctx` takes its percentage *of* at run
 time — so a step with `session: true` decides whether to carry a conversation over by measuring

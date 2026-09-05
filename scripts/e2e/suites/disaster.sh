@@ -482,4 +482,43 @@ else
 fi
 must "retention back to the default" "$SPOOLWAY" config set retention.days 30
 
+# ------------- the board names a local model a queued task is about to run
+# The footer's slot counts only ever see the lanes spoolway started, so a
+# model flagged `local = true` earns a standing line saying that manually
+# started sessions are not considered by the slots pool — drawn only when a
+# queued task actually routes onto such a model, and on the board alone.
+#
+# covers: models.<glob>.local — the board names a local model a queued task routes onto, and stays silent for a model that has not set it
+sweep
+LOCAL_MODEL=$(local_model)   # `fake-local`, the model the mock's local steps name
+queue_hang localnote          # a task whose default pipeline routes through that step
+
+# Nothing has flagged the model yet: the board treats it like any other and
+# draws no such line.
+BEFORE=$(wc -l < "$E2E_DISPATCH_LOG" 2>/dev/null || echo 0)
+BOARD_PID=$(one_shot_start_board)
+poll_until 15 bash -c \
+  'tail -n +'"$((BEFORE + 1))"' "'"$E2E_DISPATCH_LOG"'" | grep -q "slots"'
+if tail -n +"$((BEFORE + 1))" "$E2E_DISPATCH_LOG" | grep -qF "not considered by the slots pool"; then
+  bad "a model that has not set \`local\` draws no board line"
+  tail -n +"$((BEFORE + 1))" "$E2E_DISPATCH_LOG" | sed 's/^/        /'
+else
+  ok "a model that has not set \`local\` draws no board line"
+fi
+one_shot_stop "$BOARD_PID"
+
+# Flagged, the same queued task's route now draws one line naming the model.
+must "flag the model local" "$SPOOLWAY" config set "models.$LOCAL_MODEL.local" true
+BEFORE=$(wc -l < "$E2E_DISPATCH_LOG" 2>/dev/null || echo 0)
+BOARD_PID=$(one_shot_start_board)
+if wait_for_text 20 "$E2E_DISPATCH_LOG" \
+     "$LOCAL_MODEL — manually started sessions are not considered by the slots pool"; then
+  ok "the board names a local model a queued task routes onto"
+else
+  bad "the board names a local model a queued task routes onto"
+  tail -n +"$((BEFORE + 1))" "$E2E_DISPATCH_LOG" | sed 's/^/        /'
+fi
+one_shot_stop "$BOARD_PID"
+forget localnote
+
 finish
