@@ -115,24 +115,31 @@ pub struct Adapter {
     /// did before this field existed.
     pub usage_limit: Option<&'static str>,
 
-    /// Where this kind's own cached usage percentage is read back from,
-    /// relative to the home directory — `spoolway agent verify` prints it
-    /// verbatim, and [`crate::quota::read`] joins it onto the home directory
-    /// it resolves at read time.
+    /// Where this kind's own cached usage percentage is read back from.
+    /// `spoolway agent verify` prints it verbatim, and [`crate::quota::read`]
+    /// decides how to use it from [`Accounting::format`], since the two rows
+    /// established so far do not read it the same way.
     ///
-    /// Established against `claude` alone: `~/.claude.json` carries a
-    /// `cachedUsageUtilization` object with a `five_hour` and a `seven_day`
-    /// entry, each an integer `utilization` percent and an ISO `resets_at`,
-    /// plus a `fetchedAtMs` on the object itself — read verbatim off a real
-    /// file, not guessed at. The shape that reader expects is fixed to that
-    /// one file for the same reason [`Self::usage_limit`] is one phrase
-    /// rather than a pattern registry: nothing yet needs it to be more than
-    /// that.
+    /// **`claude`**: a file relative to the home directory, `.claude.json`,
+    /// whose `cachedUsageUtilization` object carries a `five_hour` and a
+    /// `seven_day` entry — each an integer `utilization` percent and an ISO
+    /// `resets_at` — plus a `fetchedAtMs` on the object itself. Read verbatim
+    /// off a real file, not guessed at.
     ///
-    /// `None` for a kind with no such cache to read — every row but
-    /// `claude`'s today. A profile of that kind is never parked for its
-    /// quota, and `spoolway agent verify` says so on its own line rather than
-    /// pretending there is nothing to say.
+    /// **`codex`**: `"sessions"`, a directory joined onto every per-lane home
+    /// spoolway has made for this kind — never this kind's own home
+    /// (`$CODEX_HOME` or `~/.codex`), which a lane spoolway did not itself
+    /// start is free to have written more recently — and walked for the
+    /// newest rollout across all of them. Its last `token_count` event
+    /// carries a `rate_limits` object with a `primary` and a `secondary`
+    /// window, each a `used_percent` float and an epoch-seconds `resets_at`;
+    /// see the comment on codex's own row for the real reading this was
+    /// established against, and its negative case.
+    ///
+    /// `None` for a kind with no such cache to read — every row but these
+    /// two today. A profile of that kind is never parked for its quota, and
+    /// `spoolway agent verify` says so on its own line rather than pretending
+    /// there is nothing to say.
     pub quota: Option<&'static str>,
 
     /// How this kind's transcript records a person's interrupt — the record
@@ -741,9 +748,36 @@ pub const ADAPTERS: &[Adapter] = &[
         }),
         // Not established against a real codex transcript yet.
         usage_limit: None,
-        // Establishing this needs a real ChatGPT-authed run — `codex-quota`'s
-        // own job, not this row's. Left as a gap rather than guessed.
-        quota: None,
+        // Read verbatim off a real ChatGPT-authed rollout on this machine —
+        // `~/.codex/sessions/2026/09/05/rollout-2026-09-05T09-51-18-
+        // 01a0708c-ec8f-7a01-b4f9-99f6337e1a05.jsonl`'s last `token_count`
+        // event carried:
+        //   "rate_limits":{"limit_id":"codex","limit_name":null,
+        //   "primary":{"used_percent":5.0,"window_minutes":300,
+        //   "resets_at":1788611977},"secondary":{"used_percent":2.0,
+        //   "window_minutes":10080,"resets_at":1789151593},
+        //   "credits":{"has_credits":false,"unlimited":false,"balance":"0"},
+        //   "individual_limit":null,"spend_control_reached":null,
+        //   "plan_type":"plus","rate_limit_reached_type":null}
+        // — a non-null `primary`, only ever seen after a `chatgpt`
+        // `auth_mode` sign-in; a local endpoint or an API key leave
+        // `rate_limits` present but `primary` and `secondary` null, along
+        // with every other field but `limit_id` itself (which stayed
+        // `"codex"`) — see [`crate::quota`]'s own doc — which is the
+        // negative case its reader has to return no reading for.
+        //
+        // `"sessions"` rather than a file: unlike claude's single cache file,
+        // codex writes this per session, so [`crate::quota::read`] walks for
+        // the newest rollout across every per-lane home spoolway has made
+        // under its own state directory, joining this onto each one, and
+        // reads the last `token_count` event's `rate_limits` out of whichever
+        // file that is. Never `own_home(kind)` — `$CODEX_HOME` or `~/.codex`
+        // — however fresh a rollout sits there: that is an interactive
+        // session or a run against a local endpoint, neither of which this
+        // binary started, and letting either override a reading from a lane
+        // spoolway actually ran would make the ceiling trust a run it never
+        // dispatched.
+        quota: Some("sessions"),
         // Captured off a real rollout: the record after Escape is a `user`
         // item whose text opens `<turn_aborted>` —
         // `{"role":"user","content":[{"type":"input_text","text":
@@ -1070,13 +1104,14 @@ mod tests {
     }
 
     /// A kind's own cache format is established the same way its quit gesture
-    /// is — against a real file, not guessed at — so only `claude` may claim
-    /// one until a second kind's is actually read.
+    /// is — against a real file, not guessed at — so only a kind whose
+    /// reading has actually been read off a real run may claim a probe.
     #[test]
-    fn only_claude_carries_a_quota_probe() {
+    fn only_claude_and_codex_carry_a_quota_probe() {
         for row in ADAPTERS {
             match row.kind {
                 "claude" => assert_eq!(row.quota, Some(".claude.json")),
+                "codex" => assert_eq!(row.quota, Some("sessions")),
                 _ => assert!(
                     row.quota.is_none(),
                     "`{}` claims a quota probe nobody has read off its real cache",

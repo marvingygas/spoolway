@@ -8037,6 +8037,142 @@ mod tests {
         assert_eq!(reload(&staffed_path).front.parked_until, None);
     }
 
+    /// A pipeline whose `review` step is staffed by `codex` rather than
+    /// `claude` — the ceiling gate's own mechanism does not change per kind,
+    /// so this is what lets the test below exercise codex's row through it
+    /// rather than asserting on `quota::read` directly.
+    fn codex_review_pipeline() -> Pipelines {
+        let yaml = "steps:\n  \
+             - id: implement\n    agent: pi\n    prompt: implementer\n    model: test-model\n\
+             \x20   on_pass: review\n  \
+             - id: review\n    agent: codex\n    prompt: implementer\n    model: test-model\n\
+             \x20   on_pass: handover\n  \
+             - id: handover\n    end: true\n";
+        let pipeline = crate::pipeline::Pipeline::parse("default", yaml).unwrap();
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert("default".into(), pipeline);
+        pipelines
+    }
+
+    /// A scratch home holding a codex rollout shaped like a real
+    /// ChatGPT-authed one — `used_percent` a float, `resets_at` epoch
+    /// seconds — readable by [`crate::quota::read`] the way
+    /// [`claude_quota_home`] is readable for claude. Written under the
+    /// managed lane home `crate::quota::read`'s codex row actually reads —
+    /// `<home>/.local/state/spoolway/codex/<session>/sessions/**` — never
+    /// under `~/.codex`, which that row never looks at.
+    fn codex_quota_home(
+        name: &str,
+        primary_pct: f64,
+        primary_resets_at: i64,
+        secondary_pct: f64,
+        secondary_resets_at: i64,
+    ) -> PathBuf {
+        let root = crate::scratch::root(&format!("dispatch-quota-codex-{name}"));
+        let dir = root.join(format!(
+            ".local/state/spoolway/codex/{name}/sessions/2026/09/05"
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let line = format!(
+            r#"{{"timestamp":"{}","type":"event_msg","payload":{{"type":"token_count","info":{{}},"rate_limits":{{"limit_id":"codex","limit_name":null,"primary":{{"used_percent":{primary_pct},"window_minutes":300,"resets_at":{primary_resets_at}}},"secondary":{{"used_percent":{secondary_pct},"window_minutes":10080,"resets_at":{secondary_resets_at}}},"credits":null,"individual_limit":null,"spend_control_reached":null,"plan_type":"plus","rate_limit_reached_type":null}}}}}}"#,
+            chrono::Utc::now().to_rfc3339(),
+        );
+        std::fs::write(dir.join("rollout-fixture.jsonl"), line).unwrap();
+        root
+    }
+
+    /// codex's own row goes through the exact same pre-launch ceiling gate
+    /// claude's does — see
+    /// [`a_quota_ceiling_over_its_limit_parks_a_new_lane_without_starting_one`]
+    /// — proven here against a fixture rollout shaped like a real
+    /// ChatGPT-authed one rather than claude's single cache file, since that
+    /// reading is what this task adds.
+    // covers: agents.codex.quota_ceiling — the pre-launch gate on a new lane, off codex's own probe
+    #[test]
+    fn a_codex_quota_ceiling_over_its_limit_parks_a_new_lane_without_starting_one() {
+        let mut repo = fixture("codex-quota-ceiling");
+        repo.config.agents.get_mut("codex").unwrap().quota_ceiling = 85;
+        let pipelines = codex_review_pipeline();
+        let parked_path = add_task(&repo, "over-ceiling", "review");
+        let staffed_path = add_task(&repo, "different-profile", "queued");
+
+        let primary_resets = now_secs() + 3600;
+        let secondary_resets = now_secs() + 6 * 86_400;
+        let home = codex_quota_home("over-ceiling", 88.0, primary_resets, 10.0, secondary_resets);
+        let mux = FakeMux::new(vec![]);
+        let report = with_home(&home, || run_pass_with(&repo, &mux, &pipelines));
+        std::fs::remove_dir_all(&home).ok();
+
+        let task = reload(&parked_path);
+        assert_eq!(task.stage(), "review", "parked, not started");
+        let until = task
+            .front
+            .parked_until
+            .expect("parked_until must be set by the ceiling");
+        assert_eq!(
+            until, primary_resets,
+            "parked_until must come from the probe's own resets_at"
+        );
+        assert!(
+            mux.did("start").iter().all(|c| !c.contains("over-ceiling")),
+            "{:?}",
+            mux.did("start")
+        );
+        assert!(
+            report
+                .actions
+                .iter()
+                .any(|a| a.contains("parked until") && a.contains("85")),
+            "{:?}",
+            report.actions
+        );
+
+        // The other task, on a step naming a different profile, is staffed
+        // in the same pass — the ceiling on `codex` never touches `pi`.
+        assert!(
+            mux.did("start")
+                .iter()
+                .any(|c| c.contains("different-profile")),
+            "{:?}",
+            mux.did("start")
+        );
+        assert_eq!(reload(&staffed_path).front.parked_until, None);
+    }
+
+    /// The other side of the gate: a codex reading safely under its own
+    /// ceiling staffs the lane exactly as if there were no probe at all —
+    /// the above-ceiling test only proves a *different* profile (`pi`) is
+    /// unaffected by codex's ceiling, never that codex's own lane starts
+    /// when its own reading is fine.
+    // covers: agents.codex.quota_ceiling — a reading under the ceiling staffs the same profile
+    #[test]
+    fn a_codex_quota_reading_under_its_ceiling_staffs_the_lane() {
+        let mut repo = fixture("codex-quota-under-ceiling");
+        repo.config.agents.get_mut("codex").unwrap().quota_ceiling = 85;
+        let pipelines = codex_review_pipeline();
+        let path = add_task(&repo, "under-ceiling", "review");
+
+        let primary_resets = now_secs() + 3600;
+        let secondary_resets = now_secs() + 6 * 86_400;
+        let home = codex_quota_home(
+            "under-ceiling",
+            40.0,
+            primary_resets,
+            10.0,
+            secondary_resets,
+        );
+        let mux = FakeMux::new(vec![]);
+        with_home(&home, || run_pass_with(&repo, &mux, &pipelines));
+        std::fs::remove_dir_all(&home).ok();
+
+        assert!(
+            mux.did("start").iter().any(|c| c.contains("under-ceiling")),
+            "a reading safely under the ceiling must not hold the lane back: {:?}",
+            mux.did("start")
+        );
+        assert_eq!(reload(&path).front.parked_until, None);
+    }
+
     /// The park is written on the task file, not held anywhere in the
     /// dispatcher's own memory — so a dispatcher that never ran during the
     /// wait, or was stopped and started again from cold, still honours it,

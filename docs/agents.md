@@ -126,23 +126,46 @@ escalation](dispatcher.md#restarts-laps-and-escalation).
 
 ### Reading a kind's quota before a lane starts
 
-A row can also carry `quota`: the file, named relative to the home directory, where this kind's
-own CLI caches its account-wide usage percentage. Only `claude` declares one today,
-`.claude.json`, whose `cachedUsageUtilization` object holds a `five_hour` and a `seven_day`
-entry — each an integer `utilization` percent and an ISO `resets_at` — plus a `fetchedAtMs`
-saying when the agent last wrote them. Nothing here goes over the network; the figure is a file
-the agent already wrote.
+A row can also carry `quota`: where this kind's own CLI leaves its account-wide usage
+percentage. `claude` and `codex` both declare one today. Nothing here goes over the network;
+the figure is something the agent already wrote to disk.
+
+The two kinds write it in different places, so the string on the row means a different thing on
+each. `claude` names a **file** relative to the home directory, `.claude.json`, whose
+`cachedUsageUtilization` object holds a `five_hour` and a `seven_day` entry. Each is an integer
+`utilization` percent and an ISO `resets_at`, and a `fetchedAtMs` beside them says when the
+agent last wrote the pair.
+
+`codex` names a **directory** instead, `sessions`, because codex writes its figure per session
+rather than to one cache. Every `token_count` event in a rollout carries a `rate_limits` object,
+with a `primary` window and a `secondary` one. `crate::quota::read` walks for the newest rollout,
+takes that file's last `token_count` event, and reads `rate_limits` out of it. The event's own
+`timestamp` is what dates the reading, standing in for claude's `fetchedAtMs`.
+
+**Codex is read only under the homes spoolway made for its own lanes.** Those are the
+`<state_root>/codex/<session>/sessions/` directories a dispatched lane writes into. Each of
+those directories is itself the `$CODEX_HOME` spoolway handed that lane, so the probe does read
+per-lane `CODEX_HOME` values. What it never looks at is the ambient `$CODEX_HOME` this process
+would otherwise resolve, or `~/.codex`. A rollout in either of those came from an interactive
+session or a run against a local endpoint, neither of which spoolway started, and letting one
+win would make the ceiling trust a run the dispatcher never dispatched.
 
 The reading gates a launch through [`quota_ceiling`](#every-profile-key). At or above the
 ceiling on either window, a pass starts no new lane of that profile and writes `parked_until:`
 on every candidate task, taken from the window's own `resets_at`. The five-hour window is
-checked first, because it is the one that resets soonest. Tasks whose step names a different
-profile are staffed in the same pass, untouched.
+checked first, because it is the one that resets soonest. Codex's `primary` and `secondary`
+windows are carried in those same two slots. Tasks whose step names a different profile are
+staffed in the same pass, untouched.
 
-**A reading spoolway cannot trust never blocks anything.** Four cases all degrade to "off": the
-kind carries no `quota` row, the file cannot be read, it does not parse, or its `fetchedAtMs` is
-older than five hours. A window whose own `resets_at` has already passed is skipped too, however
-high its cached percentage reads — the cache is only rewritten when the agent next runs, so an
+**A reading spoolway cannot trust never blocks anything.** Five cases all degrade to "off": the
+kind carries no `quota` row, the file cannot be read, it does not parse, the reading is older
+than five hours, or it parsed cleanly and carries no figure at all. That last one is codex's own
+case. A codex session that was not signed in with ChatGPT — a local endpoint, or a bare API key
+— writes `rate_limits` with both windows null: `primary` and `secondary` are null, while
+`limit_id` stays `"codex"`. The probe answers with no reading rather than calling the file
+malformed. A rollout with only one of the two windows null is a shape nobody has seen, and it
+is treated as malformed instead. A window whose own `resets_at` has already passed is skipped too,
+however high its percentage reads. The cache is only rewritten when the agent next runs, so an
 old percentage would otherwise gate every pass forever. The pane-phrase hold above is still
 behind all of this.
 
@@ -152,9 +175,17 @@ cases they are in:
 ```
 claude   quota  ~/.claude.json cachedUsageUtilization
                 five_hour 61% resets 14:00 · seven_day 16% resets 09-11 04:00
+codex    quota  newest rollout under the lane's CODEX_HOME,
+                last token_count event's rate_limits
+                primary 2% resets in 4h46m39s · secondary 6% resets in 6d19m47s
 pi       quota  no probe established — lanes of this kind are never parked
                 for quota, and its usage limit is not detected either
 ```
+
+Codex's own row shows a countdown rather than a clock time. The account behind the reading is
+not necessarily on this machine's own timezone, where claude's cache always is, so a bare clock
+would be misleading. Its `resets_at` arrives as a Unix timestamp, and its seven-day window is
+usually days out.
 
 The clause never fails the command. `spoolway doctor` says the same thing from the other side:
 it names a profile that sets `quota_ceiling` on a kind with no probe, where the ceiling can
@@ -402,6 +433,29 @@ command the session runs, and its value is exactly the id in the rollout's filen
 Run end to end afterwards, in a scratch project: a first `codex exec` turn enrolled the
 session, `codex exec resume --last` banked 2 turns of it against the model `turn_context`
 names, and a `spoolway spend` run from outside the session swept the rest.
+
+A third pass settled codex's quota row the same way, and it needed something the other two did
+not: a real ChatGPT sign-in. Every earlier reading on this machine came from a local
+OpenAI-compatible endpoint, and that account has no plan window at all — `rate_limits` is
+present on the event, but `primary` and `secondary` are both null. A bare API key gives the
+same nulls. The row could only be written once a turn ran under an actual subscription.
+
+| Clause | What the binary did |
+|---|---|
+| Where the figure is | An `event_msg` of type `token_count` carries a `rate_limits` object beside its `info`, in the same rollout the token usage is already read from. There is no cache file anywhere — the figure only exists per session |
+| The authenticated reading | `~/.codex/sessions/2026/09/05/rollout-2026-09-05T09-51-18-01a0708c-ec8f-7a01-b4f9-99f6337e1a05.jsonl`, `auth_mode: chatgpt`, last `token_count` event: `"rate_limits":{"limit_id":"codex","limit_name":null,"primary":{"used_percent":5.0,"window_minutes":300,"resets_at":1788611977},"secondary":{"used_percent":2.0,"window_minutes":10080,"resets_at":1789151593},"credits":{"has_credits":false,"unlimited":false,"balance":"0"},"individual_limit":null,"spend_control_reached":null,"plan_type":"plus","rate_limit_reached_type":null}` |
+| Shapes | `used_percent` is a float, not claude's integer. `resets_at` is a Unix timestamp in seconds, not claude's RFC3339 string. `window_minutes` is 300 and 10080 — five hours and seven days, the same two windows claude declares |
+| The unauthenticated reading | The same object with both windows null and the account fields beside them null: `"primary":null,"secondary":null,"credits":null,"plan_type":null`. `limit_id` stays `"codex"`. Seen on `~/.codex/sessions/2026/08/13/rollout-2026-08-13T12-06-16-019ffa96-38fe-7ec1-b8d2-d9b8c4698e45.jsonl`, a turn against the local endpoint |
+| Freshness | Nothing in the object says when it was fetched. The `token_count` event's own `timestamp` dates the reading instead, which is what the five-hour staleness rule is applied to |
+
+The null case is why the probe has a fifth outcome the claude reader never needed. A rollout
+whose `rate_limits` has both windows null parsed correctly and is not a broken file, so calling
+it unparseable would be wrong. It reports no reading, which the dispatcher treats the same as
+every other miss: it blocks nothing. A rollout with only one window null is a shape nobody has
+seen, and that one is reported as malformed.
+
+`usage_limit` stayed `None` on this row. No real run has left a limit phrase in a codex pane to
+quote, and this pass did not invent one.
 
 **codex declares no cache lifetime, and cannot.** Its `token_count` reports how many input
 tokens were served from cache, so cached input is priced correctly, but it carries no
