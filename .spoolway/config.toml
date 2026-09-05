@@ -39,6 +39,7 @@
 # agents.<profile>.concurrency          <n>                    1 (cloud), unset elsewhere — omitted means no cap       Most lanes of this profile running at once; 0 is unlimited. A cap on the harness — a local model's own count is `models.<glob>.slots`.
 # agents.<profile>.session_reuse_ctx    1..=100                50                                                      How large a carried session may be, as a percentage of the model's context window, before a fresh one opens instead.
 # agents.<profile>.session_blocked_ctx  0, 1..=100             0                                                       Percentage of the model's context window a *running* lane's last turn may reach before the dispatcher stops it and blocks the task; 0 is off. Must be above `session_reuse_ctx`. The reading is only taken at turn boundaries, so the ceiling can be overshot.
+# agents.<profile>.quota_ceiling        0, 1..=100             0                                                       Ceiling on this profile's own kind's cached usage percentage (either window); at or above it a pass starts no new lane and parks every candidate task instead. 0 is off. Never fires for a kind with no quota probe — `spoolway agent verify` says which those are.
 # agents.<profile>.permission_mode      <mode>                 the kind's own first mode (absent on a kind with none)  Which approval mode this profile's lanes are started with. Absent on a kind that has none.
 # models.<glob>.context_window          <tokens>               0 (unset)                                               What one session of this model gets to work in. `session_reuse_ctx` and `session_blocked_ctx` take their percentage of it, so a session step against a model with this unset never reuses or blocks on size.
 # models.<glob>.input                   <USD per 1M tokens>    0                                                       Cost per million input tokens.
@@ -105,6 +106,7 @@ kind = "claude"
 concurrency = 3
 session_reuse_ctx = 50
 session_blocked_ctx = 0
+quota_ceiling = 0
 permission_mode = "auto"
 
 [agents.codex]
@@ -112,23 +114,25 @@ kind = "codex"
 concurrency = 3
 session_reuse_ctx = 50
 session_blocked_ctx = 0
+quota_ceiling = 0
 permission_mode = "never"
 
 [agents.pi]
 kind = "pi"
 session_reuse_ctx = 50
 session_blocked_ctx = 0
-
-[models."*Qwen3.6-35B-A3B"]
-context_window = 100096
-slots = 3
-exclusive = true
+quota_ceiling = 0
 
 [models."*Ornith-1.5-35B-A3B"]
 context_window = 100096
 slots = 3
 exclusive = true
 local = true
+
+[models."*Qwen3.6-35B-A3B"]
+context_window = 100096
+slots = 3
+exclusive = true
 
 [issue_tracking]
 hook = ""
