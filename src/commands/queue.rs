@@ -100,6 +100,9 @@ struct QueueRowJson {
     out_tokens: Option<u64>,
     cost_usd: Option<f64>,
     lane_time_s: Option<i64>,
+    /// The clock a `state: "parked"` row is waiting out, already formatted —
+    /// `None` on every other state. Mirrors `Row::parked_display`.
+    parked_until: Option<String>,
 }
 
 impl From<&crate::status::Row> for QueueRowJson {
@@ -119,6 +122,7 @@ impl From<&crate::status::Row> for QueueRowJson {
             out_tokens: row.out,
             cost_usd: row.cost,
             lane_time_s: row.lane_time,
+            parked_until: row.parked_display.clone(),
         }
     }
 }
@@ -134,6 +138,7 @@ fn state_label(state: crate::status::State) -> &'static str {
         Blocked => "blocked",
         Unreachable => "unreachable",
         Queued => "queued",
+        Parked => "parked",
         Done => "done",
     }
 }
@@ -425,6 +430,8 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: &str) -> Result<Task
     front.tab_id = None;
     front.attempts = 0;
     front.usage_limit_hold = false;
+    front.parked_until = None;
+    front.parked_window = String::new();
     front.paused_at = None;
     front.launched_at = None;
     front.prompts = Default::default();

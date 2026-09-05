@@ -880,6 +880,35 @@ impl<'a> Dispatcher<'a> {
                 continue;
             };
 
+            // A quota probe or a usage-limit pane parked this task — see
+            // `Dispatcher::quota_over_ceiling` and `Dispatcher::
+            // usage_limit_hold`, both below. Checked here, ahead of
+            // everything else a pass does with a task, and against nothing
+            // but the clock this task's own file carries: a dispatcher
+            // stopped for as long as the wait takes, and started again from
+            // cold, honours the park on its very first pass without taking a
+            // fresh reading. Cleared the moment it has passed, so the task
+            // falls straight through to the ordinary walk below on the same
+            // pass rather than losing one to a clock already spent.
+            if let Some(until) = tasks[index].front.parked_until {
+                let now = now_secs();
+                if until > now {
+                    let dated =
+                        tasks[index].front.parked_window == crate::quota::Window::SevenDay.key();
+                    report.actions.push(format!(
+                        "{}: parked until {}",
+                        tasks[index].id(),
+                        crate::task::format_until(until, now, dated),
+                    ));
+                    continue;
+                }
+                if !self.dry_run {
+                    tasks[index].front.parked_until = None;
+                    tasks[index].front.parked_window = String::new();
+                    self.persist(&mut tasks[index])?;
+                }
+            }
+
             let lane = owned
                 .iter()
                 .find(|(lane_step, lane_task, _)| {
@@ -986,6 +1015,23 @@ impl<'a> Dispatcher<'a> {
                                 .map(|record| record.started_at)
                                 .is_some_and(|since| tasks[index].reported_since(since))
                     });
+                    // Ahead of the context ceiling and everything after it: a
+                    // lane whose pane already carries its kind's usage-limit
+                    // phrase is not a context problem, and reading its
+                    // transcript for one would be wasted work on a lane that
+                    // is about to be left alone either way. Checked whether
+                    // the lane reads `Working` or settled — the one thing
+                    // `check_unreported`'s own hold, further down, could
+                    // never do, since it only ever ran once a lane had
+                    // stopped — so a limit surface that keeps ticking (the
+                    // agent's own "continuing automatically") is caught the
+                    // same pass it lands rather than only once it goes quiet.
+                    if !already_reported
+                        && let Some(lane) = lane
+                        && self.usage_limit_park(&mut tasks[index], &step, lane, report)?
+                    {
+                        continue;
+                    }
                     if !already_reported
                         && let Some(lane) = lane
                         && let Some(reason) = self.ctx_ceiling_hold(&step, lane)
@@ -2174,18 +2220,27 @@ impl<'a> Dispatcher<'a> {
         ))
     }
 
-    /// `Some(reason)` when `lane`'s own pane ends on its agent kind's
-    /// usage-limit message — see [`crate::agent::Adapter::usage_limit`] —
-    /// naming the step and how long the launch ceiling's own backoff makes
-    /// the next try wait. `None` for a kind with no such message
-    /// established, or a step naming no agent at all — a command step never
-    /// reaches [`Dispatcher::check_unreported`], but the lookup is written
-    /// defensively rather than assumed.
+    /// `Some((reason, parked_until))` when `lane`'s own pane ends on its
+    /// agent kind's usage-limit message — see
+    /// [`crate::agent::Adapter::usage_limit`]. `None` for a kind with no such
+    /// message established, or a step naming no agent at all — a command
+    /// step never reaches this, but the lookup is written defensively rather
+    /// than assumed.
     ///
     /// Whether the tail *is* a limit is answered by the adapter, not by a
     /// pattern kept here: the exact wording is a fact about one CLI, and
     /// belongs on that CLI's own row in `agent.rs`.
-    fn usage_limit_hold(&self, task: &Task, step: &Step, lane: &Lane) -> Option<String> {
+    ///
+    /// The clock is the kind's own five-hour window resetting — the window
+    /// the usage-limit phrase is always about — read fresh off the same
+    /// probe `quota_over_ceiling` reads, whether or not this profile sets a
+    /// `quota_ceiling` of its own: a hold does not need the ceiling to be
+    /// configured, only the reading to exist. A kind with no probe, or a
+    /// reading that cannot be read or is judged stale, falls back to the
+    /// same doubling backoff this used to run on — `relaunch_backoff` off
+    /// `attempts`, measured from now rather than from `launched_at`, since
+    /// nothing is about to be relaunched.
+    fn usage_limit_hold(&self, task: &Task, step: &Step, lane: &Lane) -> Option<(String, i64)> {
         let agent_name = step.agent.as_deref()?;
         let profile = self.repo.config.agent(agent_name).ok()?;
         let adapter = crate::agent::adapter(&profile.kind)?;
@@ -2193,17 +2248,89 @@ impl<'a> Dispatcher<'a> {
         if !adapter.is_usage_limit(&tail) {
             return None;
         }
-        // `attempts` is incremented the moment a lane launches, so it is
-        // already at least 1 for the lane this pass just found settled on
-        // its usage limit — `.max(1)` only guards a caller that somehow
-        // reaches this before that increment lands.
-        let attempts = task.front.attempts.max(1);
-        let wait = relaunch_backoff(self.repo.config.dispatch.interval, attempts);
-        Some(format!(
-            "`{}` hit its usage limit — held rather than re-staffed, trying again in {}",
-            step.id,
-            crate::config::human_duration::format(wait),
+        let now = now_secs();
+        let probed = crate::quota::read(&profile.kind)
+            .ok()
+            .filter(|reading| !reading.stale(chrono::Utc::now()))
+            .map(|reading| reading.five_hour.resets_at.timestamp())
+            .filter(|&until| until > now);
+        let until = probed.unwrap_or_else(|| {
+            // `attempts` is incremented the moment a lane launches, so it is
+            // already at least 1 for the lane this pass just found on its
+            // usage limit — `.max(1)` only guards a caller that somehow
+            // reaches this before that increment lands.
+            let attempts = task.front.attempts.max(1);
+            let wait = relaunch_backoff(self.repo.config.dispatch.interval, attempts);
+            now + wait.as_secs() as i64
+        });
+        Some((
+            format!(
+                "`{}` hit its usage limit — pane held, parked until {}; the lane resumes its \
+                 own turn",
+                step.id,
+                // Always the five-hour window — see this fn's own doc — so
+                // never the pinned dated shape a seven-day ceiling park uses.
+                crate::task::format_until(until, now, false),
+            ),
+            until,
         ))
+    }
+
+    /// Park `task` for its lane's own usage-limit hold, if `lane`'s pane
+    /// shows one — see [`Dispatcher::usage_limit_hold`]. Answers whether it
+    /// did, so the caller can `continue` past everything else a pass would
+    /// otherwise do with this lane.
+    ///
+    /// **Touches nothing of the lane's.** No `stop_lane`, no lane record
+    /// removed, no worktree touched — the pane, its session and its
+    /// worktree are left exactly as they are, because the agent resumes its
+    /// own turn on its own clock and tearing any of that down would destroy
+    /// a session that was already coming back. The only thing that changes
+    /// is the task: `parked_until` is what keeps the reminder loop and the
+    /// scheduler off it until that clock passes.
+    fn usage_limit_park(
+        &mut self,
+        task: &mut Task,
+        step: &Step,
+        lane: &Lane,
+        report: &mut Report,
+    ) -> Result<bool> {
+        let Some((reason, until)) = self.usage_limit_hold(task, step, lane) else {
+            return Ok(false);
+        };
+        if self.dry_run {
+            report
+                .actions
+                .push(format!("would hold {} — {reason}", lane.name));
+            return Ok(true);
+        }
+        task.front.usage_limit_hold = true;
+        task.front.parked_until = Some(until);
+        // Always the five-hour window — see `usage_limit_hold`'s own doc —
+        // so cleared rather than carrying over whatever an earlier ceiling
+        // park last classified this task as.
+        task.front.parked_window = String::new();
+        task.append_to_section("## Status Log", &format!("- {reason}\n"));
+        self.persist(task)?;
+        report.actions.push(format!("{}: {reason}", task.id()));
+        Ok(true)
+    }
+
+    /// The first of `kind`'s own windows at or above `ceiling`, if its quota
+    /// probe has one — see [`crate::quota::Reading::over_ceiling`]. `None`
+    /// on `ceiling == 0` (off), on a kind with no probe, on a file that
+    /// cannot be read or parsed, and on a reading judged stale: every one of
+    /// those fails open rather than blocking a launch, which is
+    /// [`crate::quota`]'s own rule and not repeated here.
+    fn quota_over_ceiling(&self, kind: &str, ceiling: u8) -> Option<crate::quota::WindowReading> {
+        if ceiling == 0 {
+            return None;
+        }
+        let reading = crate::quota::read(kind).ok()?;
+        if reading.stale(chrono::Utc::now()) {
+            return None;
+        }
+        reading.over_ceiling(ceiling).cloned()
     }
 
     /// Tear a lane down for failing the dispatcher's one remaining check — a
@@ -2366,42 +2493,10 @@ impl<'a> Dispatcher<'a> {
         lane: &Lane,
         report: &mut Report,
     ) -> Result<()> {
-        // A lane that ended its turn on its own kind's usage-limit message is
-        // not stuck on a question and not a dead launch — it is waiting out a
-        // clock nothing spoolway does will shorten. Reminding it wastes a
-        // reminder on a session not reading them, and escalating to
-        // `blocked` only for a person, or an unattended run's own resume, to
-        // relaunch it straight back into the same wall: five consecutive
-        // lanes did exactly that on a real run, none of them doing any work.
-        // Held here instead, with the task left exactly where it is — no
-        // `set_stage`, so `attempts` is not zeroed — which is what lets the
-        // launch ceiling's own backoff (`attempts`, `launched_at` and
-        // `relaunch_backoff`) pace the retry, the same as it already does
-        // for a lane that died at launch with nothing behind.
-        if let Some(reason) = self.usage_limit_hold(task, step, lane) {
-            if self.dry_run {
-                report
-                    .actions
-                    .push(format!("would hold {} — {reason}", lane.name));
-                return Ok(());
-            }
-            self.mux.stop_lane(&lane.name, &lane.pane_id)?;
-            let ledger = self.ledger();
-            let record = self
-                .lanes
-                .remove(&lane.name)
-                .unwrap_or_else(|| LaneRecord::readopted(&lane.name, now_secs(), &ledger));
-            self.record_usage(&record, task.id(), &step.id, Some(task), &pipeline.name);
-            // Read by the launch ceiling below, so the same doubling backoff
-            // applies whether or not anybody is watching this run — a spent
-            // quota is not a question for a person the way a dead launch is.
-            task.front.usage_limit_hold = true;
-            task.append_to_section("## Status Log", &format!("- {reason}\n"));
-            self.persist(task)?;
-            report.actions.push(format!("{}: {reason}", task.id()));
-            return Ok(());
-        }
-
+        // A lane on its own kind's usage-limit message never reaches here at
+        // all any more — [`Dispatcher::usage_limit_park`] catches it ahead of
+        // this call, for a busy lane the same as a settled one, which this
+        // function's caller never was.
         let now = now_secs();
         let silent_for = self.note_progress(lane, now);
 
@@ -2811,6 +2906,47 @@ impl<'a> Dispatcher<'a> {
                 }
             };
 
+            // A profile at its own `quota_ceiling` starts nothing of this
+            // kind this pass — checked here, ahead of the attempts ceiling
+            // below and every other reason a candidate might be skipped,
+            // because a quota already over its ceiling makes every one of
+            // those questions moot. `parked_until` is what a restarted
+            // dispatcher reads back without taking a fresh reading — see the
+            // top of this pass's own per-task loop.
+            if let Some(hit) = self.quota_over_ceiling(&profile.kind, profile.quota_ceiling) {
+                let until = hit.resets_at.timestamp();
+                let now = now_secs();
+                // Pinned to whichever window actually tripped, so the shape
+                // decided here survives however close `now` later gets to
+                // `until` — see [`crate::task::Frontmatter::parked_window`].
+                let dated = hit.window == crate::quota::Window::SevenDay;
+                let reason = format!(
+                    "`{}` parked until {} — {} at {}% of its {} window, ceiling is {}",
+                    step.id,
+                    crate::task::format_until(until, now, dated),
+                    profile.kind,
+                    hit.utilization,
+                    hit.window.human(),
+                    profile.quota_ceiling,
+                );
+                if self.dry_run {
+                    report.actions.push(format!(
+                        "would park {} — {reason}",
+                        tasks[candidate.task_index].id()
+                    ));
+                    continue;
+                }
+                tasks[candidate.task_index].front.parked_until = Some(until);
+                tasks[candidate.task_index].front.parked_window = hit.window.key().to_string();
+                tasks[candidate.task_index]
+                    .append_to_section("## Status Log", &format!("- {reason}\n"));
+                self.persist(&mut tasks[candidate.task_index])?;
+                report
+                    .actions
+                    .push(format!("{}: {reason}", tasks[candidate.task_index].id()));
+                continue;
+            }
+
             // Checked before the candidate takes a slot, because a task that has
             // used up its budget must not also take a lane away from one that
             // has not. Nothing else bounds this: a lane whose agent dies at
@@ -2826,19 +2962,19 @@ impl<'a> Dispatcher<'a> {
                 // dying agent again with a clean counter, which is the busy loop
                 // this guard exists to prevent, now unbounded.
                 //
-                // A usage-limit hold gets the same backoff whether or not
-                // anybody is watching: `check_unreported`'s own hold already
-                // decided a spent quota is not a question for a person the way
-                // a dead launch is, and escalating here — to `blocked`, then
-                // resumed — would zero `attempts` the exact same way and undo
-                // that decision on the very next pass.
+                // A usage-limit hold no longer reaches here at all: it moved
+                // off `attempts`/`relaunch_backoff` entirely onto
+                // `parked_until`, checked once at the top of this pass's own
+                // task loop — see [`Dispatcher::usage_limit_hold`] — so a task
+                // held for its quota never becomes a candidate in the first
+                // place and this ceiling only ever sees a lane that genuinely
+                // died at launch with nothing behind it.
                 //
                 // The backoff is measured from the last launch and paced off the
                 // configured interval rather than a `--interval` override: what
                 // it wants is a sense of how often this run looks at anything,
                 // and the project's own figure is that within a doubling.
-                let held_for_limit = tasks[candidate.task_index].front.usage_limit_hold;
-                if self.unattended || held_for_limit {
+                if self.unattended {
                     let wait = relaunch_backoff(self.repo.config.dispatch.interval, attempts);
                     let since = tasks[candidate.task_index]
                         .front
@@ -2849,19 +2985,12 @@ impl<'a> Dispatcher<'a> {
                         let left = crate::config::human_duration::format(Duration::from_secs(
                             (wait.as_secs() as i64 - since).max(0) as u64,
                         ));
-                        report.actions.push(match held_for_limit {
-                            true => format!(
-                                "{}: `{}` is held for its usage limit — trying again in {left}",
-                                tasks[candidate.task_index].id(),
-                                step.id,
-                            ),
-                            false => format!(
-                                "{}: `{}` has been started {attempts} time(s) and left \
-                                 nothing behind — trying again in {left}",
-                                tasks[candidate.task_index].id(),
-                                step.id,
-                            ),
-                        });
+                        report.actions.push(format!(
+                            "{}: `{}` has been started {attempts} time(s) and left \
+                             nothing behind — trying again in {left}",
+                            tasks[candidate.task_index].id(),
+                            step.id,
+                        ));
                         continue;
                     }
                     // Past the wait: fall through and launch, keeping `attempts`
@@ -5768,6 +5897,8 @@ mod tests {
             tab_id: None,
             attempts: 0,
             usage_limit_hold: false,
+            parked_until: None,
+            parked_window: String::new(),
             paused_at: None,
             launched_at: None,
             prompts: Default::default(),
@@ -7671,17 +7802,18 @@ mod tests {
     /// The failure `checkout-line` hit for real: a lane's pane ends on
     /// claude's own usage-limit message, and — before this — was reminded,
     /// escalated to `blocked`, and immediately relaunched into the same
-    /// wall, five times running with no work done. Held here instead: the
-    /// task never leaves `review`, `attempts` is not zeroed the way an
-    /// escalation-and-resume would zero it, and the lane's pane is torn down
-    /// so nothing sits waiting on a session that will not move on its own.
+    /// wall, five times running with no work done. Parked here instead: the
+    /// task never leaves `review`, and the pane — session and worktree with
+    /// it — is left exactly as it is, because the agent resumes its own turn
+    /// on its own clock; tearing it down would kill a session that was
+    /// already coming back.
     ///
     /// Attended throughout — `fixture()`, not `unattended_fixture()` — on
     /// purpose: a spent quota is not a question for a person the way a dead
-    /// launch is, so the hold has to survive the very next pass whether or
+    /// launch is, so the park has to survive the very next pass whether or
     /// not anybody is watching, not only when there is nobody to escalate to.
     #[test]
-    fn a_lane_ended_on_a_usage_limit_is_held_rather_than_escalated() {
+    fn a_lane_ended_on_a_usage_limit_is_parked_rather_than_escalated() {
         let repo = fixture("usage-limit-hold");
         let path = add_task_with(&repo, "demo", "review", |f| {
             f.workspace_id = Some("w1".into());
@@ -7701,45 +7833,55 @@ mod tests {
                 .to_string(),
         );
 
+        let before = now_secs();
         let report = run_pass(&repo, &mux);
 
         let task = reload(&path);
         assert_eq!(task.stage(), "review", "held, not moved to blocked");
         assert!(task.front.usage_limit_hold, "read by the next pass below");
+        let until = task
+            .front
+            .parked_until
+            .expect("parked_until must be set by the hold");
+        assert!(
+            until > before,
+            "parked_until ({until}) must be in the future ({before})"
+        );
         assert_eq!(
             task.front.attempts, 1,
-            "not zeroed the way an escalation's set_stage would zero it — the \
-             backoff needs it intact to grow on the next attempt"
+            "the hold no longer touches `attempts` at all — it moved off that path onto \
+             `parked_until`"
         );
         let status_log = task.section("## Status Log").unwrap_or_default();
         assert!(status_log.contains("usage limit"), "{status_log}");
-        assert!(status_log.contains("trying again in"), "{status_log}");
+        assert!(status_log.contains("parked until"), "{status_log}");
         assert!(
             task.section("## Blocker").is_none(),
             "not an escalation — nobody is being asked anything"
         );
-        assert!(mux.did("stop").iter().any(|c| c.contains("demo · review")));
+        assert!(
+            mux.did("stop").is_empty(),
+            "the pane must be left running — the agent resumes its own turn"
+        );
         assert!(
             report
                 .actions
                 .iter()
-                .any(|a| a.contains("usage limit") && a.contains("trying again in")),
+                .any(|a| a.contains("usage limit") && a.contains("parked until")),
             "{:?}",
             report.actions
         );
 
-        // The lane is gone now, so this pass finds the task a candidate to
-        // launch again — attended, exactly the shape that used to escalate
-        // straight to `blocked` the moment `attempts` alone was checked. The
-        // hold reads as a wait instead, the same as unattended's.
-        let mux = FakeMux::new(vec![]);
+        // The lane is still there — nothing touched it — and this pass finds
+        // the task parked before its own clock, whether or not anybody is
+        // watching.
         let report = run_pass(&repo, &mux);
 
         let task = reload(&path);
         assert_eq!(
             task.stage(),
             "review",
-            "still held on the very next pass, attended or not"
+            "still parked on the very next pass, attended or not"
         );
         assert!(
             task.section("## Blocker").is_none(),
@@ -7750,13 +7892,262 @@ mod tests {
             "nothing relaunched into the wall"
         );
         assert!(
-            report
-                .actions
-                .iter()
-                .any(|a| a.contains("held for its usage limit") && a.contains("trying again in")),
+            mux.did("stop").is_empty(),
+            "still not torn down on a later pass either"
+        );
+        assert!(
+            report.actions.iter().any(|a| a.contains("parked until")),
             "{:?}",
             report.actions
         );
+    }
+
+    /// The gap the mockup calls out by name: the old `check_unreported` hold
+    /// only ever ran once a lane had *settled*, so a usage-limit surface that
+    /// kept ticking — the agent's own "continuing automatically" redrawing
+    /// the pane — read as `Working` forever and the hold never fired at all.
+    /// `usage_limit_park` is checked ahead of the busy/settled match itself,
+    /// so it catches the very same pane while the multiplexer still reports
+    /// it `Working`.
+    #[test]
+    fn a_usage_limit_surface_is_caught_even_while_the_lane_still_reads_working() {
+        let repo = fixture("usage-limit-hold-working");
+        let path = add_task_with(&repo, "demo", "review", |f| {
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+            f.attempts = 1;
+            f.launched_at = Some(now_secs());
+        });
+
+        let mux = FakeMux::new(vec![lane(&repo, "demo · review", LaneStatus::Working)]);
+        mux.screen.borrow_mut().insert(
+            "demo · review".to_string(),
+            "  ⚠ Usage limit reached · continuing automatically at 9:50am · esc to cancel"
+                .to_string(),
+        );
+
+        let report = run_pass(&repo, &mux);
+
+        let task = reload(&path);
+        assert_eq!(task.stage(), "review", "held, not moved to blocked");
+        assert!(
+            task.front.parked_until.is_some(),
+            "the hold must fire on a `Working` pane, not only a settled one"
+        );
+        assert!(
+            mux.did("stop").is_empty(),
+            "the pane must be left running even though it reads `Working`"
+        );
+        assert!(
+            report
+                .actions
+                .iter()
+                .any(|a| a.contains("usage limit") && a.contains("parked until")),
+            "{:?}",
+            report.actions
+        );
+    }
+
+    /// A scratch home holding a `~/.claude.json` shaped like Claude Code's
+    /// own cache, fresh (`fetchedAtMs` is now) and readable by
+    /// [`crate::quota::read`].
+    fn claude_quota_home(
+        name: &str,
+        five_hour_pct: u8,
+        five_hour_resets: &str,
+        seven_day_pct: u8,
+        seven_day_resets: &str,
+    ) -> PathBuf {
+        let root = crate::scratch::root(&format!("dispatch-quota-{name}"));
+        std::fs::create_dir_all(&root).unwrap();
+        let body = format!(
+            r#"{{"cachedUsageUtilization": {{
+                "fetchedAtMs": {},
+                "five_hour": {{"utilization": {five_hour_pct}, "resets_at": "{five_hour_resets}"}},
+                "seven_day": {{"utilization": {seven_day_pct}, "resets_at": "{seven_day_resets}"}}
+            }}}}"#,
+            chrono::Utc::now().timestamp_millis(),
+        );
+        std::fs::write(root.join(".claude.json"), body).unwrap();
+        root
+    }
+
+    /// The pre-launch half of the feature: a quota probe already at or above
+    /// its `quota_ceiling` refuses to start a new lane of that profile at
+    /// all. The task never gets a lane in the first place — `parked_until`
+    /// is written straight from the probe's own `resets_at` — and a task on
+    /// a step naming a different profile (`implement`, staffed by `pi`,
+    /// which carries no quota probe at all) is staffed in the same pass,
+    /// unaffected.
+    // covers: agents.<profile>.quota_ceiling — the pre-launch gate on a new lane
+    #[test]
+    fn a_quota_ceiling_over_its_limit_parks_a_new_lane_without_starting_one() {
+        let mut repo = fixture("quota-ceiling");
+        repo.config.agents.get_mut("claude").unwrap().quota_ceiling = 85;
+        let parked_path = add_task(&repo, "over-ceiling", "review");
+        let staffed_path = add_task(&repo, "different-profile", "queued");
+
+        let home = claude_quota_home(
+            "over-ceiling",
+            88,
+            "2099-01-01T14:00:00Z",
+            10,
+            "2099-01-08T00:00:00Z",
+        );
+        let mux = FakeMux::new(vec![]);
+        let report = with_home(&home, || run_pass(&repo, &mux));
+        std::fs::remove_dir_all(&home).ok();
+
+        let task = reload(&parked_path);
+        assert_eq!(task.stage(), "review", "parked, not started");
+        let until = task
+            .front
+            .parked_until
+            .expect("parked_until must be set by the ceiling");
+        assert_eq!(
+            until,
+            chrono::DateTime::parse_from_rfc3339("2099-01-01T14:00:00Z")
+                .unwrap()
+                .timestamp(),
+            "parked_until must come from the probe's own resets_at"
+        );
+        assert!(
+            mux.did("start").iter().all(|c| !c.contains("over-ceiling")),
+            "{:?}",
+            mux.did("start")
+        );
+        assert!(
+            report
+                .actions
+                .iter()
+                .any(|a| a.contains("parked until") && a.contains("85")),
+            "{:?}",
+            report.actions
+        );
+
+        // The other task, on a step naming a different profile, is staffed
+        // in the same pass — the ceiling on `claude` never touches `pi`.
+        assert!(
+            mux.did("start")
+                .iter()
+                .any(|c| c.contains("different-profile")),
+            "{:?}",
+            mux.did("start")
+        );
+        assert_eq!(reload(&staffed_path).front.parked_until, None);
+    }
+
+    /// The park is written on the task file, not held anywhere in the
+    /// dispatcher's own memory — so a dispatcher that never ran during the
+    /// wait, or was stopped and started again from cold, still honours it,
+    /// without ever taking a quota reading: the scratch home behind this
+    /// pass holds no `~/.claude.json` at all, and a probe read against it
+    /// would come back `Unreadable`. Once the clock has actually passed the
+    /// very next pass staffs the task, again with no reading taken.
+    // covers: parked_until — survives a restart, and needs no fresh quota reading to honour
+    #[test]
+    fn a_future_parked_until_survives_a_cold_restart_with_no_quota_reading_taken() {
+        let repo = fixture("quota-cold-restart");
+        let until = now_secs() + 3600;
+        let path = add_task_with(&repo, "demo", "review", |f| {
+            f.parked_until = Some(until);
+        });
+
+        let home = crate::scratch::root("dispatch-quota-cold-restart-empty-home");
+        std::fs::create_dir_all(&home).unwrap();
+        let mux = FakeMux::new(vec![]);
+        let report = with_home(&home, || run_pass(&repo, &mux));
+
+        let task = reload(&path);
+        assert_eq!(task.front.parked_until, Some(until), "still parked");
+        assert!(mux.did("start").is_empty(), "nothing started while parked");
+        assert!(
+            report.actions.iter().any(|a| a.contains("parked until")),
+            "{:?}",
+            report.actions
+        );
+
+        // The same effect as the clock actually running out, written by
+        // hand rather than waited for.
+        let mut task = reload(&path);
+        task.front.parked_until = Some(now_secs() - 1);
+        task.save().unwrap();
+
+        let mux = FakeMux::new(vec![]);
+        with_home(&home, || run_pass(&repo, &mux));
+        std::fs::remove_dir_all(&home).ok();
+
+        let task = reload(&path);
+        assert_eq!(task.front.parked_until, None, "cleared once past");
+        assert!(
+            !mux.did("start").is_empty(),
+            "picked up once the clock passed"
+        );
+    }
+
+    /// `--dry-run` reports the ceiling park it would make, and writes
+    /// nothing — `parked_until` must still be unset afterwards, the same
+    /// guarantee every other dry-run path in this module gives.
+    #[test]
+    fn a_dry_run_reports_the_ceiling_park_it_would_make_and_writes_nothing() {
+        let mut repo = fixture("quota-ceiling-dry");
+        repo.config.agents.get_mut("claude").unwrap().quota_ceiling = 85;
+        let path = add_task(&repo, "demo", "review");
+
+        let home = claude_quota_home(
+            "ceiling-dry",
+            88,
+            "2099-01-01T14:00:00Z",
+            10,
+            "2099-01-08T00:00:00Z",
+        );
+        let mux = FakeMux::new(vec![]);
+        let report = with_home(&home, || {
+            Dispatcher::new(&repo, &Pipelines::builtin(), &mux, true)
+                .pass()
+                .unwrap()
+        });
+        std::fs::remove_dir_all(&home).ok();
+
+        assert_eq!(
+            reload(&path).front.parked_until,
+            None,
+            "a dry run writes nothing"
+        );
+        assert!(mux.did("start").is_empty());
+        assert!(
+            report
+                .actions
+                .iter()
+                .any(|a| a.starts_with("would park") && a.contains("parked until")),
+            "{:?}",
+            report.actions
+        );
+    }
+
+    /// `--dry-run` against a task whose own `parked_until` has already
+    /// passed reports it as picked up without clearing the field — the same
+    /// "reports what a real pass would do, writes nothing" guarantee, on the
+    /// other side of the clock.
+    #[test]
+    fn a_dry_run_against_an_expired_park_writes_nothing_either() {
+        let repo = fixture("quota-park-expiry-dry");
+        let expired = now_secs() - 1;
+        let path = add_task_with(&repo, "demo", "review", |f| {
+            f.parked_until = Some(expired);
+        });
+
+        let mux = FakeMux::new(vec![]);
+        Dispatcher::new(&repo, &Pipelines::builtin(), &mux, true)
+            .pass()
+            .unwrap();
+
+        assert_eq!(
+            reload(&path).front.parked_until,
+            Some(expired),
+            "a dry run must not clear parked_until even once it is in the past"
+        );
+        assert!(mux.did("start").is_empty(), "a dry run starts nothing");
     }
 
     /// Attended, a lane that dies at launch parks the task, on the grounds that

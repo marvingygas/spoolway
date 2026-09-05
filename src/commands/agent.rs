@@ -307,6 +307,20 @@ pub fn agent_verify(
 
     report("transcript directory", transcript_dir_clause(adapter));
 
+    // Quota is drawn in its own shape rather than through `report` above —
+    // the mockup's own `claude   quota  ...` row, not the generic `ok/warn
+    // quota — ...` line every other clause here uses — so a person reading
+    // several kinds' output in a row sees which kind each quota line is
+    // about without having to scroll back to the command that produced it.
+    let quota = quota_clause(adapter);
+    if matches!(quota, Clause::Fail(_)) {
+        failed += 1;
+    }
+    match json {
+        true => clauses.push(quota.to_json("quota")),
+        false => print_quota_row(&args.kind, &quota),
+    }
+
     if json {
         let payload = serde_json::json!({"kind": args.kind, "failed": failed, "clauses": clauses});
         println!("{}", serde_json::to_string_pretty(&payload)?);
@@ -507,6 +521,120 @@ fn transcript_dir_clause(adapter: &crate::agent::Adapter) -> Clause {
             ],
         ),
     }
+}
+
+/// Where this kind's own cached usage percentage comes from, and what it
+/// currently reads — see [`crate::agent::Adapter::quota`] and
+/// [`crate::quota`]. Never a [`Clause::Fail`]: every one of the three ways
+/// this can come up short — no probe, an unreadable or unparseable file, a
+/// reading judged stale — is exactly the fail-open case `dispatch.rs`'s own
+/// gates already degrade past, so it is reported here and never blocks the
+/// command.
+fn quota_clause(adapter: &crate::agent::Adapter) -> Clause {
+    let Some(rel) = adapter.quota else {
+        // The embedded `\n` is the mockup's own line break, not a wrap this
+        // reader chose — `render_quota_row` indents whatever follows it to
+        // the note's own column, the same as the two-window `Ok` case does.
+        return Clause::Warn(
+            "no probe established — lanes of this kind are never parked\nfor quota, and its \
+             usage limit is not detected either"
+                .into(),
+            Vec::new(),
+        );
+    };
+    match crate::quota::read(adapter.kind) {
+        Err(crate::quota::Miss::NoProbe) => unreachable!("adapter.quota was just Some"),
+        Err(crate::quota::Miss::Unreadable(why)) => {
+            Clause::Warn(format!("~/{rel} could not be read: {why}"), Vec::new())
+        }
+        Err(crate::quota::Miss::Unparseable(why)) => {
+            Clause::Warn(format!("~/{rel} did not parse: {why}"), Vec::new())
+        }
+        Ok(reading) if reading.stale(chrono::Utc::now()) => Clause::Warn(
+            format!(
+                "~/{rel} cachedUsageUtilization is stale — fetched too long ago to trust; \
+                 treated as absent"
+            ),
+            Vec::new(),
+        ),
+        Ok(reading) => {
+            // A reset today reads as a bare clock the same way the board and
+            // the dispatcher's own reports do; a reset on another day is
+            // named `MM-DD HH:MM` rather than either of `format_instant`'s
+            // own shapes — this line already carries "resets", so a year
+            // nobody asked about would only crowd it, and this display
+            // names no park for `parked_window` to pin a longer one against.
+            let window = |w: &crate::quota::WindowReading| {
+                let (target, same_day) = crate::task::local_instant(
+                    w.resets_at.timestamp(),
+                    chrono::Utc::now().timestamp(),
+                );
+                let resets = match same_day {
+                    true => target.format("%H:%M").to_string(),
+                    false => target.format("%m-%d %H:%M").to_string(),
+                };
+                format!("{} {}% resets {resets}", w.window.key(), w.utilization)
+            };
+            // No indent baked in here — this note is also `--json`'s own
+            // payload, which has no notion of a printed column to align to.
+            // `print_quota_row` is what indents a continuation line, to
+            // whatever width its own kind-name column comes out to.
+            Clause::Ok(format!(
+                "~/{rel} cachedUsageUtilization\n{} · {}",
+                window(&reading.five_hour),
+                window(&reading.seven_day),
+            ))
+        }
+    }
+}
+
+/// Prints the quota clause in its own shape — the mockup's own
+/// `claude   quota  ...` row — rather than through [`Clause::print`]'s
+/// generic `ok`/`warn`/`FAIL` line every other clause in this command uses.
+/// Quota is the only clause the mockup pins to an exact rendering.
+///
+/// Prints [`render_quota_row`] — split out as a pure function, the same way
+/// `agent_list_json` is, so a test can check the actual text without
+/// capturing stdout, which nothing else in this codebase does.
+fn print_quota_row(kind: &str, clause: &Clause) {
+    println!("{}", render_quota_row(kind, clause));
+}
+
+/// The mockup's own `claude   quota  ...` row: a kind name left-aligned and
+/// padded on the right to the width of the longest kind in the whole
+/// adapter table, so every kind's own row lines up the same way whichever
+/// one is checked, then `quota`, then the note — split on its own embedded
+/// `\n` (see [`quota_clause`]'s `Ok` case) with each continuation line
+/// indented to the note's own column rather than the kind's.
+fn render_quota_row(kind: &str, clause: &Clause) -> String {
+    let width = crate::agent::ADAPTERS
+        .iter()
+        .map(|a| a.kind.len())
+        .max()
+        .unwrap_or(0);
+    let prefix = format!("{kind:<width$}   quota  ");
+    let indent = " ".repeat(prefix.chars().count());
+    // quota_clause's own doc: never a Fail. Matched exhaustively rather
+    // than assumed, in case that ever changes.
+    let (note, detail): (&str, &[String]) = match clause {
+        Clause::Ok(note) => (note.as_str(), &[]),
+        Clause::Warn(note, detail) => (note.as_str(), detail.as_slice()),
+        Clause::Fail(why) => (why.as_str(), &[]),
+    };
+    let mut lines = note.split('\n');
+    let mut out = format!("{prefix}{}", lines.next().unwrap_or_default());
+    for line in lines {
+        out.push('\n');
+        out.push_str(&indent);
+        out.push_str(line);
+    }
+    for line in detail {
+        out.push('\n');
+        out.push_str(&indent);
+        out.push_str("· ");
+        out.push_str(line);
+    }
+    out
 }
 
 /// Whether a turn actually wrote into the per-session home spoolway made it,
@@ -1196,5 +1324,193 @@ mod tests {
             "a check that bailed kept its tree: {}",
             dir.display()
         );
+    }
+
+    fn write_claude_json(home: &std::path::Path, body: &str) {
+        std::fs::write(home.join(".claude.json"), body).unwrap();
+    }
+
+    /// A kind with no [`crate::agent::Adapter::quota`] row at all — `pi`
+    /// today — is reported rather than skipped, and never fails the command.
+    #[test]
+    fn quota_clause_on_a_kind_with_no_probe_warns_it_is_never_parked() {
+        let adapter = crate::agent::adapter("pi").expect("pi is a real adapter");
+        match quota_clause(adapter) {
+            Clause::Warn(note, _) => assert!(
+                note.contains("no probe established"),
+                "unexpected note: {note}"
+            ),
+            _ => panic!("a kind with no quota row must warn, not ok or fail"),
+        }
+    }
+
+    /// A probe row whose file does not exist yet is `Unreadable`, reported
+    /// the same way — a warning, never a fail.
+    #[test]
+    fn quota_clause_on_an_unreadable_file_warns() {
+        let home = crate::scratch::root("agent-verify-quota-unreadable");
+        std::fs::create_dir_all(&home).unwrap();
+        crate::platform::test_home::with_home(&home, || {
+            let adapter = crate::agent::adapter("claude").expect("claude is a real adapter");
+            match quota_clause(adapter) {
+                Clause::Warn(note, _) => {
+                    assert!(
+                        note.contains("could not be read"),
+                        "unexpected note: {note}"
+                    )
+                }
+                _ => panic!("an unreadable probe must warn, not ok or fail"),
+            }
+        });
+    }
+
+    /// A file that exists but does not parse the cache shape this reader
+    /// expects is `Unparseable`, named as such rather than read as an
+    /// absent window.
+    #[test]
+    fn quota_clause_on_an_unparseable_file_warns_it_did_not_parse() {
+        let home = crate::scratch::root("agent-verify-quota-unparseable");
+        std::fs::create_dir_all(&home).unwrap();
+        write_claude_json(&home, "not json at all");
+        crate::platform::test_home::with_home(&home, || {
+            let adapter = crate::agent::adapter("claude").expect("claude is a real adapter");
+            match quota_clause(adapter) {
+                Clause::Warn(note, _) => {
+                    assert!(note.contains("did not parse"), "unexpected note: {note}")
+                }
+                _ => panic!("an unparseable probe must warn, not ok or fail"),
+            }
+        });
+    }
+
+    /// A reading fetched too long ago to trust is reported as stale, treated
+    /// as absent rather than acted on.
+    #[test]
+    fn quota_clause_on_a_stale_reading_warns_it_is_treated_as_absent() {
+        let home = crate::scratch::root("agent-verify-quota-stale");
+        std::fs::create_dir_all(&home).unwrap();
+        let fetched_at = (chrono::Utc::now() - chrono::Duration::hours(6)).timestamp_millis();
+        write_claude_json(
+            &home,
+            &format!(
+                r#"{{"cachedUsageUtilization": {{
+                    "fetchedAtMs": {fetched_at},
+                    "five_hour": {{"utilization": 90, "resets_at": "2099-01-01T00:00:00Z"}},
+                    "seven_day": {{"utilization": 90, "resets_at": "2099-01-01T00:00:00Z"}}
+                }}}}"#
+            ),
+        );
+        crate::platform::test_home::with_home(&home, || {
+            let adapter = crate::agent::adapter("claude").expect("claude is a real adapter");
+            match quota_clause(adapter) {
+                Clause::Warn(note, _) => assert!(note.contains("stale"), "unexpected note: {note}"),
+                _ => panic!("a stale probe must warn, not ok or fail"),
+            }
+        });
+    }
+
+    /// A fresh, well-formed reading is `Ok`, naming both windows' percentage
+    /// and reset — the mockup's own two-window line. Both resets are years
+    /// out, so both render `MM-DD HH:MM`, no year — this is the mockup's own
+    /// `resets 09-11 04:00` shape, distinct from `format_instant`'s own
+    /// cross-day shape (which does carry a year) since this display names
+    /// no park for `parked_window` to pin a longer one against.
+    ///
+    /// The expected text is derived from the same instant independently
+    /// rather than hand-typed, so the assertion holds whatever local
+    /// timezone the test happens to run under.
+    #[test]
+    fn quota_clause_on_a_fresh_reading_reports_both_windows() {
+        let home = crate::scratch::root("agent-verify-quota-fresh");
+        std::fs::create_dir_all(&home).unwrap();
+        let fetched_at = chrono::Utc::now().timestamp_millis();
+        let five_hour_resets: chrono::DateTime<chrono::Utc> =
+            "2099-01-01T00:00:00Z".parse().unwrap();
+        let seven_day_resets: chrono::DateTime<chrono::Utc> =
+            "2099-02-01T04:00:00Z".parse().unwrap();
+        write_claude_json(
+            &home,
+            &format!(
+                r#"{{"cachedUsageUtilization": {{
+                    "fetchedAtMs": {fetched_at},
+                    "five_hour": {{"utilization": 61, "resets_at": "{}"}},
+                    "seven_day": {{"utilization": 16, "resets_at": "{}"}}
+                }}}}"#,
+                five_hour_resets.to_rfc3339(),
+                seven_day_resets.to_rfc3339(),
+            ),
+        );
+        crate::platform::test_home::with_home(&home, || {
+            let adapter = crate::agent::adapter("claude").expect("claude is a real adapter");
+            let five_hour_display = five_hour_resets
+                .with_timezone(&chrono::Local)
+                .format("%m-%d %H:%M");
+            let seven_day_display = seven_day_resets
+                .with_timezone(&chrono::Local)
+                .format("%m-%d %H:%M");
+            match quota_clause(adapter) {
+                Clause::Ok(note) => {
+                    assert!(
+                        note.contains(&format!("five_hour 61% resets {five_hour_display}")),
+                        "unexpected note: {note}"
+                    );
+                    assert!(
+                        note.contains(&format!("seven_day 16% resets {seven_day_display}")),
+                        "unexpected note: {note}"
+                    );
+                    assert!(!note.contains("2099-"), "must not carry a year: {note}");
+                }
+                _ => panic!("a fresh reading must report ok with both windows"),
+            }
+        });
+    }
+
+    /// The mockup's own two rows — `claude` and `pi`, both a multi-line
+    /// `Ok`/`Warn` — line up their `quota` label at the same column however
+    /// differently long the two kind names are, and each continuation line
+    /// lands under the note rather than under the kind name.
+    #[test]
+    fn render_quota_row_lines_up_kind_names_and_indents_continuation() {
+        let ok = Clause::Ok(
+            "~/.claude.json cachedUsageUtilization\nfive_hour 61% resets 14:00 · seven_day \
+             16% resets 09-11 04:00"
+                .to_string(),
+        );
+        let warn = Clause::Warn(
+            "no probe established — lanes of this kind are never parked\nfor quota, and its \
+             usage limit is not detected either"
+                .to_string(),
+            Vec::new(),
+        );
+        let claude_row = render_quota_row("claude", &ok);
+        let pi_row = render_quota_row("pi", &warn);
+
+        let mut claude_lines = claude_row.lines();
+        let claude_first = claude_lines.next().unwrap();
+        let claude_second = claude_lines.next().expect("a continuation line");
+        let mut pi_lines = pi_row.lines();
+        let pi_first = pi_lines.next().unwrap();
+        let pi_second = pi_lines.next().expect("a continuation line");
+
+        assert_eq!(
+            claude_first,
+            "claude   quota  ~/.claude.json cachedUsageUtilization"
+        );
+        assert_eq!(
+            claude_second,
+            "                five_hour 61% resets 14:00 · seven_day 16% resets 09-11 04:00"
+        );
+        assert_eq!(
+            pi_first,
+            "pi       quota  no probe established — lanes of this kind are never parked"
+        );
+        assert_eq!(
+            pi_second,
+            "                for quota, and its usage limit is not detected either"
+        );
+
+        // Both rows' `quota` label starts at the same column, however
+        // differently long "claude" and "pi" are.
+        assert_eq!(claude_first.find("quota"), pi_first.find("quota"));
     }
 }
