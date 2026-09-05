@@ -704,9 +704,10 @@ fn agent_checks(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
 
 /// Every check and note that reads a model's own settings rather than an
 /// agent profile's: the shipped placeholder, a name that resolves to nothing,
-/// a step nothing caps, an `exclusive` model with no `slots` of its own, and
-/// a `session_blocked_ctx` set against a model that cannot honour it. Grouped
-/// together because all five walk the same `pipelines`/`config.models` data,
+/// a step nothing caps, an `exclusive` model with no `slots` of its own, a
+/// `slots`/`exclusive` model that has not said whether it is `local`, and a
+/// `session_blocked_ctx` set against a model that cannot honour it. Grouped
+/// together because all six walk the same `pipelines`/`config.models` data,
 /// several of them by way of the same `named` map.
 fn model_health_checks(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
     let mut findings = Vec::new();
@@ -841,6 +842,34 @@ fn model_health_checks(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
              `concurrency`, which a local profile does not set. Give it its own count with \
              `spoolway config set models.'{model}'.slots <n>`",
             steps.join(", ")
+        )));
+    }
+
+    // `slots` and `exclusive` both describe one card's worth of hardware, so a
+    // model carrying either is almost certainly local — and a local model that
+    // has not said so gets no board line when a queued task routes to it,
+    // which is the only thing that would ever tell a person the card is
+    // shared. Read straight off `config.models` rather than the `named` map:
+    // the flag is worth setting on a sized model whether or not a pipeline
+    // here points at it yet. `local` itself is never a failure — a run takes
+    // the same decisions with it set or absent — so this is a note.
+    for (glob, price) in &config.models {
+        if price.local || (price.slots == 0 && !price.exclusive) {
+            continue;
+        }
+        // Name `slots` whenever it is set, whether or not `exclusive` is too:
+        // the mockup this note follows reads "sets `slots` but not `local`".
+        // `exclusive` is named only for an entry that carries it alone — the
+        // `continue` above has already ruled out neither being set.
+        let which = if price.slots > 0 {
+            "`slots`"
+        } else {
+            "`exclusive`"
+        };
+        findings.push(Finding::Note(format!(
+            "model `{glob}` sets {which} but not `local`, so a run that puts lanes on it says \
+             nothing about the card being shared — set it with `spoolway config set \
+             models.'{glob}'.local true`"
         )));
     }
 
@@ -1284,6 +1313,86 @@ mod tests {
             assert!(note.contains(".spoolway/pipelines/"), "{note}");
             assert!(!note.contains(" in pipeline.yml"), "{note}");
         }
+    }
+
+    /// One note per `[models]` entry that sets `slots` or `exclusive` without
+    /// saying whether it is `local`, naming the `config set` command that
+    /// answers it. A model that has set `local`, and one that sets neither
+    /// `slots` nor `exclusive`, draw nothing. The note names `slots` whenever
+    /// it is set — the task mockup's wording — and `exclusive` only for an
+    /// entry that carries it alone.
+    #[test]
+    fn a_sized_model_that_has_not_set_local_is_noted() {
+        let pipelines = crate::pipeline::Pipelines::builtin();
+        let mut config = Config::default();
+        config.models.insert(
+            "*Qwen3.6-35B-A3B".into(),
+            crate::usage::ModelPrice {
+                slots: 3,
+                exclusive: true,
+                ..Default::default()
+            },
+        );
+        config.models.insert(
+            "*Ornith-1.5-35B-A3B".into(),
+            crate::usage::ModelPrice {
+                slots: 3,
+                exclusive: true,
+                local: true,
+                ..Default::default()
+            },
+        );
+        config.models.insert(
+            "*Muse-*".into(),
+            crate::usage::ModelPrice {
+                exclusive: true,
+                ..Default::default()
+            },
+        );
+        config.models.insert(
+            "priced-cloud-*".into(),
+            crate::usage::ModelPrice {
+                input: 5.0,
+                ..Default::default()
+            },
+        );
+
+        let local_notes: Vec<String> = model_health_checks(&pipelines, &config)
+            .iter()
+            .filter_map(|f| match f {
+                Finding::Note(text) if text.contains("but not `local`") => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        // One for Qwen, one for the exclusive-only Muse glob; nothing for the
+        // `local` Ornith entry or the priced cloud one.
+        assert_eq!(local_notes.len(), 2, "{local_notes:#?}");
+        let note = |glob: &str| {
+            local_notes
+                .iter()
+                .find(|n| n.contains(&format!("model `{glob}`")))
+                .unwrap_or_else(|| panic!("no note for {glob}: {local_notes:#?}"))
+        };
+        // `slots` is set, so the note names `slots` even though `exclusive` is
+        // set too — the wording the task mockup draws.
+        assert!(
+            note("*Qwen3.6-35B-A3B").contains("sets `slots` but not `local`"),
+            "{}",
+            note("*Qwen3.6-35B-A3B")
+        );
+        assert!(
+            note("*Qwen3.6-35B-A3B")
+                .contains("spoolway config set models.'*Qwen3.6-35B-A3B'.local true"),
+            "{}",
+            note("*Qwen3.6-35B-A3B")
+        );
+        // `exclusive` alone is the only case that names `exclusive`.
+        assert!(
+            note("*Muse-*").contains("sets `exclusive` but not `local`"),
+            "{}",
+            note("*Muse-*")
+        );
     }
 
     #[test]

@@ -344,7 +344,8 @@ struct Spend {
     slots: String,
 }
 
-/// One line per agent profile, its worker slots and nothing else.
+/// One line per agent profile, its worker slots and nothing else — then, when
+/// a queued task routes onto one, a standing line per `local` model.
 ///
 /// A line per profile rather than one summed line, because the two halves of a
 /// run are not comparable: a cloud slot and a local one are not the same kind
@@ -353,12 +354,19 @@ struct Spend {
 /// all appears once it has a live lane, and not before: `codex` ships for the
 /// sake of being pointed at, and a board nothing has been started on should
 /// not carry an idle line about it.
+///
+/// `local_models` is the names `super::queued_local_models` gathered — each
+/// gets one line under the whole slots block, since the slot figures above
+/// count only spoolway's own lanes and a person can reach the same server
+/// from another terminal. Empty on every board that routes onto no `local`
+/// model, which is every board this project draws.
 pub(super) fn footer(
     repo: &Repo,
     pipelines: &Pipelines,
     used: &BTreeMap<&str, usize>,
     model_used: &BTreeMap<&str, usize>,
     agent_model: &BTreeMap<&str, &str>,
+    local_models: &[String],
 ) -> Vec<String> {
     // Which profiles this project could actually start a lane on. Config
     // ships a profile per agent kind spoolway can drive, so a project that
@@ -441,6 +449,24 @@ pub(super) fn footer(
         lines.push(format!(
             "issue_tracking: {failures} hook failures — see tracking/"
         ));
+    }
+
+    // One line per `local` model a queued task routes onto, below the whole
+    // slots block and never folded into a slots line — the slot figures above
+    // it count only the lanes spoolway started, and this is the standing
+    // admission that the card those figures describe is one a person can also
+    // load from another terminal. `local_models` is empty whenever nothing in
+    // the queue names such a model, so the block is absent then; and `footer`
+    // is drawn on the board alone, so `--plain` and a pipe never reach here.
+    if !local_models.is_empty() {
+        lines.push(String::new());
+        for model in local_models {
+            lines.push(format!(
+                "{BOLD}{:<name_w$}{RESET}{GUTTER}{model} — manually started \
+                 sessions are not considered by the slots pool",
+                "local"
+            ));
+        }
     }
     lines
 }
@@ -2201,11 +2227,17 @@ mod tests {
         used.insert("claude", 1);
         used.insert("pi", 1);
 
-        let lines: Vec<String> =
-            footer(&repo, &pipelines, &used, &BTreeMap::new(), &BTreeMap::new())
-                .iter()
-                .map(|l| strip(l))
-                .collect();
+        let lines: Vec<String> = footer(
+            &repo,
+            &pipelines,
+            &used,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &[],
+        )
+        .iter()
+        .map(|l| strip(l))
+        .collect();
         assert_eq!(lines.len(), 2, "{lines:#?}");
 
         let line = |name: &str| lines.iter().find(|l| l.starts_with(name)).unwrap().clone();
@@ -2242,6 +2274,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
+            &[],
         )
         .iter()
         .map(|l| strip(l))
@@ -2256,11 +2289,17 @@ mod tests {
         // running on it.
         let mut used: BTreeMap<&str, usize> = BTreeMap::new();
         used.insert("unreferenced", 1);
-        let live: Vec<String> =
-            footer(&repo, &pipelines, &used, &BTreeMap::new(), &BTreeMap::new())
-                .iter()
-                .map(|l| strip(l))
-                .collect();
+        let live: Vec<String> = footer(
+            &repo,
+            &pipelines,
+            &used,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &[],
+        )
+        .iter()
+        .map(|l| strip(l))
+        .collect();
         assert!(
             live.iter().any(|l| l.starts_with("unreferenced")),
             "{live:#?}"
@@ -2279,6 +2318,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
+            &[],
         )
         .iter()
         .map(|l| strip(l))
@@ -2305,6 +2345,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
+            &[],
         )
         .iter()
         .map(|l| strip(l))
@@ -2341,7 +2382,7 @@ mod tests {
         agent_model.insert("pi", "small-local");
 
         let pipelines = Pipelines::builtin();
-        let lines: Vec<String> = footer(&repo, &pipelines, &used, &model_used, &agent_model)
+        let lines: Vec<String> = footer(&repo, &pipelines, &used, &model_used, &agent_model, &[])
             .iter()
             .map(|l| strip(l))
             .collect();
@@ -2354,6 +2395,65 @@ mod tests {
         // A profile whose live lanes name no model with its own `slots` is
         // unaffected: its usual `used`/`concurrency` reading stands.
         assert!(line("claude").contains("slots 0/1"), "{lines:#?}");
+    }
+
+    /// One `local` model a queued task routes onto draws one line, below the
+    /// whole slots block and after a blank line, naming the model. An empty
+    /// list draws nothing.
+    #[test]
+    fn a_local_model_a_queued_task_runs_draws_one_line_under_the_slots() {
+        let repo = fixture("footer-local-line");
+        let pipelines = Pipelines::builtin();
+        let mut used: BTreeMap<&str, usize> = BTreeMap::new();
+        used.insert("claude", 1);
+
+        let quiet: Vec<String> = footer(
+            &repo,
+            &pipelines,
+            &used,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &[],
+        )
+        .iter()
+        .map(|l| strip(l))
+        .collect();
+        assert!(
+            !quiet
+                .iter()
+                .any(|l| l.contains("not considered by the slots pool")),
+            "no line without a local model to name: {quiet:#?}"
+        );
+
+        let local = ["Ornith-1.5-35B-A3B".to_string()];
+        let lines: Vec<String> = footer(
+            &repo,
+            &pipelines,
+            &used,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &local,
+        )
+        .iter()
+        .map(|l| strip(l))
+        .collect();
+
+        let at = lines
+            .iter()
+            .position(|l| {
+                l.starts_with("local")
+                    && l.contains(
+                        "Ornith-1.5-35B-A3B — manually started sessions are not \
+                         considered by the slots pool",
+                    )
+            })
+            .unwrap_or_else(|| panic!("no local line: {lines:#?}"));
+        // Below the whole slots block, with a blank line between.
+        assert!(
+            lines[..at].iter().any(|l| l.contains("slots")),
+            "the slots block comes first: {lines:#?}"
+        );
+        assert_eq!(lines[at - 1], "", "a blank line separates it: {lines:#?}");
     }
 
     #[test]

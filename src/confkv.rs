@@ -373,6 +373,14 @@ pub const REFERENCE: &[Reference] = &[
                     `exclusive` one — one set of weights on the card at a time.",
     },
     Reference {
+        key: "models.<glob>.local",
+        values: "true, false",
+        default: "false",
+        sentence: "Whether this model runs on hardware you own — a board line asks \
+                    others off the card when a queued task routes to it, and it changes \
+                    nothing else.",
+    },
+    Reference {
         key: "issue_tracking.hook",
         values: "<filename>",
         default: "(blank)",
@@ -1166,10 +1174,11 @@ mod tests {
         assert_eq!(updated.models["claude-opus-5"].context_window, 1_000_000);
     }
 
-    /// A model's slot budget and its exclusivity are set the same way as any
-    /// other `[models]` field — on a glob nothing has written yet.
+    /// A model's slot budget, its exclusivity and its `local` flag are set the
+    /// same way as any other `[models]` field — on a glob nothing has written
+    /// yet — and each reads back the value that its absence stands for.
     #[test]
-    fn a_models_slots_and_exclusive_field_can_be_set() {
+    fn a_models_slots_exclusive_and_local_fields_can_be_set() {
         let config = Config::default();
 
         let updated = set(&config, "models.my-local-*.slots", "3").unwrap();
@@ -1177,6 +1186,13 @@ mod tests {
 
         let updated = set(&updated, "models.my-local-*.exclusive", "true").unwrap();
         assert!(updated.models["my-local-*"].exclusive);
+
+        // Registered, so it is readable before it has ever been written…
+        assert_eq!(get(&config, "models.my-local-*.local").unwrap(), "false");
+        // …and writable on a glob config never named.
+        let updated = set(&updated, "models.my-local-*.local", "true").unwrap();
+        assert!(updated.models["my-local-*"].local);
+        assert_eq!(get(&updated, "models.my-local-*.local").unwrap(), "true");
     }
 
     #[test]

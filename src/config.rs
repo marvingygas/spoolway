@@ -2600,6 +2600,29 @@ mod tests {
         assert!(!rendered.contains("[pricing"));
     }
 
+    /// `local` marks a model as running on hardware you own. It defaults to
+    /// false, is left out of the file at that value the way `slots` and
+    /// `exclusive` are, and comes back as it went in when it is set.
+    #[test]
+    fn a_models_local_flag_round_trips_and_is_omitted_when_false() {
+        let raw = "[models.\"*Ornith-1.5-35B-A3B\"]\n\
+                    context_window = 100096\n\
+                    slots = 3\n\
+                    exclusive = true\n\
+                    local = true\n";
+        let config: Config = toml::from_str(raw).expect("a [models] entry with local must parse");
+        assert!(config.models["*Ornith-1.5-35B-A3B"].local);
+
+        let rendered = toml::to_string(&config).unwrap();
+        assert!(rendered.contains("local = true"));
+
+        // Unset is written by leaving the key out — the same rule every zero
+        // in the table follows.
+        let plain: Config = toml::from_str("[models.\"cloud-*\"]\ninput = 5.0\n").unwrap();
+        assert!(!plain.models["cloud-*"].local);
+        assert!(!toml::to_string(&plain).unwrap().contains("local ="));
+    }
+
     /// `agents.*.model` and `agents.*.context_window` are two more retired
     /// keys, and the same rule applies: an old file with either still
     /// parses, and neither comes back on the next save.
