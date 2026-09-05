@@ -85,6 +85,12 @@ pub enum State {
     Blocked,
     /// Waiting on a dependency that can never arrive.
     Unreachable,
+    /// Held on a clock, not on a person — a quota probe over its ceiling, or
+    /// a lane whose pane already carries its kind's usage-limit phrase. See
+    /// [`crate::task::Frontmatter::parked_until`]. Next to `Queued` rather
+    /// than `Paused`: nothing went wrong and nobody has anything to answer,
+    /// it is simply not this task's turn yet.
+    Parked,
     /// In the queue, waiting for a slot or a dependency.
     Queued,
     /// Archived — its pipeline finished and its file moved to the project's
@@ -141,6 +147,11 @@ pub struct Row {
     /// resolve it any more.
     pub pipeline: String,
     pub state: State,
+    /// The clock a `Parked` row is waiting out, already formatted — `None`
+    /// on every other state. Kept off [`State`] itself, which carries no
+    /// data on any of its variants, and composed into the STATE cell by
+    /// [`view::state_cell_text`] instead.
+    pub parked_display: Option<String>,
     /// How deep this task sits in the run — [`Graph::depth`] of its id. The
     /// first tier `Row::key` sorts a group's live rows by, once whether the
     /// row is done is settled: a dependency this deep below another belongs
@@ -1565,6 +1576,14 @@ fn build_rows(
         let parked_on_blocked = task.stage() == crate::pipeline::BLOCKED
             && !pipeline.blocked_is_staffed(repo.unattended());
 
+        // A quota probe or a usage-limit pane parked this task — see
+        // `Dispatcher::quota_over_ceiling` and `Dispatcher::
+        // usage_limit_hold` in `dispatch.rs`, both of which write
+        // `parked_until` rather than moving the stage. Read the same way the
+        // dispatcher's own gate reads it: in the future, or not set at all.
+        let now = chrono::Utc::now().timestamp();
+        let quota_parked_until = task.front.parked_until.filter(|&until| until > now);
+
         // What happens to this task next. For one that is moving that is the
         // step it goes to; for one that is stuck it is whatever has to happen
         // before it moves at all, which is a person far more often than a step.
@@ -1631,6 +1650,18 @@ fn build_rows(
                 format!("unknown step `{}` — not in this pipeline", task.stage()),
                 false,
             ),
+            // Parked ahead of the ordinary running/queued read below: a task
+            // held for its quota is still sitting on a real step, which
+            // would otherwise read as `Running` (a live lane) or `Queued` (no
+            // lane yet) with nothing on the row saying why nothing is
+            // happening.
+            Some(step) if quota_parked_until.is_some() => {
+                let next = match pipeline.next_running_step(&step.id) {
+                    Some(next) => format!("→ {next}"),
+                    None => "→ done".to_string(),
+                };
+                (State::Parked, next, false)
+            }
             // A pane holding a question, unless the lane in it is visibly
             // working — in which case the question was answered, or the lane
             // only looked settled for a moment between turns, and the row
@@ -1694,6 +1725,10 @@ fn build_rows(
             step_loop,
             pipeline: pipeline.name.clone(),
             state,
+            parked_display: quota_parked_until.map(|until| {
+                let dated = task.front.parked_window == crate::quota::Window::SevenDay.key();
+                crate::task::format_instant(until, now, dated)
+            }),
             depth: graph.depth(task.id()),
             // Mirrors `Candidate::steps_left`: the pipeline's own length less
             // one, less the step's raw index — comparable across pipelines of
@@ -1848,6 +1883,7 @@ fn done_rows(
                 step_loop: None,
                 pipeline: archived_pipeline_name(pipelines, task.front.pipeline.as_deref()),
                 state: State::Done,
+                parked_display: None,
                 // An archived row's `Done` tier already puts it last within
                 // its group — see `Row::key` — so none of the run-order tiers
                 // beneath it are ever compared.
@@ -2534,6 +2570,47 @@ mod tests {
         let row = rows.iter().find(|r| r.id == "login").unwrap();
         assert!(matches!(row.state, State::WaitingOnYou));
         assert!(row.next.contains("login · implement"), "{}", row.next);
+    }
+
+    /// A task the dispatcher parked for its quota reads `Parked` on the
+    /// board, with the clock it is waiting out drawn on the STATE cell
+    /// itself — `queue list` and the board share this one table, so both
+    /// read it the same way. A `parked_until` already in the past is not
+    /// this row's business to clear; that is the dispatcher's, at the top of
+    /// its own next pass, so the row still reads `Parked` until then.
+    #[test]
+    fn a_task_parked_for_its_quota_reads_parked_with_its_own_clock() {
+        let repo = fixture("quota-parked-row");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], Some("review"));
+        let mut task = repo.task("login").unwrap();
+        let until = chrono::Utc::now().timestamp() + 3600;
+        task.front.parked_until = Some(until);
+        task.save().unwrap();
+
+        let tasks = repo.tasks().unwrap();
+        let graph = Graph::build(&tasks, &pipelines, &repo.archive_dir());
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &BTreeSet::new(),
+            &[],
+            &[],
+        )
+        .unwrap();
+        let row = rows.iter().find(|r| r.id == "login").unwrap();
+        assert!(matches!(row.state, State::Parked), "{}", row.next);
+        let display = row
+            .parked_display
+            .as_deref()
+            .expect("a parked row must carry its own clock");
+        assert_eq!(
+            display,
+            crate::task::format_instant(until, chrono::Utc::now().timestamp(), false)
+        );
+        assert!(view::plain_table(&rows).contains(&format!("parked · {display}")));
     }
 
     /// A live lane's clock is its own: `now - launched_at`, not whatever the

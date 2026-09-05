@@ -307,6 +307,15 @@ pub const REFERENCE: &[Reference] = &[
                     the ceiling can be overshot.",
     },
     Reference {
+        key: "agents.<profile>.quota_ceiling",
+        values: "0, 1..=100",
+        default: "0",
+        sentence: "Ceiling on this profile's own kind's cached usage percentage (either \
+                    window); at or above it a pass starts no new lane and parks every \
+                    candidate task instead. 0 is off. Never fires for a kind with no quota \
+                    probe — `spoolway agent verify` says which those are.",
+    },
+    Reference {
         key: "agents.<profile>.permission_mode",
         values: "<mode>",
         default: "the kind's own first mode (absent on a kind with none)",
@@ -665,6 +674,13 @@ pub fn set(config: &Config, key: &str, input: &str) -> Result<Config> {
                 "`agents.{name}.session_blocked_ctx` must be 0 (off) or between 1 and 100 \
                  (1..=100), got {}",
                 profile.session_blocked_ctx
+            );
+        }
+        if profile.quota_ceiling != 0 && !(1..=100).contains(&profile.quota_ceiling) {
+            bail!(
+                "`agents.{name}.quota_ceiling` must be 0 (off) or between 1 and 100 (1..=100), \
+                 got {}",
+                profile.quota_ceiling
             );
         }
         // Both directions of the same rule, caught wherever the edit landed:
@@ -1244,6 +1260,26 @@ mod tests {
 
         // `0` is off and is never compared against the reuse threshold.
         assert!(set(&config, "agents.claude.session_blocked_ctx", "0").is_ok());
+    }
+
+    #[test]
+    // covers: agents.<profile>.quota_ceiling — the ceiling a pass reads before starting a new lane
+    fn a_quota_ceiling_outside_its_range_is_refused() {
+        let config = Config::default();
+        assert_eq!(config.agents["claude"].quota_ceiling, 0);
+
+        let off = set(&config, "agents.claude.quota_ceiling", "0")
+            .map(|c| c.agents["claude"].quota_ceiling);
+        assert_eq!(off.ok(), Some(0), "0 is off, and always allowed");
+
+        let err = set(&config, "agents.claude.quota_ceiling", "101")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("must be 0 (off) or between 1 and 100"),
+            "{err}"
+        );
+        assert!(set(&config, "agents.claude.quota_ceiling", "85").is_ok());
     }
 
     #[test]

@@ -367,20 +367,69 @@ pub struct Frontmatter {
     #[serde(default, skip_serializing_if = "is_zero")]
     pub attempts: u32,
 
-    /// Whether the launch counted in `attempts` was held for its agent
-    /// kind's own usage-limit message rather than a dead launch — set by
-    /// `Dispatcher::usage_limit_hold` in `src/dispatch.rs`. A spent quota is
-    /// not a question for a person the way a broken agent binary is, so the
-    /// launch ceiling reads this to answer with the same doubling backoff
-    /// whether or not a person is watching, rather than escalating to
-    /// `blocked` the moment `attempts` alone would.
+    /// Whether this task is currently held for its agent kind's own
+    /// usage-limit message rather than for a dead launch — set alongside
+    /// [`Self::parked_until`] by `Dispatcher::usage_limit_hold` in
+    /// `src/dispatch.rs`. Informational now that the hold itself lives on
+    /// `parked_until` rather than on `attempts`/`relaunch_backoff`: nothing
+    /// reads this to decide anything, but a person re-reading the document
+    /// still wants to tell a quota hold apart from an ordinary park.
     ///
-    /// Cleared wherever `attempts` is: by `set_stage`, because a task that
-    /// has left the step it was held on has left the hold behind with it,
-    /// and by `launch_landed`, the moment a pass can see the next launch
-    /// actually running.
+    /// Cleared wherever `attempts` is: by `set_stage`, `set_stage_unbanked`
+    /// and `launch_landed`, because a task that has left the step it was
+    /// held on — or landed a lane on it — has left the hold behind with it;
+    /// and by `parse_submission`'s re-queue normalisation in
+    /// `src/commands/queue.rs`, which clears both by hand for a document
+    /// coming back through the queue rather than through either path.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub usage_limit_hold: bool,
+
+    /// A quota probe's or a usage-limit pane's own clock, in epoch seconds:
+    /// no candidate of this task is offered a lane, and no reminder is sent
+    /// to a lane already running one, before this passes.
+    ///
+    /// Written by two different dispatcher checks, both in `dispatch.rs`:
+    /// `quota_over_ceiling`, ahead of a launch, from the probe's own
+    /// `resets_at` for the window that tripped `agents.<profile>.
+    /// quota_ceiling`; and `usage_limit_hold`, for a lane whose pane already
+    /// carries its kind's usage-limit phrase, from the same probe when it is
+    /// fresh or a doubling backoff when it is not. Either way the park is
+    /// written here rather than held anywhere in the dispatcher's own
+    /// memory, so a dispatcher that is stopped and restarted — or never
+    /// running at all for as long as the wait takes — honours it without
+    /// taking a fresh reading: see the top of a pass's own per-task loop,
+    /// which reads this before it resolves a step or looks at a lane.
+    ///
+    /// Cleared by `set_stage` and `set_stage_unbanked`, the same as
+    /// `usage_limit_hold` and `attempts` — a task that has moved on has
+    /// left whatever parked it behind — and by the pass itself the moment it
+    /// finds this in the past, so a task is never skipped a second time on
+    /// a clock that has already run out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parked_until: Option<i64>,
+
+    /// Which of a kind's two windows `parked_until` came from —
+    /// [`crate::quota::Window::key`]'s own spelling, `"five_hour"` or
+    /// `"seven_day"` — kept only so the clock draws the right way on a pass
+    /// that did not just compute it.
+    ///
+    /// A five-hour park and a seven-day one are different enough in scale
+    /// that one display would fail one of them: a bare `HH:MM` loses all
+    /// sense of "how far" once the wait runs past today, and a full date
+    /// with a duration next to it repeats what a same-day clock already
+    /// said. So the shape is decided once, at park time, and remembered
+    /// here rather than re-derived from how much of the wait is left —
+    /// re-deriving it would have a seven-day park's own display quietly
+    /// switch to the five-hour shape on its last day, which is exactly the
+    /// day a reader most wants to see how far it has come.
+    ///
+    /// Empty for the mid-turn usage-limit hold, which is always the
+    /// five-hour clock and needs no field to say so — see
+    /// `Dispatcher::usage_limit_hold` in `dispatch.rs` — and for a
+    /// `parked_until` no writer here classified, which reads the same as
+    /// `"five_hour"`, the shorter and commoner shape.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub parked_window: String,
 
     /// The gated step this task is paused on, waiting for a person to release
     /// it — see [`crate::pipeline::PAUSED`].
@@ -466,6 +515,72 @@ fn is_zero(n: &u32) -> bool {
 /// whoever is working out why something escalated.
 pub fn route_key(from: &str, to: &str) -> String {
     format!("{from}->{to}")
+}
+
+/// `until` — epoch seconds — in local time: a bare `HH:MM` on the day it
+/// falls on `now`, or `YYYY-MM-DD HH:MM` otherwise. `dated` forces the long
+/// form even on a day that now matches `now`'s own — see [`format_until`]'s
+/// own doc for why a caller ever wants that.
+///
+/// Shared by every reader of [`Frontmatter::parked_until`] — the board, `queue
+/// list` and the dispatcher's own report lines — so a park reads the same
+/// clock everywhere it is printed. `now` is a parameter rather than read
+/// here, so a test can hold it still.
+pub fn format_instant(until: i64, now: i64, dated: bool) -> String {
+    let (target, same_day) = local_instant(until, now);
+    match dated || !same_day {
+        true => target.format("%Y-%m-%d %H:%M").to_string(),
+        false => target.format("%H:%M").to_string(),
+    }
+}
+
+/// [`format_instant`], with the wait remaining appended in parentheses —
+/// but only once the bare clock alone has stopped saying enough on its own:
+/// a same-day reset already reads as "how soon", and a duration next to it
+/// would repeat the answer rather than add one. A reset on a different day
+/// carries no sense of scale by itself, which is exactly what the
+/// parenthesised wait supplies — the mockup's own `14:00` for a five-hour
+/// park against its `2026-09-11 04:00 (6d)` for a seven-day one, and the
+/// same `(2h)` still there once that six-day wait has mostly run out.
+///
+/// `dated` is that last case's whole reason for existing: `now` and `until`
+/// can end up on the same calendar day purely because most of a multi-day
+/// wait has run out, at which point re-deriving the shape from the two
+/// timestamps alone would have the display quietly drop back to the bare
+/// five-hour shape on exactly the day a reader most wants to see how far
+/// the wait has come. Callers who know which of a kind's windows this park
+/// came from — [`Frontmatter::parked_window`] — pass `true` for
+/// `"seven_day"` and `false` otherwise, so the shape decided when the park
+/// was written survives however close `now` gets to it.
+pub fn format_until(until: i64, now: i64, dated: bool) -> String {
+    let (_, same_day) = local_instant(until, now);
+    let bare = format_instant(until, now, dated);
+    if same_day && !dated {
+        return bare;
+    }
+    let remaining = (until - now).max(0) as u64;
+    format!(
+        "{bare} ({})",
+        crate::config::human_duration::format(std::time::Duration::from_secs(remaining)),
+    )
+}
+
+/// `until` and `now`, both in local time, and whether they fall on the same
+/// calendar day — the one question [`format_instant`] and [`format_until`]
+/// both have to ask before they can decide their own shape.
+///
+/// `pub(crate)` rather than private: `spoolway agent verify`'s own quota
+/// clause asks the same same-day question, for a shorter display of its
+/// own (`MM-DD HH:MM`, no year — see `commands::agent::quota_clause`)
+/// rather than either of the two shapes here.
+pub(crate) fn local_instant(until: i64, now: i64) -> (DateTime<chrono::Local>, bool) {
+    let target = DateTime::from_timestamp(until, 0)
+        .unwrap_or_else(Utc::now)
+        .with_timezone(&chrono::Local);
+    let today = DateTime::from_timestamp(now, 0)
+        .unwrap_or_else(Utc::now)
+        .with_timezone(&chrono::Local);
+    (target, target.date_naive() == today.date_naive())
 }
 
 /// A task file as loaded from disk: typed frontmatter plus the untouched body.
@@ -601,6 +716,8 @@ impl Task {
         self.front.arrived_from = Some(from);
         self.front.attempts = 0;
         self.front.usage_limit_hold = false;
+        self.front.parked_until = None;
+        self.front.parked_window = String::new();
         self.front.launched_at = None;
 
         let stamp: DateTime<Utc> = Utc::now();
@@ -624,13 +741,16 @@ impl Task {
     /// here would leave a `loop:` budget seeing an arrival no pipeline
     /// routed. See [`Task::set_stage`], which this deliberately does not
     /// call: `rounds` and `arrived_from` are left exactly as they were, and
-    /// `attempts`, `usage_limit_hold` and `launched_at` are reset the same
-    /// way `set_stage` resets them, since neither a parked task nor the lane
-    /// it is handed back to has anything of those left to mean.
+    /// `attempts`, `usage_limit_hold`, `parked_until`, `parked_window` and
+    /// `launched_at` are reset the same way `set_stage` resets them, since
+    /// neither a parked task nor the lane it is handed back to has anything
+    /// of those left to mean.
     pub fn set_stage_unbanked(&mut self, stage: &str, message: &str) {
         self.front.stage = stage.to_string();
         self.front.attempts = 0;
         self.front.usage_limit_hold = false;
+        self.front.parked_until = None;
+        self.front.parked_window = String::new();
         self.front.launched_at = None;
 
         let stamp: DateTime<Utc> = Utc::now();
@@ -952,6 +1072,65 @@ mod tests {
     use super::*;
 
     const SAMPLE: &str = "---\nid: demo\nstage: queued\ntouches: [src/**]\n---\n## Goal\nDo a thing.\n\n## Status Log\n- earlier entry\n";
+
+    /// The mockup's own five-hour park: same local day as `now`, so the bare
+    /// clock already says how soon — `format_until` must not repeat that as
+    /// a duration in parentheses. `dated` is `false` throughout, the way a
+    /// five-hour park's own `parked_window` reads.
+    ///
+    /// Built through `chrono::Local` directly rather than parsed off a UTC
+    /// string, so the assertion holds whatever this machine's own timezone
+    /// is — `format_instant`/`format_until` compare local calendar days, and
+    /// a fixed UTC instant lands on a different local day depending on the
+    /// offset the test happens to run under.
+    #[test]
+    fn a_same_day_park_carries_no_duration() {
+        use chrono::TimeZone;
+        let now = chrono::Local
+            .with_ymd_and_hms(2026, 9, 4, 12, 0, 0)
+            .unwrap()
+            .timestamp();
+        let until = chrono::Local
+            .with_ymd_and_hms(2026, 9, 4, 14, 0, 0)
+            .unwrap()
+            .timestamp();
+        assert_eq!(format_instant(until, now, false), "14:00");
+        assert_eq!(format_until(until, now, false), "14:00");
+    }
+
+    /// The mockup's own six-day park, and the same figure days later with
+    /// most of the wait spent: a reset on a different day carries no sense
+    /// of scale on its own, which is exactly what the duration supplies.
+    /// `dated` is `true` throughout, the way a seven-day park's own
+    /// `parked_window` reads — pinned at park time rather than re-derived,
+    /// so the shape survives even once `now` has caught up to `until`'s own
+    /// calendar day.
+    #[test]
+    fn a_cross_day_park_carries_its_duration() {
+        use chrono::TimeZone;
+        let now = chrono::Local
+            .with_ymd_and_hms(2026, 9, 5, 4, 0, 0)
+            .unwrap()
+            .timestamp();
+        let until = chrono::Local
+            .with_ymd_and_hms(2026, 9, 11, 4, 0, 0)
+            .unwrap()
+            .timestamp();
+        assert_eq!(format_instant(until, now, true), "2026-09-11 04:00");
+        assert_eq!(format_until(until, now, true), "2026-09-11 04:00 (6d)");
+
+        // Days later, most of the wait spent — now on the same calendar day
+        // as `until` itself: still the dated shape and a duration, now
+        // shorter, because `dated` still says so.
+        let almost_there = chrono::Local
+            .with_ymd_and_hms(2026, 9, 11, 2, 0, 0)
+            .unwrap()
+            .timestamp();
+        assert_eq!(
+            format_until(until, almost_there, true),
+            "2026-09-11 04:00 (2h)"
+        );
+    }
 
     #[test]
     fn parses_and_round_trips() {

@@ -450,6 +450,21 @@ floor. `N` is the laps this task has taken from the step it arrived here from, `
 route's own budget, the same pair `apply_loop_budget` compares before it lets another one
 through. A step with no declared budget for that route shows a bare step id.
 
+A task holding a `parked_until:` in the future reads `● parked · 14:00`, on the board and in
+`spoolway queue list` alike — the one state whose word carries a clock, because the only thing
+a reader wants from a parked row is when it stops being parked. A reset within the day shows a
+bare time; a longer wait shows the date and how far off it is.
+
+```
+TASK       PIPELINE  STEP       STATE                NEXT
+wire-up    impl      implement  ● parked · 14:00     review
+log-view   impl      implement  ● running            review
+```
+
+Re-queueing a document clears `parked_until:` along with the `usage_limit_hold` beside it, the
+same way it clears every other field the dispatcher stamped on the earlier run — so a task can
+be taken off a park without waiting the clock out.
+
 `deploy` there is a project's own gated step — no step of any shipped pipeline declares
 `gate:`, because a pull request is already the checkpoint. A task that has passed one reads
 `● paused`, with `→` and the step passing the gate would carry it to in the NEXT column, and
@@ -823,7 +838,52 @@ A `lanes.json` that will not parse is not discarded. The pass starts from no lan
 it first copies the bad file aside as `lanes.json.bad` and writes a line to the problem log
 saying so, rather than silently overwriting a hand edit or a disk error with an empty file.
 
-A settled lane whose pane ends on its own kind's usage-limit message gets the same backoff, for the same reason: more launches do not fix a spent quota either, and reminding or escalating it only spends a person's attention — or, unattended, relaunches straight back into the same wall on the very next pass — for no better result. Whether a tail *is* a limit is answered by the agent adapter (`Adapter::usage_limit` in `src/agent.rs`), a fact about one CLI's own wording, not a pattern the dispatcher keeps in sync by hand. Held rather than escalated: the task never reaches `blocked`, `attempts` is left exactly where the launch that hit the limit set it, and a `## Status Log` line names the limit and the delay.
+A lane whose pane carries its own kind's usage-limit message takes a different road entirely,
+and it does not go through the backoff above. **The lane is left running.** Its pane, session
+and worktree are untouched and no `stop_lane` is called, because the agent picks its own turn
+back up once the window resets — killing it would throw away work that is going to finish by
+itself. Instead the dispatcher writes `parked_until:` on the task and stops nudging it: no
+reminder is sent while the park stands, the task never reaches `blocked`, and `attempts` is
+left exactly where the launch that hit the limit set it. A `## Status Log` line names the
+limit and the time the park runs to.
+
+This check runs whether the multiplexer reports the lane `Working` or settled. A limit surface
+that keeps redrawing never settles, so a check that only looked at settled lanes would miss the
+common case entirely and leave the reminder loop to escalate it.
+
+The park's clock comes from the kind's own five-hour reset when a quota reading can be taken,
+and from the doubling backoff above when one cannot. Whether a tail *is* a limit is answered by
+the agent adapter (`Adapter::usage_limit` in `src/agent.rs`), a fact about one CLI's own
+wording, not a pattern the dispatcher keeps in sync by hand.
+
+### Parking a task before the limit lands
+
+The check above catches a limit that has already landed. `agents.<profile>.quota_ceiling`
+catches one before it does. Ahead of starting a lane, a pass reads the profile's kind's own
+cached usage percentage — a file the agent wrote, never a network call — and at or above the
+ceiling on either window it starts no new lane of that profile at all. Every candidate task of
+that profile gets `parked_until:` written from the tripped window's own `resets_at`. Tasks
+whose step names a different profile are staffed in the same pass. See [Reading a kind's quota
+before a lane starts](agents.md#reading-a-kinds-quota-before-a-lane-starts) for where the
+reading comes from and the five ways it fails open.
+
+    pass 41
+      wire-up: `implement` parked until 14:00 — claude at 88% of its
+               five-hour window, ceiling is 85
+      log-view: started `implement` on pi
+      lanes still working
+
+**The park lives on the task file, not in the dispatcher.** That is the whole point of writing
+a timestamp rather than holding a timer: a seven-day wait outlives any dispatcher process, and
+often the machine. A dispatcher started from cold reads `parked_until:` at the top of its
+per-task loop, before it resolves a step or looks at a lane, and honours it without taking any
+reading of its own. The first pass after the timestamp has passed clears the field and staffs
+the task normally. A forty-minute five-hour wait and a six-day seven-day wait behave
+identically.
+
+A park never ends the run. The dispatcher keeps passing and reports the park each time; closing
+it is a person's call.
+
 
 Resuming a task hands it its full attempt budget back, since every transition zeroes the
 count.

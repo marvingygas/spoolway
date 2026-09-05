@@ -140,6 +140,7 @@ impl State {
             State::Blocked => "● blocked",
             State::Unreachable => "● unreachable",
             State::Queued => "○ queued",
+            State::Parked => "● parked",
             State::Done => "● done",
         }
     }
@@ -155,6 +156,9 @@ impl State {
             State::Blocked => format!("{ORANGE}{word}{RESET}"),
             State::Unreachable => format!("{RED}{word}{RESET}"),
             State::Queued => format!("{DIM}{word}{RESET}"),
+            // Dim like `Queued`, not amber like `Paused`: nothing is waiting
+            // on a person here, only a clock.
+            State::Parked => format!("{DIM}{word}{RESET}"),
             State::Done => format!("{DIM}{word}{RESET}"),
         }
     }
@@ -617,7 +621,7 @@ pub(super) fn table(
     // Wide enough for the widest state *on the board*, and no wider. Sized to
     // the widest word there is instead, a queue of running tasks holds seven
     // columns open for a state nothing is in.
-    let state_w = width(&|r| r.state.word().chars().count(), 5);
+    let state_w = width(&|r| state_cell_text(r).chars().count(), 5);
     let ctx_w = width(
         &|r| figure(r.ctx.map(|pct| format!("{pct}%"))).chars().count(),
         3,
@@ -987,8 +991,8 @@ pub(super) fn table(
         // padded by its visible characters — counted, not measured in bytes,
         // or the three-byte `●` shifts every row two columns out.
         let state = pad(
-            &style.paint_state(row.state),
-            row.state.word(),
+            &style.paint_state(row),
+            &state_cell_text(row),
             state_w,
             false,
         );
@@ -1056,11 +1060,27 @@ pub(super) fn table(
     out
 }
 
+/// The full text of a row's STATE cell: the state's own word, plus a
+/// `· <timestamp>` suffix on a `Parked` row — the one state whose meaning
+/// includes a clock nothing else on the board carries. Kept off
+/// [`State::word`] itself, which returns `&'static str` and so cannot carry
+/// per-row text.
+fn state_cell_text(row: &Row) -> String {
+    match (&row.state, &row.parked_display) {
+        (State::Parked, Some(display)) => format!("{} · {display}", row.state.word()),
+        _ => row.state.word().to_string(),
+    }
+}
+
 impl Style {
-    fn paint_state(&self, state: State) -> String {
-        match self.colour {
-            true => state.dot(),
-            false => state.word().to_string(),
+    fn paint_state(&self, row: &Row) -> String {
+        let dot = match self.colour {
+            true => row.state.dot(),
+            false => row.state.word().to_string(),
+        };
+        match (&row.state, &row.parked_display) {
+            (State::Parked, Some(display)) => format!("{dot} · {display}"),
+            _ => dot,
         }
     }
 

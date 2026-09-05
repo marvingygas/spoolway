@@ -53,6 +53,7 @@ Which steps run on which profile is the pipeline's business now — see
 | `concurrency` | `1` on `claude`, **absent** elsewhere | Most lanes of this profile running at once. `0` is unlimited. A cap on the harness — for a local model the count belongs to the model, as `models."<glob>".slots` |
 | `session_reuse_ctx` | `50` | How large an earlier session may be, as a percentage of the model's context window, before a `session: true` step opens fresh instead of carrying it over. 1..=100, judged on the last turn alone |
 | `session_blocked_ctx` | `0` — off | How large a *running* lane's last completed turn may get, as a percentage of that window, before the dispatcher stops the lane and blocks its task. Must be above `session_reuse_ctx` if set at all — see [`[agents.*]`](configuration.md#agents--who-runs-a-step) |
+| `quota_ceiling` | `0` — off | How much of its kind's own account-wide quota may be spent, as a percentage of either window, before a pass starts no new lane of this profile and parks every candidate task instead. 1..=100, or `0` for off. Never fires for a kind with no quota probe, and fails open on a reading that cannot be taken — see [Reading a kind's quota before a lane starts](#reading-a-kinds-quota-before-a-lane-starts) |
 | `permission_mode` | kind's own first, strongest-unattended mode; **absent** on a kind with none | Whether this kind's lanes stop and ask about a tool call. Holds the mode a lane is actually started with — `claude` ships `"auto"`, `codex` ships `"never"` — never a placeholder for one; a blank is refused by `spoolway config set` and never reaches `Config::load` |
 
 A profile no longer carries `model`, `context_window`, `args`, `sandbox`, `sandbox_extension`,
@@ -111,10 +112,53 @@ kind occupies that state today.
 A row can also carry `usage_limit`: the exact phrase this kind's own CLI leaves in a pane when
 it has hit an account-wide usage limit and stopped making progress on its own. Only `claude`
 declares one today, `"Usage limit reached"`, read verbatim off a real transcript rather than
-guessed at — see [Restarts, laps and
-escalation](dispatcher.md#restarts-laps-and-escalation) for what the dispatcher does with it. A
-kind with no `usage_limit` established, `codex` among them, leaves its lanes on the ordinary
-settled/reminder path; `Adapter::is_usage_limit` answers `false` for every tail on such a kind.
+guessed at. A kind with no `usage_limit` established, `codex` among them, leaves its lanes on
+the ordinary settled/reminder path; `Adapter::is_usage_limit` answers `false` for every tail on
+such a kind.
+
+**The pane is left alone when this phrase shows up.** The agent resumes its own turn once the
+window resets, so tearing the lane down would throw away work that is going to continue by
+itself. The dispatcher parks the task instead: it writes `parked_until:` on the task file, the
+lane keeps its pane, session and worktree, and the reminder loop stops nudging it. The park
+runs to the kind's own five-hour reset when a quota reading can be taken, and to the ordinary
+relaunch backoff when one cannot. See [Restarts, laps and
+escalation](dispatcher.md#restarts-laps-and-escalation).
+
+### Reading a kind's quota before a lane starts
+
+A row can also carry `quota`: the file, named relative to the home directory, where this kind's
+own CLI caches its account-wide usage percentage. Only `claude` declares one today,
+`.claude.json`, whose `cachedUsageUtilization` object holds a `five_hour` and a `seven_day`
+entry — each an integer `utilization` percent and an ISO `resets_at` — plus a `fetchedAtMs`
+saying when the agent last wrote them. Nothing here goes over the network; the figure is a file
+the agent already wrote.
+
+The reading gates a launch through [`quota_ceiling`](#every-profile-key). At or above the
+ceiling on either window, a pass starts no new lane of that profile and writes `parked_until:`
+on every candidate task, taken from the window's own `resets_at`. The five-hour window is
+checked first, because it is the one that resets soonest. Tasks whose step names a different
+profile are staffed in the same pass, untouched.
+
+**A reading spoolway cannot trust never blocks anything.** Four cases all degrade to "off": the
+kind carries no `quota` row, the file cannot be read, it does not parse, or its `fetchedAtMs` is
+older than five hours. A window whose own `resets_at` has already passed is skipped too, however
+high its cached percentage reads — the cache is only rewritten when the agent next runs, so an
+old percentage would otherwise gate every pass forever. The pane-phrase hold above is still
+behind all of this.
+
+`spoolway agent verify` prints each kind's quota clause, so a person can see which of those
+cases they are in:
+
+```
+claude   quota  ~/.claude.json cachedUsageUtilization
+                five_hour 61% resets 14:00 · seven_day 16% resets 09-11 04:00
+pi       quota  no probe established — lanes of this kind are never parked
+                for quota, and its usage limit is not detected either
+```
+
+The clause never fails the command. `spoolway doctor` says the same thing from the other side:
+it names a profile that sets `quota_ceiling` on a kind with no probe, where the ceiling can
+never fire.
 
 ### Telling an interrupted turn from a finished one
 

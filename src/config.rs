@@ -1122,6 +1122,25 @@ pub struct AgentProfile {
     /// way round.
     pub session_blocked_ctx: u8,
 
+    /// The ceiling on this profile's own kind's cached usage percentage,
+    /// checked before a pass starts a new lane of it — see
+    /// [`crate::agent::Adapter::quota`] and `Dispatcher::quota_over_ceiling`
+    /// in `dispatch.rs`. `0`, the default, is off: nothing is read and no
+    /// candidate is ever parked for it.
+    ///
+    /// At or above this, in either window, a pass starts no new lane of this
+    /// profile and writes `parked_until:` on every candidate task instead,
+    /// set from the probe's own `resets_at` — the task file carries the
+    /// park, not the dispatcher, so it survives a restart.
+    ///
+    /// Reading a kind's quota can fail three ways — no probe for this kind,
+    /// the file unreadable, the reading judged stale — and every one of them
+    /// is treated as "nothing to act on" rather than a reason to refuse a
+    /// launch. A profile whose kind carries no probe at all is never parked
+    /// for this however high the ceiling is set; `spoolway doctor` says so.
+    /// 1..=100, or `0` for off.
+    pub quota_ceiling: u8,
+
     /// Retired: whether a carried session was still worth resuming once its
     /// prompt cache had gone cold. Two settings governed one decision, and
     /// the second was inert unless some model declared a lifetime — that
@@ -1179,6 +1198,7 @@ impl Default for AgentProfile {
             context_window: 0,
             session_reuse_ctx: 50,
             session_blocked_ctx: 0,
+            quota_ceiling: 0,
             session_reuse_uncached: false,
             env: BTreeMap::new(),
             permission_mode: String::new(),
@@ -1214,6 +1234,7 @@ impl AgentProfile {
             // Off, like every shipped profile: nothing watches a live
             // lane's size until a person turns this on.
             session_blocked_ctx: 0,
+            quota_ceiling: 0,
             session_reuse_uncached: false,
             env: BTreeMap::new(),
             // pi has no such mode; its row in `agent::ADAPTERS` says so.
@@ -1230,6 +1251,7 @@ impl AgentProfile {
             context_window: 0,
             session_reuse_ctx: 50,
             session_blocked_ctx: 0,
+            quota_ceiling: 0,
             session_reuse_uncached: false,
             env: BTreeMap::new(),
             // `auto`, claude's own first mode: the strongest one that still
@@ -1253,6 +1275,7 @@ impl AgentProfile {
             context_window: 0,
             session_reuse_ctx: 50,
             session_blocked_ctx: 0,
+            quota_ceiling: 0,
             session_reuse_uncached: false,
             env: BTreeMap::new(),
             // `never`, codex's own first mode: the one approval setting that

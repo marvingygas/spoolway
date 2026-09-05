@@ -32,6 +32,7 @@ mod pipeline;
 mod platform;
 mod problem_log;
 mod prompt;
+mod quota;
 mod release;
 mod repo;
 mod retain;

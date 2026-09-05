@@ -130,6 +130,7 @@ pub fn row(id: &str) -> Row {
         step_loop: None,
         pipeline: "default".into(),
         state: State::Queued,
+        parked_display: None,
         depth: 0,
         steps_left: 0,
         dependents: 0,

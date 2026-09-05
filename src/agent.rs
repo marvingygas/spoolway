@@ -104,15 +104,36 @@ pub struct Adapter {
     /// usage limit and stopped making progress on its own — read verbatim off
     /// a real transcript, not guessed at. A lane whose tail carries this is
     /// not stuck on a question and not dead at launch; it is waiting out a
-    /// clock nothing spoolway does will shorten, so the dispatcher holds the
-    /// task in place and backs off rather than reminding it or handing it to
-    /// a person who cannot do anything about it either — see
-    /// `Dispatcher::check_unreported` in `dispatch.rs`.
+    /// clock nothing spoolway does will shorten, so the dispatcher leaves the
+    /// pane exactly as it is and parks the task instead of reminding it or
+    /// tearing it down — see `Dispatcher::usage_limit_hold` in `dispatch.rs`,
+    /// checked ahead of the ordinary settled/reminder path rather than inside
+    /// it, since this is true of a working pane as much as a settled one.
     ///
     /// `None` for a kind nobody has established this wording for: its lanes
     /// keep going through the ordinary settled/reminder path, exactly as they
     /// did before this field existed.
     pub usage_limit: Option<&'static str>,
+
+    /// Where this kind's own cached usage percentage is read back from,
+    /// relative to the home directory — `spoolway agent verify` prints it
+    /// verbatim, and [`crate::quota::read`] joins it onto the home directory
+    /// it resolves at read time.
+    ///
+    /// Established against `claude` alone: `~/.claude.json` carries a
+    /// `cachedUsageUtilization` object with a `five_hour` and a `seven_day`
+    /// entry, each an integer `utilization` percent and an ISO `resets_at`,
+    /// plus a `fetchedAtMs` on the object itself — read verbatim off a real
+    /// file, not guessed at. The shape that reader expects is fixed to that
+    /// one file for the same reason [`Self::usage_limit`] is one phrase
+    /// rather than a pattern registry: nothing yet needs it to be more than
+    /// that.
+    ///
+    /// `None` for a kind with no such cache to read — every row but
+    /// `claude`'s today. A profile of that kind is never parked for its
+    /// quota, and `spoolway agent verify` says so on its own line rather than
+    /// pretending there is nothing to say.
+    pub quota: Option<&'static str>,
 
     /// How this kind's transcript records a person's interrupt — the record
     /// left behind when Escape lands mid-turn. Read by
@@ -462,6 +483,8 @@ pub const ADAPTERS: &[Adapter] = &[
         }),
         // A local model has no account-wide usage limit to run out of.
         usage_limit: None,
+        // Nor a cached percentage against one.
+        quota: None,
         // Captured off a real transcript: the last record after Escape is
         // `{"type":"message","message":{"role":"assistant","content":[],
         // "stopReason":"aborted","errorMessage":"Operation aborted"}}`.
@@ -560,6 +583,9 @@ pub const ADAPTERS: &[Adapter] = &[
         // continued · continuing automatically…". The phrase itself, not the
         // clock or the rest of the line, is what stays the same between them.
         usage_limit: Some("Usage limit reached"),
+        // Read verbatim off a real `~/.claude.json` — see `quota::read`'s own
+        // doc for the shape.
+        quota: Some(".claude.json"),
         // Captured off a real transcript: the last record after Escape is
         // `{"type":"user","message":{"role":"user","content":
         // [{"type":"text","text":"[Request interrupted by user]"}]}}`.
@@ -715,6 +741,9 @@ pub const ADAPTERS: &[Adapter] = &[
         }),
         // Not established against a real codex transcript yet.
         usage_limit: None,
+        // Establishing this needs a real ChatGPT-authed run — `codex-quota`'s
+        // own job, not this row's. Left as a gap rather than guessed.
+        quota: None,
         // Captured off a real rollout: the record after Escape is a `user`
         // item whose text opens `<turn_aborted>` —
         // `{"role":"user","content":[{"type":"input_text","text":
@@ -1036,6 +1065,23 @@ mod tests {
                     "`{}` claims a quit gesture nobody has checked against its binary",
                     row.kind
                 );
+            }
+        }
+    }
+
+    /// A kind's own cache format is established the same way its quit gesture
+    /// is — against a real file, not guessed at — so only `claude` may claim
+    /// one until a second kind's is actually read.
+    #[test]
+    fn only_claude_carries_a_quota_probe() {
+        for row in ADAPTERS {
+            match row.kind {
+                "claude" => assert_eq!(row.quota, Some(".claude.json")),
+                _ => assert!(
+                    row.quota.is_none(),
+                    "`{}` claims a quota probe nobody has read off its real cache",
+                    row.kind
+                ),
             }
         }
     }
