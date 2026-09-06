@@ -35,6 +35,14 @@ pub const TRACKING_TEMPLATES_DIR: &str = ".spoolway/templates/tracking";
 /// queue screen, so an ordinary project has no directory here at all rather
 /// than an empty one `init` put there. See [`crate::repo::Repo::routines_dir`].
 pub const ROUTINES_DIR: &str = ".spoolway/routines";
+/// The project-scoped cron-job store, tracked in the checkout and shared
+/// with the team. The user-scoped store is the same base name
+/// ([`JOBS_STORE`]) in this machine's per-project home, never tracked. See
+/// [`crate::jobs`] and [`crate::repo::Repo::jobs_file`].
+pub const JOBS_FILE: &str = ".spoolway/jobs.toml";
+/// The bare name of a cron-job store, for the user-scoped copy that lives
+/// directly under the project's machine home beside `lanes.json`.
+pub const JOBS_STORE: &str = "jobs.toml";
 /// The pull request template `spoolway stack`'s summary prompt fills in,
 /// beside the task templates but a single file rather than one per pipeline —
 /// there is one shape of pull request, whatever the pipeline that opened it.

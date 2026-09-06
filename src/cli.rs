@@ -196,6 +196,10 @@ pub enum Command {
     #[command(subcommand)]
     Group(GroupCommand),
 
+    /// Read and fire cron jobs — routines the dispatcher runs on a schedule.
+    #[command(subcommand)]
+    Jobs(JobsCommand),
+
     /// Read or write single config values non-interactively.
     #[command(subcommand)]
     Config(ConfigCommand),
@@ -222,7 +226,9 @@ pub struct DoctorArgs {
 pub const HELP_GROUPS: &[(&str, &[&str])] = &[
     (
         "Your work:",
-        &["queue", "group", "issue", "dispatch", "eval", "spend"],
+        &[
+            "queue", "group", "issue", "dispatch", "jobs", "eval", "spend",
+        ],
     ),
     ("When something needs you:", &["lane", "resume"]),
     (
@@ -770,7 +776,8 @@ pub struct DispatchArgs {
     ///
     /// With neither `unattended.max_output_tokens` nor `unattended.max_cost_usd`
     /// set this run has no ceiling of any kind: no block can park a task, so
-    /// nothing but you, a gate, or an empty queue ends it.
+    /// nothing but you, a gate, or an empty queue with no job waiting on it
+    /// ends it.
     #[arg(long, overrides_with = "attended")]
     pub unattended: bool,
 
@@ -1062,6 +1069,24 @@ pub enum GroupCommand {
     /// never path-parsed — a bare word and a path are different groups even
     /// when they share a file stem.
     List,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum JobsCommand {
+    /// List every job across both stores: name, scope, schedule, pipeline,
+    /// when it fires next and when it last fired. `--json` prints the same
+    /// rows for a script.
+    List,
+
+    /// Fire one job now, ignoring its schedule — the way to test a job you
+    /// have just written. Its next scheduled firing is unaffected.
+    Run(JobsRunArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct JobsRunArgs {
+    /// The job's name, as `spoolway jobs list` prints it.
+    pub name: String,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1545,7 +1570,9 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            vec!["queue", "group", "issue", "dispatch", "eval", "spend"]
+            vec![
+                "queue", "group", "issue", "dispatch", "jobs", "eval", "spend"
+            ]
         );
     }
 

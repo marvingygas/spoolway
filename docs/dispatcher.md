@@ -38,6 +38,12 @@ A blocked or paused task stays in the queue, and so does the dispatcher: those a
 a person, not finished. With nothing queued at all it says so rather than looping over an
 empty queue.
 
+An enabled job is the one exception. While any job is enabled, the run stays resident on an
+empty queue — on the pass that drains the last task, and on a cold start with nothing
+queued, where it no longer exits 3. It prints why it is staying and when the next job fires,
+then loops on into the wait so it is alive when that window comes round. `ctrl-c` still stops
+it, and `dispatch.tear_lanes_on_stop` still applies. See [Jobs](jobs.md).
+
 ### Restarting into a repo that cannot run
 
 A supervisor, a shell loop, or a person holding a key can restart `spoolway dispatch` forever
@@ -69,15 +75,20 @@ roughly 30 seconds after the fourth and a caller that keeps retrying gets anothe
 before the next refusal.
 
 `spoolway dispatch` exits 0 on a run that dispatched and stopped on its own, 3 on an empty
-queue, 4 when another dispatcher already holds the lock, 5 when the restart guard refuses a
-start, and 1 on any other error — see [`spoolway
-dispatch`](cli-reference.md#spoolway-dispatch).
+queue with no job enabled, 4 when another dispatcher already holds the lock, 5 when the
+restart guard refuses a start, and 1 on any other error — see [`spoolway
+dispatch`](cli-reference.md#spoolway-dispatch). With a job enabled the run stays resident
+instead of exiting 3.
 
 ## What a pass does
 
 Every pass reconciles the pipeline from two sources of truth and nothing else: **each task
 file's stage**, and **the live lane list**. It remembers nothing between passes, which is
 what makes it safe to interrupt at any point.
+
+Before either of the steps below, a pass fires any cron job whose expression matches the
+current local minute, so the routine it queues is dispatched by this same pass. A dry run
+fires nothing. See [Jobs](jobs.md).
 
 In outline, a pass:
 

@@ -283,6 +283,13 @@ impl Repo {
         self.checkout.join(crate::config::TASK_TEMPLATES_DIR)
     }
 
+    /// The project-scoped cron-job store, tracked in the checkout — read from
+    /// `checkout` like every other tracked file above, so a lane sees its own
+    /// branch's jobs. See [`crate::jobs`].
+    pub fn jobs_file(&self) -> PathBuf {
+        self.checkout.join(crate::config::JOBS_FILE)
+    }
+
     /// Where a project overrides `epic.md` and `ticket.md`, the two bodies
     /// the `open` hook renders — see [`crate::task_template::resolve_tracking`].
     pub fn tracking_templates_dir(&self) -> PathBuf {
@@ -314,6 +321,19 @@ impl Repo {
     /// The usage ledger every lane's turn appends a line to.
     pub fn usage_file(&self) -> PathBuf {
         self.home().join(crate::usage::LEDGER_FILE)
+    }
+
+    /// The user-scoped cron-job store, in this machine's per-project home and
+    /// never tracked — the default place a job is written. See [`crate::jobs`].
+    pub fn user_jobs_file(&self) -> PathBuf {
+        self.home().join(crate::config::JOBS_STORE)
+    }
+
+    /// When each job last fired, always in machine home whichever store the
+    /// job itself came from — a fired minute is a fact about this machine,
+    /// not about the project. See [`crate::jobs`].
+    pub fn jobs_state_file(&self) -> PathBuf {
+        self.home().join(crate::jobs::STATE_FILE)
     }
 
     /// The advisory lock over the usage ledger's read-diff-append — see

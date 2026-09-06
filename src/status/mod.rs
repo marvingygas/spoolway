@@ -299,6 +299,10 @@ pub struct Board {
     /// [`BoardMode`]. `Browsing` on every other key, including the plain
     /// cursor moves and `r`, which never open a panel at all.
     mode: BoardMode,
+    /// A one-minute memo for the "a job keeps this run resident" footer, so
+    /// the per-second redraw does not re-scan the calendar for every enabled
+    /// cron job — see [`crate::jobs::staying_up_cached`].
+    jobs_next: Option<crate::jobs::StayingUpMemo>,
 }
 
 impl Board {
@@ -315,6 +319,7 @@ impl Board {
             watching: false,
             cursor: None,
             mode: BoardMode::Browsing,
+            jobs_next: None,
         }
     }
 
@@ -387,6 +392,7 @@ impl Board {
             &mut self.stages,
             &mut self.recent,
             self.cursor.as_deref(),
+            &mut self.jobs_next,
         )?;
         if !self.adopted {
             self.recent.clear();
@@ -1173,6 +1179,11 @@ pub fn rows(repo: &Repo, pipelines: &Pipelines) -> Result<Vec<Row>> {
     build_rows(repo, &tasks, pipelines, &graph, &waiting, &lanes, &ledger)
 }
 
+// Every argument is a distinct piece of the board's own state that `frame`
+// holds and this builds one frame from; bundling them into a struct just to
+// pass one reference would hide that. The same call the codebase's other
+// frame builders make.
+#[allow(clippy::too_many_arguments)]
 fn render(
     repo: &Repo,
     pipelines: &Pipelines,
@@ -1181,6 +1192,7 @@ fn render(
     stages: &mut BTreeMap<String, String>,
     recent: &mut VecDeque<RecentEvent>,
     cursor: Option<&str>,
+    jobs_next: &mut Option<crate::jobs::StayingUpMemo>,
 ) -> Result<String> {
     let (tasks, load_problems) = repo.tasks_and_problems()?;
     let graph = Graph::build_for_run(&tasks, pipelines, &repo.archive_dir(), repo.unattended());
@@ -1284,7 +1296,19 @@ fn render(
     frame.push('\n');
 
     if rows.is_empty() {
-        frame.push_str(&format!(" {DIM}nothing queued{RESET}\n"));
+        // A cron job keeps the dispatcher resident on an empty queue, so the
+        // board says why it is still up rather than "nothing queued" — the
+        // same facts the plain run prints, in the board's own dim style.
+        // Memoised: this redraws every second and the scan behind it is not
+        // cheap per enabled job.
+        let jobs = crate::jobs::staying_up_cached(repo, jobs_next);
+        if jobs.enabled > 0 {
+            for line in crate::jobs::staying_up_lines(&jobs) {
+                frame.push_str(&format!(" {DIM}{line}{RESET}\n"));
+            }
+        } else {
+            frame.push_str(&format!(" {DIM}nothing queued{RESET}\n"));
+        }
     } else {
         frame.push_str(&table(&rows, Style::board(pane), &totals, cursor));
     }
@@ -2594,6 +2618,28 @@ mod tests {
         // The one phase a frame in front of you cannot be read off the frame.
         let over = board.frame(&repo, &pipelines, Phase::Stopping).unwrap();
         assert!(over.contains("dispatcher stopped · "), "{over}");
+    }
+
+    /// An empty queue with a cron job enabled is why a dispatcher is still
+    /// resident, so the board says so — the same queue-empty / job-count /
+    /// next-fire facts the plain run prints — rather than "nothing queued".
+    #[test]
+    fn an_empty_queue_with_a_job_enabled_says_the_job_is_holding_the_run_up() {
+        let repo = fixture("board-jobs-resident");
+        let pipelines = Pipelines::builtin();
+        std::fs::create_dir_all(repo.home()).unwrap();
+        std::fs::write(
+            repo.user_jobs_file(),
+            "[jobs.nightly]\nschedule = \"0 3 * * *\"\npipeline = \"default\"\nroutine = \"nightly\"\n",
+        )
+        .unwrap();
+
+        let mut board = Board::for_test();
+        let frame = strip(&board.frame(&repo, &pipelines, Phase::Waiting).unwrap());
+        assert!(frame.contains("1 job enabled"), "{frame}");
+        assert!(frame.contains("staying up"), "{frame}");
+        assert!(frame.contains("next: nightly,"), "{frame}");
+        assert!(!frame.contains("nothing queued"), "{frame}");
     }
 
     /// A driving board says what the keys it now reads do — the mockup's own

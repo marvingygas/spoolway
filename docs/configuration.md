@@ -59,8 +59,9 @@ directory, so `set` behaves exactly as it does everywhere else in this section.
 `config.toml`, `.spoolway/pipelines/` and `.spoolway/prompts/` are the tracked control
 plane, and stay in the checkout. Everything spoolway *writes while it runs* — the queue, the
 archive, pending task documents, scratch worktrees, composed prompts, the headless backend's
-own records, command-step logs, `lanes.json`, `usage.jsonl`, `dispatch.pid`, and the two
-scratch queue indexes — lives outside it, at `~/.spoolway/<basename of the checkout>/`.
+own records, command-step logs, `lanes.json`, `usage.jsonl`, `dispatch.pid`, `jobs.state.json`,
+and the two scratch queue indexes — lives outside it, at `~/.spoolway/<basename of the
+checkout>/`.
 `spoolway init` claims that name by writing `~/.spoolway/<name>/project.toml`, holding the
 checkout's own path, and refuses to run in a second checkout that would claim a name already
 taken by a different one — rename one of the two directories to get past it. When the
@@ -70,6 +71,10 @@ claims the name and keeps whatever archive or queue was already there. `.dispatc
 as a name too, because that one belongs to the shared
 dispatch workspace every project's lanes open in — see [One home for every run, in every
 project](dispatcher.md#one-home-for-every-run-in-every-project).
+
+The default cron-job store, `jobs.toml`, sits here too, beside `lanes.json`. A job may
+instead be kept in `.spoolway/jobs.toml` in the checkout, tracked and shared with the team.
+Neither is a config key — see [Jobs](jobs.md).
 
 Every directory under it is created silently the first time anything resolves it, so a fresh
 clone or a home directory deleted by hand gets one back without a command failing or a note

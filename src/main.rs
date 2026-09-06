@@ -15,6 +15,7 @@ mod compose;
 mod confdoc;
 mod config;
 mod confkv;
+mod cron;
 mod dispatch;
 mod eval;
 mod fmt;
@@ -24,6 +25,7 @@ mod graph;
 mod handover;
 mod headless;
 mod install;
+mod jobs;
 mod lane_prompts;
 mod lock;
 mod models;
@@ -58,8 +60,8 @@ use std::path::PathBuf;
 use anyhow::Result;
 
 use cli::{
-    AgentCommand, Cli, Command, ConfigCommand, GroupCommand, IssueCommand, PipelineCommand,
-    PromptCommand, QueueCommand, TaskCommand,
+    AgentCommand, Cli, Command, ConfigCommand, GroupCommand, IssueCommand, JobsCommand,
+    PipelineCommand, PromptCommand, QueueCommand, TaskCommand,
 };
 use pipeline::Pipelines;
 use repo::Repo;
@@ -379,6 +381,12 @@ fn run() -> Result<()> {
                 }
 
                 Command::Group(GroupCommand::List) => commands::group_list(&repo),
+
+                Command::Jobs(JobsCommand::List) => commands::jobs_list(&repo, cli.json),
+                Command::Jobs(JobsCommand::Run(args)) => {
+                    let in_lane = std::env::var(commands::TASK_ENV).is_ok();
+                    commands::jobs_run(&repo, routing(&graph)?, &args.name, in_lane)
+                }
 
                 // Not built yet. Each of these is a slice of work in its own
                 // right; the surface is declared so the shape is visible.

@@ -312,6 +312,9 @@ together still resolves. Everything else travels unchanged — the body, and the
 `group:`. The files under `.spoolway/routines/` are never moved, rewritten or deleted by any of
 this.
 
+A cron job queues a routine folder or a single document the same way, on a schedule, from the
+dispatcher's own pass — see [Jobs](jobs.md).
+
 `s` on a highlighted pending group is the way work gets in there. It opens a panel over the
 pending screen, prefilled with the group's own name, and `enter` copies that group's documents
 into `.spoolway/routines/<name>/`, bare ids and all. A document that has already been through a

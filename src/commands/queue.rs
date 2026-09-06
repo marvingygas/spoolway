@@ -3736,9 +3736,20 @@ fn routine_batch_documents(
         }
     }
 
+    mint_routine_batch(repo, &tasks)
+}
+
+/// Mint a fresh id for every routine document and rewrite its `id:` line,
+/// and any `depends_on:` naming a sibling in this same batch, onto the
+/// minted ids — the transform the queue screen's `enter` and a scheduled
+/// job both run once they have the list of documents to queue. `tasks` is
+/// already deduped and in the order the batch should keep. Nothing is
+/// written: the returned `(source path, rewritten document)` pairs are the
+/// shape [`validate_batch`] takes.
+fn mint_routine_batch(repo: &Repo, tasks: &[&RoutineTask]) -> Vec<(String, String)> {
     let mut minted: std::collections::BTreeSet<String> = Default::default();
     let mut id_map: BTreeMap<String, String> = BTreeMap::new();
-    for task in &tasks {
+    for task in tasks {
         let id = mint_id(repo, &task.id, &minted);
         minted.insert(id.clone());
         id_map.insert(task.id.clone(), id);
@@ -3762,6 +3773,56 @@ fn routine_batch_documents(
             (task.path.display().to_string(), doc)
         })
         .collect()
+}
+
+/// Queue a routine target the way the `r` pane does, but driven by a job
+/// rather than the screen's nav. `target` is an absolute path under
+/// [`Repo::routines_dir`]: a folder queues every document at or below it as
+/// one batch, exactly as `enter` does, and a single `.md` file queues that
+/// task alone with its `depends_on` emptied, exactly as `space` does. Every
+/// queued document is put on `pipeline` — a job names its own, where the `r`
+/// pane leaves each document on whatever it carried. The batch goes through
+/// [`validate_batch`] all-or-nothing and the saved tasks are handed back so
+/// a caller can record which ids it minted. The source documents under
+/// `.spoolway/routines/` are never touched.
+pub(crate) fn queue_routine_target(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    base: &str,
+    target: &std::path::Path,
+    pipeline: &str,
+) -> Result<Vec<Task>> {
+    let mut documents = if target.is_dir() {
+        let folder = super::routines::read_folder_at(target)?;
+        // `folder.tasks` is already this folder's own documents plus every
+        // nested subfolder's, depth-first — the same list `enter` queues.
+        if folder.tasks.is_empty() {
+            bail!("{} holds no task documents", target.display());
+        }
+        let tasks: Vec<&RoutineTask> = folder.tasks.iter().collect();
+        mint_routine_batch(repo, &tasks)
+    } else {
+        let task = super::routines::read_task_at(target)?;
+        let id = mint_id(repo, &task.id, &Default::default());
+        let mut doc = with_frontmatter_field(&task.doc, "id", &id);
+        // Emptied for the same reason `begin_routine_solo` empties it: a
+        // lone document names no sibling in this batch, so a real
+        // `depends_on` would be refused by `check_dependencies_set`.
+        doc = with_frontmatter_field(&doc, "depends_on", "[]");
+        vec![(task.path.display().to_string(), doc)]
+    };
+
+    for (_, doc) in &mut documents {
+        *doc = with_frontmatter_field(doc, "pipeline", pipeline);
+    }
+
+    let tasks = validate_batch(repo, pipelines, base, &documents)?;
+    // All or none: everything above parsed and validated, so these writes
+    // are the commit — the same discipline `queue_add_documents` follows.
+    for task in &tasks {
+        task.save()?;
+    }
+    Ok(tasks)
 }
 
 /// Save every task `validate_batch` handed back, and the same report

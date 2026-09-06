@@ -74,6 +74,31 @@ pub(crate) fn list_routines(repo: &Repo) -> Result<Vec<RoutineFolder>> {
     paths.iter().map(|path| read_folder(path)).collect()
 }
 
+/// One folder at a known path, read the same recursive way [`list_routines`]
+/// reads a top-level one. For a caller that already has the folder it wants —
+/// a job pointing at `routines/nightly/` — rather than the whole tree. The
+/// path must be a directory under [`Repo::routines_dir`]; a missing one is an
+/// error here, since a job named it explicitly.
+pub(crate) fn read_folder_at(path: &Path) -> Result<RoutineFolder> {
+    if !path.is_dir() {
+        anyhow::bail!("{} is not a folder", path.display());
+    }
+    read_folder(path)
+}
+
+/// One document at a known path, read the same tolerant way [`read_task`]
+/// reads one found by walking a folder — but an error rather than `None`
+/// when it will not parse, since a job named this file directly and a silent
+/// skip would look like the job fired nothing.
+pub(crate) fn read_task_at(path: &Path) -> Result<RoutineTask> {
+    read_task(path).with_context(|| {
+        format!(
+            "{} is not a readable task document (needs a `---` fence and an `id:`)",
+            path.display()
+        )
+    })
+}
+
 /// One folder, read recursively: its own subfolders and its own documents,
 /// then every document any of those subfolders hold, folded in after.
 fn read_folder(path: &Path) -> Result<RoutineFolder> {
