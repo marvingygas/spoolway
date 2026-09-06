@@ -121,9 +121,9 @@ pub struct Adapter {
     /// established so far do not read it the same way.
     ///
     /// **`claude`**: a file relative to the home directory, `.claude.json`,
-    /// whose `cachedUsageUtilization` object carries a `five_hour` and a
+    /// whose `cachedUsageUtilization.utilization` object carries a `five_hour` and a
     /// `seven_day` entry — each an integer `utilization` percent and an ISO
-    /// `resets_at` — plus a `fetchedAtMs` on the object itself. Read verbatim
+    /// `resets_at` — plus `fetchedAtMs` on `cachedUsageUtilization`. Read verbatim
     /// off a real file, not guessed at.
     ///
     /// **`codex`**: `"sessions"`, a directory joined onto every per-lane home
@@ -137,9 +137,8 @@ pub struct Adapter {
     /// established against, and its negative case.
     ///
     /// `None` for a kind with no such cache to read — every row but these
-    /// two today. A profile of that kind is never parked for its quota, and
-    /// `spoolway agent verify` says so on its own line rather than pretending
-    /// there is nothing to say.
+    /// two today. Enabling a quota ceiling on such a profile holds new
+    /// launches; `spoolway agent verify` diagnoses the missing probe.
     pub quota: Option<&'static str>,
 
     /// How this kind's transcript records a person's interrupt — the record

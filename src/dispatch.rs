@@ -119,6 +119,12 @@ pub fn relaunch_backoff(interval: Duration, attempts: u32) -> Duration {
         .max(interval)
 }
 
+/// Quota retries do not launch anything. Start at one minute, double on
+/// each failed recheck, and cap at one hour, independently of launch attempts.
+fn quota_backoff(retries: u32) -> i64 {
+    (60i64 * (1i64 << retries.min(6))).min(3600)
+}
+
 /// What one pass did, for printing and for the loop's own decisions.
 #[derive(Debug, Default)]
 pub struct Report {
@@ -2220,7 +2226,7 @@ impl<'a> Dispatcher<'a> {
         ))
     }
 
-    /// `Some((reason, parked_until))` when `lane`'s own pane ends on its
+    /// `Some((reason, parked_until, window))` when `lane`'s own pane ends on its
     /// agent kind's usage-limit message — see
     /// [`crate::agent::Adapter::usage_limit`]. `None` for a kind with no such
     /// message established, or a step naming no agent at all — a command
@@ -2231,16 +2237,16 @@ impl<'a> Dispatcher<'a> {
     /// pattern kept here: the exact wording is a fact about one CLI, and
     /// belongs on that CLI's own row in `agent.rs`.
     ///
-    /// The clock is the kind's own five-hour window resetting — the window
-    /// the usage-limit phrase is always about — read fresh off the same
-    /// probe `quota_over_ceiling` reads, whether or not this profile sets a
-    /// `quota_ceiling` of its own: a hold does not need the ceiling to be
-    /// configured, only the reading to exist. A kind with no probe, or a
-    /// reading that cannot be read or is judged stale, falls back to the
-    /// same doubling backoff this used to run on — `relaunch_backoff` off
-    /// `attempts`, measured from now rather than from `launched_at`, since
-    /// nothing is about to be relaunched.
-    fn usage_limit_hold(&self, task: &Task, step: &Step, lane: &Lane) -> Option<(String, i64)> {
+    /// An observed exhausted window supplies its reset. Otherwise rechecks
+    /// use their own persistent backoff; launch attempts never grow while
+    /// the same lane remains held. A five-hour clock is not evidence of a
+    /// weekly limit resetting.
+    fn usage_limit_hold(
+        &self,
+        task: &Task,
+        step: &Step,
+        lane: &Lane,
+    ) -> Option<(String, i64, String)> {
         let agent_name = step.agent.as_deref()?;
         let profile = self.repo.config.agent(agent_name).ok()?;
         let adapter = crate::agent::adapter(&profile.kind)?;
@@ -2249,30 +2255,27 @@ impl<'a> Dispatcher<'a> {
             return None;
         }
         let now = now_secs();
-        let probed = crate::quota::read(&profile.kind)
+        let hit = crate::quota::trusted(&profile.kind)
             .ok()
-            .filter(|reading| !reading.stale(chrono::Utc::now()))
-            .map(|reading| reading.five_hour.resets_at.timestamp())
-            .filter(|&until| until > now);
-        let until = probed.unwrap_or_else(|| {
-            // `attempts` is incremented the moment a lane launches, so it is
-            // already at least 1 for the lane this pass just found on its
-            // usage limit — `.max(1)` only guards a caller that somehow
-            // reaches this before that increment lands.
-            let attempts = task.front.attempts.max(1);
-            let wait = relaunch_backoff(self.repo.config.dispatch.interval, attempts);
-            now + wait.as_secs() as i64
-        });
+            .and_then(|reading| reading.over_ceiling(100).cloned());
+        let until = hit
+            .as_ref()
+            .map(|hit| hit.resets_at.timestamp())
+            .unwrap_or_else(|| now + quota_backoff(task.front.quota_retries));
+        let window = hit
+            .as_ref()
+            .map(|hit| hit.window.key())
+            .unwrap_or("")
+            .to_string();
         Some((
             format!(
                 "`{}` hit its usage limit — pane held, parked until {}; the lane resumes its \
                  own turn",
                 step.id,
-                // Always the five-hour window — see this fn's own doc — so
-                // never the pinned dated shape a seven-day ceiling park uses.
-                crate::task::format_until(until, now, false),
+                crate::task::format_until(until, now, window == "seven_day"),
             ),
             until,
+            window,
         ))
     }
 
@@ -2295,7 +2298,7 @@ impl<'a> Dispatcher<'a> {
         lane: &Lane,
         report: &mut Report,
     ) -> Result<bool> {
-        let Some((reason, until)) = self.usage_limit_hold(task, step, lane) else {
+        let Some((reason, until, window)) = self.usage_limit_hold(task, step, lane) else {
             return Ok(false);
         };
         if self.dry_run {
@@ -2304,33 +2307,30 @@ impl<'a> Dispatcher<'a> {
                 .push(format!("would hold {} — {reason}", lane.name));
             return Ok(true);
         }
+        if !task.front.usage_limit_hold {
+            task.append_to_section("## Status Log", &format!("- {reason}\n"));
+        }
         task.front.usage_limit_hold = true;
+        task.front.quota_retries = task.front.quota_retries.saturating_add(1);
         task.front.parked_until = Some(until);
-        // Always the five-hour window — see `usage_limit_hold`'s own doc —
-        // so cleared rather than carrying over whatever an earlier ceiling
-        // park last classified this task as.
-        task.front.parked_window = String::new();
-        task.append_to_section("## Status Log", &format!("- {reason}\n"));
+        task.front.parked_window = window;
         self.persist(task)?;
         report.actions.push(format!("{}: {reason}", task.id()));
         Ok(true)
     }
 
-    /// The first of `kind`'s own windows at or above `ceiling`, if its quota
-    /// probe has one — see [`crate::quota::Reading::over_ceiling`]. `None`
-    /// on `ceiling == 0` (off), on a kind with no probe, on a file that
-    /// cannot be read or parsed, and on a reading judged stale: every one of
-    /// those fails open rather than blocking a launch, which is
-    /// [`crate::quota`]'s own rule and not repeated here.
-    fn quota_over_ceiling(&self, kind: &str, ceiling: u8) -> Option<crate::quota::WindowReading> {
+    /// Disabled protection takes no reading. Enabled protection requires a
+    /// fresh reading; a failure is a hold, never permission to launch.
+    fn quota_over_ceiling(
+        &self,
+        kind: &str,
+        ceiling: u8,
+    ) -> Result<Option<crate::quota::WindowReading>, String> {
         if ceiling == 0 {
-            return None;
+            return Ok(None);
         }
-        let reading = crate::quota::read(kind).ok()?;
-        if reading.stale(chrono::Utc::now()) {
-            return None;
-        }
-        reading.over_ceiling(ceiling).cloned()
+        let reading = crate::quota::trusted(kind)?;
+        Ok(reading.over_ceiling(ceiling).cloned())
     }
 
     /// Tear a lane down for failing the dispatcher's one remaining check — a
@@ -2913,7 +2913,37 @@ impl<'a> Dispatcher<'a> {
             // those questions moot. `parked_until` is what a restarted
             // dispatcher reads back without taking a fresh reading — see the
             // top of this pass's own per-task loop.
-            if let Some(hit) = self.quota_over_ceiling(&profile.kind, profile.quota_ceiling) {
+            let hit = match self.quota_over_ceiling(&profile.kind, profile.quota_ceiling) {
+                Ok(hit) => hit,
+                Err(why) => {
+                    let task = &mut tasks[candidate.task_index];
+                    let until = now_secs() + quota_backoff(task.front.quota_retries);
+                    let reason = format!(
+                        "{} quota unavailable: {why}; new launches held — refresh the agent's quota reading; inspect with `spoolway agent verify {}`",
+                        profile.kind, profile.kind
+                    );
+                    report.actions.push(format!(
+                        "{}{}: {reason}",
+                        if self.dry_run { "would park " } else { "" },
+                        task.id()
+                    ));
+                    if !self.dry_run {
+                        if task.front.quota_retries == 0 {
+                            task.append_to_section("## Status Log", &format!("- {reason}\n"));
+                        }
+                        task.front.quota_retries = task.front.quota_retries.saturating_add(1);
+                        task.front.parked_until = Some(until);
+                        task.front.parked_window = "unknown".into();
+                        self.persist(&mut tasks[candidate.task_index])?;
+                    }
+                    continue;
+                }
+            };
+            if !self.dry_run && tasks[candidate.task_index].front.quota_retries > 0 {
+                tasks[candidate.task_index].front.quota_retries = 0;
+                self.persist(&mut tasks[candidate.task_index])?;
+            }
+            if let Some(hit) = hit {
                 let until = hit.resets_at.timestamp();
                 let now = now_secs();
                 // Pinned to whichever window actually tripped, so the shape
@@ -5897,6 +5927,7 @@ mod tests {
             tab_id: None,
             attempts: 0,
             usage_limit_hold: false,
+            quota_retries: 0,
             parked_until: None,
             parked_window: String::new(),
             paused_at: None,
@@ -7948,9 +7979,139 @@ mod tests {
         );
     }
 
-    /// A scratch home holding a `~/.claude.json` shaped like Claude Code's
-    /// own cache, fresh (`fetchedAtMs` is now) and readable by
-    /// [`crate::quota::read`].
+    #[test]
+    fn unavailable_quota_holds_without_launching_and_backs_off_across_passes() {
+        let mut repo = fixture("quota-unavailable");
+        repo.config.agents.get_mut("claude").unwrap().quota_ceiling = 70;
+        let path = add_task(&repo, "unknown", "review");
+        let other = add_task(&repo, "local", "queued");
+        let home = crate::scratch::root("quota-unavailable-home");
+        std::fs::create_dir_all(&home).unwrap();
+        let mux = FakeMux::new(vec![]);
+        with_home(&home, || {
+            run_pass(&repo, &mux);
+            let mut task = reload(&path);
+            assert_eq!(task.front.quota_retries, 1);
+            assert_eq!(task.front.parked_window, "unknown");
+            assert!(task.front.parked_until.unwrap() >= now_secs() + 59);
+            assert!(mux.did("start").iter().all(|s| !s.contains("unknown")));
+            assert!(mux.did("start").iter().any(|s| s.contains("local")));
+            task.front.parked_until = Some(now_secs() - 1);
+            task.save().unwrap();
+            run_pass(&repo, &mux);
+            let mut task = reload(&path);
+            assert_eq!(task.front.quota_retries, 2);
+            assert!(task.front.parked_until.unwrap() >= now_secs() + 119);
+            assert_eq!(task.body.matches("quota unavailable:").count(), 1);
+            // The agent has refreshed its cache: resume from the same stage.
+            std::fs::write(
+                home.join(".claude.json"),
+                format!(
+                    r#"{{"cachedUsageUtilization":{{
+                "fetchedAtMs":{},"utilization":{{
+                "five_hour":{{"utilization":30,"resets_at":"2099-01-01T00:00:00Z"}},
+                "seven_day":{{"utilization":20,"resets_at":"2099-01-08T00:00:00Z"}}
+            }}}}}}"#,
+                    chrono::Utc::now().timestamp_millis()
+                ),
+            )
+            .unwrap();
+            task.front.parked_until = Some(now_secs() - 1);
+            task.save().unwrap();
+            run_pass(&repo, &mux);
+            assert!(mux.did("start").iter().any(|s| s.contains("unknown")));
+            assert_eq!(reload(&path).front.quota_retries, 0);
+        });
+        assert_eq!(reload(&other).front.parked_until, None);
+    }
+
+    #[test]
+    fn unavailable_quota_dry_run_does_not_persist_a_hold() {
+        let mut repo = fixture("quota-unavailable-dry");
+        repo.config.agents.get_mut("claude").unwrap().quota_ceiling = 70;
+        let path = add_task(&repo, "unknown", "review");
+        let before = std::fs::read(&path).unwrap();
+        let home = crate::scratch::root("quota-unavailable-dry-home");
+        std::fs::create_dir_all(&home).unwrap();
+        let mux = FakeMux::new(vec![]);
+        with_home(&home, || {
+            let pipelines = Pipelines::builtin();
+            let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux, true);
+            let report = dispatcher.pass().unwrap();
+            assert!(
+                report
+                    .actions
+                    .iter()
+                    .any(|a| a.contains("would park unknown"))
+            );
+        });
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(mux.did("start").is_empty());
+    }
+
+    #[test]
+    fn usage_limit_rechecks_back_off_without_duplicate_log_lines() {
+        let repo = fixture("quota-held-rechecks");
+        let path = add_task(&repo, "held", "review");
+        let mux = FakeMux::new(vec![lane(&repo, "held · review", LaneStatus::Working)]);
+        mux.screen
+            .borrow_mut()
+            .insert("held · review".into(), "Usage limit reached".into());
+        let home = crate::scratch::root("quota-held-rechecks-home");
+        std::fs::create_dir_all(&home).unwrap();
+        with_home(&home, || {
+            for expected in 1..=3 {
+                run_pass(&repo, &mux);
+                let mut task = reload(&path);
+                assert_eq!(task.front.quota_retries, expected);
+                assert!(
+                    task.front.parked_until.unwrap()
+                        >= now_secs() + quota_backoff(expected - 1) - 1
+                );
+                assert_eq!(task.body.matches("hit its usage limit").count(), 1);
+                task.front.parked_until = Some(now_secs() - 1);
+                task.save().unwrap();
+            }
+            let mut task = reload(&path);
+            task.set_stage("implement", None);
+            assert_eq!(task.front.quota_retries, 0);
+            assert!(!task.front.usage_limit_hold);
+        });
+        assert!(mux.did("start").is_empty());
+        assert!(mux.did("stop").is_empty());
+        assert_eq!(quota_backoff(u32::MAX), 3600);
+    }
+
+    #[test]
+    fn usage_limit_hold_uses_an_exhausted_weekly_window() {
+        let repo = fixture("quota-weekly-hold");
+        let path = add_task(&repo, "weekly", "review");
+        let home = claude_quota_home(
+            "weekly",
+            20,
+            "2099-01-01T00:00:00Z",
+            100,
+            "2099-01-08T00:00:00Z",
+        );
+        let mux = FakeMux::new(vec![lane(&repo, "weekly · review", LaneStatus::Working)]);
+        mux.screen
+            .borrow_mut()
+            .insert("weekly · review".into(), "Usage limit reached".into());
+        with_home(&home, || run_pass(&repo, &mux));
+        let task = reload(&path);
+        assert_eq!(task.front.parked_window, "seven_day");
+        assert_eq!(
+            task.front.parked_until,
+            Some(
+                chrono::DateTime::parse_from_rfc3339("2099-01-08T00:00:00Z")
+                    .unwrap()
+                    .timestamp()
+            )
+        );
+        assert!(mux.did("stop").is_empty());
+    }
+
+    /// A scratch home carrying the supported flat Claude cache layout.
     fn claude_quota_home(
         name: &str,
         five_hour_pct: u8,

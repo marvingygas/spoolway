@@ -312,8 +312,8 @@ pub const REFERENCE: &[Reference] = &[
         default: "0",
         sentence: "Ceiling on this profile's own kind's cached usage percentage (either \
                     window); at or above it a pass starts no new lane and parks every \
-                    candidate task instead. 0 is off. Never fires for a kind with no quota \
-                    probe — `spoolway agent verify` says which those are.",
+                    candidate task instead. 0 is off. An unavailable or stale quota reading \
+                    holds new launches; `spoolway agent verify` diagnoses the reading.",
     },
     Reference {
         key: "agents.<profile>.permission_mode",

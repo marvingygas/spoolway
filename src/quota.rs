@@ -16,12 +16,8 @@
 //! kind's reading without caring which shape answered it, and that has to
 //! stay true of a second kind's reading too.
 //!
-//! **Fails open, always.** A reading spoolway cannot get, cannot parse, or
-//! judges stale — or, for codex, a rollout whose account is not actually
-//! signed in with ChatGPT — never blocks a launch: the pane-phrase hold in
-//! `dispatch.rs` is still behind it. [`read`] hands the caller a [`Miss`]
-//! instead of an error for exactly that reason: every caller here is a gate
-//! that degrades to "off" rather than a command that has anything to refuse.
+//! Reading failures are explicit. An enabled dispatcher ceiling holds new
+//! launches until a trustworthy reading exists; disabled ceilings read nothing.
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -109,8 +105,8 @@ impl Reading {
 }
 
 /// Why a reading could not be produced, for a caller that wants to say so —
-/// `spoolway agent verify` names all four; a gate in `dispatch.rs` just
-/// treats every one of them as "nothing to act on".
+/// `spoolway agent verify` names each case. An enabled dispatcher ceiling
+/// holds new launches for all of them.
 pub enum Miss {
     /// This kind carries no [`crate::agent::Adapter::quota`] row at all.
     NoProbe,
@@ -138,6 +134,29 @@ pub fn read(kind: &str) -> std::result::Result<Reading, Miss> {
         Some(crate::usage::Format::Codex) => read_codex(kind, rel),
         _ => read_claude_cache(rel),
     }
+}
+
+/// A reading safe to use for admission. Expired windows require another
+/// observation: the cached percentage says nothing about their new usage.
+pub fn trusted(kind: &str) -> std::result::Result<Reading, String> {
+    let reading = read(kind).map_err(|miss| match miss {
+        Miss::NoProbe => "no quota probe".to_string(),
+        Miss::Unreadable(why) | Miss::Unparseable(why) | Miss::NoReading(why) => why,
+    })?;
+    let now = Utc::now();
+    if reading.stale(now) {
+        return Err(format!(
+            "quota reading is {} minutes old",
+            (now - reading.fetched_at).num_minutes()
+        ));
+    }
+    if [&reading.five_hour, &reading.seven_day]
+        .iter()
+        .any(|w| w.resets_at <= now)
+    {
+        return Err("quota window has reset; a fresh reading is required".into());
+    }
+    Ok(reading)
 }
 
 /// `claude`'s own shape: one file, relative to the home directory, holding
@@ -230,8 +249,16 @@ fn parse(text: &str) -> Result<Reading> {
         .ok_or_else(|| anyhow::anyhow!("no readable `fetchedAtMs`"))?;
     Ok(Reading {
         fetched_at,
-        five_hour: window(cached, "five_hour", Window::FiveHour)?,
-        seven_day: window(cached, "seven_day", Window::SevenDay)?,
+        five_hour: window(
+            cached.get("utilization").unwrap_or(cached),
+            "five_hour",
+            Window::FiveHour,
+        )?,
+        seven_day: window(
+            cached.get("utilization").unwrap_or(cached),
+            "seven_day",
+            Window::SevenDay,
+        )?,
     })
 }
 
@@ -390,6 +417,53 @@ mod tests {
 
     fn write_claude_json(home: &std::path::Path, body: &str) {
         std::fs::write(home.join(".claude.json"), body).unwrap();
+    }
+
+    #[test]
+    fn trusted_quota_rejects_stale_expired_and_malformed_readings() {
+        let home = crate::scratch::root("quota-trust");
+        std::fs::create_dir_all(&home).unwrap();
+        with_home(&home, || {
+            for (fetched, reset, reason) in [
+                (
+                    (Utc::now() - chrono::Duration::hours(6)).timestamp_millis(),
+                    "2099-01-01T00:00:00Z",
+                    "minutes old",
+                ),
+                (
+                    Utc::now().timestamp_millis(),
+                    "2020-01-01T00:00:00Z",
+                    "has reset",
+                ),
+            ] {
+                write_claude_json(
+                    &home,
+                    &format!(
+                        r#"{{"cachedUsageUtilization":{{"fetchedAtMs":{fetched},
+                    "five_hour":{{"utilization":10,"resets_at":"{reset}"}},
+                    "seven_day":{{"utilization":10,"resets_at":"2099-01-08T00:00:00Z"}}
+                }}}}"#
+                    ),
+                );
+                assert!(trusted("claude").err().unwrap().contains(reason));
+            }
+            write_claude_json(&home, "{}");
+            assert!(trusted("claude").is_err());
+        });
+    }
+
+    #[test]
+    fn nested_claude_cache_matches_the_observed_shape() {
+        let text = r#"{"cachedUsageUtilization":{"fetchedAtMs":1788636884908,
+            "utilization":{"five_hour":{"utilization":78,"resets_at":"2026-09-05T22:39:59Z"},
+            "seven_day":{"utilization":47,"resets_at":"2026-09-11T03:59:59Z"},
+            "seven_day_opus":null}}}"#;
+        let reading = parse(text).unwrap();
+        assert_eq!(reading.five_hour.utilization, 78);
+        assert_eq!(reading.seven_day.utilization, 47);
+        assert_eq!(reading.fetched_at.timestamp_millis(), 1788636884908);
+        let malformed = text.replace("\"utilization\":78", "\"utilization\":null");
+        assert!(parse(&malformed).is_err());
     }
 
     #[test]

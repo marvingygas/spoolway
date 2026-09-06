@@ -543,8 +543,7 @@ fn quota_clause(adapter: &crate::agent::Adapter) -> Clause {
         // reader chose — `render_quota_row` indents whatever follows it to
         // the note's own column, the same as the two-window `Ok` case does.
         return Clause::Warn(
-            "no probe established — lanes of this kind are never parked\nfor quota, and its \
-             usage limit is not detected either"
+            "no probe established — an enabled quota ceiling holds new launches;\nits usage limit is not detected either"
                 .into(),
             Vec::new(),
         );
@@ -575,7 +574,9 @@ fn quota_clause(adapter: &crate::agent::Adapter) -> Clause {
             Clause::Warn(format!("{source}\n{why}"), Vec::new())
         }
         Ok(reading) if reading.stale(chrono::Utc::now()) => Clause::Warn(
-            format!("{source} is stale — fetched too long ago to trust; treated as absent"),
+            format!(
+                "{source} is stale — fetched too long ago to trust; enabled quota ceilings hold new launches"
+            ),
             Vec::new(),
         ),
         Ok(reading) => {
@@ -1381,7 +1382,7 @@ mod tests {
     /// A kind with no [`crate::agent::Adapter::quota`] row at all — `pi`
     /// today — is reported rather than skipped, and never fails the command.
     #[test]
-    fn quota_clause_on_a_kind_with_no_probe_warns_it_is_never_parked() {
+    fn quota_clause_on_a_kind_with_no_probe_warns_enabled_ceilings_hold() {
         let adapter = crate::agent::adapter("pi").expect("pi is a real adapter");
         match quota_clause(adapter) {
             Clause::Warn(note, _) => assert!(
@@ -1434,7 +1435,7 @@ mod tests {
     /// A reading fetched too long ago to trust is reported as stale, treated
     /// as absent rather than acted on.
     #[test]
-    fn quota_clause_on_a_stale_reading_warns_it_is_treated_as_absent() {
+    fn quota_clause_on_a_stale_reading_warns_enabled_ceilings_hold() {
         let home = crate::scratch::root("agent-verify-quota-stale");
         std::fs::create_dir_all(&home).unwrap();
         let fetched_at = (chrono::Utc::now() - chrono::Duration::hours(6)).timestamp_millis();
@@ -1651,8 +1652,7 @@ mod tests {
                 .to_string(),
         );
         let warn = Clause::Warn(
-            "no probe established — lanes of this kind are never parked\nfor quota, and its \
-             usage limit is not detected either"
+            "no probe established — an enabled quota ceiling holds new launches;\nits usage limit is not detected either"
                 .to_string(),
             Vec::new(),
         );
@@ -1676,11 +1676,11 @@ mod tests {
         );
         assert_eq!(
             pi_first,
-            "pi       quota  no probe established — lanes of this kind are never parked"
+            "pi       quota  no probe established — an enabled quota ceiling holds new launches;"
         );
         assert_eq!(
             pi_second,
-            "                for quota, and its usage limit is not detected either"
+            "                its usage limit is not detected either"
         );
 
         // Both rows' `quota` label starts at the same column, however

@@ -430,6 +430,7 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: &str) -> Result<Task
     front.tab_id = None;
     front.attempts = 0;
     front.usage_limit_hold = false;
+    front.quota_retries = 0;
     front.parked_until = None;
     front.parked_window = String::new();
     front.paused_at = None;

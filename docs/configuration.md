@@ -428,10 +428,12 @@ the dispatcher, so it survives the dispatcher being closed and the machine being
 a second dispatcher started from cold honours it without taking any reading of its own. Tasks
 whose step names a different profile are staffed in the same pass.
 
-The gate fails open in every case where the reading is not trustworthy, because the pane-phrase
-hold is still behind it. A kind with no quota probe, a reading that cannot be read, one that
-does not parse, one that parses but carries no figure at all, a reading older than five hours,
-and a window whose own reset has already passed each leave the ceiling inert.
+An enabled ceiling holds new launches when the reading is unavailable, invalid, older than
+five hours, or has an expired window. Rechecks back off from one minute to one hour; the
+task's status log explains the failure and the board labels it `quota unavailable`.
+The agent must refresh its own reading; spoolway does not fetch quota over the network.
+Disable the ceiling explicitly to permit launches without a trustworthy reading. Running
+lanes are left intact. This threshold reserves no capacity for their remaining work.
 
 ```
 $ spoolway config set agents.claude.quota_ceiling 101

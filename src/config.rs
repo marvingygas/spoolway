@@ -1133,11 +1133,9 @@ pub struct AgentProfile {
     /// set from the probe's own `resets_at` — the task file carries the
     /// park, not the dispatcher, so it survives a restart.
     ///
-    /// Reading a kind's quota can fail three ways — no probe for this kind,
-    /// the file unreadable, the reading judged stale — and every one of them
-    /// is treated as "nothing to act on" rather than a reason to refuse a
-    /// launch. A profile whose kind carries no probe at all is never parked
-    /// for this however high the ceiling is set; `spoolway doctor` says so.
+    /// An enabled ceiling holds new launches when the reading is missing,
+    /// malformed, stale, or expired. Rechecks back off independently of
+    /// launch attempts; `spoolway agent verify` diagnoses the source.
     /// 1..=100, or `0` for off.
     pub quota_ceiling: u8,
 

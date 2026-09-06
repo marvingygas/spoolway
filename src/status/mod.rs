@@ -1773,7 +1773,12 @@ fn build_rows(
             state,
             parked_display: quota_parked_until.map(|until| {
                 let dated = task.front.parked_window == crate::quota::Window::SevenDay.key();
-                crate::task::format_instant(until, now, dated)
+                let clock = crate::task::format_instant(until, now, dated);
+                if task.front.parked_window == "unknown" {
+                    format!("quota unavailable · {clock}")
+                } else {
+                    clock
+                }
             }),
             depth: graph.depth(task.id()),
             // Mirrors `Candidate::steps_left`: the pipeline's own length less
