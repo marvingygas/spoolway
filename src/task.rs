@@ -264,8 +264,10 @@ pub struct Frontmatter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<String>,
 
-    /// What this task's worktree was actually cut from: `task/<dep>` when
-    /// `depends_on` names one, `base` otherwise. Recorded separately from
+    /// What this task's worktree was actually cut from: the first
+    /// dependency's own branch when `depends_on` names one — read from that
+    /// task's `branch:` field, see [`crate::repo::Repo::dependency_branch`] —
+    /// and `base` otherwise. Recorded separately from
     /// `base`, which keeps its own meaning — the branch the plan lands in —
     /// whether or not the two agree. Only set when a worktree is actually
     /// cut; a borrowed checkout was already there, cut from something at a
@@ -1048,6 +1050,17 @@ pub fn load_dir(dir: &Path) -> Result<(Vec<Task>, Vec<LoadProblem>)> {
     tasks.sort_by(|a, b| a.front.id.cmp(&b.front.id));
     problems.sort_by(|a, b| a.path.cmp(&b.path));
     Ok((tasks, problems))
+}
+
+/// The branch name `queue add` stamps for a task: `task/<id>`. The one place
+/// this shape is written outside `queue add` itself, so a caller that needs
+/// the branch of a task whose file records none — a file hand-dropped in
+/// `queue/` that never passed `queue add` — reconstructs it here rather than
+/// spelling `format!("task/{id}")` out again at each site. The `branch:`
+/// invariant in [`Task::parse`] is what keeps this equal to a loaded task's
+/// own field whenever that field is set.
+pub fn default_branch(id: &str) -> String {
+    format!("task/{id}")
 }
 
 /// Find one task by id across the active queue and the merged archive.

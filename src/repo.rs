@@ -407,6 +407,35 @@ impl Repo {
         task::find(&[&queue, &archive], id)
     }
 
+    /// The branch a dependency's work lives on, read from that task's own
+    /// `branch:` field rather than rebuilt from its id. The two agree for
+    /// anything `queue add` stamped, but `handover adopt` sets `branch:`
+    /// straight off a mirror without passing `queue add`, and a rebuilt
+    /// `task/<dep_id>` then names a ref that need not exist — a failure that
+    /// surfaces at the dependent's worktree cut rather than here, where the
+    /// name was chosen.
+    ///
+    /// A dependency whose task cannot be loaded is an error that names the
+    /// dependency, not a `task/<dep_id>` guess handed on to a cut that then
+    /// fails over a ref nobody can place.
+    pub fn dependency_branch(&self, dep_id: &str) -> Result<String> {
+        // The wrapped error from [`Repo::task`] already says whether the file
+        // is missing or fails to parse; this only adds why it matters and
+        // what to do, without asserting which of the two it was.
+        let dep = self.task(dep_id).with_context(|| {
+            format!(
+                "The branch of dependency `{dep_id}` could not be resolved. Add its task file \
+                 to this project's queue or archive, or repair it if it is already there, \
+                 before running a task that depends on it."
+            )
+        })?;
+        Ok(dep
+            .front
+            .branch
+            .clone()
+            .unwrap_or_else(|| task::default_branch(dep_id)))
+    }
+
     /// The branch this checkout is on.
     pub fn branch(&self) -> Result<String> {
         branch_at(&self.root)
