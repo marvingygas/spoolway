@@ -23,9 +23,10 @@ session a *directory* named after the id spoolway minted, and the transcript ins
 unambiguous whatever codex called it. See
 [Two ways to pin a session](agents.md#two-ways-to-pin-a-session).
 
-When a lane settles, one line is appended to `usage.jsonl`, under the project's own home
+When a lane settles, a line is appended to `usage.jsonl`, under the project's own home
 (`~/.spoolway/<project>/`), and never rewritten — so the record outlives the task file, which
-cleanup archives.
+cleanup archives. If more turns land in that transcript afterwards, a later read of the
+ledger appends one more line for them — see [Settled lanes](#settled-lanes).
 
 Where that lookup is declared is the kind's own row — one row per kind, in `agent::ADAPTERS`,
 spanning how it launches and how it is read back. The accounting half of a row is an
@@ -175,6 +176,30 @@ What it cannot do:
 - A session that never runs a single spoolway command is never enrolled, and never counted.
 - A lane is itself an agent session, so a lane's own spoolway commands bank nothing: the
   `SPOOLWAY_STEP` in a lane's environment is what tells the two apart.
+
+### Settled lanes
+
+A lane's transcript can keep growing after the dispatcher has torn the lane down. A tool
+result can land late. A person's interrupt can leave turns behind that the agent only writes
+out afterwards. The single line banked at teardown does not cover those turns.
+
+Reading the ledger catches them up. `spoolway eval` and `spoolway spend` sweep every settled
+lane session the ledger names, and append one line for whatever the transcript has gained
+since that session's last banked line. The new line copies `task`, `step`, `pipeline`,
+`agent`, `plan`, `run`, `trial` and `round` from the lane's most recent line, so the
+recovered spend lands in the same `spoolway eval` row the lane's own turns did. It carries no
+`outcome`: the turns arrived after the lane reported, or after it was killed without
+reporting, so nothing judged them.
+
+This is gated on the transcript's mtime. A settled lane whose file has not moved since its
+last banked line is not read at all, because otherwise every ledger read would re-parse the
+largest file in every finished run. A tie is read rather than skipped: a line banked in the
+same second the last turn landed is no proof nothing came after it.
+
+A lane still in flight is left alone. Any session named in `lanes.json` is the dispatcher's
+to bank at teardown, so the sweep skips it. The dispatcher diffs a lane's spend against a
+ledger snapshot it took once at the start of the pass, so a catch-up line slipped in behind
+it would be counted a second time.
 
 ### Windows
 

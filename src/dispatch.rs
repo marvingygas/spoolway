@@ -1970,6 +1970,13 @@ impl<'a> Dispatcher<'a> {
         if self.dry_run || record.session.is_empty() {
             return;
         }
+        // Read before the harvest, and used verbatim as the line's `ts` below.
+        // A record appended to the transcript between the harvest reaching EOF
+        // and a clock read *after* it would land with a file mtime older than
+        // that reading — and `usage::catch_up_settled_lane` gates a later
+        // sweep on exactly that mtime against this line's `ts`, so a `ts`
+        // chosen after the read would strand the unread tail forever.
+        let banked_at = chrono::Utc::now();
         let Some(harvest) = crate::usage::harvest(&record.kind, &record.session) else {
             return;
         };
@@ -2022,7 +2029,7 @@ impl<'a> Dispatcher<'a> {
         let stamp = crate::version::stamp(self.repo);
 
         let entry = crate::usage::Entry {
-            ts: chrono::Utc::now().to_rfc3339(),
+            ts: banked_at.to_rfc3339(),
             task: task_id.to_string(),
             plan: task.and_then(|t| t.front.group.clone()),
             step: step_id.to_string(),
@@ -4970,6 +4977,23 @@ pub fn lanes_awaiting_a_person(repo: &Repo) -> BTreeSet<String> {
 
 fn lanes_path(repo: &Repo) -> PathBuf {
     repo.lanes_file()
+}
+
+/// The session id of every lane a dispatcher still owns, out of `lanes.json`.
+///
+/// [`crate::usage::sweep`] reads this to leave a live lane alone. A lane still
+/// in flight is the dispatcher's to bank at teardown, and its spend is diffed
+/// against the ledger snapshot [`Dispatcher::record_usage`] took once at the
+/// start of the pass — so a catch-up line appended behind its back is banked a
+/// second time when that snapshot is diffed. An empty session is dropped: a
+/// lane from a spoolway that predates the ledger, or a project whose `args`
+/// never passed `{session_id}` through, names no session to exclude.
+pub(crate) fn live_lane_sessions(repo: &Repo) -> HashSet<String> {
+    load_lane_records(repo)
+        .into_values()
+        .map(|record| record.session)
+        .filter(|session| !session.is_empty())
+        .collect()
 }
 
 pub(crate) fn load_lane_records(repo: &Repo) -> HashMap<String, LaneRecord> {
