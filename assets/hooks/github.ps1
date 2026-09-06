@@ -47,7 +47,15 @@ if ($env:SPOOLWAY_EVENT -eq 'open') {
   } else {
     Hang-Under $env:SPOOLWAY_SOURCE $ticket  # a group of one has no epic to hang under
   }
-  "epic=$epic", "ticket=$ticket" | Set-Content $env:SPOOLWAY_OUT
+  # The short handle spoolway puts in generated names, and the issue's web
+  # address kept on the task for later use — spoolway stores and validates
+  # url= but shows it nowhere yet. $epic/$ticket are already URLs: take the
+  # issue number off the end, with a `gh-` prefix so the slug starts with a
+  # letter. The epic keys a group, the ticket keys a group of one that never
+  # opened an epic.
+  $key = if ($epic) { $epic } else { $ticket }
+  "epic=$epic", "ticket=$ticket", "slug=gh-$($key.Split('/')[-1])", "url=$key" |
+    Set-Content $env:SPOOLWAY_OUT
   exit 0
 }
 

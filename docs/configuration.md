@@ -16,6 +16,7 @@ are pipeline facts now, written once in the graph rather than duplicated in both
 ```
 spoolway config edit           # open the file in $EDITOR, re-validated on save
 spoolway config show           # the whole config
+spoolway config list           # every scalar key, as `key = value`, in key order
 spoolway config path           # where the file is
 spoolway config get agents.pi.kind
 spoolway config set models.claude-opus-5.input 5.0
@@ -100,7 +101,7 @@ auto_commit = true
 | `backend` | `herdr` | Where lanes run. `herdr` and `tmux` put every agent in a real pane you can watch, attach to and take over; `headless` needs no multiplexer at all |
 | `herdr_mode` | `grouped` | How a herdr run is laid out in the multiplexer, and read only under `backend = "herdr"`. `grouped` shares the one `spoolway-dispatcher` workspace with every project, a tab of its own per project and a pane per running task — see [One home for every run, in every project](dispatcher.md#one-home-for-every-run-in-every-project). `split` gives each task a herdr workspace of its own, cut with git and labelled `spoolway/<task>`, and leaves the dispatcher where it was started. The old spellings `workspace` and `worktrees` still parse, and so does the singular `worktree` |
 | `tmux_mode` | `grouped` | How a tmux run is laid out, read only under `backend = "tmux"`, with the same two answers: `grouped` shares the one `spoolway-dispatcher` session with every project, a window per project and a pane per running task, and `split` is a session per task, named `spoolway/<task>`, the dispatcher left where it was started. See [tmux](dispatcher.md#tmux) |
-| `worktree_root` | *(blank)* | Where a dispatched task's worktree is cut, for every backend and every layout. Blank means `~/.spoolway/<project>/worktrees`. The directory under it is the task id under a multiplexer and the branch slug headless |
+| `worktree_root` | *(blank)* | Where a dispatched task's worktree is cut, for every backend and every layout. Blank means `~/.spoolway/<project>/worktrees`. The directory under it is the branch flattened to one component, `task-<id>`, for every backend — or `task-<slug>-<id>` when a tracker slug prefixed the branch |
 | `interval` | `10s` | How long to wait between passes when looping. About the floor worth having: below it a pass's polling overhead buys no reaction time, since a lane takes wall-clock minutes regardless |
 | `lane_quiet` | `15m` | How long a lane may say nothing before the dispatcher reminds it to report. Patience, which is a different quantity from `interval` and used to be read off it — how often a pass *looks* at a lane says nothing about how long that lane may reasonably be quiet, and reading one off the other meant turning the poll rate down silently bought less patience. Ten seconds is not a stuck lane, it is a lane thinking: a step whose prompt runs the end-to-end `pr` tier ends its turn and waits on a background job for as long as that run takes. This bounds the wait before *each* reminder, and three reminders still cap the round trip, so a genuinely dead lane is escalated four of these later |
 | `default_pipeline` | `default` | Which pipeline a task runs on when its `pipeline:` field is absent. Here rather than in a pipeline file because naming the default is a statement about the set, and a file claiming to be it would be one of several |
@@ -717,6 +718,7 @@ into this same field and written back under the new name.
 hook = ""
 project_key = ""
 on_fail = ""
+key_in_names = false
 ```
 
 Where a project's issue tracker lives, so the dispatcher can tell it about a task's arrival at
@@ -729,6 +731,7 @@ is named; no pipeline file mentions one.
 | `hook` | *(blank)* | A bare filename, resolved inside `.spoolway/hooks/` in the checkout — never a path. Blank runs no hook at all and changes nothing about a task's four events, or about `spoolway issue show`. Anything that is not one plain filename — a name with a separator, one naming `.` or `..`, or one carrying a Windows drive prefix like `C:` — is refused the same way blank is, and `spoolway doctor` reports it |
 | `project_key` | *(blank)* | Opaque to spoolway — `owner/repo` on github, a project key on jira, whatever the hook script itself expects. Never parsed or validated; it reaches the script exactly as this holds it, as `SPOOLWAY_PROJECT_KEY` |
 | `on_fail` | *(blank, reads as `ignore`)* | What a non-zero hook exit does to the task it ran for. `ignore` records the failure and changes nothing else. `pause` additionally holds the task: on `queued` it lands on `paused`, and on `done` it stays out of the archive. A failure on `blocked` or `paused` is only ever recorded, whichever this holds — both are already stopped for a person |
+| `key_in_names` | `false` | Whether the tracker's own key rides into the names `queue add` generates. Off means every `group:`, `branch:` and worktree directory is named exactly as it is with no tracker at all. On, and with the `open` hook answering a `slug=` line, `queue add` prefixes the `group:`, the `branch:` (`task/<slug>-<id>`) and the worktree directory with that slug, so `git branch` shows which issue a branch belongs to. spoolway parses no tracker identifier of its own — the slug comes from the hook, and is kept only if it passes the same `check_id` alphabet a task id does |
 
 `spoolway doctor` reports a finding when `hook` is set but `project_key` is blank — a hook
 that runs with nothing to hand it opens no ticket, ever, on any of the four events:
@@ -752,6 +755,18 @@ add:
    out of the tracker. Add a case for `SPOOLWAY_EVENT=fetch` the way the
    shipped samples do, or regenerate one with `spoolway init` into a fresh
    directory to copy the branch across by hand.
+```
+
+It reports one more standing gap when `key_in_names` is on but the configured hook's own
+script never writes a `slug=` line anywhere in its text. `spoolway update` never rewrites a
+hook a project already has, so a project that turned the flag on without adding the line gets
+no prefix at all, silently, on every `queue add`:
+
+```
+!  .spoolway/config.toml: [issue_tracking] key_in_names is on, but github.sh
+   never writes `slug=` — groups, branches and worktrees will be named without
+   a prefix. Add a slug= line the way the shipped samples do, or clear
+   key_in_names.
 ```
 
 The hook is spawned detached, the same shape a pipeline's own `run:` step uses — see [What a
@@ -789,6 +804,29 @@ named one — blank otherwise), and `SPOOLWAY_DEPENDS_TICKETS` (the ticket ids o
 writes whatever it finds there into the document's own `epic:` and `ticket:` frontmatter keys,
 opaque and unparsed, exactly as `group:` and `source:` already are.
 
+Two more answer lines are optional, `slug=` and `url=`. A hook writing neither reads back
+blank, exactly as a missing `epic=` does.
+
+`slug=` is the short tracker handle for `key_in_names`. It is consulted only when that flag is
+on, and kept only if it passes the same `check_id` alphabet a task id does — lowercase
+letters, digits and hyphens. A slug that fails prints `issue_tracking: slug ... is not a
+valid name ... — ignored` and the batch queues with no prefix rather than refusing.
+
+`url=` is the issue's web address. It is stored on the task as a `url:` frontmatter key
+whatever `key_in_names` holds — it is there for later work to use and is displayed nowhere
+now — and kept only if it parses as an absolute `http` or `https` URL. One that fails prints
+`issue_tracking: url ... is not an absolute http(s) address — dropped` and the batch still
+queues.
+
+When `key_in_names` is on and a slug is kept, `queue add` applies the prefix in a pass of its
+own, after every `open` call has returned and before any task is saved. It prints one line per
+distinct prefix, naming the slug it applied and the new group name.
+
+One slug wins per group: the first non-blank answer. The winner is seeded from tasks already
+in the queue as well as from this batch. So a second `queue add` naming the bare `group:`
+strips the recognised `<slug>-` prefix off its queued siblings before the epic lookup, and
+reuses the first call's epic instead of opening a second one.
+
 Two more variables, `SPOOLWAY_EPIC_BODY` and `SPOOLWAY_TICKET_BODY`, name the paths of two
 rendered files the script can read as the tracker issue's own body. They come from
 `.spoolway/templates/tracking/epic.md` and `ticket.md`, which `spoolway init` seeds into the
@@ -800,9 +838,9 @@ task instead of spoolway's own prose, so a project's tracker never carries words
 to see there.
 
 A non-zero exit from any `open` call refuses the whole `queue add` — nothing in the batch is
-queued — but every `epic:`/`ticket:` a call before it already secured is written back into its
-document in `pending/` first, so running the same command again resumes rather than opening a
-second set for work already done.
+queued — but every `epic:`, `ticket:`, `slug:` and `url:` a call before it already secured is
+written back into its document in `pending/` first, so running the same command again resumes
+rather than opening a second set for work already done.
 
 ### `fetch` — a sixth event, run by `spoolway issue show`
 
@@ -843,6 +881,13 @@ group of one that opened no epic — under the issue named in `SPOOLWAY_SOURCE`,
 all when that value does not name an issue in this project: most of the time `SPOOLWAY_SOURCE`
 names a plan page's path rather than an issue, and spoolway never parses that field either way,
 so this is the script's own job to recognise.
+
+On `open`, all four samples also write a `slug=` and a `url=` line, keyed on the epic when
+there is one and the ticket otherwise. `github.sh`/`github.ps1` take the issue number off the
+end of the URL `gh` returned and prefix it `gh-`, so the slug starts with a letter, and pass
+that same URL through as `url=`. `jira.sh`/`jira.ps1` lowercase the key — `PROJ-12` becomes
+`proj-12` — and build the browse link from the site read back off the work item the way
+`fetch` does it.
 
 `github.sh`/`github.ps1` call `gh`, which a project already has logged in if it uses GitHub at
 all. `gh` has no sub-issue command, so the parent link goes through `gh api`'s `sub_issues`

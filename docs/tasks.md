@@ -36,9 +36,9 @@ can change with a spoolway release without a single file in your repository havi
 | `gate_at` | you, optionally | Pauses the task on `paused` once this step passes, on the same terms a step's own `gate: true` does — see [Paused is the other one, and it is not a block](#paused-is-the-other-one-and-it-is-not-a-block). Lets a document hold work for a person without giving the task a pipeline of its own |
 | `borrowed` | the dispatcher | Whether the task's checkout was already there rather than cut for it. Cleanup reads it to know the checkout and branch are not its to remove |
 | `base` | the dispatcher | The branch the group lands in, recorded at queue time from the checkout `queue add` ran in — the base of the *foot* of the stack's pull request. `spoolway stack` opens every other task's pull request against `cut_from` instead |
-| `branch` | the dispatcher | The branch for this task, always `task/<id>`. spoolway derives it and a document may not set it to anything else — see [What a document may set](#what-a-document-may-set) |
+| `branch` | the dispatcher | The branch for this task: `task/<id>`, or `task/<slug>-<id>` when `issue_tracking.key_in_names` had `queue add` prefix it with a tracker slug. spoolway derives it and a document may not set it to either shape by hand — see [What a document may set](#what-a-document-may-set) |
 | `run` | the dispatcher | Minted once, when the task's worktree is cut, and copied onto every ledger line banked for it from then on — the id `spoolway eval --runs` gathers a run's lanes under |
-| `cut_from` | the dispatcher | What the worktree was actually cut from, and what `spoolway stack` opens its pull request against: the first dependency's own `branch:` field when `depends_on` names one, `base` otherwise. That field is always `task/<dep>` today, so the name is the same either way. A dependent's worktree is cut from its dependency's branch rather than `base`, so the two can disagree — `spoolway queue show` prints this on a line of its own, distinct from `base` |
+| `cut_from` | the dispatcher | What the worktree was actually cut from, and what `spoolway stack` opens its pull request against: the first dependency's own `branch:` field when `depends_on` names one, `base` otherwise. That field is read straight off the dependency, whichever shape `queue add` stamped it — `task/<dep>` or a slug-prefixed `task/<slug>-<dep>`. A dependent's worktree is cut from its dependency's branch rather than `base`, so the two can disagree — `spoolway queue show` prints this on a line of its own, distinct from `base` |
 | `base_commit` | the dispatcher | The commit `cut_from` pointed at when the worktree was cut. `cut_from` is a branch name and branches move — by the time anyone reads it back the branch may be merged and gone; this is the fixed point recorded instead. Only written where a worktree was actually cut, never for a borrowed checkout |
 | `patch` | the dispatcher | Files, insertions and deletions the task's branch came to against `base_commit`, measured at cleanup — the last instant the branch still exists to diff |
 | `worktree_path`, `workspace_id`, `pane_id`, `tab_id` | the dispatcher | Where the task's work is physically happening. Machine-specific; never travels between machines |
@@ -66,7 +66,10 @@ back later. They round-trip through `Frontmatter`'s `extra` map untouched.
 `epic` and `ticket` are the sanctioned example of this: opaque strings written and read
 verbatim, with no typed field of their own on `Frontmatter`. `spoolway queue add`'s `open`
 hook writes them for you when `[issue_tracking]` is configured — see [`open` — a fifth event,
-run by `queue add` itself](configuration.md#open--a-fifth-event-run-by-queue-add-itself). A
+run by `queue add` itself](configuration.md#open--a-fifth-event-run-by-queue-add-itself). The
+same hook writes `slug:` and `url:` the same way, through the same `extra` map, except that
+those two are checked once at `queue add` time before they are stored — the slug against
+`check_id`'s alphabet, the url as an absolute `http`/`https` address. A
 document may also set `ticket:` by hand, to hand a document a ticket it already knows about
 rather than have `open` mint one — the same key an inbound producer sets, and the way a failed
 batch's own resume leaves a document behind: one that already sets `ticket:` is reported
@@ -100,7 +103,8 @@ either: a document may write one, and it is simply thrown away, the same as `bas
 `spoolway stack` force-pushes a squashed commit onto whatever `branch:` names. A document may
 not point that anywhere. The check runs every time a task file is loaded, not only at `queue
 add`, so a file dropped straight into `queue/` or one `handover adopt` pulled off a mirror
-cannot carry a `branch:` other than `task/<id>` past it.
+cannot carry a `branch:` past it unless the value is one spoolway itself could have stamped —
+`task/<id>`, or `task/<slug>-<id>` with a slug in `check_id`'s alphabet.
 
 `spoolway task contract`, with no arguments, prints this whole section as JSON — the required,
 optional, refused and ignored keys, one sentence per settable key on how to fill it, and the

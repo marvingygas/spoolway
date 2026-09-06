@@ -337,13 +337,12 @@ pub trait Mux {
     /// Only ever called when [`Mux::task_owns_workspace`] is true: under
     /// [`MuxMode::Grouped`] a task's checkout is cut the same way but opens no
     /// workspace of its own — its lane runs in a pane of its project's shared
-    /// tab instead. `task` is the task id, which names where the checkout
-    /// lands — see [`worktree_root`]. A backend free to choose that itself, as
-    /// headless is, may ignore it.
+    /// tab instead. The checkout lands at [`worktree_root`] under a directory
+    /// named after `branch`, flattened by [`branch_slug`] — the one rule every
+    /// backend now shares.
     fn create_workspace(
         &self,
         cwd: &Path,
-        task: &str,
         branch: &str,
         base: &str,
         label: &str,
@@ -711,9 +710,11 @@ impl Herdr {
     }
 
     /// Cut a task's own worktree with git, and say where it landed. Only ever
-    /// under [`MuxMode::Split`] — see [`Mux::create_workspace`].
-    fn cut_task_worktree(&self, task: &str, branch: &str, base: &str) -> Result<PathBuf> {
-        let path = self.worktree_root.join(task);
+    /// under [`MuxMode::Split`] — see [`Mux::create_workspace`]. The directory
+    /// is named after the branch slug, the rule every backend now shares — see
+    /// [`branch_slug`].
+    fn cut_task_worktree(&self, branch: &str, base: &str) -> Result<PathBuf> {
+        let path = self.worktree_root.join(branch_slug(branch));
         cut_worktree(&self.cwd, &path, branch, base)?;
         Ok(path)
     }
@@ -1292,7 +1293,6 @@ impl Mux for Herdr {
     fn create_workspace(
         &self,
         _cwd: &Path,
-        task: &str,
         branch: &str,
         base: &str,
         label: &str,
@@ -1307,7 +1307,7 @@ impl Mux for Herdr {
         // checkout just cut. That is what makes the row land under the
         // project's own row instead of sitting flat in the sidebar, and what
         // makes `worktree remove` later find something to remove.
-        let checkout = self.cut_task_worktree(task, branch, base)?;
+        let checkout = self.cut_task_worktree(branch, base)?;
         self.open_worktree_workspace(&checkout, label)
     }
 
@@ -1721,10 +1721,11 @@ pub fn project_home(root: &Path) -> PathBuf {
 /// project's queue and archive, so a worktree cut here never registers as a
 /// workspace of its own the way one cut at a repository's root did.
 ///
-/// The directory *under* the root still differs by backend: the task id under
-/// herdr, where one entry per task is what makes "everything the run is
-/// holding" listable, and the branch slug headless, where `git worktree list`
-/// is the only thing showing them and the branch is what a person reads.
+/// The directory *under* the root is the branch slug — see [`branch_slug`] —
+/// for every backend now: one flat entry per task that `git worktree list`
+/// and a person both read by the branch, and the same name whichever
+/// multiplexer cut it. A tracker slug on the branch rides into that directory
+/// name for free.
 pub fn worktree_root(root: &Path, config: &DispatchConfig) -> PathBuf {
     let configured = config.worktree_root.trim();
     if !configured.is_empty() {
@@ -1770,6 +1771,17 @@ fn worktree_open_argv(root: &str, path: &str, label: &str) -> Vec<String> {
         label.to_string(),
         "--no-focus".to_string(),
     ]
+}
+
+/// A branch name reduced to one directory component: `task/add-endpoint`
+/// becomes `task-add-endpoint`. Every backend names a task's worktree
+/// directory this way, so herdr, tmux and headless agree — and a slug the
+/// tracker prefixed onto the branch (`task/proj-12-add-endpoint`) rides into
+/// the directory name for free. Without it a `/` in the branch would nest
+/// every worktree under a shared `task/` directory that nothing owns or
+/// cleans up.
+pub(crate) fn branch_slug(branch: &str) -> String {
+    branch.replace('/', "-")
 }
 
 /// Cut a worktree with git, at exactly the path asked for.
@@ -2170,11 +2182,10 @@ mod tests {
     }
 
     /// The point of naming the path at all: one directory holds every worktree
-    /// spoolway cut, and the task id is what distinguishes them inside it — not
-    /// the branch, which is what herdr would have used and which flattens into
-    /// the same listing a person's own branches are in. Nested under the
-    /// project's own home, beside its queue and archive, never under
-    /// `~/.herdr`, which is the multiplexer's own directory.
+    /// spoolway cut, each named after its branch slug — see [`branch_slug`],
+    /// the rule every backend shares. Nested under the project's own home,
+    /// beside its queue and archive, never under `~/.herdr`, which is the
+    /// multiplexer's own directory.
     #[test]
     fn every_task_worktree_lands_under_the_projects_own_home() {
         let root = home().join("dev").join("spoolway");
@@ -2185,6 +2196,20 @@ mod tests {
         );
         assert!(path.starts_with(project_home(&root)), "{path:?}");
         assert!(!path.starts_with(home().join(".herdr")), "{path:?}");
+    }
+
+    /// A branch is a path with a `/` in it, and every backend flattens it to
+    /// one directory component the same way — so a tracker slug on the branch
+    /// (`task/proj-12-add-endpoint`) rides into the worktree directory name
+    /// without any backend doing anything special.
+    #[test]
+    fn a_branch_becomes_one_directory() {
+        assert_eq!(branch_slug("task/add-endpoint"), "task-add-endpoint");
+        assert_eq!(
+            branch_slug("task/proj-12-add-endpoint"),
+            "task-proj-12-add-endpoint"
+        );
+        assert_eq!(branch_slug("plan/a/b"), "plan-a-b");
     }
 
     /// A backend that overrides nothing has no gesture to try, so
@@ -2215,7 +2240,6 @@ mod tests {
         fn create_workspace(
             &self,
             _cwd: &Path,
-            _task: &str,
             _branch: &str,
             _base: &str,
             _label: &str,

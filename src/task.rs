@@ -665,21 +665,22 @@ impl Task {
         crate::config::check_id("task id", &front.id)?;
 
         // `branch` is spoolway's alone — see `queue::RESERVED_KEYS`. `queue add`
-        // stamps `task/<id>` and nothing else ever should, but a hand-edited
-        // file dropped in `queue/`, or one `handover adopt` pulled off a
-        // mirror, never passes `queue add`. `spoolway stack` force-pushes a
-        // squashed commit onto whatever this says and passes it to `gh pr
-        // view` as a positional argument, so a body-authored value is refused
-        // here rather than acted on.
-        if let Some(branch) = &front.branch {
-            let expected = format!("task/{}", front.id);
-            if branch != &expected {
-                bail!(
-                    "task `{}` sets `branch: {branch}`, but spoolway owns that field — \
-                     it must be `{expected}` or absent",
-                    front.id
-                );
-            }
+        // stamps `task/<id>`, or `task/<slug>-<id>` when
+        // `issue_tracking.key_in_names` prefixed it, and nothing else ever
+        // should. A hand-edited file dropped in `queue/`, or one `handover
+        // adopt` pulled off a mirror, never passes `queue add`. `spoolway
+        // stack` force-pushes a squashed commit onto whatever this says and
+        // passes it to `gh pr view` as a positional argument, so a
+        // body-authored value is refused here rather than acted on.
+        if let Some(branch) = &front.branch
+            && !branch_belongs_to(branch, &front.id)
+        {
+            bail!(
+                "task `{}` sets `branch: {branch}`, but spoolway owns that field — \
+                 it must be `task/{0}`, or `task/<slug>-{0}` with a slug of lowercase \
+                 letters, digits and hyphens, or absent",
+                front.id
+            );
         }
 
         Ok(Task { path, front, body })
@@ -892,10 +893,11 @@ impl Task {
     /// One extra frontmatter key, read as a plain string — blank when it is
     /// absent or not a string.
     ///
-    /// `epic:` and `ticket:` are the two callers today: neither carries a
-    /// typed field on [`Frontmatter`] — see [`Task::set_extra_str`]'s own
-    /// doc comment for why — so both are read back through the same `extra`
-    /// catch-all any other unknown key already round-trips through.
+    /// The `[issue_tracking]` `open` hook's four answers — `epic:`, `ticket:`,
+    /// `slug:` and `url:` — are the callers. None carries a typed field on
+    /// [`Frontmatter`] — see [`Task::set_extra_str`]'s own doc comment for
+    /// why — so all four are read back through the same `extra` catch-all any
+    /// other unknown key already round-trips through.
     pub fn extra_str(&self, key: &str) -> &str {
         match self.front.extra.get(key) {
             Some(serde_norway::Value::String(s)) => s.as_str(),
@@ -905,12 +907,15 @@ impl Task {
 
     /// Set one extra frontmatter key to a plain string.
     ///
-    /// No typed field on [`Frontmatter`] for `epic:` or `ticket:` on
-    /// purpose: both are opaque strings a hook script returns and nothing in
-    /// spoolway ever parses — written and read verbatim, exactly the way
-    /// `group:` and `source:` already are, so the same catch-all every other
-    /// hand-added key survives a rewrite through is enough for these two as
-    /// well.
+    /// No typed field on [`Frontmatter`] for the `open` hook's four answers
+    /// on purpose. `epic:` and `ticket:` are opaque strings spoolway never
+    /// parses — written and read verbatim, exactly the way `group:` and
+    /// `source:` already are. `slug:` and `url:` are checked once, at
+    /// `queue add` time, before they are set here — a slug against
+    /// [`crate::config::check_id`]'s alphabet, a url for an absolute
+    /// `http`/`https` scheme — and then carried the same verbatim way. The
+    /// catch-all every other hand-added key survives a rewrite through is
+    /// enough for all four.
     pub fn set_extra_str(&mut self, key: &str, value: &str) {
         self.front.extra.insert(
             key.to_string(),
@@ -1052,15 +1057,39 @@ pub fn load_dir(dir: &Path) -> Result<(Vec<Task>, Vec<LoadProblem>)> {
     Ok((tasks, problems))
 }
 
-/// The branch name `queue add` stamps for a task: `task/<id>`. The one place
-/// this shape is written outside `queue add` itself, so a caller that needs
-/// the branch of a task whose file records none — a file hand-dropped in
-/// `queue/` that never passed `queue add` — reconstructs it here rather than
-/// spelling `format!("task/{id}")` out again at each site. The `branch:`
-/// invariant in [`Task::parse`] is what keeps this equal to a loaded task's
-/// own field whenever that field is set.
+/// The unprefixed branch name for a task: `task/<id>`. The one place this
+/// shape is written outside `queue add` itself, so a caller that needs the
+/// branch of a task whose file records none — a file hand-dropped in `queue/`
+/// that never passed `queue add` — reconstructs it here rather than spelling
+/// `format!("task/{id}")` out again at each site.
+///
+/// A task whose file *does* record a `branch:` is read straight off that
+/// field — see [`crate::repo::Repo::dependency_branch`] — because
+/// `issue_tracking.key_in_names` can make `queue add` stamp a prefixed
+/// `task/<slug>-<id>` that this fallback would not reproduce.
+/// [`branch_belongs_to`] is the invariant [`Task::parse`] checks a recorded
+/// field against.
 pub fn default_branch(id: &str) -> String {
     format!("task/{id}")
+}
+
+/// Whether `branch` is a branch `queue add` could have stamped for a task
+/// named `id`: `task/<id>` plainly, or `task/<slug>-<id>` when
+/// `issue_tracking.key_in_names` prefixed it with a tracker slug. The slug
+/// itself is opaque — only its alphabet is checked, the same
+/// [`crate::config::check_id`] one every id already uses — so this refuses a
+/// branch that is neither shape while accepting the prefixed one.
+pub fn branch_belongs_to(branch: &str, id: &str) -> bool {
+    if branch == default_branch(id) {
+        return true;
+    }
+    let Some(rest) = branch.strip_prefix("task/") else {
+        return false;
+    };
+    let Some(slug) = rest.strip_suffix(&format!("-{id}")) else {
+        return false;
+    };
+    !slug.is_empty() && crate::config::check_id("issue_tracking slug", slug).is_ok()
 }
 
 /// Find one task by id across the active queue and the merged archive.
@@ -1325,6 +1354,32 @@ mod tests {
                 deletions: 44
             })
         );
+    }
+
+    /// The `branch:` invariant accepts the two shapes `queue add` stamps —
+    /// `task/<id>` and, when `issue_tracking.key_in_names` prefixed it,
+    /// `task/<slug>-<id>` — and refuses anything else.
+    #[test]
+    fn branch_invariant_accepts_the_prefixed_form_and_refuses_the_rest() {
+        assert!(branch_belongs_to("task/auth-01", "auth-01"));
+        assert!(branch_belongs_to("task/proj-12-auth-01", "auth-01"));
+        assert!(branch_belongs_to("task/p-auth-01", "auth-01"));
+
+        // A prefix that is not a valid id, a different id, a different
+        // namespace, no prefix at all.
+        assert!(!branch_belongs_to("task/PROJ-12-auth-01", "auth-01"));
+        assert!(!branch_belongs_to("task/proj-12-auth-02", "auth-01"));
+        assert!(!branch_belongs_to("feature/auth-01", "auth-01"));
+        assert!(!branch_belongs_to("task/-auth-01", "auth-01"));
+        assert!(!branch_belongs_to("auth-01", "auth-01"));
+
+        let raw = "---\nid: auth-01\nstage: implement\nbranch: task/proj-12-auth-01\n---\nbody\n";
+        let task = Task::parse(PathBuf::from("auth-01.md"), raw).unwrap();
+        assert_eq!(task.front.branch.as_deref(), Some("task/proj-12-auth-01"));
+
+        let bad = "---\nid: auth-01\nstage: implement\nbranch: task/whatever\n---\nbody\n";
+        let err = Task::parse(PathBuf::from("auth-01.md"), bad).unwrap_err();
+        assert!(format!("{err:#}").contains("spoolway owns that field"));
     }
 
     /// `cut_from` is what `spoolway queue show` prints for what the worktree

@@ -1230,6 +1230,11 @@ pub enum ConfigCommand {
     /// Print the whole config.
     Show,
 
+    /// List every scalar setting as `key = value`, one per line — every key
+    /// `get`/`set` resolve to a value today, with the value each holds. A
+    /// `[models]` glob nobody has named yet is settable but not listed.
+    List,
+
     /// Print the path to the config file.
     Path,
 

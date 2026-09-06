@@ -938,7 +938,8 @@ mod tests {
     /// never actually cut is not a conflict — it is a ref `git merge-tree`
     /// cannot even resolve, and that failure exits 1 the same way a real
     /// conflict does, so `parallel_conflicts` must not trust the exit code
-    /// alone. `queue_add` writes `task/<id>` for every task; this one is
+    /// alone. `queue_add` stamps a `branch:` on every task — `task/<id>`, or
+    /// `task/<slug>-<id>` under `issue_tracking.key_in_names`; this one is
     /// simply never cut.
     #[test]
     fn a_queued_task_with_no_branch_yet_is_not_a_predicted_conflict() {

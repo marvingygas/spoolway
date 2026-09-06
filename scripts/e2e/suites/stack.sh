@@ -479,18 +479,20 @@ fi
 
 # ------------------------------------------- a task may not name its own branch
 # `branch:` is spoolway's field outright. A task document that sets it to
-# anything but `task/<id>` is refused when the task file is loaded, well
-# before `spoolway stack` could force-push a squashed commit onto it or hand
-# a `-`-led value to `gh pr view` (findings 11, 12).
+# anything spoolway would not have stamped itself — `task/<id>`, or the
+# `task/<slug>-<id>` form `issue_tracking.key_in_names` prefixes — is refused
+# when the task file is loaded, well before `spoolway stack` could force-push
+# a squashed commit onto it or hand a `-`-led value to `gh pr view`
+# (findings 11, 12). `branch: main` here is neither shape.
 main_local_before=$(git rev-parse main)
 main_remote_before=$(git rev-parse origin/main)
 queue_task claimed "touches: [notes/claimed.md]" "base: main" "branch: main"
 claimed_out=$(cd "$WORKTREES/base" && "$SPOOLWAY" stack claimed 2>&1)
 claimed_status=$?
 if [ "$claimed_status" -ne 0 ] && grep -qF "spoolway owns that field" <<<"$claimed_out"; then
-  ok "a task whose \`branch:\` is not \`task/<id>\` is refused at load"
+  ok "a task whose \`branch:\` is a shape spoolway would not stamp is refused at load"
 else
-  bad "a task whose \`branch:\` is not \`task/<id>\` is refused at load"
+  bad "a task whose \`branch:\` is a shape spoolway would not stamp is refused at load"
   printf '        exit %s: %s\n' "$claimed_status" "$claimed_out"
 fi
 if [ "$(git rev-parse main)" = "$main_local_before" ] \

@@ -13,6 +13,51 @@ pub fn config_show(repo: &Repo, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// Every scalar setting as `key = value`, one per line — the same keys
+/// [`config_get`] and [`config_set`] resolve, so a person can see what is
+/// there to change without paging through [`config_show`]'s TOML. Reads
+/// `repo.checkout` for the same reason [`config_get`] does.
+///
+/// The list is [`crate::confkv::all_settings`], not `entries`: it also names
+/// the keys the file omits while they hold their default — the three flat
+/// `[dispatch]` ones, every profile's `concurrency`, and every `[models]`
+/// field of a glob the config already carries — so nothing that resolves to
+/// a value today is missing from it. A `[models]` glob nobody has named yet
+/// is settable but unlistable, since that keyspace has no bound.
+///
+/// The rows come out in key order, so a setting is where a person looks for
+/// it rather than wherever the file happened to put it.
+pub fn config_list(repo: &Repo, json: bool) -> Result<()> {
+    if let Some(note) = repo.checkout_note()? {
+        note.print(json)?;
+    }
+    let config = Config::load(&repo.checkout)?;
+    let entries = crate::confkv::all_settings(&config)?;
+
+    if json {
+        let rows: Vec<serde_json::Value> = entries
+            .iter()
+            .map(|e| serde_json::json!({ "key": e.key, "value": e.value }))
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+
+    print!("{}", render_config_list(&entries));
+    Ok(())
+}
+
+/// The `key = value` block [`config_list`] prints, built as a string so a
+/// test can assert on it — one row per setting, the `=` aligned in a column.
+fn render_config_list(entries: &[crate::confkv::Entry]) -> String {
+    let width = entries.iter().map(|e| e.key.len()).max().unwrap_or(0);
+    let mut out = String::new();
+    for entry in entries {
+        out.push_str(&format!("{:<width$} = {}\n", entry.key, entry.value));
+    }
+    out
+}
+
 /// Reads `repo.checkout`, not `repo.root`: a lane standing in a linked
 /// worktree is asking about the file beside it, and `repo.config` (loaded
 /// from `root` once, in `Repo::discover`) would answer for a file that is not
@@ -243,5 +288,77 @@ mod tests {
         config_set(&repo, "dispatch.default_pipeline", "changed").unwrap();
         let config = Config::load(&repo.root).unwrap();
         assert_eq!(config.dispatch.default_pipeline, "changed");
+    }
+
+    /// `config list` runs both ways, prints `key = value` rows, and names
+    /// every scalar key that resolves to a value today —
+    /// `issue_tracking.key_in_names` (the criterion the feature has to meet),
+    /// the flat keys the file omits while they hold their default, a profile's
+    /// omitted `concurrency`, and a `[models]` glob's omitted fields — all of
+    /// it in key order.
+    #[test]
+    fn config_list_prints_every_settable_key_as_key_equals_value() {
+        let repo = crate::commands::testutil::fixture("config-list");
+        config_list(&repo, false).unwrap();
+        config_list(&repo, true).unwrap();
+
+        let config = Config::load(&repo.checkout).unwrap();
+        // A glob nothing has named, given one field, so its other fields are
+        // the per-entry omissions `config list` now has to carry.
+        let config = crate::confkv::set(&config, "models.demo-model-*.input", "3.0").unwrap();
+        let entries = crate::confkv::all_settings(&config).unwrap();
+        let text = render_config_list(&entries);
+
+        assert!(
+            text.lines()
+                .any(|l| l.starts_with("issue_tracking.key_in_names ") && l.ends_with(" = false")),
+            "key_in_names row missing or not `key = value`:\n{text}"
+        );
+        // The `=` delimiter the help promises, not a bare column gap — and a
+        // single-token key to the left of it.
+        for line in text.lines() {
+            let (key, _value) = line
+                .split_once(" = ")
+                .unwrap_or_else(|| panic!("row is not `key = value`: {line}"));
+            let key = key.trim_end();
+            assert!(
+                !key.is_empty() && !key.contains(' '),
+                "bad key in row: {line}"
+            );
+        }
+        // Every omitted-default key `get`/`set` accepts is listed too.
+        let expected = crate::confkv::OMITTED_DEFAULT_KEYS
+            .iter()
+            .map(|k| (*k).to_string())
+            .chain([
+                // A profile that omits `concurrency` — `pi` among the shipped
+                // ones — and an omitted `[models]` field of the glob above.
+                "agents.pi.concurrency".to_string(),
+                "models.demo-model-*.output".to_string(),
+                "models.demo-model-*.context_window".to_string(),
+            ]);
+        for key in expected {
+            assert!(
+                entries.iter().any(|e| e.key == key),
+                "`{key}` is settable but missing from `config list`"
+            );
+            // And it still resolves through `get`, i.e. the value shown is real.
+            assert!(crate::confkv::get(&config, &key).is_ok());
+        }
+        // The field that *was* set is a plain listed row, not duplicated.
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|e| e.key == "models.demo-model-*.input")
+                .count(),
+            1
+        );
+        // The omitted keys are found after the file's own, so without a sort
+        // they trail the whole list. `agents.pi.concurrency` has to read
+        // beside the rest of `agents.pi`, not at the bottom under `update.`.
+        let keys: Vec<&str> = entries.iter().map(|e| e.key.as_str()).collect();
+        let mut sorted = keys.clone();
+        sorted.sort_unstable();
+        assert_eq!(keys, sorted, "`config list` is not in key order:\n{text}");
     }
 }

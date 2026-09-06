@@ -1331,10 +1331,11 @@ worktree](pipelines.md#whose-worktree).
 **One root, every backend, every layout**: `worktree_root`, which is
 `~/.spoolway/<project>/worktrees` unless you name another — nested under the project's own
 home, beside its queue and archive, so a worktree cut here never registers as a workspace of
-its own the way one cut at a repository's root did. Under a multiplexer the directory inside it is the task id
-— one entry per task is what makes "everything the run is holding" something you can list —
-and headless it is the branch slug, which is what `git worktree list` shows and so what a
-person looking for it reads.
+its own the way one cut at a repository's root did. The directory inside it is the branch
+flattened to one component — `task-<id>`, or `task-<slug>-<id>` when a tracker slug prefixed
+the branch — for every backend now. One entry per task is what makes "everything the run is
+holding" something you can list, and the branch is what `git worktree list` shows and so what
+a person looking for it reads.
 
 Deliberately *not* under `~/.herdr/`, which it used to be. That is herdr's directory, and
 these are checkouts herdr never hears about until it is pointed at one. A worktree you cut by

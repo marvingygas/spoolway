@@ -48,7 +48,9 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::config::DispatchConfig;
-use crate::mux::{Lane, LaneSpec, LaneStatus, Mux, Workspace, cut_worktree, worktree_root};
+use crate::mux::{
+    Lane, LaneSpec, LaneStatus, Mux, Workspace, branch_slug, cut_worktree, worktree_root,
+};
 use crate::platform::Shell;
 
 /// The dialect a turn's script is written in.
@@ -662,13 +664,6 @@ pub fn alive(pid: u32) -> bool {
     crate::lock::is_running(pid)
 }
 
-/// A branch name as one directory: `task/add-endpoint` is a path with a
-/// component in it, and every task's worktree would otherwise nest under a
-/// shared `task/` directory that nothing owns or cleans up.
-fn branch_slug(branch: &str) -> String {
-    branch.replace('/', "-")
-}
-
 /// The id a workspace is addressed by afterwards.
 ///
 /// It carries the checkout path rather than pointing at a table holding one:
@@ -742,10 +737,6 @@ impl Mux for Headless {
     fn create_workspace(
         &self,
         cwd: &Path,
-        // Not where the checkout goes here: the root is configured, and the
-        // directory under it is named after the branch, which is what
-        // `worktree list` shows and so what a person looking for it reads.
-        _task: &str,
         branch: &str,
         base: &str,
         _label: &str,
@@ -1573,14 +1564,6 @@ mod tests {
         // A colon is legal in a path and is also this id's own separator.
         let awkward = Path::new("/home/x/od:d/task-b");
         assert_eq!(pane_cwd(&new_pane_id(awkward)).as_deref(), Some(awkward));
-    }
-
-    /// A branch is a path with components in it, and every task's worktree would
-    /// otherwise nest under a shared directory nothing owns.
-    #[test]
-    fn a_branch_becomes_one_directory() {
-        assert_eq!(branch_slug("task/add-endpoint"), "task-add-endpoint");
-        assert_eq!(branch_slug("plan/a/b"), "plan-a-b");
     }
 
     /// Worktrees must land outside the checkout: inside `.spoolway/` every

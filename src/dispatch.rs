@@ -4133,7 +4133,6 @@ fn ensure_workspace(
                     true => {
                         let workspace = mux.create_workspace(
                             &repo.root,
-                            task.id(),
                             &branch,
                             &cut_from,
                             &format!("spoolway/{}", task.id()),
@@ -5329,12 +5328,11 @@ mod tests {
         fn create_workspace(
             &self,
             _cwd: &Path,
-            task: &str,
             branch: &str,
             base: &str,
             _label: &str,
         ) -> Result<Workspace> {
-            self.log(format!("create_workspace {task} on {branch} from {base}"));
+            self.log(format!("create_workspace on {branch} from {base}"));
             Ok(Workspace {
                 workspace_id: "w9".into(),
                 pane_id: "w9:p1".into(),
@@ -5628,7 +5626,7 @@ mod tests {
     }
 
     /// `what_you_have`'s own choice of base is the subtle part of it: `base:`
-    /// with no dependency, and the dependency's own `task/<id>` branch —
+    /// with no dependency, and the dependency's own recorded `branch:` —
     /// never `task.front.base` — when there is one. Pinned here rather than
     /// left to the wider prompt tests, which would keep passing if the
     /// branch chosen quietly went back to being wrong.
@@ -5969,7 +5967,7 @@ mod tests {
 
         assert_eq!(
             mux.did("create_workspace"),
-            ["create_workspace demo on task/demo from work"]
+            ["create_workspace on task/demo from work"]
         );
         assert_eq!(mux.did("start"), ["start demo · implement"]);
         assert_eq!(mux.did("prompt"), ["prompt demo · implement"]);
@@ -6550,7 +6548,7 @@ mod tests {
 
         assert_eq!(
             mux.did("create_workspace"),
-            ["create_workspace demo on task/demo from work"]
+            ["create_workspace on task/demo from work"]
         );
     }
 
@@ -6567,7 +6565,7 @@ mod tests {
 
         assert_eq!(
             mux.did("create_workspace"),
-            ["create_workspace demo on task/demo from work"]
+            ["create_workspace on task/demo from work"]
         );
     }
 
@@ -11574,9 +11572,11 @@ mod tests {
     #[test]
     fn a_task_whose_branch_is_already_checked_out_borrows_that_checkout() {
         let repo = fixture("in-place");
-        // The task's branch is `task/<id>` and nothing else now — see
-        // `queue::RESERVED_KEYS` — so the "already checked out" case is the
-        // fixture root itself sitting on `task/plan-closeout`.
+        // A document may not set its own `branch:` — see
+        // `queue::RESERVED_KEYS` — and this fixture never turns on
+        // `issue_tracking.key_in_names`, so the branch is the plain
+        // `task/<id>` and the "already checked out" case is the fixture root
+        // itself sitting on `task/plan-closeout`.
         crate::repo::run(
             &repo.root,
             "git",
@@ -12338,6 +12338,93 @@ mod tests {
             repo.git(&["rev-parse", "--verify", "--quiet", "task/first"])
                 .is_err(),
             "nothing queued needs it any more"
+        );
+    }
+
+    /// The same sweep recovers a task id from a branch
+    /// `issue_tracking.key_in_names` prefixed — `task/<slug>-<id>` — so a
+    /// prefixed orphan branch is freed exactly as a bare one is.
+    #[test]
+    fn an_orphaned_prefixed_branch_is_recovered_and_freed() {
+        let repo = fixture("prefixed-branch-freed");
+        repo.git(&["checkout", "-q", "-b", "task/proj-12-auth-01"])
+            .unwrap();
+        repo.git(&["commit", "-q", "--allow-empty", "-m", "auth-01"])
+            .unwrap();
+        repo.git(&["checkout", "-q", "work"]).unwrap();
+
+        let first = add_task_with(&repo, "auth-01", "done", |f| {
+            f.branch = Some("task/proj-12-auth-01".into());
+        });
+        let second = add_task_with(&repo, "auth-02", "done", |f| {
+            f.branch = Some("task/proj-12-auth-02".into());
+            f.depends_on = vec!["auth-01".into()];
+        });
+
+        let mux = FakeMux::new(vec![]);
+        let pipelines = Pipelines::builtin();
+        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux, false);
+        let mut report = Report::default();
+
+        dispatcher
+            .clean_up(&mut reload(&first), &[], &mut report)
+            .unwrap();
+        assert!(
+            repo.git(&["rev-parse", "--verify", "--quiet", "task/proj-12-auth-01"])
+                .is_ok(),
+            "`auth-02` is still queued and names it"
+        );
+
+        dispatcher
+            .clean_up(&mut reload(&second), &[], &mut report)
+            .unwrap();
+        assert!(
+            repo.git(&["rev-parse", "--verify", "--quiet", "task/proj-12-auth-01"])
+                .is_err(),
+            "the prefixed orphan branch was not recovered and freed"
+        );
+    }
+
+    /// The recovery matches the branch against each task's recorded `branch:`
+    /// exactly, so a prefixed branch whose slug happens to contain another
+    /// real task's id is still attributed to its own task: `task/proj-old-x`
+    /// is `x` (slug `proj-old`), never the queued `old-x` whose own branch is
+    /// something else — and `old-x` still on the queue must keep its branch.
+    #[test]
+    fn a_prefixed_branch_is_not_mis_attributed_to_a_task_its_slug_contains() {
+        let repo = fixture("prefixed-branch-ambiguous");
+        for branch in ["task/proj-old-x", "task/old-x"] {
+            repo.git(&["checkout", "-q", "-b", branch]).unwrap();
+            repo.git(&["commit", "-q", "--allow-empty", "-m", branch])
+                .unwrap();
+            repo.git(&["checkout", "-q", "work"]).unwrap();
+        }
+
+        // `x` has finished; `old-x` is a different, still-queued task.
+        let finished = add_task_with(&repo, "x", "done", |f| {
+            f.branch = Some("task/proj-old-x".into());
+        });
+        add_task_with(&repo, "old-x", "queued", |f| {
+            f.branch = Some("task/old-x".into());
+        });
+
+        let mux = FakeMux::new(vec![]);
+        let pipelines = Pipelines::builtin();
+        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux, false);
+        let mut report = Report::default();
+        dispatcher
+            .clean_up(&mut reload(&finished), &[], &mut report)
+            .unwrap();
+
+        assert!(
+            repo.git(&["rev-parse", "--verify", "--quiet", "task/proj-old-x"])
+                .is_err(),
+            "`x`'s own prefixed branch should have been freed"
+        );
+        assert!(
+            repo.git(&["rev-parse", "--verify", "--quiet", "task/old-x"])
+                .is_ok(),
+            "the still-queued `old-x` must keep its branch"
         );
     }
 

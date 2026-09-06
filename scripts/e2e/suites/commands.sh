@@ -39,6 +39,7 @@
 # covers: issue_tracking.hook — a bare filename, resolved inside .spoolway/hooks/, fires once per task per event with the full environment set
 # covers: issue_tracking.project_key — opaque, handed to the hook verbatim as SPOOLWAY_PROJECT_KEY
 # covers: issue_tracking.on_fail — a non-zero exit under "pause" holds the task on `queued` and `done`, and only records the failure on `blocked` and `paused`
+# covers: issue_tracking.key_in_names — with it on and the hook answering slug=, `queue add` writes `group: <slug>-<group>` and `branch: task/<slug>-<id>` and stores the hook's url=
 # covers: retention.days — an entry past the age is swept from a byproduct directory, and never from queue/, however old
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -1151,6 +1152,67 @@ must "the second run over the same batch queues both" \
   "$SPOOLWAY" queue add --from "$LIVE/opened-ok.md" --from "$LIVE/opened-fails.md"
 has "the resumed run kept the first ticket rather than opening a new one" \
   "ticket: $FIRST_TICKET" "$SPOOLWAY_PROJECT_HOME/queue/opened-ok.md"
+
+# --------------------------------------------- issue_tracking.key_in_names
+# With the flag on and the hook answering a `slug=`, `queue add` writes the
+# prefixed `group:` and `branch:` into each queued document — proven here
+# through the real binary and a real hook. The worktree directory follows the
+# branch slug too, but that is a dispatched checkout this block never cuts;
+# `src/mux.rs`'s own tests cover the directory name. The hook also answers a
+# `url=`, which is stored on the task and validated but shown nowhere yet.
+cat > .spoolway/hooks/open-key.sh <<'EOF'
+#!/bin/sh
+[ "$SPOOLWAY_EVENT" = open ] || exit 0
+dir=$(dirname "$SPOOLWAY_OUT")
+counter="$dir/open-key-counter"
+next() {
+  n=$(cat "$counter" 2>/dev/null || echo 90)
+  n=$((n + 1)); echo "$n" >"$counter"; echo "$n"
+}
+epic=$SPOOLWAY_EPIC
+if [ -z "$epic" ] && [ "$SPOOLWAY_GROUP_SIZE" -gt 1 ]; then
+  epic="acme/app#$(next)"
+fi
+ticket="acme/app#$(next)"
+key=${epic:-$ticket}
+num=${key##*#}
+{
+  echo "epic=$epic"; echo "ticket=$ticket"
+  echo "slug=gh-$num"
+  echo "url=https://github.com/acme/app/issues/$num"
+} >"$SPOOLWAY_OUT"
+EOF
+chmod +x .spoolway/hooks/open-key.sh
+must "the hook is switched to one that also answers a slug and a url" \
+  "$SPOOLWAY" config set issue_tracking.hook open-key.sh
+must "key_in_names is turned on" \
+  "$SPOOLWAY" config set issue_tracking.key_in_names true
+
+task_doc "$LIVE/keyed-a.md" keyed-a "$BODY" "group: keyed-rework" \
+  "touches: [notes/keyed-a.md]"
+task_doc "$LIVE/keyed-b.md" keyed-b "$BODY" "group: keyed-rework" \
+  "touches: [notes/keyed-b.md]" "depends_on: [keyed-a]"
+says "queue add names the prefix it applied" \
+  "names prefixed" \
+  "$SPOOLWAY" queue add --from "$LIVE/keyed-a.md" --from "$LIVE/keyed-b.md"
+
+KEYED_A="$SPOOLWAY_PROJECT_HOME/queue/keyed-a.md"
+KEYED_B="$SPOOLWAY_PROJECT_HOME/queue/keyed-b.md"
+has "the group carries the slug prefix" "group: gh-" "$KEYED_A"
+has "the group keeps its original name after the prefix" "keyed-rework" "$KEYED_A"
+has "the branch carries the slug prefix and ends in the task id" \
+  "branch: task/gh-" "$KEYED_A"
+has "the branch ends in the task id" "-keyed-a" "$KEYED_A"
+has "the slug is stored on the task" "slug: gh-" "$KEYED_A"
+has "the issue url is stored on the task" \
+  "url: https://github.com/acme/app/issues/" "$KEYED_A"
+has "the dependent of the same group takes the same prefix" \
+  "branch: task/gh-" "$KEYED_B"
+
+must "key_in_names is turned back off" \
+  "$SPOOLWAY" config set issue_tracking.key_in_names false
+must "the hook is restored to the plain one" \
+  "$SPOOLWAY" config set issue_tracking.hook open.sh
 
 # ------------------------------------------------- on_fail = "pause"
 # A hook that always fails, on each of the four events by hand: `pause` holds

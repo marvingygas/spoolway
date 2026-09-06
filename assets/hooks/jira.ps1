@@ -78,7 +78,18 @@ if ($env:SPOOLWAY_EVENT -eq 'open') {
   foreach ($dep in ($env:SPOOLWAY_DEPENDS_TICKETS -split '\s+' | Where-Object { $_ })) {
     acli jira workitem link create --out $dep --in $ticket --type Blocks --yes
   }
-  "epic=$epic", "ticket=$ticket" | Set-Content $env:SPOOLWAY_OUT
+  # The short handle spoolway puts in generated names, and the issue's web
+  # address kept on the task for later use — spoolway stores and validates
+  # url= but shows it nowhere yet. The epic keys a group; a group of one that
+  # never opened an epic is keyed by its ticket. slug= is the key lowercased
+  # — PROJ-12 becomes proj-12 — and url= is the browse link, its site read
+  # back off the work item the same way fetch does it.
+  $key  = if ($epic) { $epic } else { $ticket }
+  $slug = $key.ToLower()
+  $self = (acli jira workitem view --key $key --json | ConvertFrom-Json).self
+  $site = [regex]::Match($self, '^https?://[^/]+').Value
+  "epic=$epic", "ticket=$ticket", "slug=$slug", "url=$site/browse/$key" |
+    Set-Content $env:SPOOLWAY_OUT
   exit 0
 }
 

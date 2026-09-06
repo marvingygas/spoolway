@@ -21,6 +21,10 @@ serde_norway = "0.9"
 terminal_size = "0.4.4"
 toml = "0.8"
 toml_edit = "0.22"
+# WHATWG-URL parsing, for validating the `url=` a tracker hook answers on the
+# `open` event — see `queue::is_absolute_http_url`. A hand-rolled authority
+# scan kept leaking malformed IPv6 literals and out-of-range ports.
+url = "2"
 
 [profile.release]
 strip = true
