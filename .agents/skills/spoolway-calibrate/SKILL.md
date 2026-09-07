@@ -89,7 +89,7 @@ this procedure cannot reduce to that shape is dropped before the person ever see
    Walk them one at a time, never batched — a person approving a table they have not actually
    read is the same failure a mechanical fix from `spoolway-doctor` would be here, and these
    fixes edit prose and routing, not restore a generated block. Put each finding to them with
-   **AskUserQuestion**, the one you recommend first:
+   **request_user_input**, the one you recommend first:
 
    - **Cut it as a task** — the lines and the arithmetic are both settled. Goes to step 8.
    - **Plan it first** — invoke **spoolway-plan** with this finding as its goal, and let that

@@ -90,7 +90,12 @@ fn repeat_init_that_adds_skills_omits_project_success() {
         "Skills installed successfully.\n"
     );
     assert!(project.as_ref().join(".claude/skills").is_dir());
-    assert!(project.as_ref().join(".codex/skills").is_dir());
+    let codex_plan = project
+        .as_ref()
+        .join(".agents/skills/spoolway-plan/SKILL.md");
+    let codex_plan = std::fs::read_to_string(codex_plan).expect("read installed Codex plan skill");
+    assert!(codex_plan.contains("request_user_input"));
+    assert!(!codex_plan.contains("AskUserQuestion"));
 }
 
 #[test]

@@ -91,7 +91,7 @@ turning each into a fix concrete enough to approve.
              Fix:   <…>
              Class: <…>
 
-   Then **AskUserQuestion**: the mechanical fixes batched as one option and named
+   Then use **request_user_input**: the mechanical fixes batched as one option and named
    individually in its description, each decision as its own question with its real
    options, and in every case an option that changes nothing. If nothing failed and no note
    is worth acting on, say so in a line and stop — do not manufacture work to have a
