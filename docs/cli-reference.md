@@ -280,8 +280,9 @@ that actually runs, or one made with `--force`, clears the count. See [Restartin
 that cannot run](dispatcher.md#restarting-into-a-repo-that-cannot-run).
 
 `spoolway dispatch` exits 0 on a run that dispatched and stopped on its own, 3 on an empty
-queue, 4 when another dispatcher already holds the lock, 5 when the restart guard refuses a
-start, and 1 on any other error.
+queue with no job enabled, 4 when another dispatcher already holds the lock, 5 when the
+restart guard refuses a start, and 1 on any other error. With a job enabled the run stays
+resident on an empty queue rather than exiting 3 — see [Jobs](jobs.md).
 
 Where every task is sitting, from another terminal or with no run going: `spoolway queue
 list`.
@@ -302,6 +303,47 @@ Refused, by name, when no hook is configured at all, or when the configured hook
 has no `fetch` branch — `spoolway doctor` reports the second of those too, for every install
 whose hook predates this event. See [`fetch` — a sixth event, run by `spoolway issue
 show`](configuration.md#fetch--a-sixth-event-run-by-spoolway-issue-show).
+
+### `spoolway jobs`
+
+Open the jobs screen — the only thing that writes a cron job. The left pane lists every job
+both stores hold and the right pane shows the highlighted one in full. With no job anywhere,
+the screen names both store paths instead.
+
+`n` writes a new job by walking three panels: the routines browser, where `space` ticks a
+folder and `enter` over that ticked folder picks it (or `space` picks one document); the
+schedule field, which states the expression back in words and shows its next three firings as
+it is typed; and the pipeline picker, which narrows over every pipeline the repo defines.
+`esc` at any panel leaves nothing written.
+
+Over the list, `e` edits the highlighted job through those same three panels, `space` pauses
+and resumes it, `x` deletes it after confirming, `r` fires it now, and `q` quits. A new job is
+written to the user store and takes its name from the leaf of its routine; `e` keeps the name
+and store the job already had.
+
+See [Jobs](jobs.md) for the stores, the grammar, and how a pass fires one.
+
+### `spoolway jobs list`
+
+Every job across both stores, as a table: `NAME`, `SCOPE`, `SCHEDULE`, `PIPELINE`, `NEXT`,
+`LAST`. A count line and a per-store count follow it.
+
+`NEXT` reads `paused` for a disabled job, `bad expr` for one whose expression will not parse,
+`never` for one that parses but never comes round, and otherwise a relative time within a
+day, a weekday and time within a week, or a full date beyond that. `LAST` is `-` until the
+job has fired, then `ok, <time> ago`.
+
+`--json` prints one object per job instead: `name`, `scope`, `schedule`, `pipeline`,
+`routine`, `enabled`, `source`, `next` (local RFC 3339, or `null`) and `last_fired` (epoch
+seconds, or `null`). A `schedule_error` key is present only on a row whose expression will
+not parse, so a script can test for its presence.
+
+### `spoolway jobs run <name>`
+
+Fire one job now, ignoring its schedule — the way to test a job you have just written. The
+routine is queued exactly as a scheduled firing would queue it, and the run is recorded, so
+`LAST` updates and a still-running previous copy is not stacked on. The job's next scheduled
+firing is unaffected. Refused from inside a lane.
 
 ### `spoolway eval`
 

@@ -84,8 +84,8 @@ REPO=$(cd "$E2E_DIR/../.." && pwd)
 #               model (SPOOLWAY_E2E_CODEX_MODEL); pointed at a local endpoint
 #               it spends nothing.
 smoke_suites=(flow)
-pr_suites=(flow commands stacking stack conflicts forge disaster lock trials routines restart quota)
-nightly_suites=(flow commands stacking stack conflicts forge disaster lock trials routines restart quota)
+pr_suites=(flow commands stacking stack conflicts forge disaster lock trials routines jobs jobs-screen restart quota)
+nightly_suites=(flow commands stacking stack conflicts forge disaster lock trials routines jobs jobs-screen restart quota)
 cloud_suites=(warmth)
 live_suites=(live)
 

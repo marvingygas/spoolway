@@ -17,6 +17,7 @@ pages themselves live in [`docs/`](docs/README.md) and each one can be read on i
 | [Tasks and the queue](docs/tasks.md) | Writing and queueing work, dependencies, conflicts, and what a task file holds |
 | [Planning](docs/planning.md) | From one goal to an approved breakdown, the queue screen in full, trials and routines |
 | [The dispatcher](docs/dispatcher.md) | Scheduling, the board, gates, escalation, backends, and taking over a lane |
+| [Jobs](docs/jobs.md) | Firing a routine on a cron schedule from the dispatcher's own pass |
 
 ## Shaping the system
 

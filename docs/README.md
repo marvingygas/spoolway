@@ -21,6 +21,7 @@ be read on its own, but the order below is the order most people meet them in.
 | [Tasks and the queue](tasks.md) | Writing tasks, queueing them, dependencies, conflicts, routine folders, and what a task file holds |
 | [Planning](planning.md) | Turning a goal into a plan, queueing it, and closing it out onto the mainline |
 | [The dispatcher](dispatcher.md) | Running the pipeline: scheduling, gates, escalation, backends, and taking over a lane |
+| [Jobs](jobs.md) | Firing a routine on a cron schedule from the dispatcher's own pass |
 
 ## Shaping the system
 

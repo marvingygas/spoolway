@@ -8,7 +8,9 @@ use crate::screen::PollableRead;
 
 /// An empty queue is an ordinary ending: nothing was there to dispatch, and
 /// running again once something is queued is exactly what a person or a
-/// script should do next.
+/// script should do next. Only when no job is enabled — an enabled job keeps
+/// the run resident on an empty queue instead, so it is alive when the
+/// job's window comes round.
 pub const EXIT_EMPTY_QUEUE: i32 = 3;
 
 /// Another dispatcher already holds the repo lock. Ordinary too — the
@@ -115,17 +117,28 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         return Ok(EXIT_ALREADY_RUNNING);
     }
 
-    // Nothing queued is nothing to dispatch. Without this the loop would sit
-    // there printing "nothing to do" until somebody noticed, and a dispatcher
-    // started in the wrong project looks exactly like one with no work yet.
+    // Whether the run has already said, this spell of empty queue, that a job
+    // is keeping it resident. Reset every time the queue is not empty, so the
+    // next drain says it again.
+    let mut idle_announced = false;
+
+    // Nothing queued is nothing to dispatch — unless a job is enabled, which
+    // keeps the run resident so it is alive when that job's window comes
+    // round. Without the guard the loop would sit there printing "nothing to
+    // do" until somebody noticed, and a dispatcher started in the wrong
+    // project looks exactly like one with no work yet.
     //
     // Not counted: a repo with nothing to do is not a storm, and restarting
     // into an empty queue forever is a caller's own choice to make, not
     // something this guard has any business refusing.
     if repo.tasks()?.is_empty() {
-        println!("nothing is queued, so there is nothing to dispatch.");
-        println!("  spoolway queue add --from <path>");
-        return Ok(EXIT_EMPTY_QUEUE);
+        if crate::jobs::enabled_count(repo) == 0 {
+            println!("nothing is queued, so there is nothing to dispatch.");
+            println!("  spoolway queue add --from <path>");
+            return Ok(EXIT_EMPTY_QUEUE);
+        }
+        print_staying_up(&crate::jobs::staying_up(repo));
+        idle_announced = true;
     }
 
     // A start that gets this far can actually run. Whatever the guard above
@@ -352,20 +365,30 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
 
         match repo.tasks() {
             Ok(tasks) if tasks.is_empty() => {
-                stop(
-                    repo,
-                    pipelines,
-                    mux.as_ref(),
-                    board.as_mut(),
-                    &mut out,
-                    args,
-                )?;
-                println!("  queue is empty — every task is done. Stopping.");
-                return Ok(0);
+                if crate::jobs::enabled_count(repo) == 0 {
+                    stop(
+                        repo,
+                        pipelines,
+                        mux.as_ref(),
+                        board.as_mut(),
+                        &mut out,
+                        args,
+                    )?;
+                    println!("  queue is empty — every task is done. Stopping.");
+                    return Ok(0);
+                }
+                // A job keeps the run resident. Say so once per spell of
+                // empty queue — not every pass, and never over a board,
+                // which owns the screen — then loop on into the wait.
+                if board.is_none() && !idle_announced {
+                    println!();
+                    print_staying_up(&crate::jobs::staying_up(repo));
+                }
+                idle_announced = true;
             }
             // A queue that cannot be read is a reason to try again next pass,
             // not to decide the work is finished.
-            _ => {}
+            _ => idle_announced = false,
         }
 
         match board.as_mut() {
@@ -509,6 +532,14 @@ fn stop(
         let _ = board.draw(repo, pipelines, crate::status::Phase::Stopping, out);
     }
     Ok(())
+}
+
+/// Print the "a job keeps this run resident" lines under the plain run. The
+/// board shows the same facts its own way — see [`crate::status`].
+fn print_staying_up(jobs: &crate::jobs::StayingUp) {
+    for line in crate::jobs::staying_up_lines(jobs) {
+        println!("  {line}");
+    }
 }
 
 #[cfg(test)]

@@ -282,6 +282,7 @@ pub fn doctor(
     report.record_all(agent_kind_checks(&config));
     doctor_update(repo, &mut report);
     report.record_all(prompt_checks(repo, pipelines));
+    report.record_all(jobs_checks(repo, pipelines));
 
     // A dispatcher that is running is a fact about this moment that changes
     // what a person should do next. Its absence is the ordinary case, and says
@@ -1039,6 +1040,72 @@ fn prompt_checks(repo: &Repo, pipelines: &Pipelines) -> Vec<Finding> {
             "{} lane-prompts finding(s) — `spoolway prompt check` to read them",
             lane_prompt_findings.len()
         )));
+    }
+
+    findings
+}
+
+/// Cron jobs: one that names a routine that is gone, one whose expression
+/// will not parse, one whose pipeline is not defined. A store that will not
+/// load at all — a name in both, malformed TOML — is a single finding.
+fn jobs_checks(repo: &Repo, pipelines: &Pipelines) -> Vec<Finding> {
+    let mut findings = Vec::new();
+
+    let jobs = match crate::jobs::load(repo) {
+        Ok(jobs) => jobs,
+        Err(err) => {
+            findings.push(Finding::Check("job stores load".into(), Err(err)));
+            return findings;
+        }
+    };
+
+    for job in &jobs {
+        let name = &job.name;
+
+        // Parses *and* comes round: `0 0 30 2 *` parses cleanly and never
+        // fires, and `spoolway jobs list` / the dispatcher's "run doctor"
+        // line both need this to be the thing that names it.
+        findings.push(Finding::Check(
+            format!("job `{name}` schedule fires"),
+            match crate::cron::Cron::parse(&job.spec.schedule) {
+                Err(why) => Err(anyhow::anyhow!("`{}` — {why}", job.spec.schedule)),
+                Ok(cron) => match cron.next_after(chrono::Local::now().naive_local()) {
+                    Some(_) => Ok(None),
+                    None => Err(anyhow::anyhow!(
+                        "`{}` parses but never comes round — check its day-of-month and month \
+                         fields in {}",
+                        job.spec.schedule,
+                        job.source.display()
+                    )),
+                },
+            },
+        ));
+
+        findings.push(Finding::Check(
+            format!("job `{name}` routine exists"),
+            match job.target(repo) {
+                Err(why) => Err(why),
+                Ok(target) if target.exists() => Ok(None),
+                Ok(target) => Err(anyhow::anyhow!(
+                    "{} is not there — nothing under `.spoolway/routines/` matches `{}`",
+                    target.display(),
+                    job.spec.routine
+                )),
+            },
+        ));
+
+        findings.push(Finding::Check(
+            format!("job `{name}` pipeline is defined"),
+            if pipelines.pipelines.contains_key(&job.spec.pipeline) {
+                Ok(None)
+            } else {
+                Err(anyhow::anyhow!(
+                    "`{}` is not a pipeline (defined: {})",
+                    job.spec.pipeline,
+                    pipelines.names().join(", ")
+                ))
+            },
+        ));
     }
 
     findings

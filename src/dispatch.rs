@@ -650,6 +650,20 @@ impl<'a> Dispatcher<'a> {
         let step_ids = self.pipelines.all_step_ids();
         let all_lanes = self.mux.list_lanes()?;
 
+        // Fire any cron job whose expression matches this minute, before the
+        // queue is read below, so its freshly queued documents are dispatched
+        // by this same pass. A dry run makes no changes and so fires nothing.
+        // Trouble with a job is reported like any other pass trouble and
+        // never fails the pass.
+        if !self.dry_run {
+            crate::jobs::fire_due(
+                self.repo,
+                self.pipelines,
+                &mut report.actions,
+                &mut report.problems,
+            );
+        }
+
         let (mut tasks, load_problems) = self.repo.tasks_and_problems()?;
 
         // What each task's `last_report` reads as right now, so a `persist`
