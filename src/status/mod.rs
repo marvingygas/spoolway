@@ -1671,25 +1671,52 @@ fn build_rows(
             // — a fixed description said the same thing at every one of them.
             _ if task.stage() == crate::pipeline::QUEUED => {
                 let dependency = crate::commands::dependency_note(graph, task.id());
-                let state = match dependency.as_deref() {
-                    Some(d)
-                        if d.starts_with("unreachable")
-                            || d.contains("cycle")
-                            || d.contains("itself") =>
-                    {
-                        State::Unreachable
-                    }
-                    _ => State::Queued,
+                // Asked of the graph, never read back out of the note's own
+                // English. This used to substring-match the rendered
+                // sentence — `starts_with("unreachable")`,
+                // `contains("cycle")`, `contains("itself")` — which made
+                // every task id containing one of those words its own bug
+                // report: `waiting on: park-lifecycle` contains "cycle", so
+                // an ordinary unmet dependency was drawn in red as a
+                // dependency cycle. The graph is asked the same two
+                // questions `dependency_note` asks it, and answers about the
+                // shape of the queue rather than about the spelling of a
+                // task's name.
+                let state = match graph.cycle_with(task.id()).is_some()
+                    || graph.unreachable(task.id()).is_some()
+                {
+                    true => State::Unreachable,
+                    false => State::Queued,
                 };
                 // The gate only ranks a candidate now, it does not drop one
                 // — so a task it has ranked behind another group is not
                 // held apart from every other task waiting on a worker
                 // slot, and reads the same line the rest of them do.
-                let next = match dependency {
-                    Some(d) => d,
-                    None => "waiting for a worker slot to free up".to_string(),
-                };
-                (state, next, false)
+                //
+                // A park outranks that plain queued read, the same way it
+                // does on a real step below. A task on `queued` is parked by
+                // exactly the same quota gate: `route_reserved_stage` turns
+                // it into a candidate, and a candidate over its kind's
+                // ceiling gets `parked_until` written on it. A row that read
+                // `queued · waiting for a worker slot` right through a
+                // four-day park was describing a dispatcher that had
+                // stopped, which is the one thing it was not doing.
+                //
+                // Only when nothing else holds it. A dependency it is still
+                // waiting on is the harder hold and the more useful thing to
+                // say, so that wording keeps the row whether or not a park
+                // is also running.
+                match dependency {
+                    Some(d) => (state, d, false),
+                    None if quota_parked_until.is_some() => {
+                        (State::Parked, format!("→ {}", pipeline.entry()), false)
+                    }
+                    None => (
+                        state,
+                        "waiting for a worker slot to free up".to_string(),
+                        false,
+                    ),
+                }
             }
             _ if parked_on_blocked => {
                 // A block only offers the resume key once whatever put it
@@ -2799,6 +2826,130 @@ mod tests {
             crate::task::format_instant(until, chrono::Utc::now().timestamp(), false)
         );
         assert!(view::plain_table(&rows).contains(&format!("parked · {display}")));
+    }
+
+    /// A dependency whose id happens to contain one of the words the state
+    /// used to be sniffed out of is still an ordinary dependency.
+    ///
+    /// The `queued` state was decided by substring-matching the rendered
+    /// note: `contains("cycle")` over `waiting on: park-lifecycle` is true,
+    /// so a task waiting on a perfectly healthy dependency was drawn in red
+    /// as one caught in a dependency cycle. Real trouble is a question for
+    /// the graph, and this asks it there.
+    #[test]
+    fn a_dependency_named_for_a_lifecycle_is_not_a_dependency_cycle() {
+        let repo = fixture("cycle-in-the-name");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "park-lifecycle", &[], Some(crate::pipeline::QUEUED));
+        add(
+            &repo,
+            "paused-board",
+            &["park-lifecycle"],
+            Some(crate::pipeline::QUEUED),
+        );
+
+        let tasks = repo.tasks().unwrap();
+        let graph = Graph::build(&tasks, &pipelines, &repo.archive_dir());
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &BTreeSet::new(),
+            &[],
+            &[],
+        )
+        .unwrap();
+
+        let row = rows.iter().find(|r| r.id == "paused-board").unwrap();
+        assert!(
+            matches!(row.state, State::Queued),
+            "an unmet dependency is `queued`, not `unreachable`: {}",
+            row.next
+        );
+        assert!(
+            row.next.contains("waiting on: park-lifecycle"),
+            "{}",
+            row.next
+        );
+    }
+
+    /// The same park, read on a task that never left `queued`.
+    ///
+    /// A `queued` task is parked by exactly the same gate a task on a real
+    /// step is — the quota check runs on candidates, and `queued` is where
+    /// candidates come from — but the `queued` arm of the match answered
+    /// ahead of the park arm and never consulted it. The row read
+    /// `queued · waiting for a worker slot to free up` for the whole park,
+    /// which describes a dispatcher that has stopped rather than one holding
+    /// a task on a clock.
+    #[test]
+    fn a_queued_task_parked_for_its_quota_also_reads_parked() {
+        let repo = fixture("quota-parked-queued-row");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], Some(crate::pipeline::QUEUED));
+        let mut task = repo.task("login").unwrap();
+        let until = chrono::Utc::now().timestamp() + 3600;
+        task.front.parked_until = Some(until);
+        task.save().unwrap();
+
+        let tasks = repo.tasks().unwrap();
+        let graph = Graph::build(&tasks, &pipelines, &repo.archive_dir());
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &BTreeSet::new(),
+            &[],
+            &[],
+        )
+        .unwrap();
+
+        let row = rows.iter().find(|r| r.id == "login").unwrap();
+        assert!(matches!(row.state, State::Parked), "{}", row.next);
+        assert!(
+            !row.next.contains("worker slot"),
+            "a park is not a queue for a slot: {}",
+            row.next
+        );
+        let display = row
+            .parked_display
+            .as_deref()
+            .expect("a parked row must carry its own clock");
+        assert!(view::plain_table(&rows).contains(&format!("parked · {display}")));
+    }
+
+    /// A dependency it cannot pass is the harder hold, and keeps the row even
+    /// when a park is running underneath it — the park says when a slot could
+    /// be taken, the dependency says whether there is anything to take one
+    /// for.
+    #[test]
+    fn a_dependency_outranks_a_park_on_a_queued_row() {
+        let repo = fixture("quota-parked-queued-dependency");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "api", &[], Some("implement"));
+        add(&repo, "login", &["api"], Some(crate::pipeline::QUEUED));
+        let mut task = repo.task("login").unwrap();
+        task.front.parked_until = Some(chrono::Utc::now().timestamp() + 3600);
+        task.save().unwrap();
+
+        let tasks = repo.tasks().unwrap();
+        let graph = Graph::build(&tasks, &pipelines, &repo.archive_dir());
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &BTreeSet::new(),
+            &[],
+            &[],
+        )
+        .unwrap();
+
+        let row = rows.iter().find(|r| r.id == "login").unwrap();
+        assert!(matches!(row.state, State::Queued), "{}", row.next);
+        assert!(row.next.contains("waiting on: api"), "{}", row.next);
     }
 
     /// A live lane's clock is its own: `now - launched_at`, not whatever the

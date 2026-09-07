@@ -902,31 +902,12 @@ impl<'a> Dispatcher<'a> {
 
             // A quota probe or a usage-limit pane parked this task — see
             // `Dispatcher::quota_over_ceiling` and `Dispatcher::
-            // usage_limit_hold`, both below. Checked here, ahead of
-            // everything else a pass does with a task, and against nothing
-            // but the clock this task's own file carries: a dispatcher
-            // stopped for as long as the wait takes, and started again from
-            // cold, honours the park on its very first pass without taking a
-            // fresh reading. Cleared the moment it has passed, so the task
-            // falls straight through to the ordinary walk below on the same
-            // pass rather than losing one to a clock already spent.
-            if let Some(until) = tasks[index].front.parked_until {
-                let now = now_secs();
-                if until > now {
-                    let dated =
-                        tasks[index].front.parked_window == crate::quota::Window::SevenDay.key();
-                    report.actions.push(format!(
-                        "{}: parked until {}",
-                        tasks[index].id(),
-                        crate::task::format_until(until, now, dated),
-                    ));
-                    continue;
-                }
-                if !self.dry_run {
-                    tasks[index].front.parked_until = None;
-                    tasks[index].front.parked_window = String::new();
-                    self.persist(&mut tasks[index])?;
-                }
+            // usage_limit_hold`, both below. Read here, ahead of everything
+            // else a pass does with a task on a real step; the other half of
+            // the same gate sits in `route_reserved_stage`, for a task that
+            // is still on `queued`. See [`Dispatcher::parked`].
+            if self.parked(&mut tasks[index], report)? {
+                continue;
             }
 
             let lane = owned
@@ -1222,6 +1203,45 @@ impl<'a> Dispatcher<'a> {
         Ok((candidates, archived))
     }
 
+    /// Whether `task` is still inside a quota or usage-limit park, clearing
+    /// an expired one on the way out.
+    ///
+    /// Checked against nothing but the clock the task's own file carries: a
+    /// dispatcher stopped for as long as the wait takes, and started again
+    /// from cold, honours the park on its very first pass without taking a
+    /// fresh reading. An expired park is cleared here, so the task falls
+    /// straight through to the ordinary walk on the same pass rather than
+    /// losing one to a clock already spent.
+    ///
+    /// Called from two places, because the two kinds of parked task reach
+    /// the decision by different routes. A task sitting on a real step meets
+    /// this in [`Dispatcher::collect_candidates`]'s own loop. A task sitting
+    /// on `queued` never gets that far — [`Dispatcher::route_reserved_stage`]
+    /// turns it into a candidate and sends the loop straight on to the next
+    /// task — so without the second call its park was re-probed, re-written
+    /// and re-logged on every single pass for as long as the park lasted.
+    fn parked(&mut self, task: &mut Task, report: &mut Report) -> Result<bool> {
+        let Some(until) = task.front.parked_until else {
+            return Ok(false);
+        };
+        let now = now_secs();
+        if until > now {
+            let dated = task.front.parked_window == crate::quota::Window::SevenDay.key();
+            report.actions.push(format!(
+                "{}: parked until {}",
+                task.id(),
+                crate::task::format_until(until, now, dated),
+            ));
+            return Ok(true);
+        }
+        if !self.dry_run {
+            task.front.parked_until = None;
+            task.front.parked_window = String::new();
+            self.persist(task)?;
+        }
+        Ok(false)
+    }
+
     /// Handle a task's stage when it is one of the dispatcher's own reserved
     /// ones — `queued`, `done`, `blocked`, or `paused`, see
     /// `crate::pipeline::RESERVED` — and say what
@@ -1304,6 +1324,22 @@ impl<'a> Dispatcher<'a> {
                     return Ok(Routed::NextTask);
                 }
                 TrackingGate::Pending => return Ok(Routed::NextTask),
+            }
+            // Before the dependency gate, and so before this task can become
+            // a candidate at all: a park is a clock, and a task waiting one
+            // out has no business being ranked for a worker slot.
+            //
+            // Nothing read the park on `queued` at all before this, which
+            // cost two different things. A park the pass could not derive
+            // again from a fresh reading was ignored outright and the task
+            // started anyway. A park it could derive again was re-probed,
+            // re-written and re-logged every `dispatch.interval` — a
+            // seven-day-window park appended tens of thousands of
+            // `## Status Log` lines to one task file — while the board went
+            // on reading the row as an ordinary `queued`, so the run looked
+            // wedged rather than held.
+            if self.parked(task, report)? {
+                return Ok(Routed::NextTask);
             }
             if graph.ready(&id) {
                 let next = pipeline.entry().to_string();
@@ -8029,6 +8065,63 @@ mod tests {
                 .any(|a| a.contains("usage limit") && a.contains("parked until")),
             "{:?}",
             report.actions
+        );
+    }
+
+    /// A task parked while it was still sitting on `queued` stays parked,
+    /// and costs the pass nothing while it waits.
+    ///
+    /// `route_reserved_stage` turns a `queued` task straight into a candidate
+    /// and sends the loop on to the next task, so the park gate in
+    /// `collect_candidates`'s own body never saw it — the park was not read
+    /// at all on the one stage every task passes through. Two things came of
+    /// that. A park the pass could not re-derive was ignored outright and the
+    /// task started anyway, which is what this asserts first. And a park it
+    /// could re-derive was re-probed, re-written and re-logged every pass: at
+    /// the default ten second interval a seven-day-window park appended tens
+    /// of thousands of `## Status Log` lines to one task file.
+    #[test]
+    fn a_task_parked_on_queued_is_not_re_probed_or_re_logged_every_pass() {
+        let mut repo = fixture("quota-parked-on-queued");
+        repo.config.agents.get_mut("claude").unwrap().quota_ceiling = 70;
+        let until = now_secs() + 3600;
+        let path = add_task_with(&repo, "demo", crate::pipeline::QUEUED, |f| {
+            f.parked_until = Some(until);
+            f.parked_window = crate::quota::Window::SevenDay.key().to_string();
+        });
+
+        let mux = FakeMux::new(Vec::new());
+        let report = run_pass(&repo, &mux);
+
+        let task = reload(&path);
+        assert_eq!(
+            task.stage(),
+            crate::pipeline::QUEUED,
+            "the park holds it where it is"
+        );
+        assert_eq!(
+            task.front.parked_until,
+            Some(until),
+            "the deadline it arrived with, not one this pass wrote again"
+        );
+        assert!(
+            mux.did("start").is_empty(),
+            "a parked task must not take a worker slot"
+        );
+        assert!(
+            report.actions.iter().any(|a| a.contains("parked until")),
+            "the pass says why nothing moved: {:?}",
+            report.actions
+        );
+
+        let before = task.section("## Status Log").unwrap_or_default();
+        for _ in 0..3 {
+            run_pass(&repo, &mux);
+        }
+        assert_eq!(
+            reload(&path).section("## Status Log").unwrap_or_default(),
+            before,
+            "three more passes must not have written a single further line"
         );
     }
 
