@@ -682,7 +682,7 @@ save.
 ### Skills
 
 A kind that has a notion of project skills at all names its own directory for them: `claude`
-reads `.claude/skills`, `codex` reads `.codex/skills`, and `pi` reads `.pi/skills`. That is the
+reads `.claude/skills`, `codex` reads `.agents/skills`, and `pi` reads `.pi/skills`. That is the
 same directory `spoolway install` writes a project's skills into, so the two cannot name it
 differently.
 

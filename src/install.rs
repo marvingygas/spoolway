@@ -129,14 +129,11 @@ impl Provider {
             // Claude Code's own convention, and the one the spec is written
             // from. The others are all reachable from it.
             Provider::Claude => [".claude", "skills"],
-            // Settled by running it: a `.codex/skills/spoolway-probe/SKILL.md`
-            // written into an empty project put both the skill's name and a
-            // marker word from its description into the turn's rollout, on
-            // codex 0.147.0 against a local endpoint. It also took
-            // `disable-model-invocation: true` without complaint — codex ships
-            // a python validator that rejects that key, but the validator
-            // belongs to its `skill-installer` plugin and not to the loader.
-            Provider::Codex => [".codex", "skills"],
+            // Codex's repository scope from its current skills documentation.
+            // `.codex/skills` was accepted by older builds, but current Codex
+            // scans `.agents/skills` from the working directory to the repo
+            // root; installing under the old root leaves `/skills` empty.
+            Provider::Codex => [".agents", "skills"],
             // `<cwd>/.pi/skills`, joined from `CONFIG_DIR_NAME` — which is
             // `.pi` unless a fork's package.json overrides it. Guarded by
             // project trust: pi collects these only inside `if
@@ -242,7 +239,7 @@ mod tests {
     fn root_of(provider: Provider) -> [&'static str; 2] {
         match provider {
             Provider::Claude => [".claude", "skills"],
-            Provider::Codex => [".codex", "skills"],
+            Provider::Codex => [".agents", "skills"],
             Provider::Pi => [".pi", "skills"],
         }
     }
