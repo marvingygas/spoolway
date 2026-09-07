@@ -411,6 +411,14 @@ pub const REFERENCE: &[Reference] = &[
         sentence: "What a non-zero hook exit does: `ignore` only records it, `pause` also \
                     holds the task — on `queued` to `paused`, on `done` out of the archive.",
     },
+    Reference {
+        key: "issue_tracking.key_in_names",
+        values: "true, false",
+        default: "false",
+        sentence: "Whether a `slug=` the hook answers prefixes the group, branch and \
+                    worktree name `queue add` generates — `task/<slug>-<id>`. Off changes \
+                    nothing.",
+    },
 ];
 
 /// The one-sentence note for a dotted key, if it has one.
@@ -469,6 +477,84 @@ pub fn entries(config: &Config) -> Result<Vec<Entry>> {
     let value = Value::try_from(config).context("rendering config")?;
     let mut out = Vec::new();
     walk(&value, &mut String::new(), &mut out);
+    Ok(out)
+}
+
+/// The three flat `[dispatch]` keys `get` and `set` accept that [`entries`]
+/// never lists, because they are skipped from the file while they hold their
+/// default — see [`unset_value`], which resolves each. [`all_settings`] adds
+/// these plus the per-entry omissions (`[models]` zeros, an absent
+/// `agents.<profile>.concurrency`) for every profile and model glob the
+/// config already carries; only a `[models]` glob nobody has named yet stays
+/// off the list, and no list could show that open-ended keyspace.
+pub const OMITTED_DEFAULT_KEYS: &[&str] = &[
+    "dispatch.tear_lanes_on_stop",
+    "dispatch.lane_child_ceiling",
+    "dispatch.priority",
+];
+
+/// Every scalar setting `config get`/`set` resolves for a key that already
+/// names something: [`entries`] plus the omitted-default keys it skips — the
+/// three flat [`OMITTED_DEFAULT_KEYS`], the `concurrency` of every profile
+/// that omits it, and every price/limit field of every `[models]` glob the
+/// config already carries. This is the list `spoolway config list` prints, so
+/// its promise to name every settable scalar key holds for every key that
+/// resolves to a value today.
+///
+/// A `[models]` glob the config has never named is still settable — [`set`]
+/// creates it on first write — so that keyspace is open-ended and no list can
+/// enumerate it.
+///
+/// Sorted by key, unlike [`entries`]'s file order: the omitted keys are found
+/// last and would otherwise trail the list, away from the table they belong
+/// to.
+pub fn all_settings(config: &Config) -> Result<Vec<Entry>> {
+    let mut out = entries(config)?;
+
+    let push_omitted = |out: &mut Vec<Entry>, key: String| {
+        if out.iter().any(|e| e.key == key) {
+            return;
+        }
+        let Some(value) = unset_value(config, &key) else {
+            return;
+        };
+        let kind = match value.as_str() {
+            "true" | "false" => Kind::Bool,
+            other if !other.is_empty() && other.parse::<f64>().is_ok() => Kind::Number,
+            _ => Kind::Text,
+        };
+        let note = note(&key);
+        out.push(Entry {
+            key,
+            value,
+            kind,
+            note,
+        });
+    };
+
+    for key in OMITTED_DEFAULT_KEYS {
+        push_omitted(&mut out, (*key).to_string());
+    }
+    for profile in config.agents.keys() {
+        push_omitted(&mut out, format!("agents.{profile}.concurrency"));
+    }
+    // The field *names* on `[models]`, read off the probe the same way
+    // `models_key` does — a rendered default names none, since a zero is
+    // omitted.
+    let price_fields: Vec<String> = match Value::try_from(crate::usage::ModelPrice::probe()) {
+        Ok(Value::Table(table)) => table.keys().cloned().collect(),
+        _ => Vec::new(),
+    };
+    for glob in config.models.keys() {
+        for field in &price_fields {
+            push_omitted(&mut out, format!("models.{glob}.{field}"));
+        }
+    }
+    // The omitted keys are appended after everything the file carries, so
+    // without this an absent `agents.pi.concurrency` would print at the
+    // bottom of the list rather than beside the rest of `agents.pi`. A person
+    // scanning for one setting reads the key column, so sort by it.
+    out.sort_by(|a, b| a.key.cmp(&b.key));
     Ok(out)
 }
 

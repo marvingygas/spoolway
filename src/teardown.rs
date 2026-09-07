@@ -381,9 +381,13 @@ impl<'a> Dispatcher<'a> {
             .any(|t| t.front.depends_on.iter().any(|dep| dep == id))
     }
 
-    /// Delete every local `task/<id>` branch whose task has already finished
-    /// — there is no `<id>.md` left in the queue — and that nothing still
-    /// queued names in `depends_on` any more.
+    /// Delete every local `task/…` branch whose task has already finished —
+    /// there is no `<id>.md` left in the queue — and that nothing still
+    /// queued names in `depends_on` any more. The branch is `task/<id>`, or
+    /// `task/<slug>-<id>` when `issue_tracking.key_in_names` prefixed it;
+    /// either way the owning task is found by an exact match against its
+    /// recorded `branch:` field — see [`task_for_branch`] — not by taking the
+    /// branch name apart.
     ///
     /// Reaching `done` retains a depended-on branch rather than deleting it,
     /// and nothing revisits that task once its file has moved to the
@@ -403,9 +407,13 @@ impl<'a> Dispatcher<'a> {
             return;
         };
         for branch in listing.lines() {
-            let Some(id) = branch.strip_prefix("task/") else {
+            // The task that recorded this exact branch, if any is still on
+            // disk. A branch no queue or archive task claims — its task swept
+            // from the archive by `retention.days`, say — is left alone.
+            let Some(owner) = task_for_branch(self.repo, branch) else {
                 continue;
             };
+            let id = owner.id();
             // Still in the queue: this task owns its branch until it reaches
             // `done` itself, whatever else is going on around it.
             if self.repo.queue_dir().join(format!("{id}.md")).exists() {
@@ -419,14 +427,10 @@ impl<'a> Dispatcher<'a> {
                 continue;
             }
             // Only a branch spoolway made, for a task that actually
-            // finished, is spoolway's to delete — read back from the
-            // archive, since a borrowed checkout's own frontmatter is the
-            // only record of that once the task's file has moved.
-            let archived = self.repo.archive_dir().join(format!("{id}.md"));
-            let Ok(finished) = Task::load(&archived) else {
-                continue;
-            };
-            if finished.front.borrowed {
+            // finished, is spoolway's to delete — the archived record is the
+            // only place `borrowed` is still readable once the task's file
+            // has moved, and `task_for_branch` found `owner` there.
+            if owner.front.borrowed {
                 continue;
             }
             let _ = self.repo.git(&["branch", "-D", branch]);
@@ -681,5 +685,42 @@ impl<'a> Dispatcher<'a> {
         }
 
         Ok(())
+    }
+}
+
+/// The task that recorded `branch` as its own `branch:` — matched exactly,
+/// not by taking the branch name apart. `queue add` stamps `task/<id>`, or
+/// `task/<slug>-<id>` when `issue_tracking.key_in_names` prefixed it, and the
+/// slug is opaque, so its length cannot be read back out of the branch. This
+/// walks candidate ids by dropping one leading `<segment>-` at a time, but
+/// accepts a candidate only when the task file it names records this exact
+/// branch — so `task/proj-old-auth-01` resolves to `auth-01` (slug
+/// `proj-old`) and never to a real `old-auth-01` whose own branch is
+/// something else.
+///
+/// The queue is searched before the archive, so a task still in flight
+/// returns its live record. A task file that records no `branch:` at all — a
+/// hand-dropped one that never passed `queue add` — matches only the bare
+/// `task/<id>` its id implies, never a prefixed branch. `None` when no task
+/// on disk claims the branch — its task swept from the archive by
+/// `retention.days`, say — which the sweep then leaves alone.
+fn task_for_branch(repo: &crate::repo::Repo, branch: &str) -> Option<Task> {
+    let mut candidate = branch.strip_prefix("task/")?;
+    loop {
+        for dir in [repo.queue_dir(), repo.archive_dir()] {
+            if let Ok(task) = Task::load(&dir.join(format!("{candidate}.md"))) {
+                let claims = match task.front.branch.as_deref() {
+                    Some(recorded) => recorded == branch,
+                    None => branch == crate::task::default_branch(candidate),
+                };
+                if claims {
+                    return Some(task);
+                }
+            }
+        }
+        match candidate.split_once('-') {
+            Some((_, tail)) if !tail.is_empty() => candidate = tail,
+            _ => return None,
+        }
     }
 }

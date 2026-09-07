@@ -470,6 +470,25 @@ fn issue_tracking_checks(
             None => Ok(None),
         },
     ));
+    // `issue_tracking.key_in_names` prefixes every generated name with a
+    // `slug=` the hook answers — but `spoolway update` never rewrites a hook
+    // a project already has, so a project that turned the flag on without
+    // adding the line gets no prefix at all, silently, on every `queue add`.
+    findings.push(Finding::Check(
+        "the configured hook writes a `slug=` line".into(),
+        match crate::tracking::missing_slug_line(
+            &repo.checkout,
+            &tracking.hook,
+            tracking.key_in_names,
+        ) {
+            Some(name) => Err(anyhow::anyhow!(
+                "{config_path}: [issue_tracking] key_in_names is on, but {name} never writes \
+                 `slug=` — groups, branches and worktrees will be named without a prefix. Add a \
+                 slug= line the way the shipped samples do, or clear key_in_names."
+            )),
+            None => Ok(None),
+        },
+    ));
     // The two shipped hooks each shell out to a binary this project does not
     // otherwise need — `gh` is already checked below for `spoolway stack`,
     // so only the one hook that would go unnoticed is checked here: `jira.sh`
@@ -1612,6 +1631,60 @@ mod tests {
             .unwrap();
         let err = acli.as_ref().unwrap_err();
         assert!(err.to_string().contains("jira.sh"), "{err}");
+    }
+
+    /// `key_in_names` on, but the configured hook script never writes
+    /// `slug=`: a standing gap `doctor` names, and one it stays quiet about
+    /// both when the script does write the line and when the flag is off.
+    #[test]
+    fn issue_tracking_checks_reports_key_in_names_without_a_slug_line() {
+        let repo = scratch_repo("slug-gap");
+        let hooks_dir = repo.checkout.join(".spoolway/hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        std::fs::write(
+            hooks_dir.join("jira.sh"),
+            "#!/bin/sh\n{ echo \"epic=$SPOOLWAY_EPIC\"; echo \"ticket=x\"; } >\"$SPOOLWAY_OUT\"\n",
+        )
+        .unwrap();
+
+        let on = crate::config::IssueTrackingConfig {
+            hook: "jira.sh".into(),
+            project_key: "PROJ".into(),
+            key_in_names: true,
+            ..Default::default()
+        };
+        let findings = issue_tracking_checks(&repo, &on);
+        let gap = findings.iter().find_map(|f| match f {
+            Finding::Check(label, outcome)
+                if label == "the configured hook writes a `slug=` line" =>
+            {
+                Some(outcome)
+            }
+            _ => None,
+        });
+        let err = gap
+            .expect("the slug check is missing")
+            .as_ref()
+            .unwrap_err();
+        assert!(err.to_string().contains("key_in_names is on"), "{err}");
+        assert!(err.to_string().contains("jira.sh"), "{err}");
+
+        // Flag off: nothing to report.
+        let off = crate::config::IssueTrackingConfig {
+            key_in_names: false,
+            ..on.clone()
+        };
+        let quiet = issue_tracking_checks(&repo, &off)
+            .into_iter()
+            .find_map(|f| match f {
+                Finding::Check(label, outcome)
+                    if label == "the configured hook writes a `slug=` line" =>
+                {
+                    Some(outcome)
+                }
+                _ => None,
+            });
+        assert!(quiet.unwrap().is_ok());
     }
 
     /// Neither of `gh`'s two callers is present: no step runs `spoolway

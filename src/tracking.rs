@@ -101,8 +101,26 @@ pub enum OpenResult {
     /// No hook is configured at all — `queue add` runs no process, and
     /// whatever the caller already had for `epic`/`ticket` is unchanged.
     NoHook,
-    /// The hook exited zero and answered.
-    Answered { epic: String, ticket: String },
+    /// The hook exited zero and answered. `slug` and `url` are two more
+    /// optional lines it may add; a hook writing neither reads back blank,
+    /// exactly as a missing `epic=` does. All four are opaque here — `queue
+    /// add` does the checking:
+    ///
+    /// - `slug` feeds naming only, so it is consulted only when
+    ///   `issue_tracking.key_in_names` is on, and dropped unless it passes
+    ///   [`crate::config::check_id`]'s alphabet.
+    /// - `url` is stored on the task whatever the flag says — it is there for
+    ///   `terminal-names` to use later — and dropped unless it is an absolute
+    ///   `http`/`https` address.
+    ///
+    /// A failing check is reported and the value dropped; the batch is never
+    /// refused over one.
+    Answered {
+        epic: String,
+        ticket: String,
+        slug: String,
+        url: String,
+    },
     /// The hook exited non-zero, or ended without a code at all — the same
     /// [`RunState::Interrupted`] a command step's own run can end in.
     Failed { exit_code: Option<i32> },
@@ -182,8 +200,18 @@ pub fn open_ticket(
 
     Ok(match state {
         RunState::Exited(0) => {
-            let (epic, ticket) = read_answer(&out_path);
-            OpenResult::Answered { epic, ticket }
+            let Answer {
+                epic,
+                ticket,
+                slug,
+                url,
+            } = read_answer(&out_path);
+            OpenResult::Answered {
+                epic,
+                ticket,
+                slug,
+                url,
+            }
         }
         RunState::Exited(code) => OpenResult::Failed {
             exit_code: Some(code),
@@ -238,22 +266,39 @@ fn open_env(
     ])
 }
 
-/// The two answers a hook script leaves at `SPOOLWAY_OUT`: an `epic=` line
-/// and a `ticket=` line, in either order, each optional — a script that
-/// wrote neither (a group of one, told to skip the epic) reads back as two
-/// blank strings rather than an error.
-fn read_answer(path: &Path) -> (String, String) {
+/// Everything a hook script may leave at `SPOOLWAY_OUT` on the `open` event.
+/// Every field is optional and order does not matter — a script that wrote
+/// none of them reads back as four blank strings rather than an error, the
+/// same way a group of one told to skip the epic already does.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct Answer {
+    pub epic: String,
+    pub ticket: String,
+    /// The short handle for `issue_tracking.key_in_names`; blank when the
+    /// hook writes no `slug=` line.
+    pub slug: String,
+    /// The issue's web address, stored for `terminal-names` to use later;
+    /// blank when the hook writes no `url=` line.
+    pub url: String,
+}
+
+/// Parse the `epic=`, `ticket=`, `slug=` and `url=` lines a hook script
+/// leaves at `SPOOLWAY_OUT`, in any order, each optional.
+fn read_answer(path: &Path) -> Answer {
     let raw = std::fs::read_to_string(path).unwrap_or_default();
-    let mut epic = String::new();
-    let mut ticket = String::new();
+    let mut answer = Answer::default();
     for line in raw.lines() {
         if let Some(value) = line.strip_prefix("epic=") {
-            epic = value.trim().to_string();
+            answer.epic = value.trim().to_string();
         } else if let Some(value) = line.strip_prefix("ticket=") {
-            ticket = value.trim().to_string();
+            answer.ticket = value.trim().to_string();
+        } else if let Some(value) = line.strip_prefix("slug=") {
+            answer.slug = value.trim().to_string();
+        } else if let Some(value) = line.strip_prefix("url=") {
+            answer.url = value.trim().to_string();
         }
     }
-    (epic, ticket)
+    answer
 }
 
 /// What one synchronous `fetch` hook call came back with — see
@@ -393,6 +438,41 @@ pub fn fetch_issue(repo: &Repo, reference: &str) -> Result<FetchResult> {
 /// mentions the word nowhere has certainly not grown that branch.
 pub(crate) fn has_fetch_branch(script: &str) -> bool {
     script.contains("fetch")
+}
+
+/// Whether `script`'s own text ever writes a `slug=` line — the static check
+/// `spoolway doctor` runs when `issue_tracking.key_in_names` is on, the same
+/// shape as [`has_fetch_branch`]. A plain substring search: every shipped
+/// sample writes `echo "slug=..."`, and a script that never mentions the
+/// token cannot answer one.
+pub(crate) fn writes_slug_line(script: &str) -> bool {
+    script.contains("slug=")
+}
+
+/// `hook_name`, when [`key_in_names`] is on but the script it names — resolved
+/// inside `.spoolway/hooks/` under `checkout`, the same join [`hook_path`]
+/// makes — never writes a `slug=` line, so every generated name would carry
+/// no prefix. `None` when the flag is off, when `hook_name` is blank or not a
+/// bare filename, or when the script cannot be read: each of those is either
+/// nothing to report or a different finding already made elsewhere.
+///
+/// [`key_in_names`] is passed rather than read from a [`Config`] so `doctor`
+/// can hand its own freshly loaded copy, the same way every other check here
+/// takes `checkout` and `hook_name` directly.
+pub(crate) fn missing_slug_line(
+    checkout: &Path,
+    hook_name: &str,
+    key_in_names: bool,
+) -> Option<String> {
+    if !key_in_names {
+        return None;
+    }
+    let name = hook_name.trim();
+    if name.is_empty() || !is_bare_filename(name) {
+        return None;
+    }
+    let script = std::fs::read_to_string(checkout.join(".spoolway/hooks").join(name)).ok()?;
+    (!writes_slug_line(&script)).then(|| name.to_string())
 }
 
 /// `hook_name`, when the script it names — resolved inside `.spoolway/hooks/`
@@ -1071,6 +1151,8 @@ mod tests {
             OpenResult::Answered {
                 epic: "3-parents:acme/app#42".into(),
                 ticket: "acme/app#43".into(),
+                slug: String::new(),
+                url: String::new(),
             }
         );
 
@@ -1204,5 +1286,63 @@ mod tests {
         assert_eq!(missing_fetch_branch(&repo.checkout, "current.sh"), None);
         assert_eq!(missing_fetch_branch(&repo.checkout, ""), None);
         assert_eq!(missing_fetch_branch(&repo.checkout, "../escaped"), None);
+    }
+
+    /// `read_answer` picks up the two new optional lines, in any order, and a
+    /// hook writing neither reads them back blank — exactly as a missing
+    /// `epic=` already does.
+    #[test]
+    fn read_answer_parses_slug_and_url_when_present_and_blank_when_not() {
+        let repo = fixture("read-answer-slug");
+        let with = repo.tracking_dir().join("with.out");
+        std::fs::create_dir_all(repo.tracking_dir()).unwrap();
+        std::fs::write(
+            &with,
+            "url=https://acme.atlassian.net/browse/PROJ-12\nticket=PROJ-13\nslug=proj-12\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_answer(&with),
+            Answer {
+                epic: String::new(),
+                ticket: "PROJ-13".into(),
+                slug: "proj-12".into(),
+                url: "https://acme.atlassian.net/browse/PROJ-12".into(),
+            }
+        );
+
+        let without = repo.tracking_dir().join("without.out");
+        std::fs::write(&without, "epic=PROJ-12\nticket=PROJ-13\n").unwrap();
+        let answer = read_answer(&without);
+        assert!(answer.slug.is_empty());
+        assert!(answer.url.is_empty());
+    }
+
+    /// What `doctor` reports when `key_in_names` is on: a configured hook
+    /// whose own script never writes `slug=` names the script, and one that
+    /// does — or the flag being off — reports nothing.
+    #[test]
+    fn missing_slug_line_names_a_hook_that_never_writes_one() {
+        let repo = fixture("missing-slug");
+        std::fs::write(
+            repo.checkout.join(".spoolway/hooks/old.sh"),
+            "#!/bin/sh\n{ echo \"epic=$SPOOLWAY_EPIC\"; echo \"ticket=x\"; } >\"$SPOOLWAY_OUT\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.checkout.join(".spoolway/hooks/current.sh"),
+            "#!/bin/sh\necho \"slug=proj-12\" >>\"$SPOOLWAY_OUT\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            missing_slug_line(&repo.checkout, "old.sh", true),
+            Some("old.sh".to_string())
+        );
+        assert_eq!(missing_slug_line(&repo.checkout, "current.sh", true), None);
+        // The flag being off is nothing to report, whatever the script says.
+        assert_eq!(missing_slug_line(&repo.checkout, "old.sh", false), None);
+        assert_eq!(missing_slug_line(&repo.checkout, "", true), None);
+        assert_eq!(missing_slug_line(&repo.checkout, "../escaped", true), None);
     }
 }

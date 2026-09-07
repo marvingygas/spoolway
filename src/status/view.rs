@@ -128,6 +128,12 @@ const CYAN: &str = "\x1b[36m";
 // or `Paused` never read as the same colour from across a room.
 const ORANGE: &str = "\x1b[38;5;208m";
 
+/// The two halves of an OSC 8 terminal hyperlink: `OSC8 <url> ST <label> OSC8
+/// ST`. `ST` here is `ESC \`, the string terminator — a hyperlink escape has
+/// no `m` in it, which is why [`strip_ansi`] needs a branch of its own for it.
+pub(super) const OSC8: &str = "\x1b]8;;";
+pub(super) const ST: &str = "\x1b\\";
+
 impl State {
     /// What the state reads as, with nothing invisible in it. The dot is part
     /// of the word: it is what carries the colour, and a plain-text table wants
@@ -906,12 +912,32 @@ pub(super) fn table(
     // heading rather than a row of its own. Drawn for both readings of the
     // table, figures or none. Nothing for the `no group` block — there is no
     // name for it to carry.
-    let band = |out: &mut String, group: &str| {
+    let band = |out: &mut String, group: &str, url: Option<&str>| {
         if group == NO_GROUP {
             return;
         }
-        let line = format!("{lead}▌{group}");
-        out.push_str(&style.paint(DIM, &line));
+        // Compose the visible line as plain text first — this is the string a
+        // width measurement or a clip would act on, the same compose-then-
+        // colour order the rest of this function keeps (see the note above
+        // `arrivals` in `ticker`). The band itself is never clipped: its full
+        // name shows at every pane width, see
+        // `a_narrow_pane_sheds_columns_and_clips_ids_before_a_row_wraps`.
+        let plain = format!("{lead}▌{group}");
+        // Only now, with the visible line whole, wrap the group-name span —
+        // and only that span, leaving the `lead` and the `▌` outside it — in
+        // an OSC 8 hyperlink to the group's issue. Only where the board
+        // paints colour: a `queue list` piped to a file or a pager has no
+        // terminal to resolve a link against. `plain` ends with `group`
+        // verbatim, so the byte length of everything before it is a char
+        // boundary.
+        let composed = match url.filter(|_| style.colour) {
+            Some(url) => {
+                let before = &plain[..plain.len() - group.len()];
+                format!("{before}{OSC8}{url}{ST}{group}{OSC8}{ST}")
+            }
+            None => plain,
+        };
+        out.push_str(&style.paint(DIM, &composed));
         out.push('\n');
     };
 
@@ -960,6 +986,19 @@ pub(super) fn table(
         out.push_str(&line);
     };
 
+    // The band's hyperlink target for a group is the first `url:` any of its
+    // rows carries. `url:` is stored per task and is optional — a leading
+    // task queued or archived before the tracker ran has none — so reading
+    // only the first row would let that task hide a sibling's valid link.
+    // `key-in-names` writes the same issue's url onto every task of a group
+    // it opens, so the first one found stands for the whole group.
+    let mut group_urls: BTreeMap<&str, &str> = BTreeMap::new();
+    for row in rows {
+        if let Some(url) = row.issue_url.as_deref() {
+            group_urls.entry(row.group()).or_insert(url);
+        }
+    }
+
     let mut group: Option<&str> = None;
     for row in rows {
         if group != Some(row.group()) {
@@ -968,7 +1007,11 @@ pub(super) fn table(
             }
             group = Some(row.group());
             out.push('\n');
-            band(&mut out, group.unwrap());
+            band(
+                &mut out,
+                group.unwrap(),
+                group_urls.get(group.unwrap()).copied(),
+            );
         }
 
         // A cell padded to its column and, for an archived row, dimmed whole
@@ -1414,8 +1457,9 @@ pub(super) fn clamp_rows(frame: &str, height: Option<usize>) -> String {
         .collect()
 }
 
-/// A line as a reader sees it, with the colour codes taken out whole — an
-/// `m` inside `12m 03s` is not a code ending.
+/// A line as a reader sees it, with the escape codes taken out whole — an
+/// `m` inside `12m 03s` is not a code ending, and neither is one inside the
+/// url of a group band's hyperlink.
 ///
 /// Used only where a confirm panel is drawn over the board: [`crate::screen::overlay`]
 /// writes a panel row by walking a target row's own characters, escape bytes
@@ -1427,17 +1471,35 @@ pub(super) fn clamp_rows(frame: &str, height: Option<usize>) -> String {
 /// and in colour again.
 pub(super) fn strip_ansi(text: &str) -> String {
     let mut out = String::new();
-    let mut chars = text.chars();
+    let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
-        match c {
-            '\u{1b}' => {
-                for c in chars.by_ref() {
-                    if c == 'm' {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        if chars.peek() == Some(&']') {
+            // An OSC sequence — the group band's `ESC ] 8 ; ; <url> ESC \`
+            // hyperlink is the only one drawn here. It ends on `ESC \` (ST)
+            // or a bare BEL, never on an `m`, so a url with an `m` in it
+            // would end an `m`-terminated skip early and leak the rest of
+            // the url into the panel over the board.
+            while let Some(c) = chars.next() {
+                match c {
+                    '\u{7}' => break,
+                    '\u{1b}' => {
+                        chars.next(); // the `\` closing `ESC \`
                         break;
                     }
+                    _ => {}
                 }
             }
-            _ => out.push(c),
+        } else {
+            // A CSI colour code: skip to its `m` terminator.
+            for c in chars.by_ref() {
+                if c == 'm' {
+                    break;
+                }
+            }
         }
     }
     out
@@ -1595,6 +1657,127 @@ mod tests {
         assert!(plain.contains("▌auth"), "the band — {plain}");
         assert!(!plain.contains("total"), "{plain}");
         assert!(!plain.contains("CTX"), "{plain}");
+    }
+
+    /// The board wraps the group name — and only the name — in an OSC 8
+    /// hyperlink to the group's issue when the row carries a `url:`. The `▌`
+    /// and the dim styling stay outside it, and a name search over the
+    /// stripped frame still finds the band.
+    #[test]
+    fn the_group_band_links_the_name_when_the_group_has_a_url() {
+        let url = "https://acme.atlassian.net/browse/PROJ-12";
+        let linked = Row {
+            group: Some("proj-12-auth-rework".into()),
+            issue_url: Some(url.into()),
+            ..row("auth-01")
+        };
+        let painted = table(
+            std::slice::from_ref(&linked),
+            Style::board(200),
+            &BTreeMap::new(),
+            None,
+        );
+        assert!(
+            painted.contains(&format!("▌{OSC8}{url}{ST}proj-12-auth-rework{OSC8}{ST}")),
+            "the escape wraps the name only, ▌ outside it — {painted:?}"
+        );
+        assert!(
+            strip(&painted)
+                .lines()
+                .any(|l| l.trim_end().ends_with("▌proj-12-auth-rework")),
+            "a group search still finds the band — {painted:?}"
+        );
+
+        // Even at a pane narrow enough to clip task ids, the band and its
+        // hyperlink come through whole — the escape is spliced in after the
+        // visible line is composed, so no width cut ever passes over it.
+        let narrow = table(
+            std::slice::from_ref(&linked),
+            Style::board(30),
+            &BTreeMap::new(),
+            None,
+        );
+        assert!(
+            narrow.contains(&format!("▌{OSC8}{url}{ST}proj-12-auth-rework{OSC8}{ST}")),
+            "a narrow pane must not touch the band's escape — {narrow:?}"
+        );
+    }
+
+    /// `url:` is optional and stored per task, so the first row of a group
+    /// can lack it while a sibling carries it. The band still links, taking
+    /// the first url any row of the group has rather than only the leading
+    /// row's — and it is drawn once, not once per row.
+    #[test]
+    fn the_group_band_links_from_a_later_row_when_the_first_has_no_url() {
+        let url = "https://acme.atlassian.net/browse/PROJ-12";
+        let first = Row {
+            group: Some("proj-12-auth".into()),
+            issue_url: None,
+            ..row("auth-01")
+        };
+        let later = Row {
+            group: Some("proj-12-auth".into()),
+            issue_url: Some(url.into()),
+            ..row("auth-02")
+        };
+        let painted = table(&[first, later], Style::board(200), &BTreeMap::new(), None);
+        assert!(
+            painted.contains(&format!("▌{OSC8}{url}{ST}proj-12-auth{OSC8}{ST}")),
+            "a later row's url must reach the band — {painted:?}"
+        );
+        assert_eq!(
+            painted.matches(OSC8).count(),
+            2,
+            "one hyperlink, its two halves — {painted:?}"
+        );
+    }
+
+    /// The band is byte-for-byte the old one when the group has no url, and
+    /// `queue list` — which prints no colour — never carries a link even when
+    /// it does.
+    #[test]
+    fn the_group_band_carries_no_link_without_a_url_or_without_colour() {
+        let bare = Row {
+            group: Some("g".into()),
+            issue_url: None,
+            ..row("a")
+        };
+        let with_url = Row {
+            group: Some("g".into()),
+            issue_url: Some("https://acme.example/m".into()),
+            ..row("a")
+        };
+
+        let board = table(
+            std::slice::from_ref(&bare),
+            Style::board(200),
+            &BTreeMap::new(),
+            None,
+        );
+        assert!(!board.contains(OSC8), "no url, no link — {board:?}");
+
+        assert_eq!(
+            plain_table(std::slice::from_ref(&bare)),
+            plain_table(std::slice::from_ref(&with_url)),
+            "`queue list` resolves no link"
+        );
+        assert!(
+            !plain_table(std::slice::from_ref(&with_url)).contains(OSC8),
+            "no colour, no link"
+        );
+    }
+
+    /// `strip_ansi` takes an OSC 8 hyperlink out whole, url and all. The old
+    /// skip ran to the first `m`, so a url with an `m` in it — a `.com` host,
+    /// `atlassian`, `acme` — ended the skip early and dropped the rest of the
+    /// url and its `ESC \` into the panel drawn over the board. This asserts
+    /// the whole escape is gone and only the visible name is left.
+    #[test]
+    fn strip_ansi_removes_a_hyperlink_escape_whole_including_an_m_in_its_url() {
+        let url = "https://acme.atlassian.net/browse/PROJ-12";
+        assert!(url.contains('m'), "the url needs an `m` for this to bite");
+        let band = format!("{DIM}   ▌{OSC8}{url}{ST}proj-12-auth-rework{OSC8}{ST}{RESET}");
+        assert_eq!(strip_ansi(&band), "   ▌proj-12-auth-rework");
     }
 
     /// A group's total holds the step in flight as well as everything banked.

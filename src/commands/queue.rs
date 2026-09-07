@@ -172,10 +172,12 @@ pub(crate) fn longest_agent_step(pipeline: &crate::pipeline::Pipeline) -> &str {
 ///
 /// `branch` is here because a task body is content an agent wrote, and
 /// `spoolway stack` force-pushes a squashed commit onto whatever `branch:`
-/// says. spoolway derives `task/<id>` itself, `register_stack` and
-/// `ensure_workspace` hardcode that shape for a dependency, and a value
-/// starting with `-` would also reach `gh pr view` as a flag — so a document
-/// may not name a branch at all.
+/// says. spoolway derives the value itself — `task/<id>`, or
+/// `task/<slug>-<id>` when `issue_tracking.key_in_names` prefixes it — and
+/// stamps it in [`parse_submission`]; every dependency caller then reads that
+/// recorded field rather than rebuilding a shape of its own. A value starting
+/// with `-` would also reach `gh pr view` as a flag — so a document may not
+/// name a branch at all.
 pub(crate) const RESERVED_KEYS: &[&str] = &[
     "stage",
     "run",
@@ -550,7 +552,12 @@ fn queue_add_documents(
     // it into the queue — because a sibling document further down the batch
     // turned out to be broken — would be a ticket nothing ever points back
     // at.
-    open_tickets(repo, documents, &mut tasks)?;
+    let group_slug = open_tickets(repo, documents, &mut tasks)?;
+
+    // The prefix goes on in a pass of its own, after the hook has answered:
+    // the slug does not exist until `open_tickets` has run, and `branch:` was
+    // already stamped and the lane name already checked by `validate_batch`.
+    prefix_generated_names(&mut tasks, &group_slug);
 
     // All or none: every document above already parsed and validated, so
     // nothing left here can fail — the writes are the commit.
@@ -573,6 +580,41 @@ fn queue_add_documents(
     Ok(())
 }
 
+/// Prefix each task's `group:`, `branch:` and stored `slug:` with the slug its
+/// group's hook answered — `group: <slug>-<group>`, `branch:
+/// task/<slug>-<id>`. A no-op for any group with no slug, which is every group
+/// when `issue_tracking.key_in_names` is off, so with the flag off every
+/// generated name is byte-for-byte what it is today.
+///
+/// Runs after [`open_tickets`] and before any task is saved. The `task/` ref
+/// namespace is kept, so `spoolway stack` and the orphaned-branch sweep still
+/// find these branches where they look today; the worktree directory follows
+/// the branch and so picks the prefix up on its own — see
+/// [`crate::mux::branch_slug`].
+fn prefix_generated_names(tasks: &mut [Task], group_slug: &BTreeMap<String, String>) {
+    // The one winning slug per group onto every `slug:` first — the same
+    // stamp the failure path runs before `write_back_ids`.
+    stamp_group_slugs(tasks, group_slug);
+
+    // One line per distinct prefix applied, naming the new group — the rename
+    // is invisible otherwise until somebody runs `git branch`.
+    let mut announced: std::collections::BTreeSet<(String, String)> = Default::default();
+    for task in tasks.iter_mut() {
+        let Some(group) = task.front.group.clone() else {
+            continue;
+        };
+        let Some(slug) = group_slug.get(&group) else {
+            continue;
+        };
+        let prefixed_group = format!("{slug}-{group}");
+        task.front.branch = Some(format!("task/{slug}-{}", task.front.id));
+        task.front.group = Some(prefixed_group.clone());
+        if announced.insert((slug.clone(), prefixed_group.clone())) {
+            println!("issue_tracking: names prefixed `{slug}` — group `{prefixed_group}`\n");
+        }
+    }
+}
+
 /// Call the `[issue_tracking]` open hook once for every document in the
 /// batch that does not already name a `ticket:`, before any of them is
 /// queued — a no-op start to finish when no hook is configured at all.
@@ -588,9 +630,25 @@ fn queue_add_documents(
 /// before every id already answered is written back into the document it
 /// came from, in place on disk: see [`write_back_ids`], which is what makes
 /// re-running the same `queue add` resume rather than open a second set.
-fn open_tickets(repo: &Repo, documents: &[(String, String)], tasks: &mut [Task]) -> Result<()> {
+///
+/// Returns the slug decided for each `group:` this batch touches — one per
+/// group, the first non-blank `slug=` a hook answers, seeded from tasks
+/// already in the queue as well as this batch. Empty unless
+/// `issue_tracking.key_in_names` is on and a hook actually answered a slug;
+/// [`prefix_generated_names`] is what applies it.
+fn open_tickets(
+    repo: &Repo,
+    documents: &[(String, String)],
+    tasks: &mut [Task],
+) -> Result<BTreeMap<String, String>> {
+    // `group:` on every task in this batch is still the bare name a document
+    // wrote — `validate_batch` never prefixes it — so every map here is keyed
+    // by the bare group.
+    let mut group_slug: BTreeMap<String, String> = BTreeMap::new();
+    let key_in_names = repo.config.issue_tracking.key_in_names;
+
     if !crate::tracking::configured(repo) {
-        return Ok(());
+        return Ok(group_slug);
     }
 
     let mut group_size: BTreeMap<String, usize> = BTreeMap::new();
@@ -600,13 +658,63 @@ fn open_tickets(repo: &Repo, documents: &[(String, String)], tasks: &mut [Task])
         }
     }
     // Seeded from the queue too, not only this batch: a group opened over
-    // more than one `queue add` call already has its epic on a sibling this
-    // batch never mentions.
+    // more than one `queue add` call already has its epic — and its slug — on
+    // a sibling this batch never mentions. A queued sibling's `group:` already
+    // carries the `<slug>-` prefix from its own `queue add`, so a recognised
+    // prefix is stripped before comparing: a person writes the bare `group:`
+    // in every document they ever cut, and the second `queue add` still finds
+    // the first one's epic instead of opening a second.
     let mut group_epic: BTreeMap<String, String> = BTreeMap::new();
     for sibling in repo.tasks().unwrap_or_default() {
+        let Some(group) = sibling.front.group.clone() else {
+            continue;
+        };
+        // A queued file can be hand-edited, and a stored slug with it. One
+        // that no longer passes `check_id` is ignored outright — not used to
+        // strip a `<slug>-` prefix off the group for the epic lookup, and not
+        // seeded as a prefix — so a bad value cannot attach this group to the
+        // wrong epic or an invalid branch. It is dropped in silence: a queued
+        // sibling is not this command's input to complain about.
+        let sib_slug = match sibling.extra_str("slug") {
+            s if accept_slug(s) => s,
+            _ => "",
+        };
+        let bare = strip_slug_prefix(&group, sib_slug).to_string();
         let epic = sibling.extra_str("epic");
-        if let (Some(group), false) = (sibling.front.group.clone(), epic.is_empty()) {
-            group_epic.entry(group).or_insert_with(|| epic.to_string());
+        if !epic.is_empty() {
+            group_epic
+                .entry(bare.clone())
+                .or_insert_with(|| epic.to_string());
+        }
+        if key_in_names && !sib_slug.is_empty() {
+            group_slug
+                .entry(bare)
+                .or_insert_with(|| sib_slug.to_string());
+        }
+    }
+    // And from this batch: a document already carrying `slug:` — one reported
+    // `kept`, or one a prior failed run wrote back — pins its group's slug
+    // the same way a queued sibling does, so a hook answering a different
+    // slug on the re-run cannot displace the first non-blank answer. This
+    // document *is* this command's input, so a bad `slug:` here is reported —
+    // and stripped from the task, so what queues does not carry the value
+    // the note just said was dropped.
+    if key_in_names {
+        for task in tasks.iter_mut() {
+            let slug = task.extra_str("slug").to_string();
+            let Some(group) = task.front.group.clone().filter(|_| !slug.is_empty()) else {
+                continue;
+            };
+            if accept_slug(&slug) {
+                group_slug.entry(group).or_insert(slug);
+            } else {
+                println!(
+                    "  issue_tracking: slug `{slug}` on `{}` is not a valid name \
+                     (lowercase letters, digits and hyphens) — ignored",
+                    task.id()
+                );
+                task.front.extra.remove("slug");
+            }
         }
     }
 
@@ -650,7 +758,12 @@ fn open_tickets(repo: &Repo, documents: &[(String, String)], tasks: &mut [Task])
 
         match crate::tracking::open_ticket(repo, &tasks[i], size, &known_epic, &depends_tickets)? {
             crate::tracking::OpenResult::NoHook => unreachable!("checked configured() above"),
-            crate::tracking::OpenResult::Answered { epic, ticket } => {
+            crate::tracking::OpenResult::Answered {
+                epic,
+                ticket,
+                slug,
+                url,
+            } => {
                 if !epic.is_empty() && !group_epic.contains_key(&group) {
                     group_epic.insert(group.clone(), epic.clone());
                     println!("  {:<8} {:<9} {:<13} {}", "epic", "created", epic, group);
@@ -663,6 +776,14 @@ fn open_tickets(repo: &Repo, documents: &[(String, String)], tasks: &mut [Task])
                     tasks[i].set_extra_str("ticket", &ticket);
                     opened.push(format!("ticket {ticket} (`{}`)", tasks[i].id()));
                 }
+                record_slug_and_url(
+                    &mut tasks[i],
+                    &slug,
+                    &url,
+                    key_in_names,
+                    &group,
+                    &mut group_slug,
+                );
                 println!(
                     "  {:<8} {:<9} {:<13} {}",
                     "ticket",
@@ -679,6 +800,11 @@ fn open_tickets(repo: &Repo, documents: &[(String, String)], tasks: &mut [Task])
                     "—",
                     tasks[i].id()
                 );
+                // The group's winning slug onto every task first, so the
+                // ids written back carry the dependency-order decision — not
+                // a later task's own raw answer, which document order would
+                // otherwise let win the re-run.
+                stamp_group_slugs(tasks, &group_slug);
                 write_back_ids(documents, tasks)?;
                 let code = exit_code
                     .map(|c| c.to_string())
@@ -711,7 +837,122 @@ fn open_tickets(repo: &Repo, documents: &[(String, String)], tasks: &mut [Task])
         }
     }
     println!();
-    Ok(())
+    Ok(group_slug)
+}
+
+/// The bare `group:` name, with a recognised `<slug>-` prefix removed. A
+/// queued sibling carries the prefix its own `queue add` applied; comparing
+/// against the bare name a fresh document writes is what lets the epic and
+/// slug lookups in [`open_tickets`] span more than one `queue add`.
+fn strip_slug_prefix<'a>(group: &'a str, slug: &str) -> &'a str {
+    if slug.is_empty() {
+        return group;
+    }
+    group
+        .strip_prefix(slug)
+        .and_then(|rest| rest.strip_prefix('-'))
+        .unwrap_or(group)
+}
+
+/// Whether a slug a hook or a document offered is one spoolway will build a
+/// name out of: non-blank and inside [`crate::config::check_id`]'s alphabet,
+/// the same one every task id, group and branch already uses.
+fn accept_slug(slug: &str) -> bool {
+    !slug.is_empty() && crate::config::check_id("issue_tracking slug", slug).is_ok()
+}
+
+/// Take the `slug=` and `url=` a hook answered on the `open` event.
+///
+/// The url is stored on the task as `url:` and validated whatever
+/// `key_in_names` holds: the task's goal is to have it on the task for
+/// `terminal-names` to use later, and the flag gates only the naming, not
+/// that.
+///
+/// The slug is naming, so it is looked at only when `key_in_names` is on, and
+/// only pinned in `group_slug` — where the first valid answer in dependency
+/// order wins. It is *not* stamped onto this task here: [`stamp_group_slugs`]
+/// writes the one winning value onto every task of the group, so a later
+/// task's own answer never ends up on its `slug:` line.
+///
+/// A slug that [`accept_slug`] rejects, or a url that is not an absolute
+/// `http`/`https` address, is dropped with a printed note — the batch queues
+/// without it rather than refusing, since neither is load-bearing for the
+/// ticket that was already opened.
+fn record_slug_and_url(
+    task: &mut Task,
+    slug: &str,
+    url: &str,
+    key_in_names: bool,
+    group: &str,
+    group_slug: &mut BTreeMap<String, String>,
+) {
+    if key_in_names && !slug.is_empty() {
+        if accept_slug(slug) {
+            group_slug
+                .entry(group.to_string())
+                .or_insert_with(|| slug.to_string());
+        } else {
+            println!(
+                "  issue_tracking: slug `{slug}` for `{}` is not a valid name \
+                 (lowercase letters, digits and hyphens) — ignored",
+                task.id()
+            );
+        }
+    }
+    if !url.is_empty() {
+        if is_absolute_http_url(url) {
+            task.set_extra_str("url", url);
+        } else {
+            println!(
+                "  issue_tracking: url `{url}` for `{}` is not an absolute http(s) address — dropped",
+                task.id()
+            );
+        }
+    }
+}
+
+/// Stamp the one winning slug for each group onto every task of that group's
+/// `slug:` line — the value [`open_tickets`] pinned in `group_slug`, which is
+/// the first valid answer in dependency order. Run before a batch is saved
+/// (via [`prefix_generated_names`]) and again before [`write_back_ids`] on a
+/// mid-batch failure, so what lands on disk is the group's decision, never a
+/// later task's own raw answer.
+fn stamp_group_slugs(tasks: &mut [Task], group_slug: &BTreeMap<String, String>) {
+    for task in tasks.iter_mut() {
+        if let Some(group) = &task.front.group
+            && let Some(slug) = group_slug.get(group)
+        {
+            task.set_extra_str("slug", slug);
+        }
+    }
+}
+
+/// Whether `s` is an absolute `http`/`https` URL with a host.
+///
+/// Parsed by the `url` crate — the WHATWG URL standard — rather than a
+/// hand-rolled authority scan, so a malformed IPv6 literal (`https://[abc]/`,
+/// `https://[::::]/`), an out-of-range port (`https://host:99999/`) and a
+/// bare scheme (`https://`, `https://:`, `https://@`) all fail at
+/// `Url::parse`, and a relative path (`/browse/PROJ-12`) is not a URL at all.
+/// On top of "it parses": the scheme must be `http` or `https` and there must
+/// be a non-empty host. Userinfo and a port are fine.
+///
+/// One check runs before the parser: the raw string must hold no whitespace.
+/// The standard folds an interior space into the userinfo as `%20` and parses
+/// on, so a hook answering a `url=` line with a space in it would otherwise
+/// read back as a valid URL rather than the malformed answer it is.
+///
+/// spoolway hands the string on to `terminal-names` untouched and never
+/// fetches it, so nothing past this is checked.
+fn is_absolute_http_url(s: &str) -> bool {
+    if s.contains(char::is_whitespace) {
+        return false;
+    }
+    let Ok(parsed) = url::Url::parse(s) else {
+        return false;
+    };
+    matches!(parsed.scheme(), "http" | "https")
+        && parsed.host_str().is_some_and(|host| !host.is_empty())
 }
 
 /// This task's own dependencies, processed first, so `open_tickets` can walk
@@ -765,11 +1006,13 @@ fn dependency_ticket(repo: &Repo, tasks: &[Task], dep: &str) -> Result<String> {
     Ok(existing.extra_str("ticket").to_string())
 }
 
-/// Write every id `open_tickets` already secured back into the document it
+/// Write every value `open_tickets` already secured back into the document it
 /// came from, in place on disk — called only once a hook call has failed,
-/// so a re-run of the same `queue add` sees those documents already
-/// carrying `epic:`/`ticket:` and reports them `kept` rather than opening a
-/// second ticket for work the first call already did.
+/// so a re-run of the same `queue add` sees those documents already carrying
+/// `epic:`/`ticket:`/`slug:`/`url:` and does not undo the first call's work:
+/// a `ticket:` reports the document `kept` and skips the hook, and a `slug:`
+/// pins the group's prefix so the re-run's hook cannot answer a different
+/// one.
 ///
 /// `documents` and `tasks` are index-aligned: `validate_batch` parses one
 /// [`Task`] per document, in the order `documents` names them, and never
@@ -785,13 +1028,11 @@ fn write_back_ids(documents: &[(String, String)], tasks: &[Task]) -> Result<()> 
         }
 
         let mut updated = raw.clone();
-        let epic = task.extra_str("epic");
-        if !epic.is_empty() {
-            updated = with_frontmatter_field(&updated, "epic", epic);
-        }
-        let ticket = task.extra_str("ticket");
-        if !ticket.is_empty() {
-            updated = with_frontmatter_field(&updated, "ticket", ticket);
+        for key in ["epic", "ticket", "slug", "url"] {
+            let value = task.extra_str(key);
+            if !value.is_empty() {
+                updated = with_frontmatter_field(&updated, key, value);
+            }
         }
         if updated != *raw {
             crate::task::write_atomic(path, &updated)
@@ -3419,14 +3660,16 @@ const AUTHORED_FIELDS: &[&str] = &[
 
 /// Passthrough keys that still have to go, despite landing in
 /// [`crate::task::Frontmatter`]'s own untyped `extra` map the same as a
-/// project's real metadata does: `epic:` and `ticket:` are a hook's own
-/// answer for the *finished* run, and a document that kept either into a
-/// fresh submission would point the new run at the old run's ticket —
-/// `queue add` reports such a document `kept` and never calls the `open`
-/// hook for it, so the new run gets no ticket of its own either. See
-/// [`crate::task::Task::extra_str`] and `set_extra_str` for how the two are
-/// carried.
-const DROPPED_PASSTHROUGH_FIELDS: &[&str] = &["epic", "ticket"];
+/// project's real metadata does: all four are a hook's own answer for the
+/// *finished* run. A document that kept `epic:` or `ticket:` into a fresh
+/// submission would point the new run at the old run's ticket — `queue add`
+/// reports such a document `kept` and never calls the `open` hook for it, so
+/// the new run gets no ticket of its own either. `slug:` and `url:` are the
+/// machine-written pair from the same answer: a kept `slug:` would pin the
+/// new run's group prefix to the old issue's key, and a kept `url:` would
+/// address the old issue. See [`crate::task::Task::extra_str`] and
+/// `set_extra_str` for how they are carried.
+const DROPPED_PASSTHROUGH_FIELDS: &[&str] = &["epic", "ticket", "slug", "url"];
 
 /// A document's text with its frontmatter reduced to what its author owns —
 /// [`AUTHORED_FIELDS`], plus any key that is not a typed `Frontmatter` field
@@ -3925,6 +4168,62 @@ mod tests {
     /// A minimal, non-empty body — the shape most of these tests only need
     /// to exist, not to say anything in particular.
     const BODY: &str = "## Goal\n\nDo the thing.\n";
+
+    #[test]
+    fn strip_slug_prefix_removes_only_a_recognised_prefix() {
+        assert_eq!(
+            strip_slug_prefix("proj-12-auth-rework", "proj-12"),
+            "auth-rework"
+        );
+        // No slug known, or the group does not carry it: left whole.
+        assert_eq!(strip_slug_prefix("auth-rework", ""), "auth-rework");
+        assert_eq!(strip_slug_prefix("auth-rework", "proj-12"), "auth-rework");
+        // The slug must be followed by a hyphen to count as a prefix.
+        assert_eq!(strip_slug_prefix("proj-12x", "proj-12"), "proj-12x");
+    }
+
+    #[test]
+    fn is_absolute_http_url_accepts_only_an_absolute_web_address() {
+        assert!(is_absolute_http_url(
+            "https://acme.atlassian.net/browse/PROJ-12"
+        ));
+        assert!(is_absolute_http_url("http://localhost:8080/x"));
+        assert!(is_absolute_http_url("https://host"));
+        // The scheme is case-insensitive, and a plain port is fine.
+        assert!(is_absolute_http_url("HTTPS://host/x"));
+        assert!(is_absolute_http_url("Http://Example.com"));
+        assert!(is_absolute_http_url("http://host:443/x"));
+        // Userinfo is fine — the criterion asks only for an absolute http(s) URL.
+        assert!(is_absolute_http_url("https://u:p@host:443/x"));
+        // A well-formed bracketed IPv6 host, with and without a port.
+        assert!(is_absolute_http_url("https://[::1]/"));
+        assert!(is_absolute_http_url("https://[2001:db8::1]:8443/x"));
+
+        assert!(!is_absolute_http_url("/browse/PROJ-12"));
+        assert!(!is_absolute_http_url("ftp://acme/x"));
+        assert!(!is_absolute_http_url("acme.atlassian.net/browse/PROJ-12"));
+        // A scheme with no real host before the path, query or fragment.
+        assert!(!is_absolute_http_url("https://"));
+        assert!(!is_absolute_http_url("https://?x"));
+        assert!(!is_absolute_http_url("https://#x"));
+        assert!(!is_absolute_http_url("https:// "));
+        assert!(!is_absolute_http_url("https://a b/c"));
+        assert!(!is_absolute_http_url("https://:"));
+        assert!(!is_absolute_http_url("https://:8080/x"));
+        assert!(!is_absolute_http_url("https://@"));
+        assert!(!is_absolute_http_url("https://@/path"));
+        // Whitespace anywhere in the raw string — the standard would fold an
+        // interior space into the userinfo and parse on.
+        assert!(!is_absolute_http_url("https://user name@host"));
+        assert!(!is_absolute_http_url("https://host /x"));
+        // A malformed IPv6 literal, and out-of-range or non-numeric ports.
+        assert!(!is_absolute_http_url("https://[]/"));
+        assert!(!is_absolute_http_url("https://[abc]/"));
+        assert!(!is_absolute_http_url("https://[::::]/"));
+        assert!(!is_absolute_http_url("https://host:abc"));
+        assert!(!is_absolute_http_url("https://host:99999/"));
+        assert!(!is_absolute_http_url("https://host:123456"));
+    }
 
     /// A whole task document, in the shape `--from` accepts: `id:` plus
     /// whatever else `extra` puts in the frontmatter, then `body`.
@@ -7511,6 +7810,400 @@ mod tests {
             let untouched = std::fs::read_to_string(&path).unwrap();
             assert_eq!(untouched, text);
         }
+
+        /// A slug a successful call secured is written back into its pending
+        /// document when a later call in the batch fails, so the re-run reads
+        /// it as `slug:` and pins the group's prefix — a hook answering a
+        /// different slug on the re-run cannot displace the first one.
+        #[test]
+        fn a_secured_slug_survives_a_failed_batch_and_pins_the_re_run() {
+            let mut repo = fixture("open-slug-writeback");
+            repo.config.issue_tracking.key_in_names = true;
+            with_hook(
+                &mut repo,
+                r#"if [ "$SPOOLWAY_TASK" = "auth-02" ]; then exit 1; fi
+                   { echo "ticket=PROJ-13"; echo "slug=proj-12"; } >"$SPOOLWAY_OUT""#,
+            );
+
+            let a = document("auth-01", "group: auth-rework\n", BODY);
+            let a_path = write_doc(&repo, "auth-01.md", &a);
+            let b = document("auth-02", "group: auth-rework\n", BODY);
+            let b_path = write_doc(&repo, "auth-02.md", &b);
+            queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&[&a_path, &b_path]),
+                &repo.root,
+                false,
+            )
+            .unwrap_err();
+
+            // `auth-01`'s slug landed in its pending document, in place.
+            assert!(
+                std::fs::read_to_string(&a_path)
+                    .unwrap()
+                    .contains("slug: proj-12"),
+                "the secured slug was not written back"
+            );
+
+            // The re-run: the hook now answers a different slug for the task
+            // that had not been reached, but `auth-01`'s written-back `slug:`
+            // is what wins.
+            with_hook(
+                &mut repo,
+                r#"{ echo "ticket=PROJ-14"; echo "slug=other-99"; } >"$SPOOLWAY_OUT""#,
+            );
+            queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&[&a_path, &b_path]),
+                &repo.root,
+                false,
+            )
+            .unwrap();
+
+            for id in ["auth-01", "auth-02"] {
+                assert_eq!(
+                    queued(&repo, id).front.group.as_deref(),
+                    Some("proj-12-auth-rework"),
+                    "{id} took the wrong prefix"
+                );
+            }
+        }
+
+        /// The winner is the first valid answer in *dependency* order, not
+        /// document order — and it stays the winner across a mid-batch
+        /// failure even when the documents were submitted back to front.
+        /// Documents `[c, b, a]`, chained `a <- b <- c`: the hook answers a
+        /// different valid slug for `a` and `b`, then fails for `c`. `a`'s
+        /// slug is what every document of the group carries afterwards.
+        #[test]
+        fn the_dependency_order_winner_survives_reversed_document_order() {
+            let mut repo = fixture("open-slug-dep-order");
+            repo.config.issue_tracking.key_in_names = true;
+            with_hook(
+                &mut repo,
+                r#"case "$SPOOLWAY_TASK" in
+                     chain-a) slug=aa-1 ;;
+                     chain-b) slug=bb-2 ;;
+                     *) exit 1 ;;
+                   esac
+                   { echo "ticket=t-$SPOOLWAY_TASK"; echo "slug=$slug"; } >"$SPOOLWAY_OUT""#,
+            );
+
+            let a = document("chain-a", "group: chain\n", BODY);
+            let a_path = write_doc(&repo, "chain-a.md", &a);
+            let b = document("chain-b", "group: chain\ndepends_on: [chain-a]\n", BODY);
+            let b_path = write_doc(&repo, "chain-b.md", &b);
+            let c = document("chain-c", "group: chain\ndepends_on: [chain-b]\n", BODY);
+            let c_path = write_doc(&repo, "chain-c.md", &c);
+
+            // Submitted back to front.
+            queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&[&c_path, &b_path, &a_path]),
+                &repo.root,
+                false,
+            )
+            .unwrap_err();
+
+            for path in [&a_path, &b_path] {
+                assert!(
+                    std::fs::read_to_string(path)
+                        .unwrap()
+                        .contains("slug: aa-1"),
+                    "{path} did not carry the dependency-order winner"
+                );
+            }
+
+            // The re-run queues the lot; every document is prefixed `aa-1`.
+            with_hook(
+                &mut repo,
+                r#"{ echo "ticket=t-$SPOOLWAY_TASK"; echo "slug=late-9"; } >"$SPOOLWAY_OUT""#,
+            );
+            queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&[&c_path, &b_path, &a_path]),
+                &repo.root,
+                false,
+            )
+            .unwrap();
+            for id in ["chain-a", "chain-b", "chain-c"] {
+                assert_eq!(
+                    queued(&repo, id).front.group.as_deref(),
+                    Some("aa-1-chain"),
+                    "{id} took the wrong prefix"
+                );
+            }
+        }
+
+        /// End to end, through the real binary path with a real hook script:
+        /// with `issue_tracking.key_in_names` on and the hook answering a
+        /// `slug=`, `queue add` writes `group: <slug>-<group>` and `branch:
+        /// task/<slug>-<id>`, stores the `slug:` and the `url:`, and the
+        /// prefixed branch still loads back cleanly through `src/task.rs`'s
+        /// own invariant.
+        #[test]
+        fn key_in_names_prefixes_the_group_the_branch_and_stores_the_url() {
+            let mut repo = fixture("open-prefix");
+            repo.config.issue_tracking.key_in_names = true;
+            with_hook(
+                &mut repo,
+                r#"{ echo "epic=PROJ-12"; echo "ticket=PROJ-13"
+                     echo "slug=proj-12"
+                     echo "url=https://acme.atlassian.net/browse/PROJ-12"; } >"$SPOOLWAY_OUT""#,
+            );
+
+            let parent = document("auth-01", "group: auth-rework\n", BODY);
+            let parent_path = write_doc(&repo, "auth-01.md", &parent);
+            let child = document(
+                "auth-02",
+                "group: auth-rework\ndepends_on: [auth-01]\n",
+                BODY,
+            );
+            let child_path = write_doc(&repo, "auth-02.md", &child);
+
+            queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&[&parent_path, &child_path]),
+                &repo.root,
+                false,
+            )
+            .unwrap();
+
+            for id in ["auth-01", "auth-02"] {
+                let task = queued(&repo, id);
+                assert_eq!(
+                    task.front.group.as_deref(),
+                    Some("proj-12-auth-rework"),
+                    "{id}"
+                );
+                assert_eq!(
+                    task.front.branch.as_deref(),
+                    Some(format!("task/proj-12-{id}").as_str()),
+                    "{id}"
+                );
+                assert_eq!(task.extra_str("slug"), "proj-12", "{id}");
+            }
+            assert_eq!(
+                queued(&repo, "auth-01").extra_str("url"),
+                "https://acme.atlassian.net/browse/PROJ-12"
+            );
+        }
+
+        /// With the flag off, a `slug=` the hook answers is ignored and every
+        /// generated name is byte-for-byte what it is today — but a valid
+        /// `url=` is still stored on the task, since the goal is to have it
+        /// there for `terminal-names` and the flag gates only the naming.
+        #[test]
+        fn with_the_flag_off_a_slug_answer_changes_no_name_but_the_url_is_kept() {
+            let mut repo = fixture("open-no-prefix");
+            with_hook(
+                &mut repo,
+                r#"{ echo "ticket=PROJ-13"; echo "slug=proj-12"
+                     echo "url=https://acme.atlassian.net/browse/PROJ-12"; } >"$SPOOLWAY_OUT""#,
+            );
+
+            let doc = document("auth-01", "group: auth-rework\n", BODY);
+            let path = write_doc(&repo, "auth-01.md", &doc);
+            queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&[&path]),
+                &repo.root,
+                false,
+            )
+            .unwrap();
+
+            let task = queued(&repo, "auth-01");
+            assert_eq!(task.front.group.as_deref(), Some("auth-rework"));
+            assert_eq!(task.front.branch.as_deref(), Some("task/auth-01"));
+            assert_eq!(task.extra_str("slug"), "", "the slug is naming, gated off");
+            assert_eq!(
+                task.extra_str("url"),
+                "https://acme.atlassian.net/browse/PROJ-12",
+                "the url is stored whatever the flag says"
+            );
+        }
+
+        /// An invalid slug — one that fails `check_id`'s alphabet — is
+        /// reported and dropped: the batch still queues, just without a
+        /// prefix.
+        #[test]
+        fn an_invalid_slug_is_dropped_and_the_batch_still_queues() {
+            let mut repo = fixture("open-bad-slug");
+            repo.config.issue_tracking.key_in_names = true;
+            with_hook(
+                &mut repo,
+                r#"{ echo "ticket=PROJ-13"; echo "slug=PROJ-12"; } >"$SPOOLWAY_OUT""#,
+            );
+
+            let doc = document("auth-01", "group: auth-rework\n", BODY);
+            let path = write_doc(&repo, "auth-01.md", &doc);
+            queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&[&path]),
+                &repo.root,
+                false,
+            )
+            .unwrap();
+
+            let task = queued(&repo, "auth-01");
+            assert_eq!(task.front.group.as_deref(), Some("auth-rework"));
+            assert_eq!(task.front.branch.as_deref(), Some("task/auth-01"));
+            assert_eq!(task.extra_str("slug"), "");
+        }
+
+        /// A `slug:` a person authored (or hand-edited) onto a document is
+        /// held to the same `check_id` alphabet as one a hook answers: an
+        /// invalid one is dropped, and the batch queues with no prefix rather
+        /// than an invalid branch.
+        #[test]
+        fn an_authored_invalid_slug_is_not_turned_into_a_branch_prefix() {
+            let mut repo = fixture("open-authored-bad-slug");
+            repo.config.issue_tracking.key_in_names = true;
+            with_hook(&mut repo, r#"{ echo "ticket=PROJ-13"; } >"$SPOOLWAY_OUT""#);
+
+            let doc = document("auth-01", "group: auth-rework\nslug: PROJ-12\n", BODY);
+            let path = write_doc(&repo, "auth-01.md", &doc);
+            queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&[&path]),
+                &repo.root,
+                false,
+            )
+            .unwrap();
+
+            let task = queued(&repo, "auth-01");
+            assert_eq!(task.front.group.as_deref(), Some("auth-rework"));
+            assert_eq!(task.front.branch.as_deref(), Some("task/auth-01"));
+            // The value the note said was dropped is not on the queued task.
+            assert_eq!(task.extra_str("slug"), "");
+        }
+
+        /// A `url=` that is not an absolute http(s) address is dropped, not
+        /// stored — the batch still queues.
+        #[test]
+        fn a_relative_url_is_dropped_and_the_batch_still_queues() {
+            let mut repo = fixture("open-bad-url");
+            with_hook(
+                &mut repo,
+                r#"{ echo "ticket=PROJ-13"; echo "url=/browse/PROJ-12"; } >"$SPOOLWAY_OUT""#,
+            );
+
+            let doc = document("auth-01", "group: auth-rework\n", BODY);
+            let path = write_doc(&repo, "auth-01.md", &doc);
+            queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&[&path]),
+                &repo.root,
+                false,
+            )
+            .unwrap();
+
+            assert_eq!(queued(&repo, "auth-01").extra_str("url"), "");
+        }
+
+        /// One slug and one epic per group, spanning two `queue add` calls: a
+        /// second call naming the bare `group:` reuses the first call's epic
+        /// and picks the same prefix back up, because the lookup strips the
+        /// recognised `<slug>-` prefix off a queued sibling before comparing.
+        #[test]
+        fn a_second_queue_add_reuses_the_epic_and_the_slug() {
+            let mut repo = fixture("open-prefix-resume");
+            repo.config.issue_tracking.key_in_names = true;
+            with_hook(
+                &mut repo,
+                r#"epic=$SPOOLWAY_EPIC
+                   if [ -z "$epic" ] && [ "$SPOOLWAY_GROUP_SIZE" -gt 1 ]; then epic=PROJ-12; fi
+                   { echo "epic=$epic"; echo "ticket=t-$SPOOLWAY_TASK"
+                     echo "slug=proj-12"
+                     echo "url=https://acme.atlassian.net/browse/${epic:-PROJ-13}"; } >"$SPOOLWAY_OUT""#,
+            );
+
+            let a = document("auth-01", "group: auth-rework\n", BODY);
+            let a_path = write_doc(&repo, "auth-01.md", &a);
+            let b = document("auth-02", "group: auth-rework\n", BODY);
+            let b_path = write_doc(&repo, "auth-02.md", &b);
+            queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&[&a_path, &b_path]),
+                &repo.root,
+                false,
+            )
+            .unwrap();
+            assert_eq!(queued(&repo, "auth-01").extra_str("epic"), "PROJ-12");
+
+            // A second call, naming the bare group the way a person always
+            // writes it.
+            let c = document("auth-03", "group: auth-rework\n", BODY);
+            let c_path = write_doc(&repo, "auth-03.md", &c);
+            queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&[&c_path]),
+                &repo.root,
+                false,
+            )
+            .unwrap();
+
+            let third = queued(&repo, "auth-03");
+            assert_eq!(
+                third.extra_str("epic"),
+                "PROJ-12",
+                "the second call must reuse the first call's epic, not open a new one"
+            );
+            assert_eq!(third.front.group.as_deref(), Some("proj-12-auth-rework"));
+            assert_eq!(third.front.branch.as_deref(), Some("task/proj-12-auth-03"));
+        }
+
+        /// A queued sibling whose stored `slug:` was hand-edited to something
+        /// `check_id` rejects is not a recognised prefix: its `<slug>-` is not
+        /// stripped off its group for the epic lookup, so a fresh document
+        /// naming a *different* group that merely shares the suffix does not
+        /// inherit that sibling's epic.
+        #[test]
+        fn an_invalid_sibling_slug_is_not_a_recognised_prefix_for_the_epic_lookup() {
+            let mut repo = fixture("open-bad-sibling-slug");
+            repo.config.issue_tracking.key_in_names = true;
+
+            // A sibling already in the queue, with a corrupt `slug:` and a
+            // group that starts with it.
+            std::fs::create_dir_all(repo.queue_dir()).unwrap();
+            std::fs::write(
+                repo.queue_dir().join("sib.md"),
+                "---\nid: sib\ntitle: sib, done\nstage: queued\ngroup: PROJ-rework\n\
+                 epic: EPIC-1\nslug: PROJ\n---\n## Goal\n\nx\n",
+            )
+            .unwrap();
+
+            with_hook(
+                &mut repo,
+                r#"{ echo "epic=$SPOOLWAY_EPIC"; echo "ticket=t-$SPOOLWAY_TASK"
+                     echo "slug=re-1"; } >"$SPOOLWAY_OUT""#,
+            );
+            let doc = document("fresh", "group: rework\n", BODY);
+            let path = write_doc(&repo, "fresh.md", &doc);
+            queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&[&path]),
+                &repo.root,
+                false,
+            )
+            .unwrap();
+
+            // `rework` and `PROJ-rework` are unrelated groups once `PROJ` is
+            // rejected, so `fresh` did not inherit `EPIC-1`.
+            assert_ne!(queued(&repo, "fresh").extra_str("epic"), "EPIC-1");
+        }
     }
 
     mod reset_for_reuse_tests {
@@ -7518,9 +8211,9 @@ mod tests {
 
         /// A document in the shape a queued or archived task actually has on
         /// disk: every key spoolway stamps over a task's life, alongside what
-        /// its author wrote. `epic:`/`ticket:` stand in for the passthrough
-        /// keys the reset has to name specially; `my_custom:` stands in for
-        /// an ordinary one it does not.
+        /// its author wrote. `epic:`/`ticket:`/`slug:`/`url:` stand in for the
+        /// passthrough keys the reset has to name specially; `my_custom:`
+        /// stands in for an ordinary one it does not.
         const STAMPED_DOC: &str = "\
 ---
 id: board-key-map
@@ -7534,6 +8227,8 @@ pipeline: ui
 group: board-key-map
 epic: https://github.com/acme/app/issues/1
 ticket: https://github.com/acme/app/issues/2
+slug: gh-1
+url: https://github.com/acme/app/issues/1
 my_custom: kept
 branch: task/board-key-map
 base: master
@@ -7557,7 +8252,8 @@ body\n";
 
         /// The allowlist keeps every field an author owns, drops every field
         /// spoolway stamped — `stage:` and the rest of `RESERVED_KEYS` among
-        /// them — and drops `epic:`/`ticket:` despite neither being a typed
+        /// them — and drops all four hook-written passthrough keys
+        /// (`epic:`/`ticket:`/`slug:`/`url:`) despite none being a typed
         /// `Frontmatter` field at all. A project's own `my_custom:` key
         /// survives, the same as any passthrough key does. The body travels
         /// byte for byte.
@@ -7583,6 +8279,8 @@ body\n";
                 "stage:",
                 "epic:",
                 "ticket:",
+                "slug:",
+                "url:",
                 "branch:",
                 "base:",
                 "run:",

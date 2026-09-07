@@ -89,7 +89,18 @@ if [ "$SPOOLWAY_EVENT" = open ]; then
     acli jira workitem link create --out "$dep" --in "$ticket" \
       --type Blocks --yes                    # --type takes the outward wording
   done
-  { echo "epic=$epic"; echo "ticket=$ticket"; } > "$SPOOLWAY_OUT"
+  # The short handle spoolway puts in generated names, and the issue's web
+  # address kept on the task for later use — spoolway stores and validates
+  # `url=` but shows it nowhere yet. The epic keys a group; a group of one
+  # that never opened an epic is keyed by its ticket. `slug=` is just the key
+  # lowercased — `PROJ-12` becomes `proj-12` — and `url=` is the browse link,
+  # its site read back off the work item the same way `fetch` does it.
+  key=${epic:-$ticket}
+  slug=$(printf '%s' "$key" | tr 'A-Z' 'a-z')
+  site=$(acli jira workitem view --key "$key" --json \
+           | jq -r '.self // empty' | sed -n 's#^\(https\{0,1\}://[^/]*\).*#\1#p')
+  { echo "epic=$epic"; echo "ticket=$ticket"
+    echo "slug=$slug"; echo "url=$site/browse/$key"; } > "$SPOOLWAY_OUT"
   exit 0
 fi
 

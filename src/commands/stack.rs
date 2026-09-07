@@ -242,7 +242,7 @@ pub fn stack(repo: &Repo, args: &StackArgs) -> Result<()> {
 
     let (own_number, url) = open_or_reuse_pr(&worktree, &branch, &cut_from, &title, &body)?;
     report_line("pull req", format!("#{own_number} — {url}"));
-    let stacked = register_stack(&worktree, &id, &task.front.depends_on, own_number)?;
+    let stacked = register_stack(repo, &worktree, &id, &task.front.depends_on, own_number)?;
     report_line("stack", stacked);
 
     println!("\ndone. exit 0");
@@ -689,6 +689,7 @@ fn write_temp_body(worktree: &Path, body: &str) -> Result<PathBuf> {
 /// call in it, just bookkeeping. Returns what happened, for the `stack`
 /// line of the run's own report.
 fn register_stack(
+    repo: &Repo,
     worktree: &Path,
     id: &str,
     depends_on: &[String],
@@ -702,7 +703,11 @@ fn register_stack(
     let gh = gh_program();
     let (owner, repo_name) = owner_repo(worktree)?;
 
-    let dep_branch = format!("task/{dep_id}");
+    // The dependency's real branch, read from its task file rather than
+    // rebuilt as `task/<dep_id>` — the name its pull request was opened on,
+    // and the one `gh pr view` is asked for below. An unresolvable
+    // dependency fails by name here.
+    let dep_branch = repo.dependency_branch(dep_id)?;
     let dep = pr_view(&gh, worktree, &dep_branch)?.ok_or_else(|| {
         anyhow::anyhow!("dependency `{dep_id}` has no pull request on `{dep_branch}` to stack onto")
     })?;
@@ -933,7 +938,8 @@ mod tests {
     /// never actually cut is not a conflict — it is a ref `git merge-tree`
     /// cannot even resolve, and that failure exits 1 the same way a real
     /// conflict does, so `parallel_conflicts` must not trust the exit code
-    /// alone. `queue_add` writes `task/<id>` for every task; this one is
+    /// alone. `queue_add` stamps a `branch:` on every task — `task/<id>`, or
+    /// `task/<slug>-<id>` under `issue_tracking.key_in_names`; this one is
     /// simply never cut.
     #[test]
     fn a_queued_task_with_no_branch_yet_is_not_a_predicted_conflict() {

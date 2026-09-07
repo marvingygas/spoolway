@@ -4107,7 +4107,7 @@ fn ensure_workspace(
         .front
         .branch
         .clone()
-        .unwrap_or_else(|| format!("task/{}", task.id()));
+        .unwrap_or_else(|| crate::task::default_branch(task.id()));
 
     if task.front.workspace_id.is_none() {
         // Under `split` a task cuts a workspace (or a pane) of its own, named
@@ -4161,8 +4161,15 @@ fn ensure_workspace(
                 // `base` keeps its own meaning — the branch the plan lands in
                 // — regardless: only the commit the worktree actually starts
                 // from moves.
+                //
+                // The dependency's branch is read from its own task file, not
+                // rebuilt as `task/<dep>`: `handover adopt` can set a
+                // `branch:` that shape does not predict, and a wrong name here
+                // becomes a failed `git worktree add` rather than a wrong
+                // diff. An unresolvable dependency fails by name here rather
+                // than at the cut — see [`Repo::dependency_branch`].
                 let cut_from = match task.front.depends_on.first() {
-                    Some(dep) => format!("task/{dep}"),
+                    Some(dep) => repo.dependency_branch(dep)?,
                     None => base.clone(),
                 };
                 // Resolved just before the cut, so it names the exact commit
@@ -4177,7 +4184,6 @@ fn ensure_workspace(
                     true => {
                         let workspace = mux.create_workspace(
                             &repo.root,
-                            task.id(),
                             &branch,
                             &cut_from,
                             &format!("spoolway/{}", task.id()),
@@ -4389,7 +4395,7 @@ fn start_one(
     // framing and the policy it cannot know. Written per lane rather than
     // pointed at the project's own file, so that spoolway's half of the system
     // prompt is unskippable — see [`system_prompt`].
-    let system_prompt_text = crate::compose::system_prompt(repo, task, pipeline, step, &prompt);
+    let system_prompt_text = crate::compose::system_prompt(repo, task, pipeline, step, &prompt)?;
     let prompt_file = write_system_prompt(repo, &name, &system_prompt_text)?;
 
     let model = resolve_model(step);
@@ -5390,12 +5396,11 @@ mod tests {
         fn create_workspace(
             &self,
             _cwd: &Path,
-            task: &str,
             branch: &str,
             base: &str,
             _label: &str,
         ) -> Result<Workspace> {
-            self.log(format!("create_workspace {task} on {branch} from {base}"));
+            self.log(format!("create_workspace on {branch} from {base}"));
             Ok(Workspace {
                 workspace_id: "w9".into(),
                 pane_id: "w9:p1".into(),
@@ -5625,6 +5630,9 @@ mod tests {
     #[test]
     fn this_pass_opens_on_the_report_contract_with_nothing_else_to_say() {
         let repo = fixture("no-scope-line");
+        add_task_with(&repo, "earlier", "done", |f| {
+            f.branch = Some("task/earlier".into());
+        });
         let path = add_task_with(&repo, "login", "implement", |front| {
             front.touches = vec!["src/api/**".into(), "src/routes/**".into()];
             front.depends_on = vec!["earlier".into()];
@@ -5659,6 +5667,9 @@ mod tests {
     #[test]
     fn what_you_have_names_the_dependency_and_omits_the_group() {
         let repo = fixture("reading-list");
+        add_task_with(&repo, "earlier-task", "done", |f| {
+            f.branch = Some("task/earlier-task".into());
+        });
         let path = add_task_with(&repo, "login", "implement", |front| {
             front.touches = vec!["src/api/routes.rs".into()];
             front.depends_on = vec!["earlier-task".into()];
@@ -5683,7 +5694,7 @@ mod tests {
     }
 
     /// `what_you_have`'s own choice of base is the subtle part of it: `base:`
-    /// with no dependency, and the dependency's own `task/<id>` branch —
+    /// with no dependency, and the dependency's own recorded `branch:` —
     /// never `task.front.base` — when there is one. Pinned here rather than
     /// left to the wider prompt tests, which would keep passing if the
     /// branch chosen quietly went back to being wrong.
@@ -5708,8 +5719,11 @@ mod tests {
 
         // `base:` is deliberately something other than the dependency's own
         // branch, the way a task queued up front from a shared plan branch
-        // is — see the `implement` handoff. The dependency's branch must win
-        // regardless.
+        // is — see the `implement` handoff. The dependency's branch, read
+        // from its own task file, must win regardless.
+        add_task_with(&repo, "earlier", "done", |f| {
+            f.branch = Some("task/earlier".into());
+        });
         let stacked = Task::load(&add_task_with(&repo, "stacked", "implement", |front| {
             front.depends_on = vec!["earlier".into()];
             front.base = Some("plan/live".into());
@@ -5805,7 +5819,7 @@ mod tests {
         let pipeline = pipelines.get("default").unwrap();
         let step = pipeline.step("handover").unwrap();
 
-        let composed = crate::compose::system_prompt(&repo, &task, pipeline, step, theirs);
+        let composed = crate::compose::system_prompt(&repo, &task, pipeline, step, theirs).unwrap();
         assert!(composed.contains(theirs), "the prompt was not carried");
         // And nothing spoolway writes says how to use git.
         for gone in [
@@ -5828,7 +5842,8 @@ mod tests {
     fn sent(repo: &Repo, task: &Task, pipeline: &Pipeline, step: &Step) -> String {
         format!(
             "{}\n\n{}",
-            crate::compose::system_prompt(repo, task, pipeline, step, "[the project's prompt]"),
+            crate::compose::system_prompt(repo, task, pipeline, step, "[the project's prompt]")
+                .unwrap(),
             crate::compose::opening_prompt(repo, task, pipeline, step),
         )
     }
@@ -6021,7 +6036,7 @@ mod tests {
 
         assert_eq!(
             mux.did("create_workspace"),
-            ["create_workspace demo on task/demo from work"]
+            ["create_workspace on task/demo from work"]
         );
         assert_eq!(mux.did("start"), ["start demo · implement"]);
         assert_eq!(mux.did("prompt"), ["prompt demo · implement"]);
@@ -6602,7 +6617,7 @@ mod tests {
 
         assert_eq!(
             mux.did("create_workspace"),
-            ["create_workspace demo on task/demo from work"]
+            ["create_workspace on task/demo from work"]
         );
     }
 
@@ -6619,7 +6634,7 @@ mod tests {
 
         assert_eq!(
             mux.did("create_workspace"),
-            ["create_workspace demo on task/demo from work"]
+            ["create_workspace on task/demo from work"]
         );
     }
 
@@ -8876,7 +8891,7 @@ mod tests {
         let pipeline = pipelines.get("default").unwrap();
         let sent = format!(
             "{}{}",
-            crate::compose::system_prompt(&repo, &task, pipeline, step, "[prompt]"),
+            crate::compose::system_prompt(&repo, &task, pipeline, step, "[prompt]").unwrap(),
             crate::compose::opening_prompt(&repo, &task, pipeline, step),
         );
         assert!(sent.contains("This step is gated"), "got: {sent}");
@@ -11756,9 +11771,11 @@ mod tests {
     #[test]
     fn a_task_whose_branch_is_already_checked_out_borrows_that_checkout() {
         let repo = fixture("in-place");
-        // The task's branch is `task/<id>` and nothing else now — see
-        // `queue::RESERVED_KEYS` — so the "already checked out" case is the
-        // fixture root itself sitting on `task/plan-closeout`.
+        // A document may not set its own `branch:` — see
+        // `queue::RESERVED_KEYS` — and this fixture never turns on
+        // `issue_tracking.key_in_names`, so the branch is the plain
+        // `task/<id>` and the "already checked out" case is the fixture root
+        // itself sitting on `task/plan-closeout`.
         crate::repo::run(
             &repo.root,
             "git",
@@ -12347,6 +12364,11 @@ mod tests {
         repo.git(&["commit", "-q", "-m", "first's work"]).unwrap();
         repo.git(&["checkout", "-q", "work"]).unwrap();
 
+        // The dependency's own task file: the cut reads its `branch:` rather
+        // than rebuilding `task/first` from the id.
+        add_task_with(&repo, "first", "done", |f| {
+            f.branch = Some("task/first".into());
+        });
         let mut task = reload(&add_task_with(&repo, "second", "implement", |f| {
             f.depends_on = vec!["first".into()];
         }));
@@ -12376,6 +12398,45 @@ mod tests {
         assert!(
             worktree.join("first.txt").exists(),
             "the dependent's worktree already carries the dependency's work, ancestry rather than a later rebase"
+        );
+
+        std::fs::remove_dir_all(&worktree).ok();
+    }
+
+    /// The cut reads a dependency's branch from that task, not by formatting
+    /// its id back into `task/<dep_id>`.
+    ///
+    /// When the dependency cannot be found at all, that has to surface as a
+    /// named error about the dependency — not as a git failure over a branch
+    /// name that was reconstructed from the id and never existed. Today the
+    /// reconstructed `task/first` is handed straight to `cut_worktree`, which
+    /// fails with `could not cut a worktree for ...`, saying nothing about
+    /// the dependency being the problem.
+    #[test]
+    fn a_dependency_that_cannot_be_found_fails_by_name_not_at_the_worktree_cut() {
+        let repo = fixture("dep-not-found");
+        let worktree = crate::mux::worktree_root(&repo.root, &repo.config.dispatch).join("second");
+        let _ = std::fs::remove_dir_all(&worktree);
+
+        // `second` names `first` as a dependency, but no `first` task file
+        // exists and no `task/first` branch was ever cut.
+        let mut task = reload(&add_task_with(&repo, "second", "implement", |f| {
+            f.depends_on = vec!["first".into()];
+        }));
+        let mux = FakeMux::new(vec![]).tabs_in_one_workspace();
+
+        let err = ensure_workspace(&repo, &mux, &mut task, &Default::default())
+            .expect_err("an unresolvable dependency must not silently reach the worktree cut");
+        let err = format!("{err:#}");
+
+        assert!(
+            err.contains("first"),
+            "the error should name the dependency `first`; got: {err}"
+        );
+        assert!(
+            !err.contains("could not cut a worktree"),
+            "the failure should land where the dependency is resolved, not at the \
+             git worktree cut over a rebuilt `task/first`; got: {err}"
         );
 
         std::fs::remove_dir_all(&worktree).ok();
@@ -12476,6 +12537,93 @@ mod tests {
             repo.git(&["rev-parse", "--verify", "--quiet", "task/first"])
                 .is_err(),
             "nothing queued needs it any more"
+        );
+    }
+
+    /// The same sweep recovers a task id from a branch
+    /// `issue_tracking.key_in_names` prefixed — `task/<slug>-<id>` — so a
+    /// prefixed orphan branch is freed exactly as a bare one is.
+    #[test]
+    fn an_orphaned_prefixed_branch_is_recovered_and_freed() {
+        let repo = fixture("prefixed-branch-freed");
+        repo.git(&["checkout", "-q", "-b", "task/proj-12-auth-01"])
+            .unwrap();
+        repo.git(&["commit", "-q", "--allow-empty", "-m", "auth-01"])
+            .unwrap();
+        repo.git(&["checkout", "-q", "work"]).unwrap();
+
+        let first = add_task_with(&repo, "auth-01", "done", |f| {
+            f.branch = Some("task/proj-12-auth-01".into());
+        });
+        let second = add_task_with(&repo, "auth-02", "done", |f| {
+            f.branch = Some("task/proj-12-auth-02".into());
+            f.depends_on = vec!["auth-01".into()];
+        });
+
+        let mux = FakeMux::new(vec![]);
+        let pipelines = Pipelines::builtin();
+        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux, false);
+        let mut report = Report::default();
+
+        dispatcher
+            .clean_up(&mut reload(&first), &[], &mut report)
+            .unwrap();
+        assert!(
+            repo.git(&["rev-parse", "--verify", "--quiet", "task/proj-12-auth-01"])
+                .is_ok(),
+            "`auth-02` is still queued and names it"
+        );
+
+        dispatcher
+            .clean_up(&mut reload(&second), &[], &mut report)
+            .unwrap();
+        assert!(
+            repo.git(&["rev-parse", "--verify", "--quiet", "task/proj-12-auth-01"])
+                .is_err(),
+            "the prefixed orphan branch was not recovered and freed"
+        );
+    }
+
+    /// The recovery matches the branch against each task's recorded `branch:`
+    /// exactly, so a prefixed branch whose slug happens to contain another
+    /// real task's id is still attributed to its own task: `task/proj-old-x`
+    /// is `x` (slug `proj-old`), never the queued `old-x` whose own branch is
+    /// something else — and `old-x` still on the queue must keep its branch.
+    #[test]
+    fn a_prefixed_branch_is_not_mis_attributed_to_a_task_its_slug_contains() {
+        let repo = fixture("prefixed-branch-ambiguous");
+        for branch in ["task/proj-old-x", "task/old-x"] {
+            repo.git(&["checkout", "-q", "-b", branch]).unwrap();
+            repo.git(&["commit", "-q", "--allow-empty", "-m", branch])
+                .unwrap();
+            repo.git(&["checkout", "-q", "work"]).unwrap();
+        }
+
+        // `x` has finished; `old-x` is a different, still-queued task.
+        let finished = add_task_with(&repo, "x", "done", |f| {
+            f.branch = Some("task/proj-old-x".into());
+        });
+        add_task_with(&repo, "old-x", "queued", |f| {
+            f.branch = Some("task/old-x".into());
+        });
+
+        let mux = FakeMux::new(vec![]);
+        let pipelines = Pipelines::builtin();
+        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux, false);
+        let mut report = Report::default();
+        dispatcher
+            .clean_up(&mut reload(&finished), &[], &mut report)
+            .unwrap();
+
+        assert!(
+            repo.git(&["rev-parse", "--verify", "--quiet", "task/proj-old-x"])
+                .is_err(),
+            "`x`'s own prefixed branch should have been freed"
+        );
+        assert!(
+            repo.git(&["rev-parse", "--verify", "--quiet", "task/old-x"])
+                .is_ok(),
+            "the still-queued `old-x` must keep its branch"
         );
     }
 
@@ -13673,9 +13821,11 @@ mod tests {
 
         // `situating` differs only by the step id and one bullet — the one
         // that says whether a person reads this pane once the lane reports.
-        let gated_situating =
-            crate::compose::situating(&pipeline, gated_step, &task, &repo).replace("`ask`", "`X`");
+        let gated_situating = crate::compose::situating(&pipeline, gated_step, &task, &repo)
+            .unwrap()
+            .replace("`ask`", "`X`");
         let plain_situating = crate::compose::situating(&pipeline, plain_step, &task, &repo)
+            .unwrap()
             .replace("`deploy`", "`X`");
         let gated_lines: Vec<&str> = gated_situating.lines().collect();
         let plain_lines: Vec<&str> = plain_situating.lines().collect();
@@ -13828,6 +13978,7 @@ mod tests {
                     pipeline.step(step).unwrap(),
                     "[prompt]"
                 )
+                .unwrap()
                 .contains("spoolway runs one task at a time"),
                 "the framing must survive in the system prompt alone"
             );
@@ -13923,7 +14074,8 @@ mod tests {
         let step = pipeline.step("implement").unwrap();
         let task = reload(&add_task(&repo, "demo", "implement"));
 
-        let prompt = crate::compose::system_prompt(&repo, &task, pipeline, step, "[prompt]");
+        let prompt =
+            crate::compose::system_prompt(&repo, &task, pipeline, step, "[prompt]").unwrap();
         assert!(
             prompt.trim_end().ends_with("`stage:` yourself."),
             "got: {prompt}"
@@ -13944,7 +14096,8 @@ mod tests {
         let step = pipeline.step("implement").unwrap();
         let task = reload(&add_task(&repo, "demo", "implement"));
 
-        let prompt = crate::compose::system_prompt(&repo, &task, pipeline, step, "[prompt]");
+        let prompt =
+            crate::compose::system_prompt(&repo, &task, pipeline, step, "[prompt]").unwrap();
         let have_at = prompt.find("WHAT YOU HAVE").expect("no WHAT YOU HAVE");
         let write_down_at = prompt
             .find("WHAT YOU WRITE DOWN")
@@ -13971,7 +14124,8 @@ mod tests {
         let step = pipeline.step("implement").unwrap();
         let task = reload(&add_task(&repo, "demo", "implement"));
 
-        let prompt = crate::compose::system_prompt(&repo, &task, pipeline, step, "[prompt]");
+        let prompt =
+            crate::compose::system_prompt(&repo, &task, pipeline, step, "[prompt]").unwrap();
         assert!(prompt.contains("Status Log"), "got: {prompt}");
         assert!(prompt.contains("Handoff"), "got: {prompt}");
         assert!(prompt.contains("Blocker"), "got: {prompt}");
@@ -13989,7 +14143,8 @@ mod tests {
         let step = pipeline.step("implement").unwrap();
         let task = reload(&add_task(&repo, "demo", "implement"));
 
-        let prompt = crate::compose::system_prompt(&repo, &task, pipeline, step, "[prompt]");
+        let prompt =
+            crate::compose::system_prompt(&repo, &task, pipeline, step, "[prompt]").unwrap();
         let column_of = |label: &str, first_value_word: &str| {
             let line = prompt
                 .lines()
@@ -14022,7 +14177,8 @@ mod tests {
         let step = pipeline.step("implement").unwrap();
         let task = reload(&add_task(&repo, "demo", "implement"));
 
-        let prompt = crate::compose::system_prompt(&repo, &task, pipeline, step, "[prompt]");
+        let prompt =
+            crate::compose::system_prompt(&repo, &task, pipeline, step, "[prompt]").unwrap();
         assert!(prompt.contains("Our own words."), "got: {prompt}");
         assert!(prompt.contains("Our own words too."), "got: {prompt}");
         assert!(
@@ -14046,7 +14202,7 @@ mod tests {
         let task = reload(&add_task(&repo, "demo", "implement"));
         let role = "[the project's prompt]";
 
-        let prompt = crate::compose::system_prompt(&repo, &task, pipeline, step, role);
+        let prompt = crate::compose::system_prompt(&repo, &task, pipeline, step, role).unwrap();
         let words = prompt.replace(role, "").split_whitespace().count();
         assert!(words < 345, "got {words} words:\n{prompt}");
     }
@@ -14063,7 +14219,8 @@ mod tests {
         let step = pipeline.step("implement").unwrap();
         let task = reload(&add_task(&repo, "demo", "implement"));
 
-        let prompt = crate::compose::system_prompt(&repo, &task, pipeline, step, "[prompt]");
+        let prompt =
+            crate::compose::system_prompt(&repo, &task, pipeline, step, "[prompt]").unwrap();
         assert!(!prompt.contains("\n\n\n"), "got: {prompt}");
     }
 
@@ -14079,14 +14236,15 @@ mod tests {
         let step = pipeline.step(crate::pipeline::BLOCKED).unwrap();
         let task = reload(&add_task(&repo, "demo", crate::pipeline::BLOCKED));
 
-        let prompt = crate::compose::system_prompt(&repo, &task, pipeline, step, "[prompt]");
+        let prompt =
+            crate::compose::system_prompt(&repo, &task, pipeline, step, "[prompt]").unwrap();
         assert!(prompt.contains("--pause"), "got: {prompt}");
         assert!(!prompt.contains("--fail"), "got: {prompt}");
         assert!(!prompt.contains("--block"), "got: {prompt}");
 
         let implement = pipeline.step("implement").unwrap();
         let elsewhere =
-            crate::compose::system_prompt(&repo, &task, pipeline, implement, "[prompt]");
+            crate::compose::system_prompt(&repo, &task, pipeline, implement, "[prompt]").unwrap();
         assert!(
             !elsewhere.contains("--pause"),
             "no other step offers --pause: got: {elsewhere}"

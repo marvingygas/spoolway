@@ -186,6 +186,9 @@ fn run() -> Result<()> {
         Command::Config(ConfigCommand::Show) => {
             commands::config_show(&Repo::discover(&cwd)?, cli.json)
         }
+        Command::Config(ConfigCommand::List) => {
+            commands::config_list(&Repo::discover(&cwd)?, cli.json)
+        }
         Command::Config(ConfigCommand::Path) => {
             let repo = Repo::discover(&cwd)?;
             if let Some(note) = repo.checkout_note()? {

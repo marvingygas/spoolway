@@ -34,7 +34,7 @@ runs — including when `-C` names the project explicitly. In the main checkout 
 print exactly what they always did.
 
 The commands that print it are `pipeline show`, `pipeline check`, `pipeline list`, `prompt
-list`, `prompt check`, `config show`, `config get` and `config path`. `doctor` reports on both
+list`, `prompt check`, `config show`, `config list`, `config get` and `config path`. `doctor` reports on both
 sides at once and prints the line once. Commands reading only the queue, the lane state, the
 archive or the usage ledger never print it: they answer for the project and always did.
 
@@ -163,7 +163,9 @@ back through `--from`.
 
 With `[issue_tracking]` configured, this opens a ticket for every document in the batch before
 any of them is written — see [`open` — a fifth event, run by `queue
-add` itself](configuration.md#open--a-fifth-event-run-by-queue-add-itself).
+add` itself](configuration.md#open--a-fifth-event-run-by-queue-add-itself). With
+`issue_tracking.key_in_names` on and the hook answering a `slug=`, it also prefixes each
+task's `group:`, `branch:` and worktree directory with that slug.
 
 ### `spoolway queue list`
 
@@ -753,14 +755,17 @@ neither a passing check nor a failing one touches anything under `.spoolway/`. A
 the same message `queue add --from` gives for the same document, and exits non-zero; nothing is
 printed for one that passes beyond a short report of what was checked.
 
-### `spoolway config show` / `path` / `get <key>` / `set <key> <value>` / `edit`
+### `spoolway config show` / `list` / `path` / `get <key>` / `set <key> <value>` / `edit`
 
 Read or write single values non-interactively, e.g. `spoolway config set
 agents.pi.concurrency 4`. `edit` opens the file in `$EDITOR` and re-validates it on save —
-the file's own comments carry every explanation.
+the file's own comments carry every explanation. `list` prints every scalar setting as
+`key = value`, one per line, in key order — the same keys `get` and `set` resolve, including
+the ones the file omits while they hold their default. A `[models]` glob nobody has named yet
+is settable but not listed. `--json` emits `[{"key","value"}, …]`.
 
-`show`, `path`, `get` and `edit` answer for the checkout a command was run in; standing in a
-linked worktree, they read and validate that worktree's own `config.toml`. `show`, `path` and
+`show`, `list`, `path`, `get` and `edit` answer for the checkout a command was run in; standing in a
+linked worktree, they read and validate that worktree's own `config.toml`. `show`, `list`, `path` and
 `get` say so, printing the [`checkout:` line](#the-checkout-line) before their output whenever the
 checkout is not the project. `edit` opens a file rather than printing one, so it prints no such
 line. `set` writes only the

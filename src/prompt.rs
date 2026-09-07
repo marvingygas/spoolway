@@ -217,7 +217,7 @@ pub fn contract(repo: &Repo, pipelines: &Pipelines, args: &PromptContractArgs) -
     // against what the lane actually reads.
     let prompt = std::fs::read_to_string(&prompt_path)
         .unwrap_or_else(|_| format!("[no prompt at {} — `spoolway init`]", prompt_path.display()));
-    for line in crate::compose::system_prompt(repo, &task, pipeline, step, &prompt).lines() {
+    for line in crate::compose::system_prompt(repo, &task, pipeline, step, &prompt)?.lines() {
         println!("   | {line}");
     }
 

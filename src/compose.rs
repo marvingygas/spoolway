@@ -5,14 +5,20 @@
 //! prompt's own text, with no dispatcher state. That is the whole reason it
 //! lives apart from [`crate::dispatch`]: composing what a lane is told does
 //! not need a running pass, a multiplexer or a task lock, only the same few
-//! facts every one of these functions takes and returns a `String` from.
-//! The one thing any of it reads is the project's own
+//! facts every one of these functions takes.
+//! Two files are read on the way: the project's own
 //! `.spoolway/templates/lane-prompts.md`, through
-//! [`crate::lane_prompts::render`] — which is why the typed-message
-//! functions take a [`Repo`] they otherwise have no use for. Writing the
-//! system prompt to disk (`write_system_prompt`) and everything about
-//! actually starting a lane with it stays in `dispatch`, which is the half
-//! of this that owns the filesystem and the multiplexer.
+//! [`crate::lane_prompts::render`], and — when the task has a dependency —
+//! that dependency's own task file, for the branch its worktree was cut
+//! from (see [`Repo::dependency_branch`]). Both are why the typed-message
+//! functions take a [`Repo`], and the second is why [`system_prompt`] and
+//! [`situating`] return a `Result`: a dependency that cannot be resolved is
+//! an error, not a guessed branch name in the prompt. Writing the system
+//! prompt to disk (`write_system_prompt`) and everything about actually
+//! starting a lane with it stays in `dispatch`, which is the half of this
+//! that owns the filesystem and the multiplexer.
+
+use anyhow::Result;
 
 use crate::pipeline::Pipeline;
 use crate::pipeline::Step;
@@ -75,7 +81,7 @@ pub(crate) fn system_prompt(
     pipeline: &Pipeline,
     step: &Step,
     prompt: &str,
-) -> String {
+) -> Result<String> {
     // A toolbox for `blocked` alone — see [`toolbox`]. Every other step reads
     // this empty, which is also what keeps `cost`, `eval`, `doctor` and
     // `config get` out of a lane's reach entirely: nothing here ever names
@@ -85,17 +91,17 @@ pub(crate) fn system_prompt(
         false => String::new(),
     };
 
-    format!(
+    Ok(format!(
         "{situating}\n\n\
          YOUR ROLE AT THIS STEP\n\n\
          {prompt}{toolbox}\n\n\
          THIS PASS\n\n\
          {policy}{contract}",
-        situating = situating(pipeline, step, task, repo),
+        situating = situating(pipeline, step, task, repo)?,
         prompt = prompt.trim(),
         policy = policy(repo, task, pipeline, step),
         contract = report_contract(pipeline, step.id == crate::pipeline::BLOCKED),
-    )
+    ))
 }
 
 /// What a lane is, in the words of somebody who has never heard of spoolway,
@@ -118,7 +124,12 @@ pub(crate) fn system_prompt(
 /// act on that fact, this is only the fact itself. `blocked` alone rewrites
 /// the first bullet: every other lane owns one task's own step, and
 /// `blocked`'s does not.
-pub(crate) fn situating(pipeline: &Pipeline, step: &Step, task: &Task, repo: &Repo) -> String {
+pub(crate) fn situating(
+    pipeline: &Pipeline,
+    step: &Step,
+    task: &Task,
+    repo: &Repo,
+) -> Result<String> {
     let first_bullet = match step.id == crate::pipeline::BLOCKED {
         true => format!(
             "- Your remit is the run, not one task's step. `{task}` may have stopped inside \
@@ -141,7 +152,7 @@ pub(crate) fn situating(pipeline: &Pipeline, step: &Step, task: &Task, repo: &Re
         }
     };
 
-    format!(
+    Ok(format!(
         "YOUR LANE\n\n\
          spoolway runs one task at a time through a pipeline of steps, one agent per step. You \
          are a lane: step `{step}` of task `{task}` in pipeline `{pipeline}`, in a git \
@@ -158,9 +169,9 @@ pub(crate) fn situating(pipeline: &Pipeline, step: &Step, task: &Task, repo: &Re
         step = step.id,
         task = task.id(),
         pipeline = pipeline.name,
-        what_you_have = what_you_have(repo, task),
+        what_you_have = what_you_have(repo, task)?,
         what_you_write_down = what_you_write_down(repo),
-    )
+    ))
 }
 
 /// The `WHAT YOU HAVE` block: the exact commands and paths this lane needs,
@@ -171,13 +182,13 @@ pub(crate) fn situating(pipeline: &Pipeline, step: &Step, task: &Task, repo: &Re
 ///
 /// The diff and log read against `task.front.base` when there is no
 /// dependency, and against the first dependency's own branch when there is —
-/// `task/<id>`, the one `spoolway queue add` always writes, see
-/// `commands::queue::add`. Not `task.front.base` even then: it is only the
-/// queueing worktree's branch at the moment this task was added, which is
-/// the dependency's branch solely when a planner happened to queue from
-/// inside it, and something else — the shared plan branch, say — when it
-/// queued both tasks up front instead. The branch name is the one fact that
-/// never depends on where the queueing happened.
+/// read from that task's own `branch:` field through
+/// [`Repo::dependency_branch`], not `task.front.base` even then: `base` is
+/// only the queueing worktree's branch at the moment this task was added,
+/// which is the dependency's branch solely when a planner happened to queue
+/// from inside it, and something else — the shared plan branch, say — when
+/// it queued both tasks up front instead. The branch name is the one fact
+/// that never depends on where the queueing happened.
 ///
 /// A dependency's branch cannot say what finishing that task actually left
 /// behind, which is the one thing `spoolway queue show` adds — one line per
@@ -185,7 +196,7 @@ pub(crate) fn situating(pipeline: &Pipeline, step: &Step, task: &Task, repo: &Re
 /// dependency to read against but a lane may still owe reading to the rest.
 /// This is the reading list's old job, folded in here now that `reading_block`
 /// is gone: a single line named once is one line to read, not two.
-fn what_you_have(repo: &Repo, task: &Task) -> String {
+fn what_you_have(repo: &Repo, task: &Task) -> Result<String> {
     // Computed rather than read off the environment: the scratch directory is
     // made later, in the same launch that calls this, and a lane resolving
     // its own facts from `$SPOOLWAY_SCRATCH` is exactly the naming this block
@@ -213,9 +224,16 @@ fn what_you_have(repo: &Repo, task: &Task) -> String {
                 .iter()
                 .map(|dep| format!("\n{blank}`spoolway queue show {dep}` — what it left you"))
                 .collect();
+            // The dependency's real branch, read from its task file — not
+            // rebuilt as `task/<first>`, which `handover adopt` can leave
+            // wrong. A dependency that cannot be resolved is a hard error
+            // here, the same one `ensure_workspace` raises when it cuts this
+            // task's worktree: a prompt that named a guessed branch would
+            // tell the lane to diff against a ref that need not exist.
+            let branch = repo.dependency_branch(first)?;
             (
-                format!("task/{first}"),
-                format!("`{first}`, branch `task/{first}`"),
+                branch.clone(),
+                format!("`{first}`, branch `{branch}`"),
                 extra,
             )
         }
@@ -241,7 +259,7 @@ fn what_you_have(repo: &Repo, task: &Task) -> String {
         format!(" {:width$} {sits_value}{extra}", "you sit on"),
     ];
 
-    format!("\n\nWHAT YOU HAVE\n\n{}", lines.join("\n"))
+    Ok(format!("\n\nWHAT YOU HAVE\n\n{}", lines.join("\n")))
 }
 
 /// Total characters on one wrapped line of `WHAT YOU WRITE DOWN`, margin

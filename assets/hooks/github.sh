@@ -57,7 +57,15 @@ if [ "$SPOOLWAY_EVENT" = open ]; then
   else
     hang_under "$SPOOLWAY_SOURCE" "$ticket"  # a group of one has no epic to hang under
   fi
-  { echo "epic=$epic"; echo "ticket=$ticket"; } > "$SPOOLWAY_OUT"
+  # The short handle spoolway puts in generated names, and the issue's web
+  # address kept on the task for later use — spoolway stores and validates
+  # `url=` but shows it nowhere yet. `$epic`/`$ticket` are already URLs here:
+  # take the issue number off the end, with a `gh-` prefix so the slug starts
+  # with a letter the way every spoolway id does. The epic keys a group, the
+  # ticket keys a group of one that never opened an epic.
+  key=${epic:-$ticket}
+  { echo "epic=$epic"; echo "ticket=$ticket"
+    echo "slug=gh-${key##*/}"; echo "url=$key"; } > "$SPOOLWAY_OUT"
   exit 0
 fi
 

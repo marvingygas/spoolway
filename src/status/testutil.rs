@@ -125,6 +125,7 @@ pub fn row(id: &str) -> Row {
     Row {
         id: id.into(),
         group: Some("demo".into()),
+        issue_url: None,
         parallel: false,
         stage: "implement".into(),
         step_loop: None,

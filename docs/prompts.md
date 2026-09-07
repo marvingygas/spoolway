@@ -1,6 +1,6 @@
 ---
 domain: prompts
-covers: ["src/prompt.rs", "assets/prompts/**"]
+covers: ["src/prompt.rs", "src/compose.rs", "assets/prompts/**"]
 ---
 
 # Prompts

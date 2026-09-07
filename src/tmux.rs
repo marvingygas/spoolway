@@ -27,8 +27,8 @@ use anyhow::{Context, Result, bail};
 
 use crate::config::{DispatchConfig, MuxMode};
 use crate::mux::{
-    Lane, LaneSpec, LaneStatus, Mux, Workspace, cut_worktree, dispatch_workspace_label,
-    project_label, worktree_root,
+    Lane, LaneSpec, LaneStatus, Mux, Workspace, branch_slug, cut_worktree,
+    dispatch_workspace_label, project_label, worktree_root,
 };
 
 /// How long a pane's screen must sit unchanged before its lane counts as
@@ -778,7 +778,6 @@ impl Mux for Tmux {
     fn create_workspace(
         &self,
         _cwd: &Path,
-        task: &str,
         branch: &str,
         base: &str,
         label: &str,
@@ -786,8 +785,10 @@ impl Mux for Tmux {
         // Only ever called under `split` — see [`Mux::create_workspace`] —
         // where the checkout is cut with git, into a session of its own that
         // owns it: stamped so that removal, and only removal of a session so
-        // stamped, takes the worktree with it.
-        let checkout = self.worktree_root.join(task);
+        // stamped, takes the worktree with it. The directory is named after
+        // the branch slug, the rule every backend now shares — see
+        // [`crate::mux::branch_slug`].
+        let checkout = self.worktree_root.join(branch_slug(branch));
         cut_worktree(&self.cwd, &checkout, branch, base)?;
 
         let (session, window, pane) = self.open_session(label, &checkout)?;
@@ -1374,7 +1375,7 @@ done"#,
         f.chatty_agent("pi");
         let ws = f
             .mux
-            .create_workspace(&f.repo, "demo", "task/demo", "main", "implementer")
+            .create_workspace(&f.repo, "task/demo", "main", "implementer")
             .unwrap();
         f.start_in(&ws.pane_id, "implement-demo", "pi", &BTreeMap::new());
 
@@ -1599,7 +1600,7 @@ done"#,
 
         let task = f
             .mux
-            .create_workspace(&f.repo, "demo", "task/demo", "main", "spoolway/demo")
+            .create_workspace(&f.repo, "task/demo", "main", "spoolway/demo")
             .unwrap();
         assert!(task.checkout_path.is_dir());
         f.mux.remove_workspace(&task.workspace_id).unwrap();
@@ -1631,7 +1632,7 @@ done"#,
         let f = Fixture::new("heal-owned", MuxMode::Split);
         let task = f
             .mux
-            .create_workspace(&f.repo, "demo", "task/demo", "main", "spoolway/demo")
+            .create_workspace(&f.repo, "task/demo", "main", "spoolway/demo")
             .unwrap();
 
         // The session is gone — a restart, say — but the worktree it cut

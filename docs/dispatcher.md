@@ -240,7 +240,13 @@ still open, the very next redraw drops to `no dispatcher is running` — with wh
 it left running still on the board, which is what makes an abandoned run visible.
 
 A band line opens each group's block, at the row's own left margin and outdented past the
-cursor gutter so it reads as a heading: `▌<group>`, the group's name and nothing else. A task
+cursor gutter so it reads as a heading: `▌<group>`, the group's name and nothing else. Where
+the group has an issue behind it, that name is also a link to it: the board wraps the name — the
+`▌` and the dim styling stay outside — in an OSC 8 terminal hyperlink pointing at the issue URL
+any one of the group's tasks carries, so clicking it opens the issue in your browser. The link
+is written only where the board paints colour, so the colourless renderings — `dispatch
+--plain` and `spoolway queue list` — carry the band's old bytes unchanged, as does a group
+with no issue behind it. A task
 queued outside any group falls into `no group` — sorted last, fixed
 rather than alphabetical — whose block gets no band and no closing total line, since there is
 no group name for either to carry. Inside a group, rows sort by run order: a done row sorts
@@ -1349,10 +1355,11 @@ worktree](pipelines.md#whose-worktree).
 **One root, every backend, every layout**: `worktree_root`, which is
 `~/.spoolway/<project>/worktrees` unless you name another — nested under the project's own
 home, beside its queue and archive, so a worktree cut here never registers as a workspace of
-its own the way one cut at a repository's root did. Under a multiplexer the directory inside it is the task id
-— one entry per task is what makes "everything the run is holding" something you can list —
-and headless it is the branch slug, which is what `git worktree list` shows and so what a
-person looking for it reads.
+its own the way one cut at a repository's root did. The directory inside it is the branch
+flattened to one component — `task-<id>`, or `task-<slug>-<id>` when a tracker slug prefixed
+the branch — for every backend now. One entry per task is what makes "everything the run is
+holding" something you can list, and the branch is what `git worktree list` shows and so what
+a person looking for it reads.
 
 Deliberately *not* under `~/.herdr/`, which it used to be. That is herdr's directory, and
 these are checkouts herdr never hears about until it is pointed at one. A worktree you cut by

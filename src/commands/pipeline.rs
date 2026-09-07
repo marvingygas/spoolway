@@ -1135,7 +1135,6 @@ mod tests {
         fn create_workspace(
             &self,
             _cwd: &Path,
-            _task: &str,
             _branch: &str,
             _base: &str,
             _label: &str,

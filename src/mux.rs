@@ -337,13 +337,12 @@ pub trait Mux {
     /// Only ever called when [`Mux::task_owns_workspace`] is true: under
     /// [`MuxMode::Grouped`] a task's checkout is cut the same way but opens no
     /// workspace of its own — its lane runs in a pane of its project's shared
-    /// tab instead. `task` is the task id, which names where the checkout
-    /// lands — see [`worktree_root`]. A backend free to choose that itself, as
-    /// headless is, may ignore it.
+    /// tab instead. The checkout lands at [`worktree_root`] under a directory
+    /// named after `branch`, flattened by [`branch_slug`] — the one rule every
+    /// backend now shares.
     fn create_workspace(
         &self,
         cwd: &Path,
-        task: &str,
         branch: &str,
         base: &str,
         label: &str,
@@ -711,9 +710,11 @@ impl Herdr {
     }
 
     /// Cut a task's own worktree with git, and say where it landed. Only ever
-    /// under [`MuxMode::Split`] — see [`Mux::create_workspace`].
-    fn cut_task_worktree(&self, task: &str, branch: &str, base: &str) -> Result<PathBuf> {
-        let path = self.worktree_root.join(task);
+    /// under [`MuxMode::Split`] — see [`Mux::create_workspace`]. The directory
+    /// is named after the branch slug, the rule every backend now shares — see
+    /// [`branch_slug`].
+    fn cut_task_worktree(&self, branch: &str, base: &str) -> Result<PathBuf> {
+        let path = self.worktree_root.join(branch_slug(branch));
         cut_worktree(&self.cwd, &path, branch, base)?;
         Ok(path)
     }
@@ -1292,7 +1293,6 @@ impl Mux for Herdr {
     fn create_workspace(
         &self,
         _cwd: &Path,
-        task: &str,
         branch: &str,
         base: &str,
         label: &str,
@@ -1307,7 +1307,7 @@ impl Mux for Herdr {
         // checkout just cut. That is what makes the row land under the
         // project's own row instead of sitting flat in the sidebar, and what
         // makes `worktree remove` later find something to remove.
-        let checkout = self.cut_task_worktree(task, branch, base)?;
+        let checkout = self.cut_task_worktree(branch, base)?;
         self.open_worktree_workspace(&checkout, label)
     }
 
@@ -1721,10 +1721,11 @@ pub fn project_home(root: &Path) -> PathBuf {
 /// project's queue and archive, so a worktree cut here never registers as a
 /// workspace of its own the way one cut at a repository's root did.
 ///
-/// The directory *under* the root still differs by backend: the task id under
-/// herdr, where one entry per task is what makes "everything the run is
-/// holding" listable, and the branch slug headless, where `git worktree list`
-/// is the only thing showing them and the branch is what a person reads.
+/// The directory *under* the root is the branch slug — see [`branch_slug`] —
+/// for every backend now: one flat entry per task that `git worktree list`
+/// and a person both read by the branch, and the same name whichever
+/// multiplexer cut it. A tracker slug on the branch rides into that directory
+/// name for free.
 pub fn worktree_root(root: &Path, config: &DispatchConfig) -> PathBuf {
     let configured = config.worktree_root.trim();
     if !configured.is_empty() {
@@ -1772,6 +1773,17 @@ fn worktree_open_argv(root: &str, path: &str, label: &str) -> Vec<String> {
     ]
 }
 
+/// A branch name reduced to one directory component: `task/add-endpoint`
+/// becomes `task-add-endpoint`. Every backend names a task's worktree
+/// directory this way, so herdr, tmux and headless agree — and a slug the
+/// tracker prefixed onto the branch (`task/proj-12-add-endpoint`) rides into
+/// the directory name for free. Without it a `/` in the branch would nest
+/// every worktree under a shared `task/` directory that nothing owns or
+/// cleans up.
+pub(crate) fn branch_slug(branch: &str) -> String {
+    branch.replace('/', "-")
+}
+
 /// Cut a worktree with git, at exactly the path asked for.
 ///
 /// Shared by the headless backend, which has never had a multiplexer to ask,
@@ -1803,12 +1815,35 @@ pub fn cut_worktree(repo: &Path, path: &Path, branch: &str, base: &str) -> Resul
     Ok(())
 }
 
-/// A sanity bound on a lane's own name, `<task> · <step>` — long enough that
-/// any real task id is fine, short enough that a pane header or a tab strip
-/// does not overflow with it. Checked when the task is queued, because the
-/// alternative is a lane that refuses to start somewhere in the middle of a
-/// pipeline, after earlier steps have already done their work.
-pub const LANE_NAME_MAX: usize = 32;
+/// herdr's own bound on an agent name: 1–32 characters, refused outright by
+/// `agent start` with `invalid_agent_name` (herdr 0.8.2). It is not spoolway's
+/// choice and cannot be argued with, so [`LANE_NAME_MAX`] is derived from it
+/// rather than picked.
+const AGENT_NAME_MAX: usize = 32;
+
+/// What the wire spelling saves against a lane's own name: `" · "` is four
+/// bytes and [`AGENT_NAME_SEPARATOR`] is two.
+const AGENT_NAME_SAVING: usize = LANE_NAME_SEPARATOR.len() - AGENT_NAME_SEPARATOR.len();
+
+/// The bound on a lane's own name, `<task> · <step>`, checked when the task is
+/// queued — because the alternative is a lane that refuses to start somewhere
+/// in the middle of a pipeline, after earlier steps have already done their
+/// work.
+///
+/// It is [`AGENT_NAME_MAX`] and not a round number of spoolway's own choosing.
+/// A lane crosses the wire as [`to_agent_name`] spells it, which is this name
+/// with its separator swapped, so the wire name is always [`AGENT_NAME_SAVING`]
+/// bytes shorter. Every id a task is allowed to carry therefore names an agent
+/// herdr will accept, with nothing spare. Both counts agree here: a task id and
+/// a step id are ASCII (see [`crate::config::check_id`]), so the wire name's
+/// bytes are its characters, and the only multi-byte character in the lane name
+/// is the `·` this arithmetic removes.
+///
+/// Raising it means raising what herdr accepts first. There is no spelling that
+/// buys more room: at anything above this, a task queues and then fails to
+/// start a lane mid-pipeline, which is the failure the queue-time check exists
+/// to prevent.
+pub const LANE_NAME_MAX: usize = AGENT_NAME_MAX + AGENT_NAME_SAVING;
 
 /// Is `id` usable as a task id for a pipeline whose longest step is
 /// `longest_step`? Returns the reason it is not, so the caller can say which of
@@ -1838,7 +1873,7 @@ pub fn check_task_id(id: &str, longest_step: &str) -> Result<()> {
 /// checked by [`crate::config::check_id`] to hold nothing but lowercase
 /// letters, digits and hyphens, so neither can ever contain it.
 pub fn parse_lane_name<'a>(name: &'a str, steps: &[&str]) -> Option<(&'a str, &'a str)> {
-    let (task, step) = name.split_once(" · ")?;
+    let (task, step) = name.split_once(LANE_NAME_SEPARATOR)?;
     if task.is_empty() || !steps.contains(&step) {
         return None;
     }
@@ -1857,14 +1892,23 @@ pub fn parse_lane_name<'a>(name: &'a str, steps: &[&str]) -> Option<(&'a str, &'
 /// the whole name is the id there. A task id holds no spaces (see
 /// [`crate::config::check_id`]), so `" · "` stays unambiguous.
 pub fn lane_task(name: &str) -> &str {
-    name.split_once(" · ").map_or(name, |(task, _)| task)
+    name.split_once(LANE_NAME_SEPARATOR)
+        .map_or(name, |(task, _)| task)
 }
+
+/// What spoolway writes between a lane's two halves, everywhere except the
+/// wire — see [`AGENT_NAME_SEPARATOR`] for what herdr gets instead.
+///
+/// Named rather than spelled out at each use, because [`LANE_NAME_MAX`] does
+/// arithmetic on its length and a literal there would be a number nobody could
+/// check.
+const LANE_NAME_SEPARATOR: &str = " · ";
 
 /// The label a lane's own name is built from: task first, since a lane's pane
 /// sits in its project's tab, where the task is what tells one apart from
 /// another and the step is what changes as it moves.
 pub fn tab_label(task: &str, step: &str) -> String {
-    format!("{task} · {step}")
+    format!("{task}{LANE_NAME_SEPARATOR}{step}")
 }
 
 /// What herdr writes between a lane's two halves, in place of [`lane_name`]'s
@@ -1887,14 +1931,14 @@ const AGENT_NAME_SEPARATOR: &str = "__";
 
 /// A lane's name as herdr will accept it — see [`AGENT_NAME_SEPARATOR`].
 fn to_agent_name(lane: &str) -> String {
-    lane.replace(" · ", AGENT_NAME_SEPARATOR)
+    lane.replace(LANE_NAME_SEPARATOR, AGENT_NAME_SEPARATOR)
 }
 
 /// And back, for a name read out of `agent list`. A name with no separator in
 /// it is returned untouched: it is somebody else's session, and
 /// [`parse_lane_name`] is what refuses it.
 fn from_agent_name(name: &str) -> String {
-    name.replace(AGENT_NAME_SEPARATOR, " · ")
+    name.replace(AGENT_NAME_SEPARATOR, LANE_NAME_SEPARATOR)
 }
 
 #[cfg(test)]
@@ -2074,7 +2118,7 @@ mod tests {
             Some(("pr-review", "add-health-endpoint"))
         );
 
-        assert!(wire.chars().count() <= LANE_NAME_MAX);
+        assert!(wire.chars().count() <= AGENT_NAME_MAX);
         let mut chars = wire.chars();
         assert!(chars.next().is_some_and(|c| c.is_ascii_lowercase()));
         assert!(
@@ -2134,6 +2178,25 @@ mod tests {
         assert_eq!(parse_lane_name(" · implement", &steps), None);
     }
 
+    /// The bound exists to keep every id herdr will ever be handed inside its
+    /// own 1–32 character rule. So the longest id the queue accepts must still
+    /// name an agent herdr takes — with nothing to spare, or the bound is
+    /// costing ids room for no reason.
+    #[test]
+    fn the_longest_id_the_queue_accepts_still_names_an_agent_herdr_takes() {
+        for step in ["pr", "implement", "review", "look", "blocked"] {
+            let longest = "a".repeat(LANE_NAME_MAX - lane_name(step, "").len());
+            assert!(check_task_id(&longest, step).is_ok());
+
+            let wire = to_agent_name(&lane_name(step, &longest));
+            assert_eq!(
+                wire.chars().count(),
+                AGENT_NAME_MAX,
+                "`{wire}` should sit exactly on herdr's cap"
+            );
+        }
+    }
+
     #[test]
     fn a_task_id_is_refused_when_its_lane_could_never_be_named() {
         assert!(check_task_id("slug-subcommand", "implement").is_ok());
@@ -2170,11 +2233,10 @@ mod tests {
     }
 
     /// The point of naming the path at all: one directory holds every worktree
-    /// spoolway cut, and the task id is what distinguishes them inside it — not
-    /// the branch, which is what herdr would have used and which flattens into
-    /// the same listing a person's own branches are in. Nested under the
-    /// project's own home, beside its queue and archive, never under
-    /// `~/.herdr`, which is the multiplexer's own directory.
+    /// spoolway cut, each named after its branch slug — see [`branch_slug`],
+    /// the rule every backend shares. Nested under the project's own home,
+    /// beside its queue and archive, never under `~/.herdr`, which is the
+    /// multiplexer's own directory.
     #[test]
     fn every_task_worktree_lands_under_the_projects_own_home() {
         let root = home().join("dev").join("spoolway");
@@ -2185,6 +2247,20 @@ mod tests {
         );
         assert!(path.starts_with(project_home(&root)), "{path:?}");
         assert!(!path.starts_with(home().join(".herdr")), "{path:?}");
+    }
+
+    /// A branch is a path with a `/` in it, and every backend flattens it to
+    /// one directory component the same way — so a tracker slug on the branch
+    /// (`task/proj-12-add-endpoint`) rides into the worktree directory name
+    /// without any backend doing anything special.
+    #[test]
+    fn a_branch_becomes_one_directory() {
+        assert_eq!(branch_slug("task/add-endpoint"), "task-add-endpoint");
+        assert_eq!(
+            branch_slug("task/proj-12-add-endpoint"),
+            "task-proj-12-add-endpoint"
+        );
+        assert_eq!(branch_slug("plan/a/b"), "plan-a-b");
     }
 
     /// A backend that overrides nothing has no gesture to try, so
@@ -2215,7 +2291,6 @@ mod tests {
         fn create_workspace(
             &self,
             _cwd: &Path,
-            _task: &str,
             _branch: &str,
             _base: &str,
             _label: &str,

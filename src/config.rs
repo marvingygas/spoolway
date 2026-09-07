@@ -78,9 +78,11 @@ pub const SCRATCH_DIR: &str = "scratch";
 /// Task ids and step ids are both path components before they are anything
 /// else. A lane's composed prompt is `prompts/<task> · <step>.md`, a headless
 /// lane's record is `headless/<task> · <step>.json`, a command step's output is
-/// `commands/<task> · <step>.log`, and a task's worktree is named after its id —
-/// four directories, two ids, and not one of them a fixed string. An id holding
-/// `/` or `..` therefore writes outside the directory it was supposed to name,
+/// `commands/<task> · <step>.log`, and a task's worktree directory is its
+/// branch flattened to one component — `task-<id>`, or `task-<slug>-<id>` when
+/// a tracker prefixed it — four directories, two ids, and not one of them a
+/// fixed string. An id holding `/` or `..` therefore writes outside the
+/// directory it was supposed to name,
 /// which is a confusing failure rather than a breach: both ids come from files
 /// a lane may not write, and a pipeline that wanted to run something arbitrary
 /// has `commands:` for that. It is refused because a name that means one thing
@@ -259,9 +261,10 @@ impl Default for Config {
 /// steps a pipeline may declare — so a project that wants a ticket touched on
 /// one of them has nowhere else to say so.
 ///
-/// Every value is blank by default, which is what "no issue tracking" means:
-/// a blank `hook` runs nothing and changes nothing about a task's four
-/// events, whatever the other two keys hold.
+/// The defaults are "no issue tracking": `hook`, `project_key` and `on_fail`
+/// blank, `key_in_names` false. A blank `hook` runs nothing and changes
+/// nothing about a task's four events or about `queue add`'s generated names,
+/// whatever the other three keys hold.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct IssueTrackingConfig {
@@ -286,6 +289,18 @@ pub struct IssueTrackingConfig {
     /// `blocked` or `paused` is only ever recorded, whichever this holds —
     /// both are already stopped for a person.
     pub on_fail: String,
+
+    /// Whether the issue's key rides into every name `queue add` generates.
+    /// Off by default: nothing changes, and every group, branch and worktree
+    /// directory is named exactly as it is today.
+    ///
+    /// On, and with the tracker hook answering a `slug=` line, `queue add`
+    /// prefixes the `group:`, the `branch:` (`task/<slug>-<id>`) and the
+    /// worktree directory with that slug, so `git branch` shows which issue a
+    /// branch belongs to. spoolway still parses no tracker identifier of its
+    /// own — the slug comes from the hook, the one thing that knows the
+    /// tracker, and is only checked against [`check_id`]'s alphabet.
+    pub key_in_names: bool,
 }
 
 /// What `spoolway pipeline gen` opens, and what it hands the generation
