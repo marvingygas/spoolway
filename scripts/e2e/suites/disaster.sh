@@ -521,4 +521,49 @@ fi
 one_shot_stop "$BOARD_PID"
 forget localnote
 
+# ---------------- `spoolway eval` banks no catch-up line for a live lane
+# The settled-lane sweep catches up the turns that arrive in a transcript
+# after the dispatcher tore its lane down. A lane still in flight is not
+# that: its spend is the dispatcher's to bank at teardown, diffed against a
+# snapshot the pass read once, so a line `spoolway eval` slipped in behind
+# it is counted twice. The sweep skips any session `lanes.json` still names
+# — held here against a real dispatcher with a real lane asleep, and a
+# ledger line already naming that session so the sweep would otherwise read
+# its transcript and bank the delta.
+sweep
+echo 4000 > "$CTL/transcript"   # the mock writes a transcript for its lanes
+dispatcher_start
+queue_hang evallive
+EVAL_PID=$(lane_pid "evallive · implement" 20)
+poll_until 15 lane_on_record "evallive · implement"
+SID=$(sed -n 's/.*"session": *"\([^"]*\)".*/\1/p' \
+        "$SPOOLWAY_PROJECT_HOME/lanes.json" | head -1)
+if [ -n "$EVAL_PID" ] && [ -n "$SID" ]; then
+  # A line as though a prior step of this same session had already been
+  # banked, dated far in the past so only the live-lane guard — not the
+  # sweep's mtime gate — is what keeps the (newer) transcript unread.
+  printf '{"ts":"2020-01-01T00:00:00+00:00","task":"evallive","step":"implement","pipeline":"disaster","agent":"pi","kind":"pi","model":"fake-local","session":"%s","turns":1,"tokens":{"input":10,"output":16}}\n' \
+    "$SID" >> "$SPOOLWAY_PROJECT_HOME/usage.jsonl"
+  BEFORE=$(grep -c "\"session\":\"$SID\"" "$SPOOLWAY_PROJECT_HOME/usage.jsonl")
+  # `eval` itself has to succeed: a crash or refusal leaves the ledger
+  # untouched too, and asserting "no line appeared" over that would pass for
+  # the wrong reason.
+  if "$SPOOLWAY" eval >/dev/null 2>&1; then
+    AFTER=$(grep -c "\"session\":\"$SID\"" "$SPOOLWAY_PROJECT_HOME/usage.jsonl")
+    if [ "$AFTER" = "$BEFORE" ]; then
+      ok "\`spoolway eval\` banks no catch-up line for a lane still in flight"
+    else
+      bad "\`spoolway eval\` banks no catch-up line for a lane still in flight"
+      printf '        ledger lines for %s before/after: %s/%s\n' "$SID" "$BEFORE" "$AFTER"
+    fi
+  else
+    bad "\`spoolway eval\` exited non-zero — cannot judge whether its sweep banked a line"
+  fi
+else
+  bad "\`spoolway eval\` banks no catch-up line for a lane still in flight (the lane never started)"
+fi
+: > "$CTL/transcript"
+sweep
+forget evallive
+
 finish

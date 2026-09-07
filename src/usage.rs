@@ -2290,8 +2290,10 @@ pub fn bank_lane(repo: &Repo, kind: &str, session: &str, task: &str, step: &str)
     if session.is_empty() {
         return None;
     }
+    // Read before the harvest, never after it — see [`bank_lane_at`].
+    let banked_at = chrono::Utc::now();
     let harvest = harvest(kind, session)?;
-    bank_lane_from(repo, kind, session, task, step, &harvest)
+    bank_lane_from(repo, kind, session, task, step, banked_at, &harvest)
 }
 
 /// [`bank_lane`] against an already-read transcript, so the diff-and-append is
@@ -2302,14 +2304,58 @@ fn bank_lane_from(
     session: &str,
     task: &str,
     step: &str,
+    banked_at: chrono::DateTime<chrono::Utc>,
     harvest: &Harvest,
 ) -> Option<Entry> {
     let _lock = crate::lock::LedgerLock::acquire(&repo.ledger_lock_file());
     let ledger = read(repo).unwrap_or_default();
+    bank_lane_at(
+        repo, kind, session, task, step, banked_at, None, &ledger, harvest,
+    )
+}
+
+/// The diff-and-append behind [`bank_lane_from`], with the ledger already read
+/// and [`crate::lock::LedgerLock`] already held.
+///
+/// Split out so [`sweep`] can catch a settled lane up against the one snapshot
+/// it already took, under the one lock it already holds — re-acquiring the
+/// ledger lock from inside a `sweep` that holds it would deadlock on the same
+/// process.
+///
+/// `banked_at` becomes the line's `ts`, and the caller must have read it
+/// **before** harvesting the transcript — not from a clock read here, after.
+/// A record appended between the harvest reaching EOF and a later clock
+/// reading would land with a file mtime older than that reading, and
+/// [`catch_up_settled_lane`] gates a future sweep on exactly that mtime
+/// against this line's `ts`: a `ts` chosen after the read would make every
+/// later sweep skip the unread tail. Stamping the line no later than the
+/// moment the harvest observed the file keeps the mtime of anything it missed
+/// **no older** than the line — and the gate reads on a tie, so "no older" is
+/// enough for that record to be swept next time.
+///
+/// `carry` is the session's most recent lane line. Its `pipeline`, `agent`,
+/// `plan`, `run`, `trial` and `round` are copied onto the new line, so spend
+/// recovered by a sweep lands in the same `spoolway eval` row the lane's own
+/// turns did rather than in a pipeline-less one no group owns. `None` for
+/// [`bank_lane`]'s caller — the headless interrupt has a lane name and a
+/// transcript, not a loaded pipeline — where those fields stay blank the way a
+/// line written before they existed carries them.
+#[allow(clippy::too_many_arguments)]
+fn bank_lane_at(
+    repo: &Repo,
+    kind: &str,
+    session: &str,
+    task: &str,
+    step: &str,
+    banked_at: chrono::DateTime<chrono::Utc>,
+    carry: Option<&Entry>,
+    ledger: &[Entry],
+    harvest: &Harvest,
+) -> Option<Entry> {
     let mut banked = Tokens::default();
     let mut banked_cost = 0.0f64;
     let mut banked_turns = 0u32;
-    for entry in &ledger {
+    for entry in ledger {
         if entry.session == session {
             banked.add(&entry.tokens);
             banked_cost += entry.cost_usd.unwrap_or(0.0);
@@ -2328,16 +2374,16 @@ fn bank_lane_from(
     };
     let stamp = crate::version::stamp(repo);
     let entry = Entry {
-        ts: chrono::Utc::now().to_rfc3339(),
+        ts: banked_at.to_rfc3339(),
         task: task.to_string(),
-        plan: None,
+        plan: carry.and_then(|c| c.plan.clone()),
         step: step.to_string(),
-        pipeline: String::new(),
-        agent: String::new(),
+        pipeline: carry.map(|c| c.pipeline.clone()).unwrap_or_default(),
+        agent: carry.map(|c| c.agent.clone()).unwrap_or_default(),
         kind: kind.to_string(),
         model,
         session: session.to_string(),
-        round: 0,
+        round: carry.map(|c| c.round).unwrap_or(0),
         wall_s: 0,
         turns: harvest.turns.saturating_sub(banked_turns),
         tokens,
@@ -2345,14 +2391,84 @@ fn bank_lane_from(
         ctx_peak: Some(harvest.ctx_peak),
         version: Some(stamp.version),
         commit: stamp.commit,
+        // The turns swept up here arrived after the lane reported — or after it
+        // was killed without reporting — so nothing judged them. A guessed
+        // `pass` would put unjudged work in the pass rate.
         outcome: None,
-        run: None,
-        trial: None,
+        run: carry.and_then(|c| c.run.clone()),
+        trial: carry.and_then(|c| c.trial.clone()),
         skill: None,
         project: String::new(),
     };
     append(repo, &entry).ok()?;
     Some(entry)
+}
+
+/// Catch one settled lane session up to its transcript.
+fn catch_up_settled_lane(
+    repo: &Repo,
+    kind: &str,
+    session: &str,
+    ledger: &[Entry],
+) -> Option<Entry> {
+    let path = session_file(kind, session)?;
+    // Taken before the gate and the harvest below read the file — see
+    // [`bank_lane_at`] for why a stamp chosen after the read loses a racing
+    // tail.
+    let banked_at = chrono::Utc::now();
+    catch_up_settled_lane_at(repo, kind, session, &path, banked_at, ledger)
+}
+
+/// [`catch_up_settled_lane`] against a transcript already located, so a test
+/// drives it without a home directory full of sessions — the same split
+/// [`bank_session_at`] has from [`sweep`].
+fn catch_up_settled_lane_at(
+    repo: &Repo,
+    kind: &str,
+    session: &str,
+    path: &Path,
+    banked_at: chrono::DateTime<chrono::Utc>,
+    ledger: &[Entry],
+) -> Option<Entry> {
+    // The gate: read the transcript only if it has moved since this session's
+    // most recent banked line. `spoolway eval` and `spoolway spend` sweep on
+    // every invocation, and a lane the dispatcher banked at teardown and never
+    // touched again has a transcript no newer than that line — re-parsing the
+    // largest file in every finished run each time buys nothing. A tie reads:
+    // a line banked in the same second the last turn landed is no proof
+    // nothing came after it.
+    let last_banked = ledger
+        .iter()
+        .filter(|entry| entry.session == session)
+        .filter_map(|entry| chrono::DateTime::parse_from_rfc3339(&entry.ts).ok())
+        .map(|ts| ts.with_timezone(&chrono::Utc))
+        .max()?;
+    let moved = touched_at(path)
+        .map(|at| chrono::DateTime::<chrono::Utc>::from(at) >= last_banked)
+        .unwrap_or(false);
+    if !moved {
+        return None;
+    }
+
+    let harvest = harvest_file(kind, path)?;
+    // The lane's most recent line, whose columns the catch-up line inherits.
+    // Its own `task` and `step` are read back from it too — a settled lane
+    // knows which task it belonged to only through what it was banked as.
+    let carry = ledger
+        .iter()
+        .rev()
+        .find(|entry| entry.session == session && !entry.is_skill())?;
+    bank_lane_at(
+        repo,
+        kind,
+        session,
+        &carry.task,
+        &carry.step,
+        banked_at,
+        Some(carry),
+        ledger,
+        &harvest,
+    )
 }
 
 /// Enrol the session this command is running in, by banking what it has spent
@@ -2390,14 +2506,28 @@ pub fn bank_ambient(repo: &Repo) -> Vec<Entry> {
         .collect()
 }
 
-/// Catch every interactive session this ledger knows about up to its
-/// transcript, and return what that appended.
+/// Catch the sessions this ledger names up to their transcripts, and return
+/// what that appended.
 ///
-/// This is what makes reading the ledger enough: a session is enrolled by the
-/// first spoolway command run in it and swept by every read afterwards, so a
-/// plan that was never queued — and the hour of conversation after the last
-/// command — are still counted. Idempotent by construction, since
-/// [`bank_session_at`] banks only the delta.
+/// Two populations, read two ways. A session of either kind is skipped when its
+/// `kind` carries no accounting row — one spoolway never knew, or a kind whose
+/// row was removed under a ledger that still holds its old lines — since there
+/// is then no transcript format to read it back in.
+///
+/// - **Interactive sessions**, through [`bank_session_at`], one line per skill
+///   segment. This is what makes reading the ledger enough: a session is
+///   enrolled by the first spoolway command run in it and swept by every read
+///   afterwards, so a plan that was never queued — and the hour of
+///   conversation after the last command — are still counted.
+/// - **Settled lane sessions**, through [`catch_up_settled_lane`], one line for
+///   the turns that landed in a lane's transcript after the dispatcher tore it
+///   down. A lane [`crate::dispatch::live_lane_sessions`] still names is left
+///   out — it is the dispatcher's to bank at teardown — and a lane whose
+///   transcript has not moved since its last banked line is not even read.
+///
+/// Idempotent either way: [`bank_session_at`] and [`catch_up_settled_lane`]
+/// both bank only the delta since this session was last banked, and the
+/// settled-lane read is gated on the transcript's mtime as well.
 ///
 /// This project's ledger only. A `--all` read spans projects, but writing to
 /// another project's ledger from a command run here is not something a read
@@ -2422,11 +2552,22 @@ pub fn sweep(repo: &Repo) -> Vec<Entry> {
         return Vec::new();
     };
     let ledger = read(repo).unwrap_or_default();
+    // The lanes a dispatcher still owns. Their spend is banked at teardown and
+    // diffed against the snapshot `record_usage` read once at the top of the
+    // pass, so a catch-up line appended here would be banked a second time
+    // then — see [`crate::dispatch::live_lane_sessions`].
+    let live = crate::dispatch::live_lane_sessions(repo);
 
     let mut seen: HashSet<(&str, &str)> = HashSet::new();
-    let mut sessions: Vec<(&str, &str)> = Vec::new();
+    let mut skill_sessions: Vec<(&str, &str)> = Vec::new();
+    // Settled lane sessions the ledger names, kept apart from the skill ones:
+    // a lane line is caught up by a different reader — [`catch_up_settled_lane`]
+    // — than the per-skill [`bank_session_at`] an interactive session's line
+    // goes through.
+    let mut lane_seen: HashSet<(&str, &str)> = HashSet::new();
+    let mut lane_sessions: Vec<(&str, &str)> = Vec::new();
     for entry in &ledger {
-        if !entry.is_skill() || entry.session.is_empty() {
+        if entry.session.is_empty() {
             continue;
         }
         // A kind with no accounting row has no transcript to catch up to —
@@ -2435,19 +2576,31 @@ pub fn sweep(repo: &Repo) -> Vec<Entry> {
         if kind(&entry.kind).is_none() {
             continue;
         }
-        if seen.insert((entry.kind.as_str(), entry.session.as_str())) {
-            sessions.push((entry.kind.as_str(), entry.session.as_str()));
+        let key = (entry.kind.as_str(), entry.session.as_str());
+        if entry.is_skill() {
+            if seen.insert(key) {
+                skill_sessions.push(key);
+            }
+        } else if !live.contains(&entry.session) && lane_seen.insert(key) {
+            lane_sessions.push(key);
         }
     }
 
-    sessions
+    let mut appended: Vec<Entry> = skill_sessions
         .into_iter()
         .filter_map(|(kind, session)| {
             let path = session_file(kind, session)?;
             Some(bank_session_at(repo, kind, session, &path, &ledger))
         })
         .flatten()
-        .collect()
+        .collect();
+
+    for (kind, session) in lane_sessions {
+        if let Some(entry) = catch_up_settled_lane(repo, kind, session, &ledger) {
+            appended.push(entry);
+        }
+    }
+    appended
 }
 
 /// Read one project's ledger, tagging every entry with the project's name.
@@ -2496,6 +2649,35 @@ mod tests {
         let _lock = crate::lock::LedgerLock::acquire(&repo.ledger_lock_file());
         let ledger = read(repo).unwrap_or_default();
         bank_session_at(repo, kind, session, path, &ledger)
+    }
+
+    /// [`catch_up_settled_lane_at`] with the watermark a real sweep would take
+    /// — the current instant, read before the harvest. The tests about the
+    /// watermark itself call the function directly with a fixed instant.
+    fn catch_up(
+        repo: &Repo,
+        kind: &str,
+        session: &str,
+        path: &Path,
+        ledger: &[Entry],
+    ) -> Option<Entry> {
+        catch_up_settled_lane_at(repo, kind, session, path, chrono::Utc::now(), ledger)
+    }
+
+    /// Run `f` with `SPOOLWAY_STEP` out of the environment, so [`sweep`] does
+    /// not take its `in_lane` early return — this test binary is itself run
+    /// inside a lane as often as not. Restores whatever was there. The caller
+    /// holds [`AMBIENT_ENV`], which is what serialises this against every other
+    /// test that reaches for the same variable.
+    fn out_of_lane<T>(f: impl FnOnce() -> T) -> T {
+        let previous = std::env::var_os(crate::dispatch::ENV_STEP);
+        crate::platform::remove_test_env(crate::dispatch::ENV_STEP);
+        let result = f();
+        match previous {
+            Some(value) => crate::platform::set_test_env(crate::dispatch::ENV_STEP, value),
+            None => crate::platform::remove_test_env(crate::dispatch::ENV_STEP),
+        }
+        result
     }
 
     fn prices() -> BTreeMap<String, ModelPrice> {
@@ -4068,6 +4250,7 @@ mod tests {
             "sL",
             "demo",
             "implement",
+            chrono::Utc::now(),
             &harvest(1_000, 200, 3),
         )
         .expect("a first bank");
@@ -4085,6 +4268,7 @@ mod tests {
             "sL",
             "demo",
             "implement",
+            chrono::Utc::now(),
             &harvest(1_600, 260, 4),
         )
         .expect("a second bank");
@@ -4100,6 +4284,7 @@ mod tests {
                 "sL",
                 "demo",
                 "implement",
+                chrono::Utc::now(),
                 &harvest(1_600, 260, 4)
             )
             .is_none()
@@ -4299,6 +4484,302 @@ mod tests {
         };
         assert_eq!(lane.skill_label(), None);
         assert!(!lane.is_skill());
+    }
+
+    // ------------------------------------------------ settled lanes, swept
+
+    /// A lane the dispatcher banked at teardown, whose transcript then grew —
+    /// the turns a person's Escape or a late tool result left behind. `sweep`
+    /// catches it up with exactly one line, and a second sweep over the same
+    /// session appends nothing.
+    #[test]
+    fn a_settled_lane_whose_transcript_grew_gains_one_line_then_nothing() {
+        let (repo, path) = fixture("settled-lane-grew");
+        let torn_down = Entry {
+            ts: (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339(),
+            task: "demo".into(),
+            step: "implement".into(),
+            session: "s".into(),
+            turns: 3,
+            tokens: Tokens {
+                output: 100,
+                ..Tokens::default()
+            },
+            ..plain_entry()
+        };
+        append(&repo, &torn_down).unwrap();
+
+        // Turns that landed after teardown: the transcript totals to more now.
+        std::fs::write(&path, transcript(&[("", 100), ("", 40)])).unwrap();
+
+        let ledger = read(&repo).unwrap();
+        let first = catch_up(&repo, "claude", "s", &path, &ledger).expect("the catch-up line");
+        assert_eq!(first.tokens.output, 40, "only what the ledger had not seen");
+        assert_eq!(first.session, "s");
+        assert!(first.skill.is_none(), "a lane line, not a skill line");
+
+        // Read again with nothing new in the transcript.
+        let ledger = read(&repo).unwrap();
+        assert!(
+            catch_up(&repo, "claude", "s", &path, &ledger).is_none(),
+            "the session is already caught up"
+        );
+
+        let banked: u64 = read(&repo)
+            .unwrap()
+            .iter()
+            .filter(|e| e.session == "s")
+            .map(|e| e.tokens.output)
+            .sum();
+        assert_eq!(banked, 140, "totals to the transcript, not past it");
+    }
+
+    /// The whole path, through `sweep`: a settled lane no `lanes.json` still
+    /// names is caught up to its transcript, and reading twice appends once.
+    #[test]
+    fn sweep_catches_up_a_settled_lane_the_dispatcher_has_let_go() {
+        let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let (repo, _) = fixture("sweep-settled-lane");
+        let session = "0198e2c0-8888-4000-8000-000000000008";
+        let home = home_with("claude", session, &transcript(&[("", 100), ("", 500)]));
+
+        let banked = Entry {
+            ts: (chrono::Utc::now() - chrono::Duration::seconds(60)).to_rfc3339(),
+            task: "demo".into(),
+            step: "implement".into(),
+            pipeline: "impl_tdd".into(),
+            agent: "pi".into(),
+            round: 1,
+            session: session.into(),
+            tokens: Tokens {
+                output: 100,
+                ..Tokens::default()
+            },
+            ..plain_entry()
+        };
+        append(&repo, &banked).unwrap();
+
+        let appended =
+            crate::platform::test_home::with_home(&home, || out_of_lane(|| sweep(&repo)));
+        assert_eq!(appended.len(), 1, "one catch-up line");
+        assert_eq!(appended[0].session, session);
+        assert_eq!(appended[0].tokens.output, 500);
+        assert_eq!(appended[0].step, "implement", "the lane's own step");
+        assert_eq!(appended[0].pipeline, "impl_tdd");
+        assert!(appended[0].skill.is_none());
+
+        let again = crate::platform::test_home::with_home(&home, || out_of_lane(|| sweep(&repo)));
+        assert!(again.is_empty(), "idempotent");
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A lane still in flight — one `lanes.json` names — is the dispatcher's
+    /// alone. Its spend is banked at teardown and diffed against the snapshot
+    /// `record_usage` took once at the top of the pass, so a catch-up line
+    /// appended behind its back is banked a second time when that snapshot is
+    /// diffed. `sweep` leaves it alone even though the ledger names its
+    /// session and its transcript has grown.
+    #[test]
+    fn sweep_leaves_a_lane_the_dispatcher_still_owns_alone() {
+        let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let (repo, _) = fixture("sweep-live-lane");
+        let session = "0198e2c0-9999-4000-8000-000000000009";
+        let home = home_with("claude", session, &transcript(&[("", 100), ("", 500)]));
+
+        let banked = Entry {
+            ts: (chrono::Utc::now() - chrono::Duration::seconds(60)).to_rfc3339(),
+            task: "demo".into(),
+            step: "implement".into(),
+            session: session.into(),
+            tokens: Tokens {
+                output: 100,
+                ..Tokens::default()
+            },
+            ..plain_entry()
+        };
+        append(&repo, &banked).unwrap();
+
+        std::fs::create_dir_all(repo.home()).unwrap();
+        std::fs::write(
+            repo.lanes_file(),
+            format!(
+                "{{\"demo · implement\":{{\"started_at\":0,\"last_progress\":0,\
+                 \"output_hash\":0,\"session\":\"{session}\"}}}}"
+            ),
+        )
+        .unwrap();
+
+        let appended =
+            crate::platform::test_home::with_home(&home, || out_of_lane(|| sweep(&repo)));
+        assert!(
+            appended.is_empty(),
+            "a live lane is the dispatcher's to bank"
+        );
+        assert_eq!(
+            read(&repo).unwrap().len(),
+            1,
+            "no catch-up line was written"
+        );
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// The catch-up line stands in the same `spoolway eval` row the lane's own
+    /// turns did: `task`, `step`, `pipeline`, `agent`, `plan`, `run`, `trial`
+    /// and `round` are copied from the session's most recent lane line. It
+    /// carries no `outcome` — the turns swept up here were never judged.
+    #[test]
+    fn the_catch_up_line_copies_the_lanes_own_columns_and_carries_no_outcome() {
+        let (repo, path) = fixture("settled-lane-columns");
+        let lane = Entry {
+            ts: (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339(),
+            task: "demo".into(),
+            step: "implement".into(),
+            pipeline: "impl_tdd".into(),
+            agent: "pi".into(),
+            plan: Some("epic".into()),
+            round: 4,
+            run: Some("r1234".into()),
+            trial: Some("t9".into()),
+            outcome: Some("pass".into()),
+            session: "s".into(),
+            tokens: Tokens {
+                output: 10,
+                ..Tokens::default()
+            },
+            ..plain_entry()
+        };
+        append(&repo, &lane).unwrap();
+        std::fs::write(&path, transcript(&[("", 10), ("", 7)])).unwrap();
+
+        let ledger = read(&repo).unwrap();
+        let line = catch_up(&repo, "claude", "s", &path, &ledger).expect("the catch-up line");
+
+        assert_eq!(line.task, "demo");
+        assert_eq!(line.step, "implement");
+        assert_eq!(line.pipeline, "impl_tdd");
+        assert_eq!(line.agent, "pi");
+        assert_eq!(line.plan.as_deref(), Some("epic"));
+        assert_eq!(line.round, 4);
+        assert_eq!(line.run.as_deref(), Some("r1234"));
+        assert_eq!(line.trial.as_deref(), Some("t9"));
+        assert_eq!(line.outcome, None, "late turns were never judged");
+    }
+
+    /// A settled lane whose transcript has not moved since its last banked line
+    /// is not read at all — `spoolway eval` and `spoolway spend` run on every
+    /// invocation, and re-parsing the largest file in every finished run each
+    /// time is the cost this gate removes.
+    #[test]
+    fn a_settled_lane_whose_transcript_has_not_moved_is_not_read() {
+        let (repo, path) = fixture("settled-lane-still");
+        // The transcript holds spend the ledger has never seen...
+        std::fs::write(&path, transcript(&[("", 100), ("", 999)])).unwrap();
+        // ...but its clock sits before the line the dispatcher last banked.
+        crate::scratch::set_mtime(
+            &path,
+            std::time::SystemTime::now() - std::time::Duration::from_secs(120),
+        );
+        let banked = Entry {
+            ts: chrono::Utc::now().to_rfc3339(),
+            task: "demo".into(),
+            step: "implement".into(),
+            session: "s".into(),
+            tokens: Tokens {
+                output: 100,
+                ..Tokens::default()
+            },
+            ..plain_entry()
+        };
+        append(&repo, &banked).unwrap();
+
+        let ledger = read(&repo).unwrap();
+        assert!(
+            catch_up(&repo, "claude", "s", &path, &ledger).is_none(),
+            "nothing has arrived since the ledger last saw this session"
+        );
+        assert_eq!(read(&repo).unwrap().len(), 1, "no line was appended");
+    }
+
+    /// The tie: a transcript last written in the very second its banked line
+    /// was is read, not skipped — a line banked as the last turn landed is no
+    /// proof nothing came after it.
+    #[test]
+    fn a_transcript_touched_at_the_banked_lines_instant_is_read() {
+        let (repo, path) = fixture("settled-lane-tie");
+        let banked = Entry {
+            ts: chrono::Utc::now().to_rfc3339(),
+            task: "demo".into(),
+            step: "implement".into(),
+            session: "s".into(),
+            tokens: Tokens {
+                output: 10,
+                ..Tokens::default()
+            },
+            ..plain_entry()
+        };
+        append(&repo, &banked).unwrap();
+        std::fs::write(&path, transcript(&[("", 10), ("", 5)])).unwrap();
+        let at: std::time::SystemTime = chrono::DateTime::parse_from_rfc3339(&banked.ts)
+            .unwrap()
+            .into();
+        crate::scratch::set_mtime(&path, at);
+
+        let ledger = read(&repo).unwrap();
+        let line =
+            catch_up(&repo, "claude", "s", &path, &ledger).expect("a tie is read, not skipped");
+        assert_eq!(line.tokens.output, 5);
+    }
+
+    /// The catch-up line is stamped with the instant the caller took *before*
+    /// the harvest, not a clock read after it. A record that lands between the
+    /// harvest reaching EOF and a later reading gets a file mtime older than
+    /// that reading; the next sweep's gate compares the transcript's mtime to
+    /// this line's `ts`, so a `ts` chosen after the read would make every
+    /// future sweep skip the unread tail. Here the transcript's own clock
+    /// sits just past the watermark, and that alone must make the next sweep
+    /// read it.
+    #[test]
+    fn a_record_landing_after_the_harvest_watermark_is_still_swept() {
+        let (repo, path) = fixture("settled-lane-watermark");
+        let torn_down = Entry {
+            ts: (chrono::Utc::now() - chrono::Duration::seconds(300)).to_rfc3339(),
+            task: "demo".into(),
+            step: "implement".into(),
+            session: "s".into(),
+            tokens: Tokens {
+                output: 100,
+                ..Tokens::default()
+            },
+            ..plain_entry()
+        };
+        append(&repo, &torn_down).unwrap();
+        std::fs::write(&path, transcript(&[("", 100), ("", 40)])).unwrap();
+
+        // The watermark a sweep takes before it reads the file.
+        let watermark = chrono::Utc::now();
+        let ledger = read(&repo).unwrap();
+        let first = catch_up_settled_lane_at(&repo, "claude", "s", &path, watermark, &ledger)
+            .expect("the catch-up line");
+        assert_eq!(
+            first.ts,
+            watermark.to_rfc3339(),
+            "stamped with the pre-harvest watermark, not a later clock"
+        );
+
+        // A turn the first harvest never saw lands now. Its file mtime is just
+        // past the watermark — the only thing newer than the banked line.
+        std::fs::write(&path, transcript(&[("", 100), ("", 40), ("", 7)])).unwrap();
+        crate::scratch::set_mtime(
+            &path,
+            std::time::SystemTime::from(watermark) + std::time::Duration::from_millis(500),
+        );
+
+        let ledger = read(&repo).unwrap();
+        let tail = catch_up(&repo, "claude", "s", &path, &ledger)
+            .expect("the tail written past the watermark is not lost to the gate");
+        assert_eq!(tail.tokens.output, 7);
     }
 
     #[test]
