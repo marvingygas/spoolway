@@ -798,6 +798,8 @@ afterwards: the provider whose directory the skills go in, the issue tracker to 
 local steps run on, and the model those steps name. Answer any of them with the flag
 instead and it is not asked. With no terminal — a script, CI, a pipe — nothing is asked
 and nothing blocks: the defaults are taken silently, `none` among them for the tracker.
+Fixed choices start on the default and use ↑/↓ to move; Enter or Space accepts the
+highlighted answer.
 
 | Flag | Meaning |
 |---|---|
@@ -815,6 +817,10 @@ applied rather than silently dropped, since rewriting a config a project has bee
 on is not what a second `init` is for. Every hook script is still written whichever
 tracker a project answers, or none at all, so switching trackers afterwards is a
 `spoolway config set issue_tracking.hook` away rather than a second `init`.
+
+A successful fresh run prints only “Skills installed successfully.” and “Project initialized
+successfully.”, apart from actionable warnings. A repeat run that only adds skills omits the
+project line. `spoolway install <provider>` uses the same concise skills message.
 
 See [Installation and setup](installation.md#scaffolding-a-project).
 

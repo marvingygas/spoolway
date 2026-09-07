@@ -405,7 +405,9 @@ fn run() -> Result<()> {
                     exit_dispatch(commands::dispatch(&repo, routing(&graph)?, args))
                 }
                 Command::Install(args) => {
-                    crate::install::install(&repo.root, args.provider, args.force)
+                    let installed = crate::install::install(&repo.root, args.provider, args.force)?;
+                    crate::install::report(installed);
+                    Ok(())
                 }
                 Command::Update(args) => update::run(&repo, args),
             }

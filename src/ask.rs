@@ -7,10 +7,10 @@
 //! checked here rather than remembered at each call site: [`interactive`] is
 //! the only thing that decides, and every function below goes through it.
 //!
-//! Deliberately hand-rolled rather than a prompting crate. Three questions
-//! asked once, at the one moment a project is created, do not justify a
-//! dependency — and a dependency would still have to be taught this module's
-//! actual subject, which is not how to draw a menu but when to refuse to.
+//! Fixed choices use a terminal selector so a person can move the highlighted
+//! answer with the arrow keys and accept it, while free text remains an
+//! ordinary line. The decision about whether anyone is there to answer still
+//! belongs here rather than to the prompting library.
 
 use std::io::{BufRead, IsTerminal, Write};
 
@@ -27,57 +27,32 @@ pub fn interactive() -> bool {
     std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
 }
 
-/// One question with a fixed set of answers, as a numbered menu.
+/// One question with a fixed set of answers, as an interactive selector.
 ///
 /// `options` are `(value, note)`; the note is what the value means, shown
-/// beside it. Returns the chosen value's index. An empty line takes `default`,
-/// and so does anything unrecognised — after saying so, because a person who
-/// typed `codx` should see that they got claude rather than find out from the
-/// paths in the summary.
+/// beside it. The default starts highlighted, arrow keys move the highlight,
+/// and Enter or Space accepts it. Returns the chosen value's index.
 pub fn choose(question: &str, options: &[(&str, &str)], default: usize) -> Result<usize> {
     debug_assert!(default < options.len(), "the default must be on the menu");
     if !interactive() {
         return Ok(default);
     }
 
-    println!("{question}");
     let width = options
         .iter()
         .map(|(value, _)| value.len())
         .max()
         .unwrap_or(0);
-    for (i, (value, note)) in options.iter().enumerate() {
-        let mark = if i == default { "*" } else { " " };
-        println!("  {mark} {}) {value:width$}  {note}", i + 1);
-    }
-
-    let answer = read(&format!("[1-{}, default {}]", options.len(), default + 1))?;
-    let answer = answer.trim();
-    if answer.is_empty() {
-        return Ok(default);
-    }
-    // By number, or by name — a person who has read the menu has both in front
-    // of them and no reason to think only one of them counts.
-    if let Some(index) = answer
-        .parse::<usize>()
-        .ok()
-        .filter(|n| (1..=options.len()).contains(n))
-        .map(|n| n - 1)
-    {
-        return Ok(index);
-    }
-    if let Some(index) = options
+    let items: Vec<String> = options
         .iter()
-        .position(|(value, _)| value.eq_ignore_ascii_case(answer))
-    {
-        return Ok(index);
-    }
-
-    println!(
-        "  (`{answer}` is not on the menu — taking {})",
-        options[default].0
-    );
-    Ok(default)
+        .map(|(value, note)| format!("{value:width$}  {note}"))
+        .collect();
+    let term = dialoguer::console::Term::stdout();
+    Ok(dialoguer::Select::new()
+        .with_prompt(question)
+        .items(&items)
+        .default(default)
+        .interact_on(&term)?)
 }
 
 /// One question with a free-text answer, or `None` for an empty one.

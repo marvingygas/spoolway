@@ -182,50 +182,37 @@ impl Provider {
     }
 }
 
+/// The facts a command may report after the skill files are safely in place.
+pub struct Outcome {
+    caveat: Option<&'static str>,
+}
+
 /// Write the provider's skill files, skipping any that already exist unless
-/// `force`.
-pub fn install(root: &Path, provider: Provider, force: bool) -> Result<()> {
+/// `force`. Rendering is left to [`report`], so a caller embedding the install
+/// does not inherit a nested file-by-file transcript.
+pub fn install(root: &Path, provider: Provider, force: bool) -> Result<Outcome> {
     let planned = provider.plan(root);
-    let mut wrote = 0;
 
     for file in &planned {
         if file.path.exists() && !force {
-            println!(
-                "  kept    {} (exists — use --force to overwrite)",
-                show(root, &file.path)
-            );
             continue;
         }
         write_atomic(&file.path, file.contents)?;
-        println!("  wrote   {}", show(root, &file.path));
-        wrote += 1;
     }
 
-    println!();
-    if wrote == 0 {
-        println!("Nothing changed.");
-    } else {
-        println!(
-            "Wrote {wrote} file(s) for {}. Start a fresh session to pick them up.",
-            provider.name()
-        );
-    }
-    // Printed whether or not anything was written: a project that installed
-    // these last week and has never seen them load wants this line too.
-    if let Some(caveat) = provider.caveat() {
-        println!("  note  {caveat}");
-    }
-    Ok(())
+    Ok(Outcome {
+        caveat: provider.caveat(),
+    })
 }
 
-/// The same repo-relative rendering the rest of spoolway prints.
-///
-/// This one only ever reaches a console, so the separator is cosmetic — but a
-/// tool that says `.claude\skills\…` here and `.claude/skills/…` three lines
-/// later in a task file looks like two tools, and there is no reason for the
-/// exception.
-fn show(root: &Path, path: &Path) -> String {
-    crate::platform::relative(root, path)
+/// Print the deliberately small successful-install report.
+pub fn report(outcome: Outcome) {
+    // Reported whether or not anything was written: a project that installed
+    // these last week and has never seen them load wants this warning too.
+    if let Some(caveat) = outcome.caveat {
+        println!("  note  {caveat}");
+    }
+    println!("Skills installed successfully.");
 }
 
 #[cfg(test)]

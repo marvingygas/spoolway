@@ -456,6 +456,11 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     // person runs without knowing yet what they have got hold of.
     print!("{}", crate::status::banner("setting up a project"));
 
+    // A repeat run is how a project adds another provider's skills. Keep that
+    // successful outcome distinct from creating (or deliberately replacing)
+    // the project's scaffold.
+    let already_initialized = Config::path_in(root).exists() && !args.force;
+
     // Before anything is written: a name clash is a refusal, not a partial
     // scaffold left for the next run to trip over. `claim` says what it did
     // only when there was something to say — a fresh or repeat claim is
@@ -492,12 +497,8 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     std::fs::create_dir_all(state.join("prompts"))
         .with_context(|| format!("creating {}", state.join("prompts").display()))?;
 
-    let mut wrote = Vec::new();
-    let mut skipped = Vec::new();
-
-    let mut place = |path: std::path::PathBuf, contents: &[u8], exec: bool| -> Result<()> {
+    let place = |path: std::path::PathBuf, contents: &[u8], exec: bool| -> Result<()> {
         if path.exists() && !args.force {
-            skipped.push(path);
             return Ok(());
         }
         write_atomic(&path, contents)?;
@@ -515,7 +516,6 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
                 std::fs::set_permissions(&path, perms)?;
             }
         }
-        wrote.push(path);
         Ok(())
     };
 
@@ -643,51 +643,18 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
 
     crate::usage::registry::register(root);
 
-    for path in &wrote {
-        println!("  wrote   {}", relative(root, path));
-    }
-    for path in &skipped {
-        println!("  kept    {} (exists)", relative(root, path));
-    }
     for note in &notes {
         println!("{note}");
-    }
-
-    println!();
-    // A project that was already set up is not initialising, it is upgrading —
-    // and `--force` is the wrong tool for that, because it takes the prompts
-    // this project has written with it.
-    if !skipped.is_empty() && !args.force {
-        println!("This project was already set up, so nothing existing was changed.");
-        println!("To take what a newer spoolway writes without losing your own prose:");
-        println!("  spoolway update --dry-run");
-        println!();
     }
     // The skills, in the provider's own convention. Run from here rather than
     // suggested, because "and now run this other command" is the manual step
     // this exists to remove — and a project that skipped it had skills that
     // were shipped, documented, and never installed.
-    crate::install::install(root, answers.provider, args.force)?;
-
-    println!();
-    println!("spoolway is set up in {}.", root.display());
-    // Only what is still open. A project that named its model has no reason to
-    // be told where the placeholder is, and a person who just answered three
-    // questions should not be handed the same three back as a list.
-    println!("Next:");
-    if answers.model.is_none() {
-        // The placeholder is written into the pipeline files, not `config.toml`
-        // — `agents.*.model` is retired and `config set` refuses it. Point at
-        // the files that actually carry it.
-        println!(
-            "  edit .spoolway/pipelines/*.yml   # name a model: every local step's `model:` \
-             still says `{}` (`spoolway pipeline show` lists them)",
-            crate::models::PLACEHOLDER
-        );
-    } else {
-        println!("  spoolway config edit        # concurrency, timeouts, agent profiles");
+    let installed = crate::install::install(root, answers.provider, args.force)?;
+    crate::install::report(installed);
+    if !already_initialized {
+        println!("Project initialized successfully.");
     }
-    println!("  spoolway queue              # add a task, and start dispatching on the spot");
     Ok(())
 }
 
