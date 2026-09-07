@@ -54,6 +54,7 @@
 # issue_tracking.hook                   <filename>             (blank)                                                 A bare filename, resolved inside `.spoolway/hooks/`; blank runs no hook and changes nothing about a task's `queued`, `blocked`, `paused` or `done`.
 # issue_tracking.project_key            <string>               (blank)                                                 Opaque to spoolway — `owner/repo` on github, a project key on jira — handed to the hook verbatim as `SPOOLWAY_PROJECT_KEY`.
 # issue_tracking.on_fail                ignore, pause          ignore                                                  What a non-zero hook exit does: `ignore` only records it, `pause` also holds the task — on `queued` to `paused`, on `done` out of the archive.
+# issue_tracking.key_in_names           true, false            false                                                   Whether a `slug=` the hook answers prefixes the group, branch and worktree name `queue add` generates — `task/<slug>-<id>`. Off changes nothing.
 
 skills = ["spoolway-plan"]
 
@@ -138,3 +139,4 @@ exclusive = true
 hook = ""
 project_key = ""
 on_fail = ""
+key_in_names = false
