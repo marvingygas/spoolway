@@ -197,8 +197,11 @@ pub enum Command {
     Group(GroupCommand),
 
     /// Read and fire cron jobs — routines the dispatcher runs on a schedule.
-    #[command(subcommand)]
-    Jobs(JobsCommand),
+    /// Bare, opens the jobs screen a person writes a job from.
+    Jobs {
+        #[command(subcommand)]
+        command: Option<JobsCommand>,
+    },
 
     /// Read or write single config values non-interactively.
     #[command(subcommand)]

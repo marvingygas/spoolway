@@ -1191,8 +1191,12 @@ use super::pending::{Group, GroupState, PendingTask, TaskState};
 use super::routines::{RoutineFolder, RoutineTask};
 
 /// Which pane a `Char(' ')` or an arrow acts on.
+///
+/// `pub(super)` because the `spoolway jobs` screen reuses this module's
+/// routines browser whole to pick a job's target — see
+/// [`super::jobs::jobs_screen`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Focus {
+pub(super) enum Focus {
     Groups,
     Tasks,
 }
@@ -1298,20 +1302,23 @@ fn selectable(group: &Group) -> bool {
 /// `routines`, read fresh every time `r` opens this mode, the same read
 /// [`super::routines::list_routines`] gives the empty-directory case no
 /// error over.
+///
+/// `pub(super)` along with its fields so the `spoolway jobs` screen can drive
+/// the same browser and then read back which folder or document was picked.
 #[derive(Debug, Clone)]
-struct RoutineNav {
-    path: Vec<String>,
-    focus: Focus,
-    folder_cursor: usize,
-    task_cursor: usize,
+pub(super) struct RoutineNav {
+    pub(super) path: Vec<String>,
+    pub(super) focus: Focus,
+    pub(super) folder_cursor: usize,
+    pub(super) task_cursor: usize,
     /// Ticked folders, by their own absolute path — the same identity
     /// [`RoutineFolder::path`] carries, so two folders that happen to share
     /// a name in different parents are never confused for one another.
-    selected: std::collections::BTreeSet<std::path::PathBuf>,
+    pub(super) selected: std::collections::BTreeSet<std::path::PathBuf>,
 }
 
 impl RoutineNav {
-    fn new() -> RoutineNav {
+    pub(super) fn new() -> RoutineNav {
         RoutineNav {
             path: Vec::new(),
             focus: Focus::Groups,
@@ -1924,7 +1931,10 @@ fn handle_browse_key(groups: &[Group], state: &mut ScreenState, key: Key) {
 /// for a breadcrumb naming a folder that is no longer there — read fresh
 /// only when `r` opens this mode, so nothing here has to reload mid-browse —
 /// rather than a panic.
-fn routine_level<'a>(routines: &'a [RoutineFolder], path: &[String]) -> &'a [RoutineFolder] {
+pub(super) fn routine_level<'a>(
+    routines: &'a [RoutineFolder],
+    path: &[String],
+) -> &'a [RoutineFolder] {
     let mut level = routines;
     for name in path {
         match level.iter().find(|folder| &folder.name == name) {
@@ -1936,7 +1946,7 @@ fn routine_level<'a>(routines: &'a [RoutineFolder], path: &[String]) -> &'a [Rou
 }
 
 /// The folder the left pane's cursor sits on, at the current breadcrumb.
-fn highlighted_routine_folder<'a>(
+pub(super) fn highlighted_routine_folder<'a>(
     routines: &'a [RoutineFolder],
     nav: &RoutineNav,
 ) -> Option<&'a RoutineFolder> {
@@ -1948,7 +1958,7 @@ fn highlighted_routine_folder<'a>(
 /// to act on or leave this mode outright, so `run_screen` reads those first
 /// and only falls through to this for the rest, the same split it makes for
 /// `handle_browse_key`.
-fn handle_routine_key(routines: &[RoutineFolder], nav: &mut RoutineNav, key: Key) {
+pub(super) fn handle_routine_key(routines: &[RoutineFolder], nav: &mut RoutineNav, key: Key) {
     match key {
         Key::Up | Key::Char('k') => match nav.focus {
             Focus::Groups => {
@@ -2261,13 +2271,13 @@ fn selected_documents(groups: &[Group], state: &ScreenState) -> Vec<(TaskKey, St
 /// for one frame. The widths do not count the border or the one space of
 /// padding on either side of it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Layout {
-    left: usize,
-    right: usize,
+pub(super) struct Layout {
+    pub(super) left: usize,
+    pub(super) right: usize,
     /// How many rows the panes are cut to, or `None` where there is no
     /// terminal to measure. Output that is not a terminal has no bottom to
     /// fall off, so it keeps every row it was going to write.
-    rows: Option<usize>,
+    pub(super) rows: Option<usize>,
 }
 
 /// The widths a run with no terminal to measure falls back to. `left` is
@@ -2335,7 +2345,7 @@ const SPARE_COLUMN: usize = 1;
 
 /// The layout for this frame, measured fresh every draw so a resized
 /// terminal reflows on the next one.
-fn layout() -> Layout {
+pub(super) fn layout() -> Layout {
     match terminal_size::terminal_size() {
         Some((width, height)) => layout_for(width.0 as usize, height.0 as usize),
         None => Layout {
@@ -2386,7 +2396,7 @@ const NARROW_RIGHT_PANE: usize = 40;
 /// left for a value beside its label at all, so the label gets its own line
 /// and the value wraps beneath it, indented two — every label stays on
 /// screen either way, which a shrinking label column could not promise.
-fn labeled_row(label: &str, value: &str, width: usize) -> Vec<String> {
+pub(super) fn labeled_row(label: &str, value: &str, width: usize) -> Vec<String> {
     if width < NARROW_RIGHT_PANE {
         let mut lines = vec![format!("    {label}")];
         lines.extend(wrapped("      ", value, width));
@@ -2789,7 +2799,7 @@ fn routine_task_lines(
 /// The whole of [`Mode::Routines`]'s own frame: the same two-pane geometry
 /// [`two_pane_frame`] lays the pending screen out with, folders on the left
 /// and the highlighted one's own documents on the right.
-fn render_routines(
+pub(super) fn render_routines(
     routines: &[RoutineFolder],
     routines_dir: &std::path::Path,
     pipelines: &Pipelines,
@@ -2821,7 +2831,7 @@ fn render_routines(
 /// all. Where the content does not fit, the pane's bottom row is spent on
 /// saying how much is out of sight rather than on a line that would be
 /// silently the last one a person sees.
-fn window(lines: &[String], focus: (usize, usize), rows: Option<usize>) -> Vec<String> {
+pub(super) fn window(lines: &[String], focus: (usize, usize), rows: Option<usize>) -> Vec<String> {
     let Some(rows) = rows else {
         return lines.to_vec();
     };
@@ -2847,7 +2857,7 @@ fn window(lines: &[String], focus: (usize, usize), rows: Option<usize>) -> Vec<S
 /// the layout the acceptance criteria and the mockup both call for: the
 /// pending groups on the left, the highlighted group's tasks on the right,
 /// rather than the two stacked one above the other.
-fn two_pane_frame(
+pub(super) fn two_pane_frame(
     left: &[String],
     right: &[String],
     left_title: &str,

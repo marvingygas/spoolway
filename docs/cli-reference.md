@@ -306,9 +306,22 @@ show`](configuration.md#fetch--a-sixth-event-run-by-spoolway-issue-show).
 
 ### `spoolway jobs`
 
-Read the cron jobs that fire a routine on a schedule, and fire one by hand. The screen that
-writes a job is a later task; until it lands you edit the store files directly. See
-[Jobs](jobs.md) for the stores, the grammar, and how a pass fires one.
+Open the jobs screen — the only thing that writes a cron job. The left pane lists every job
+both stores hold and the right pane shows the highlighted one in full. With no job anywhere,
+the screen names both store paths instead.
+
+`n` writes a new job by walking three panels: the routines browser, where `space` ticks a
+folder and `enter` over that ticked folder picks it (or `space` picks one document); the
+schedule field, which states the expression back in words and shows its next three firings as
+it is typed; and the pipeline picker, which narrows over every pipeline the repo defines.
+`esc` at any panel leaves nothing written.
+
+Over the list, `e` edits the highlighted job through those same three panels, `space` pauses
+and resumes it, `x` deletes it after confirming, `r` fires it now, and `q` quits. A new job is
+written to the user store and takes its name from the leaf of its routine; `e` keeps the name
+and store the job already had.
+
+See [Jobs](jobs.md) for the stores, the grammar, and how a pass fires one.
 
 ### `spoolway jobs list`
 

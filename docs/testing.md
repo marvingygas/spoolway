@@ -131,7 +131,7 @@ A tier is a named set of suites, so a command step has something short to name.
 | Tier | Suites | Used by |
 |---|---|---|
 | `smoke` | flow | Nothing automatic; the fast signal for a person running it by hand |
-| `pr` | flow, commands, stacking, stack, conflicts, forge, disaster, lock, trials, routines, jobs, restart | The last task of a chain, through the `suite` step in `.spoolway/pipelines/*.yml` |
+| `pr` | flow, commands, stacking, stack, conflicts, forge, disaster, lock, trials, routines, jobs, jobs-screen, restart, quota | The last task of a chain, through the `suite` step in `.spoolway/pipelines/*.yml` |
 | `nightly` | the same as `pr` | The nightly routine, run by a person |
 | `cloud` | warmth | Nothing automatic. It spends real tokens, and refuses to run without `SPOOLWAY_E2E_CLOUD=1` |
 | `live` | live | Nothing automatic. It runs the real `codex` binary, and skips it unless `SPOOLWAY_E2E_CODEX_MODEL` names it a model |
@@ -156,6 +156,7 @@ spends nothing when its models resolve to a local endpoint — see
 | `trials` | One task forked across two pipelines from the queue screen's own `p` picker: an arm per pipeline lands in the queue directory under a minted id, with the right `pipeline:`, `skip:` and `group:` on it. Nothing here drives a dispatcher | Real keystrokes piped into the real binary — `run_screen` is exercised headlessly in Rust, but never as the whole binary reading a real pipe |
 | `routines` | The repeatable documents under `.spoolway/routines/`, through the queue screen's `r` pane and `s` panel: `enter` lands the right task files under minted ids with their bodies untouched, and `s` copies a pending group's documents back into the checkout | The same, against a real tracked `.spoolway/routines/` tree |
 | `jobs` | A cron job in a store, fired by a real dispatcher pass against a matching minute: the routine's documents reach the queue under minted ids with `depends_on` remapped and the job's pipeline set, the routine tree is left untouched, and `spoolway doctor` names a job whose expression will not parse, never comes round, points at a missing routine, or names an undefined pipeline | A real dispatcher driving a real `.spoolway/routines/` tree |
+| `jobs-screen` | The `spoolway jobs` screen writing a job: the routine/schedule/pipeline walk lands a `[jobs.<name>]` table in the user store with the typed expression, the picked routine and the default pipeline, `jobs list` then shows it, `space` pauses and resumes it, and `x` then `y` deletes it | Real keystrokes piped into the real binary, against a real store file on disk |
 | `restart` | `spoolway dispatch`'s restart guard: four starts in a row against a held lock each report exit 4, a fifth is refused with exit 5, `--force` starts one anyway and clears the count, and an empty queue reports exit 3 without ever tripping the guard | A real lock file, and real process exit codes across repeated real invocations |
 | `warmth` | **cloud tier only.** Real `claude-haiku-4-5` lanes, because a stand-in's transcript agrees with the parser by construction | A real model writes the transcript |
 | `live` | **live tier only.** The real `codex` binary through `agent verify --live` — a turn, then a resume — because a stand-in written from the adapter row cannot notice a CLI changing its flag grammar | The real binary |

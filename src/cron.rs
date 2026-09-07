@@ -128,6 +128,48 @@ impl Cron {
         })
     }
 
+    /// The expression stated back in plain words, for the `spoolway jobs`
+    /// screen's schedule field — `0 3 * * 1-5` reads as "03:00, Monday to
+    /// Friday". Only the shapes the grammar's own examples show get a phrasing
+    /// of their own; anything more elaborate falls back to a literal
+    /// field-by-field reading rather than risk a summary that is subtly wrong.
+    pub fn describe(&self) -> String {
+        let minutes = set_bits(self.minute, 0, 59);
+        let hours = set_bits(self.hour, 0, 23);
+        let mut out = describe_time(&minutes, &hours);
+        out.push_str(&self.describe_days());
+        out.push_str(&describe_months(&set_bits(self.month, 1, 12)));
+        out
+    }
+
+    /// The day half of [`Cron::describe`]: `, Monday to Friday`, ` on the
+    /// 1st`, or ` on the 13th or any Friday`.
+    ///
+    /// Which clause is drawn turns on whether each day mask is *full* — every
+    /// value set — not on whether the field began with `*`. A stepped field
+    /// like `*/2` in day-of-week is not "restricted" under the Vixie rule, but
+    /// it still fires on only some days, so it must be spelled out. The
+    /// restricted flags are consulted only to pick the joining word when both
+    /// masks narrow the days: `or` when Vixie's rule makes a match on *either*
+    /// fire the job (both fields restricted), `and` when both must match.
+    fn describe_days(&self) -> String {
+        let doms = set_bits(self.dom, 1, 31);
+        let dows = set_bits(self.dow, 0, 6);
+        let dom_full = is_full(&doms, 1, 31);
+        let dow_full = is_full(&dows, 0, 6);
+        match (dom_full, dow_full) {
+            (true, true) => String::new(),
+            (true, false) => format!(", {}", weekday_phrase(&dows)),
+            (false, true) => format!(" on {}", dom_phrase(&doms)),
+            (false, false) if self.dom_restricted && self.dow_restricted => format!(
+                " on {} or any {}",
+                dom_phrase(&doms),
+                weekday_list(&dows, "or")
+            ),
+            (false, false) => format!(" on {} and {}", dom_phrase(&doms), weekday_phrase(&dows)),
+        }
+    }
+
     /// Whether this expression fires at `when`, to the minute.
     pub fn matches(&self, when: &NaiveDateTime) -> bool {
         bit(self.minute, when.minute())
@@ -199,6 +241,183 @@ impl Cron {
 /// Bit `value` of `mask`, false for any value past bit 63.
 fn bit(mask: u64, value: u32) -> bool {
     value < 64 && mask & (1u64 << value) != 0
+}
+
+/// Every value in `lo..=hi` whose bit is set in `mask`, ascending — the
+/// human-readable inverse of [`parse_field`], used only by [`Cron::describe`].
+fn set_bits(mask: u64, lo: u32, hi: u32) -> Vec<u32> {
+    (lo..=hi).filter(|&v| bit(mask, v)).collect()
+}
+
+/// The step of a `*/n` field: `Some(n)` when `values` is exactly every `n`th
+/// number from `lo` up to `hi` (`n >= 2`), else `None`. `*/15` over the
+/// minute field comes back as `Some(15)`.
+fn step_from(values: &[u32], lo: u32, hi: u32) -> Option<u32> {
+    if values.len() < 2 || values[0] != lo {
+        return None;
+    }
+    let step = values[1] - values[0];
+    if step < 2 {
+        return None;
+    }
+    let expected: Vec<u32> = (lo..=hi).step_by(step as usize).collect();
+    (expected == values).then_some(step)
+}
+
+/// Whether `values` covers the whole `lo..=hi` range — a field that was `*`.
+fn is_full(values: &[u32], lo: u32, hi: u32) -> bool {
+    values.len() as u32 == hi - lo + 1
+}
+
+/// The time-of-day half of [`Cron::describe`].
+fn describe_time(minutes: &[u32], hours: &[u32]) -> String {
+    let minutes_full = is_full(minutes, 0, 59);
+    let hours_full = is_full(hours, 0, 23);
+
+    if minutes_full && hours_full {
+        return "every minute".to_string();
+    }
+    if hours_full && let Some(step) = step_from(minutes, 0, 59) {
+        return match step {
+            15 => "every quarter of an hour".to_string(),
+            20 => "every 20 minutes".to_string(),
+            30 => "every half hour".to_string(),
+            n => format!("every {n} minutes"),
+        };
+    }
+    if minutes == [0] {
+        if hours_full {
+            return "every hour, on the hour".to_string();
+        }
+        if let Some(step) = step_from(hours, 0, 23) {
+            return format!("every {step} hours");
+        }
+    }
+    if minutes.len() == 1 && hours.len() == 1 {
+        let (minute, hour) = (minutes[0], hours[0]);
+        return if hour == 0 && minute == 0 {
+            "midnight".to_string()
+        } else {
+            format!("{hour:02}:{minute:02}")
+        };
+    }
+    if minutes.len() == 1 && hours_full {
+        return format!("{} minutes past every hour", minutes[0]);
+    }
+    // Nothing above fits — read the two fields out literally rather than
+    // guess at a phrasing.
+    format!(
+        "at minute {} of hour {}",
+        number_list(minutes),
+        number_list(hours)
+    )
+}
+
+/// The month clause of [`Cron::describe`]: ` in January`, ` in January and
+/// July`, or empty when every month fires.
+fn describe_months(months: &[u32]) -> String {
+    if is_full(months, 1, 12) {
+        return String::new();
+    }
+    const NAMES: [&str; 12] = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
+    let names: Vec<&str> = months
+        .iter()
+        .filter_map(|&m| NAMES.get(m as usize - 1).copied())
+        .collect();
+    format!(" in {}", conjoin(&names, "and"))
+}
+
+/// A weekday set as a phrase: a single day, a contiguous `Monday to Friday`
+/// run, or an `and`-joined list.
+fn weekday_phrase(days: &[u32]) -> String {
+    if let Some((first, last)) = contiguous_run(days)
+        && first != last
+    {
+        return format!("{} to {}", weekday_name(first), weekday_name(last));
+    }
+    weekday_list(days, "and")
+}
+
+/// A weekday set as a `join`-joined list of names, no range collapsing —
+/// for the both-day-fields-restricted case, where "any Monday or Friday"
+/// must not read as a range.
+fn weekday_list(days: &[u32], join: &str) -> String {
+    let names: Vec<&str> = days.iter().map(|&d| weekday_name(d)).collect();
+    conjoin(&names, join)
+}
+
+/// `0` is Sunday, matching the cron day-of-week numbering.
+fn weekday_name(day: u32) -> &'static str {
+    match day % 7 {
+        0 => "Sunday",
+        1 => "Monday",
+        2 => "Tuesday",
+        3 => "Wednesday",
+        4 => "Thursday",
+        5 => "Friday",
+        _ => "Saturday",
+    }
+}
+
+/// The lowest and highest of `values` when they form one unbroken ascending
+/// run (`1,2,3,4,5`), else `None`.
+fn contiguous_run(values: &[u32]) -> Option<(u32, u32)> {
+    let first = *values.first()?;
+    let last = *values.last()?;
+    (values.len() as u32 == last - first + 1).then_some((first, last))
+}
+
+/// A day-of-month set as `the 1st`, `the 1st and 15th`, `the 1st, 15th and
+/// 28th`.
+fn dom_phrase(days: &[u32]) -> String {
+    let ordinals: Vec<String> = days.iter().map(|&d| ordinal(d)).collect();
+    let refs: Vec<&str> = ordinals.iter().map(String::as_str).collect();
+    format!("the {}", conjoin(&refs, "and"))
+}
+
+/// `1` to `1st`, `2` to `2nd`, `13` to `13th`.
+fn ordinal(n: u32) -> String {
+    let suffix = match (n % 10, n % 100) {
+        (1, 11) | (2, 12) | (3, 13) => "th",
+        (1, _) => "st",
+        (2, _) => "nd",
+        (3, _) => "rd",
+        _ => "th",
+    };
+    format!("{n}{suffix}")
+}
+
+/// A plain comma list of numbers, for [`describe_time`]'s literal fallback.
+fn number_list(values: &[u32]) -> String {
+    values
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// `["a"]` to `a`, `["a","b"]` to `a and b`, `["a","b","c"]` to `a, b and c`
+/// — `join` is the word before the last item (`and` or `or`).
+fn conjoin(items: &[&str], join: &str) -> String {
+    match items {
+        [] => String::new(),
+        [only] => only.to_string(),
+        [first, second] => format!("{first} {join} {second}"),
+        [rest @ .., last] => format!("{} {join} {last}", rest.join(", ")),
+    }
 }
 
 /// One field: a comma list of terms, folded into a bitmask. `names` maps
@@ -320,6 +539,59 @@ mod tests {
         assert!(cron.matches(&at("2026-09-07 03:00")));
         assert!(!cron.matches(&at("2026-09-07 03:01")));
         assert!(!cron.matches(&at("2026-09-07 04:00")));
+    }
+
+    fn described(expr: &str) -> String {
+        Cron::parse(expr).unwrap().describe()
+    }
+
+    #[test]
+    fn describe_reads_the_grammar_examples_back_in_words() {
+        assert_eq!(described("0 3 * * 1-5"), "03:00, Monday to Friday");
+        assert_eq!(described("*/15 * * * *"), "every quarter of an hour");
+        assert_eq!(described("0 3 * * sun"), "03:00, Sunday");
+        assert_eq!(described("30 2 1 * *"), "02:30 on the 1st");
+        assert_eq!(described("@daily"), "midnight");
+        assert_eq!(described("@hourly"), "every hour, on the hour");
+        assert_eq!(described("* * * * *"), "every minute");
+    }
+
+    #[test]
+    fn describe_handles_lists_ranges_and_both_day_fields() {
+        assert_eq!(
+            described("0 9 * * 1,3,5"),
+            "09:00, Monday, Wednesday and Friday"
+        );
+        assert_eq!(described("0 0 1,15 * *"), "midnight on the 1st and 15th");
+        assert_eq!(described("0 3 13 * fri"), "03:00 on the 13th or any Friday");
+        assert_eq!(described("0 0 1 1 *"), "midnight on the 1st in January");
+        assert_eq!(described("0 */6 * * *"), "every 6 hours");
+    }
+
+    #[test]
+    fn describe_spells_out_a_stepped_day_field_the_vixie_flag_calls_unrestricted() {
+        // `*/2` in day-of-week begins with `*`, so Vixie's restricted flag is
+        // false — but it still only fires every other weekday, and a summary
+        // that said "03:00" alone would be wrong.
+        assert_eq!(
+            described("0 3 * * */2"),
+            "03:00, Sunday, Tuesday, Thursday and Saturday"
+        );
+        // A stepped day-of-month, likewise: fires the 1st, 8th, 15th, 22nd, 29th.
+        assert_eq!(
+            described("0 0 */7 * *"),
+            "midnight on the 1st, 8th, 15th, 22nd and 29th"
+        );
+    }
+
+    #[test]
+    fn describe_falls_back_to_a_literal_reading_when_nothing_fits() {
+        // Two scattered minutes and two scattered hours — no tidy phrasing,
+        // so the fields are read out rather than summarised wrongly.
+        assert_eq!(
+            described("5,35 8,20 * * *"),
+            "at minute 5, 35 of hour 8, 20"
+        );
     }
 
     #[test]

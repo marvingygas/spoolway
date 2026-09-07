@@ -26,9 +26,11 @@ A job only ever runs work that already exists as a routine. Nothing here creates
 schedules an arbitrary command, or writes to a file under `.spoolway/routines/`. The routine
 documents are read and never changed.
 
-Nothing writes a job yet either. The two stores hold jobs and every command reads them; the
-screen that writes one is a later task. Until then you edit the store files by hand. A store
-with no job in it lists nothing, and the dispatcher behaves exactly as it does today.
+The `spoolway jobs` screen is the only thing that writes a job. There is no `jobs add`, no
+`jobs set` and no config key. A person picks a routine, types an expression, picks a pipeline,
+and the screen saves it. Editing a store file by hand still works and is the only way to put a
+job in the project store. A store with no job in it lists nothing, and the dispatcher behaves
+exactly as it does today.
 
 ## How it works
 
@@ -77,6 +79,55 @@ With no job enabled, nothing changes. An empty queue still stops the run, a cold
 nothing queued still exits 3, `ctrl-c` still stops a resident run, and
 `dispatch.tear_lanes_on_stop` still applies when it does. See
 [When it stops](dispatcher.md#when-it-stops).
+
+## The jobs screen
+
+`spoolway jobs`, with no subcommand, opens the screen a job is written from. It is the only
+thing that writes one. The left pane lists every job both stores hold, and the right pane shows
+the highlighted job in full: its routine and how many documents that routine holds, its
+schedule, its pipeline, its scope, its next firing, its last one, and the documents it queues.
+
+With no job in either store the left pane says so and the right pane names both store paths, so
+it is clear where a job would land.
+
+The keys over the list are `↑↓` to move, `n` to write a new job, `e` to edit the highlighted
+one, `space` to pause and resume it, `x` to delete it after a `y`/`n` confirmation, `r` to fire
+it now, and `q` to quit.
+
+### The three choices
+
+`n` and `e` both walk the same three panels, and `esc` at any of them leaves nothing written.
+
+The first is the routines browser the queue screen's `r` already draws, reused as it stands.
+`space` ticks a folder and `enter` over that same ticked folder makes it the job's target.
+`enter` does nothing while the cursor sits on a folder that is not itself ticked. `space` over a
+single document on the right picks that one document instead.
+
+The second is the schedule field. It shows the expression as typed, states it back in words, and
+recomputes the next three firings on every keystroke. An expression that will not parse says so
+in place of those three lines, and `enter` is refused until it parses.
+
+The third is the pipeline picker. It lists every pipeline the repo defines with the first line
+of its own `description:`, marks the project default, and narrows as a query is typed. `enter`
+chooses the highlighted one and saves the job.
+
+### What the screen decides for you
+
+A new job is written to the **user** store. There is no scope picker; the walk has exactly the
+three choices above. A job in the project store is made by writing it into
+`.spoolway/jobs.toml` once by hand, after which the screen manages it like any other and `e`
+writes the edit back to that same file.
+
+A new job takes its **name** from the leaf of the routine it points at — the folder `nightly`
+becomes the job `nightly`, and the document `nightly/audit.md` becomes the job `audit`. There is
+no name field. `e` keeps the name the job already had, so re-saving a job is never a collision
+with itself.
+
+Both stores are re-read immediately before a save, so a name that another checkout or a hand
+edit added while the draft was open is still refused. The refusal names both store paths.
+
+An edit or a pause toggle rewrites only the keys it owns inside the job's own `[jobs.<name>]`
+table. A comment above the job, and any key a newer build wrote there, both survive.
 
 ## Key concepts
 
@@ -136,6 +187,7 @@ is refused before any command touches it.
 ## Usage
 
 ```
+spoolway jobs                      # the screen: write, edit, pause, delete, fire
 spoolway jobs list                 # every job across both stores
 spoolway jobs list --json          # the same rows, machine-readable
 spoolway jobs run <name>           # fire one job now, ignoring its schedule
@@ -186,7 +238,7 @@ can test for its presence.
 | --- | --- |
 | `src/jobs.rs` | The stores, the merge, `fire_due` at the top of a pass, the firing history, and the "staying up" lines. |
 | `src/cron.rs` | The five-field expression: parsing, matching a minute, and the next firing after a given instant. |
-| `src/commands/jobs.rs` | `spoolway jobs list` and `jobs run`. |
+| `src/commands/jobs.rs` | `spoolway jobs list`, `jobs run`, and the bare `spoolway jobs` screen — the only writer. |
 | `src/commands/queue.rs` | `queue_routine_target`, the queueing path a job shares with the `r` pane. |
 | `src/commands/dispatch.rs` | The resident dispatcher and `EXIT_EMPTY_QUEUE`. |
 | `src/commands/doctor.rs` | The job checks above. |

@@ -10,10 +10,10 @@
 //! history lives in one JSON file in machine home, whichever store the job
 //! came from — a fired minute is a fact about this machine.
 //!
-//! Everything here reads. The stores are written only by the `spoolway jobs`
-//! screen (a later task); a missing store is an empty list, not an error, so
-//! a project with no job in it lists nothing and the dispatcher behaves
-//! exactly as it does today.
+//! Reads dominate. The two stores are written only by the `spoolway jobs`
+//! screen, through [`write`] and [`delete`] — nothing else stamps a schedule.
+//! A missing store is an empty list, not an error, so a project with no job in
+//! it lists nothing and the dispatcher behaves exactly as it does today.
 //!
 //! A missed window stays missed: a job is only ever asked whether it matches
 //! the *current* minute, so a window that passed while no dispatcher ran is
@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use chrono::{Duration, Local, NaiveDateTime, TimeZone};
 use serde::{Deserialize, Serialize};
+use toml_edit::{DocumentMut, Item, Table};
 
 use crate::cron::Cron;
 use crate::pipeline::Pipelines;
@@ -172,6 +173,101 @@ fn read_store(path: &Path) -> Result<Store> {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Store::default()),
         Err(err) => Err(err).with_context(|| format!("reading job store {}", path.display())),
     }
+}
+
+/// The file a job of `scope` lives in.
+fn store_path(repo: &Repo, scope: Scope) -> PathBuf {
+    match scope {
+        Scope::User => repo.user_jobs_file(),
+        Scope::Project => repo.jobs_file(),
+    }
+}
+
+/// A store file's text, or `None` when the file is simply not there. Any
+/// other read failure — a permission wall, an I/O error — is returned with
+/// the path, so a caller never mistakes it for an empty store and overwrites
+/// the file that would not open.
+fn read_store_text(path: &Path) -> Result<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err).with_context(|| format!("reading job store {}", path.display())),
+    }
+}
+
+/// Write one job into its scope's store, editing the `[jobs.<name>]` table in
+/// place — its own comments, key order and any key this reader does not know
+/// are kept — and leaving every other byte of the file where it was.
+///
+/// `schedule`, `pipeline` and `routine` are set to `spec`'s values. `enabled`
+/// is written as `false` only for a paused job; a running one has no key,
+/// since absent means enabled (see [`JobSpec::enabled`]) — so resuming a job
+/// removes the key rather than writing the default.
+pub fn write(repo: &Repo, scope: Scope, name: &str, spec: &JobSpec) -> Result<()> {
+    let path = store_path(repo, scope);
+    let text = read_store_text(&path)?.unwrap_or_default();
+    let mut doc: DocumentMut = text
+        .parse()
+        .with_context(|| format!("job store {} is not valid TOML", path.display()))?;
+
+    let jobs = doc
+        .as_table_mut()
+        .entry("jobs")
+        .or_insert_with(|| Item::Table(Table::new()))
+        .as_table_mut()
+        .with_context(|| format!("`jobs` in {} is not a table", path.display()))?;
+    // `[jobs]` is only ever a parent of `[jobs.<name>]` tables, so it prints
+    // as those headers alone rather than an empty `[jobs]` line of its own.
+    jobs.set_implicit(true);
+
+    // Edit the job's own table rather than replace it: a store may carry a
+    // comment above a job, or a key a newer screen writes that this build
+    // does not know, and reconstructing the table from scratch would drop
+    // both.
+    let entry = jobs
+        .entry(name)
+        .or_insert_with(|| Item::Table(Table::new()))
+        .as_table_mut()
+        .with_context(|| format!("`jobs.{name}` in {} is not a table", path.display()))?;
+    entry["schedule"] = toml_edit::value(spec.schedule.as_str());
+    entry["pipeline"] = toml_edit::value(spec.pipeline.as_str());
+    entry["routine"] = toml_edit::value(spec.routine.as_str());
+    if spec.enabled {
+        entry.remove("enabled");
+    } else {
+        entry["enabled"] = toml_edit::value(false);
+    }
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    crate::task::write_atomic(&path, doc.to_string())
+}
+
+/// Remove a job from whichever store holds it, leaving the rest of that file
+/// untouched. Removing a name no store has is not an error — the stores
+/// already say what this was asked to make them say — but a store that will
+/// not read is, so a confirmed delete never reports success over a job that
+/// is still there.
+pub fn delete(repo: &Repo, name: &str) -> Result<()> {
+    for scope in [Scope::User, Scope::Project] {
+        let path = store_path(repo, scope);
+        let Some(text) = read_store_text(&path)? else {
+            continue;
+        };
+        let mut doc: DocumentMut = text
+            .parse()
+            .with_context(|| format!("job store {} is not valid TOML", path.display()))?;
+        let removed = doc
+            .get_mut("jobs")
+            .and_then(Item::as_table_mut)
+            .is_some_and(|jobs| jobs.remove(name).is_some());
+        if removed {
+            crate::task::write_atomic(&path, doc.to_string())?;
+        }
+    }
+    Ok(())
 }
 
 /// One job's firing history. All fields optional so a hand-deleted or
@@ -459,6 +555,34 @@ pub fn next_fire(schedule: &str) -> Option<chrono::DateTime<Local>> {
     Some(chrono::DateTime::from_timestamp(at, 0)?.with_timezone(&Local))
 }
 
+/// The next `count` local firings of `schedule` from now, for the jobs
+/// screen's schedule field, which shows the next three as the expression is
+/// typed. Empty when the expression will not parse; shorter than `count` only
+/// when it fires fewer times than that before [`crate::cron::SEARCH_LIMIT_DAYS`].
+///
+/// A minute that a spring-forward gap skips is stepped over — the scan simply
+/// moves to the next matching minute — the same way [`next_fire`] treats one.
+pub fn next_fires(schedule: &str, count: usize) -> Vec<chrono::DateTime<Local>> {
+    let Ok(cron) = Cron::parse(schedule) else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(count);
+    let mut cursor = Local::now().naive_local();
+    while out.len() < count {
+        let Some(next) = cron.next_after(cursor) else {
+            break;
+        };
+        cursor = next;
+        match Local.from_local_datetime(&next) {
+            chrono::LocalResult::Single(when) | chrono::LocalResult::Ambiguous(when, _) => {
+                out.push(when)
+            }
+            chrono::LocalResult::None => continue,
+        }
+    }
+    out
+}
+
 /// How far before `after` [`next_real_fire`] begins its wall-clock scan, so
 /// that a fall-back window which repeats a wall label is not missed.
 ///
@@ -667,6 +791,147 @@ mod tests {
             job.target(&repo).unwrap(),
             repo.routines_dir().join("nightly/audit.md")
         );
+    }
+
+    fn spec(schedule: &str) -> JobSpec {
+        JobSpec {
+            schedule: schedule.to_string(),
+            pipeline: "impl".to_string(),
+            routine: "nightly".to_string(),
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn a_written_job_reads_back_through_load() {
+        let repo = fixture("jobs-write");
+        write(&repo, Scope::User, "nightly-audit", &spec("0 3 * * 1-5")).unwrap();
+
+        let jobs = load(&repo).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].name, "nightly-audit");
+        assert_eq!(jobs[0].scope, Scope::User);
+        assert_eq!(jobs[0].spec.schedule, "0 3 * * 1-5");
+        assert!(jobs[0].spec.enabled, "no `enabled` key means enabled");
+    }
+
+    #[test]
+    fn writing_a_job_leaves_a_sibling_and_a_comment_where_they_were() {
+        let repo = fixture("jobs-write-preserve");
+        write_user_store(
+            &repo,
+            "# hand-written note\n[jobs.weekly-deps]\nschedule = \"0 3 * * sun\"\n\
+             pipeline = \"impl\"\nroutine = \"weekly\"\n",
+        );
+
+        write(&repo, Scope::User, "nightly-audit", &spec("@daily")).unwrap();
+
+        let text = std::fs::read_to_string(repo.user_jobs_file()).unwrap();
+        assert!(text.contains("# hand-written note"), "{text}");
+        assert!(text.contains("[jobs.weekly-deps]"), "{text}");
+        assert!(text.contains("[jobs.nightly-audit]"), "{text}");
+        let jobs = load(&repo).unwrap();
+        assert_eq!(jobs.len(), 2);
+    }
+
+    #[test]
+    fn editing_a_job_keeps_its_own_comment_and_any_key_this_reader_does_not_know() {
+        let repo = fixture("jobs-write-inplace");
+        write_user_store(
+            &repo,
+            "# nightly deps audit\n[jobs.nightly]\nschedule = \"0 3 * * *\"\n\
+             pipeline = \"impl\"\nroutine = \"nightly\"\nnotify = \"slack\"\n",
+        );
+
+        // Re-save with a changed schedule, the way `e` does.
+        write(
+            &repo,
+            Scope::User,
+            "nightly",
+            &JobSpec {
+                schedule: "0 4 * * 1-5".to_string(),
+                pipeline: "impl".to_string(),
+                routine: "nightly".to_string(),
+                enabled: true,
+            },
+        )
+        .unwrap();
+
+        let text = std::fs::read_to_string(repo.user_jobs_file()).unwrap();
+        assert!(
+            text.contains("# nightly deps audit"),
+            "comment kept: {text}"
+        );
+        assert!(
+            text.contains("notify = \"slack\""),
+            "unknown key kept: {text}"
+        );
+        assert!(text.contains("0 4 * * 1-5"), "schedule updated: {text}");
+        assert!(!text.contains("0 3 * * *"), "old schedule gone: {text}");
+    }
+
+    #[test]
+    fn write_and_delete_surface_a_store_that_will_not_read_rather_than_treat_it_as_absent() {
+        let repo = fixture("jobs-store-unreadable");
+        // A directory where the store file should be: `read_to_string` fails
+        // with something other than NotFound, and neither call may pretend
+        // the store is empty.
+        std::fs::create_dir_all(repo.home()).unwrap();
+        std::fs::create_dir_all(repo.user_jobs_file()).unwrap();
+
+        assert!(write(&repo, Scope::User, "x", &spec("@daily")).is_err());
+        assert!(delete(&repo, "x").is_err());
+    }
+
+    #[test]
+    fn a_paused_job_writes_enabled_false_and_resuming_drops_the_key() {
+        let repo = fixture("jobs-write-paused");
+        let mut paused = spec("@daily");
+        paused.enabled = false;
+        write(&repo, Scope::User, "lint-sweep", &paused).unwrap();
+        assert!(
+            std::fs::read_to_string(repo.user_jobs_file())
+                .unwrap()
+                .contains("enabled = false")
+        );
+
+        write(&repo, Scope::User, "lint-sweep", &spec("@daily")).unwrap();
+        assert!(
+            !std::fs::read_to_string(repo.user_jobs_file())
+                .unwrap()
+                .contains("enabled"),
+            "resuming removes the key rather than writing the default"
+        );
+    }
+
+    #[test]
+    fn delete_removes_a_job_from_the_store_that_holds_it_and_is_quiet_otherwise() {
+        let repo = fixture("jobs-delete");
+        write(&repo, Scope::Project, "a", &spec("@daily")).unwrap();
+        write(&repo, Scope::Project, "b", &spec("@weekly")).unwrap();
+
+        delete(&repo, "a").unwrap();
+        delete(&repo, "never-existed").unwrap();
+
+        let names: Vec<String> = load(&repo).unwrap().into_iter().map(|j| j.name).collect();
+        assert_eq!(names, vec!["b"]);
+    }
+
+    #[test]
+    fn next_fires_returns_the_next_three_in_order() {
+        let fires = next_fires("*/30 * * * *", 3);
+        assert_eq!(fires.len(), 3);
+        assert!(fires[0] < fires[1] && fires[1] < fires[2]);
+        assert!(fires[0] > Local::now());
+        for when in &fires {
+            let minute = when.format("%M").to_string();
+            assert!(minute == "00" || minute == "30", "on the half hour: {when}");
+        }
+    }
+
+    #[test]
+    fn next_fires_is_empty_for_an_expression_that_will_not_parse() {
+        assert!(next_fires("99 3 * * *", 3).is_empty());
     }
 
     #[test]

@@ -315,6 +315,15 @@ this.
 A cron job queues a routine folder or a single document the same way, on a schedule, from the
 dispatcher's own pass — see [Jobs](jobs.md).
 
+`spoolway jobs` is where such a job is written, and it is the only thing that writes one. It
+lists the jobs both stores hold and shows the highlighted one in full. `n` walks three choices:
+the routine to run, picked in this same routines browser; the cron expression, in a field that
+states it back in words and shows its next three firings as it is typed; and the pipeline, from
+a picker over every pipeline the repo defines. Over the list, `e` edits a job through those same
+three panels, `space` pauses and resumes it, `x` deletes it after confirming, and `r` fires it
+now. The routine documents themselves are only ever read — picking a pipeline sets the job's own
+field and never touches a document's `pipeline:` key.
+
 `s` on a highlighted pending group is the way work gets in there. It opens a panel over the
 pending screen, prefilled with the group's own name, and `enter` copies that group's documents
 into `.spoolway/routines/<name>/`, bare ids and all. A document that has already been through a

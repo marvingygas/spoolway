@@ -88,7 +88,8 @@ what makes it safe to interrupt at any point.
 
 Before either of the steps below, a pass fires any cron job whose expression matches the
 current local minute, so the routine it queues is dispatched by this same pass. A dry run
-fires nothing. See [Jobs](jobs.md).
+fires nothing. The dispatcher only ever fires jobs; it never writes one. The `spoolway jobs`
+screen is the only writer. See [Jobs](jobs.md).
 
 In outline, a pass:
 

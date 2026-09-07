@@ -382,8 +382,16 @@ fn run() -> Result<()> {
 
                 Command::Group(GroupCommand::List) => commands::group_list(&repo),
 
-                Command::Jobs(JobsCommand::List) => commands::jobs_list(&repo, cli.json),
-                Command::Jobs(JobsCommand::Run(args)) => {
+                // Bare `spoolway jobs`, with no subcommand: the screen.
+                Command::Jobs { command: None } => {
+                    commands::jobs_screen(&repo, routing(&graph)?, &cwd)
+                }
+                Command::Jobs {
+                    command: Some(JobsCommand::List),
+                } => commands::jobs_list(&repo, cli.json),
+                Command::Jobs {
+                    command: Some(JobsCommand::Run(args)),
+                } => {
                     let in_lane = std::env::var(commands::TASK_ENV).is_ok();
                     commands::jobs_run(&repo, routing(&graph)?, &args.name, in_lane)
                 }
