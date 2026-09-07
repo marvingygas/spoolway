@@ -729,6 +729,7 @@ mod tests {
             tab_id: None,
             attempts: 0,
             usage_limit_hold: false,
+            quota_retries: 0,
             parked_until: None,
             parked_window: String::new(),
             paused_at: None,

@@ -370,10 +370,9 @@ pub struct Frontmatter {
     /// Whether this task is currently held for its agent kind's own
     /// usage-limit message rather than for a dead launch — set alongside
     /// [`Self::parked_until`] by `Dispatcher::usage_limit_hold` in
-    /// `src/dispatch.rs`. Informational now that the hold itself lives on
-    /// `parked_until` rather than on `attempts`/`relaunch_backoff`: nothing
-    /// reads this to decide anything, but a person re-reading the document
-    /// still wants to tell a quota hold apart from an ordinary park.
+    /// `src/dispatch.rs`. Marks the first logged hold; the hold itself lives on
+    /// `parked_until` rather than on launch attempts. Repeated observations
+    /// of the same hold update the clock without appending the log again.
     ///
     /// Cleared wherever `attempts` is: by `set_stage`, `set_stage_unbanked`
     /// and `launch_landed`, because a task that has left the step it was
@@ -383,6 +382,11 @@ pub struct Frontmatter {
     /// coming back through the queue rather than through either path.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub usage_limit_hold: bool,
+
+    /// Consecutive quota rechecks, independent of launch attempts. Persisted
+    /// so restarting the dispatcher does not restart a tight retry loop.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub quota_retries: u32,
 
     /// A quota probe's or a usage-limit pane's own clock, in epoch seconds:
     /// no candidate of this task is offered a lane, and no reminder is sent
@@ -401,7 +405,7 @@ pub struct Frontmatter {
     /// which reads this before it resolves a step or looks at a lane.
     ///
     /// Cleared by `set_stage` and `set_stage_unbanked`, the same as
-    /// `usage_limit_hold` and `attempts` — a task that has moved on has
+    /// `usage_limit_hold`, `quota_retries` and `attempts` — a task that has moved on has
     /// left whatever parked it behind — and by the pass itself the moment it
     /// finds this in the past, so a task is never skipped a second time on
     /// a clock that has already run out.
@@ -423,11 +427,9 @@ pub struct Frontmatter {
     /// switch to the five-hour shape on its last day, which is exactly the
     /// day a reader most wants to see how far it has come.
     ///
-    /// Empty for the mid-turn usage-limit hold, which is always the
-    /// five-hour clock and needs no field to say so — see
-    /// `Dispatcher::usage_limit_hold` in `dispatch.rs` — and for a
-    /// `parked_until` no writer here classified, which reads the same as
-    /// `"five_hour"`, the shorter and commoner shape.
+    /// `unknown` marks an unavailable admission reading. Empty marks a
+    /// mid-turn hold without an observed exhausted window, or an older
+    /// unclassified park; these display a recheck time without a date.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub parked_window: String,
 
@@ -716,6 +718,7 @@ impl Task {
         self.front.arrived_from = Some(from);
         self.front.attempts = 0;
         self.front.usage_limit_hold = false;
+        self.front.quota_retries = 0;
         self.front.parked_until = None;
         self.front.parked_window = String::new();
         self.front.launched_at = None;
@@ -749,6 +752,7 @@ impl Task {
         self.front.stage = stage.to_string();
         self.front.attempts = 0;
         self.front.usage_limit_hold = false;
+        self.front.quota_retries = 0;
         self.front.parked_until = None;
         self.front.parked_window = String::new();
         self.front.launched_at = None;
@@ -806,9 +810,11 @@ impl Task {
     /// Answers whether anything changed, so a caller reading every task on
     /// every pass writes only the file that moved.
     pub fn launch_landed(&mut self) -> bool {
-        let counted = self.front.attempts > 0;
+        let counted =
+            self.front.attempts > 0 || self.front.usage_limit_hold || self.front.quota_retries > 0;
         self.front.attempts = 0;
         self.front.usage_limit_hold = false;
+        self.front.quota_retries = 0;
         counted
     }
 

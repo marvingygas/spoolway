@@ -497,8 +497,8 @@ step nothing has been spent at yet. The transcript behind them is re-read at mos
 seconds and only when it has changed, so a figure can be that stale — invisible against a
 one-second redraw, and much cheaper than reading a megabyte of conversation per frame.
 
-The footer is worker slots and nothing else — one line per capped agent profile, its name
-and `slots <live>/<cap>`. Where the model a profile's live lanes are running has `slots` of
+The footer shows one line per capped agent profile, its name and `slots <live>/<cap>`.
+Quota-capable profiles also show `quota off`, or `quota ceiling <percent>%` when enabled. Where the model a profile's live lanes are running has `slots` of
 its own, the figure counts against the model's own cap instead of the profile's
 `concurrency` — a smaller local model swapped in shrinks that line on its own, with nobody
 touching `[agents.pi]`. What a run has spent lives on the board itself now, in each group's
@@ -866,10 +866,11 @@ This check runs whether the multiplexer reports the lane `Working` or settled. A
 that keeps redrawing never settles, so a check that only looked at settled lanes would miss the
 common case entirely and leave the reminder loop to escalate it.
 
-The park's clock comes from the kind's own five-hour reset when a quota reading can be taken,
-and from the doubling backoff above when one cannot. Whether a tail *is* a limit is answered by
-the agent adapter (`Adapter::usage_limit` in `src/agent.rs`), a fact about one CLI's own
-wording, not a pattern the dispatcher keeps in sync by hand.
+The park's clock comes from an observed exhausted window's reset, including a weekly reset.
+Without one, `quota_retries` backs off rechecks from one minute to one hour independently of
+launch attempts. The counter survives restarts and clears when the lane resumes or the task
+moves on. Repeated holds update the clock without appending duplicate status-log entries.
+Whether a tail is a limit is answered by `Adapter::usage_limit` in `src/agent.rs`.
 
 ### Parking a task before the limit lands
 
@@ -880,7 +881,12 @@ above the ceiling on either window it starts no new lane of that profile at all.
 that profile gets `parked_until:` written from the tripped window's own `resets_at`. Tasks
 whose step names a different profile are staffed in the same pass. See [Reading a kind's quota
 before a lane starts](agents.md#reading-a-kinds-quota-before-a-lane-starts) for where the
-reading comes from and the six ways it fails open.
+reading comes from. An enabled ceiling holds launches when that reading is unavailable,
+stale, malformed or expired, rechecking with the same persistent backoff. The board's profile
+footer names the quota ceiling, or `quota off`; a task awaiting a reading says
+`quota unavailable` beside its recheck time. `spoolway agent verify <kind>` diagnoses the source.
+The ceiling checks admission only: running lanes and external sessions can still exhaust
+the account during processing.
 
     pass 41
       wire-up: `implement` parked until 14:00 — claude at 88% of its
@@ -892,8 +898,8 @@ reading comes from and the six ways it fails open.
 a timestamp rather than holding a timer: a seven-day wait outlives any dispatcher process, and
 often the machine. A dispatcher started from cold reads `parked_until:` at the top of its
 per-task loop, before it resolves a step or looks at a lane, and honours it without taking any
-reading of its own. The first pass after the timestamp has passed clears the field and staffs
-the task normally. A forty-minute five-hour wait and a six-day seven-day wait behave
+reading of its own. The first pass after the timestamp has passed clears the field and rechecks quota
+before admitting another lane. A forty-minute five-hour wait and a six-day seven-day wait behave
 identically.
 
 A park never ends the run. The dispatcher keeps passing and reports the park each time; closing

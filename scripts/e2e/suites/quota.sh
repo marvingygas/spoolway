@@ -41,9 +41,10 @@ RESETS_AT=$(date -u -d "@$(($(date +%s) + 5))" +%Y-%m-%dT%H:%M:%SZ)
 cat > "$HOME/.claude.json" <<JSON
 {"cachedUsageUtilization": {
   "fetchedAtMs": $(($(date +%s) * 1000)),
+  "utilization": {
   "five_hour": {"utilization": 88, "resets_at": "$RESETS_AT"},
   "seven_day": {"utilization": 10, "resets_at": "2099-01-01T00:00:00Z"}
-}}
+}}}
 JSON
 
 BODY="$LIVE/body.md"
@@ -76,9 +77,10 @@ has "the park names the probe's own reading" "88%" "$SPOOLWAY_PROJECT_HOME/queue
 cat > "$HOME/.claude.json" <<JSON
 {"cachedUsageUtilization": {
   "fetchedAtMs": $(($(date +%s) * 1000)),
+  "utilization": {
   "five_hour": {"utilization": 40, "resets_at": "2099-01-01T00:00:00Z"},
   "seven_day": {"utilization": 10, "resets_at": "2099-01-01T00:00:00Z"}
-}}
+}}}
 JSON
 
 if drive quota gone 40; then ok "once the clock passes, the task is picked up and runs to \`done\`"

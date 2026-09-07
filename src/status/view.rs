@@ -346,6 +346,7 @@ fn shorten_home(path: &std::path::Path) -> String {
 struct Spend {
     name: String,
     slots: String,
+    quota: String,
 }
 
 /// One line per agent profile, its worker slots and nothing else — then, when
@@ -426,6 +427,15 @@ pub(super) fn footer(
             Some(Spend {
                 name: name.clone(),
                 slots,
+                quota: match profile.quota_ceiling {
+                    0 if crate::agent::adapter(&profile.kind)
+                        .is_some_and(|a| a.quota.is_some()) =>
+                    {
+                        " · quota off".into()
+                    }
+                    0 => String::new(),
+                    ceiling => format!(" · quota ceiling {ceiling}%"),
+                },
             })
         })
         .collect();
@@ -437,8 +447,8 @@ pub(super) fn footer(
         .iter()
         .map(|spend| {
             format!(
-                "{BOLD}{:<name_w$}{RESET}{GUTTER}{DIM}slots{RESET} {}",
-                spend.name, spend.slots
+                "{BOLD}{:<name_w$}{RESET}{GUTTER}{DIM}slots{RESET} {}{}",
+                spend.name, spend.slots, spend.quota
             )
         })
         .collect();
@@ -2262,6 +2272,7 @@ mod tests {
 
         let line = |name: &str| lines.iter().find(|l| l.starts_with(name)).unwrap().clone();
         assert!(line("claude").contains("slots 1/1"), "{lines:#?}");
+        assert!(line("claude").contains("quota off"), "{lines:#?}");
         // No cap either side: the model names no `slots` and the profile no
         // `concurrency`, so the ceiling is what zero has always meant.
         assert!(line("pi").contains("slots 1/\u{221e}"), "{lines:#?}");

@@ -137,10 +137,9 @@ steps:
 
   - id: document
     description: Bring the domain documents in line with what this task changed.
-    agent: claude
+    agent: pi
     prompt: archivist
-    model: claude-sonnet-5
-    effort: low
+    model: ornith/Ornith-1.5-35B-A3B
     on_pass: handover
     on_fail: blocked
 
