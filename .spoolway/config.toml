@@ -107,7 +107,7 @@ kind = "claude"
 concurrency = 3
 session_reuse_ctx = 50
 session_blocked_ctx = 0
-quota_ceiling = 70
+quota_ceiling = 90
 permission_mode = "auto"
 
 [agents.codex]
@@ -115,7 +115,7 @@ kind = "codex"
 concurrency = 3
 session_reuse_ctx = 50
 session_blocked_ctx = 0
-quota_ceiling = 70
+quota_ceiling = 90
 permission_mode = "never"
 
 [agents.pi]
