@@ -80,11 +80,11 @@ comment, not the body.
      splits, take the smaller tasks and the larger count, and let the criteria fall well
      under the five bullets rather than up against them.
 
-   **Offer the shape, with one AskUserQuestion.** Settle on a recommended count first, then put
+   **Offer the shape, with one request_user_input call.** Settle on a recommended count first, then put
    **that count and the four below it** on the ballot, floored at 1 — a recommendation of 6
    names 2, 3, 4, 5 and 6; a recommendation of 3 names 1, 2 and 3. Name every member in the
    question text — `Split this shape: 2, 3, 4, 5 or 6 tasks — or generate a pipeline` — because
-   AskUserQuestion takes only four options and one of the four is always "Generate a pipeline
+   request_user_input takes only four options and one of the four is always "Generate a pipeline
    for this plan" (`spoolway pipeline gen --plan <path>`, one line, session ends with nothing
    cut): the three largest counts fill the remaining slots, largest first and marked
    recommended, and the question text tells the person to type the rest under *Other*. Put

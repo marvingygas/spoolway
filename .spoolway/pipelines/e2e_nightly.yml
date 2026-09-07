@@ -1,0 +1,28 @@
+# Full reference: docs/pipelines.md
+
+description: >-
+  Run this repo's end-to-end coverage — the headless suites, and the plan runs
+  against a real local model — then report what failed and what is still
+  uncovered.
+
+task_template: default
+
+steps:
+  - id: preflight
+    description: Run the headless suites and the check that only happens here.
+    agent: pi
+    prompt: nightly-preflight
+    model: ornith/Ornith-1.5-35B-A3B
+    on_pass: plans
+    on_fail: blocked
+
+  - id: plans
+    description: >-
+      Run the plans against a real local model, watch them, clean them, and
+      report what failed and what is still uncovered.
+    agent: claude
+    prompt: nightly-plans
+    model: claude-opus-5
+    effort: high
+    on_pass: done
+    on_fail: blocked

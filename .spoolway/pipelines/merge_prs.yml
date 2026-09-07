@@ -1,0 +1,28 @@
+# Full reference: docs/pipelines.md
+
+description: >-
+  Merge every open pull request on this repository into main — order the
+  stacks, resolve the conflicts directly, verify the merged tree, push, prune
+  the branches, and reinstall the binary.
+
+task_template: default
+
+steps:
+  - id: survey
+    description: Survey every open pull request and order the stacks.
+    agent: pi
+    prompt: pr-surveyor
+    model: ornith/Ornith-1.5-35B-A3B
+    on_pass: merge
+    on_fail: blocked
+
+  - id: merge
+    description: >-
+      Merge every open pull request into main, resolve conflicts, verify the
+      merged tree, push, and prune dead branches.
+    agent: claude
+    prompt: pr-merger
+    model: claude-opus-5
+    effort: high
+    on_pass: done
+    on_fail: blocked

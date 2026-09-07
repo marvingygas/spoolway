@@ -2,7 +2,8 @@
 //!
 //! The skills are embedded in the binary, so `spoolway install` needs nothing on
 //! disk to copy from. Each provider decides only *where* files go and in what
-//! shape — the content is shared.
+//! shape. The Codex copies keep the same procedure but name Codex's
+//! `request_user_input` tool rather than Claude's `AskUserQuestion`.
 //!
 //! The layout follows the Agent Skills spec: a directory per skill with a
 //! `SKILL.md` entrypoint, a `name` matching that directory, and static
@@ -35,6 +36,7 @@ use crate::task::write_atomic;
 struct Skill {
     name: &'static str,
     skill_md: &'static str,
+    codex_skill_md: &'static str,
     /// Files landing under the skill's own `assets/`, by filename.
     assets: &'static [(&'static str, &'static str)],
 }
@@ -45,6 +47,7 @@ const SKILLS: &[Skill] = &[
     Skill {
         name: "spoolway-plan",
         skill_md: include_str!("../assets/skills/claude/spoolway-plan/SKILL.md"),
+        codex_skill_md: include_str!("../.agents/skills/spoolway-plan/SKILL.md"),
         // Names nothing: the skill's own skeleton is not yet part of what
         // this file ships — see this module's header.
         assets: &[],
@@ -57,6 +60,7 @@ const SKILLS: &[Skill] = &[
     Skill {
         name: "spoolway-tasks",
         skill_md: include_str!("../assets/skills/claude/spoolway-tasks/SKILL.md"),
+        codex_skill_md: include_str!("../.agents/skills/spoolway-tasks/SKILL.md"),
         assets: &[],
     },
     // Reshaping the flow itself: the graph, and the prompts its agent steps
@@ -69,6 +73,7 @@ const SKILLS: &[Skill] = &[
     Skill {
         name: "spoolway-pipeline",
         skill_md: include_str!("../assets/skills/claude/spoolway-pipeline/SKILL.md"),
+        codex_skill_md: include_str!("../.agents/skills/spoolway-pipeline/SKILL.md"),
         assets: &[],
     },
     // Reading a pipeline's health is CLI calls too, and the same shape as the
@@ -78,6 +83,7 @@ const SKILLS: &[Skill] = &[
     Skill {
         name: "spoolway-doctor",
         skill_md: include_str!("../assets/skills/claude/spoolway-doctor/SKILL.md"),
+        codex_skill_md: include_str!("../.agents/skills/spoolway-doctor/SKILL.md"),
         assets: &[],
     },
     // Reads a window of archived tasks and the spend ledger back into the
@@ -87,6 +93,7 @@ const SKILLS: &[Skill] = &[
     Skill {
         name: "spoolway-calibrate",
         skill_md: include_str!("../assets/skills/claude/spoolway-calibrate/SKILL.md"),
+        codex_skill_md: include_str!("../.agents/skills/spoolway-calibrate/SKILL.md"),
         assets: &[],
     },
 ];
@@ -151,9 +158,13 @@ impl Provider {
             .iter()
             .flat_map(|skill| {
                 let dir = skills.join(skill.name);
+                let skill_md = match self {
+                    Provider::Codex => skill.codex_skill_md,
+                    Provider::Claude | Provider::Pi => skill.skill_md,
+                };
                 let mut files = vec![Planned {
                     path: dir.join("SKILL.md"),
-                    contents: skill.skill_md,
+                    contents: skill_md,
                 }];
                 files.extend(skill.assets.iter().map(|(file, contents)| Planned {
                     path: dir.join("assets").join(file),
@@ -182,50 +193,37 @@ impl Provider {
     }
 }
 
+/// The facts a command may report after the skill files are safely in place.
+pub struct Outcome {
+    caveat: Option<&'static str>,
+}
+
 /// Write the provider's skill files, skipping any that already exist unless
-/// `force`.
-pub fn install(root: &Path, provider: Provider, force: bool) -> Result<()> {
+/// `force`. Rendering is left to [`report`], so a caller embedding the install
+/// does not inherit a nested file-by-file transcript.
+pub fn install(root: &Path, provider: Provider, force: bool) -> Result<Outcome> {
     let planned = provider.plan(root);
-    let mut wrote = 0;
 
     for file in &planned {
         if file.path.exists() && !force {
-            println!(
-                "  kept    {} (exists — use --force to overwrite)",
-                show(root, &file.path)
-            );
             continue;
         }
         write_atomic(&file.path, file.contents)?;
-        println!("  wrote   {}", show(root, &file.path));
-        wrote += 1;
     }
 
-    println!();
-    if wrote == 0 {
-        println!("Nothing changed.");
-    } else {
-        println!(
-            "Wrote {wrote} file(s) for {}. Start a fresh session to pick them up.",
-            provider.name()
-        );
-    }
-    // Printed whether or not anything was written: a project that installed
-    // these last week and has never seen them load wants this line too.
-    if let Some(caveat) = provider.caveat() {
-        println!("  note  {caveat}");
-    }
-    Ok(())
+    Ok(Outcome {
+        caveat: provider.caveat(),
+    })
 }
 
-/// The same repo-relative rendering the rest of spoolway prints.
-///
-/// This one only ever reaches a console, so the separator is cosmetic — but a
-/// tool that says `.claude\skills\…` here and `.claude/skills/…` three lines
-/// later in a task file looks like two tools, and there is no reason for the
-/// exception.
-fn show(root: &Path, path: &Path) -> String {
-    crate::platform::relative(root, path)
+/// Print the deliberately small successful-install report.
+pub fn report(outcome: Outcome) {
+    // Reported whether or not anything was written: a project that installed
+    // these last week and has never seen them load wants this warning too.
+    if let Some(caveat) = outcome.caveat {
+        println!("  note  {caveat}");
+    }
+    println!("Skills installed successfully.");
 }
 
 #[cfg(test)]
@@ -291,6 +289,27 @@ mod tests {
                 );
             }
             seen.push((dir, provider.name()));
+        }
+    }
+
+    /// Provider-specific copies may differ only where the agent's tool really
+    /// has a different name. A Claude tool name in a Codex skill reads like an
+    /// instruction to call something that does not exist, which can turn a
+    /// required question into prose or stop the workflow entirely.
+    #[test]
+    fn codex_skills_name_request_user_input_not_ask_user_question() {
+        for skill in SKILLS {
+            assert!(
+                !skill.codex_skill_md.contains("AskUserQuestion"),
+                "{} still names Claude's question tool in its Codex copy",
+                skill.name
+            );
+            assert_eq!(
+                skill.codex_skill_md.contains("request_user_input"),
+                skill.skill_md.contains("AskUserQuestion"),
+                "{} does not preserve whether the procedure asks a question",
+                skill.name
+            );
         }
     }
 

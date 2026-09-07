@@ -54,11 +54,16 @@ spoolway init
 
 At a terminal it asks five things before it writes anything — the coding agent you plan in,
 the issue tracker to name in `[issue_tracking]` and the project its tickets file into, the
-agent kind your local pipeline steps run on, and the model those steps name. Each has a flag
+agent kind your local pipeline steps run on, and the model those steps name. Fixed choices
+use an arrow-key selector; move with ↑/↓ and accept with Enter or Space. Each has a flag
 (`--provider`, `--tracker`, `--project-key`, `--agent`, `--model`), and giving it means the
 question is not asked. Run without a terminal — a script, CI, a pipe — nothing is asked and
 the defaults are taken: claude, no tracker, pi, and the model placeholder left standing for
 `doctor` to report.
+
+On success, `init` prints only that the skills were installed and the project was initialized,
+plus any actionable warning. Running it again to add another provider's skills omits the project
+message. The narrower `spoolway install <provider>` command uses the same concise skills message.
 
 `--agent` settles **one profile**, `agents.pi`, and is not a project-wide choice of agent.
 A pipeline step names an agent *profile*; a profile names a kind; and a project may define as

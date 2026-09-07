@@ -31,7 +31,7 @@ described. If their route isn't the best one to that outcome, say so in two sent
 the alternative, then plan whichever they pick.
 
 **The person is in the room now, and will not be later.** Every question is asked through
-**AskUserQuestion**, never written onto the page. **Do not write the page until every question
+**request_user_input**, never written onto the page. **Do not write the page until every question
 is settled out loud.**
 
 - **Ask only what the code cannot answer** — read what the codebase settles; where one option is
@@ -95,13 +95,13 @@ day it changes; a path stays true. Name the file that already holds the ground n
    before anything else: a correction or a scope cut often lives in a comment, and planning
    off the body alone plans off a stale draft. Then read the relevant code yourself before
    proposing anything — where that survey is genuinely large, offer **one or two read-only
-   research subagents** with AskUserQuestion, and spawn them only on a yes.
+   research subagents** with request_user_input, and spawn them only on a yes.
 
 2. **Settle everything, before a single line of the page is written.** List every open question
-   and put them to the person with **AskUserQuestion**, batched.
+   and put them to the person with **request_user_input**, batched.
 
 3. **Ask whether the page is wanted.** Once the shape is settled, put it to them with
-   **AskUserQuestion** — *Write the plan page?* — two answers: **Write it** (step 4), or **Cut
+   **request_user_input** — *Write the plan page?* — two answers: **Write it** (step 4), or **Cut
    the tasks now** (step 7, no page written). A shape settled out loud is enough to cut from.
    The page is for a decision somebody has to approve, or come back to months later.
 
@@ -122,7 +122,7 @@ day it changes; a path stays true. Name the file that already holds the ground n
 
 5. **Revising an existing plan is a proposal, not an edit.** Read the file first, then, before
    touching it: **summarise the change**, section by section, two or three lines each, not a
-   diff; **ask whatever it raises**, through AskUserQuestion; and **wait for the person to
+   diff; **ask whatever it raises**, through request_user_input; and **wait for the person to
    confirm** — "Apply it" or equivalent authorises the edit. `assets/page.md`'s "Revising a
    plan" has the rest: Edits only, the proof block re-run, and what to say when a breakdown has
    already been cut from the shape being revised. A new plan's first copy skips all of this.
@@ -130,7 +130,7 @@ day it changes; a path stays true. Name the file that already holds the ground n
 6. **Open it, say one line, and ask.** `wslview`, `xdg-open` or `open` — first that exists —
    then the path and nothing else: `Plan is ready: /abs/path/to/page`.
 
-   **Then put the approval to them, with AskUserQuestion, in the same turn** — never skipped,
+   **Then put the approval to them, with request_user_input, in the same turn** — never skipped,
    never replaced by an inviting sentence: a session that publishes and stops has handed
    somebody a plan with no tasks and no sign a step is outstanding. One question — *Cut the
    tasks for this plan?* — three answers: **Cut them now** (step 7, this session), **Revise it

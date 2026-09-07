@@ -31,7 +31,7 @@ what the loader enforces.
 ## Procedure
 
 - Read what the project has, from the commands above, never documentation.
-- Ask what you cannot decide, through AskUserQuestion, 2–3 concrete options
+- Ask what you cannot decide through request_user_input, with 2–3 concrete options
   each. Always worth asking what one pass has to produce.
 - Write the pipeline from the contract's own template, and a prompt for
   every step the project does not already have one for.
