@@ -116,9 +116,9 @@ to `Frontmatter` and forgotten in `task contract`'s own groups fails spoolway's 
 ### Two constraints no key can express
 
 An id is also a lane name, `<task> · <step>`, at every agent step it visits — the widest one
-decides — and a lane name stops at 32 bytes. `check_task_id` in `src/mux.rs` is what
+decides — and a lane name stops at 34 bytes. `check_task_id` in `src/mux.rs` is what
 enforces it, at queue time rather than only when a lane for it finally tries to start: an id
-budget of `28 - len(longest agent step of that pipeline)` characters, the 4 the separator itself
+budget of `30 - len(longest agent step of that pipeline)` characters, the 4 the separator itself
 costs already spent. `spoolway task contract | jq '.pipelines.<name>.id_budget'` prints it for any
 pipeline this project defines, rather than requiring the arithmetic to be redone by hand.
 

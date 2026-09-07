@@ -228,7 +228,13 @@ still open, the very next redraw drops to `no dispatcher is running` — with wh
 it left running still on the board, which is what makes an abandoned run visible.
 
 A band line opens each group's block, at the row's own left margin and outdented past the
-cursor gutter so it reads as a heading: `▌<group>`, the group's name and nothing else. A task
+cursor gutter so it reads as a heading: `▌<group>`, the group's name and nothing else. Where
+the group has an issue behind it, that name is also a link to it: the board wraps the name — the
+`▌` and the dim styling stay outside — in an OSC 8 terminal hyperlink pointing at the issue URL
+any one of the group's tasks carries, so clicking it opens the issue in your browser. The link
+is written only where the board paints colour, so the colourless renderings — `dispatch
+--plain` and `spoolway queue list` — carry the band's old bytes unchanged, as does a group
+with no issue behind it. A task
 queued outside any group falls into `no group` — sorted last, fixed
 rather than alphabetical — whose block gets no band and no closing total line, since there is
 no group name for either to carry. Inside a group, rows sort by run order: a done row sorts

@@ -123,6 +123,14 @@ pub struct Row {
     /// The group this task came from, verbatim. `None` is a task queued
     /// outside any group — see [`NO_GROUP`].
     pub group: Option<String>,
+    /// This task's own issue URL, from its `url:` frontmatter. `key-in-names`
+    /// owns setting it, off the tracker hook's answer, and stores it per task
+    /// — there is no invariant that the tasks of a group all carry it or
+    /// agree on it, only that the hook writes the same issue's url onto each
+    /// task of a group it opens. `None` when this task has no `url:`. The
+    /// board's group band takes the first row of the group that has one as
+    /// its hyperlink target — see the `group_urls` map in [`view::table`].
+    pub issue_url: Option<String>,
     /// Whether this task declared `parallel: true` — an overlap with another
     /// declared-parallel task of the same group is deliberate, not a missing
     /// `depends_on`. Marked on the row so a reader of the board sees the same
@@ -1766,6 +1774,7 @@ fn build_rows(
         rows.push(Row {
             id: task.id().to_string(),
             group: task.front.group.clone(),
+            issue_url: issue_url_of(task),
             parallel: task.front.parallel,
             stage: task.stage().to_string(),
             step_loop,
@@ -1901,6 +1910,14 @@ fn cached_archive(dir: &Path) -> Result<Arc<Vec<crate::task::Task>>> {
     Ok(Arc::new(crate::task::load_dir(dir)?.0))
 }
 
+/// The issue URL a task carries as `url:`, or `None` when it carries none —
+/// `key-in-names` owns storing it, off the tracker hook's `open` answer. The
+/// board reads it only to point the group band's hyperlink somewhere.
+fn issue_url_of(task: &crate::task::Task) -> Option<String> {
+    let url = task.extra_str("url");
+    (!url.is_empty()).then(|| url.to_string())
+}
+
 /// Every task whose file has moved to the project's own `archive/`, as
 /// dimmed `● done` rows — but only for a group named among `active_groups`. A
 /// group with nothing left in the queue is not on the board at all, so its
@@ -1922,6 +1939,7 @@ fn done_rows(
             Some(Row {
                 id: task.id().to_string(),
                 group: Some(group),
+                issue_url: issue_url_of(task),
                 parallel: task.front.parallel,
                 stage: task.stage().to_string(),
                 // An archived task has no live step to read a loop count off
@@ -2300,7 +2318,7 @@ fn run_elapsed(repo: &Repo) -> Option<i64> {
 mod tests {
     use super::*;
     use crate::status::testutil::*;
-    use crate::status::view::{GUTTER, RecentEvent, Verdict, ticker};
+    use crate::status::view::{GUTTER, OSC8, RecentEvent, ST, Verdict, ticker};
 
     /// The footer's slot count is what says whether more work can start, so it
     /// has to count the lanes the dispatcher counts and nothing else. A
@@ -2594,6 +2612,42 @@ mod tests {
         // The one phase a frame in front of you cannot be read off the frame.
         let over = board.frame(&repo, &pipelines, Phase::Stopping).unwrap();
         assert!(over.contains("dispatcher stopped · "), "{over}");
+    }
+
+    /// A task's `url:` frontmatter reaches the group band as a real OSC 8
+    /// hyperlink in the frame the board hands back — the whole path from the
+    /// saved document through `Row::issue_url` into the painted bytes, not
+    /// just `view::table` exercised in isolation. Stripped, the band is still
+    /// the plain heading a group search matches.
+    #[test]
+    fn a_saved_task_url_becomes_the_group_bands_hyperlink_in_the_frame() {
+        let repo = fixture("band-url-frame");
+        let pipelines = Pipelines::builtin();
+        add_to(
+            &repo,
+            "auth-01",
+            &[],
+            Some("implement"),
+            Some("proj-12-auth"),
+        );
+
+        let url = "https://acme.atlassian.net/browse/PROJ-12";
+        let mut task = repo.task("auth-01").unwrap();
+        task.set_extra_str("url", url);
+        task.save().unwrap();
+
+        let mut board = Board::for_test();
+        let frame = board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
+        assert!(
+            frame.contains(&format!("▌{OSC8}{url}{ST}proj-12-auth{OSC8}{ST}")),
+            "the band should carry the issue hyperlink — {frame}"
+        );
+        assert!(
+            strip(&frame)
+                .lines()
+                .any(|l| l.trim_end().ends_with("▌proj-12-auth")),
+            "a group search still finds the band — {frame}"
+        );
     }
 
     /// A driving board says what the keys it now reads do — the mockup's own

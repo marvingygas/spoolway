@@ -100,9 +100,9 @@ comment, not the body.
    identical to `.spoolway/templates/tasks/<pipeline>.md`:
 
    - `id` — the task id, and the file's own stem. **Keep it short enough to become a lane
-     name:** a lane is called `<id> · <step>` and stops at 32 bytes. Measure against the
+     name:** a lane is called `<id> · <step>` and stops at 34 bytes. Measure against the
      `id_budget` step 1's contract already printed for this task's own pipeline — `bugfix`'s
-     is 13 — rather than working the arithmetic again.
+     is 15 — rather than working the arithmetic again.
    - `title` — a Conventional Commits line: a type, the area of code in parentheses, a colon,
      and one short present-tense sentence. `feat(queue): add a --dry-run flag`. The type is
      `feat`, `fix`, `docs`, `refactor`, `perf`, `test`, `build`, `ci` or `chore`; the

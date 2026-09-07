@@ -204,8 +204,8 @@ stays in `source:` and there is no `plan:` at all.
 
 Step 6 proves the set before it says it is done, with `spoolway task contract --from` pointed at
 the pending directory: the same validation `queue add --from` runs, stopping short of the save.
-Each task id is measured there, because a lane is named `<id> · <step>` and stops at 32 bytes.
-How much room an id has is not a fixed number — it is `28 - <longest step of the pipeline that
+Each task id is measured there, because a lane is named `<id> · <step>` and stops at 34 bytes.
+How much room an id has is not a fixed number — it is `30 - <longest step of the pipeline that
 document names>`, so the same id can be fine on `default` and too long on `bugfix`, whose
 longest step is `reproduce-again`.
 
