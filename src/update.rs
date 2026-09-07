@@ -596,14 +596,30 @@ fn shipped_for(repo: &Repo, path: &Path) -> Option<String> {
 /// `install` would be this command choosing an agent on someone's behalf.
 ///
 /// Every provider, not just `claude`: `init` and `install` write the same
-/// skills under `.codex/skills/` and `.pi/skills/` too, and a codex or pi
+/// skills under `.agents/skills/` and `.pi/skills/` too, and a codex or pi
 /// project that never sees them refreshed keeps stale skills after every
 /// update. The `planned.path.exists()` check below still limits the writes to
-/// providers a project actually installed.
+/// providers a project actually installed. Codex's former `.codex/skills/`
+/// root counts as an installation too: writing the current set under
+/// `.agents/skills/` migrates it without deleting anything from the old root.
 fn skills(repo: &Repo, args: &UpdateArgs, outcomes: &mut Vec<Outcome>) -> Result<()> {
     for provider in <crate::cli::Provider as clap::ValueEnum>::value_variants() {
-        for planned in provider.plan(&repo.root) {
-            if !planned.path.exists() {
+        let planned = provider.plan(&repo.root);
+        let migrate_codex = *provider == crate::cli::Provider::Codex
+            && planned.iter().any(|file| {
+                let relative = file
+                    .path
+                    .strip_prefix(provider.skills_dir(&repo.root))
+                    .expect("a provider's plan is below its skills directory");
+                repo.root
+                    .join(".codex")
+                    .join("skills")
+                    .join(relative)
+                    .exists()
+            });
+
+        for planned in planned {
+            if !planned.path.exists() && !migrate_codex {
                 continue;
             }
             let shown = crate::platform::relative(&repo.root, &planned.path);
@@ -1224,7 +1240,7 @@ mod tests {
         skills(&repo, &args(), &mut outcomes).unwrap();
         let lines = outcome_lines(&outcomes);
 
-        for provider_dir in [".codex", ".pi"] {
+        for provider_dir in [".agents", ".pi"] {
             assert!(
                 lines
                     .iter()
@@ -1232,5 +1248,31 @@ mod tests {
                 "{provider_dir} skills not refreshed: {lines:?}"
             );
         }
+    }
+
+    /// Codex moved its repository skill root from `.codex/skills` to
+    /// `.agents/skills`. An update is the one chance to carry existing
+    /// installations forward without asking every project to reinstall by
+    /// hand. The old files are deliberately left in place: they may include
+    /// work that is not spoolway's to remove.
+    #[test]
+    fn skills_migrates_a_legacy_codex_install_without_deleting_it() {
+        let repo = fixture("skills-codex-legacy");
+        let legacy = repo.root.join(".codex/skills/spoolway-plan/SKILL.md");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, "stale, from an older release\n").unwrap();
+
+        let mut outcomes = Vec::new();
+        skills(&repo, &args(), &mut outcomes).unwrap();
+
+        for planned in crate::cli::Provider::Codex.plan(&repo.root) {
+            assert_eq!(
+                std::fs::read_to_string(&planned.path).unwrap(),
+                planned.contents,
+                "{} was not migrated",
+                planned.path.display()
+            );
+        }
+        assert!(legacy.exists(), "the legacy install must not be deleted");
     }
 }

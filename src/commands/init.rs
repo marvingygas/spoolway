@@ -803,7 +803,7 @@ mod tests {
         // onto one machine.
         assert!(pipelines.contains("claude-opus-5"), "{pipelines}");
 
-        assert!(root.join(".codex").join("skills").is_dir());
+        assert!(root.join(".agents").join("skills").is_dir());
         assert!(
             !root.join(".claude").exists(),
             "only one provider was asked for"

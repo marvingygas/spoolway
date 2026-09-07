@@ -829,7 +829,7 @@ Every provider converged on the same layout — one directory per skill, holding
 | Provider | Skills go in |
 |---|---|
 | `claude` | `.claude/skills/` |
-| `codex` | `.codex/skills/` |
+| `codex` | `.agents/skills/` |
 | `pi` | `.pi/skills/` — loaded only once the project is trusted, so answer pi's trust prompt or start it with `--approve` |
 
 `gemini` is not here. It has no adapter row either: nothing about it has been settled

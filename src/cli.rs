@@ -662,7 +662,7 @@ pub struct InstallArgs {
 pub enum Provider {
     /// One directory per skill under `.claude/skills/`, each holding a SKILL.md.
     Claude,
-    /// The same, under `.codex/skills/`.
+    /// The same, under `.agents/skills/`.
     Codex,
     /// The same, under `.pi/skills/` — loaded once the project is trusted.
     Pi,

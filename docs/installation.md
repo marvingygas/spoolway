@@ -149,7 +149,7 @@ the directory goes, because all three converged on the same layout:
 | Provider | Skills go in |
 |---|---|
 | `claude` | `.claude/skills/` |
-| `codex` | `.codex/skills/` |
+| `codex` | `.agents/skills/` |
 | `pi` | `.pi/skills/` — loaded only once the project is trusted, so answer pi's trust prompt or start it with `--approve` |
 
 Which one you plan in is a separate question from what your lanes run: planning in Claude
