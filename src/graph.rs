@@ -606,6 +606,7 @@ mod tests {
                 quota_retries: 0,
                 parked_until: None,
                 parked_window: String::new(),
+                parked_at: None,
                 paused_at: None,
                 launched_at: None,
                 prompts: Default::default(),

@@ -11,7 +11,12 @@
 # harness's own compressed clock — and once it has, the very next pass picks
 # the task straight back up.
 #
+# The park also records `parked_at:` — the fixed start of the continuous
+# hold, beside the moving `parked_until:` deadline — and the whole park is
+# gone from the task file once its clock passes and the lane runs.
+#
 # covers: agents.<profile>.quota_ceiling — a fixture reading above the ceiling parks a new lane rather than starting one, and the task is picked up once its own clock passes
+# covers: parked_at — written when the ceiling first parks the task, cleared once it leaves the hold
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=../lib.sh
@@ -66,6 +71,7 @@ if lane_on_record "quota · review"; then bad "no \`claude\` lane was started wh
 else ok "no \`claude\` lane was started while it was parked"; fi
 
 has "the park names the probe's own reading" "88%" "$SPOOLWAY_PROJECT_HOME/queue/quota.md"
+has "the park records when it began" "parked_at:" "$SPOOLWAY_PROJECT_HOME/queue/quota.md"
 
 # Move the fixture reading itself, below the ceiling, rather than leaving
 # the original 88% sitting there for `parked_until`'s own clock to outlive
@@ -85,5 +91,14 @@ JSON
 
 if drive quota gone 40; then ok "once the clock passes, the task is picked up and runs to \`done\`"
 else bad "once the clock passes, the task is picked up and runs to \`done\` (stuck at \`$(stage_of quota)\`)"; fi
+
+# The archived document is the same file the queue held, renamed. A launch out
+# of a park drops all three park fields together, so none of them survives here.
+lacks "the launch left no park behind: no start" \
+  "parked_at:" "$SPOOLWAY_PROJECT_HOME/archive/quota.md"
+lacks "the launch left no park behind: no deadline" \
+  "parked_until:" "$SPOOLWAY_PROJECT_HOME/archive/quota.md"
+lacks "the launch left no park behind: no window" \
+  "parked_window:" "$SPOOLWAY_PROJECT_HOME/archive/quota.md"
 
 finish

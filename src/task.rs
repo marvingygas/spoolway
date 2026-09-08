@@ -407,10 +407,13 @@ pub struct Frontmatter {
     /// which reads this before it resolves a step or looks at a lane.
     ///
     /// Cleared by `set_stage` and `set_stage_unbanked`, the same as
-    /// `usage_limit_hold`, `quota_retries` and `attempts` — a task that has moved on has
-    /// left whatever parked it behind — and by the pass itself the moment it
-    /// finds this in the past, so a task is never skipped a second time on
-    /// a clock that has already run out.
+    /// `usage_limit_hold`, `quota_retries` and `attempts` — a task that has
+    /// moved on has left whatever parked it behind. When the deadline is
+    /// merely in the past, `Dispatcher::parked` leaves this field alone and
+    /// only stops gating the task; the same pass then rewrites the park as
+    /// one whole — a re-park with a fresh deadline, a launch that drops all
+    /// three park fields in `start_one`, or a stage move — so a reader never
+    /// sees this cleared while `parked_at` or `parked_window` still stands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parked_until: Option<i64>,
 
@@ -434,6 +437,43 @@ pub struct Frontmatter {
     /// unclassified park; these display a recheck time without a date.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub parked_window: String,
+
+    /// When one continuous quota or usage-limit park began, in epoch
+    /// seconds — fixed for the whole of that hold, unlike
+    /// [`Self::parked_until`] beside it, which is only ever the *next*
+    /// recheck deadline and moves every time the park is re-probed.
+    ///
+    /// The intended reading is the park's age, `now - parked_at`, for a
+    /// display that wants "how long has this been held" rather than "when
+    /// does the next probe fall". Nothing consumes it that way yet — the
+    /// board still draws parks off `parked_until` — so this field is only
+    /// written and round-tripped for now, against the board change that will
+    /// read it (see the `parked-duration-and-paused-state` plan).
+    ///
+    /// Written once, by whichever dispatcher check in `src/dispatch.rs`
+    /// first parks the task — `quota_over_ceiling`, the unavailable-reading
+    /// branch, or `usage_limit_hold` — and left exactly as it was on every
+    /// later pass that finds the same hold still in force. That includes a
+    /// pass whose expired `parked_until` is rechecked and re-parked: a
+    /// re-park is the same uninterrupted hold, so the age goes on counting
+    /// from here rather than restarting. `Dispatcher::parked` deliberately
+    /// does not touch this when a deadline expires — an expiry is a
+    /// recheck, not an exit.
+    ///
+    /// Cleared on a true exit from the hold, wherever `parked_until` and
+    /// `parked_window` are also cleared: [`Task::set_stage`] and
+    /// [`Task::set_stage_unbanked`] when the task leaves the step,
+    /// [`Task::launch_landed`] when a lane of it is seen running,
+    /// `parse_submission`'s re-queue normalisation in
+    /// `src/commands/queue.rs`, and the launch path in `start_one`
+    /// (`src/dispatch.rs`) for a task that starts a lane from the very step
+    /// it was parked on, where no stage move runs.
+    ///
+    /// Absent on a task file written before this field existed, and on any
+    /// park that predates it. A reader that finds it absent is meant to show
+    /// no age rather than invent one from a missing start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parked_at: Option<i64>,
 
     /// The gated step this task is paused on, waiting for a person to release
     /// it — see [`crate::pipeline::PAUSED`].
@@ -724,6 +764,7 @@ impl Task {
         self.front.quota_retries = 0;
         self.front.parked_until = None;
         self.front.parked_window = String::new();
+        self.front.parked_at = None;
         self.front.launched_at = None;
 
         let stamp: DateTime<Utc> = Utc::now();
@@ -747,10 +788,10 @@ impl Task {
     /// here would leave a `loop:` budget seeing an arrival no pipeline
     /// routed. See [`Task::set_stage`], which this deliberately does not
     /// call: `rounds` and `arrived_from` are left exactly as they were, and
-    /// `attempts`, `usage_limit_hold`, `parked_until`, `parked_window` and
-    /// `launched_at` are reset the same way `set_stage` resets them, since
-    /// neither a parked task nor the lane it is handed back to has anything
-    /// of those left to mean.
+    /// `attempts`, `usage_limit_hold`, `parked_until`, `parked_window`,
+    /// `parked_at` and `launched_at` are reset the same way `set_stage`
+    /// resets them, since neither a parked task nor the lane it is handed
+    /// back to has anything of those left to mean.
     pub fn set_stage_unbanked(&mut self, stage: &str, message: &str) {
         self.front.stage = stage.to_string();
         self.front.attempts = 0;
@@ -758,6 +799,7 @@ impl Task {
         self.front.quota_retries = 0;
         self.front.parked_until = None;
         self.front.parked_window = String::new();
+        self.front.parked_at = None;
         self.front.launched_at = None;
 
         let stamp: DateTime<Utc> = Utc::now();
@@ -810,14 +852,28 @@ impl Task {
     /// started, and the board read `None` — a dash — for the rest of the
     /// step.
     ///
+    /// Also forgives the whole quota park — `parked_until`, `parked_window`
+    /// and `parked_at`. A lane of this task is running, so the hold it was
+    /// parked for is over; the dispatcher's own `parked` gate keeps this off
+    /// a task still inside a live park, so the only park this ever sees is a
+    /// spent one — most often a usage-limit lane that has resumed its own
+    /// turn, whose growing "still parked" age would otherwise sit on the
+    /// board over a lane hard at work.
+    ///
     /// Answers whether anything changed, so a caller reading every task on
     /// every pass writes only the file that moved.
     pub fn launch_landed(&mut self) -> bool {
-        let counted =
-            self.front.attempts > 0 || self.front.usage_limit_hold || self.front.quota_retries > 0;
+        let counted = self.front.attempts > 0
+            || self.front.usage_limit_hold
+            || self.front.quota_retries > 0
+            || self.front.parked_until.is_some()
+            || self.front.parked_at.is_some();
         self.front.attempts = 0;
         self.front.usage_limit_hold = false;
         self.front.quota_retries = 0;
+        self.front.parked_until = None;
+        self.front.parked_window = String::new();
+        self.front.parked_at = None;
         counted
     }
 
@@ -1256,6 +1312,29 @@ mod tests {
         assert_eq!(task.front.launched_at, None);
     }
 
+    /// `launch_landed` forgives a quota or usage-limit park the same way it
+    /// forgives `attempts`: a lane of this task is running now, so the hold
+    /// is over and the whole park — its start, its deadline and its window —
+    /// comes off. A park with nothing else set still counts as something to
+    /// forgive.
+    #[test]
+    fn launch_landed_forgives_a_quota_park() {
+        let mut task = Task::parse(PathBuf::from("demo.md"), SAMPLE).unwrap();
+        task.front.parked_at = Some(1_000);
+        task.front.parked_until = Some(2_000);
+        task.front.parked_window = "seven_day".into();
+
+        assert!(task.launch_landed(), "a live park is something to forgive");
+        assert_eq!(task.front.parked_at, None);
+        assert_eq!(task.front.parked_until, None);
+        assert_eq!(task.front.parked_window, "");
+
+        assert!(
+            !task.launch_landed(),
+            "nothing left to forgive the second time"
+        );
+    }
+
     /// A stage change is an arrival, and a lap is a transition: `set_stage`
     /// banks the round on its own, before any lane has even started. Launching
     /// a lane there is a separate cost, banked separately.
@@ -1405,6 +1484,47 @@ mod tests {
         let reparsed = Task::parse(PathBuf::from("demo.md"), &rendered).unwrap();
         assert_eq!(reparsed.front.base.as_deref(), Some("main"));
         assert_eq!(reparsed.front.cut_from.as_deref(), Some("task/dependency"));
+    }
+
+    /// `parked_at` round-trips like any other optional epoch field, stays
+    /// out of a file that never set it, and a park written by an older
+    /// spoolway — `parked_until` with no `parked_at` beside it — still
+    /// parses, read as `None` rather than refused.
+    #[test]
+    fn parked_at_round_trips_and_a_legacy_park_omits_it() {
+        let mut task = Task::parse(PathBuf::from("demo.md"), SAMPLE).unwrap();
+        assert_eq!(task.front.parked_at, None);
+        assert!(!task.render().unwrap().contains("parked_at:"));
+
+        task.front.parked_at = Some(1_788_793_980);
+        let rendered = task.render().unwrap();
+        assert!(rendered.contains("parked_at: 1788793980"), "{rendered}");
+        let reparsed = Task::parse(PathBuf::from("demo.md"), &rendered).unwrap();
+        assert_eq!(reparsed.front.parked_at, Some(1_788_793_980));
+
+        let legacy = "---\nid: demo\nstage: review\nparked_until: 1788801180\n\
+                      parked_window: five_hour\n---\nbody\n";
+        let task = Task::parse(PathBuf::from("demo.md"), legacy).unwrap();
+        assert_eq!(task.front.parked_at, None);
+        assert_eq!(task.front.parked_until, Some(1_788_801_180));
+    }
+
+    /// Both stage moves drop `parked_at` the same way they already drop
+    /// `parked_until` and `parked_window`: a task that has left the step it
+    /// was parked on has left the hold, so its age has nothing left to
+    /// count.
+    #[test]
+    fn a_stage_move_clears_parked_at() {
+        let mut task = Task::parse(PathBuf::from("demo.md"), SAMPLE).unwrap();
+        task.front.parked_at = Some(1_000);
+        task.front.parked_until = Some(2_000);
+        task.set_stage("review", Some("moved on"));
+        assert_eq!(task.front.parked_at, None);
+
+        let mut task = Task::parse(PathBuf::from("demo.md"), SAMPLE).unwrap();
+        task.front.parked_at = Some(1_000);
+        task.set_stage_unbanked("paused", "parked from the board");
+        assert_eq!(task.front.parked_at, None);
     }
 
     /// `at` round-trips like any other field, and a task file written before
