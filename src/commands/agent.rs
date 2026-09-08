@@ -812,8 +812,10 @@ fn run_live_turn(
 /// Unlike everything above it, a reading that fails here **does** fail the
 /// command: an absent accounting row is a legal state, but a declared one that
 /// does not read back is a wrong row.
-/// A scratch tree — and the per-session agent home the check makes it — that
-/// go when it falls out of scope.
+/// A scratch tree — and the per-session agent home the check makes it — torn
+/// down when it falls out of scope, with one carve-out: for a kind that
+/// refreshes its quota reading out of a lane home, the newest such home is
+/// kept, so a person can refresh a stale reading with one `verify --live` run.
 ///
 /// A guard rather than a `remove_dir_all` at the end of the check, because the
 /// check has a dozen ways out: every `?` on a spawn that would not start, the
@@ -821,19 +823,107 @@ fn run_live_turn(
 /// function call would clean up after exactly the run that needed it least.
 ///
 /// `home` is the state directory `prepare_session_home` makes for a kind that
-/// mints its own session id — `None` for every other kind. It was never
-/// reclaimed before, so CI running `verify --live` per push left one behind
-/// on every run (review finding 62).
+/// mints its own session id — `None` for every other kind. When `keep_home` is
+/// false it is taken back on the way out; leaving it unreclaimed is what had CI
+/// running `verify --live` per push leak one per run (review finding 62). When
+/// `keep_home` is true the home stays and [`prune_verify_homes`] takes back
+/// every older live-check home beside it instead, so the leak stays closed at
+/// one home per kind.
 struct ScratchTree {
     dir: std::path::PathBuf,
     home: Option<std::path::PathBuf>,
+    /// Set when this kind reads its quota out of a lane home — see
+    /// [`crate::quota::refreshes_from_lane_home`]. Keeps `home` on the way out
+    /// rather than deleting it, and prunes older live-check homes in its place.
+    keep_home: bool,
 }
 
 impl Drop for ScratchTree {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);
         if let Some(home) = &self.home {
-            let _ = std::fs::remove_dir_all(home);
+            match self.keep_home {
+                true => prune_verify_homes(home),
+                false => drop_dir(home),
+            }
+        }
+    }
+}
+
+/// The file `agent_verify_live` drops into a per-session home it means to keep.
+///
+/// It does two jobs. Its presence tells a live-check home from a codex lane's
+/// live `$CODEX_HOME` — the two sit in the same directory, and only the former
+/// is ever swept; `prepare_session_home` never writes it. Its contents are the
+/// wall-clock nanoseconds at which the home was made, written once and never
+/// rewritten, which is how [`prune_verify_homes`] orders two runs. The
+/// directory's own mtime cannot do that job: codex keeps bumping it as it
+/// creates `sessions/` and writes its config, so a slow older run's home can
+/// end up with a later mtime than a fast newer run's.
+const VERIFY_HOME_MARKER: &str = ".spoolway-verify-live";
+
+/// Write [`VERIFY_HOME_MARKER`] into `home` with this instant's creation stamp.
+fn mark_verify_home(home: &std::path::Path) {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let _ = std::fs::write(home.join(VERIFY_HOME_MARKER), stamp.to_string());
+}
+
+/// The creation stamp [`mark_verify_home`] wrote, or `None` for a directory
+/// with no marker (a real lane's `$CODEX_HOME`) or an unparseable one (a marker
+/// from before this file carried a stamp).
+fn verify_home_stamp(home: &std::path::Path) -> Option<u128> {
+    std::fs::read_to_string(home.join(VERIFY_HOME_MARKER))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// Take back one per-session home the live check made — today's behaviour, for
+/// a kind whose quota is not read out of that home.
+fn drop_dir(home: &std::path::Path) {
+    let _ = std::fs::remove_dir_all(home);
+}
+
+/// Keep `kept` and take back every *older* live-check home beside it.
+///
+/// The acceptance criterion is that the newest home survives and only older
+/// ones go. Two `verify --live` runs can overlap: if the older run's guard
+/// drops first, an unconditional sweep would delete the newer run's home while
+/// it is still writing its rollout, and the newer guard would then leave no
+/// rollout at all. So a sibling is pruned only when its [`VERIFY_HOME_MARKER`]
+/// creation stamp predates `kept`'s — a value fixed when each home is made,
+/// unlike the directory mtime codex keeps advancing under both.
+///
+/// A directory with no readable stamp is never a candidate: that is a real
+/// codex lane's `$CODEX_HOME`, which lives in this same directory and must
+/// outlive any codex lane in flight. This is what keeps review finding 62's
+/// leak from reopening now that the home is no longer deleted outright: at most
+/// one live-check home per kind is left behind.
+fn prune_verify_homes(kept: &std::path::Path) {
+    let Some(parent) = kept.parent() else {
+        return;
+    };
+    let Some(kept_stamp) = verify_home_stamp(kept) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.file_name() == kept.file_name() || !entry.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        // Only a home stamped before the one this run kept. No stamp, an
+        // unreadable one, or one at or after `kept`'s is left alone — a
+        // concurrent run's home is newer, and losing it costs that run its
+        // rollout.
+        if verify_home_stamp(&path).is_some_and(|stamp| stamp < kept_stamp) {
+            let _ = std::fs::remove_dir_all(&path);
         }
     }
 }
@@ -893,10 +983,12 @@ fn agent_verify_live(
     // and a check that is run often enough to be useful is run often enough to
     // matter: one machine held 531 of these trees, the oldest two weeks old.
     // The per-session agent home, if this kind gets one, is added below once
-    // its path is known.
+    // its path is known — and unlike the tree it may be kept, for a kind that
+    // refreshes its quota reading out of that home (see `ScratchTree`).
     let mut scratch = ScratchTree {
         dir: dir.clone(),
         home: None,
+        keep_home: crate::quota::refreshes_from_lane_home(&args.kind),
     };
     // A repo, because a lane's worktree is one and at least one kind checks:
     // codex refuses to start outside a git repo with "Not inside a trusted
@@ -938,10 +1030,21 @@ fn agent_verify_live(
         .context("this kind has no headless row")?;
 
     // The same home a lane of this kind would be given, made the same way. For
-    // a kind that pins by id this is `None` and nothing below changes; for one
-    // that pins by home, the guard now owns it and takes it back on the way
-    // out however the check ends (review finding 62).
+    // a kind that pins by id this is `None` and nothing below changes. For one
+    // that pins by home the guard owns it from here: it takes the home back on
+    // the way out (review finding 62), unless this kind refreshes a quota
+    // reading out of that home — then the newest home is kept for a manual
+    // `verify --live` refresh and only the older ones are pruned.
     scratch.home = crate::agent::prepare_session_home(&args.kind, &session, &dir);
+    if scratch.keep_home
+        && let Some(home) = &scratch.home
+    {
+        // Marks this home as one `verify --live` made and means to keep, and
+        // stamps it with its creation instant, so the prune on the way out
+        // sweeps its own older homes and never a newer concurrent run's or a
+        // codex lane's live `$CODEX_HOME` in the same directory.
+        mark_verify_home(home);
+    }
     let env: Vec<(String, String)> = adapter.session_env(&session);
 
     println!(
@@ -1312,6 +1415,9 @@ mod tests {
             let _scratch = ScratchTree {
                 dir: dir.clone(),
                 home: Some(home.clone()),
+                // A kind whose quota is not read out of a lane home keeps
+                // today's behaviour: the home goes on the way out.
+                keep_home: false,
             };
             assert!(dir.exists(), "the guard must not delete it early");
         }
@@ -1339,6 +1445,7 @@ mod tests {
             let _scratch = ScratchTree {
                 dir: dir.to_path_buf(),
                 home: None,
+                keep_home: false,
             };
             bail!("the reading did not match its row")
         }
@@ -1348,6 +1455,87 @@ mod tests {
             !dir.exists(),
             "a check that bailed kept its tree: {}",
             dir.display()
+        );
+    }
+
+    /// For a kind that refreshes its quota out of a lane home, the guard keeps
+    /// the home this run wrote — with its rollout — and prunes only its own
+    /// *older* live-check homes, so review finding 62's leak stays closed at
+    /// one home per kind. Four siblings pin the edges:
+    ///
+    /// - an older marked home is swept;
+    /// - a newer marked home is left — it belongs to a `verify --live` run
+    ///   still in flight, and deleting it would cost that run its rollout;
+    /// - a real codex lane's `$CODEX_HOME`, marker-less, is never a candidate.
+    ///
+    /// Run age comes from the marker's creation stamp, not the directory
+    /// mtime: the kept home's mtime is set here to the newest of all four and
+    /// the surviving newer home's to the oldest, so a prune that consulted
+    /// mtime would delete exactly the home that must survive.
+    #[test]
+    fn the_guard_keeps_its_home_and_prunes_only_older_verify_homes() {
+        use std::time::{Duration, SystemTime};
+
+        let parent = crate::scratch::root("agent-verify-kept-home");
+        std::fs::create_dir_all(&parent).unwrap();
+        let now = SystemTime::now();
+
+        // The home this run wrote its rollout into — stamped in the middle,
+        // but with the newest mtime of the four.
+        let kept = parent.join("this-verify-session");
+        std::fs::create_dir_all(&kept).unwrap();
+        std::fs::write(kept.join(VERIFY_HOME_MARKER), "2000").unwrap();
+        std::fs::write(kept.join("rollout.jsonl"), "{}").unwrap();
+        crate::scratch::set_mtime(&kept, now);
+
+        // An older live-check home — stamped before `kept`.
+        let older = parent.join("older-verify-session");
+        std::fs::create_dir_all(&older).unwrap();
+        std::fs::write(older.join(VERIFY_HOME_MARKER), "1000").unwrap();
+        crate::scratch::set_mtime(&older, now - Duration::from_secs(60));
+
+        // A newer live-check home — a concurrent run still in flight. Stamped
+        // after `kept`, yet given the oldest mtime of the four: codex bumps a
+        // home's mtime as it writes, so mtime order is not run order.
+        let newer = parent.join("concurrent-verify-session");
+        std::fs::create_dir_all(&newer).unwrap();
+        std::fs::write(newer.join(VERIFY_HOME_MARKER), "3000").unwrap();
+        crate::scratch::set_mtime(&newer, now - Duration::from_secs(120));
+
+        // A real codex lane's home in the same directory — no marker.
+        let lane = parent.join("a-live-lane-session");
+        std::fs::create_dir_all(&lane).unwrap();
+        std::fs::write(lane.join("auth.json"), "{}").unwrap();
+
+        {
+            let scratch_dir = crate::scratch::root("agent-verify-kept-scratch");
+            std::fs::create_dir_all(&scratch_dir).unwrap();
+            let _scratch = ScratchTree {
+                dir: scratch_dir,
+                home: Some(kept.clone()),
+                keep_home: true,
+            };
+        }
+
+        assert!(
+            kept.join("rollout.jsonl").exists(),
+            "the kept home and its rollout must outlive the guard: {}",
+            kept.display()
+        );
+        assert!(
+            !older.exists(),
+            "an older live-check home must be pruned: {}",
+            older.display()
+        );
+        assert!(
+            newer.exists(),
+            "a newer live-check home belongs to a concurrent run and must survive: {}",
+            newer.display()
+        );
+        assert!(
+            lane.join("auth.json").exists(),
+            "a real lane home in the same directory must be left alone: {}",
+            lane.display()
         );
     }
 

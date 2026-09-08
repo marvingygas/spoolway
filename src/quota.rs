@@ -146,6 +146,23 @@ fn is_codex(kind: &str) -> bool {
         .is_some_and(|accounting| matches!(accounting.format, crate::usage::Format::Codex))
 }
 
+/// Whether `kind` refreshes its quota reading out of a per-lane home.
+///
+/// True only for a kind that both carries a [`crate::agent::Adapter::quota`]
+/// row and reads it out of rollouts under a per-session home — codex today.
+/// False for a kind with no quota row, and for one whose reading is a cache
+/// file in the real home directory rather than a lane's own home (claude).
+///
+/// This is the one case where `spoolway agent verify <kind> --live` has reason
+/// to keep the home it wrote rather than take it back: that home then carries
+/// a fresh rollout a stale reading can be refreshed from by hand.
+pub fn refreshes_from_lane_home(kind: &str) -> bool {
+    crate::agent::adapter(kind)
+        .and_then(|adapter| adapter.quota)
+        .is_some()
+        && is_codex(kind)
+}
+
 /// A reading safe to use for admission. Expired windows require another
 /// observation: the cached percentage says nothing about their new usage.
 pub fn trusted(kind: &str) -> std::result::Result<Reading, String> {
@@ -525,6 +542,17 @@ mod tests {
     #[test]
     fn a_kind_with_no_probe_row_is_no_probe() {
         assert!(matches!(read("pi"), Err(Miss::NoProbe)));
+    }
+
+    /// Only a kind that reads its quota out of a per-lane home — codex —
+    /// refreshes from one. claude's reading is a cache file in the real home,
+    /// and `pi` carries no quota row at all.
+    #[test]
+    fn only_codex_refreshes_its_quota_from_a_lane_home() {
+        assert!(refreshes_from_lane_home("codex"));
+        assert!(!refreshes_from_lane_home("claude"));
+        assert!(!refreshes_from_lane_home("pi"));
+        assert!(!refreshes_from_lane_home("nope"));
     }
 
     #[test]
