@@ -130,10 +130,20 @@ pub enum Miss {
 pub fn read(kind: &str) -> std::result::Result<Reading, Miss> {
     let adapter = crate::agent::adapter(kind).ok_or(Miss::NoProbe)?;
     let rel = adapter.quota.ok_or(Miss::NoProbe)?;
-    match adapter.accounting.as_ref().map(|a| a.format) {
-        Some(crate::usage::Format::Codex) => read_codex(kind, rel),
-        _ => read_claude_cache(rel),
+    match is_codex(kind) {
+        true => read_codex(kind, rel),
+        false => read_claude_cache(rel),
     }
+}
+
+/// Whether this kind's reading comes out of rollouts rather than a cache
+/// file — asked of the accounting row rather than of the kind's name, the
+/// same question [`read`] branches on and [`trusted`] words its staleness
+/// message from.
+fn is_codex(kind: &str) -> bool {
+    crate::agent::adapter(kind)
+        .and_then(|adapter| adapter.accounting.as_ref())
+        .is_some_and(|accounting| matches!(accounting.format, crate::usage::Format::Codex))
 }
 
 /// A reading safe to use for admission. Expired windows require another
@@ -145,10 +155,18 @@ pub fn trusted(kind: &str) -> std::result::Result<Reading, String> {
     })?;
     let now = Utc::now();
     if reading.stale(now) {
-        return Err(format!(
-            "quota reading is {} minutes old",
-            (now - reading.fetched_at).num_minutes()
-        ));
+        let minutes = (now - reading.fetched_at).num_minutes();
+        // codex's reading is a search of two directories rather than one
+        // file, so a stale one has to say where it looked and how old the
+        // best thing it found was — that is the whole of what a person needs
+        // to decide whether to run codex once or go looking for a real
+        // problem.
+        return Err(match is_codex(kind) {
+            true => format!(
+                "the newest rollout under either home is {minutes} minutes old ({CODEX_HOMES})"
+            ),
+            false => format!("quota reading is {minutes} minutes old"),
+        });
     }
     if [&reading.five_hour, &reading.seven_day]
         .iter()
@@ -171,42 +189,71 @@ fn read_claude_cache(rel: &str) -> std::result::Result<Reading, Miss> {
 }
 
 /// codex's own shape: no cache file, so `rel` (`"sessions"`) is a directory
-/// under a lane's own home rather than a file — the newest rollout in it
-/// carries the freshest reading, exactly as `~/.claude.json`'s single file
-/// does for claude, just spread across many files instead of one.
+/// under a codex home rather than a file — the newest rollout in it carries
+/// the freshest reading, exactly as `~/.claude.json`'s single file does for
+/// claude, just spread across many files instead of one.
 ///
-/// The home spoolway made for a lane, never `~/.codex` — the task this row
-/// was established for says so directly, and the reason is trust as much as
-/// correctness: a rollout under a lane's own `$CODEX_HOME` is one this
-/// binary itself started and can vouch for, where an interactive session or
-/// a run against a local endpoint is neither. Reading `own_home(kind)` too
-/// would let whichever of the two happened to write more recently override
-/// the other silently — a person testing a local model minutes before a
-/// dispatcher pass would suppress the account's real reading with a
-/// same-account run this binary never started.
+/// Two kinds of home are searched, and the newest rollout across both wins.
+/// A per-lane `$CODEX_HOME` spoolway made under its own state root is one
+/// this binary started and can vouch for. `~/.codex` is the home an
+/// interactive session writes to, which this binary did not start.
+///
+/// Reading only the managed homes deadlocked the queue. Nothing but a codex
+/// lane ever writes a managed rollout, and the gate reading it holds every
+/// codex lane, so once the newest managed rollout aged past [`STALE_AFTER`]
+/// no lane could run to replace it and the account's real figure — sitting
+/// in `~/.codex`, well under the ceiling — was never read.
+///
+/// The trust argument that excluded `~/.codex` is answered by the null-window
+/// skip below rather than by ignoring the directory: the case it was afraid
+/// of is a session settled against a local endpoint, and that session writes
+/// `rate_limits` with both windows null, which is never a reading here.
 fn read_codex(kind: &str, rel: &str) -> std::result::Result<Reading, Miss> {
-    let path = newest_managed_codex_rollout(kind, rel).ok_or_else(|| {
-        Miss::Unreadable(
-            "no rollout found under any managed lane home for this kind — no codex lane has \
-             written one here yet"
-                .into(),
-        )
-    })?;
-    let text = std::fs::read_to_string(&path)
-        .map_err(|err| Miss::Unreadable(format!("{}: {err}", path.display())))?;
-    match parse_codex(&text) {
-        Ok(Some(reading)) => Ok(reading),
-        Ok(None) => Err(Miss::NoReading(format!(
-            "{}: rate_limits present with both windows null — not signed in with ChatGPT",
-            path.display()
-        ))),
-        Err(err) => Err(Miss::Unparseable(format!("{}: {err}", path.display()))),
+    let mut rollouts = codex_rollouts(kind, rel);
+    if rollouts.is_empty() {
+        return Err(Miss::Unreadable(format!(
+            "no rollout under either codex home ({CODEX_HOMES}) — no codex session has \
+             written one yet"
+        )));
     }
+    // Newest first, so the first rollout that yields a reading is the
+    // freshest one that has anything to say.
+    rollouts.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+
+    // A rollout that carries no reading is skipped rather than allowed to
+    // win on recency: a session settled against a local endpoint writes both
+    // windows null minutes before a dispatcher pass, and letting that blank
+    // out the account's real figure from the other home is the same failure
+    // this function was widened to fix, just from the other side. Only when
+    // no rollout anywhere carries both windows does a miss come back — the
+    // newest one's, since that is the file a person would go look at.
+    let mut newest_miss = None;
+    for (_, path) in rollouts {
+        let miss = match std::fs::read_to_string(&path) {
+            Err(err) => Miss::Unreadable(format!("{}: {err}", path.display())),
+            Ok(text) => match parse_codex(&text) {
+                Ok(Some(reading)) => return Ok(reading),
+                Ok(None) => Miss::NoReading(format!(
+                    "{}: rate_limits present with both windows null — not signed in with ChatGPT",
+                    path.display()
+                )),
+                Err(err) => Miss::Unparseable(format!("{}: {err}", path.display())),
+            },
+        };
+        newest_miss.get_or_insert(miss);
+    }
+    Err(newest_miss.expect("a non-empty rollout list leaves a miss behind"))
 }
 
-/// The newest rollout under any per-lane home spoolway has made for `kind` —
-/// see [`read_codex`]'s own doc for why `own_home` is deliberately not among
-/// the places this looks.
+/// The two places a codex rollout is looked for, named the way the hold
+/// message a parked task carries names them.
+const CODEX_HOMES: &str = "state/spoolway/codex, ~/.codex";
+
+/// Every candidate rollout for `kind`, each with the moment it was last
+/// written — every `.jsonl`, not just the newest per home. [`read_codex`]
+/// walks this newest-first and passes over any rollout that carries no
+/// reading, so an older real rollout in the same home as a newer null one
+/// still has to be in the list for it to be found.
 ///
 /// `state_root().join(home.dir)` (`<state_root>/codex`) holds one directory
 /// per session id, each a full `$CODEX_HOME` of its own — including its own
@@ -214,27 +261,36 @@ fn read_codex(kind: &str, rel: &str) -> std::result::Result<Reading, Miss> {
 /// (see [`crate::agent::Accounting::store`]'s own doc). So each session's
 /// directory is walked at `rel` specifically, the same restriction a
 /// [`crate::usage::FileShape::OwnHome`] lookup already applies for one known
-/// session, rather than handed to [`crate::usage::newest_transcript`] whole
-/// and risking exactly that fixture file winning.
-fn newest_managed_codex_rollout(kind: &str, rel: &str) -> Option<std::path::PathBuf> {
-    let sessions_root =
-        crate::usage::state_root()?.join(crate::agent::adapter(kind)?.home.as_ref()?.dir);
-    let mut best: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
-    for entry in std::fs::read_dir(&sessions_root).ok()?.flatten() {
-        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
-            continue;
-        }
-        let Some(path) = crate::usage::newest_transcript(&entry.path().join(rel)) else {
-            continue;
-        };
-        let Ok(modified) = std::fs::metadata(&path).and_then(|m| m.modified()) else {
-            continue;
-        };
-        if best.as_ref().is_none_or(|(at, _)| modified > *at) {
-            best = Some((modified, path));
+/// session, rather than handed to [`crate::usage::transcripts_under`] whole
+/// and risking exactly that fixture file being counted. The interactive home
+/// is joined at `rel` for the same reason.
+///
+/// The interactive home is `~/.codex` off the home directory, deliberately
+/// not [`crate::agent::own_home`], which honours `$CODEX_HOME`. A dispatcher
+/// started from inside a codex session inherits that variable pointing at
+/// that session's own home, which the managed scan already covers — so
+/// honouring it here would make the account's reading depend on the shell
+/// the dispatcher happened to be launched from.
+fn codex_rollouts(kind: &str, rel: &str) -> Vec<(std::time::SystemTime, std::path::PathBuf)> {
+    let mut found = Vec::new();
+
+    if let (Some(state_root), Some(home)) = (
+        crate::usage::state_root(),
+        crate::agent::adapter(kind).and_then(|adapter| adapter.home.as_ref()),
+    ) && let Ok(entries) = std::fs::read_dir(state_root.join(home.dir))
+    {
+        for entry in entries.flatten() {
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                found.extend(crate::usage::transcripts_under(&entry.path().join(rel)));
+            }
         }
     }
-    best.map(|(_, path)| path)
+    if let Some(home) = crate::platform::home_dir() {
+        found.extend(crate::usage::transcripts_under(
+            &home.join(format!(".{kind}")).join(rel),
+        ));
+    }
+    found
 }
 
 fn parse(text: &str) -> Result<Reading> {
@@ -727,40 +783,65 @@ mod tests {
         .replace('\n', "")
     }
 
-    /// A rollout under the managed lane home `newest_managed_codex_rollout`
-    /// actually reads — `<home>/.local/state/spoolway/codex/<session>/sessions/**`
-    /// — the only place a real codex lane writes one. `session` need not be a
-    /// real id; it only has to be some directory under `codex`, the same as
-    /// a real per-lane home would be.
+    /// One rollout file `name` under `dir`, carrying a single `token_count`
+    /// line. Split out so a test can put more than one rollout in the same
+    /// session tree — the case that tells `codex_rollouts` apart from a
+    /// "newest file per home" scan.
+    fn write_codex_rollout_file(
+        dir: &std::path::Path,
+        name: &str,
+        timestamp: &str,
+        rate_limits: &str,
+    ) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join(name),
+            codex_token_count_line(timestamp, rate_limits),
+        )
+        .unwrap();
+    }
+
+    /// The session tree a managed codex lane writes under, for `session` —
+    /// `<home>/.local/state/spoolway/codex/<session>/sessions/**`, the place
+    /// `codex_rollouts` walks for [`read_codex`]. `session` need not be a real
+    /// id; it only has to be some directory under `codex`.
+    fn managed_codex_sessions_dir(home: &std::path::Path, session: &str) -> std::path::PathBuf {
+        home.join(".local/state/spoolway/codex")
+            .join(session)
+            .join("sessions/2026/09/05")
+    }
+
+    /// A rollout under a managed lane home — see [`managed_codex_sessions_dir`].
     fn write_managed_codex_rollout(
         home: &std::path::Path,
         session: &str,
         timestamp: &str,
         rate_limits: &str,
     ) {
-        let dir = home
-            .join(".local/state/spoolway/codex")
-            .join(session)
-            .join("sessions/2026/09/05");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("rollout-fixture.jsonl"),
-            codex_token_count_line(timestamp, rate_limits),
-        )
-        .unwrap();
+        write_codex_rollout_file(
+            &managed_codex_sessions_dir(home, session),
+            "rollout-fixture.jsonl",
+            timestamp,
+            rate_limits,
+        );
     }
 
-    /// A rollout under this kind's own home — `~/.codex` under a fixture's
-    /// `$HOME` — the shape an interactive session or a run against a local
-    /// endpoint writes, and never a place [`read_codex`] looks.
+    /// The `~/.codex` session tree under a fixture's `$HOME`.
+    fn interactive_codex_sessions_dir(home: &std::path::Path) -> std::path::PathBuf {
+        home.join(".codex/sessions/2026/09/05")
+    }
+
+    /// A rollout under `~/.codex` — this kind's own home, the shape an
+    /// interactive session or a run against a local endpoint writes.
+    /// [`read_codex`] now reads this directory alongside the managed lane
+    /// homes, and the newest rollout across both wins.
     fn write_interactive_codex_rollout(home: &std::path::Path, timestamp: &str, rate_limits: &str) {
-        let dir = home.join(".codex/sessions/2026/09/05");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("rollout-fixture.jsonl"),
-            codex_token_count_line(timestamp, rate_limits),
-        )
-        .unwrap();
+        write_codex_rollout_file(
+            &interactive_codex_sessions_dir(home),
+            "rollout-fixture.jsonl",
+            timestamp,
+            rate_limits,
+        );
     }
 
     const REAL_SHAPED_RATE_LIMITS: &str = r#"{"limit_id":"codex","limit_name":null,
@@ -769,6 +850,20 @@ mod tests {
         "credits":{"has_credits":false,"unlimited":false,"balance":"0"},
         "individual_limit":null,"spend_control_reached":null,"plan_type":"plus",
         "rate_limit_reached_type":null}"#;
+
+    /// The same shape as [`REAL_SHAPED_RATE_LIMITS`] at percentages a test
+    /// picks, for the tests that tell two rollouts apart by their readings.
+    /// `resets_at` is far enough out that the reading is never read as an
+    /// already-reset window.
+    fn real_shaped_rate_limits(primary: f64, secondary: f64) -> String {
+        format!(
+            r#"{{"limit_id":"codex","limit_name":null,
+            "primary":{{"used_percent":{primary},"window_minutes":300,"resets_at":9999999999}},
+            "secondary":{{"used_percent":{secondary},"window_minutes":10080,"resets_at":9999999999}},
+            "credits":null,"individual_limit":null,"spend_control_reached":null,
+            "plan_type":"plus","rate_limit_reached_type":null}}"#
+        )
+    }
 
     const NULL_RATE_LIMITS: &str = r#"{"limit_id":"codex","limit_name":null,"primary":null,
         "secondary":null,"credits":null,"individual_limit":null,
@@ -841,19 +936,21 @@ mod tests {
         // under a loaded test run.
         std::thread::sleep(std::time::Duration::from_millis(5));
         // A second, later-written session — its rollout is the newest file
-        // on disk, and it carries the null shape, which is what makes the
-        // two distinguishable in the assertion below.
+        // on disk, and it carries a reading of its own, which is what makes
+        // the two distinguishable in the assertion below.
         write_managed_codex_rollout(
             &home,
             "newer-session",
-            "2026-09-05T07:51:22Z",
-            NULL_RATE_LIMITS,
+            &Utc::now().to_rfc3339(),
+            &real_shaped_rate_limits(42.0, 17.0),
         );
         with_home(&home, || {
-            assert!(
-                matches!(read("codex"), Err(Miss::NoReading(_))),
-                "the newer session's null-shaped rollout must be the one read"
+            let reading = read("codex").unwrap_or_else(|_| panic!("expected a reading"));
+            assert_eq!(
+                reading.five_hour.utilization, 42,
+                "the newer session's rollout must be the one read"
             );
+            assert_eq!(reading.seven_day.utilization, 17);
         });
     }
 
@@ -911,34 +1008,227 @@ mod tests {
         });
     }
 
-    /// The other half of the same guarantee, and the one review's own repro
-    /// pinned: a rollout under `own_home` — an interactive session, or a run
-    /// against a local endpoint — must never win, however much newer it is
-    /// than the managed lane's own reading. Written *after* the managed one,
-    /// so its mtime really is the latest file on disk, and carrying a wildly
-    /// different reading (99%/99%) so a wrong pick is unmistakable.
+    /// The other half of the guarantee the deadlock fix rests on, in the
+    /// direction the deadlock repro does not cover: recency decides, whichever
+    /// home wrote. Here the managed lane's rollout is the newest file on disk
+    /// and an interactive one sits beside it carrying a wildly different
+    /// reading (99%/99%), so a wrong pick is unmistakable.
+    ///
+    /// This replaces a test that pinned the opposite rule — that a rollout
+    /// under `~/.codex` could never win however much newer it was. That rule
+    /// is what deadlocked the queue, and the trust worry behind it is answered
+    /// now by skipping null-window rollouts rather than by ignoring the whole
+    /// directory.
     #[test]
-    fn an_interactive_rollout_never_overrides_a_managed_lane_reading() {
-        let home = crate::scratch::root("quota-codex-interactive-never-wins");
+    fn the_newest_rollout_wins_whichever_codex_home_wrote_it() {
+        let home = crate::scratch::root("quota-codex-newest-across-homes");
+        write_interactive_codex_rollout(
+            &home,
+            &Utc::now().to_rfc3339(),
+            &real_shaped_rate_limits(99.0, 99.0),
+        );
+        // A gap wide enough to survive a filesystem's own mtime resolution
+        // under load, the same one `the_newest_managed_rollout_is_the_one_read`
+        // needs.
+        std::thread::sleep(std::time::Duration::from_millis(5));
         write_managed_codex_rollout(
             &home,
             "fixture-session",
             &Utc::now().to_rfc3339(),
             REAL_SHAPED_RATE_LIMITS,
         );
-        let alarming_rate_limits = r#"{"limit_id":"codex","limit_name":null,
-            "primary":{"used_percent":99.0,"window_minutes":300,"resets_at":9999999999},
-            "secondary":{"used_percent":99.0,"window_minutes":10080,"resets_at":9999999999},
-            "credits":null,"individual_limit":null,"spend_control_reached":null,
-            "plan_type":"plus","rate_limit_reached_type":null}"#;
-        write_interactive_codex_rollout(&home, &Utc::now().to_rfc3339(), alarming_rate_limits);
         with_home(&home, || {
             let reading = read("codex").unwrap_or_else(|_| panic!("expected a reading"));
             assert_eq!(
                 reading.five_hour.utilization, 5,
-                "the newer interactive rollout must never be read"
+                "the managed lane's rollout is the newest, so it is the one read"
             );
             assert_eq!(reading.seven_day.utilization, 2);
+        });
+    }
+
+    /// The trust worry that used to justify ignoring `~/.codex`, answered
+    /// where it actually lives. A session settled against a local endpoint
+    /// writes `rate_limits` with both windows null; written last, it is the
+    /// newest rollout on the machine. It must not blank out the account's
+    /// real figure from the other home — a rollout carrying no reading is
+    /// skipped rather than allowed to win on recency.
+    #[test]
+    fn a_null_window_rollout_never_blanks_out_a_real_reading_from_the_other_home() {
+        let home = crate::scratch::root("quota-codex-null-never-wins");
+        write_managed_codex_rollout(
+            &home,
+            "fixture-session",
+            &Utc::now().to_rfc3339(),
+            REAL_SHAPED_RATE_LIMITS,
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        write_interactive_codex_rollout(&home, &Utc::now().to_rfc3339(), NULL_RATE_LIMITS);
+        with_home(&home, || {
+            let reading = read("codex").unwrap_or_else(|_| panic!("expected a reading"));
+            assert_eq!(
+                reading.five_hour.utilization, 5,
+                "the newer null-window rollout must be skipped, not read"
+            );
+            assert_eq!(reading.seven_day.utilization, 2);
+        });
+    }
+
+    /// The same skip, inside a single home. A session writes a real reading,
+    /// then later settles against a local endpoint and writes a null one into
+    /// the same session tree. The null rollout is the newest file there, so a
+    /// scan that took only the newest file per home would return it — and the
+    /// real reading beneath it would be lost even though nothing else on the
+    /// machine carries one. `codex_rollouts` hands `read_codex` every rollout,
+    /// so the older real one is still found.
+    #[test]
+    fn a_newer_null_rollout_does_not_hide_an_older_real_one_in_the_same_home() {
+        let home = crate::scratch::root("quota-codex-same-home-null-over-real");
+        let dir = interactive_codex_sessions_dir(&home);
+        write_codex_rollout_file(
+            &dir,
+            "rollout-real.jsonl",
+            &Utc::now().to_rfc3339(),
+            &real_shaped_rate_limits(44.0, 21.0),
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        write_codex_rollout_file(
+            &dir,
+            "rollout-null.jsonl",
+            &Utc::now().to_rfc3339(),
+            NULL_RATE_LIMITS,
+        );
+        with_home(&home, || {
+            let reading = read("codex").unwrap_or_else(|_| panic!("expected a reading"));
+            assert_eq!(
+                reading.five_hour.utilization, 44,
+                "the older real rollout in the same tree must still be found"
+            );
+            assert_eq!(reading.seven_day.utilization, 21);
+        });
+    }
+
+    /// The floor under that skip: with no rollout anywhere carrying both
+    /// windows, there is genuinely nothing to report, and the result stays
+    /// `Miss::NoReading` rather than becoming a reading of nothing.
+    #[test]
+    fn null_windows_in_both_homes_are_still_no_reading() {
+        let home = crate::scratch::root("quota-codex-null-everywhere");
+        write_managed_codex_rollout(
+            &home,
+            "fixture-session",
+            &Utc::now().to_rfc3339(),
+            NULL_RATE_LIMITS,
+        );
+        write_interactive_codex_rollout(&home, &Utc::now().to_rfc3339(), NULL_RATE_LIMITS);
+        with_home(&home, || {
+            assert!(matches!(read("codex"), Err(Miss::NoReading(_))));
+        });
+    }
+
+    /// codex keeps a plugin fixture `.jsonl` under `.tmp` in a lane's own
+    /// home, and it is not a rollout — see [`crate::agent::Accounting::store`].
+    /// Written last so it is the newest file in the tree, and carrying a
+    /// reading of its own, so a walk that reached it would be unmistakable.
+    #[test]
+    fn a_tmp_fixture_under_a_lane_home_is_never_read() {
+        let home = crate::scratch::root("quota-codex-tmp-excluded");
+        write_managed_codex_rollout(
+            &home,
+            "fixture-session",
+            &Utc::now().to_rfc3339(),
+            REAL_SHAPED_RATE_LIMITS,
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let tmp = home.join(".local/state/spoolway/codex/fixture-session/.tmp");
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join("plugin-fixture.jsonl"),
+            codex_token_count_line(
+                &Utc::now().to_rfc3339(),
+                &real_shaped_rate_limits(99.0, 99.0),
+            ),
+        )
+        .unwrap();
+        with_home(&home, || {
+            let reading = read("codex").unwrap_or_else(|_| panic!("expected a reading"));
+            assert_eq!(
+                reading.five_hour.utilization, 5,
+                "the `.tmp` fixture is not a rollout and must never be read"
+            );
+        });
+    }
+
+    /// A hold has to be actionable. When every rollout under both homes is
+    /// older than `STALE_AFTER`, the refusal names the age of the newest one
+    /// found and both directories it looked in — which is the whole of what a
+    /// person needs to decide between running codex once and going looking
+    /// for a real problem.
+    #[test]
+    fn a_stale_codex_reading_names_both_homes_and_the_age_it_found() {
+        let home = crate::scratch::root("quota-codex-stale-message");
+        let stale = (Utc::now() - chrono::Duration::hours(6)).to_rfc3339();
+        write_managed_codex_rollout(&home, "fixture-session", &stale, REAL_SHAPED_RATE_LIMITS);
+        write_interactive_codex_rollout(&home, &stale, REAL_SHAPED_RATE_LIMITS);
+        with_home(&home, || {
+            let why = trusted("codex")
+                .err()
+                .expect("a six-hour-old reading is stale");
+            assert!(why.contains("minutes old"), "unexpected refusal: {why}");
+            assert!(
+                why.contains("state/spoolway/codex") && why.contains("~/.codex"),
+                "the refusal must name both directories searched: {why}"
+            );
+        });
+    }
+
+    /// The same, for the case where neither home holds a rollout at all:
+    /// both directories are still named, so a person is never left guessing
+    /// where spoolway looked.
+    #[test]
+    fn no_rollout_in_either_home_names_both_homes() {
+        let home = crate::scratch::root("quota-codex-missing-names-homes");
+        std::fs::create_dir_all(&home).unwrap();
+        with_home(&home, || match read("codex") {
+            Err(Miss::Unreadable(why)) => assert!(
+                why.contains("state/spoolway/codex") && why.contains("~/.codex"),
+                "unexpected refusal: {why}"
+            ),
+            _ => panic!("no rollout anywhere reads as unreadable"),
+        });
+    }
+
+    /// The deadlock this task exists to break. Every managed lane home carries
+    /// only a stale rollout — no codex lane has run in over five hours — so
+    /// `trusted` fails, every candidate is parked, and no lane ever runs to
+    /// write a fresh one. A fresh reading does exist, under `~/.codex`, but
+    /// `read_codex` never looks there.
+    ///
+    /// Before the fix: `read_codex` reads only the stale managed rollout, so
+    /// `trusted("codex")` fails with "quota reading is N minutes old".
+    /// After the fix: it resolves from `~/.codex/sessions` too, the fresh
+    /// rollout there is the newest, and `trusted` returns 83% / 61%.
+    #[test]
+    fn a_fresh_reading_under_the_home_codex_dir_breaks_a_stale_managed_deadlock() {
+        let home = crate::scratch::root("quota-codex-home-dir-breaks-deadlock");
+        let stale = (Utc::now() - chrono::Duration::hours(6)).to_rfc3339();
+        write_managed_codex_rollout(&home, "fixture-session", &stale, REAL_SHAPED_RATE_LIMITS);
+        // A gap wide enough to survive a filesystem's own mtime resolution
+        // under load, so the interactive rollout below is unambiguously the
+        // newest file on disk — the same gap the other newest-wins tests force.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let fresh_rate_limits = r#"{"limit_id":"codex","limit_name":null,
+            "primary":{"used_percent":83.0,"window_minutes":300,"resets_at":9999999999},
+            "secondary":{"used_percent":61.0,"window_minutes":10080,"resets_at":9999999999},
+            "credits":null,"individual_limit":null,"spend_control_reached":null,
+            "plan_type":"plus","rate_limit_reached_type":null}"#;
+        write_interactive_codex_rollout(&home, &Utc::now().to_rfc3339(), fresh_rate_limits);
+        with_home(&home, || {
+            let reading = trusted("codex").unwrap_or_else(|why| {
+                panic!("the fresh ~/.codex reading should resolve and be trusted, got: {why}")
+            });
+            assert_eq!(reading.five_hour.utilization, 83);
+            assert_eq!(reading.seven_day.utilization, 61);
         });
     }
 }

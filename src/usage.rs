@@ -1528,6 +1528,18 @@ pub(crate) fn newest_transcript(root: &Path) -> Option<PathBuf> {
     newest_matching(root, |_| true)
 }
 
+/// Every `.jsonl` anywhere under `root`, each with its mtime.
+///
+/// The same walk as [`newest_transcript`], without collapsing to the newest
+/// one. [`crate::quota::read`]'s codex row wants all of them: a rollout that
+/// carries no reading has to be passed over for the next-newest that does, so
+/// it cannot ask for just the newest file up front.
+pub(crate) fn transcripts_under(root: &Path) -> Vec<(std::time::SystemTime, PathBuf)> {
+    let mut found = Vec::new();
+    transcripts_matching(root, |_| true, &mut |at, path| found.push((at, path)));
+    found
+}
+
 /// The same walk, over the transcripts whose file stem `keep` accepts.
 ///
 /// Newest rather than first found for both callers, and for the same reason in
@@ -1536,6 +1548,22 @@ pub(crate) fn newest_transcript(root: &Path) -> Option<PathBuf> {
 /// one file carrying its id. The last thing written is the live one either way.
 fn newest_matching(root: &Path, keep: impl Fn(&str) -> bool) -> Option<PathBuf> {
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    transcripts_matching(root, keep, &mut |at, path| {
+        if best.as_ref().is_none_or(|(best, _)| at > *best) {
+            best = Some((at, path));
+        }
+    });
+    best.map(|(_, path)| path)
+}
+
+/// The shared walk under `newest_matching` and `transcripts_under`: every
+/// `.jsonl` under `root` whose stem `keep` accepts and whose mtime is
+/// readable is handed to `visit`, in no particular order.
+fn transcripts_matching(
+    root: &Path,
+    keep: impl Fn(&str) -> bool,
+    visit: &mut impl FnMut(std::time::SystemTime, PathBuf),
+) {
     let mut pending = vec![root.to_path_buf()];
     while let Some(dir) = pending.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -1553,15 +1581,12 @@ fn newest_matching(root: &Path, keep: impl Fn(&str) -> bool) -> Option<PathBuf> 
                     let Ok(at) = entry.metadata().and_then(|m| m.modified()) else {
                         continue;
                     };
-                    if best.as_ref().is_none_or(|(best, _)| at > *best) {
-                        best = Some((at, path));
-                    }
+                    visit(at, path);
                 }
                 _ => {}
             }
         }
     }
-    best.map(|(_, path)| path)
 }
 
 /// Where spoolway keeps state of its own, for the one thing that needs a
