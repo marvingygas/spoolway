@@ -292,8 +292,8 @@ as a failure — `agent is no longer running in the target pane`. The dispatcher
 next pass, so a run survives this, but it costs a lane.
 
 Somebody pressing it is the worse outcome. Option 1 replaces the codex binary while other
-lanes are running it, which is the hazard `CLAUDE.md` states about spoolway's own binary,
-arriving through codex instead.
+lanes are running it, creating the same live-binary replacement hazard spoolway guards against
+for its own dispatcher, arriving through codex instead.
 
 So a lane is launched with `-c check_for_update_on_startup=false`. Unlike the trust table,
 this key really is read from the merged config, so it is a flag rather than something written

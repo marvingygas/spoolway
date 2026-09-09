@@ -21,7 +21,7 @@
 //! note that could be a stale copy of one from three releases ago, or somebody
 //! else's sentence in the same position, explains nothing. Prose about a
 //! project's own choices belongs where it is read: a prompt, a pipeline, or
-//! `CLAUDE.md`. What [`compare`] is for is saying afterwards what that rewrite
+//! project documentation. What [`compare`] is for is saying afterwards what that rewrite
 //! actually did, key by key, so it can be read rather than diffed.
 
 use anyhow::{Context, Result};

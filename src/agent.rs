@@ -756,8 +756,8 @@ pub const ADAPTERS: &[Adapter] = &[
             // lane never reaches `working` and the launch is reported failed —
             // and worse if somebody does, because option 1 swaps the binary
             // every *other* live lane is running out from under them. It is
-            // the hazard `CLAUDE.md` states about spoolway's own binary,
-            // arriving through codex instead.
+            // the same live-binary replacement hazard spoolway guards against
+            // for its own dispatcher, arriving through codex instead.
             //
             // Established by running it: with the check left on and a home
             // whose `version.json` named a newer release, the dialog came up

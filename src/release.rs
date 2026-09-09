@@ -34,9 +34,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 
-/// The npm package the binary ships as. `CLAUDE.md` calls this the wrapper:
-/// the unscoped name a person installs, which resolves one `@spoolway/<plat>`
-/// package underneath.
+/// The npm package the binary ships as: the unscoped wrapper a person installs,
+/// which resolves one `@spoolway/<plat>` package underneath.
 pub const PACKAGE: &str = "spoolway";
 
 /// How stale a cached answer may be before a refresh is spawned behind the
@@ -474,9 +473,9 @@ pub fn upgrade(lock_file: &Path) -> Upgrade {
     if Channel::detect() == Channel::Other {
         return Upgrade::Unmanaged(version);
     }
-    // `CLAUDE.md`'s rule, enforced rather than remembered: a running
-    // dispatcher is executing the file npm is about to replace, and a
-    // half-written binary is a dispatcher that dies mid-pass.
+    // Refuse rather than rely on a remembered release rule: a running dispatcher
+    // is executing the file npm is about to replace, and a half-written binary is
+    // a dispatcher that dies mid-pass.
     if let Ok(Some(pid)) = crate::lock::Lock::holder(lock_file) {
         return Upgrade::Dispatching(version, pid);
     }
@@ -484,7 +483,7 @@ pub fn upgrade(lock_file: &Path) -> Upgrade {
     // `--ignore-scripts` costs nothing here and takes lifecycle scripts out of
     // the upgrade path: the packaging deliberately has no postinstall, which
     // is what makes the npm install work under `--ignore-scripts` in the first
-    // place. See `CLAUDE.md`.
+    // place; the wrapper contains no lifecycle install script.
     let target = format!("{PACKAGE}@{version}");
     match npm(&["install", "-g", &target, "--ignore-scripts"]) {
         Some(_) => Upgrade::Installed(version),

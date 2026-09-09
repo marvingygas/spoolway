@@ -240,7 +240,7 @@ fn ignores(repo: &Repo, args: &UpdateArgs, outcomes: &mut Vec<Outcome>) -> Resul
 /// is what this binary says today, not a copy of what some older one said, and
 /// not somebody's sentence sitting where a note belongs. Prose about a
 /// project's own choices has somewhere better to live — a prompt, a pipeline,
-/// or the project's own `CLAUDE.md` — where it is read by whoever needs it
+/// or project documentation — where it is read by whoever needs it
 /// rather than by nobody.
 ///
 /// Until this existed nothing brought a config forward at all, and the only

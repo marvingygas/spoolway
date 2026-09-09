@@ -42,6 +42,9 @@ comment, not the body.
    file is opened here.
 
 2. **Route each subject to a pipeline, then decompose against that pipeline's own window.**
+   Read the pipelines before choosing task boundaries. Let their purpose, steps, and context
+   windows shape the split instead of fitting pipelines onto an already-cut list.
+
    Each task: **independently completable**, one model, one worktree, no
    coordination; **whole enough that one lane holds the change at once**, split by *subject*
    not size; **small in criteria too**, five bullets or split; **ordered**, chained with
