@@ -2975,9 +2975,14 @@ impl<'a> Dispatcher<'a> {
                 Err(why) => {
                     let task = &mut tasks[candidate.task_index];
                     let until = now_secs() + quota_backoff(task.front.quota_retries);
+                    // `why` names where the reading was looked for and how
+                    // old the best one found was, so what is left to say is
+                    // the way out: running the agent once is what writes a
+                    // fresh reading, and `--live` is spoolway doing that for
+                    // you.
                     let reason = format!(
-                        "{} quota unavailable: {why}; new launches held — refresh the agent's quota reading; inspect with `spoolway agent verify {}`",
-                        profile.kind, profile.kind
+                        "{} quota unavailable: {why}; new launches held — run {} once, or `spoolway agent verify {} --live`",
+                        profile.kind, profile.kind, profile.kind
                     );
                     report.actions.push(format!(
                         "{}{}: {reason}",

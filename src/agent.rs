@@ -127,10 +127,8 @@ pub struct Adapter {
     /// off a real file, not guessed at.
     ///
     /// **`codex`**: `"sessions"`, a directory joined onto every per-lane home
-    /// spoolway has made for this kind — never this kind's own home
-    /// (`$CODEX_HOME` or `~/.codex`), which a lane spoolway did not itself
-    /// start is free to have written more recently — and walked for the
-    /// newest rollout across all of them. Its last `token_count` event
+    /// spoolway has made for this kind and onto `~/.codex`, then walked for
+    /// the newest rollout across all of them. Its last `token_count` event
     /// carries a `rate_limits` object with a `primary` and a `secondary`
     /// window, each a `used_percent` float and an epoch-seconds `resets_at`;
     /// see the comment on codex's own row for the real reading this was
@@ -852,14 +850,18 @@ pub const ADAPTERS: &[Adapter] = &[
         // `"sessions"` rather than a file: unlike claude's single cache file,
         // codex writes this per session, so [`crate::quota::read`] walks for
         // the newest rollout across every per-lane home spoolway has made
-        // under its own state directory, joining this onto each one, and
-        // reads the last `token_count` event's `rate_limits` out of whichever
-        // file that is. Never `own_home(kind)` — `$CODEX_HOME` or `~/.codex`
-        // — however fresh a rollout sits there: that is an interactive
-        // session or a run against a local endpoint, neither of which this
-        // binary started, and letting either override a reading from a lane
-        // spoolway actually ran would make the ceiling trust a run it never
-        // dispatched.
+        // under its own state directory *and* `~/.codex`, joining this onto
+        // each one, and reads the last `token_count` event's `rate_limits`
+        // out of whichever file that is.
+        //
+        // `~/.codex` was excluded once, on the grounds that a session
+        // spoolway did not start should not override a lane it did. That
+        // deadlocked the queue: only a codex lane writes a managed rollout,
+        // and the gate reading it holds every codex lane, so a reading that
+        // aged out could never be replaced. The worry it was guarding
+        // against — a run settled against a local endpoint — writes both
+        // windows null, and [`crate::quota`] skips those rather than letting
+        // them win on recency, which is where that guard belongs.
         quota: Some("sessions"),
         // Captured off a real rollout: the record after Escape is a `user`
         // item whose text opens `<turn_aborted>` —

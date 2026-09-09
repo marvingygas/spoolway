@@ -532,11 +532,11 @@ fn transcript_dir_clause(adapter: &crate::agent::Adapter) -> Clause {
 /// past, so it is reported here and never blocks the command.
 ///
 /// The two established rows read a different shape off a different place, so
-/// this branches on [`crate::agent::Accounting::format`] rather than
-/// assuming `claude`'s file-and-clock-time display is universal — codex has
-/// no single cache file to name, and its own mockup reads the reset as a
-/// countdown rather than a clock, since the account it describes may not be
-/// signed in from this machine's own timezone at all.
+/// the source line branches on [`crate::agent::Accounting::format`] rather
+/// than assuming `claude`'s single-cache-file wording is universal — codex
+/// has no one file to name, and reads its figure from the newest rollout
+/// under either codex home. The window line itself is rendered the same for
+/// both, as the task's codex mockup draws it.
 fn quota_clause(adapter: &crate::agent::Adapter) -> Clause {
     let Some(rel) = adapter.quota else {
         // The embedded `\n` is the mockup's own line break, not a wrap this
@@ -556,7 +556,7 @@ fn quota_clause(adapter: &crate::agent::Adapter) -> Clause {
     // way a two-window `Ok` case splits its lines — `render_quota_row`
     // indents every one of them to the note's own column.
     let source = match is_codex {
-        true => "newest rollout under the lane's CODEX_HOME,\nlast token_count event's rate_limits"
+        true => "newest rollout under either codex home,\nlast token_count event's rate_limits"
             .to_string(),
         false => format!("~/{rel} cachedUsageUtilization"),
     };
@@ -581,48 +581,24 @@ fn quota_clause(adapter: &crate::agent::Adapter) -> Clause {
         ),
         Ok(reading) => {
             let now = chrono::Utc::now();
-            let window = |w: &crate::quota::WindowReading| match is_codex {
-                // codex's own two windows are `primary`/`secondary` on the
-                // wire, not `five_hour`/`seven_day` — those labels are
-                // claude's own key names, kept for the reading's internal
-                // bookkeeping (`Window::SevenDay` still decides the park's
-                // own date shape in `dispatch.rs`) but not what a person
-                // reading `agent verify`'s codex row should see.
-                //
-                // And the reset itself reads as a countdown rather than a
-                // clock: the account behind this reading is not necessarily
-                // this machine's own local time, where claude's cache always
-                // is.
-                true => {
-                    let label = match w.window {
-                        crate::quota::Window::FiveHour => "primary",
-                        crate::quota::Window::SevenDay => "secondary",
-                    };
-                    let remaining = (w.resets_at.timestamp() - now.timestamp()).max(0) as u64;
-                    format!(
-                        "{label} {}% resets in {}",
-                        w.utilization,
-                        crate::config::human_duration::format(std::time::Duration::from_secs(
-                            remaining
-                        )),
-                    )
-                }
-                // A reset today reads as a bare clock the same way the board
-                // and the dispatcher's own reports do; a reset on another day
-                // is named `MM-DD HH:MM` rather than either of
-                // `format_instant`'s own shapes — this line already carries
-                // "resets", so a year nobody asked about would only crowd
-                // it, and this display names no park for `parked_window` to
-                // pin a longer one against.
-                false => {
-                    let (target, same_day) =
-                        crate::task::local_instant(w.resets_at.timestamp(), now.timestamp());
-                    let resets = match same_day {
-                        true => target.format("%H:%M").to_string(),
-                        false => target.format("%m-%d %H:%M").to_string(),
-                    };
-                    format!("{} {}% resets {resets}", w.window.key(), w.utilization)
-                }
+            // Both kinds render a window the same way — the label is the
+            // window's own key (`five_hour`/`seven_day`), and the reset is an
+            // absolute local time, as the task's own mockup draws it for
+            // codex. A reset today reads as a bare clock the same way the
+            // board and the dispatcher's own reports do; a reset on another
+            // day is named `MM-DD HH:MM` rather than either of
+            // `format_instant`'s own shapes — this line already carries
+            // "resets", so a year nobody asked about would only crowd it,
+            // and this display names no park for `parked_window` to pin a
+            // longer one against.
+            let window = |w: &crate::quota::WindowReading| {
+                let (target, same_day) =
+                    crate::task::local_instant(w.resets_at.timestamp(), now.timestamp());
+                let resets = match same_day {
+                    true => target.format("%H:%M").to_string(),
+                    false => target.format("%m-%d %H:%M").to_string(),
+                };
+                format!("{} {}% resets {resets}", w.window.key(), w.utilization)
             };
             // No indent baked in here — this note is also `--json`'s own
             // payload, which has no notion of a printed column to align to.
@@ -836,8 +812,10 @@ fn run_live_turn(
 /// Unlike everything above it, a reading that fails here **does** fail the
 /// command: an absent accounting row is a legal state, but a declared one that
 /// does not read back is a wrong row.
-/// A scratch tree — and the per-session agent home the check makes it — that
-/// go when it falls out of scope.
+/// A scratch tree — and the per-session agent home the check makes it — torn
+/// down when it falls out of scope, with one carve-out: for a kind that
+/// refreshes its quota reading out of a lane home, the newest such home is
+/// kept, so a person can refresh a stale reading with one `verify --live` run.
 ///
 /// A guard rather than a `remove_dir_all` at the end of the check, because the
 /// check has a dozen ways out: every `?` on a spawn that would not start, the
@@ -845,19 +823,107 @@ fn run_live_turn(
 /// function call would clean up after exactly the run that needed it least.
 ///
 /// `home` is the state directory `prepare_session_home` makes for a kind that
-/// mints its own session id — `None` for every other kind. It was never
-/// reclaimed before, so CI running `verify --live` per push left one behind
-/// on every run (review finding 62).
+/// mints its own session id — `None` for every other kind. When `keep_home` is
+/// false it is taken back on the way out; leaving it unreclaimed is what had CI
+/// running `verify --live` per push leak one per run (review finding 62). When
+/// `keep_home` is true the home stays and [`prune_verify_homes`] takes back
+/// every older live-check home beside it instead, so the leak stays closed at
+/// one home per kind.
 struct ScratchTree {
     dir: std::path::PathBuf,
     home: Option<std::path::PathBuf>,
+    /// Set when this kind reads its quota out of a lane home — see
+    /// [`crate::quota::refreshes_from_lane_home`]. Keeps `home` on the way out
+    /// rather than deleting it, and prunes older live-check homes in its place.
+    keep_home: bool,
 }
 
 impl Drop for ScratchTree {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);
         if let Some(home) = &self.home {
-            let _ = std::fs::remove_dir_all(home);
+            match self.keep_home {
+                true => prune_verify_homes(home),
+                false => drop_dir(home),
+            }
+        }
+    }
+}
+
+/// The file `agent_verify_live` drops into a per-session home it means to keep.
+///
+/// It does two jobs. Its presence tells a live-check home from a codex lane's
+/// live `$CODEX_HOME` — the two sit in the same directory, and only the former
+/// is ever swept; `prepare_session_home` never writes it. Its contents are the
+/// wall-clock nanoseconds at which the home was made, written once and never
+/// rewritten, which is how [`prune_verify_homes`] orders two runs. The
+/// directory's own mtime cannot do that job: codex keeps bumping it as it
+/// creates `sessions/` and writes its config, so a slow older run's home can
+/// end up with a later mtime than a fast newer run's.
+const VERIFY_HOME_MARKER: &str = ".spoolway-verify-live";
+
+/// Write [`VERIFY_HOME_MARKER`] into `home` with this instant's creation stamp.
+fn mark_verify_home(home: &std::path::Path) {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let _ = std::fs::write(home.join(VERIFY_HOME_MARKER), stamp.to_string());
+}
+
+/// The creation stamp [`mark_verify_home`] wrote, or `None` for a directory
+/// with no marker (a real lane's `$CODEX_HOME`) or an unparseable one (a marker
+/// from before this file carried a stamp).
+fn verify_home_stamp(home: &std::path::Path) -> Option<u128> {
+    std::fs::read_to_string(home.join(VERIFY_HOME_MARKER))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// Take back one per-session home the live check made — today's behaviour, for
+/// a kind whose quota is not read out of that home.
+fn drop_dir(home: &std::path::Path) {
+    let _ = std::fs::remove_dir_all(home);
+}
+
+/// Keep `kept` and take back every *older* live-check home beside it.
+///
+/// The acceptance criterion is that the newest home survives and only older
+/// ones go. Two `verify --live` runs can overlap: if the older run's guard
+/// drops first, an unconditional sweep would delete the newer run's home while
+/// it is still writing its rollout, and the newer guard would then leave no
+/// rollout at all. So a sibling is pruned only when its [`VERIFY_HOME_MARKER`]
+/// creation stamp predates `kept`'s — a value fixed when each home is made,
+/// unlike the directory mtime codex keeps advancing under both.
+///
+/// A directory with no readable stamp is never a candidate: that is a real
+/// codex lane's `$CODEX_HOME`, which lives in this same directory and must
+/// outlive any codex lane in flight. This is what keeps review finding 62's
+/// leak from reopening now that the home is no longer deleted outright: at most
+/// one live-check home per kind is left behind.
+fn prune_verify_homes(kept: &std::path::Path) {
+    let Some(parent) = kept.parent() else {
+        return;
+    };
+    let Some(kept_stamp) = verify_home_stamp(kept) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.file_name() == kept.file_name() || !entry.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        // Only a home stamped before the one this run kept. No stamp, an
+        // unreadable one, or one at or after `kept`'s is left alone — a
+        // concurrent run's home is newer, and losing it costs that run its
+        // rollout.
+        if verify_home_stamp(&path).is_some_and(|stamp| stamp < kept_stamp) {
+            let _ = std::fs::remove_dir_all(&path);
         }
     }
 }
@@ -917,10 +983,12 @@ fn agent_verify_live(
     // and a check that is run often enough to be useful is run often enough to
     // matter: one machine held 531 of these trees, the oldest two weeks old.
     // The per-session agent home, if this kind gets one, is added below once
-    // its path is known.
+    // its path is known — and unlike the tree it may be kept, for a kind that
+    // refreshes its quota reading out of that home (see `ScratchTree`).
     let mut scratch = ScratchTree {
         dir: dir.clone(),
         home: None,
+        keep_home: crate::quota::refreshes_from_lane_home(&args.kind),
     };
     // A repo, because a lane's worktree is one and at least one kind checks:
     // codex refuses to start outside a git repo with "Not inside a trusted
@@ -962,10 +1030,21 @@ fn agent_verify_live(
         .context("this kind has no headless row")?;
 
     // The same home a lane of this kind would be given, made the same way. For
-    // a kind that pins by id this is `None` and nothing below changes; for one
-    // that pins by home, the guard now owns it and takes it back on the way
-    // out however the check ends (review finding 62).
+    // a kind that pins by id this is `None` and nothing below changes. For one
+    // that pins by home the guard owns it from here: it takes the home back on
+    // the way out (review finding 62), unless this kind refreshes a quota
+    // reading out of that home — then the newest home is kept for a manual
+    // `verify --live` refresh and only the older ones are pruned.
     scratch.home = crate::agent::prepare_session_home(&args.kind, &session, &dir);
+    if scratch.keep_home
+        && let Some(home) = &scratch.home
+    {
+        // Marks this home as one `verify --live` made and means to keep, and
+        // stamps it with its creation instant, so the prune on the way out
+        // sweeps its own older homes and never a newer concurrent run's or a
+        // codex lane's live `$CODEX_HOME` in the same directory.
+        mark_verify_home(home);
+    }
     let env: Vec<(String, String)> = adapter.session_env(&session);
 
     println!(
@@ -1336,6 +1415,9 @@ mod tests {
             let _scratch = ScratchTree {
                 dir: dir.clone(),
                 home: Some(home.clone()),
+                // A kind whose quota is not read out of a lane home keeps
+                // today's behaviour: the home goes on the way out.
+                keep_home: false,
             };
             assert!(dir.exists(), "the guard must not delete it early");
         }
@@ -1363,6 +1445,7 @@ mod tests {
             let _scratch = ScratchTree {
                 dir: dir.to_path_buf(),
                 home: None,
+                keep_home: false,
             };
             bail!("the reading did not match its row")
         }
@@ -1372,6 +1455,87 @@ mod tests {
             !dir.exists(),
             "a check that bailed kept its tree: {}",
             dir.display()
+        );
+    }
+
+    /// For a kind that refreshes its quota out of a lane home, the guard keeps
+    /// the home this run wrote — with its rollout — and prunes only its own
+    /// *older* live-check homes, so review finding 62's leak stays closed at
+    /// one home per kind. Four siblings pin the edges:
+    ///
+    /// - an older marked home is swept;
+    /// - a newer marked home is left — it belongs to a `verify --live` run
+    ///   still in flight, and deleting it would cost that run its rollout;
+    /// - a real codex lane's `$CODEX_HOME`, marker-less, is never a candidate.
+    ///
+    /// Run age comes from the marker's creation stamp, not the directory
+    /// mtime: the kept home's mtime is set here to the newest of all four and
+    /// the surviving newer home's to the oldest, so a prune that consulted
+    /// mtime would delete exactly the home that must survive.
+    #[test]
+    fn the_guard_keeps_its_home_and_prunes_only_older_verify_homes() {
+        use std::time::{Duration, SystemTime};
+
+        let parent = crate::scratch::root("agent-verify-kept-home");
+        std::fs::create_dir_all(&parent).unwrap();
+        let now = SystemTime::now();
+
+        // The home this run wrote its rollout into — stamped in the middle,
+        // but with the newest mtime of the four.
+        let kept = parent.join("this-verify-session");
+        std::fs::create_dir_all(&kept).unwrap();
+        std::fs::write(kept.join(VERIFY_HOME_MARKER), "2000").unwrap();
+        std::fs::write(kept.join("rollout.jsonl"), "{}").unwrap();
+        crate::scratch::set_mtime(&kept, now);
+
+        // An older live-check home — stamped before `kept`.
+        let older = parent.join("older-verify-session");
+        std::fs::create_dir_all(&older).unwrap();
+        std::fs::write(older.join(VERIFY_HOME_MARKER), "1000").unwrap();
+        crate::scratch::set_mtime(&older, now - Duration::from_secs(60));
+
+        // A newer live-check home — a concurrent run still in flight. Stamped
+        // after `kept`, yet given the oldest mtime of the four: codex bumps a
+        // home's mtime as it writes, so mtime order is not run order.
+        let newer = parent.join("concurrent-verify-session");
+        std::fs::create_dir_all(&newer).unwrap();
+        std::fs::write(newer.join(VERIFY_HOME_MARKER), "3000").unwrap();
+        crate::scratch::set_mtime(&newer, now - Duration::from_secs(120));
+
+        // A real codex lane's home in the same directory — no marker.
+        let lane = parent.join("a-live-lane-session");
+        std::fs::create_dir_all(&lane).unwrap();
+        std::fs::write(lane.join("auth.json"), "{}").unwrap();
+
+        {
+            let scratch_dir = crate::scratch::root("agent-verify-kept-scratch");
+            std::fs::create_dir_all(&scratch_dir).unwrap();
+            let _scratch = ScratchTree {
+                dir: scratch_dir,
+                home: Some(kept.clone()),
+                keep_home: true,
+            };
+        }
+
+        assert!(
+            kept.join("rollout.jsonl").exists(),
+            "the kept home and its rollout must outlive the guard: {}",
+            kept.display()
+        );
+        assert!(
+            !older.exists(),
+            "an older live-check home must be pruned: {}",
+            older.display()
+        );
+        assert!(
+            newer.exists(),
+            "a newer live-check home belongs to a concurrent run and must survive: {}",
+            newer.display()
+        );
+        assert!(
+            lane.join("auth.json").exists(),
+            "a real lane home in the same directory must be left alone: {}",
+            lane.display()
         );
     }
 
@@ -1514,10 +1678,10 @@ mod tests {
         });
     }
 
-    /// A rollout under the managed lane home `spoolway agent verify`'s codex
-    /// quota clause actually reads —
-    /// `<home>/.local/state/spoolway/codex/<session>/sessions/**` — never
-    /// `~/.codex`. See `crate::quota::tests::write_managed_codex_rollout`,
+    /// A rollout under a managed lane home —
+    /// `<home>/.local/state/spoolway/codex/<session>/sessions/**`, one of the
+    /// places `spoolway agent verify`'s codex quota clause reads (it also
+    /// reads `~/.codex`). See `crate::quota::tests::write_managed_codex_rollout`,
     /// this command's own copy of the same fixture shape.
     fn write_codex_rollout(home: &std::path::Path, timestamp: &str, rate_limits: &str) {
         let dir = home.join(".local/state/spoolway/codex/fixture-session/sessions/2026/09/05");
@@ -1543,13 +1707,13 @@ mod tests {
         "secondary":null,"credits":null,"individual_limit":null,
         "spend_control_reached":null,"plan_type":null,"rate_limit_reached_type":null}"#;
 
-    /// codex's own row, once signed in with ChatGPT: `primary`/`secondary`,
-    /// not claude's `five_hour`/`seven_day` labels, and a countdown rather
-    /// than a clock — the mockup's own `resets in 2h11m` shape. The
-    /// `timestamp` itself is `Utc::now()`, so this stays fresh however long
-    /// after that real capture the suite happens to run.
+    /// codex's own row, once signed in with ChatGPT: the window labels are
+    /// `five_hour`/`seven_day` and the reset is an absolute local time, as
+    /// the task's own codex mockup draws it. The `timestamp` itself is
+    /// `Utc::now()`, so this stays fresh however long after that real capture
+    /// the suite happens to run.
     #[test]
-    fn quota_clause_on_a_fresh_codex_reading_reports_primary_and_secondary() {
+    fn quota_clause_on_a_fresh_codex_reading_reports_both_windows_like_the_mockup() {
         let home = crate::scratch::root("agent-verify-quota-codex-fresh");
         std::fs::create_dir_all(&home).unwrap();
         write_codex_rollout(
@@ -1559,23 +1723,27 @@ mod tests {
         );
         crate::platform::test_home::with_home(&home, || {
             let adapter = crate::agent::adapter("codex").expect("codex is a real adapter");
+            let five_hour_resets = chrono::DateTime::from_timestamp(1788611977, 0)
+                .unwrap()
+                .with_timezone(&chrono::Local)
+                .format("%m-%d %H:%M");
+            let seven_day_resets = chrono::DateTime::from_timestamp(1789151593, 0)
+                .unwrap()
+                .with_timezone(&chrono::Local)
+                .format("%m-%d %H:%M");
             match quota_clause(adapter) {
                 Clause::Ok(note) => {
                     assert!(
-                        note.contains("primary 5% resets in"),
+                        note.contains(&format!("five_hour 5% resets {five_hour_resets}")),
                         "unexpected note: {note}"
                     );
                     assert!(
-                        note.contains("secondary 2% resets in"),
+                        note.contains(&format!("seven_day 2% resets {seven_day_resets}")),
                         "unexpected note: {note}"
                     );
                     assert!(
-                        note.contains("newest rollout under the lane's CODEX_HOME"),
+                        note.contains("newest rollout under either codex home"),
                         "unexpected note: {note}"
-                    );
-                    assert!(
-                        !note.contains("five_hour") && !note.contains("seven_day"),
-                        "codex's row must not borrow claude's window labels: {note}"
                     );
                 }
                 _ => panic!("a fresh codex reading must report ok with both windows"),
@@ -1586,9 +1754,6 @@ mod tests {
     /// The mockup's own codex row, pinned exactly rather than by substring —
     /// `render_quota_row` is what `spoolway agent verify` actually prints, so
     /// this is the line a person reading the command's output really sees.
-    /// Reset times are relative durations, not a clock, so only their
-    /// `resets in <duration>` shape is checked — the exact figure depends on
-    /// how much of the fixed window has run out by the time this executes.
     #[test]
     fn agent_verify_prints_codexs_quota_row_exactly_as_the_mockup_draws_it() {
         let home = crate::scratch::root("agent-verify-quota-codex-exact");
@@ -1600,22 +1765,31 @@ mod tests {
         );
         crate::platform::test_home::with_home(&home, || {
             let adapter = crate::agent::adapter("codex").expect("codex is a real adapter");
+            let five_hour_resets = chrono::DateTime::from_timestamp(1788611977, 0)
+                .unwrap()
+                .with_timezone(&chrono::Local)
+                .format("%m-%d %H:%M");
+            let seven_day_resets = chrono::DateTime::from_timestamp(1789151593, 0)
+                .unwrap()
+                .with_timezone(&chrono::Local)
+                .format("%m-%d %H:%M");
             let clause = quota_clause(adapter);
             let rendered = render_quota_row("codex", &clause);
             let mut lines = rendered.lines();
             assert_eq!(
                 lines.next().unwrap(),
-                "codex    quota  newest rollout under the lane's CODEX_HOME,"
+                "codex    quota  newest rollout under either codex home,"
             );
             assert_eq!(
                 lines.next().unwrap(),
                 "                last token_count event's rate_limits"
             );
-            let third = lines.next().unwrap();
-            assert!(
-                third.starts_with("                primary 5% resets in ")
-                    && third.contains(" · secondary 2% resets in "),
-                "unexpected third line: {third}"
+            assert_eq!(
+                lines.next().unwrap(),
+                format!(
+                    "                five_hour 5% resets {five_hour_resets} · \
+                     seven_day 2% resets {seven_day_resets}"
+                ),
             );
         });
     }

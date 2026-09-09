@@ -140,17 +140,32 @@ even if a flat pair is also present.
 
 `codex` names a **directory** instead, `sessions`, because codex writes its figure per session
 rather than to one cache. Every `token_count` event in a rollout carries a `rate_limits` object,
-with a `primary` window and a `secondary` one. `crate::quota::read` walks for the newest rollout,
-takes that file's last `token_count` event, and reads `rate_limits` out of it. The event's own
-`timestamp` is what dates the reading, standing in for claude's `fetchedAtMs`.
+with a `primary` window and a `secondary` one. `crate::quota::read` walks the rollouts under
+both homes newest-first and takes the newest one that carries a reading; a rollout with both
+windows null is passed over for the next-newest. The last `token_count` event's `rate_limits` is
+what is read out of whichever file wins, and the event's own `timestamp` is what dates the
+reading, standing in for claude's `fetchedAtMs`.
 
-**Codex is read only under the homes spoolway made for its own lanes.** Those are the
-`<state_root>/codex/<session>/sessions/` directories a dispatched lane writes into. Each of
-those directories is itself the `$CODEX_HOME` spoolway handed that lane, so the probe does read
-per-lane `CODEX_HOME` values. What it never looks at is the ambient `$CODEX_HOME` this process
-would otherwise resolve, or `~/.codex`. A rollout in either of those came from an interactive
-session or a run against a local endpoint, neither of which spoolway started, and letting one
-win would make the ceiling trust a run the dispatcher never dispatched.
+**Codex is read from two places, and the newest rollout across both wins.** The managed homes
+are the `<state_root>/codex/<session>/sessions/` directories a dispatched lane writes into. Each
+of those directories is itself the `$CODEX_HOME` spoolway handed that lane, so the probe does read
+per-lane `CODEX_HOME` values. The other home is `~/.codex`, where an interactive session or a run
+against a local endpoint writes. Both are walked: every `.jsonl` under a session's `sessions/`
+tree is a candidate, not just the newest file in it, so a real reading under an older null one is
+still found.
+
+The ambient `$CODEX_HOME` this process would otherwise resolve is not a third home. A dispatcher
+started inside a codex session inherits it pointing at a managed home the scan already covers, so
+honouring it would make the reading depend on the shell the dispatcher launched from rather than
+on the account.
+
+A rollout in `~/.codex` comes from a run spoolway did not start, and the case that guards
+against it — a session settled against a local endpoint — writes `rate_limits` with both windows
+null, which is never a reading here. That null is skipped rather than allowed to win on recency,
+so it cannot blank out the account's real figure from the other home; when no rollout anywhere
+carries both windows the result is `Miss::NoReading`. Reading only the managed homes deadlocks
+the queue: only a codex lane writes a managed rollout, and the gate reading it holds every codex
+lane, so a reading that aged out could never be replaced.
 
 The reading gates a launch through [`quota_ceiling`](#every-profile-key). At or above the
 ceiling on either window, a pass starts no new lane of that profile and writes `parked_until:`
@@ -178,17 +193,18 @@ cases they are in:
 ```
 claude   quota  ~/.claude.json cachedUsageUtilization
                 five_hour 61% resets 14:00 · seven_day 16% resets 09-11 04:00
-codex    quota  newest rollout under the lane's CODEX_HOME,
+codex    quota  newest rollout under either codex home,
                 last token_count event's rate_limits
-                primary 2% resets in 4h46m39s · secondary 6% resets in 6d19m47s
+                five_hour 2% resets 14:00 · seven_day 6% resets 09-11 20:33
 pi       quota  no probe established — an enabled quota ceiling holds new launches;
                 its usage limit is not detected either
 ```
 
-Codex's own row shows a countdown rather than a clock time. The account behind the reading is
-not necessarily on this machine's own timezone, where claude's cache always is, so a bare clock
-would be misleading. Its `resets_at` arrives as a Unix timestamp, and its seven-day window is
-usually days out.
+Both kinds render their windows the same way: the window's own key (`five_hour`/`seven_day`)
+and an absolute local reset time. A reset within the day shows a bare clock; a reset on another
+day shows `MM-DD HH:MM`, because the line already carries "resets" and a year nobody asked about
+would only crowd it. The account behind codex's reading is not necessarily on this machine's own
+timezone, so the reset is an absolute local time rather than a countdown.
 
 The clause never fails the command. `spoolway doctor` says the same thing from the other side:
 it names a profile that sets `quota_ceiling` on a kind with no probe, where new launches stay held until the ceiling is disabled or a supported kind is used.

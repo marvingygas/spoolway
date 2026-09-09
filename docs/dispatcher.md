@@ -902,7 +902,10 @@ before a lane starts](agents.md#reading-a-kinds-quota-before-a-lane-starts) for 
 reading comes from. An enabled ceiling holds launches when that reading is unavailable,
 stale, malformed or expired, rechecking with the same persistent backoff. The board's profile
 footer names the quota ceiling, or `quota off`; a task awaiting a reading says
-`quota unavailable` beside its recheck time. `spoolway agent verify <kind>` diagnoses the source.
+`quota unavailable` beside its recheck time. When the reading itself could not be produced the
+park has no reset to name, so it shows `quota unavailable` with no clock — its `parked_until`
+is the dispatcher's own retry deadline, not a quota reset. `spoolway agent verify <kind>`
+diagnoses the source.
 The ceiling checks admission only: running lanes and external sessions can still exhaust
 the account during processing.
 

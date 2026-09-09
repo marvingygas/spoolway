@@ -1832,13 +1832,17 @@ fn build_rows(
             pipeline: pipeline.name.clone(),
             state,
             parked_display: quota_parked_until.map(|until| {
-                let dated = task.front.parked_window == crate::quota::Window::SevenDay.key();
-                let clock = crate::task::format_instant(until, now, dated);
+                // An `unknown`-window park has no quota reset to name. Its
+                // `parked_until` is the dispatcher's own retry deadline,
+                // which doubles outward every pass, so drawing it here put a
+                // retry clock in exactly the position a real window's reset
+                // time occupies — a board that read 22:05, 22:13 and 22:29
+                // in one evening while the account's usage never moved.
                 if task.front.parked_window == "unknown" {
-                    format!("quota unavailable · {clock}")
-                } else {
-                    clock
+                    return "quota unavailable".to_string();
                 }
+                let dated = task.front.parked_window == crate::quota::Window::SevenDay.key();
+                crate::task::format_instant(until, now, dated)
             }),
             depth: graph.depth(task.id()),
             // Mirrors `Candidate::steps_left`: the pipeline's own length less
@@ -2826,6 +2830,50 @@ mod tests {
             crate::task::format_instant(until, chrono::Utc::now().timestamp(), false)
         );
         assert!(view::plain_table(&rows).contains(&format!("parked · {display}")));
+    }
+
+    /// A park with no real window to name prints no clock. When the
+    /// dispatcher could not produce a quota reading at all it sets
+    /// `parked_window` to `"unknown"` and pushes `parked_until` out by its
+    /// own retry backoff. That instant is a retry deadline, not a quota
+    /// reset, and it drifts outward every pass, so the row must not draw it
+    /// in the position a real window's reset time occupies.
+    ///
+    /// Before the fix: `parked_display` reads `quota unavailable · <clock>`.
+    /// After the fix: it reads `quota unavailable` with no clock.
+    #[test]
+    fn an_unknown_window_park_prints_quota_unavailable_with_no_clock() {
+        let repo = fixture("quota-unknown-window-no-clock");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], Some("review"));
+        let mut task = repo.task("login").unwrap();
+        task.front.parked_until = Some(chrono::Utc::now().timestamp() + 3600);
+        task.front.parked_window = "unknown".to_string();
+        task.save().unwrap();
+
+        let tasks = repo.tasks().unwrap();
+        let graph = Graph::build(&tasks, &pipelines, &repo.archive_dir());
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &BTreeSet::new(),
+            &[],
+            &[],
+        )
+        .unwrap();
+
+        let row = rows.iter().find(|r| r.id == "login").unwrap();
+        assert!(matches!(row.state, State::Parked), "{}", row.next);
+        let display = row
+            .parked_display
+            .as_deref()
+            .expect("a parked row must carry its hold text");
+        assert_eq!(
+            display, "quota unavailable",
+            "an `unknown`-window park names no reset time"
+        );
     }
 
     /// A dependency whose id happens to contain one of the words the state
