@@ -177,8 +177,8 @@ pub struct Row {
     pub dependents: usize,
     /// How full the conversation this task's live lane is holding has got, as
     /// a percentage of its model's context window. The same reading
-    /// `session_reuse_ctx` forks a fresh session on, so a row approaching it
-    /// is a row about to lose its session.
+    /// an enabled `session_reuse_ctx` forks a fresh session on, so a row
+    /// approaching that ceiling is a row about to lose its session.
     ///
     /// `None` wherever there is no honest answer: no live lane, a model whose
     /// window nothing resolves, or a session that has not taken a turn yet.
@@ -2068,7 +2068,8 @@ fn lane_time_at(ledger: &[crate::usage::Entry], task: &str, stage: &str) -> Opti
 /// The same arithmetic `dispatch::carried_session` decides on — a last turn
 /// over the model's `context_window` — which is the whole point of the column:
 /// the number on the board is the number the dispatcher will act on, so a row
-/// nearing `session_reuse_ctx` is a row about to be given a fresh session.
+/// nearing an enabled `session_reuse_ctx` is a row about to be given a fresh
+/// session.
 ///
 /// `None` where the model resolves to no window at all, which is a `[models]`
 /// row missing rather than a session measured and found small.

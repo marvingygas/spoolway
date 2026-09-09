@@ -359,9 +359,10 @@ pub struct Step {
     /// step's behaviour today.
     ///
     /// A plain switch: the step says *whether*, and the agent profile that
-    /// runs it says *how far* — `agents.<profile>.session_reuse_ctx` bounds
-    /// how large the earlier session may be, as a percentage of the model's
-    /// context window, and `agents.<profile>.session_reuse_uncached` says
+    /// runs it may say *how far* — a nonzero
+    /// `agents.<profile>.session_reuse_ctx` bounds how large the earlier
+    /// session may be, as a percentage of the model's context window, and
+    /// `agents.<profile>.session_reuse_uncached` says
     /// whether a session whose prompt cache has gone cold is still worth
     /// resuming. Both used to live here as the two shapes `session:` took —
     /// a bare `true` or a percentage — and moved to the profile because they
@@ -447,8 +448,8 @@ pub struct Step {
     /// same tokens whether one lap opened a conversation or three did, and only
     /// the lap count can be written down in advance and mean the same thing
     /// every run. What still bounds a conversation's own cost is
-    /// `agents.<profile>.session_reuse_ctx`, on the agent profile, entirely
-    /// separate from this.
+    /// an enabled `agents.<profile>.session_reuse_ctx`, on the agent profile,
+    /// entirely separate from this.
     ///
     /// Counted per route in, not per step, because a step several loops come
     /// back to is several loops: `review` and `e2e` both send failures to
@@ -680,7 +681,7 @@ fn deserialize_retired_max_new_sessions<'de, D: serde::Deserializer<'de>>(
         "`max_new_sessions:` is now `loop:` — it bounds how many times a task may arrive at \
          this step from a given one, a lap of the loop, not how many fresh conversations that \
          cost. A step with `session: true` may re-prompt a live session as often as it needs; \
-         what still bounds a conversation's own size is `session_reuse_ctx` on the agent \
+         what may bound a conversation's own size is `session_reuse_ctx` on the agent \
          profile, entirely separate from this. Rename the key, and consider raising the \
          number: a whole conversation was stingier than a lap now is",
     ))

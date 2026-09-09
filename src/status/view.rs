@@ -2454,7 +2454,8 @@ mod tests {
         assert_eq!(lines.len(), 2, "{lines:#?}");
 
         let line = |name: &str| lines.iter().find(|l| l.starts_with(name)).unwrap().clone();
-        assert!(line("claude").contains("slots 1/1"), "{lines:#?}");
+        // Fresh profiles assert no harness cap, including Claude.
+        assert!(line("claude").contains("slots 1/∞"), "{lines:#?}");
         assert!(line("claude").contains("quota off"), "{lines:#?}");
         // No cap either side: the model names no `slots` and the profile no
         // `concurrency`, so the ceiling is what zero has always meant.
@@ -2577,6 +2578,9 @@ mod tests {
     #[test]
     fn a_models_own_slots_are_counted_in_the_footer() {
         let mut repo = fixture("footer-model-slots");
+        // Give the otherwise uncapped Claude profile an explicit limit so
+        // this test can distinguish the model override from profile fallback.
+        repo.config.agents.get_mut("claude").unwrap().concurrency = 1;
         repo.config.models.insert(
             "small-local".to_string(),
             crate::usage::ModelPrice {

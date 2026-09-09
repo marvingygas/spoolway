@@ -50,9 +50,9 @@ Which steps run on which profile is the pipeline's business now — see
 | Key | Default | Meaning |
 |---|---|---|
 | `kind` | `pi` | Which agent binary this is. Decides the argv template, the headless flags, the permission-mode flag, and how (or whether) it carries a step's effort |
-| `concurrency` | `1` on `claude`, **absent** elsewhere | Most lanes of this profile running at once. `0` is unlimited. A cap on the harness — for a local model the count belongs to the model, as `models."<glob>".slots` |
-| `session_reuse_ctx` | `50` | How large an earlier session may be, as a percentage of the model's context window, before a `session: true` step opens fresh instead of carrying it over. 1..=100, judged on the last turn alone |
-| `session_blocked_ctx` | `0` — off | How large a *running* lane's last completed turn may get, as a percentage of that window, before the dispatcher stops the lane and blocks its task. Must be above `session_reuse_ctx` if set at all — see [`[agents.*]`](configuration.md#agents--who-runs-a-step) |
+| `concurrency` | **absent** on every shipped profile | Most lanes of this profile running at once. `0` is unlimited. A cap on the harness — for a local model the count belongs to the model, as `models."<glob>".slots` |
+| `session_reuse_ctx` | `0` — off | How large an earlier session may be, as a percentage of the model's context window, before a `session: true` step opens fresh instead of carrying it over. `0` — the default — never refuses reuse on size; a nonzero value is `1..=100`, judged on the last turn alone |
+| `session_blocked_ctx` | `0` — off | How large a *running* lane's last completed turn may get, as a percentage of that window, before the dispatcher stops the lane and blocks its task. Must be above `session_reuse_ctx` when both are set — see [`[agents.*]`](configuration.md#agents--who-runs-a-step) |
 | `quota_ceiling` | `0` — off | How much of its kind's own account-wide quota may be spent, as a percentage of either window, before a pass starts no new lane of this profile and parks every candidate task instead. 1..=100, or `0` for off. Holds new launches when the reading is unavailable, invalid, stale or expired — see [Reading a kind's quota before a lane starts](#reading-a-kinds-quota-before-a-lane-starts) |
 | `permission_mode` | kind's own first, strongest-unattended mode; **absent** on a kind with none | Whether this kind's lanes stop and ask about a tool call. Holds the mode a lane is actually started with — `claude` ships `"auto"`, `codex` ships `"never"` — never a placeholder for one; a blank is refused by `spoolway config set` and never reaches `Config::load` |
 
@@ -719,7 +719,7 @@ the only place it can be resolved.
 
 `concurrency` caps a **harness**: how many copies of one binary spoolway runs at once. That is
 a real question for a hosted agent, where the answer is a fact about an account and its rate
-limits, and `claude` is the one shipped profile that answers it — one lane.
+limits, and no shipped profile answers it — a fresh project does not know the account or model capacity it would need to assert one, so it states it explicitly on the profile when it wants a cap.
 
 It is the wrong question for a local one, and the local profiles ship without it. `pi` and
 `codex` are both harnesses in front of the same server, and what that server
@@ -739,7 +739,9 @@ A model's context window is not a profile setting either — see
 [`[models."<glob>"]`](configuration.md#modelsglob--what-a-model-costs-and-how-big-its-window-is)
 in the configuration reference. Two profile settings read it at run time: `session_reuse_ctx`
 and `session_blocked_ctx` each take their percentage of it. A `session: true` step against a
-model with `context_window` unset never reuses an earlier session and never blocks on size.
+model with `context_window` unset reuses an earlier session whenever its reuse ceiling is off
+(`session_reuse_ctx = 0`); it refuses reuse on size only when a nonzero ceiling is set and so
+needs a window to measure against.
 The number does not truncate, chunk or cap anything a lane writes.
 
 ## What ends a lane

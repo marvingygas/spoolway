@@ -336,14 +336,13 @@ instructions could disagree with each other.
 ```toml
 [agents.pi]
 kind = "pi"
-session_reuse_ctx = 50
+session_reuse_ctx = 0
 session_blocked_ctx = 0
 quota_ceiling = 0
 
 [agents.claude]
 kind = "claude"
-concurrency = 1
-session_reuse_ctx = 50
+session_reuse_ctx = 0
 session_blocked_ctx = 0
 quota_ceiling = 0
 permission_mode = "auto"
@@ -372,10 +371,9 @@ ids only spoolway computes.
 Three profiles ship, each named after the kind it runs: `pi`, `codex` and
 `claude` — see [Profiles](agents.md#profiles) for why a profile is named for its binary
 rather than for a role. `pi` and `codex` run against a local server and share one set of
-limits; `claude` is a cloud kind with no local option, carrying a
-`concurrency` of its own — see [Concurrency and the model
-server](agents.md#concurrency-and-the-model-server) for why that number is a harness fact a
-local profile has no business asserting. `codex` is referenced by no
+limits; `claude` is a cloud kind with no local option — see [Concurrency and the model
+server](agents.md#concurrency-and-the-model-server) for why no shipped profile asserts a
+harness cap of its own. `codex` is referenced by no
 shipped step and exists so that pointing a step at that CLI is an edit to its `agent:`
 rather than a profile somebody has to write first. A profile is a fact about *this machine* — which binary, under
 what limits, how long before it is judged stuck. **Which model runs, and how big
@@ -389,10 +387,11 @@ session](dispatcher.md#a-step-that-carries-its-own-session). The step's own `ses
 *whether*; this says *how far*, per profile, because how large a session may be is a fact
 about where a lane runs rather than about which step wants it. It is a percentage of the
 model's `context_window`, 1..=100, and is refused outside that range with the range named in
-the message. Serialised even at its default, so an existing `.spoolway/config.toml` gains it
-on its next save with nothing typed by hand. `50` on every shipped profile: how large a
-carried session may grow before it is worth starting over is a fact about context windows, not
-about where the model runs, so it is one number rather than a local and a hosted one.
+the message. `0` — the default on every shipped profile — is off: a carried session is never
+refused on size, so a `session: true` step reuses whenever its store is warm enough without
+needing a window to measure against. A nonzero value is `1..=100`. Serialised even at its
+default, so an existing `.spoolway/config.toml` gains it on its next save with nothing typed
+by hand.
 
 **`session_blocked_ctx`** is the ceiling on a *running* lane's size, checked on every dispatch
 pass rather than only at launch. It is a percentage of the model's `context_window`, the same
@@ -404,14 +403,17 @@ the `spoolway report` contract or degrade quietly as its window fills. The readi
 taken at turn boundaries, so the ceiling can be overshot — a lane at 79% can end its next turn
 well past 100%.
 
-It must be set above `session_reuse_ctx` if it is set at all: a task blocked at or below the
+It must be set above `session_reuse_ctx` when both are set: a task blocked at or below the
 reuse threshold would have the very session that just blocked it carried right back in on the
-next visit, over the size that tripped the ceiling, and block again immediately. `spoolway
+next visit, over the size that tripped the ceiling, and block again immediately. With either
+guard off there is no threshold to sit above, so the check holds only when both are nonzero.
+`spoolway
 config set` refuses either edit that would put the two the wrong way round:
 
 ```
-$ spoolway config set agents.claude.session_blocked_ctx 40
-error: `session_blocked_ctx` (40) must be above `session_reuse_ctx` (50) — a task blocked below
+$ spoolway config set agents.claude.session_reuse_ctx 40
+$ spoolway config set agents.claude.session_blocked_ctx 30
+error: `session_blocked_ctx` (30) must be above `session_reuse_ctx` (40) — a task blocked below
   the reuse threshold carries the same session back and re-blocks
 ```
 
@@ -695,8 +697,10 @@ other `[models]` key is set.
 
 `context_window` is what `agents.<profile>.session_reuse_ctx` takes its percentage *of* at run
 time — so a step with `session: true` decides whether to carry a conversation over by measuring
-the last turn against this number. A model with no window here is never sized at all, and the
-pass says so and opens fresh rather than carrying blind. Sizing a task against a session is not
+the last turn against this number. A model with no window here is never sized, and the pass
+opens fresh rather than carrying blind — but only when a reuse ceiling is set and so needs a
+window to measure against. With `session_reuse_ctx` off (`0`), no window is needed and a
+carried session is reused on its age alone. Sizing a task against a session is not
 this any more — `spoolway-tasks` estimates size and complexity directly, on the split
 ballot. It does read `spoolway models` for one thing: the window on whichever model its chosen
 pipeline gives the implementing step, which is what decides whether it cuts larger tasks or

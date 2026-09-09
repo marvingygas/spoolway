@@ -272,9 +272,10 @@ pub struct ModelPrice {
     /// small enough for this model to finish in one sitting, and it does not
     /// truncate, chunk, or cap anything a lane does. `dispatch::start_one` is
     /// the one runtime reader — a `session:` step's declared bound is a
-    /// percentage of this, so a step naming a model with no window here never
-    /// resumes, only ever opens fresh. Zero means unset; a hosted model's
-    /// planner falls back to what it publishes.
+    /// percentage of this when that profile enables a reuse ceiling. A step
+    /// naming a model with no window here can still resume when the ceiling is
+    /// off. Zero means unset; a hosted model's planner falls back to what it
+    /// publishes.
     #[serde(skip_serializing_if = "unset_usize")]
     pub context_window: usize,
     /// USD per 1M input tokens.
@@ -832,8 +833,8 @@ pub fn live_of(kind: &str, path: &Path) -> Option<Live> {
 /// reports that means "this is the conversation's size", because each
 /// request restates the whole conversation as its input.
 ///
-/// Consulted by `dispatch::carried_session`, which checks this against
-/// `agents.<profile>.session_reuse_ctx` and the session's own age against
+/// Consulted by `dispatch::carried_session`, which checks this against an
+/// enabled `agents.<profile>.session_reuse_ctx` and the session's own age against
 /// `models.<glob>.session_reuse_idle` — the second reading is [`touched_at`]'s,
 /// not this function's, since it is a fact about the store rather than about
 /// any one turn.
