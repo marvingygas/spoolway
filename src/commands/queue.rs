@@ -435,6 +435,7 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: &str) -> Result<Task
     front.quota_retries = 0;
     front.parked_until = None;
     front.parked_window = String::new();
+    front.parked_at = None;
     front.paused_at = None;
     front.launched_at = None;
     front.prompts = Default::default();
@@ -4911,6 +4912,22 @@ mod tests {
         let text = document("demo", "group: demo\nbase: some/other/branch\n", BODY);
         let task = parse_submission("mine.md", &text, "plan/live").unwrap();
         assert_eq!(task.front.base.as_deref(), Some("plan/live"));
+    }
+
+    /// The park fields are the dispatcher's, not a document's — a submission
+    /// that carries `parked_at:` (or the deadline beside it) from an earlier
+    /// run has them wiped, the same as `attempts:` or `launched_at:`.
+    #[test]
+    fn a_document_carrying_park_fields_has_them_reset() {
+        let text = document(
+            "demo",
+            "group: demo\nparked_at: 1788793980\nparked_until: 1788801180\nparked_window: five_hour\n",
+            BODY,
+        );
+        let task = parse_submission("mine.md", &text, "plan/demo").unwrap();
+        assert_eq!(task.front.parked_at, None);
+        assert_eq!(task.front.parked_until, None);
+        assert_eq!(task.front.parked_window, "");
     }
 
     /// A repeat submission is refused whether the id is still in the queue —

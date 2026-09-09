@@ -896,7 +896,9 @@ The check above catches a limit that has already landed. `agents.<profile>.quota
 catches one before it does. Ahead of starting a lane, a pass reads the profile's kind's own
 cached usage percentage — something the agent wrote to disk, never a network call — and at or
 above the ceiling on either window it starts no new lane of that profile at all. Every candidate task of
-that profile gets `parked_until:` written from the tripped window's own `resets_at`. Tasks
+that profile gets `parked_until:` written from the tripped window's own `resets_at`, and the
+first park of a continuous hold also stamps `parked_at:` — the fixed start the age counts from —
+while every later re-probe moves only `parked_until`. Tasks
 whose step names a different profile are staffed in the same pass. See [Reading a kind's quota
 before a lane starts](agents.md#reading-a-kinds-quota-before-a-lane-starts) for where the
 reading comes from. An enabled ceiling holds launches when that reading is unavailable,
@@ -919,8 +921,13 @@ the account during processing.
 a timestamp rather than holding a timer: a seven-day wait outlives any dispatcher process, and
 often the machine. A dispatcher started from cold reads `parked_until:` at the top of its
 per-task loop, before it resolves a step or looks at a lane, and honours it without taking any
-reading of its own. The first pass after the timestamp has passed clears the field and rechecks quota
-before admitting another lane. A forty-minute five-hour wait and a six-day seven-day wait behave
+reading of its own. The first pass after the timestamp has passed rechecks quota without touching the park: an expired
+deadline is a recheck, not an exit, so the same pass resolves the hold in one write — re-parking
+with a fresh deadline against a still-exhausted reading, or admitting another lane once the reading
+has dropped. The hold's age, stamped once when it began (`parked_at`), keeps counting from there
+rather than restarting, and a pass that reaches no decision at all (a dependency still open, say)
+leaves the whole park on disk with its deadline simply in the past — still held, not yet decided. A
+forty-minute five-hour wait and a six-day seven-day wait behave
 identically.
 
 A park never ends the run. The dispatcher keeps passing and reports the park each time; closing
