@@ -72,6 +72,7 @@ no marker and are never touched.
 - `.where` — the absolute path this page is written to; a fact you already have, never a
   question for the person.
 - `.standfirst` — one sentence a person can approve or reject.
+- Intend's paragraph — one sentence naming the outcome this plan means to produce.
 - Context's paragraph — two or three sentences: what is true today, and the pressure on it.
 - Context's figure — the one view of the system as it is, inline SVG with an `aria-label`
   summarising it; delete the whole `<figure>` only when the context genuinely has no shape.

@@ -48,10 +48,10 @@ Every plan is written on the same spine, in this order:
 
 | Section | What goes in it |
 |---|---|
+| **Intend** | The outcome this plan means to produce. One sentence. |
 | **Context** | What is true today, and the pressure on it. One drawing of the system as it is. |
 | **Decisions** | One record per decision, each led by a figure and closed by what it costs. |
 | **Mockup** | The finished thing, drawn: the walkthrough, or the run end to end. One heading and figure per step, no prose. |
-That is [Nygard's architecture decision record](https://cognitect.com/blog/2011/11/15/documenting-architecture-decisions).
 **The page ends at the Mockup.** The breakdown is not on it: a task is a document, written into
 the pending directory at step 7, and the page argues the shape those documents were cut from.
 Same headings, order and words on every plan.
@@ -117,7 +117,7 @@ day it changes; a path stays true. Name the file that already holds the ground n
    grep -n '\[\[' <path>
    ```
 
-   Fill only Context, Decisions and Mockup. The page never carries tasks at all — not before
+   Fill only Intend, Context, Decisions and Mockup. The page never carries tasks at all — not before
    approval, not after.
 
 5. **Revising an existing plan is a proposal, not an edit.** Read the file first, then, before

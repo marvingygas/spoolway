@@ -97,17 +97,17 @@ plan](#queueing-a-plan) below.
 
 ### The spine
 
-Every plan argues on the same three sections, in the same order: Context, Decisions and
-Mockup. The page ends there. The breakdown is not on it — a task is a document, written beside
-the page — so a page carries no `id`, no `pipeline` and no `touches` glob at any point in its
-life. It argues a shape; `spoolway-tasks` is where that shape becomes a real `touches`, a real
-`depends_on`, a real task id, in files of their own.
+Every plan argues on the same four sections, in the same order: Intend, Context, Decisions and
+Mockup. Intend is one sentence; the page ends at the Mockup. The breakdown is not on it — a task
+is a document, written beside the page — so a page carries no `id`, no `pipeline` and no
+`touches` glob at any point in its life. It argues a shape; `spoolway-tasks` is where that shape
+becomes a real `touches`, a real `depends_on`, a real task id, in files of their own.
 
 ## Writing a good breakdown
 
 `spoolway-tasks` encodes a set of rules that matter whether or not you use it, at the
 moment it decides ids, globs and dependencies — not at planning time, since none of that exists
-yet while the page's Context, Decisions and Mockup are still being argued.
+yet while the page's Intend, Context, Decisions and Mockup are still being argued.
 
 **Plan against the system as it is.** A person describing a detailed solution is telling you
 about a problem; the solution is evidence, not specification.
