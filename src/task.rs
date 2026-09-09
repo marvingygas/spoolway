@@ -203,9 +203,9 @@ pub struct Frontmatter {
     /// The chain of work this task belongs to — opaque, and never path-parsed.
     ///
     /// This is the grouping key every reader of the queue uses: the scheduler
-    /// drains one group before spreading across several, the board and `queue
-    /// list` print one block per group, and `handover`/`adopt` filter by it.
-    /// Read verbatim everywhere, unlike the old grouping key this replaced —
+    /// drains one group before spreading across several, and the board and
+    /// `queue list` print one block per group. Read verbatim everywhere, unlike
+    /// the old grouping key this replaced —
     /// that one was a path, so a GitHub issue URL and a plan page with the
     /// same file stem collided under it. A task with no `group:` is a group
     /// of one, the same as a task with no grouping key used to be. Not to be
@@ -709,9 +709,9 @@ impl Task {
         // `branch` is spoolway's alone — see `queue::RESERVED_KEYS`. `queue add`
         // stamps `task/<id>`, or `task/<slug>-<id>` when
         // `issue_tracking.key_in_names` prefixed it, and nothing else ever
-        // should. A hand-edited file dropped in `queue/`, or one `handover
-        // adopt` pulled off a mirror, never passes `queue add`. `spoolway
-        // stack` force-pushes a squashed commit onto whatever this says and
+        // should. A hand-edited file dropped in `queue/` never passes `queue
+        // add`. `spoolway stack` force-pushes a squashed commit onto whatever
+        // this says and
         // passes it to `gh pr view` as a positional argument, so a
         // body-authored value is refused here rather than acted on.
         if let Some(branch) = &front.branch

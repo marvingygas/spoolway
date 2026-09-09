@@ -1,5 +1,5 @@
-//! `spoolway report`, and the verbs that move a settled or stuck task:
-//! `resume`, `adopt`, `handover`.
+//! `spoolway report`, and the verb that moves a settled or stuck task:
+//! `resume`.
 
 use super::*;
 
@@ -295,8 +295,10 @@ pub fn report(
     // leaves exactly that. Held at `blocked` instead, so a person sees the
     // worktree before it is gone.
     //
-    // Only `Unrecorded` — not residue a lane deliberately left, which is on
-    // the mirror and named in the log. `dispatch::Dispatcher::clean_up` makes
+    // Only `Unrecorded` — not residue a lane deliberately left, which is named
+    // in the status log and backed up nowhere. Cleanup knowingly discards that
+    // residue rather than committing files the lane excluded or stranding the
+    // task. `dispatch::Dispatcher::clean_up` makes
     // the same check for the road every shipped pipeline actually takes to
     // `done`, from a command step rather than from this report; this covers a
     // pipeline whose agent step routes `on_pass: done` directly.
@@ -447,36 +449,6 @@ pub fn set_blocked_from(task: &mut Task, current: &str) {
     }
 }
 
-pub fn adopt(repo: &Repo, args: &crate::cli::AdoptArgs) -> Result<()> {
-    let adopted = crate::handover::adopt(repo, &args.from, args.group.as_deref(), &args.tasks)?;
-    println!(
-        "adopted {} task(s) from {}: {}",
-        adopted.len(),
-        args.from,
-        adopted.join(", ")
-    );
-    println!(
-        "`spoolway dispatch` picks them up from here — worktrees are cut fresh on this machine."
-    );
-    Ok(())
-}
-
-pub fn handover(repo: &Repo, args: &crate::cli::HandoverArgs) -> Result<()> {
-    let outcome = crate::handover::handover(repo, args.group.as_deref(), args.reset_unpublished)?;
-    for (what, happened) in &outcome {
-        println!("  {what}: {happened}");
-    }
-    println!(
-        "\nThey take it with:\n    spoolway adopt --from {}{}",
-        crate::handover::identity(repo)?,
-        args.group
-            .as_deref()
-            .map(|g| format!(" --group {g}"))
-            .unwrap_or_default()
-    );
-    Ok(())
-}
-
 /// Commit whatever the lane left uncommitted in its worktree, and say what had
 /// to be picked up.
 ///
@@ -508,8 +480,9 @@ pub enum AutoCommit {
     /// residue (a generated lockfile, a build artefact no `.gitignore`
     /// covers). Left uncommitted on purpose: sweeping it into a commit the
     /// lane did not intend gets the change failed in review for touching
-    /// files the task's non-goals forbid. It is snapshotted to the mirror and
-    /// named in the log, so nothing is lost by leaving it.
+    /// files the task's non-goals forbid. It is named in the status log and
+    /// backed up nowhere; a later cleanup knowingly discards it rather than
+    /// turning residue into task work.
     Residue(String),
 }
 
@@ -524,10 +497,10 @@ impl AutoCommit {
         }
     }
 
-    /// Whether uncommitted work would be lost if the worktree were torn down
-    /// now. `Residue` is not this: it is on the mirror and in the log, and
-    /// blocking a cleanup terminal for it would strand every task that leaves
-    /// a lockfile behind.
+    /// Whether uncommitted work must prevent the worktree from being torn down.
+    /// `Residue` is not this: it is named in the status log but backed up
+    /// nowhere, and cleanup knowingly discards it because blocking for residue
+    /// would strand every task that leaves a lockfile behind.
     pub fn is_unrecorded(&self) -> bool {
         matches!(self, AutoCommit::Unrecorded(_))
     }
@@ -639,11 +612,10 @@ pub fn auto_commit(
     // failed in review for touching files the task's non-goals forbid, which is
     // a loop nothing downstream can break. Observed doing exactly that.
     //
-    // Nothing is lost either way: uncommitted residue is still snapshotted onto
-    // this machine's mirror, and the status log says it is there. So residue
-    // comes back as [`AutoCommit::Residue`], not `Unrecorded`, and a cleanup
-    // terminal is not held for it — holding every task that leaves a lockfile
-    // behind would be its own loop.
+    // Residue is named in the status log and backed up nowhere. It comes back
+    // as [`AutoCommit::Residue`], not `Unrecorded`, so cleanup knowingly
+    // discards it rather than committing files the lane excluded; holding every
+    // task that leaves a lockfile behind would be its own loop.
     let now = match crate::repo::run(worktree, "git", &["rev-parse", "HEAD"]) {
         Ok(out) => out,
         Err(e) => {

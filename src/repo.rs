@@ -366,18 +366,6 @@ impl Repo {
         self.home().join(crate::lock::RESTART_FILE)
     }
 
-    /// A scratch index for the queue mirror, written and removed within one
-    /// pass.
-    pub fn mirror_index_file(&self) -> PathBuf {
-        self.home().join("mirror.index")
-    }
-
-    /// A scratch index for a task's prune pass, written and removed within one
-    /// pass.
-    pub fn prune_index_file(&self) -> PathBuf {
-        self.home().join("prune.index")
-    }
-
     /// Every active task, in id order.
     ///
     /// A `*.md` in the queue that will not parse is skipped rather than
@@ -428,12 +416,11 @@ impl Repo {
     }
 
     /// The branch a dependency's work lives on, read from that task's own
-    /// `branch:` field rather than rebuilt from its id. The two agree for
-    /// anything `queue add` stamped, but `handover adopt` sets `branch:`
-    /// straight off a mirror without passing `queue add`, and a rebuilt
-    /// `task/<dep_id>` then names a ref that need not exist — a failure that
-    /// surfaces at the dependent's worktree cut rather than here, where the
-    /// name was chosen.
+    /// `branch:` field rather than rebuilt from its id. `queue add` may stamp
+    /// `task/<slug>-<dep_id>` when `issue_tracking.key_in_names` is enabled,
+    /// so rebuilding `task/<dep_id>` can name a ref that does not exist — a
+    /// failure that surfaces at the dependent's worktree cut rather than here,
+    /// where the name was chosen.
     ///
     /// A dependency whose task cannot be loaded is an error that names the
     /// dependency, not a `task/<dep_id>` guess handed on to a cut that then

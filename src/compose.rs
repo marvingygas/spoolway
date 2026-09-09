@@ -225,9 +225,10 @@ fn what_you_have(repo: &Repo, task: &Task) -> Result<String> {
                 .map(|dep| format!("\n{blank}`spoolway queue show {dep}` — what it left you"))
                 .collect();
             // The dependency's real branch, read from its task file — not
-            // rebuilt as `task/<first>`, which `handover adopt` can leave
-            // wrong. A dependency that cannot be resolved is a hard error
-            // here, the same one `ensure_workspace` raises when it cuts this
+            // rebuilt as `task/<first>`, because `issue_tracking.key_in_names`
+            // may have stamped `task/<slug>-<first>`. A dependency that cannot
+            // be resolved is a hard error here, the same one `ensure_workspace`
+            // raises when it cuts this
             // task's worktree: a prompt that named a guessed branch would
             // tell the lane to diff against a ref that need not exist.
             let branch = repo.dependency_branch(first)?;
