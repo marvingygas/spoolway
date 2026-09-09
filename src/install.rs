@@ -1,9 +1,22 @@
 //! Installing pipeline skills into a coding agent's own convention.
 //!
 //! The skills are embedded in the binary, so `spoolway install` needs nothing on
-//! disk to copy from. Each provider decides only *where* files go and in what
-//! shape. The Codex copies keep the same procedure but name Codex's
-//! `request_user_input` tool rather than Claude's `AskUserQuestion`.
+//! disk to copy from. Every copy of every skill lives under
+//! `assets/skills/<provider>/`, one directory per provider, and this file
+//! embeds them from there. Nothing is read from an installed directory such as
+//! `.claude/skills` or `.agents/skills`: those are output, and a source that
+//! doubles as an install target drifts the moment somebody edits one and not
+//! the other.
+//!
+//! A provider decides *where* files go, and which copy goes there. The three
+//! copies differ only in how the procedure asks the person a question, because
+//! that is the one thing the three agents genuinely do differently:
+//!
+//! - Claude calls its `AskUserQuestion` tool.
+//! - Codex calls `request_user_input`, which is the same thing under another
+//!   name.
+//! - pi has no dialog tool at all. Its copies print the question as output and
+//!   end the turn, and the person answers in their next prompt.
 //!
 //! The layout follows the Agent Skills spec: a directory per skill with a
 //! `SKILL.md` entrypoint, a `name` matching that directory, and static
@@ -32,13 +45,33 @@ use anyhow::Result;
 use crate::cli::Provider;
 use crate::task::write_atomic;
 
-/// One skill: its entrypoint, and the static resources it brings with it.
+/// One skill: its entrypoint per provider, and the static resources it brings
+/// with it.
 struct Skill {
     name: &'static str,
+    /// The Claude copy, and the one the shape of a skill is written from.
     skill_md: &'static str,
+    /// The same procedure naming Codex's `request_user_input` tool.
     codex_skill_md: &'static str,
+    /// The same procedure again, written for an agent with no dialog tool:
+    /// questions are printed and the turn ends there.
+    pi_skill_md: &'static str,
     /// Files landing under the skill's own `assets/`, by filename.
     assets: &'static [(&'static str, &'static str)],
+}
+
+#[cfg(test)]
+impl Skill {
+    /// Every provider's copy of this skill, by the name that provider is
+    /// selected under. Tests walk this so a copy added here cannot skip the
+    /// checks the others pass.
+    fn copies(&self) -> [(&'static str, &'static str); 3] {
+        [
+            ("claude", self.skill_md),
+            ("codex", self.codex_skill_md),
+            ("pi", self.pi_skill_md),
+        ]
+    }
 }
 
 /// Skills shipped for the planning and queueing half of the pipeline. The
@@ -47,7 +80,8 @@ const SKILLS: &[Skill] = &[
     Skill {
         name: "spoolway-plan",
         skill_md: include_str!("../assets/skills/claude/spoolway-plan/SKILL.md"),
-        codex_skill_md: include_str!("../.agents/skills/spoolway-plan/SKILL.md"),
+        codex_skill_md: include_str!("../assets/skills/codex/spoolway-plan/SKILL.md"),
+        pi_skill_md: include_str!("../assets/skills/pi/spoolway-plan/SKILL.md"),
         // Names nothing: the skill's own skeleton is not yet part of what
         // this file ships — see this module's header.
         assets: &[],
@@ -60,7 +94,8 @@ const SKILLS: &[Skill] = &[
     Skill {
         name: "spoolway-tasks",
         skill_md: include_str!("../assets/skills/claude/spoolway-tasks/SKILL.md"),
-        codex_skill_md: include_str!("../.agents/skills/spoolway-tasks/SKILL.md"),
+        codex_skill_md: include_str!("../assets/skills/codex/spoolway-tasks/SKILL.md"),
+        pi_skill_md: include_str!("../assets/skills/pi/spoolway-tasks/SKILL.md"),
         assets: &[],
     },
     // Reshaping the flow itself: the graph, and the prompts its agent steps
@@ -73,7 +108,8 @@ const SKILLS: &[Skill] = &[
     Skill {
         name: "spoolway-pipeline",
         skill_md: include_str!("../assets/skills/claude/spoolway-pipeline/SKILL.md"),
-        codex_skill_md: include_str!("../.agents/skills/spoolway-pipeline/SKILL.md"),
+        codex_skill_md: include_str!("../assets/skills/codex/spoolway-pipeline/SKILL.md"),
+        pi_skill_md: include_str!("../assets/skills/pi/spoolway-pipeline/SKILL.md"),
         assets: &[],
     },
     // Reading a pipeline's health is CLI calls too, and the same shape as the
@@ -83,7 +119,8 @@ const SKILLS: &[Skill] = &[
     Skill {
         name: "spoolway-doctor",
         skill_md: include_str!("../assets/skills/claude/spoolway-doctor/SKILL.md"),
-        codex_skill_md: include_str!("../.agents/skills/spoolway-doctor/SKILL.md"),
+        codex_skill_md: include_str!("../assets/skills/codex/spoolway-doctor/SKILL.md"),
+        pi_skill_md: include_str!("../assets/skills/pi/spoolway-doctor/SKILL.md"),
         assets: &[],
     },
     // Reads a window of archived tasks and the spend ledger back into the
@@ -93,7 +130,8 @@ const SKILLS: &[Skill] = &[
     Skill {
         name: "spoolway-calibrate",
         skill_md: include_str!("../assets/skills/claude/spoolway-calibrate/SKILL.md"),
-        codex_skill_md: include_str!("../.agents/skills/spoolway-calibrate/SKILL.md"),
+        codex_skill_md: include_str!("../assets/skills/codex/spoolway-calibrate/SKILL.md"),
+        pi_skill_md: include_str!("../assets/skills/pi/spoolway-calibrate/SKILL.md"),
         assets: &[],
     },
 ];
@@ -159,8 +197,9 @@ impl Provider {
             .flat_map(|skill| {
                 let dir = skills.join(skill.name);
                 let skill_md = match self {
+                    Provider::Claude => skill.skill_md,
                     Provider::Codex => skill.codex_skill_md,
-                    Provider::Claude | Provider::Pi => skill.skill_md,
+                    Provider::Pi => skill.pi_skill_md,
                 };
                 let mut files = vec![Planned {
                     path: dir.join("SKILL.md"),
@@ -313,6 +352,52 @@ mod tests {
         }
     }
 
+    /// pi has no dialog tool. Naming either of the other two in its copy tells
+    /// the agent to call something that does not exist, and the question it was
+    /// meant to ask is then simply not asked.
+    #[test]
+    fn pi_skills_name_no_dialog_tool_at_all() {
+        for skill in SKILLS {
+            for tool in ["AskUserQuestion", "request_user_input"] {
+                assert!(
+                    !skill.pi_skill_md.contains(tool),
+                    "{} names `{tool}` in its pi copy, and pi has no such tool",
+                    skill.name
+                );
+            }
+        }
+    }
+
+    /// A question dropped in translation is the failure this whole split
+    /// exists to avoid: the procedure carries on past a decision the person was
+    /// supposed to make. Where Claude's copy asks, pi's copy has to say both
+    /// that the question is printed and that the turn ends on it — printing a
+    /// question and continuing answers it on the person's behalf.
+    #[test]
+    fn a_pi_skill_that_asks_prints_the_question_and_stops() {
+        for skill in SKILLS {
+            if !skill.skill_md.contains("AskUserQuestion") {
+                continue;
+            }
+            let pi = skill.pi_skill_md.to_lowercase();
+            assert!(
+                pi.contains("print"),
+                "{}'s pi copy asks a question without saying it is printed",
+                skill.name
+            );
+            assert!(
+                pi.contains("end the turn") || pi.contains("ends there"),
+                "{}'s pi copy never says the turn ends on the question",
+                skill.name
+            );
+            assert!(
+                pi.contains("next prompt"),
+                "{}'s pi copy never says where the answer comes back",
+                skill.name
+            );
+        }
+    }
+
     /// The name a provider prints is the name `--provider` takes. They are
     /// written in two places — `Provider::name` and clap's derive — and a
     /// summary line naming something the flag will not accept is a paste that
@@ -353,26 +438,33 @@ mod tests {
 
     #[test]
     fn every_skill_carries_frontmatter_a_provider_can_read() {
-        for Skill { name, skill_md, .. } in SKILLS {
-            assert!(skill_md.starts_with("---\n"), "{name} has no frontmatter");
-            assert!(
-                skill_md.contains(&format!("name: {name}")),
-                "{name}'s frontmatter name does not match its file"
-            );
-            // Every skill here is human-triggered, except spoolway-tasks: it
-            // is called from inside another skill's own procedure (see
-            // spoolway-plan's step 7), and `disable-model-invocation: true`
-            // would make a skill unreachable from there.
-            if *name == "spoolway-tasks" {
+        for skill in SKILLS {
+            let name = skill.name;
+            for (provider, skill_md) in skill.copies() {
                 assert!(
-                    !skill_md.contains("disable-model-invocation"),
-                    "{name} must stay reachable from another skill's own procedure"
+                    skill_md.starts_with("---\n"),
+                    "{name}'s {provider} copy has no frontmatter"
                 );
-            } else {
                 assert!(
-                    skill_md.contains("disable-model-invocation: true"),
-                    "{name} should be human-invoked only"
+                    skill_md.contains(&format!("name: {name}")),
+                    "{name}'s {provider} copy has a frontmatter name that does not match its file"
                 );
+                // Every skill here is human-triggered, except spoolway-tasks: it
+                // is called from inside another skill's own procedure (see
+                // spoolway-plan's step 7), and `disable-model-invocation: true`
+                // would make a skill unreachable from there.
+                if name == "spoolway-tasks" {
+                    assert!(
+                        !skill_md.contains("disable-model-invocation"),
+                        "{name}'s {provider} copy must stay reachable from another skill's own \
+                         procedure"
+                    );
+                } else {
+                    assert!(
+                        skill_md.contains("disable-model-invocation: true"),
+                        "{name}'s {provider} copy should be human-invoked only"
+                    );
+                }
             }
         }
     }
@@ -382,12 +474,8 @@ mod tests {
     /// a thing a person editing prose could break without noticing.
     #[test]
     fn every_skill_is_valid_by_the_agent_skills_spec() {
-        for Skill {
-            name,
-            skill_md: contents,
-            ..
-        } in SKILLS
-        {
+        for skill in SKILLS {
+            let name = skill.name;
             // `name`: 1–64 chars, lowercase alphanumeric and hyphens, no
             // leading, trailing or doubled hyphen — and it must equal the
             // directory, which here is the name it is installed under.
@@ -402,33 +490,42 @@ mod tests {
                 "{name} misuses hyphens"
             );
 
-            let front = contents
-                .split("---\n")
-                .nth(1)
-                .unwrap_or_else(|| panic!("{name} has no frontmatter block"));
-            let description = front
-                .lines()
-                .find_map(|line| line.strip_prefix("description:"))
-                .unwrap_or_else(|| panic!("{name} has no description"))
-                .trim();
+            // Every provider's copy is a skill in its own right, and a
+            // validator will reject it on its own terms — so each one is
+            // checked, not just the Claude copy the others are written from.
+            for (provider, contents) in skill.copies() {
+                let front = contents
+                    .split("---\n")
+                    .nth(1)
+                    .unwrap_or_else(|| panic!("{name}'s {provider} copy has no frontmatter block"));
+                let description = front
+                    .lines()
+                    .find_map(|line| line.strip_prefix("description:"))
+                    .unwrap_or_else(|| panic!("{name}'s {provider} copy has no description"))
+                    .trim();
 
-            // `description`: non-empty, and 1024 is the spec's ceiling. Claude
-            // Code truncates the listing at 1536 including `when_to_use`, so
-            // the spec's limit is the binding one either way.
-            assert!(!description.is_empty(), "{name}'s description is empty");
-            assert!(
-                description.len() <= 1024,
-                "{name}'s description is {} chars, past the spec's 1024",
-                description.len()
-            );
+                // `description`: non-empty, and 1024 is the spec's ceiling.
+                // Claude Code truncates the listing at 1536 including
+                // `when_to_use`, so the spec's limit is the binding one either
+                // way.
+                assert!(
+                    !description.is_empty(),
+                    "{name}'s {provider} description is empty"
+                );
+                assert!(
+                    description.len() <= 1024,
+                    "{name}'s {provider} description is {} chars, past the spec's 1024",
+                    description.len()
+                );
 
-            // "Keep your main SKILL.md under 500 lines." Past that the body is
-            // meant to be split into files loaded on demand.
-            let lines = contents.lines().count();
-            assert!(
-                lines < 500,
-                "{name} is {lines} lines; the spec says under 500"
-            );
+                // "Keep your main SKILL.md under 500 lines." Past that the body
+                // is meant to be split into files loaded on demand.
+                let lines = contents.lines().count();
+                assert!(
+                    lines < 500,
+                    "{name}'s {provider} copy is {lines} lines; the spec says under 500"
+                );
+            }
         }
     }
 }

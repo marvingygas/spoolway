@@ -419,11 +419,19 @@ mod tests {
     /// (the shape is `<name>/PROMPT.md`), no `gates` (gone) — finding 29.
     #[test]
     fn the_shipped_doctor_skill_names_nothing_retired() {
-        let skill = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("assets/skills/claude/spoolway-doctor/SKILL.md"),
-        )
-        .unwrap();
+        // Every provider's copy, not just Claude's: they are three separate
+        // files, and a retired command left behind in one of them is shipped to
+        // that provider's users all the same.
+        let skill: String = ["claude", "codex", "pi"]
+            .iter()
+            .map(|provider| {
+                std::fs::read_to_string(
+                    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join(format!("assets/skills/{provider}/spoolway-doctor/SKILL.md")),
+                )
+                .unwrap()
+            })
+            .collect();
 
         for banned in [
             "config set agents.x.model",

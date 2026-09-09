@@ -83,14 +83,15 @@ comment, not the body.
      splits, take the smaller tasks and the larger count, and let the criteria fall well
      under the five bullets rather than up against them.
 
-   **Offer the shape, with one AskUserQuestion.** Settle on a recommended count first, then put
+   **Offer the shape, as one printed ballot.** Settle on a recommended count first, then put
    **that count and the four below it** on the ballot, floored at 1 — a recommendation of 6
    names 2, 3, 4, 5 and 6; a recommendation of 3 names 1, 2 and 3. Name every member in the
-   question text — `Split this shape: 2, 3, 4, 5 or 6 tasks — or generate a pipeline` — because
-   AskUserQuestion takes only four options and one of the four is always "Generate a pipeline
-   for this plan" (`spoolway pipeline gen --plan <path>`, one line, session ends with nothing
-   cut): the three largest counts fill the remaining slots, largest first and marked
-   recommended, and the question text tells the person to type the rest under *Other*. Put
+   question text — `Split this shape: 2, 3, 4, 5 or 6 tasks — or generate a pipeline` — and
+   give every count its own lettered line, largest first, the recommended one marked as such.
+   A printed ballot has no option limit, so nothing is left for the person to type out; the
+   last option is always "Generate a pipeline for this plan" (`spoolway pipeline gen --plan
+   <path>`, one line, session ends with nothing cut). **pi has no dialog tool, so the ballot
+   is printed and the turn ends there** — the answer arrives as the person's next prompt. Put
    size and the routed pipeline's own name against every task name on every candidate, and
    every pipeline named there carries its own `description:` verbatim in that option's own
    text — a person approves the routing by picking the count, not by a question of its own, so
