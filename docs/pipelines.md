@@ -995,6 +995,11 @@ is not a step of the pipeline the task runs on — a pipeline's steps can be ren
 under a queued task's own copy, and this is where that shows up rather than at the dispatch pass that
 would otherwise silently do nothing with a name that never matches.
 
+This validates only the project's own loaded pipelines. The two samples shipped under
+`assets/pipelines/` are no longer opened by this command — `spoolway init` specializes them as
+test fixtures, and their parse, structure and neutrality about Pi, model and effort choices are
+release-time proof held by a repository test in `src/assets.rs`, not by any one project's config.
+
 `pipeline contract` prints every key a pipeline and a step may carry, the rules refused at
 load, and an annotated blank pipeline to copy from — read straight off the struct and the
 validation `pipeline check` runs, so it cannot drift from what the loader actually enforces.

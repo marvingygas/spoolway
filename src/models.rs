@@ -307,7 +307,11 @@ mod tests {
     }
 
     /// Shipped pipeline text makes no model choice. Its explicit blanks stay
-    /// visible for a person to fill before dispatch.
+    /// visible for a person to fill before dispatch. A text-level check
+    /// rather than a parsed one, kept beside `resolve`'s own model-pricing
+    /// tests; `crate::assets::tests::bundled_pipelines_parse_and_stay_agent_neutral`
+    /// asserts the same blanks off the parsed, assembled pipeline instead,
+    /// alongside its structural and `pi`-neutrality checks.
     #[test]
     fn shipped_pipelines_name_no_model() {
         for (name, body) in crate::pipeline::BUILTIN_PIPELINES {

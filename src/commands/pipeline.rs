@@ -613,22 +613,17 @@ fn show_one(pipeline: &Pipeline, default: &str) -> Result<()> {
     Ok(())
 }
 
-/// Every disk-dependent problem `pipeline_check` finds in one set of
-/// pipelines: an agent profile a step names but config does not define, a
-/// task skeleton a `task_template:` names but nobody wrote, and — per agent step —
-/// a missing prompt file, a blank model, an `effort:`/`session:`/`skills:`
-/// the step's agent kind cannot carry.
+/// Every disk-dependent problem `pipeline_check` finds in the project's own
+/// loaded pipelines: an agent profile a step names but config does not
+/// define, a task skeleton a `task_template:` names but nobody wrote, and —
+/// per agent step — a missing prompt file, a blank model, an
+/// `effort:`/`session:`/`skills:` the step's agent kind cannot carry.
 ///
-/// Pulled out of `pipeline_check` so the same rigor runs twice. Shipped assets
-/// are checked against the default profile table because init has not yet
-/// specialized their Claude scaffold identity, and their intentional blank
-/// models are exempted; every other disk and kind check is identical.
-fn step_problems(
-    repo: &Repo,
-    pipelines: &Pipelines,
-    config: &Config,
-    allow_blank_models: bool,
-) -> Vec<String> {
+/// Runtime readiness is a project's own to answer: whether `assets/pipelines/*.yml`
+/// still parses and stays neutral about Pi, model and effort choices is
+/// release-time proof instead, held in `src/assets.rs`'s own tests against
+/// the repository rather than any one project's config.
+fn step_problems(repo: &Repo, pipelines: &Pipelines, config: &Config) -> Vec<String> {
     let mut problems = Vec::new();
 
     for (agent, steps) in pipelines.referenced_agents() {
@@ -697,7 +692,7 @@ fn step_problems(
             // turns that synthetic step into a lane.
             let unstaffed_blocked =
                 step.id == crate::pipeline::BLOCKED && !config.unattended.enabled;
-            if !unstaffed_blocked && (model_is_missing || (model_is_blank && !allow_blank_models)) {
+            if !unstaffed_blocked && (model_is_missing || model_is_blank) {
                 problems.push(format!(
                     "`{}`/`{}` names no model: — give it one",
                     pipeline.name, step.id
@@ -801,45 +796,6 @@ fn step_problems(
     problems
 }
 
-/// The config shipped asset steps mean before init specializes them.
-///
-/// Keep the project's other profiles because the assembled `blocked` step can
-/// name one of them, but pin the assets' placeholder `claude` profile to the
-/// shipped Claude definition. Otherwise a Codex-only fresh config would make
-/// the unspecialized asset look broken before init's substitution runs.
-fn shipped_step_config(config: &Config) -> Config {
-    let mut validation = config.clone();
-    let claude = crate::config::AgentProfile::defaults()
-        .remove("claude")
-        .expect("the shipped profile table has claude");
-    validation.agents.insert("claude".into(), claude);
-    validation
-}
-
-/// Whether any shipped step's `run:` names a path that only exists inside
-/// this repository — `./target/release/spoolway`, say — rather than
-/// resolving the binary through `PATH` the way a project that installed
-/// spoolway actually has it. This is what let `run: ./target/release/spoolway
-/// stack` ship in `assets/pipelines/default.yml` unnoticed: nothing validated
-/// the shipped file against a config outside this repository until this
-/// check existed.
-fn shipped_run_names_a_repo_local_path(shipped: &Pipelines) -> Vec<String> {
-    let mut problems = Vec::new();
-    for pipeline in shipped.pipelines.values() {
-        for step in &pipeline.steps {
-            let Some(run) = &step.run else { continue };
-            if run.contains("./target/") {
-                problems.push(format!(
-                    "`{}`/`{}` runs `{run}`, a path that only exists inside this repository's \
-                     own build — resolve the binary through PATH instead",
-                    pipeline.name, step.id
-                ));
-            }
-        }
-    }
-    problems
-}
-
 /// Split an old single `pipeline.yml` into one file per pipeline.
 ///
 /// Writes what it can and *says* what it cannot: `default:` and `observer:`
@@ -854,30 +810,14 @@ pub fn pipeline_check(repo: &Repo, pipelines: Result<Pipelines>, json: bool) -> 
     }
 
     // A pipeline file that will not load does not stop this check — it is
-    // reported as the first problem, and the shipped pipelines, a separate
-    // file, are still validated. Everything else here reads the project's
-    // own loaded set, so it is what is skipped.
+    // reported as the one problem, and nothing else is derived: there is no
+    // loaded set left to check a step, a skip, or a prompt against, and the
+    // embedded samples are release-time proof, not this project's own.
     let pipelines = match pipelines {
         Ok(pipelines) => pipelines,
         Err(err) => {
-            let mut problems = vec![format!("pipelines do not load: {err:#}")];
-            if let Ok(shipped) = Pipelines::shipped(&repo.config) {
-                let shipped_config = shipped_step_config(&repo.config);
-                problems.extend(
-                    step_problems(repo, &shipped, &shipped_config, true)
-                        .into_iter()
-                        .map(|problem| format!("shipped pipeline {problem}")),
-                );
-                problems.extend(
-                    shipped_run_names_a_repo_local_path(&shipped)
-                        .into_iter()
-                        .map(|problem| format!("shipped pipeline {problem}")),
-                );
-            }
-            for problem in &problems {
-                println!("  problem: {problem}");
-            }
-            bail!("{} problem(s) found", problems.len());
+            println!("  problem: pipelines do not load: {err:#}");
+            bail!("1 problem(s) found");
         }
     };
     let pipelines = &pipelines;
@@ -894,25 +834,7 @@ pub fn pipeline_check(repo: &Repo, pipelines: Result<Pipelines>, json: bool) -> 
         gate_warnings.extend(pipeline.description_warnings());
     }
 
-    let mut problems = step_problems(repo, pipelines, &repo.config, false);
-
-    // The two shipped pipelines are checked even when an override shadows
-    // them. Their parseable Claude identity is checked against the matching
-    // default profile because init specializes it later; only their deliberate
-    // blank models are exempted. Prompts, skeletons, kind capabilities and
-    // command paths retain the same checks as project pipelines.
-    let shipped = Pipelines::shipped(&repo.config)?;
-    let shipped_config = shipped_step_config(&repo.config);
-    problems.extend(
-        step_problems(repo, &shipped, &shipped_config, true)
-            .into_iter()
-            .map(|problem| format!("shipped pipeline {problem}")),
-    );
-    problems.extend(
-        shipped_run_names_a_repo_local_path(&shipped)
-            .into_iter()
-            .map(|problem| format!("shipped pipeline {problem}")),
-    );
+    let mut problems = step_problems(repo, pipelines, &repo.config);
 
     // A queued task's own `skip:` names steps by hand — a replay's copy, or
     // one a person edited in — and a pipeline's steps can be renamed out from
@@ -1457,8 +1379,10 @@ mod tests {
 
     /// `pipeline check` is the command you run to find out which pipeline
     /// file does not parse, so a load failure is reported as a problem
-    /// rather than aborting the command before it starts — the shipped
-    /// pipelines, a separate file, are still validated.
+    /// rather than aborting the command before it starts — and nothing else
+    /// is derived once it has failed: there is no loaded set left to check a
+    /// step, a skip or a prompt against, and the embedded samples are
+    /// `src/assets.rs`'s own release-time proof, never this project's.
     #[test]
     fn pipeline_check_reports_a_load_failure_instead_of_refusing_to_run() {
         let root = crate::scratch::root("commands-pipeline-check-load-failure");
@@ -1477,46 +1401,65 @@ mod tests {
         let err = pipeline_check(&repo, Err(anyhow::anyhow!("unknown field priority")), false)
             .expect_err("a pipeline that will not load is a problem");
         assert!(
-            err.to_string().contains("problem"),
-            "the load failure is a counted problem, not a hard abort: {err}"
+            err.to_string().contains("1 problem(s) found"),
+            "the load failure is the only counted problem — nothing from the embedded \
+             samples is appended behind it: {err}"
         );
     }
 
-    /// Shipped assets are templates before init substitutes the selected
-    /// profile and leave their models blank on purpose. Those two facts must
-    /// not hide the other shipped checks an override used to bypass.
+    /// The bug this task fixed: a project that owns no `bugfix.yml` of its
+    /// own, and dropped the `reproducer` prompt that only that shipped
+    /// sample ever calls for, used to fail `pipeline check` anyway — the
+    /// command validated the binary's own embedded copy of `bugfix.yml`
+    /// against this project's config regardless of what the project
+    /// actually loaded, and would have pushed "shipped pipeline
+    /// `bugfix`/`reproduce` needs prompt …" into `problems`. A project's own
+    /// `solo` pipeline, naming neither, has to pass clean instead — `Ok`
+    /// here is the proof, since `pipeline_check` bails whenever `problems`
+    /// is non-empty.
+    ///
+    /// `config.agents.remove("pi")` is not what made the old code fail —
+    /// every shipped `agent:` line is already `claude`, and the deleted
+    /// `shipped_step_config` pinned that profile regardless of a project's
+    /// own config — but it does put the project in the exact shape the
+    /// acceptance criteria describe: local files naming no `pi` profile at
+    /// all, so a `pi`-sourced finding leaking in would be as visible as any
+    /// other.
     #[test]
-    fn shipped_scaffold_exemptions_keep_other_step_checks() {
-        let root = crate::scratch::root("commands-shipped-scaffold-checks");
+    fn pipeline_check_derives_findings_only_from_the_loaded_set() {
+        let root = crate::scratch::root("commands-pipeline-check-project-owned-only");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         crate::scratch::git_init(&root, &["-b", "main"]);
         init_at(&root);
 
         let mut config = Config::default();
-        config.agents.retain(|name, _| name == "codex");
-        config.unattended.blocked_agent = "codex".into();
-        config.unattended.blocked_model.clear();
+        config.agents.remove("pi");
+
         let repo = Repo {
             home: root.join(".home"),
             checkout: root.clone(),
             root,
-            config: config.clone(),
+            config,
         };
-        let shipped = Pipelines::shipped(&config).unwrap();
-        let validation = shipped_step_config(&config);
 
-        let problems = step_problems(&repo, &shipped, &validation, true);
-        assert!(problems.is_empty(), "{problems:?}");
+        // Only the shipped `bugfix` sample calls for this prompt — `solo`,
+        // below, never does.
+        std::fs::remove_file(crate::prompt::path_for(&repo, "reproducer")).unwrap();
 
-        std::fs::remove_file(crate::prompt::path_for(&repo, "reviewer")).unwrap();
-        let problems = step_problems(&repo, &shipped, &validation, true);
-        assert_eq!(
-            problems.len(),
-            2,
-            "one reviewer step per shipped pipeline: {problems:?}"
-        );
-        assert!(problems.iter().all(|problem| problem.contains("reviewer")));
+        let pipeline = Pipeline::parse(
+            "solo",
+            "steps:\n  - id: a\n    agent: claude\n    prompt: implementer\n    \
+             model: m\n    on_pass: z\n  - id: z\n    end: true\n",
+        )
+        .unwrap();
+        let pipelines = Pipelines {
+            default: "solo".into(),
+            pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
+        };
+
+        pipeline_check(&repo, Ok(pipelines), false)
+            .expect("a prompt only the embedded bugfix sample needs must not leak in");
     }
 
     /// A gate with no `on_fail` is a warning, not a refusal: `Pipeline::validate`
@@ -1711,54 +1654,6 @@ mod tests {
 
         let err = pipeline_check(&repo, Ok(pipelines), false).unwrap_err();
         assert!(err.to_string().contains("1 problem"), "{err}");
-    }
-
-    /// The regression guard for the bug this task actually shipped:
-    /// `run: ./target/release/spoolway stack` in `assets/pipelines/*.yml`,
-    /// which worked in this repository and nowhere a project installed
-    /// spoolway. Tested directly against the pure function rather than
-    /// through `pipeline_check`, since that now also validates the real
-    /// shipped pipelines on disk, and a unit test has no business asserting
-    /// on those.
-    #[test]
-    fn shipped_run_names_a_repo_local_path_flags_a_target_relative_run() {
-        let pipeline = Pipeline::parse(
-            "default",
-            "steps:\n  - id: handover\n    run: ./target/release/spoolway stack\n    \
-             on_pass: z\n  - id: z\n    end: true\n",
-        )
-        .unwrap();
-        let shipped = Pipelines {
-            default: "default".into(),
-            pipelines: [("default".to_string(), pipeline)].into_iter().collect(),
-        };
-
-        let problems = shipped_run_names_a_repo_local_path(&shipped);
-        assert_eq!(problems.len(), 1, "{problems:?}");
-        assert!(problems[0].contains("`default`/`handover`"), "{problems:?}");
-        assert!(
-            problems[0].contains("./target/release/spoolway stack"),
-            "{problems:?}"
-        );
-    }
-
-    /// The same step, resolving the binary through `PATH` the way a project
-    /// that installed spoolway actually has it — the fix this criterion
-    /// asked for, which must not itself be flagged.
-    #[test]
-    fn shipped_run_names_a_repo_local_path_accepts_a_path_run() {
-        let pipeline = Pipeline::parse(
-            "default",
-            "steps:\n  - id: handover\n    run: spoolway stack\n    on_pass: z\n  \
-             - id: z\n    end: true\n",
-        )
-        .unwrap();
-        let shipped = Pipelines {
-            default: "default".into(),
-            pipelines: [("default".to_string(), pipeline)].into_iter().collect(),
-        };
-
-        assert!(shipped_run_names_a_repo_local_path(&shipped).is_empty());
     }
 
     /// The name of every field declared directly on `pub struct <name> {` in

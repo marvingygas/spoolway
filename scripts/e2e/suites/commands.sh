@@ -307,6 +307,34 @@ fi
 says "and names this project's own agent profiles" '"pi"' \
   "$SPOOLWAY" pipeline contract
 
+# ------------------------------------------------------- pipeline check: project-owned only
+# `pipeline check` used to also validate the two pipelines shipped inside the
+# binary — `assets/pipelines/default.yml` and `bugfix.yml` — against this
+# project's config, even for a project that dropped its own copy of one of
+# them. A project that keeps only its own override, `default.yml`, and never
+# wrote a `bugfix.yml` of its own, with the prompt only that embedded sample
+# ever called for gone too, is what proves the leak is closed: only a real
+# process, run against the built binary and its real embedded assets, can
+# prove that.
+PICHECK="$LIVE/picheck"
+mkdir -p "$PICHECK" && (cd "$PICHECK" && git init -q -b main .)
+must "a project scaffolded fresh for this case" \
+  env -C "$PICHECK" "$SPOOLWAY" init --provider claude --tracker none
+rm -f "$PICHECK/.spoolway/pipelines/bugfix.yml"
+rm -rf "$PICHECK/.spoolway/prompts/reproducer"
+must "filling in the three models its own pipeline needs" \
+  sed -i 's/model: ""/model: fake-local/' "$PICHECK/.spoolway/pipelines/default.yml"
+
+PICHECK_OUT="$LIVE/picheck.out"
+if env -C "$PICHECK" "$SPOOLWAY" pipeline check >"$PICHECK_OUT" 2>&1; then
+  ok "pipeline check passes on the project's own override alone, the shipped bugfix.yml and its reproducer prompt gone"
+else
+  bad "pipeline check passes on the project's own override alone, the shipped bugfix.yml and its reproducer prompt gone"
+  sed 's/^/        /' "$PICHECK_OUT"
+fi
+has "and reports only the pipeline this project actually loaded" '["default"]' "$PICHECK_OUT"
+lacks "with no mention of the bundled sample it dropped" "bugfix" "$PICHECK_OUT"
+
 # ---------------------------------------------------------- prompt contract
 # `prompt contract` gains a seventh section, on every call, whatever
 # `--step` names — the prompt skeleton, not a paraphrase of it.

@@ -89,10 +89,10 @@ pub fn key_block() -> &'static str {
 /// The built-in set, parsed. Falls out of [`BUILTIN_PIPELINES`] so there is one
 /// copy of the text and no second definition to keep in step.
 ///
-/// `pub(crate)` rather than private: `pipeline_check` reads this directly, so
-/// the two shipped pipelines are validated in full whether or not this
-/// project's own `.spoolway/pipelines/` shadows them with an override — see
-/// `commands::pipeline_check`.
+/// `pub(crate)` rather than private: [`Pipelines::load`] reads this directly
+/// as the on-disk fallback for a project with no `.spoolway/pipelines/` of
+/// its own, and the `#[cfg(test)]` [`Pipelines::builtin`] and
+/// [`Pipelines::shipped`] helpers both build on it too.
 pub(crate) fn builtin_pipelines() -> Result<BTreeMap<String, Pipeline>> {
     BUILTIN_PIPELINES
         .iter()
@@ -1985,15 +1985,18 @@ impl Pipelines {
     }
 
     /// The two shipped pipelines, assembled against `config` rather than the
-    /// built-in default — what `pipeline_check` validates alongside whatever
-    /// this project's own `.spoolway/pipelines/` loaded, so a shipped
-    /// pipeline is gated whether or not an override shadows it.
+    /// built-in default. `spoolway pipeline check` no longer opens these —
+    /// it derives every finding from a project's own loaded set — so this is
+    /// release-time proof only: `src/assets.rs`'s own tests hold
+    /// `assets/pipelines/*.yml` to the same structural rules and to
+    /// neutrality about Pi, model and effort choices.
     ///
     /// `dispatch.default_pipeline` is forced to `default` first: this is a
-    /// fixed two-pipeline reference set, not the project's real routing, and
+    /// fixed two-pipeline reference set, not a project's real routing, and
     /// `assemble`'s own [`Pipelines::validate`] refuses a default that names
     /// a pipeline outside the set it is validating — which a project whose
     /// real default is `impl`, say, would otherwise trip on every time.
+    #[cfg(test)]
     pub(crate) fn shipped(config: &crate::config::Config) -> Result<Pipelines> {
         let mut config = config.clone();
         config.dispatch.default_pipeline = "default".to_string();

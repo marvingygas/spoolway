@@ -527,6 +527,11 @@ fn run_summary(repo: &Repo, task: &Task) -> Result<Option<(String, String)>> {
         ("worktree", repo.root.display().to_string()),
         ("repo", repo.root.display().to_string()),
         ("state_dir", state_dir.display().to_string()),
+        // The task file moved out of `state_dir` along with the rest of a
+        // project's runtime state — see `crate::repo::Repo::home` — so a
+        // lane's own `--add-dir` grant needs this too, the same as a
+        // dispatched lane's launch in `dispatch.rs`.
+        ("project_home", repo.home().display().to_string()),
     ]);
     let mut rendered = profile.render_args(&values)?;
     let effort = (!summary.effort.trim().is_empty()).then_some(summary.effort.as_str());
