@@ -448,8 +448,11 @@ the agent itself writes its usage percentage into, which today means `claude` an
 starts](agents.md#reading-a-kinds-quota-before-a-lane-starts).
 
 Two windows are checked, `five_hour` first and then `seven_day`, and either one at or above the
-ceiling stops the launch. The pass then writes `parked_until:` on every candidate task of that
-profile, taken from the window's own `resets_at`. The park lives on the task file rather than in
+ceiling stops the launch. The pass writes `parked_until:` on every candidate task of that
+profile, taken from the window's own `resets_at`, and stamps `parked_at:` once at the start of
+the continuous hold. Later rechecks may move that deadline or refine its window while preserving
+the fixed `parked_at`; the board reads the latter to show the increasing elapsed age. The park
+lives on the task file rather than in
 the dispatcher, so it survives the dispatcher being closed and the machine being turned off —
 a second dispatcher started from cold honours it without taking any reading of its own. Tasks
 whose step names a different profile are staffed in the same pass.

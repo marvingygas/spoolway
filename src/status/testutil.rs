@@ -132,6 +132,8 @@ pub fn row(id: &str) -> Row {
         pipeline: "default".into(),
         state: State::Queued,
         parked_display: None,
+        parked_reason: None,
+        parked_until_display: None,
         depth: 0,
         steps_left: 0,
         dependents: 0,

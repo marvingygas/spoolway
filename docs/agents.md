@@ -118,11 +118,12 @@ such a kind.
 
 **The pane is left alone when this phrase shows up.** The agent resumes its own turn once the
 window resets, so tearing the lane down would throw away work that is going to continue by
-itself. The dispatcher parks the task instead: it writes `parked_until:` on the task file, the
-lane keeps its pane, session and worktree, and the reminder loop stops nudging it. The park
-runs to an observed exhausted window's reset, or uses a separate quota-recheck backoff
-from one minute to one hour. Repeated holds do not append duplicate log entries. See [Restarts, laps and
-escalation](dispatcher.md#restarts-laps-and-escalation).
+itself. The dispatcher parks the task instead: it writes the next recheck to `parked_until:`
+and stamps the continuous hold's fixed start in `parked_at:`. The board renders the increasing
+elapsed age from that start while the lane keeps its pane, session and worktree and the reminder
+loop stops nudging it. The park runs to an observed exhausted window's reset, or uses a separate
+quota-recheck backoff from one minute to one hour. Repeated holds do not append duplicate log
+entries. See [Restarts, laps and escalation](dispatcher.md#restarts-laps-and-escalation).
 
 ### Reading a kind's quota before a lane starts
 
@@ -168,11 +169,12 @@ the queue: only a codex lane writes a managed rollout, and the gate reading it h
 lane, so a reading that aged out could never be replaced.
 
 The reading gates a launch through [`quota_ceiling`](#every-profile-key). At or above the
-ceiling on either window, a pass starts no new lane of that profile and writes `parked_until:`
-on every candidate task, taken from the window's own `resets_at`. The five-hour window is
-checked first, because it is the one that resets soonest. Codex's `primary` and `secondary`
-windows are carried in those same two slots. Tasks whose step names a different profile are
-staffed in the same pass, untouched.
+ceiling on either window, a pass starts no new lane of that profile, writes `parked_until:`
+from the window's own `resets_at` on every candidate task, and stamps `parked_at:` on the first
+hold. Rechecks preserve that start, so status can keep counting the elapsed age. The five-hour
+window is checked first, because it is the one that resets soonest. Codex's `primary` and
+`secondary` windows are carried in those same two slots. Tasks whose step names a different
+profile are staffed in the same pass, untouched.
 
 **An enabled ceiling requires a trustworthy reading.** Missing probes, unreadable or
 malformed files, readings older than five hours, and expired windows hold new launches.

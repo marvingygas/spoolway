@@ -176,7 +176,13 @@ board draws, once and as plain text, without the board's own spend columns or it
 total lines — for another terminal while a run is going, or for no run at all.
 
 `--json` prints the dispatcher's pid, if one holds the lock, and one object per task instead —
-the fields a script would actually want, rather than the board's own row shape.
+the fields a script would actually want, rather than the board's own row shape. A question-held
+row and a gate-held paused row both emit `"state": "paused"` and both carry the `[r]` resume
+key — the difference is the route, not the key: the question-held row's `next` names the pane
+to look at (``look at pane `<lane>``` — [r] resumes it), the gate-held row's names the resume
+route (`→ handover — [r] resumes it`). Parked rows
+retain the `parked_until` recheck clock for compatibility and add `parked_age`, the formatted
+elapsed duration from `parked_at` (`null` for a legacy park without that timestamp).
 
 ### `spoolway queue show <task>`
 

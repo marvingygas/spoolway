@@ -443,12 +443,13 @@ pub struct Frontmatter {
     /// [`Self::parked_until`] beside it, which is only ever the *next*
     /// recheck deadline and moves every time the park is re-probed.
     ///
-    /// The intended reading is the park's age, `now - parked_at`, for a
-    /// display that wants "how long has this been held" rather than "when
-    /// does the next probe fall". Nothing consumes it that way yet — the
-    /// board still draws parks off `parked_until` — so this field is only
-    /// written and round-tripped for now, against the board change that will
-    /// read it (see the `parked-duration-and-paused-state` plan).
+    /// The reading is the park's age, `now - parked_at`: "how long has this
+    /// been held", not "when does the next probe fall". The board and `queue
+    /// list` draw a parked row's STATE cell as `● parked · 8m` from it,
+    /// and `queue list --json` reports the same string as `parked_age` —
+    /// `crate::status::build_rows`. It is also what marks a task as still
+    /// inside a hold there, since it outlives a `parked_until` deadline that
+    /// has run out; a legacy park without it shows a bare `● parked`.
     ///
     /// Written once, by whichever dispatcher check in `src/dispatch.rs`
     /// first parks the task — `quota_over_ceiling`, the unavailable-reading
@@ -566,10 +567,11 @@ pub fn route_key(from: &str, to: &str) -> String {
 /// form even on a day that now matches `now`'s own — see [`format_until`]'s
 /// own doc for why a caller ever wants that.
 ///
-/// Shared by every reader of [`Frontmatter::parked_until`] — the board, `queue
-/// list` and the dispatcher's own report lines — so a park reads the same
-/// clock everywhere it is printed. `now` is a parameter rather than read
-/// here, so a test can hold it still.
+/// Used by the dispatcher's own report lines (through [`format_until`]) so a
+/// park's recheck time reads the same wherever it is logged. The board and
+/// `queue list` no longer print this clock — a parked row there shows the
+/// park's elapsed age from [`Frontmatter::parked_at`] instead. `now` is a
+/// parameter rather than read here, so a test can hold it still.
 pub fn format_instant(until: i64, now: i64, dated: bool) -> String {
     let (target, same_day) = local_instant(until, now);
     match dated || !same_day {

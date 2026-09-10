@@ -100,9 +100,14 @@ struct QueueRowJson {
     out_tokens: Option<u64>,
     cost_usd: Option<f64>,
     lane_time_s: Option<i64>,
-    /// The clock a `state: "parked"` row is waiting out, already formatted —
-    /// `None` on every other state. Mirrors `Row::parked_display`.
+    /// The recheck clock retained for compatibility with the original JSON
+    /// schema. This is not the elapsed age drawn by the board.
     parked_until: Option<String>,
+    /// How long a `state: "parked"` row has been held — `now - parked_at`,
+    /// already formatted (`"8m"`, `"1h 04m"`). `None` on every other
+    /// state, and on a legacy park with no recorded start. Mirrors
+    /// `Row::parked_display`.
+    parked_age: Option<String>,
 }
 
 impl From<&crate::status::Row> for QueueRowJson {
@@ -122,7 +127,8 @@ impl From<&crate::status::Row> for QueueRowJson {
             out_tokens: row.out,
             cost_usd: row.cost,
             lane_time_s: row.lane_time,
-            parked_until: row.parked_display.clone(),
+            parked_until: row.parked_until_display.clone(),
+            parked_age: row.parked_display.clone(),
         }
     }
 }
@@ -132,7 +138,6 @@ impl From<&crate::status::Row> for QueueRowJson {
 fn state_label(state: crate::status::State) -> &'static str {
     use crate::status::State::*;
     match state {
-        WaitingOnYou => "waiting_on_you",
         Paused => "paused",
         Running => "running",
         Blocked => "blocked",
@@ -4170,6 +4175,61 @@ mod tests {
     /// to exist, not to say anything in particular.
     const BODY: &str = "## Goal\n\nDo the thing.\n";
 
+    /// `queue list --json` reports one `paused` for both a gate-held row and
+    /// a question-held one — `State::WaitingOnYou` is gone — while `next`
+    /// still carries the wording that tells the two apart and `resumable` is
+    /// `true` on both: a question-held row offers the same `[r]` a gate does,
+    /// alongside the pane it names. A parked row carries its elapsed age as
+    /// additive `parked_age`, while the existing `parked_until` clock keeps
+    /// its name and meaning. Nothing emits the old `waiting_on_you` state
+    /// label.
+    #[test]
+    fn queue_json_reports_paused_and_a_parked_age() {
+        use crate::status::State;
+        use crate::status::testutil::row;
+
+        let mut gate = row("release-me");
+        gate.state = State::Paused;
+        gate.resumable = true;
+        gate.next = "→ handover — [r] resumes it".into();
+
+        let mut question = row("question");
+        question.state = State::Paused;
+        question.resumable = true;
+        question.next = "look at pane `question · implement` — [r] resumes it".into();
+
+        let mut parked = row("job-engine");
+        parked.state = State::Parked;
+        parked.parked_display = Some("42m".into());
+        parked.parked_reason = Some("quota unavailable".into());
+        parked.parked_until_display = Some("23:05".into());
+
+        let json: Vec<QueueRowJson> = [&gate, &question, &parked]
+            .iter()
+            .map(|r| QueueRowJson::from(*r))
+            .collect();
+
+        assert_eq!(json[0].state, "paused");
+        assert!(json[0].resumable);
+        assert_eq!(json[1].state, "paused");
+        assert!(json[1].resumable);
+        assert_eq!(
+            json[1].next,
+            "look at pane `question · implement` — [r] resumes it"
+        );
+        assert_eq!(json[2].state, "parked");
+        assert_eq!(json[2].parked_until.as_deref(), Some("23:05"));
+        assert_eq!(json[2].parked_age.as_deref(), Some("42m"));
+
+        let rendered = serde_json::to_string(&json[2]).unwrap();
+        assert!(
+            rendered.contains("\"parked_until\":\"23:05\""),
+            "{rendered}"
+        );
+        assert!(rendered.contains("\"parked_age\":\"42m\""), "{rendered}");
+        assert!(!rendered.contains("waiting_on_you"), "{rendered}");
+    }
+
     #[test]
     fn strip_slug_prefix_removes_only_a_recognised_prefix() {
         assert_eq!(
@@ -4812,6 +4872,46 @@ mod tests {
 
         let task = queued(&repo, "solo");
         assert_eq!(task.stage(), "implement");
+    }
+
+    /// A question-held row is never on `paused`, `parked` or `blocked` —
+    /// none of `paused_at`, `parked_from` or `blocked_from` is ever set for
+    /// it — so `resume_task`'s guard against a task with nothing to resume
+    /// must not treat that absence as a reason to do nothing, the way it
+    /// does for a genuine race on the persisted `paused` stage. `r` on that
+    /// row instead falls through to `back_onto_its_step`, which resumes at
+    /// `resume_target`'s `last_report.step`: the step the row was already
+    /// on. That restarts it — banking a round on the step's own route to
+    /// itself and logging the same "unblocked by hand" message a block's
+    /// `r` would — rather than leaving `r` a silent no-op the rest of the
+    /// suite could not tell apart from the guard doing its job.
+    #[test]
+    fn a_question_held_task_is_restarted_on_the_step_its_pane_never_answered() {
+        let repo = fixture("queue-resume-question-pane");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "solo", &[]);
+        let mut task = queued(&repo, "solo");
+        task.set_stage_unbanked("implement", "test setup");
+        task.front.last_report = Some(crate::task::LastReport {
+            step: "implement".into(),
+            outcome: "pass".into(),
+            at: 0,
+        });
+        task.save().unwrap();
+        let before = queued(&repo, "solo");
+        assert_eq!(before.front.paused_at, None);
+        assert_eq!(before.front.parked_from, None);
+        assert_eq!(before.front.blocked_from, None);
+
+        queue_resume(&repo, &pipelines, "solo").unwrap();
+
+        let task = queued(&repo, "solo");
+        assert_eq!(task.stage(), "implement");
+        assert!(
+            task.body.contains("unblocked by hand"),
+            "the step was restarted rather than left alone: {}",
+            task.body
+        );
     }
 
     #[test]

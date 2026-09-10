@@ -213,7 +213,7 @@ dispatcher running · pid 48213 · up 6m 49s
    TASK       PIPELINE   STEP           STATE              CTX   OUT    COST      TIME   NEXT
 
  ▌auth
- ▸ login      default    deploy         ● waiting on you     —   18k   $2.14    4m 00s   answer it in pane `login · deploy`
+ ▸ login      default    deploy         ● paused             —   18k   $2.14    4m 00s   look at pane `login · deploy` — [r] resumes it
    profile    bugfix     queued         ● unreachable        —     —       —         —   unreachable — login is blocked
    signup     default    done           ● done               —     —       —         —
                                                                  49k   $2.14   31m 02s
@@ -470,15 +470,17 @@ floor. `N` is the laps this task has taken from the step it arrived here from, `
 route's own budget, the same pair `apply_loop_budget` compares before it lets another one
 through. A step with no declared budget for that route shows a bare step id.
 
-A task holding a `parked_until:` in the future reads `● parked · 14:00`, on the board and in
-`spoolway queue list` alike — the one state whose word carries a clock, because the only thing
-a reader wants from a parked row is when it stops being parked. A reset within the day shows a
-bare time; a longer wait shows the date and how far off it is.
+A task holding a quota park reads its elapsed age from the fixed `parked_at:` timestamp, on
+the board and in `spoolway queue list` alike. The age keeps increasing while rechecks move
+`parked_until:`. A legacy park without `parked_at:` gets no invented age; when the quota
+reading itself is unavailable, its state can still retain that separate diagnosis.
 
 ```
-TASK       PIPELINE  STEP       STATE                NEXT
-wire-up    impl      implement  ● parked · 14:00     review
-log-view   impl      implement  ● running            review
+TASK       PIPELINE  STEP       STATE                                  NEXT
+wire-up    impl      implement  ● parked · 8m                           review
+quota      impl      implement  ● parked · quota unavailable · 42m     review
+legacy     impl      implement  ● parked                                review
+log-view   impl      implement  ● running                               review
 ```
 
 Re-queueing a document clears `parked_until:` along with the `usage_limit_hold` beside it, the
@@ -732,8 +734,11 @@ nothing. `Mux::prompt` is what stands in its place instead: implemented once, on
 so a headless lane is reminded by reopening its pinned session and a resident one by typing into
 the pane it never left — the same call either way, identical for every agent kind.
 
-Either way you are told once that a pane is worth a look — the board's `waiting on you` — and
-the pane is named in the status output.
+Either way you are told once that a pane is worth a look — the board's `paused` state, the
+same state a gated task on the `paused` stage gets — and NEXT names the pane to look at, in the
+same ``look at pane `<lane>``` — [r] resumes it`` form a gate's resume carries. The task
+remains on its live pipeline step; the two differ only in route, not in key: the pane-held row
+points at the pane, the gate-held row points at the resume route.
 
 Once, and not for the rest of the lane's life: the mark comes off the moment the lane is seen
 working again. Whether you answered the question or the lane was only quiet long enough between
@@ -744,7 +749,7 @@ that is a second question and worth being told about.
 A lane that ended its turn *waiting* on something — a backgrounded watch, a scheduled
 wakeup — is this same case and not a third one. Nothing under spoolway resumes a settled
 session beyond the reminder above, so the pane it left is the pane a lane holding a question
-leaves, and the board says `waiting on you` about a pane with no question in it. That is
+leaves, and the board says `paused` and names a pane with no question in it. That is
 prevention's job too: the framing every lane is sent says in as many words that nothing brings
 it back to a turn, and that nothing watches how long any one call takes any more — long waits
 are polled through, awake, inside the turn, because there is no clock left to sit through them
@@ -1209,7 +1214,7 @@ spoolway-dispatcher:  2 windows  (created Thu Aug 14 09:12)
 │   ✻ Working… (esc to interrupt)        │   ✻ Working… (esc to interrupt)│
 ├────────────────────────────────────────┼────────────────────────────────┤
 │ ● fix-flaky · review                   │                                │
-│   waiting on you                       │                                │
+│   paused — look at pane                │                                │
 └────────────────────────────────────────┴────────────────────────────────┘
 ```
 

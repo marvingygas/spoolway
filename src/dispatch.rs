@@ -3937,8 +3937,9 @@ impl<'a> Dispatcher<'a> {
     /// holding a question from one that ended its turn on a background job it
     /// started, and the second is what the `e2e` prompt does every time: it
     /// starts a suite run allowed 45 minutes and stops talking. Marking that
-    /// immediately put `waiting on you` on the board against a pane where
-    /// nobody had asked anything, and sent a person to go and look at it.
+    /// immediately put `● paused — look at pane …` on the board against a
+    /// pane where nobody had asked anything, and sent a person to go and
+    /// look at it.
     ///
     /// So a lane earns the mark the same way it earns a reminder, by being
     /// quiet for `dispatch.lane_quiet` — the patience `b00bb5c` gave the
@@ -3973,7 +3974,7 @@ impl<'a> Dispatcher<'a> {
     /// The mark is read as "this pane is holding a question", and a lane
     /// mid-turn is not: the question was answered, or the lane only looked
     /// settled for a moment between turns. Leaving it set is what had the
-    /// board reading `waiting on you` at a pane the agent was visibly still
+    /// board reading `● paused` at a pane the agent was visibly still
     /// working in, for the rest of the lane's life — the mark used to be
     /// cleared by the watchdog that ran here, and nothing took that over when
     /// the clocks were retired.
@@ -9363,7 +9364,7 @@ mod tests {
     /// And unmarked again the moment the lane is working, because then it is
     /// holding no question: either somebody answered it, or the lane was only
     /// quiet between turns for long enough to look settled. A mark that stayed
-    /// put had the board reading `waiting on you` at a pane with an agent
+    /// put had the board reading `● paused` at a pane with an agent
     /// visibly mid-turn in it, for the rest of that lane's life.
     ///
     /// The mark is earned by `dispatch.lane_quiet` of silence, not by one

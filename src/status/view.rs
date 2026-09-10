@@ -118,14 +118,12 @@ pub(super) const AMBER: &str = "\x1b[33m";
 
 const RED: &str = "\x1b[31m";
 
-const CYAN: &str = "\x1b[36m";
-
 // Blocked's own colour, apart from `RED`: a block is a task waiting on a
 // person, the same *kind* of stop `Paused` is, and red is reserved for a
 // dead end nothing here can move past on its own — the graph's own
 // `Unreachable`, the state a dependency cycle or a missing dependency reads
-// as. Orange rather than amber too, so a block and a genuine `WaitingOnYou`
-// or `Paused` never read as the same colour from across a room.
+// as. Orange rather than amber too, so a block and a `Paused` row never read
+// as the same colour from across a room.
 const ORANGE: &str = "\x1b[38;5;208m";
 
 /// The two halves of an OSC 8 terminal hyperlink: `OSC8 <url> ST <label> OSC8
@@ -140,7 +138,6 @@ impl State {
     /// the same column width as a coloured one.
     pub fn word(self) -> &'static str {
         match self {
-            State::WaitingOnYou => "● waiting on you",
             State::Paused => "● paused",
             State::Running => "● running",
             State::Blocked => "● blocked",
@@ -154,9 +151,9 @@ impl State {
     fn dot(self) -> String {
         let word = self.word();
         match self {
-            State::WaitingOnYou => format!("{AMBER}{BOLD}{word}{RESET}"),
-            // Amber like a question and not red like a failure: a paused task
-            // is a step that went *well*, waiting to be let past.
+            // Amber, and bold: a paused task is a step that went *well* and
+            // is now the one thing on the board a person can act on — whether
+            // it is a gate to release or a pane to look at.
             State::Paused => format!("{AMBER}{BOLD}{word}{RESET}"),
             State::Running => format!("{GREEN}{word}{RESET}"),
             State::Blocked => format!("{ORANGE}{word}{RESET}"),
@@ -1166,7 +1163,6 @@ pub(super) fn table(
                 None => row.next.clone(),
             };
             let next = match row.state {
-                State::WaitingOnYou => style.paint(CYAN, &next),
                 State::Done => style.paint(DIM, &next),
                 _ => next,
             };
@@ -1182,15 +1178,18 @@ pub(super) fn table(
     out
 }
 
-/// The full text of a row's STATE cell: the state's own word, plus a
-/// `· <timestamp>` suffix on a `Parked` row — the one state whose meaning
-/// includes a clock nothing else on the board carries. Kept off
-/// [`State::word`] itself, which returns `&'static str` and so cannot carry
-/// per-row text.
+/// The full text of a row's STATE cell: the state's own word, plus an
+/// optional unavailable-reading reason and `· <age>` suffix on a `Parked`
+/// row — the one state whose meaning includes per-row context and elapsed
+/// duration. Kept off [`State::word`] itself, which returns `&'static str`
+/// and so cannot carry either value.
 fn state_cell_text(row: &Row) -> String {
-    match (&row.state, &row.parked_display) {
-        (State::Parked, Some(display)) => format!("{} · {display}", row.state.word()),
-        _ => row.state.word().to_string(),
+    let word = row.state.word();
+    match (&row.state, &row.parked_reason, &row.parked_display) {
+        (State::Parked, Some(reason), Some(age)) => format!("{word} · {reason} · {age}"),
+        (State::Parked, Some(reason), None) => format!("{word} · {reason}"),
+        (State::Parked, None, Some(age)) => format!("{word} · {age}"),
+        _ => word.to_string(),
     }
 }
 
@@ -1200,8 +1199,10 @@ impl Style {
             true => row.state.dot(),
             false => row.state.word().to_string(),
         };
-        match (&row.state, &row.parked_display) {
-            (State::Parked, Some(display)) => format!("{dot} · {display}"),
+        match (&row.state, &row.parked_reason, &row.parked_display) {
+            (State::Parked, Some(reason), Some(age)) => format!("{dot} · {reason} · {age}"),
+            (State::Parked, Some(reason), None) => format!("{dot} · {reason}"),
+            (State::Parked, None, Some(age)) => format!("{dot} · {age}"),
             _ => dot,
         }
     }
@@ -1561,6 +1562,19 @@ pub(crate) fn human_secs(total: i64) -> String {
     }
 }
 
+/// A park age changes at the precision a person needs on the board: seconds
+/// while it is less than a minute, whole minutes below an hour, then hours
+/// and minutes. Unlike [`human_secs`], this deliberately does not let a
+/// minute-scale hold make the STATE column tick every second.
+pub(crate) fn park_age(total: i64) -> String {
+    let (h, m, s) = (total / 3600, (total % 3600) / 60, total % 60);
+    match (h, m) {
+        (0, 0) => format!("{s}s"),
+        (0, _) => format!("{m}m"),
+        _ => format!("{h}h {m:02}m"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1579,10 +1593,6 @@ mod tests {
             format!("{RED}● unreachable{RESET}")
         );
         assert_eq!(State::Paused.dot(), format!("{AMBER}{BOLD}● paused{RESET}"));
-        assert_eq!(
-            State::WaitingOnYou.dot(),
-            format!("{AMBER}{BOLD}● waiting on you{RESET}")
-        );
         assert_eq!(State::Running.dot(), format!("{GREEN}● running{RESET}"));
     }
 
@@ -2828,6 +2838,28 @@ mod tests {
         assert_eq!(human_secs(47), "47s");
         assert_eq!(human_secs(723), "12m 03s");
         assert_eq!(human_secs(3840), "1h 04m");
+    }
+
+    /// Parked STATE cells use stable minute precision rather than the lane
+    /// timer's seconds, matching the board contract exactly at 42 minutes.
+    #[test]
+    fn parked_state_cell_renders_a_whole_minute_age() {
+        let parked = Row {
+            state: State::Parked,
+            parked_display: Some(park_age(42 * 60)),
+            ..row("job-engine")
+        };
+
+        assert_eq!(state_cell_text(&parked), "● parked · 42m");
+        let plain = plain_table(&[parked]);
+        let rendered = plain
+            .lines()
+            .find(|line| line.contains("job-engine"))
+            .unwrap_or_else(|| panic!("parked row in {plain:?}"));
+        assert_eq!(
+            rendered,
+            "   job-engine   default    implement   ● parked · 42m   "
+        );
     }
 
     /// The ticker is the section that gives when the pane is short, and what

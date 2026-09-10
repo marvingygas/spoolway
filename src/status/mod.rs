@@ -69,14 +69,14 @@ const RECENT: usize = 6;
 /// What one task is doing, reduced to the thing the board colors by.
 #[derive(Clone, Copy, PartialEq)]
 pub enum State {
-    /// A lane's pane is holding a question for a person. Sorts by run order
-    /// like any other row now — see [`Row::key`] — but stays marked in amber:
-    /// nothing else on the board can shorten the run the way answering can.
-    WaitingOnYou,
-    /// Finished a gated step and waiting to be let past it. Next to
-    /// `waiting on you` rather than next to `blocked`, because it is the same
-    /// kind of thing — a person is the only thing between this task and the
-    /// rest of its pipeline — and nothing went wrong.
+    /// A person is the one thing between this task and the rest of its
+    /// pipeline, and nothing went wrong. Two situations reach it: a gated
+    /// step that finished and is waiting to be let past, and a live pane
+    /// that ended its turn on a question. The state does not tell the two
+    /// apart — NEXT does, naming the resume for the first and the pane to
+    /// look at for the second — because the reader's next move is the same
+    /// either way: go and intervene. Next to `blocked` rather than inside
+    /// it, since a paused step passed and a blocked one did not.
     Paused,
     /// Something is working the task right now: a live lane, or the run of a
     /// command step, which has no lane at all.
@@ -86,10 +86,13 @@ pub enum State {
     /// Waiting on a dependency that can never arrive.
     Unreachable,
     /// Held on a clock, not on a person — a quota probe over its ceiling, or
-    /// a lane whose pane already carries its kind's usage-limit phrase. See
-    /// [`crate::task::Frontmatter::parked_until`]. Next to `Queued` rather
-    /// than `Paused`: nothing went wrong and nobody has anything to answer,
-    /// it is simply not this task's turn yet.
+    /// a lane whose pane already carries its kind's usage-limit phrase. Read
+    /// off [`crate::task::Frontmatter::parked_at`], the fixed start of a
+    /// continuous hold, falling back to a future
+    /// [`crate::task::Frontmatter::parked_until`] for a legacy park that has
+    /// no `parked_at`. Next to `Queued` rather than `Paused`: nothing went
+    /// wrong and nobody has anything to answer, it is simply not this task's
+    /// turn yet.
     Parked,
     /// In the queue, waiting for a slot or a dependency.
     Queued,
@@ -155,11 +158,20 @@ pub struct Row {
     /// resolve it any more.
     pub pipeline: String,
     pub state: State,
-    /// The clock a `Parked` row is waiting out, already formatted — `None`
-    /// on every other state. Kept off [`State`] itself, which carries no
-    /// data on any of its variants, and composed into the STATE cell by
+    /// How long a `Parked` row has been held, already formatted — `None` on
+    /// every other state and when a legacy park has no `parked_at` to count
+    /// from. Kept off [`State`] itself, which carries no data on any of its
+    /// variants, and composed into the STATE cell by
     /// [`view::state_cell_text`] instead.
     pub parked_display: Option<String>,
+    /// A board-only explanation that precedes the elapsed age on a `Parked`
+    /// row. Kept separate so the machine-readable `parked_age` field remains
+    /// a duration rather than sometimes becoming diagnostic prose.
+    pub parked_reason: Option<String>,
+    /// The formatted recheck clock historically exposed as `parked_until`
+    /// by `queue list --json`. The board no longer draws this clock, but the
+    /// machine-readable contract retains it beside the additive park age.
+    pub parked_until_display: Option<String>,
     /// How deep this task sits in the run — [`Graph::depth`] of its id. The
     /// first tier `Row::key` sorts a group's live rows by, once whether the
     /// row is done is settled: a dependency this deep below another belongs
@@ -925,14 +937,26 @@ pub(crate) fn resume_task(repo: &Repo, pipelines: &Pipelines, id: &str) -> Resul
     // `paused_at` is a gate passed, waiting to be sent on past it;
     // `parked_from` is a person's own interrupt, and `blocked_from` is a
     // real block — both waiting to be sent back to where they stopped. Only
-    // ever one of the three, and never none, on a task standing on `paused`.
+    // ever one of the three, and never none, on a task genuinely standing on
+    // `paused` — so a task there with none of them set is a race: some other
+    // process already answered it since the row was built, and there is
+    // nothing left here for this key to do.
     //
-    // Nothing here has to say which: `commands::resume` reads
+    // A task holding a person-answered *question* never reaches `paused` at
+    // all — it is still standing on its own live step, and none of the three
+    // fields is ever set for it — so this guard only reads them on the stage
+    // where their absence is actually a race rather than the ordinary shape
+    // of that row.
+    //
+    // Nothing here has to say which of the three: `commands::resume` reads
     // `paused_at.is_some()` itself to route a gate one way and everything
     // else the other, so naming a step here would only risk disagreeing
     // with it — see `back_onto_its_step`, which finds `parked_from` and
-    // `blocked_from` on its own.
-    if task.front.paused_at.is_none()
+    // `blocked_from` on its own, and which also handles the question-pane
+    // case by falling back to `resume_target`'s `last_report.step`: pressing
+    // `r` there restarts the step the pane's question was never answered on.
+    if task.stage() == crate::pipeline::PAUSED
+        && task.front.paused_at.is_none()
         && task.front.parked_from.is_none()
         && task.front.blocked_from.is_none()
     {
@@ -1707,12 +1731,21 @@ fn build_rows(
             && !pipeline.blocked_is_staffed(repo.unattended());
 
         // A quota probe or a usage-limit pane parked this task — see
-        // `Dispatcher::quota_over_ceiling` and `Dispatcher::
-        // usage_limit_hold` in `dispatch.rs`, both of which write
-        // `parked_until` rather than moving the stage. Read the same way the
-        // dispatcher's own gate reads it: in the future, or not set at all.
+        // `Dispatcher::quota_over_ceiling` and `Dispatcher::usage_limit_hold`
+        // in `dispatch.rs`. `park-lifecycle` stamps `parked_at` once when a
+        // continuous hold begins and clears it only on a true exit — a
+        // launch, a stage move, a re-queue — so it stays set across a
+        // re-probe whose `parked_until` deadline has already run out. Reading
+        // the hold off `parked_at`, rather than off `parked_until > now`,
+        // keeps the row on `Parked` through that gap instead of flashing back
+        // to `running` for the one frame between the deadline passing and the
+        // next pass re-parking — the transient unpark frame this task
+        // removes. A legacy park written before `parked_at` existed has only
+        // the deadline to go on, and no age to show.
         let now = chrono::Utc::now().timestamp();
-        let quota_parked_until = task.front.parked_until.filter(|&until| until > now);
+        let parked_at = task.front.parked_at;
+        let parked_hold =
+            parked_at.is_some() || task.front.parked_until.is_some_and(|until| until > now);
 
         // What happens to this task next. For one that is moving that is the
         // step it goes to; for one that is stuck it is whatever has to happen
@@ -1760,7 +1793,7 @@ fn build_rows(
                 // is also running.
                 match dependency {
                     Some(d) => (state, d, false),
-                    None if quota_parked_until.is_some() => {
+                    None if parked_hold => {
                         (State::Parked, format!("→ {}", pipeline.entry()), false)
                     }
                     None => (
@@ -1812,7 +1845,7 @@ fn build_rows(
             // would otherwise read as `Running` (a live lane) or `Queued` (no
             // lane yet) with nothing on the row saying why nothing is
             // happening.
-            Some(step) if quota_parked_until.is_some() => {
+            Some(step) if parked_hold => {
                 let next = match pipeline.next_running_step(&step.id) {
                     Some(next) => format!("→ {next}"),
                     None => "→ done".to_string(),
@@ -1822,11 +1855,18 @@ fn build_rows(
             // A pane holding a question, unless the lane in it is visibly
             // working — in which case the question was answered, or the lane
             // only looked settled for a moment between turns, and the row
-            // reads as the running step it is.
+            // reads as the running step it is. `Paused`, the same state a
+            // gated task on `paused` gets: both ask the reader to intervene,
+            // and NEXT carries the difference — the pane to look at here, the
+            // resume there. Resumable like a gate too, though `r` cannot
+            // answer the question for a person: it restarts the step the
+            // pane never got an answer on, exactly as `resume_task` does for
+            // any other row this key fires on — see its own comment for why
+            // that fallback lands there rather than doing nothing.
             Some(_) if waiting.contains(&lane) && !working => (
-                State::WaitingOnYou,
-                format!("answer it in pane `{lane}`"),
-                false,
+                State::Paused,
+                format!("look at pane `{lane}` — [r] resumes it"),
+                true,
             ),
             Some(step) => {
                 let state = match live || command_run.is_some() {
@@ -1883,19 +1923,43 @@ fn build_rows(
             step_loop,
             pipeline: pipeline.name.clone(),
             state,
-            parked_display: quota_parked_until.map(|until| {
-                // An `unknown`-window park has no quota reset to name. Its
-                // `parked_until` is the dispatcher's own retry deadline,
-                // which doubles outward every pass, so drawing it here put a
-                // retry clock in exactly the position a real window's reset
-                // time occupies — a board that read 22:05, 22:13 and 22:29
-                // in one evening while the account's usage never moved.
-                if task.front.parked_window == "unknown" {
-                    return "quota unavailable".to_string();
-                }
-                let dated = task.front.parked_window == crate::quota::Window::SevenDay.key();
-                crate::task::format_instant(until, now, dated)
-            }),
+            // The park's elapsed age, `now - parked_at`, drawn onto the STATE
+            // cell as `● parked · 8m` — how long this has been held, not
+            // when the next probe falls. `parked_at` is fixed for the whole
+            // continuous hold, so this counts up smoothly across every
+            // re-probe rather than jumping when a deadline moves. Only on a
+            // row that actually reads `Parked`, and only when `parked_at` is
+            // set: a legacy park has no start to count from, so it supplies
+            // no age. Its separate unavailable-reading reason, when present,
+            // remains visible below.
+            parked_display: (state == State::Parked)
+                .then(|| parked_at.map(|at| view::park_age((now - at).max(0))))
+                .flatten(),
+            // Keep an unavailable reading visible without putting prose in
+            // the additive JSON age field. This also preserves the diagnosis
+            // for a legacy hold whose missing `parked_at` leaves no age to
+            // draw beside it.
+            parked_reason: (state == State::Parked && task.front.parked_window == "unknown")
+                .then(|| "quota unavailable".to_string()),
+            // Keep the pre-existing JSON clock independent of the board's
+            // age: consumers of `parked_until` must not silently receive a
+            // duration with different semantics under the old field name. An
+            // `unknown`-window park still names no reset time here either —
+            // `parked_until` is the dispatcher's own retry deadline in that
+            // case, drifting outward every pass, and printing it would put
+            // back the exact clock this task's `parked_display` fix removed
+            // from the board (a board reading 22:05, 22:13 and 22:29 in one
+            // evening while usage never moved), just under the JSON field
+            // instead.
+            parked_until_display: task.front.parked_until.filter(|&until| until > now).map(
+                |until| {
+                    if task.front.parked_window == "unknown" {
+                        return "quota unavailable".to_string();
+                    }
+                    let dated = task.front.parked_window == crate::quota::Window::SevenDay.key();
+                    crate::task::format_instant(until, now, dated)
+                },
+            ),
             depth: graph.depth(task.id()),
             // Mirrors `Candidate::steps_left`: the pipeline's own length less
             // one, less the step's raw index — comparable across pipelines of
@@ -2060,6 +2124,8 @@ fn done_rows(
                 pipeline: archived_pipeline_name(pipelines, task.front.pipeline.as_deref()),
                 state: State::Done,
                 parked_display: None,
+                parked_reason: None,
+                parked_until_display: None,
                 // An archived row's `Done` tier already puts it last within
                 // its group — see `Row::key` — so none of the run-order tiers
                 // beneath it are ever compared.
@@ -2892,7 +2958,7 @@ mod tests {
     /// of seconds. In between — and for good, with no dispatcher running —
     /// the board would tell a person to go and answer a pane with an agent
     /// visibly mid-turn in it. A working lane reads as the running step it is,
-    /// and settles back to `waiting on you` the moment it stops.
+    /// and settles back to `paused` the moment it stops.
     #[test]
     fn a_marked_lane_that_is_working_reads_as_running() {
         let repo = fixture("waiting-but-working");
@@ -2910,26 +2976,75 @@ mod tests {
         let row = rows.iter().find(|r| r.id == "login").unwrap();
         assert!(matches!(row.state, State::Running), "{}", row.next);
 
-        // Quiet again: the pane really is holding the question, and the row
-        // says where to go and answer it.
+        // Quiet again: the pane really is holding the question. The row reads
+        // `paused`, the same state a gated task gets, and NEXT names both the
+        // pane to look at and the same `[r]` a gate would offer.
         let mut settled = lane("login · implement", &repo.root);
         settled.status = crate::mux::LaneStatus::Done;
         let rows =
             build_rows(&repo, &tasks, &pipelines, &graph, &waiting, &[settled], &[]).unwrap();
         let row = rows.iter().find(|r| r.id == "login").unwrap();
-        assert!(matches!(row.state, State::WaitingOnYou));
-        assert!(row.next.contains("login · implement"), "{}", row.next);
+        assert!(matches!(row.state, State::Paused));
+        assert!(row.resumable);
+        assert_eq!(
+            row.next,
+            "look at pane `login · implement` — [r] resumes it"
+        );
     }
 
     /// A task the dispatcher parked for its quota reads `Parked` on the
-    /// board, with the clock it is waiting out drawn on the STATE cell
-    /// itself — `queue list` and the board share this one table, so both
-    /// read it the same way. A `parked_until` already in the past is not
-    /// this row's business to clear; that is the dispatcher's, at the top of
-    /// its own next pass, so the row still reads `Parked` until then.
+    /// board, with the park's elapsed age — `now - parked_at` — drawn on the
+    /// STATE cell itself. `queue list` and the board share this one table, so
+    /// both read it the same way. A `parked_until` already in the past does
+    /// not end the hold: `parked_at` is what the row is read off, so it still
+    /// reads `Parked` with a growing age until the dispatcher resolves it.
     #[test]
-    fn a_task_parked_for_its_quota_reads_parked_with_its_own_clock() {
+    fn a_task_parked_for_its_quota_reads_parked_with_its_elapsed_age() {
         let repo = fixture("quota-parked-row");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], Some("review"));
+        let mut task = repo.task("login").unwrap();
+        // An hour-plus age so `park_age` is stable across the sub-second
+        // gap between this save and the assertion — its `h` branch drops the
+        // seconds, where a bare-minutes age would tick mid-test.
+        task.front.parked_at = Some(chrono::Utc::now().timestamp() - 3840);
+        // The recheck deadline has already run out; the hold has not.
+        task.front.parked_until = Some(chrono::Utc::now().timestamp() - 60);
+        task.save().unwrap();
+
+        let tasks = repo.tasks().unwrap();
+        let graph = Graph::build(&tasks, &pipelines, &repo.archive_dir());
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &BTreeSet::new(),
+            &[],
+            &[],
+        )
+        .unwrap();
+        let row = rows.iter().find(|r| r.id == "login").unwrap();
+        assert!(matches!(row.state, State::Parked), "{}", row.next);
+        let display = row
+            .parked_display
+            .as_deref()
+            .expect("a parked row carries its elapsed age");
+        assert_eq!(display, "1h 04m");
+        assert_eq!(
+            row.parked_until_display, None,
+            "the compatible JSON clock expires even while parked_at keeps the hold visible"
+        );
+        assert!(view::plain_table(&rows).contains("parked · 1h 04m"));
+    }
+
+    /// A park written by an older spoolway carries `parked_until` but no
+    /// `parked_at`. The row still reads `Parked` off the future deadline, but
+    /// there is no start to count an age from, so the STATE cell is a bare
+    /// `● parked` with nothing invented after it.
+    #[test]
+    fn a_legacy_park_with_no_parked_at_shows_no_age() {
+        let repo = fixture("legacy-park-row");
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("review"));
         let mut task = repo.task("login").unwrap();
@@ -2951,26 +3066,37 @@ mod tests {
         .unwrap();
         let row = rows.iter().find(|r| r.id == "login").unwrap();
         assert!(matches!(row.state, State::Parked), "{}", row.next);
-        let display = row
-            .parked_display
-            .as_deref()
-            .expect("a parked row must carry its own clock");
+        assert_eq!(row.parked_display, None);
         assert_eq!(
-            display,
-            crate::task::format_instant(until, chrono::Utc::now().timestamp(), false)
+            row.parked_until_display,
+            Some(crate::task::format_instant(
+                until,
+                chrono::Utc::now().timestamp(),
+                false
+            )),
+            "legacy JSON consumers keep receiving the recheck clock"
         );
-        assert!(view::plain_table(&rows).contains(&format!("parked · {display}")));
+        let table = view::plain_table(&rows);
+        assert!(table.contains("● parked"), "{table}");
+        assert!(!table.contains("parked · "), "{table}");
     }
 
-    /// A park with no real window to name prints no clock. When the
-    /// dispatcher could not produce a quota reading at all it sets
-    /// `parked_window` to `"unknown"` and pushes `parked_until` out by its
-    /// own retry backoff. That instant is a retry deadline, not a quota
-    /// reset, and it drifts outward every pass, so the row must not draw it
-    /// in the position a real window's reset time occupies.
+    /// A park with no real window to name carries its diagnosis on
+    /// `parked_reason`, not on the age itself. When the dispatcher could not
+    /// produce a quota reading at all it sets `parked_window` to `"unknown"`
+    /// and pushes `parked_until` out by its own retry backoff. That instant
+    /// is a retry deadline, not a quota reset, and it drifts outward every
+    /// pass, so the row must not draw it in the position a real window's
+    /// reset time occupies — and this task has no `parked_at` either, so
+    /// `parked_display` invents no age for it.
     ///
-    /// Before the fix: `parked_display` reads `quota unavailable · <clock>`.
-    /// After the fix: it reads `quota unavailable` with no clock.
+    /// The compatible JSON clock, `parked_until_display`, must not leak that
+    /// drifting deadline back out either: it is the same bare `quota
+    /// unavailable` a board reading it would draw, not `quota unavailable ·
+    /// <clock>` — printing the clock there would reintroduce, under the old
+    /// field's name, the exact "22:05, 22:13, 22:29 in one evening while
+    /// usage never moved" defect this task's `parked_display` fix removed
+    /// from the board.
     #[test]
     fn an_unknown_window_park_prints_quota_unavailable_with_no_clock() {
         let repo = fixture("quota-unknown-window-no-clock");
@@ -2996,13 +3122,19 @@ mod tests {
 
         let row = rows.iter().find(|r| r.id == "login").unwrap();
         assert!(matches!(row.state, State::Parked), "{}", row.next);
-        let display = row
-            .parked_display
-            .as_deref()
-            .expect("a parked row must carry its hold text");
         assert_eq!(
-            display, "quota unavailable",
-            "an `unknown`-window park names no reset time"
+            row.parked_reason.as_deref(),
+            Some("quota unavailable"),
+            "an `unknown`-window park names no reset time, but still says why it is held"
+        );
+        assert_eq!(
+            row.parked_until_display.as_deref(),
+            Some("quota unavailable"),
+            "the compatible JSON clock names no reset time either, with no drifting deadline appended"
+        );
+        assert_eq!(
+            row.parked_display, None,
+            "no `parked_at` means no invented age"
         );
     }
 
@@ -3052,7 +3184,9 @@ mod tests {
         );
     }
 
-    /// The same park, read on a task that never left `queued`.
+    /// The same park, read on a task that never left `queued`. An unavailable
+    /// quota reading keeps its diagnosis alongside the elapsed age; replacing
+    /// the recheck clock must not erase why the task is held.
     ///
     /// A `queued` task is parked by exactly the same gate a task on a real
     /// step is — the quota check runs on candidates, and `queued` is where
@@ -3067,8 +3201,9 @@ mod tests {
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some(crate::pipeline::QUEUED));
         let mut task = repo.task("login").unwrap();
-        let until = chrono::Utc::now().timestamp() + 3600;
-        task.front.parked_until = Some(until);
+        task.front.parked_at = Some(chrono::Utc::now().timestamp() - 3840);
+        task.front.parked_until = Some(chrono::Utc::now().timestamp() + 3600);
+        task.front.parked_window = "unknown".into();
         task.save().unwrap();
 
         let tasks = repo.tasks().unwrap();
@@ -3094,8 +3229,10 @@ mod tests {
         let display = row
             .parked_display
             .as_deref()
-            .expect("a parked row must carry its own clock");
-        assert!(view::plain_table(&rows).contains(&format!("parked · {display}")));
+            .expect("a parked row carries its elapsed age");
+        assert_eq!(display, "1h 04m");
+        assert_eq!(row.parked_reason.as_deref(), Some("quota unavailable"));
+        assert!(view::plain_table(&rows).contains("parked · quota unavailable · 1h 04m"));
     }
 
     /// A dependency it cannot pass is the harder hold, and keeps the row even
@@ -3550,7 +3687,7 @@ mod tests {
         let row = frame.lines().find(|l| l.contains("login")).unwrap();
 
         // `○ queued` is the widest state here, so CTX starts right after it
-        // rather than out where `● waiting on you` would end.
+        // rather than out where a longer state like `● unreachable` would end.
         let ctx_at = header.find("CTX").unwrap() - header.find("STATE").unwrap();
         assert_eq!(
             ctx_at,
