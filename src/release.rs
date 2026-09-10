@@ -51,7 +51,8 @@ pub const MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 /// about releases on this laptop" is not a fact about the repository.
 pub const ENV_SKIP: &str = "SPOOLWAY_SKIP_VERSION_CHECK";
 
-/// Set on the process an upgrade re-execs, so it does its files and stops.
+/// Set to the old binary's version on the process an upgrade re-execs, so it
+/// does its files, can select the exact release range, and stops.
 ///
 /// Without it an install that somehow still saw a newer version would install,
 /// exec, install, exec. See [`upgrade`].
@@ -460,7 +461,7 @@ pub enum Upgrade {
 /// [`crate::repo::Repo::lock_file`] for every real caller.
 ///
 /// Deliberately does not re-exec: the caller does that, because only the
-/// caller knows what it wanted to do next. See [`exec_upgraded`].
+/// caller knows what it wanted to do next. See [`hand_over`].
 pub fn upgrade(lock_file: &Path) -> Upgrade {
     // The process an upgrade already exec'd. Its files are what it is here to
     // write; installing again would be a loop.
@@ -538,10 +539,18 @@ pub fn hand_over(args: &[String], expect_version: &str) -> Result<std::process::
         ),
     }
 
-    Ok(Command::new(&program)
-        .args(args)
-        .env(ENV_UPGRADED, "1")
-        .status()?)
+    Ok(upgraded_command(&program, args).status()?)
+}
+
+fn upgraded_command(program: &Path, args: &[String]) -> Command {
+    let mut command = Command::new(program);
+    command.args(args);
+    // The old process is the only authoritative source for the lower end of a
+    // skipped-release range. Carry it across the executable swap; the new
+    // process cannot reconstruct it from npm's latest-version cache, which now
+    // contains only its own version.
+    command.env(ENV_UPGRADED, current());
+    command
 }
 
 #[cfg(test)]
@@ -728,6 +737,17 @@ mod tests {
             cached(9999).stale(1000),
             "a cache stamped after now is a clock that moved, not a fresh answer"
         );
+    }
+
+    #[test]
+    fn handover_carries_the_compiling_binarys_actual_version() {
+        let command = upgraded_command(Path::new("spoolway"), &["update".into()]);
+        let carried = command
+            .get_envs()
+            .find(|(key, _)| *key == ENV_UPGRADED)
+            .and_then(|(_, value)| value)
+            .and_then(|value| value.to_str());
+        assert_eq!(carried, Some(current()));
     }
 
     /// The state file is the machine's, not the project's: every checkout runs

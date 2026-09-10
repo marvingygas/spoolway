@@ -89,6 +89,8 @@ const KEPT: &str =
     "Files were overwritten; your config values, prompts and task skeletons were kept.";
 
 pub fn run(repo: &Repo, args: &UpdateArgs) -> Result<()> {
+    use std::io::IsTerminal;
+
     if !args.replace.is_empty() {
         return replace(repo, args);
     }
@@ -126,7 +128,30 @@ pub fn run(repo: &Repo, args: &UpdateArgs) -> Result<()> {
 
     println!();
     println!("{KEPT}");
+
+    let upgraded = std::env::var(crate::release::ENV_UPGRADED).ok();
+    if let Some(previous) =
+        digest_previous(args, upgraded.as_deref(), std::io::stdout().is_terminal())
+        && let Some(digest) = crate::release_notes::update_digest(previous, true)?
+    {
+        println!();
+        print!("{digest}");
+    }
     Ok(())
+}
+
+/// Whether this invocation is the successful far side of a person-facing npm
+/// handover. The explicit arguments prevent a forged/stale environment value
+/// from making dry runs or file replacement print an upgrade digest, while the
+/// terminal gate keeps stdout stable for scripts and pipes.
+fn digest_previous<'a>(
+    args: &UpdateArgs,
+    upgraded: Option<&'a str>,
+    terminal: bool,
+) -> Option<&'a str> {
+    (!args.dry_run && args.replace.is_empty() && terminal)
+        .then_some(upgraded)
+        .flatten()
 }
 
 /// Take the newer release, if there is one, and hand over to it.
@@ -136,9 +161,25 @@ pub fn run(repo: &Repo, args: &UpdateArgs) -> Result<()> {
 /// here — nothing newer, nothing installable, or a dispatcher that must not
 /// have its binary rewritten under it.
 fn install(repo: &Repo) -> Result<Option<std::process::ExitStatus>> {
+    let upgrade = crate::release::upgrade(&repo.lock_file());
+    install_upgrade(repo, upgrade, crate::release::hand_over)
+}
+
+/// Turn the release layer's exhaustive outcome into update behaviour. Keeping
+/// the handover call injectable makes the success edge testable without
+/// replacing the running binary or invoking npm; the production caller passes
+/// [`crate::release::hand_over`] unchanged.
+fn install_upgrade<F>(
+    repo: &Repo,
+    upgrade: crate::release::Upgrade,
+    hand_over: F,
+) -> Result<Option<std::process::ExitStatus>>
+where
+    F: FnOnce(&[String], &str) -> Result<std::process::ExitStatus>,
+{
     use crate::release::Upgrade;
 
-    match crate::release::upgrade(&repo.lock_file()) {
+    match upgrade {
         Upgrade::Current => Ok(None),
 
         Upgrade::Installed(version) => {
@@ -148,7 +189,7 @@ fn install(repo: &Repo) -> Result<Option<std::process::ExitStatus>> {
                 crate::release::PACKAGE
             );
             println!();
-            Ok(Some(crate::release::hand_over(&relaunch(repo), &version)?))
+            Ok(Some(hand_over(&relaunch(repo), &version)?))
         }
 
         // The whole reason a channel is resolved before anything is said: an
@@ -779,6 +820,87 @@ mod tests {
             dry_run: false,
             replace: Vec::new(),
         }
+    }
+
+    #[test]
+    fn only_a_successful_interactive_handover_gets_a_digest() {
+        let normal = args();
+        assert_eq!(digest_previous(&normal, Some("0.1.0"), true), Some("0.1.0"));
+        assert_eq!(
+            digest_previous(&normal, None, true),
+            None,
+            "ordinary file update"
+        );
+        assert_eq!(
+            digest_previous(&normal, Some("0.1.0"), false),
+            None,
+            "piped output"
+        );
+
+        let dry = UpdateArgs {
+            dry_run: true,
+            ..args()
+        };
+        assert_eq!(digest_previous(&dry, Some("0.1.0"), true), None);
+        let replace = UpdateArgs {
+            replace: vec!["file".into()],
+            ..args()
+        };
+        assert_eq!(digest_previous(&replace, Some("0.1.0"), true), None);
+    }
+
+    fn successful_status() -> std::process::ExitStatus {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            std::process::ExitStatus::from_raw(0)
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::ExitStatusExt;
+            std::process::ExitStatus::from_raw(0)
+        }
+    }
+
+    #[test]
+    fn every_upgrade_outcome_has_one_explicit_update_path() {
+        use crate::release::Upgrade;
+
+        let repo = fixture("upgrade-outcomes");
+        assert!(
+            install_upgrade(&repo, Upgrade::Current, |_, _| panic!("no handover"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            install_upgrade(&repo, Upgrade::Unmanaged("0.2.0".into()), |_, _| panic!(
+                "no handover"
+            ))
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            install_upgrade(
+                &repo,
+                Upgrade::Dispatching("0.2.0".into(), 42),
+                |_, _| panic!("no handover")
+            )
+            .unwrap()
+            .is_none()
+        );
+
+        let status = install_upgrade(
+            &repo,
+            Upgrade::Installed("0.2.0".into()),
+            |args, version| {
+                assert_eq!(args, relaunch(&repo));
+                assert_eq!(version, "0.2.0");
+                Ok(successful_status())
+            },
+        )
+        .unwrap()
+        .expect("an installed release hands over");
+        assert!(status.success());
     }
 
     fn outcome_lines(outcomes: &[Outcome]) -> Vec<String> {
