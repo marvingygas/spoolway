@@ -1049,6 +1049,11 @@ impl Priority {
 /// - `{project_home}` absolute path to the project's own home (see
 ///   [`crate::repo::Repo::home`]) — the task file a lane reads from outside
 ///   its worktree
+/// - `{git_dir}`      absolute path to the git directory a lane needs write
+///   access to for `git add`/`git commit` to work (see
+///   [`crate::repo::git_dir`]) — a linked worktree's objects and branch ref
+///   live in the main checkout's shared `.git`, outside `{worktree}` and
+///   otherwise read-only to a lane confined to it
 /// - `{session_id}`   session id spoolway minted for this lane, so that the
 ///   transcript the agent writes can be found again and its token usage
 ///   recorded. Drop it and the lane still runs — it just spends unaccounted.
@@ -2160,6 +2165,7 @@ mod tests {
             "repo",
             "state_dir",
             "project_home",
+            "git_dir",
         ]
         .iter()
         .map(|key| (*key, format!("<{key}>")))
@@ -2396,6 +2402,29 @@ mod tests {
         incomplete.remove("state_dir");
         let err = cloud.render_args(&incomplete).unwrap_err();
         assert!(err.to_string().contains("{state_dir}"));
+    }
+
+    /// Both agent kinds a lane can be dispatched with are launched with a
+    /// third `--add-dir`, naming the git directory the lane's worktree
+    /// actually uses — the grant that lets `git add`/`git commit` create
+    /// `index.lock` there instead of failing on a read-only filesystem.
+    #[test]
+    fn both_kinds_carry_the_git_dir_as_a_third_add_dir() {
+        for kind in ["claude", "codex"] {
+            let profile = AgentProfile::defaults()[kind].clone();
+            let args = profile.render_args(&values()).unwrap();
+            let add_dirs: Vec<&str> = args
+                .windows(2)
+                .filter(|pair| pair[0] == "--add-dir")
+                .map(|pair| pair[1].as_str())
+                .collect();
+            assert_eq!(
+                add_dirs,
+                ["<state_dir>", "<project_home>", "<git_dir>"],
+                "`{kind}` must carry `{{state_dir}}`, `{{project_home}}` and \
+                 `{{git_dir}}` as its three `--add-dir` grants, in that order"
+            );
+        }
     }
 
     /// spoolway is not in the business of choosing anyone's models, and

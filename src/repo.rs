@@ -541,6 +541,38 @@ fn main_checkout(dir: &Path) -> Option<PathBuf> {
     common.parent()?.canonicalize().ok()
 }
 
+/// The git directory a lane needs write access to for `git add`/`git commit`
+/// to work in the checkout at `worktree`.
+///
+/// `--git-common-dir`, not the plainer `--git-dir`: in a linked worktree
+/// `--git-dir` names that worktree's own `<repo>/.git/worktrees/<name>`, but
+/// new blob/tree/commit objects and the branch ref itself are read and
+/// written in the *common* dir, `<repo>/.git` — proven against a real
+/// checkout by making each half read-only in turn: `chmod a-w
+/// <repo>/.git/objects` fails `git add` there with `insufficient permission
+/// for adding an object to repository database`, and `chmod a-w
+/// <repo>/.git/refs` fails the following `git commit` with `cannot lock ref
+/// 'HEAD'`. A grant of `--git-dir` alone would leave both writes refused.
+/// `--git-common-dir` answers the directory that holds both — and, since
+/// `<repo>/.git/worktrees/<name>` nests inside it, the one grant covers
+/// `index.lock` too, without needing to also assemble that name from
+/// `cut_worktree`'s own bookkeeping.
+///
+/// For a borrowed checkout — one a lane's workspace was pointed at rather
+/// than one `cut_worktree` made — `worktree` is the main checkout or a
+/// linked worktree cut by something else, and either way `--git-common-dir`
+/// still answers that repo's one shared `.git`, never a `worktrees/<name>`
+/// path assembled for a name that may not exist.
+pub fn git_dir(worktree: &Path) -> Result<PathBuf> {
+    let out = run(
+        worktree,
+        "git",
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )
+    .with_context(|| format!("resolving the git directory for {}", worktree.display()))?;
+    Ok(PathBuf::from(out.trim()))
+}
+
 /// The checkout `start` itself sits in — the linked worktree when `start` is
 /// inside one, `root` otherwise.
 ///
@@ -720,6 +752,66 @@ mod tests {
             wt.canonicalize().unwrap(),
             "but the tracked control plane is read from the worktree's own \
              checkout, not the main one's"
+        );
+
+        git(
+            &work,
+            &["worktree", "remove", "--force", wt.to_str().unwrap()],
+        );
+    }
+
+    /// A linked worktree's own git dir, `.git/worktrees/<name>`, holds
+    /// `index.lock` — but not the objects a `git add` writes or the branch
+    /// ref a `git commit` moves, which live in the main checkout's shared
+    /// `.git` instead. So the grant a lane needs is the *main* checkout's
+    /// `.git`, whether it is asked of the linked worktree or of the main
+    /// checkout itself — the two resolve to the one path a real commit made
+    /// from inside the linked worktree actually writes into, existing and
+    /// identical either way, never a `worktrees/<name>` path that holds only
+    /// half of what a commit needs.
+    #[test]
+    fn git_dir_resolves_a_linked_worktree_to_the_shared_main_git_dir() {
+        let (_origin, work) = fixture("git-dir");
+        let wt = work.parent().unwrap().join("task-wt");
+        git(
+            &work,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "task/git-dir",
+                wt.to_str().unwrap(),
+            ],
+        );
+
+        let main_dir = git_dir(&work).unwrap();
+        let linked_dir = git_dir(&wt).unwrap();
+
+        assert!(main_dir.is_dir(), "{main_dir:?} must exist");
+        assert_eq!(main_dir, work.join(".git"));
+        assert_eq!(
+            linked_dir, main_dir,
+            "a linked worktree's git dir is the *common* dir it shares with \
+             the main checkout, not its own worktrees/<name> subdirectory — \
+             that is where a commit made from inside it actually writes"
+        );
+
+        // Proof, not assertion by construction: a real commit from inside the
+        // linked worktree must land its object and its ref move under the
+        // resolved `main_dir` — the exact grant a lane is given.
+        std::fs::write(wt.join("f.txt"), "content").unwrap();
+        git(&wt, &["add", "f.txt"]);
+        git(&wt, &["commit", "-q", "-m", "from the linked worktree"]);
+        let head_after = git(&wt, &["rev-parse", "HEAD"]);
+        assert!(
+            main_dir
+                .join("objects")
+                .join(&head_after.trim()[..2])
+                .join(&head_after.trim()[2..])
+                .is_file(),
+            "the commit's object must land under the resolved git dir, not \
+             the linked worktree's own subdirectory"
         );
 
         git(

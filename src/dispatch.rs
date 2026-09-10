@@ -4585,6 +4585,17 @@ fn start_one(
         None => crate::usage::new_session_id(),
     };
 
+    // A lane's own files sit under `worktree`, but a linked worktree writes
+    // the objects `git add` creates and moves the branch ref `git commit`
+    // advances in the main checkout's shared `.git` — read-only to a lane
+    // confined to `worktree`, so both failed with `Read-only file system`
+    // before this grant existed. Resolved from inside `worktree` rather than
+    // assembled from `dispatch.worktree_root` and the branch, so a borrowed
+    // checkout (whose git directory is already the repo's own `.git`) gets
+    // the same directory it already reads and writes, not a guess at one —
+    // see `crate::repo::git_dir`.
+    let git_dir = crate::repo::git_dir(&worktree)?;
+
     let values: BTreeMap<&str, String> = BTreeMap::from([
         ("model", model.clone()),
         ("session_id", session.clone()),
@@ -4604,6 +4615,7 @@ fn start_one(
         // lane's own `--add-dir` grant needs this too, or a kind confined to
         // what it names can no longer read the file it is working from.
         ("project_home", repo.home().display().to_string()),
+        ("git_dir", git_dir.display().to_string()),
     ]);
     let mut args = profile.render_args(&values)?;
     args.extend(profile.effort_args(step.effort.as_deref()));
@@ -5539,11 +5551,24 @@ mod tests {
             _label: &str,
         ) -> Result<Workspace> {
             self.log(format!("create_workspace on {branch} from {base}"));
+            let checkout_path = PathBuf::from("/tmp/spoolway-fake-worktree");
+            // A real (if minimal) git repo, not just a path: a launch now
+            // resolves `{git_dir}` by asking git from inside the checkout,
+            // and this constant stands in for a cut worktree everywhere the
+            // fake mux is used for one. Guarded on `.git` already existing,
+            // rather than run unconditionally, because every dispatch test
+            // shares this one path and runs concurrently with the others —
+            // two racing `git init`s on the same directory each fail trying
+            // to lock the other's half-written `config`.
+            if !checkout_path.join(".git").exists() {
+                std::fs::create_dir_all(&checkout_path).unwrap();
+                let _ = crate::repo::run(&checkout_path, "git", &["init", "-q"]);
+            }
             Ok(Workspace {
                 workspace_id: "w9".into(),
                 pane_id: "w9:p1".into(),
                 tab_id: Some("w9:t1".into()),
-                checkout_path: PathBuf::from("/tmp/spoolway-fake-worktree"),
+                checkout_path,
             })
         }
         fn close_workspace(&self, id: &str) -> Result<()> {
@@ -5990,9 +6015,14 @@ mod tests {
     /// already placed needs: a task whose worktree has gone is one the
     /// dispatcher cuts a fresh workspace for, and a test asserting on the
     /// workspace it recorded would be asserting on the replacement.
+    ///
+    /// A real (if minimal) git repo, not just a directory: a launch now
+    /// resolves `{git_dir}` by asking git from inside the worktree, and a
+    /// plain directory answers "not a git repository" instead.
     fn a_checkout(name: &str) -> PathBuf {
         let path = crate::scratch::root(name);
         std::fs::create_dir_all(&path).unwrap();
+        crate::repo::run(&path, "git", &["init", "-q"]).unwrap();
         path
     }
 

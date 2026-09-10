@@ -623,6 +623,7 @@ it, not hand-spelled flags. Each row's template substitutes:
 | `{repo}` | Absolute path to the project root |
 | `{state_dir}` | Absolute path to the project's `.spoolway/` — the prompts a lane reads from outside its worktree |
 | `{project_home}` | Absolute path to the project's own home — the task file a lane reads from outside its worktree |
+| `{git_dir}` | Absolute path to the repo's shared `.git` — the one write grant of the three `--add-dir` paths; the objects and branch ref a lane's `git add`/`git commit` write from inside its worktree live there, outside `{worktree}` and otherwise read-only to it |
 | `{session_id}` | The session id spoolway minted for this lane |
 
 Drop `{session_id}` and the lane still runs. For a kind that takes an id, it then spends

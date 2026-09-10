@@ -78,8 +78,8 @@ pub struct Adapter {
 
     /// The argv template a lane of this kind is started with. Placeholders —
     /// `{model}`, `{prompt_file}`, `{task_file}`, `{worktree}`, `{repo}`,
-    /// `{state_dir}`, `{project_home}`, `{session_id}` — are substituted by
-    /// [`crate::config::AgentProfile::render_args`] from what a lane start
+    /// `{state_dir}`, `{project_home}`, `{git_dir}`, `{session_id}` — are
+    /// substituted by [`crate::config::AgentProfile::render_args`] from what a lane start
     /// already computes; see that function's doc comment for what each one
     /// carries. Empty on a kind nobody has wired up yet — a profile naming
     /// such a kind is refused rather than launched with no flags at all.
@@ -623,6 +623,16 @@ pub const ADAPTERS: &[Adapter] = &[
             "{state_dir}",
             "--add-dir",
             "{project_home}",
+            // A lane's own worktree is not the whole of what `git add` and
+            // `git commit` there need to write to: a linked worktree's index
+            // lives outside it, and the objects and branch ref a commit
+            // writes live further out still, in the main checkout's shared
+            // `.git` — so without this grant every commit a lane tries fails
+            // with `Read-only file system`. `{git_dir}` names that shared
+            // directory, never the worktree's own — see
+            // `crate::repo::git_dir`.
+            "--add-dir",
+            "{git_dir}",
         ],
         // Takes the id spoolway mints, so it needs no home of its own.
         home: None,
@@ -746,6 +756,15 @@ pub const ADAPTERS: &[Adapter] = &[
             "{state_dir}",
             "--add-dir",
             "{project_home}",
+            // Same reasoning again, this time for writing rather than
+            // reading: `--sandbox workspace-write` confines codex to
+            // `worktree`, and a linked worktree writes its objects and moves
+            // its branch ref in the main checkout's shared `.git`, further
+            // outside it still than the worktree's own index — so without
+            // this grant `git add`/`git commit` there fail. See
+            // `crate::repo::git_dir`.
+            "--add-dir",
+            "{git_dir}",
             // codex checks for a newer release of itself on startup, and a
             // newer one stops the lane dead: `✨ Update available! 0.153.4 ->
             // 0.153.6`, then `1. Update now (runs npm install -g

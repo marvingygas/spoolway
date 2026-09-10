@@ -380,6 +380,11 @@ fn sample_placeholders(session: &str) -> std::collections::BTreeMap<&'static str
         // lane reads from outside its worktree the same way it reads
         // `state_dir` for its prompts.
         ("project_home", "/<home>/.spoolway/<project>".to_string()),
+        // The git directory a lane needs write access to for `git
+        // add`/`git commit` to work in a linked worktree — see
+        // `crate::repo::git_dir`. The main checkout's own `.git`, shared by
+        // every worktree of the repo, not a `worktrees/<task>` subdirectory.
+        ("git_dir", "/<repo>/.git".to_string()),
     ])
 }
 
@@ -1002,6 +1007,12 @@ fn agent_verify_live(
     std::fs::write(&task_file, "# verify\n\nNothing to do.\n")?;
 
     let profile = crate::config::AgentProfile::for_kind(&args.kind);
+    // `dir` is the scratch tree's own repo, cut with no worktree of its own —
+    // so its git directory is just `dir/.git`, but this asks git for it
+    // rather than assuming that shape, the same as a real lane start does.
+    // Falls back to the literal path a fresh `git init` would have produced
+    // if that init above was swallowed and never ran.
+    let git_dir = crate::repo::git_dir(&dir).unwrap_or_else(|_| dir.join(".git"));
     let values = std::collections::BTreeMap::from([
         ("model", model.clone()),
         ("session_id", session.clone()),
@@ -1011,6 +1022,7 @@ fn agent_verify_live(
         ("repo", dir.display().to_string()),
         ("state_dir", dir.display().to_string()),
         ("project_home", dir.display().to_string()),
+        ("git_dir", git_dir.display().to_string()),
     ]);
     let rendered_args = profile.render_args(&values)?;
     // Composed by the adapter, exactly as a headless lane's first turn is —
