@@ -873,7 +873,11 @@ against the binary, and a guessed row is worse than no row.
 ### `spoolway update`
 
 Install the latest published release, then take what it writes without touching what you
-wrote. Prints the paths it brought forward and one line saying what it left alone.
+wrote. Prints the paths it brought forward and one line saying what it left alone. After a
+successful npm self-update at a terminal, the new binary also prints the exact version range,
+a compact release digest, any migration instructions, and a link to the full notes. Dry runs,
+file-only updates, unmanaged installs, dispatcher-blocked upgrades, and captured output do not
+print that digest.
 
 The binary half only happens where npm installed spoolway, because npm is what upgrades it —
 anything else is told which release is out and left alone. A running dispatcher stops the
@@ -884,6 +888,17 @@ case stops the files being brought forward.
 |---|---|
 | `--dry-run` | Print what would change and write nothing. Installs nothing either |
 | `--replace <PATH>` | Replace one whole file with the shipped version, saving yours beside it. Repeat for each |
+
+### `spoolway whats-new`
+
+Read the release record embedded in the installed binary. With no flag it prints that binary's
+full release section: theme, overview, three to five highlights, any migration instructions,
+other recorded sections, and the GitHub release URL. It does not discover a project or contact
+GitHub, so it works from any directory and remains available offline.
+
+| Flag | Meaning |
+|---|---|
+| `--since <VERSION>` | Print every embedded release later than `X.Y.Z`, oldest first. An empty range is reported explicitly |
 
 ### `spoolway doctor`
 

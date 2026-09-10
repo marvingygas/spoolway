@@ -55,6 +55,19 @@ source "$HERE/../agents.sh"
 LIVE=${WORK:-$(mktemp -d)}
 CTL="$LIVE/ctl"
 
+# -------------------------------------------------------- embedded releases
+# This is intentionally before any fixture creates a repository: the history
+# belongs to the installed binary, and requiring project discovery here would
+# make the recovery command least useful immediately after installation.
+says "whats-new works outside a project" "0.1.0 — Deterministic agent pipelines arrive" \
+  env -C "$LIVE" "$SPOOLWAY" whats-new
+says "a release range selects the embedded release" "0.1.0 — Deterministic agent pipelines arrive" \
+  env -C "$LIVE" "$SPOOLWAY" whats-new --since 0.0.0
+says "an empty release range is explicit" "No releases follow 0.1.0." \
+  env -C "$LIVE" "$SPOOLWAY" whats-new --since 0.1.0
+refuses "a malformed release range is refused" "canonical numeric components" \
+  env -C "$LIVE" "$SPOOLWAY" whats-new --since yesterday
+
 # A command step's output has to travel with the change to be worth anything,
 # and where the change goes is the forge. So this suite needs one too, even
 # though nothing here is about handing over.
@@ -161,6 +174,18 @@ works "init with no terminal asks nothing and takes the defaults" \
   env -C "$INITDIR/unasked" "$SPOOLWAY" init
 has "so the model choice is visibly blank" 'model: ""' \
   "$INITDIR/unasked/.spoolway/pipelines/default.yml"
+
+# Even an authentic-looking handover value must not leak the digest into a
+# captured stdout stream. The new binary appends it only when stdout is a TTY;
+# unit coverage holds the positive side without making this suite depend on a
+# platform-specific pseudo-terminal utility.
+HANDOVER_OUT=$(env SPOOLWAY_UPGRADED=0.0.0 \
+  "$SPOOLWAY" -C "$INITDIR/unasked" update 2>&1)
+HANDOVER_STATUS=$?
+works "the captured post-handover update still succeeds" \
+  test "$HANDOVER_STATUS" -eq 0
+silent_about "post-handover notes do not cross the non-terminal output boundary" \
+  "Updated spoolway" printf '%s\n' "$HANDOVER_OUT"
 works "and claude's skills are what a run with nobody to ask installs" \
   test -f "$INITDIR/unasked/.claude/skills/spoolway-plan/SKILL.md"
 works "spoolway-tasks lands beside it" \

@@ -36,6 +36,7 @@ mod problem_log;
 mod prompt;
 mod quota;
 mod release;
+mod release_notes;
 mod repo;
 mod retain;
 mod runfiles;
@@ -119,6 +120,14 @@ fn run() -> Result<()> {
     // lookup written to a file.
     if matches!(cli.command, Command::VersionCheck) {
         release::refresh();
+        return Ok(());
+    }
+
+    // Release history belongs to the installed binary, not to a checkout.
+    // Keep it ahead of cwd resolution and project discovery so it works from
+    // an empty directory just as `--version` does.
+    if let Command::WhatsNew(args) = &cli.command {
+        print!("{}", release_notes::whats_new(args.since.as_deref())?);
         return Ok(());
     }
 
@@ -255,6 +264,7 @@ fn run() -> Result<()> {
                 | Command::Agent(_)
                 | Command::Config(_)
                 | Command::Doctor(_)
+                | Command::WhatsNew(_)
                 | Command::VersionCheck => {
                     unreachable!("handled above")
                 }
@@ -453,7 +463,7 @@ fn notify(cli: &Cli, cwd: &std::path::Path) {
     // installing as it installs it, and a line telling somebody to run what
     // they are already running is noise — twice over, since the process an
     // upgrade re-execs would print it again on the way through.
-    if matches!(cli.command, Command::Update(_)) {
+    if matches!(cli.command, Command::Update(_) | Command::WhatsNew(_)) {
         return;
     }
 

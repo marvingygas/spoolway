@@ -1,6 +1,6 @@
 ---
 domain: installation
-covers: ["src/install.rs", "src/update.rs", "src/release.rs", "src/assets.rs", "src/ask.rs", "src/gitignore.rs", "npm/**", "scripts/build-npm.mjs"]
+covers: ["src/install.rs", "src/update.rs", "src/release.rs", "src/release_notes.rs", "CHANGELOG.md", "src/assets.rs", "src/ask.rs", "src/gitignore.rs", "npm/**", "scripts/build-npm.mjs"]
 ---
 
 # Installation and setup
@@ -214,6 +214,23 @@ spoolway update               # take it
 It is also what takes the newer spoolway. When a release is out and npm is what installed
 this binary, `update` runs `npm install -g spoolway@<version> --ignore-scripts` first and
 then hands over to the binary it just installed, so the files written are that release's own.
+At a terminal, a successful handover finishes by showing the old and new versions, a compact
+digest of what changed, every migration that applies, and links to the full notes. A one-release
+update includes three to five highlights; a jump across releases keeps one theme per release
+instead and points to `spoolway whats-new --since <old-version>` for the full history. That
+digest is deliberately absent from dry runs, file-only updates, unmanaged or dispatcher-blocked
+upgrades, and non-terminal output.
+
+The same history is compiled into the binary and needs neither a checkout nor a network call:
+
+```
+spoolway whats-new                 # this installed release in full
+spoolway whats-new --since 0.1.0   # every later embedded release, oldest first
+```
+
+The second form refuses anything other than an `X.Y.Z` version and says explicitly when no
+embedded release follows it. The source record and its format contract live in
+[`CHANGELOG.md`](../CHANGELOG.md); every binary version must have a valid section there.
 Two things stop the install and neither stops the files:
 
 | What stops it | What happens |

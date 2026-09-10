@@ -70,6 +70,9 @@ pub enum Command {
     )]
     Update(UpdateArgs),
 
+    /// Read the release notes embedded in this binary.
+    WhatsNew(WhatsNewArgs),
+
     /// Refresh the cached "latest published version" answer, and print nothing.
     ///
     /// Not a verb anybody types. `spoolway` spawns this, detached, when the
@@ -256,7 +259,10 @@ pub const HELP_GROUPS: &[(&str, &[&str])] = &[
         "Shaping the project:",
         &["pipeline", "prompt", "agent", "task", "config", "models"],
     ),
-    ("Setting up:", &["init", "install", "update", "doctor"]),
+    (
+        "Setting up:",
+        &["init", "install", "update", "whats-new", "doctor"],
+    ),
     ("Working with someone else:", &["handover", "adopt"]),
     ("Called by lanes, not by you:", &["report", "stack"]),
 ];
@@ -1254,6 +1260,13 @@ pub struct UpdateArgs {
     /// a decision, losing eleven you forgot about is an accident.
     #[arg(long = "replace", value_name = "PATH")]
     pub replace: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct WhatsNewArgs {
+    /// Print every embedded release after this version, oldest first.
+    #[arg(long, value_name = "VERSION")]
+    pub since: Option<String>,
 }
 
 #[derive(Debug, Args)]

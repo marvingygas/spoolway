@@ -1,14 +1,15 @@
 # Full reference: docs/pipelines.md
 
 description: >-
-  Cut a spoolway release — bump the version, rehearse the build, tag it, and
-  verify what npm and GitHub actually ended up with.
+  Cut a spoolway release — bump the version, commit the approved changelog
+  section, rehearse the build, tag it, and verify what npm and GitHub actually
+  ended up with.
 
 task_template: default
 
 steps:
   - id: preflight
-    description: Prove main is releasable and assemble the evidence for the next version.
+    description: Prove main is releasable, and assemble the diff, pull requests, contributors and changelog state for the next version.
     agent: pi
     prompt: release-preflight
     model: ornith/Ornith-1.5-35B-A3B
@@ -20,7 +21,7 @@ steps:
     on_fail: blocked
 
   - id: notes
-    description: Create state-of-the-art release notes grounded in the changes since the last tag.
+    description: Write the one approved changelog section that ships as the entry, the embedded notes and the release body.
     agent: claude
     prompt: release-notes
     model: claude-opus-5
@@ -31,7 +32,7 @@ steps:
     on_fail: blocked
 
   - id: publish
-    description: Bump, rehearse, tag, publish, apply the approved notes, and verify the release.
+    description: Commit the section with the version bump, rehearse, tag, publish, and verify the published body against it.
     agent: claude
     prompt: release-publisher
     model: claude-opus-5

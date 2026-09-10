@@ -77,8 +77,60 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # The GitHub release body is the tagged `CHANGELOG.md` section, never a
+  # generated commit list. The same bytes are compiled into the binary by
+  # `include_str!`, so the release page and `spoolway whats-new` cannot
+  # disagree about what a version shipped. Extracting the section in its own
+  # job ahead of `publish` is what makes a missing, duplicated, or mistyped
+  # heading fail before the first irreversible npm publish rather than after
+  # six packages are already on the registry.
+  notes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Skipping the job outright would skip everything that needs it, so the
+      # job always runs and only its tag-only steps are conditional. A
+      # `workflow_dispatch` rehearsal therefore passes straight through.
+      - name: Extract the tagged release section
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          heading="## $version — "
+
+          # Counted by literal prefix rather than a regex, so a version whose
+          # dots would otherwise act as wildcards cannot match a neighbour.
+          found="$(awk -v heading="$heading" '
+            index($0, heading) == 1 { total++ }
+            END { print total + 0 }
+          ' CHANGELOG.md)"
+          if [ "$found" != "1" ]; then
+            echo "CHANGELOG.md at tag $GITHUB_REF_NAME holds $found sections headed \"$heading\", but the release body is built from exactly one; add the missing $version section or merge the duplicates on main, move tag $GITHUB_REF_NAME to that commit, and rerun this workflow." >&2
+            exit 1
+          fi
+
+          # A section runs from its own heading to the next `## ` heading. The
+          # command substitution drops trailing blank lines, so the file the
+          # release body is created from is byte-identical no matter how much
+          # whitespace separates one section from the next.
+          body="$(awk -v heading="$heading" '
+            index($0, heading) == 1 { inside = 1 }
+            inside && /^## / && index($0, heading) != 1 { inside = 0 }
+            inside { print }
+          ' CHANGELOG.md)"
+          printf '%s\n' "$body" > release-body.md
+          cat release-body.md
+
+      - uses: actions/upload-artifact@v4
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          name: release-body
+          path: release-body.md
+          if-no-files-found: error
+          retention-days: 7
+
   publish:
-    needs: [matrix, test, build]
+    needs: [matrix, notes, test, build]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -204,7 +256,15 @@ jobs:
           ( cd dist && sha256sum ./* > SHA256SUMS )
           cat dist/SHA256SUMS
 
+      # `--notes-file` rather than `--generate-notes`: the body is the release
+      # record the tag already carries, extracted once by the `notes` job and
+      # carried here as an artifact so the page cannot drift from the bytes
+      # that job validated. `dist/*` is still the only upload glob, so the
+      # notes file is never attached as an asset.
       - name: Create the release
-        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --verify-tag \
+            --notes-file artifacts/release-body/release-body.md
         env:
           GH_TOKEN: ${{ github.token }}
