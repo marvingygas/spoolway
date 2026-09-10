@@ -157,21 +157,6 @@ pub enum Command {
     /// session, and this says where it is.
     Lane(LaneArgs),
 
-    /// Take in-flight tasks from a colleague's mirror into this queue.
-    ///
-    /// A move, not a copy: the tasks leave their mirror, so the machine that
-    /// had them stops dispatching them. Runs entirely from this side — the
-    /// person handing over does not have to be there, or to have done anything.
-    Adopt(AdoptArgs),
-
-    /// Mirror this queue to your own ref, so a colleague can adopt from it.
-    ///
-    /// The only thing that mirrors: run it before handing work over, and run
-    /// it again after a colleague has adopted, so this machine lets go of what
-    /// they took. Also the place to send unfinished work back to the start
-    /// rather than have a colleague inherit it.
-    Handover(HandoverArgs),
-
     /// Work with the task queue. Bare, opens the queue screen.
     Queue {
         #[command(subcommand)]
@@ -263,7 +248,6 @@ pub const HELP_GROUPS: &[(&str, &[&str])] = &[
         "Setting up:",
         &["init", "install", "update", "whats-new", "doctor"],
     ),
-    ("Working with someone else:", &["handover", "adopt"]),
     ("Called by lanes, not by you:", &["report", "stack"]),
 ];
 
@@ -881,35 +865,6 @@ pub struct ReportArgs {
     /// alongside `--pass`, `--fail` or `--block`, and whatever the outcome.
     #[arg(long, value_name = "TEXT")]
     pub handoff: Vec<String>,
-}
-
-#[derive(Debug, Args)]
-pub struct AdoptArgs {
-    /// Whose mirror to take from: their git `user.email`.
-    #[arg(long, value_name = "EMAIL")]
-    pub from: String,
-
-    /// Take every task of this group.
-    #[arg(long, value_name = "GROUP")]
-    pub group: Option<String>,
-
-    /// Take these tasks by id. Without either filter, takes everything.
-    pub tasks: Vec<String>,
-}
-
-#[derive(Debug, Args)]
-pub struct HandoverArgs {
-    /// Hand over only this group's tasks.
-    #[arg(long, value_name = "GROUP")]
-    pub group: Option<String>,
-
-    /// Send tasks that never reached `handover` back to the start of the pipeline.
-    ///
-    /// Their commits are on this machine and nowhere else, so a colleague
-    /// cannot have them; the task file's goal and acceptance criteria can be
-    /// worked from instead, which is usually the better trade anyway.
-    #[arg(long)]
-    pub reset_unpublished: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1585,14 +1540,26 @@ mod tests {
     }
 
     #[test]
-    fn the_top_level_help_prints_the_six_headings_in_order() {
+    fn the_top_level_help_prints_the_five_headings_in_order() {
+        assert_eq!(HELP_GROUPS.len(), 5);
         let help = command().render_help().to_string();
+        assert!(!help.contains("Working with someone else:"));
         let mut rest = help.as_str();
         for (heading, _) in HELP_GROUPS {
             let at = rest
                 .find(heading)
                 .unwrap_or_else(|| panic!("`{heading}` is missing from the top-level help"));
             rest = &rest[at + heading.len()..];
+        }
+    }
+
+    #[test]
+    fn removed_collaboration_verbs_are_unknown_commands() {
+        for verb in ["adopt", "handover"] {
+            let error = command()
+                .try_get_matches_from(["spoolway", verb])
+                .expect_err("a removed command must not parse");
+            assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand);
         }
     }
 

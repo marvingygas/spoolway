@@ -104,8 +104,8 @@ either: a document may write one, and it is simply thrown away, the same as `bas
 `branch` is refused, not thrown away, because a task body is content an agent wrote and
 `spoolway stack` force-pushes a squashed commit onto whatever `branch:` names. A document may
 not point that anywhere. The check runs every time a task file is loaded, not only at `queue
-add`, so a file dropped straight into `queue/` or one `handover adopt` pulled off a mirror
-cannot carry a `branch:` past it unless the value is one spoolway itself could have stamped —
+add`, so a file dropped straight into `queue/` cannot carry a `branch:` past it unless the
+value is one spoolway itself could have stamped —
 `task/<id>`, or `task/<slug>-<id>` with a slug in `check_id`'s alphabet.
 
 `spoolway task contract`, with no arguments, prints this whole section as JSON — the required,

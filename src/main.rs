@@ -22,7 +22,6 @@ mod fmt;
 mod gitignore;
 mod globs;
 mod graph;
-mod handover;
 mod headless;
 mod install;
 mod jobs;
@@ -316,9 +315,6 @@ fn run() -> Result<()> {
                         cli.json,
                     )
                 }
-                Command::Adopt(args) => commands::adopt(&repo, args),
-                Command::Handover(args) => commands::handover(&repo, args),
-
                 // Bare `spoolway queue`, with no subcommand: the screen.
                 Command::Queue { command: None } => {
                     commands::queue_screen(&repo, routing(&graph)?, &cwd)

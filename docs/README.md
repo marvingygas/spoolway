@@ -38,7 +38,6 @@ be read on its own, but the order below is the order most people meet them in.
 |---|---|
 | [Cost accounting](cost.md) | The usage ledger, model pricing, and reading what a run came to |
 | [Comparing versions](eval.md) | What editing a prompt or a pipeline did to what the work costs |
-| [Collaboration](collaboration.md) | Handing in-flight work to a colleague, and adopting theirs |
 
 ## Reference
 

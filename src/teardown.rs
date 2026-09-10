@@ -117,7 +117,8 @@ impl<'a> Dispatcher<'a> {
         // against this function's own contract that a cleanup terminal
         // "cannot delete work that was never recorded" (review finding 4).
         // Held at `blocked` instead. Residue a lane deliberately left is not
-        // this: it is snapshotted to the mirror and named in the log.
+        // this: it is named in the status log and backed up nowhere, and
+        // cleanup knowingly discards it rather than turning it into task work.
         //
         // `""` for `started_at`: there is no lane record to read a launch HEAD
         // from by the time cleanup runs, and an unknown one makes `auto_commit`

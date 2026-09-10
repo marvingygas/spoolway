@@ -4279,9 +4279,9 @@ fn ensure_workspace(
                 // from moves.
                 //
                 // The dependency's branch is read from its own task file, not
-                // rebuilt as `task/<dep>`: `handover adopt` can set a
-                // `branch:` that shape does not predict, and a wrong name here
-                // becomes a failed `git worktree add` rather than a wrong
+                // rebuilt as `task/<dep>`: `issue_tracking.key_in_names` can
+                // stamp `task/<slug>-<dep>`, and a wrong name here becomes a
+                // failed `git worktree add` rather than a wrong
                 // diff. An unresolvable dependency fails by name here rather
                 // than at the cut — see [`Repo::dependency_branch`].
                 let cut_from = match task.front.depends_on.first() {
