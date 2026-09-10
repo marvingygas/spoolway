@@ -4946,9 +4946,8 @@ enum SessionMiss {
     NotFound,
     /// Found, but its last turn is past `session_reuse_ctx`.
     OverSize,
-    /// Found, but this model's window is resolved before the transcript is
-    /// ever read — so an unset window means the session's size was never
-    /// measured at all, not that it was measured and found small.
+    /// Found with a size ceiling enabled, but this model's window is unset,
+    /// so the session cannot be measured against that ceiling.
     WindowUnset,
     /// Found and under size, but its store has sat longer than the model's
     /// `session_reuse_idle`.
@@ -4988,8 +4987,9 @@ impl SessionMiss {
 ///
 /// Size comes from the transcript that entry names, because a ledger entry is
 /// a sum and a sum is not a context — see [`crate::usage::last_turn`] —
-/// and is checked on every carried session: there is no unbounded form left,
-/// `session:` on the step only ever says whether to look at all.
+/// and is checked when the profile enables a ceiling. A zero
+/// `session_reuse_ctx` leaves reuse unbounded by percentage; `session:` on the
+/// step still says whether to look at all.
 /// `session_reuse_ctx` is `profile`'s, not the step's, per that split.
 ///
 /// Age is checked after size, and only refuses a session that is otherwise
@@ -5019,13 +5019,16 @@ fn carried_session(
         .ok_or(SessionMiss::NotFound)?;
 
     let price = crate::models::resolve(&repo.config.models, model).price;
-    let window = price
-        .map(|price| price.context_window)
-        .filter(|window| *window > 0)
-        .ok_or(SessionMiss::WindowUnset)?;
-    let size = crate::usage::last_turn(&entry.kind, &entry.session).ok_or(SessionMiss::NotFound)?;
-    if exceeds_percent(window, profile.session_reuse_ctx, size) {
-        return Err(SessionMiss::OverSize);
+    if profile.session_reuse_ctx != 0 {
+        let window = price
+            .map(|price| price.context_window)
+            .filter(|window| *window > 0)
+            .ok_or(SessionMiss::WindowUnset)?;
+        let size =
+            crate::usage::last_turn(&entry.kind, &entry.session).ok_or(SessionMiss::NotFound)?;
+        if exceeds_percent(window, profile.session_reuse_ctx, size) {
+            return Err(SessionMiss::OverSize);
+        }
     }
 
     if let Some(idle) = price.and_then(|price| price.session_reuse_idle) {
@@ -11502,8 +11505,8 @@ mod tests {
     use crate::platform::test_home::with_home;
 
     /// A model with a window wide enough that `size` tokens never comes near
-    /// either shipped profile's `session_reuse_ctx`, so a test can add a
-    /// transcript fixture without also having to reason about the size bound.
+    /// the explicit `session_reuse_ctx` used by size-bound tests, so a test
+    /// can add a transcript fixture without also reasoning about that bound.
     fn priced(repo: &mut Repo, model: &str) {
         repo.config.models.insert(
             model.to_string(),
@@ -11532,11 +11535,12 @@ mod tests {
     }
 
     /// The standing form: `fix` is the same prompt as `implement`, so its
-    /// next visit is the same conversation rather than a fresh one.
+    /// next visit is the same conversation rather than a fresh one. The
+    /// default zero ceiling does not require a model window just to reuse it.
     #[test]
-    fn a_standing_session_key_resumes_its_prompts_earlier_conversation() {
-        let mut repo = fixture("session-carry");
-        priced(&mut repo, "test-model");
+    fn a_zero_reuse_ceiling_resumes_its_prompts_earlier_conversation() {
+        let repo = fixture("session-carry");
+        assert_eq!(repo.config.agents["pi"].session_reuse_ctx, 0);
         add_task(&repo, "demo", "fix");
         let kind = local_kind(&repo);
         write_entry(
@@ -11562,16 +11566,19 @@ mod tests {
         );
     }
 
-    /// The size bound needs a model with a known window to measure against —
+    /// An enabled size bound needs a model with a known window to measure against —
     /// a model neither `[models]` nor the built-in table prices has nothing
     /// to compare the transcript to, so the step opens fresh rather than
-    /// guessing. Checked on every carried session now, `session: true`
-    /// included — there is no unbounded form left.
+    /// guessing. A zero bound is the explicit unbounded form and is covered
+    /// separately above.
     // covers: agents.<profile>.session_reuse_ctx — how large a carried session may be before a fresh one opens instead
     // covers: models.<glob>.context_window — what one session of this model gets to work in
     #[test]
     fn a_session_key_falls_through_when_the_models_window_is_unset() {
-        let repo = fixture("session-window-unset");
+        let mut repo = fixture("session-window-unset");
+        // An enabled percentage needs a window to measure against. The
+        // default zero does not, as the test above demonstrates.
+        repo.config.agents.get_mut("pi").unwrap().session_reuse_ctx = 50;
         add_task(&repo, "demo", "fix");
         let kind = local_kind(&repo);
         write_entry(

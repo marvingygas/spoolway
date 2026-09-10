@@ -525,9 +525,9 @@ definitions were read from. In the main checkout nothing extra is printed.
 
 Validate the pipeline definitions and their agent references against the config they will run
 with. Includes the prompt checks. Also validates the two shipped pipelines,
-`assets/pipelines/default.yml` and `assets/pipelines/bugfix.yml`, against this same config —
-even when a project's own `.spoolway/pipelines/` overrides them, so a shipped `run:` line that
-would only work inside this repository is caught before it ships.
+`assets/pipelines/default.yml` and `assets/pipelines/bugfix.yml`, checking their `run:` commands
+against this same config — even when a project's own `.spoolway/pipelines/` overrides them, so a
+shipped `run:` line that would only work inside this repository is caught before it ships.
 
 ```
 $ spoolway pipeline check
@@ -549,7 +549,8 @@ The overlong warning fires past 400 characters, counted in characters rather tha
 description is read to choose between pipelines, so a few sentences is the size it wants.
 
 A pipeline file that will not parse does not abort the command you ran to find it. The load
-failure is printed as the first problem and the two shipped pipelines are still validated.
+failure is printed as the first problem and the two shipped pipelines' `run:` commands are
+still checked.
 
 ### `spoolway pipeline contract`
 
@@ -799,35 +800,42 @@ whichever coding agent you plan in. It also claims this project's own name under
 `~/.spoolway/`, where the queue, the archive and everything else spoolway writes while it
 runs will live; see [Runtime state](configuration.md#runtime-state).
 
-At a terminal it asks five things, each of which is otherwise a file to go and edit
-afterwards: the provider whose directory the skills go in, the issue tracker to name in
-`[issue_tracking]` and the project its tickets file into, the agent kind the pipeline's
-local steps run on, and the model those steps name. Answer any of them with the flag
+At a terminal it asks three things, each of which is otherwise a file to go and edit
+afterwards: the coding agent you plan in, whose convention the skills go in and which
+becomes the fresh project's one agent profile, the issue tracker to name in
+`[issue_tracking]` and the project its tickets file into. Answer any of them with the flag
 instead and it is not asked. With no terminal — a script, CI, a pipe — nothing is asked
-and nothing blocks: the defaults are taken silently, `none` among them for the tracker.
-Fixed choices start on the default and use ↑/↓ to move; Enter or Space accepts the
-highlighted answer.
+and nothing blocks: the defaults are taken silently, `claude` for the agent and `none`
+among them for the tracker. Fixed choices start on the default and use ↑/↓ to move; Enter or
+Space accepts the highlighted answer.
+
+The agent you plan in is the single source of a fresh project's agent identity: a fresh
+scaffold keeps exactly that one profile, points `pipeline_gen.pipeline_agent` and
+`unattended.blocked_agent` at it, and specializes every bundled pipeline's agent steps to
+it. Model and effort are left blank on every step, because spoolway cannot choose either
+for you and a fresh scaffold writes the blank down explicitly rather than leaving the
+placeholder standing. Add or change profiles with `spoolway config set`.
 
 | Flag | Meaning |
 |---|---|
-| `--provider <PROVIDER>` | The coding agent you plan in, whose convention the skills are installed under. Defaults to `claude` |
+| `--provider <claude\|codex>` | The coding agent you plan in, whose convention the skills are installed under and which becomes the fresh project's sole agent profile. Defaults to `claude` |
 | `--tracker <github\|jira\|none>` | The tracker `[issue_tracking]` names. The prompt's menu notes whether the tool each one calls — `gh` or `acli` — is on `PATH`. Defaults to `none` |
 | `--project-key <KEY>` | The project the chosen tracker's tickets open into: `owner/repo` on github, a project key on jira. Ignored when `--tracker` is `none` or unset |
-| `--agent <KIND>` | What `agents.pi` runs, as `spoolway agent list` names it — that one profile, not the project. Steps naming another profile run on whatever kind it names. Defaults to `pi` |
-| `--model <MODEL>` | What the local steps name, in place of the `your-local-model` placeholder the pipelines ship with. Left unset, the placeholder stands and `doctor` reports it |
 | `--force` | Overwrite existing config, pipeline and prompt files |
 | `--take-over` | Claim this project's name even though the machine's record of it still holds an archive or queued tasks, when the checkout that name was registered to no longer exists. Refused without this flag — nothing is deleted either way, but a state that old is not yours to walk into by accident |
 
 Run again in a project that already has a config, `init` installs skills and changes
-nothing else — `--agent`, `--model`, `--tracker` and `--project-key` are reported as not
-applied rather than silently dropped, since rewriting a config a project has been running
-on is not what a second `init` is for. Every hook script is still written whichever
-tracker a project answers, or none at all, so switching trackers afterwards is a
+nothing else — `--tracker` and `--project-key` are reported as not applied rather than
+silently dropped, since rewriting a config a project has been running on is not what a
+second `init` is for. Every hook script is still written whichever tracker a project
+answers, or none at all, so switching trackers afterwards is a
 `spoolway config set issue_tracking.hook` away rather than a second `init`.
 
-A successful fresh run prints only “Skills installed successfully.” and “Project initialized
-successfully.”, apart from actionable warnings. A repeat run that only adds skills omits the
-project line. `spoolway install <provider>` uses the same concise skills message.
+A successful fresh run prints “Skills installed successfully.” and “Project initialized
+successfully.”, plus one concise sentence telling you to set model and effort on every agent
+step in `.spoolway/pipelines/*.yml` before dispatching, apart from actionable warnings. A
+repeat run that only adds skills omits the project line and the sentence. `spoolway install
+<provider>` uses the same concise skills message.
 
 See [Installation and setup](installation.md#scaffolding-a-project).
 

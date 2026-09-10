@@ -23,16 +23,12 @@ use crate::pipeline::{Pipelines, StepKind};
 use crate::repo::Repo;
 use crate::usage::ModelPrice;
 
-/// The name the shipped pipelines put on every local step: not a model, an
-/// instruction to name one.
+/// The sentinel older scaffolds and the annotated generation template use to
+/// instruct a person to name a local model.
 ///
-/// It is a real string rather than an empty `model:` so that the shipped
-/// pipelines are valid files a person edits in place — `pipeline check` wants
-/// every agent step to name something, and "nothing" would fail before anybody
-/// had read the comment telling them what to put there. The cost of that is
-/// that it also *passes* every check asking whether a model is named, which is
-/// why `spoolway doctor` knows it by name: a project still carrying it has not
-/// chosen a model, whatever the file says.
+/// Kept recognizable so doctor can diagnose existing files and so pipeline
+/// generation can distinguish its illustrative local model from a real one.
+/// Fresh bundled pipelines now use explicit blanks instead.
 pub const PLACEHOLDER: &str = "your-local-model";
 
 /// litellm's price map, vendored and distilled. See the module docs.
@@ -310,41 +306,28 @@ mod tests {
         assert!(resolved.price.is_none());
     }
 
-    /// Every agent step in the shipped pipelines names a model — the previous
-    /// task's own acceptance criterion. This is that criterion's sequel: a
-    /// name that cannot be priced or sized fails silently until someone
-    /// happens to read `spoolway doctor`, so every real model name here must
-    /// resolve to both, against no project config at all.
-    ///
-    /// One exception, and it is deliberate rather than missed: the shipped
-    /// local steps carry the literal placeholder `your-local-model`, telling
-    /// a person to put their own local model's name there. Nobody — not
-    /// litellm, not spoolway — can know that model's price ahead of a real
-    /// name replacing it; `spoolway doctor` is what reports the gap once one
-    /// does and still resolves to nothing.
+    /// Shipped pipeline text makes no model choice. Its explicit blanks stay
+    /// visible for a person to fill before dispatch. A text-level check
+    /// rather than a parsed one, kept beside `resolve`'s own model-pricing
+    /// tests; `crate::assets::tests::bundled_pipelines_parse_and_stay_agent_neutral`
+    /// asserts the same blanks off the parsed, assembled pipeline instead,
+    /// alongside its structural and `pi`-neutrality checks.
     #[test]
-    fn every_real_model_the_shipped_pipelines_name_resolves() {
-        let pipelines = Pipelines::builtin();
-        let no_config = BTreeMap::new();
-
-        let real_models: Vec<&str> = named(&pipelines)
-            .into_keys()
-            .filter(|model| *model != PLACEHOLDER)
-            .collect();
-        assert!(
-            !real_models.is_empty(),
-            "no real model names in the shipped pipelines to check"
-        );
-
-        for model in real_models {
-            let resolved = resolve(&no_config, model);
-            let price = resolved.price.unwrap_or_else(|| {
-                panic!("`{model}`, named by a shipped pipeline step, resolves to nothing")
-            });
-            assert!(
-                price.context_window > 0,
-                "`{model}`, named by a shipped pipeline step, resolves to a price with no window"
-            );
+    fn shipped_pipelines_name_no_model() {
+        for (name, body) in crate::pipeline::BUILTIN_PIPELINES {
+            let mut agent_steps = 0;
+            let mut blank_models = 0;
+            let mut blank_efforts = 0;
+            for line in body.lines().map(str::trim) {
+                match line {
+                    line if line.starts_with("agent:") => agent_steps += 1,
+                    "model: \"\"" => blank_models += 1,
+                    "effort: \"\"" => blank_efforts += 1,
+                    _ => {}
+                }
+            }
+            assert_eq!(blank_models, agent_steps, "pipeline `{name}`");
+            assert_eq!(blank_efforts, agent_steps, "pipeline `{name}`");
         }
     }
 }

@@ -3,15 +3,6 @@
 
 use super::*;
 
-/// Every kind spoolway can start, in table order.
-pub(super) fn launchable() -> Vec<&'static str> {
-    crate::agent::ADAPTERS
-        .iter()
-        .filter(|adapter| adapter.launches())
-        .map(|adapter| adapter.kind)
-        .collect()
-}
-
 /// Every kind spoolway knows, and what each one can do here.
 ///
 /// The roster, deliberately over the whole adapter table rather than over the

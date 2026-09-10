@@ -348,12 +348,13 @@ mod tests {
     }
 
     /// No shipped pipeline file names a path that only resolves inside this
-    /// repository's own build. `spoolway pipeline check` runs the same check
-    /// through `shipped_run_names_a_repo_local_path`, but only over the files
-    /// `BUILTIN_PIPELINES` loads — this one reads every `*.yml` on disk, so a
-    /// file added under `assets/pipelines/` without a table row is still held to
-    /// it. A `local.yml` that shipped `run: ./target/debug/spoolway stack`
-    /// behind the table's back is what this closes.
+    /// repository's own build. `spoolway pipeline check` validates only a
+    /// project's own loaded pipelines now — this is the release-time proof
+    /// that the bundled samples stay clean, and it reads every `*.yml` on
+    /// disk directly, so a file added under `assets/pipelines/` without a
+    /// table row is still held to it. A `local.yml` that shipped `run:
+    /// ./target/debug/spoolway stack` behind the table's back is what this
+    /// closes.
     #[test]
     fn no_shipped_pipeline_file_names_a_repo_local_path() {
         let pipeline_dir =
@@ -384,6 +385,65 @@ mod tests {
             offenders.is_empty(),
             "shipped pipeline `run:` names a repo-local path: {offenders:?}"
         );
+    }
+
+    /// Release-time proof that `assets/pipelines/*.yml` still parses and
+    /// stays neutral, now that `spoolway pipeline check` derives every
+    /// finding from a project's own loaded set and never opens these files
+    /// itself. `Pipelines::shipped` parses, assembles and runs
+    /// `Pipelines::validate` over both — the same structural rules `pipeline
+    /// check` holds a project's own files to: every id unique, every
+    /// transition naming a real step, every cycle bounded. Neutrality is
+    /// checked directly per agent step written in the file: no assignment to
+    /// a `pi` profile (spoolway's own retired special case) and no fixed
+    /// `model:`/`effort:` — every choice is left an explicit blank for a
+    /// project's own `init` to fill in. `blocked` is skipped: `assemble`
+    /// materialises it whole from `[unattended]`'s own defaults rather than
+    /// from anything either file writes, so it carries no neutrality promise
+    /// of its own.
+    ///
+    /// The blank `model:`/`effort:` half of this overlaps with
+    /// `crate::models::tests::shipped_pipelines_name_no_model`, which checks
+    /// the same files at the text level — kept apart rather than merged,
+    /// since that one lives beside `resolve`'s own model-pricing tests. This
+    /// one adds what that one cannot: parse, assemble and validate against
+    /// [`crate::pipeline::Pipelines::validate`], and the `pi`-assignment
+    /// check.
+    #[test]
+    fn bundled_pipelines_parse_and_stay_agent_neutral() {
+        let shipped = crate::pipeline::Pipelines::shipped(&crate::config::Config::default())
+            .expect("assets/pipelines/*.yml must parse and validate structurally");
+
+        for pipeline in shipped.pipelines.values() {
+            for step in &pipeline.steps {
+                if step.kind() != crate::pipeline::StepKind::Agent
+                    || step.id == crate::pipeline::BLOCKED
+                {
+                    continue;
+                }
+                assert_ne!(
+                    step.agent.as_deref(),
+                    Some("pi"),
+                    "`{}`/`{}` assigns the retired `pi` profile directly",
+                    pipeline.name,
+                    step.id
+                );
+                assert!(
+                    step.model.as_deref().is_none_or(|m| m.trim().is_empty()),
+                    "`{}`/`{}` fixes a model choice: {:?}",
+                    pipeline.name,
+                    step.id,
+                    step.model
+                );
+                assert!(
+                    step.effort.as_deref().is_none_or(|e| e.trim().is_empty()),
+                    "`{}`/`{}` fixes an effort choice: {:?}",
+                    pipeline.name,
+                    step.id,
+                    step.effort
+                );
+            }
+        }
     }
 
     /// The crate description npm and crates.io display is a sentence from the

@@ -1067,9 +1067,9 @@ pub struct AgentProfile {
 
     /// Most lanes of this profile running at once. Zero means unlimited.
     ///
-    /// A cap on the *harness*, which is why only `claude` ships with one: how
-    /// many `claude` lanes may be in flight is a fact about an account and its
-    /// rate limits, and the profile is the only thing that knows it.
+    /// A cap on the *harness*: how many `claude` lanes may be in flight can be
+    /// a fact about an account and its rate limits, and the profile is the
+    /// place to state it explicitly. No shipped profile guesses that fact.
     ///
     /// It is the wrong axis for a local profile, and the shipped local
     /// profiles leave it at zero for that reason. `pi` and `codex` are
@@ -1115,7 +1115,8 @@ pub struct AgentProfile {
     /// model's `context_window` in `[models]`: a ledger entry's own token
     /// count is a running sum across every turn the session has ever spent,
     /// and a sum only grows, so it says what the session has cost rather
-    /// than how large it now is. 1..=100.
+    /// than how large it now is. `0` — the default — disables this ceiling;
+    /// otherwise the value is 1..=100.
     pub session_reuse_ctx: u8,
 
     /// How large a *running* lane's last completed turn may get, as a
@@ -1137,7 +1138,7 @@ pub struct AgentProfile {
     /// the next pass ever looks — this is a property of when the number is
     /// taken, not a bug to chase.
     ///
-    /// Must be set above `session_reuse_ctx` if it is set at all: a task
+    /// Must be set above `session_reuse_ctx` when both are set: a task
     /// blocked at or below the reuse threshold would have the very session
     /// that just blocked it carried right back in on the next visit, over
     /// the size that tripped the ceiling, and block again immediately.
@@ -1217,7 +1218,7 @@ impl Default for AgentProfile {
             // means. Asserting a cap of one here was arbitrary anyway.
             concurrency: 0,
             context_window: 0,
-            session_reuse_ctx: 50,
+            session_reuse_ctx: 0,
             session_blocked_ctx: 0,
             quota_ceiling: 0,
             session_reuse_uncached: false,
@@ -1228,16 +1229,13 @@ impl Default for AgentProfile {
 }
 
 impl AgentProfile {
-    /// The profiles a scaffolded project starts with: `pi` and `claude`,
-    /// which the built-in pipelines reference, plus `codex`, which is there
-    /// so pointing a step at it is an edit to a step's `agent:` rather than a
-    /// profile somebody has to write first.
+    /// The built-in profile definitions. Fresh-project init retains only the
+    /// selected Claude or Codex row; defaults kept in memory still include Pi
+    /// for older projects and test/runtime assembly.
     ///
-    /// Two of the three run against a local server, and neither of those two
-    /// carries a `concurrency` — see the field's own doc for why that number
-    /// belongs to the model rather than to the harness in front of it. The
-    /// other is a cloud kind with no local option, and carries a cap of its
-    /// own.
+    /// None carries a `concurrency`: a fresh project does not know the
+    /// account or model capacity it would need to assert one. See the field's
+    /// own doc for where an explicit harness cap belongs.
     pub fn defaults() -> BTreeMap<String, AgentProfile> {
         let pi = AgentProfile {
             kind: "pi".into(),
@@ -1249,9 +1247,8 @@ impl AgentProfile {
             // model's `slots`, not this profile's business.
             concurrency: 0,
             context_window: 0,
-            // How *large* a carried session may get is not a local-or-hosted
-            // question, and is the same 50% for every profile.
-            session_reuse_ctx: 50,
+            // Off until the project chooses a percentage ceiling.
+            session_reuse_ctx: 0,
             // Off, like every shipped profile: nothing watches a live
             // lane's size until a person turns this on.
             session_blocked_ctx: 0,
@@ -1268,9 +1265,10 @@ impl AgentProfile {
             model: String::new(),
             sandbox: false,
             sandbox_extension: false,
-            concurrency: 1,
+            // Unset: spoolway cannot infer an account's safe parallelism.
+            concurrency: 0,
             context_window: 0,
-            session_reuse_ctx: 50,
+            session_reuse_ctx: 0,
             session_blocked_ctx: 0,
             quota_ceiling: 0,
             session_reuse_uncached: false,
@@ -1294,7 +1292,7 @@ impl AgentProfile {
             sandbox_extension: false,
             concurrency: 0,
             context_window: 0,
-            session_reuse_ctx: 50,
+            session_reuse_ctx: 0,
             session_blocked_ctx: 0,
             quota_ceiling: 0,
             session_reuse_uncached: false,
@@ -1419,7 +1417,10 @@ impl AgentProfile {
     /// on a kind with no such flag, the same way an unset `permission_mode`
     /// is: `pipeline check` is where that mismatch is refused, not here.
     pub fn effort_args(&self, effort: Option<&str>) -> Vec<String> {
-        let Some(effort) = effort else {
+        // Scaffolded pipelines write the choice down explicitly as `""`.
+        // Treat that visible blank exactly like an absent key instead of
+        // launching a CLI with an effort flag whose value is empty.
+        let Some(effort) = effort.filter(|value| !value.trim().is_empty()) else {
             return Vec::new();
         };
         let Some(row) = crate::agent::adapter(&self.kind).and_then(|a| a.effort.as_ref()) else {
@@ -2026,15 +2027,19 @@ mod tests {
 
         assert_eq!(parsed.dispatch.interval, original.dispatch.interval);
         assert_eq!(parsed.agents["claude"].kind, "claude");
-        // The cloud profile carries a `concurrency`, and the two local ones
-        // do not: a cap on the harness is a cloud fact, and a local model's
-        // own count is `models."<glob>".slots`. Zero has to survive the round
+        // No profile guesses a harness cap. Zero has to survive the round
         // trip as zero rather than being written out and read back as
         // something else.
-        assert_eq!(parsed.agents["claude"].concurrency, 1);
-        for name in ["pi", "codex"] {
+        for name in ["pi", "claude", "codex"] {
             assert_eq!(parsed.agents[name].concurrency, 0, "{name}");
+            assert_eq!(parsed.agents[name].session_reuse_ctx, 0, "{name}");
+            assert_eq!(parsed.agents[name].session_blocked_ctx, 0, "{name}");
+            assert_eq!(parsed.agents[name].quota_ceiling, 0, "{name}");
         }
+        assert!(
+            !text.contains("concurrency ="),
+            "a fresh profile must omit its zero concurrency cap:\n{text}"
+        );
         // Every model your pipelines name is already covered by the built-in
         // table once it exists; nothing here is a guess spoolway made for you.
         assert!(parsed.models.is_empty());
@@ -2227,6 +2232,8 @@ mod tests {
         assert_eq!(cloud.kind, "claude");
         assert_eq!(cloud.effort_args(Some("high")), ["--effort", "high"]);
         assert!(cloud.effort_args(None).is_empty());
+        assert!(cloud.effort_args(Some("")).is_empty());
+        assert!(cloud.effort_args(Some("   ")).is_empty());
     }
 
     /// pi's `--thinking` is a token budget, not a named level — a different

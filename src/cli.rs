@@ -570,22 +570,16 @@ pub struct SpendArgs {
 #[derive(Debug, Args, Default)]
 #[command(
     long_about = "Scaffold a project: config, pipelines, prompts, skeletons, ignore rules \
-        — and the five answers that would otherwise be edited in afterwards.\n\n\
-        `--agent`, `--model`, `--tracker` and `--project-key` are asked at a terminal and \
+        — and the three answers that would otherwise be edited in afterwards.\n\n\
+        `--tracker` and `--project-key` are asked at a terminal and \
         skipped everywhere else, so a script that runs `init` gets the defaults and no \
         prompt. Give any of them as a flag and it is not asked either. `--provider` is asked \
         every time, fresh project or not — installing skills is worth doing even for a \
         project that has everything else already.\n\n\
-        `--provider` is the coding agent *you* plan in, and decides only where the skills \
-        land. `--agent` is what a lane runs, which is a different question with a different \
-        answer — planning in claude while the pipeline's local steps run on pi is the \
-        arrangement this project itself uses.\n\n\
-        `--agent` settles one profile, `agents.pi`, and nothing else. It is not a \
-        project-wide choice of agent: a step names an agent *profile*, a profile names a \
-        kind, and a project may define as many profiles of as many kinds as it likes — the \
-        shipped config already ships a second one, `agents.claude`, running claude. So a \
-        pipeline is free to run one step on pi, the next on codex and the next on claude. \
-        Add or change a profile with `spoolway config set`; see `docs/agents.md`.\n\n\
+        `--provider` is the coding agent *you* plan in. A fresh project installs that \
+        provider's skills, creates its one agent profile, and points every scaffolded lane \
+        at it. Model and effort stay blank for each step because spoolway cannot choose \
+        either for you. Add or change profiles with `spoolway config set`.\n\n\
         `--tracker` names the issue tracker `[issue_tracking]` points at — `github`, `jira` \
         or `none` — and `--project-key` is the project its tickets open into. Every hook \
         script is written whichever answer this is, so switching trackers later is a \
@@ -607,23 +601,7 @@ pub struct InitArgs {
     /// The coding agent you plan in, whose convention the skills are installed
     /// under. Asked at a terminal; `claude` when there is nobody to ask.
     #[arg(long, value_enum)]
-    pub provider: Option<Provider>,
-
-    /// The agent kind the pipeline's local steps run on, as `agents.pi.kind`
-    /// would name it — that one profile only, not the project. Other steps run
-    /// on other profiles, of any launchable kind. Asked at a terminal; `pi`
-    /// when there is nobody to ask.
-    #[arg(long, value_name = "KIND")]
-    pub agent: Option<String>,
-
-    /// The model those local steps name, written into the pipelines in place of
-    /// the placeholder they ship with.
-    ///
-    /// spoolway names no model of its own, so left unset this stays the
-    /// placeholder — which every check that asks whether a step names something
-    /// is satisfied by, and no lane can actually run.
-    #[arg(long, value_name = "MODEL")]
-    pub model: Option<String>,
+    pub provider: Option<PlanningAgent>,
 
     /// Which issue tracker `[issue_tracking]` names. Asked at a terminal, on
     /// a fresh project only; `none` when there is nobody to ask, which
@@ -647,6 +625,30 @@ pub struct InstallArgs {
     /// Overwrite files that already exist.
     #[arg(long)]
     pub force: bool,
+}
+
+/// A coding agent that can be the identity of a freshly scaffolded project.
+///
+/// Kept separate from [`Provider`]: Pi skills remain installable for existing
+/// projects, but a new scaffold deliberately starts from one Claude or Codex
+/// profile instead of recreating the old mixed Pi/hosted arrangement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum PlanningAgent {
+    Claude,
+    Codex,
+}
+
+impl PlanningAgent {
+    pub fn provider(self) -> Provider {
+        match self {
+            Self::Claude => Provider::Claude,
+            Self::Codex => Provider::Codex,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        self.provider().name()
+    }
 }
 
 /// A coding agent a person plans in, named by where it looks for skills.

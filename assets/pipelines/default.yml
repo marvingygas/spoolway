@@ -20,7 +20,7 @@
 #                                        Absent: the step id.
 #   model             <name>             Model this step runs. Required on an agent step.
 #   effort            <string>           Passed to the agent kind's effort flag.
-#                                        Absent: no flag is sent.
+#                                        Blank or absent: no flag is sent.
 #   skills            <a, b, c>          Skills invoked at the top of this step's
 #                                        opening prompt. Comma separated, leading
 #                                        slash optional, names only.
@@ -63,9 +63,10 @@ description: >-
 steps:
   - id: implement
     description: Write the code to satisfy the task's acceptance criteria.
-    agent: pi
+    agent: claude
     prompt: implementer
-    model: your-local-model
+    model: ""
+    effort: ""
     session: true
     on_pass: review
     on_fail: blocked
@@ -74,8 +75,8 @@ steps:
     description: Check the diff against the acceptance criteria and project standards.
     agent: claude
     prompt: reviewer
-    model: claude-opus-5
-    effort: high
+    model: ""
+    effort: ""
     session: true
     loop:
       implement: 2
@@ -84,9 +85,10 @@ steps:
 
   - id: document
     description: Bring the domain documents in line with what this task changed.
-    agent: pi
+    agent: claude
     prompt: archivist
-    model: your-local-model
+    model: ""
+    effort: ""
     on_pass: handover
     on_fail: blocked
 

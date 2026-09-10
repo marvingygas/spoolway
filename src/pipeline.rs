@@ -89,10 +89,10 @@ pub fn key_block() -> &'static str {
 /// The built-in set, parsed. Falls out of [`BUILTIN_PIPELINES`] so there is one
 /// copy of the text and no second definition to keep in step.
 ///
-/// `pub(crate)` rather than private: `pipeline_check` reads this directly, so
-/// the two shipped pipelines are validated in full whether or not this
-/// project's own `.spoolway/pipelines/` shadows them with an override — see
-/// `commands::pipeline_check`.
+/// `pub(crate)` rather than private: [`Pipelines::load`] reads this directly
+/// as the on-disk fallback for a project with no `.spoolway/pipelines/` of
+/// its own, and the `#[cfg(test)]` [`Pipelines::builtin`] and
+/// [`Pipelines::shipped`] helpers both build on it too.
 pub(crate) fn builtin_pipelines() -> Result<BTreeMap<String, Pipeline>> {
     BUILTIN_PIPELINES
         .iter()
@@ -324,6 +324,7 @@ pub struct Step {
     /// How hard `model:` thinks, handed straight through to the flag its
     /// agent kind carries an effort on — `--effort` for claude, dropped
     /// entirely for a kind with none, such as pi.
+    /// Blank is the explicit form of no effort choice and sends no flag.
     ///
     /// A free string, not a closed set: which levels a model accepts is the
     /// model's own fact, changes when the model does, and a copy of that list
@@ -359,9 +360,10 @@ pub struct Step {
     /// step's behaviour today.
     ///
     /// A plain switch: the step says *whether*, and the agent profile that
-    /// runs it says *how far* — `agents.<profile>.session_reuse_ctx` bounds
-    /// how large the earlier session may be, as a percentage of the model's
-    /// context window, and `agents.<profile>.session_reuse_uncached` says
+    /// runs it may say *how far* — a nonzero
+    /// `agents.<profile>.session_reuse_ctx` bounds how large the earlier
+    /// session may be, as a percentage of the model's context window, and
+    /// `agents.<profile>.session_reuse_uncached` says
     /// whether a session whose prompt cache has gone cold is still worth
     /// resuming. Both used to live here as the two shapes `session:` took —
     /// a bare `true` or a percentage — and moved to the profile because they
@@ -447,8 +449,8 @@ pub struct Step {
     /// same tokens whether one lap opened a conversation or three did, and only
     /// the lap count can be written down in advance and mean the same thing
     /// every run. What still bounds a conversation's own cost is
-    /// `agents.<profile>.session_reuse_ctx`, on the agent profile, entirely
-    /// separate from this.
+    /// an enabled `agents.<profile>.session_reuse_ctx`, on the agent profile,
+    /// entirely separate from this.
     ///
     /// Counted per route in, not per step, because a step several loops come
     /// back to is several loops: `review` and `e2e` both send failures to
@@ -680,7 +682,7 @@ fn deserialize_retired_max_new_sessions<'de, D: serde::Deserializer<'de>>(
         "`max_new_sessions:` is now `loop:` — it bounds how many times a task may arrive at \
          this step from a given one, a lap of the loop, not how many fresh conversations that \
          cost. A step with `session: true` may re-prompt a live session as often as it needs; \
-         what still bounds a conversation's own size is `session_reuse_ctx` on the agent \
+         what may bound a conversation's own size is `session_reuse_ctx` on the agent \
          profile, entirely separate from this. Rename the key, and consider raising the \
          number: a whole conversation was stingier than a lap now is",
     ))
@@ -1953,23 +1955,48 @@ impl Pipelines {
     /// disk and falls back to the same files; this is the test fixture.
     #[cfg(test)]
     pub fn builtin() -> Pipelines {
-        Pipelines::assemble(
+        let mut pipelines = Pipelines::assemble(
             builtin_pipelines().expect("built-in pipelines must parse"),
             &crate::config::Config::default(),
         )
-        .expect("built-in pipelines must be valid")
+        .expect("built-in pipelines must be valid");
+
+        // Most dispatcher tests need a runnable pipeline fixture, while the
+        // assets now deliberately scaffold explicit blanks. Hydrate only this
+        // test helper with representative choices; production always loads a
+        // project's specialized files from disk.
+        for pipeline in pipelines.pipelines.values_mut() {
+            for step in &mut pipeline.steps {
+                if step.kind() != StepKind::Agent || step.id == BLOCKED {
+                    continue;
+                }
+                if step.id == "review" {
+                    step.agent = Some("claude".into());
+                    step.model = Some("claude-opus-5".into());
+                    step.effort = Some("high".into());
+                } else {
+                    step.agent = Some("pi".into());
+                    step.model = Some(crate::models::PLACEHOLDER.into());
+                    step.effort = None;
+                }
+            }
+        }
+        pipelines
     }
 
     /// The two shipped pipelines, assembled against `config` rather than the
-    /// built-in default — what `pipeline_check` validates alongside whatever
-    /// this project's own `.spoolway/pipelines/` loaded, so a shipped
-    /// pipeline is gated whether or not an override shadows it.
+    /// built-in default. `spoolway pipeline check` no longer opens these —
+    /// it derives every finding from a project's own loaded set — so this is
+    /// release-time proof only: `src/assets.rs`'s own tests hold
+    /// `assets/pipelines/*.yml` to the same structural rules and to
+    /// neutrality about Pi, model and effort choices.
     ///
     /// `dispatch.default_pipeline` is forced to `default` first: this is a
-    /// fixed two-pipeline reference set, not the project's real routing, and
+    /// fixed two-pipeline reference set, not a project's real routing, and
     /// `assemble`'s own [`Pipelines::validate`] refuses a default that names
     /// a pipeline outside the set it is validating — which a project whose
     /// real default is `impl`, say, would otherwise trip on every time.
+    #[cfg(test)]
     pub(crate) fn shipped(config: &crate::config::Config) -> Result<Pipelines> {
         let mut config = config.clone();
         config.dispatch.default_pipeline = "default".to_string();
@@ -2099,10 +2126,8 @@ mod tests {
         }
     }
 
-    /// `handover` is a command step in one shipped pipeline and a model step
-    /// in another, and `spoolway doctor` asks about it by id across all of
-    /// them. A `run:` step names no model on purpose, so counting it as a
-    /// missing one would report a perfectly runnable agent as unrunnable.
+    /// A command step names no model on purpose, so it does not make a
+    /// configured agent step sharing an id read as model-less.
     // covers: step.run — a command step runs no agent, so it carries no model to be missing
     #[test]
     fn a_command_step_does_not_count_as_a_step_missing_its_model() {
@@ -2120,8 +2145,8 @@ mod tests {
             "the shipped set should still have a command `handover`: {command_steps:?}"
         );
 
-        // Every agent a shipped pipeline names has a model for every step it
-        // really runs — the command steps sharing those ids change nothing.
+        // `Pipelines::builtin` hydrates the scaffold for dispatcher tests;
+        // command steps sharing ids do not erase those fixture models.
         for (agent, steps) in pipelines.referenced_agents() {
             for step in steps {
                 assert!(

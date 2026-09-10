@@ -393,7 +393,7 @@ pub fn report(
 /// step behind it is exactly the second case.
 ///
 /// What it counts is laps, not conversations: a step with `session: true` may
-/// be re-prompted as often as its session survives, and that is a separate
+/// be re-prompted as often as its session survives, with an optional separate
 /// bound — `session_reuse_ctx` on the agent profile.
 ///
 /// An unattended run still takes this exit. `on_loop_max` is where the

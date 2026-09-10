@@ -52,25 +52,26 @@ Run the initialiser inside a git repository:
 spoolway init
 ```
 
-At a terminal it asks five things before it writes anything — the coding agent you plan in,
-the issue tracker to name in `[issue_tracking]` and the project its tickets file into, the
-agent kind your local pipeline steps run on, and the model those steps name. Fixed choices
-use an arrow-key selector; move with ↑/↓ and accept with Enter or Space. Each has a flag
-(`--provider`, `--tracker`, `--project-key`, `--agent`, `--model`), and giving it means the
-question is not asked. Run without a terminal — a script, CI, a pipe — nothing is asked and
-the defaults are taken: claude, no tracker, pi, and the model placeholder left standing for
-`doctor` to report.
+At a terminal it asks three things before it writes anything — the coding agent you plan in,
+the issue tracker to name in `[issue_tracking]` and the project its tickets file into. Fixed
+choices use an arrow-key selector; move with ↑/↓ and accept with Enter or Space. Each has a
+flag (`--provider`, `--tracker`, `--project-key`), and giving it means the question is not
+asked. Run without a terminal — a script, CI, a pipe — nothing is asked and the defaults are
+taken: claude and no tracker. Every agent step's model and effort stay blank for you to fill
+in.
 
-On success, `init` prints only that the skills were installed and the project was initialized,
-plus any actionable warning. Running it again to add another provider's skills omits the project
-message. The narrower `spoolway install <provider>` command uses the same concise skills message.
+On a fresh success, `init` prints that the skills were installed and the project was initialized,
+plus one sentence telling you to set model and effort on every agent step in
+`.spoolway/pipelines/*.yml` before dispatching, and any actionable warning. Running it again to
+add another provider's skills omits the project message (and the sentence). The narrower
+`spoolway install <provider>` command uses the same concise skills message.
 
-`--agent` settles **one profile**, `agents.pi`, and is not a project-wide choice of agent.
-A pipeline step names an agent *profile*; a profile names a kind; and a project may define as
-many profiles of as many kinds as it likes — the config `init` writes already carries a second
-one, `agents.claude`, running claude. So a pipeline can run one step on pi, the next on codex
-and the next on claude, whatever this question was answered with. Add or change a profile
-afterwards with `spoolway config set`; see [Agents and models](agents.md).
+`--provider` settles the fresh project's one agent identity: a fresh scaffold keeps exactly
+that one profile, points `pipeline_gen.pipeline_agent` and `unattended.blocked_agent` at it,
+and specializes every bundled pipeline's agent steps to it. Model and effort are left blank on
+every step, because spoolway cannot choose either for you. A pipeline can still name a step
+onto any other profile of any other kind — add or change profiles with `spoolway config set`
+afterwards; see [Agents and models](agents.md).
 
 It creates, in one pass:
 
@@ -90,10 +91,10 @@ It creates, in one pass:
 An existing file is kept rather than overwritten. `--force` overwrites.
 
 Run `init` again in a project that already has a config and it installs skills and changes
-nothing else — which is how you add a second provider. `--agent` and `--model` are reported
-as not applied rather than quietly dropped: rewriting a config a project has been running on
-is not what a second `init` is for. `spoolway config set` is, and `--force` takes the
-shipped config back.
+nothing else — which is how you add a second provider. `--tracker` and `--project-key` are
+reported as not applied rather than quietly dropped: rewriting a config a project has been
+running on is not what a second `init` is for. `spoolway config set` is, and `--force` takes
+the shipped config back.
 
 **Everything spoolway writes while it runs — the queue, the archive, plans, lane
 bookkeeping, the usage ledger — lives outside the checkout, at
@@ -157,10 +158,10 @@ the directory goes, because all three converged on the same layout:
 | `codex` | `.agents/skills/` |
 | `pi` | `.pi/skills/` — loaded only once the project is trusted, so answer pi's trust prompt or start it with `--approve` |
 
-Which one you plan in is a separate question from what your lanes run: planning in Claude
-Code while the pipeline's local steps run on pi is the arrangement spoolway itself is
-developed under. `--provider` is the first; `--agent`, and `spoolway agent list`, are the
-second.
+Which one you plan in is a separate question from what your lanes run. `--provider` is the
+agent you plan in, and for a fresh project it also becomes that project's one agent profile —
+see [`spoolway init`](#scaffolding-a-project). A pipeline can still run a step on another
+profile of another kind you add later with `spoolway config set`.
 
 `gemini` is not on the list. It has no adapter row either — nothing about it has been
 settled against the binary, and a guessed row is worse than no row.

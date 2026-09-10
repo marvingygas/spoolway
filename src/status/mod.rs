@@ -177,8 +177,8 @@ pub struct Row {
     pub dependents: usize,
     /// How full the conversation this task's live lane is holding has got, as
     /// a percentage of its model's context window. The same reading
-    /// `session_reuse_ctx` forks a fresh session on, so a row approaching it
-    /// is a row about to lose its session.
+    /// an enabled `session_reuse_ctx` forks a fresh session on, so a row
+    /// approaching that ceiling is a row about to lose its session.
     ///
     /// `None` wherever there is no honest answer: no live lane, a model whose
     /// window nothing resolves, or a session that has not taken a turn yet.
@@ -2120,7 +2120,8 @@ fn lane_time_at(ledger: &[crate::usage::Entry], task: &str, stage: &str) -> Opti
 /// The same arithmetic `dispatch::carried_session` decides on — a last turn
 /// over the model's `context_window` — which is the whole point of the column:
 /// the number on the board is the number the dispatcher will act on, so a row
-/// nearing `session_reuse_ctx` is a row about to be given a fresh session.
+/// nearing an enabled `session_reuse_ctx` is a row about to be given a fresh
+/// session.
 ///
 /// `None` where the model resolves to no window at all, which is a `[models]`
 /// row missing rather than a session measured and found small.
@@ -2547,12 +2548,21 @@ mod tests {
     fn queued_local_models_names_a_local_model_a_queued_task_will_run() {
         let mut repo = fixture("queued-local-models");
         add(&repo, "login", &[], Some("implement"));
-        let pipelines = Pipelines::builtin();
+        let mut pipelines = Pipelines::builtin();
         let tasks = repo.tasks().unwrap();
 
-        // The shipped `default` pipeline's local steps carry the placeholder,
-        // so flagging that name `local` is the whole of what a real project's
-        // own model name would do here.
+        // Fresh shipped steps are blank. Give this fixture the local model a
+        // configured project would have chosen before asking what the footer
+        // reports about it.
+        pipelines
+            .pipelines
+            .get_mut("default")
+            .unwrap()
+            .steps
+            .iter_mut()
+            .find(|step| step.id == "implement")
+            .unwrap()
+            .model = Some(crate::models::PLACEHOLDER.to_string());
         repo.config.models.insert(
             crate::models::PLACEHOLDER.to_string(),
             crate::usage::ModelPrice {

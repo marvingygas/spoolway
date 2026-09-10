@@ -693,7 +693,15 @@ fn agent_checks(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
         // spoolway names no model of its own: every step that runs on this
         // agent has to name one, and finding that out here beats finding it
         // out from an agent that was handed an empty `--model`.
-        let model = if steps.iter().all(|step| pipelines.step_has_model(step)) {
+        // `blocked` is materialised even in attended mode, where it parks for
+        // a person and launches no agent. Config checks enforce its model once
+        // unattended mode actually staffs it; do not misdirect an attended
+        // project to pipeline YAML for this config-derived blank.
+        let model = if steps
+            .iter()
+            .filter(|step| config.unattended.enabled || **step != crate::pipeline::BLOCKED)
+            .all(|step| pipelines.step_has_model(step))
+        {
             Ok(Some(
                 "set per step in .spoolway/pipelines/<name>.yml".into(),
             ))
@@ -723,7 +731,7 @@ fn agent_checks(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
 }
 
 /// Every check and note that reads a model's own settings rather than an
-/// agent profile's: the shipped placeholder, a name that resolves to nothing,
+/// agent profile's: the legacy/template placeholder, a name that resolves to nothing,
 /// a step nothing caps, an `exclusive` model with no `slots` of its own, a
 /// `slots`/`exclusive` model that has not said whether it is `local`, and a
 /// `session_blocked_ctx` set against a model that cannot honour it. Grouped
@@ -733,8 +741,8 @@ fn model_health_checks(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
     let mut findings = Vec::new();
 
     // The one unresolvable name that is a failure rather than a note: the
-    // placeholder the shipped pipelines carry, which says "name your local
-    // model here" and is not a model. It satisfies every check that asks
+    // placeholder older scaffolds and the annotated template carry, which
+    // says "name your local model here" and is not a model. It satisfies checks that ask
     // whether a step names something — that is what a placeholder does — so a
     // project that has not read the comment above it looks configured and is
     // not, and finds out one lane later when an agent is handed a model
@@ -749,7 +757,7 @@ fn model_health_checks(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
         match unset.is_empty() {
             true => Ok(None),
             false => Err(anyhow::anyhow!(
-                "{} still name `{}`, which is the placeholder spoolway ships rather than a \
+                "{} still name `{}`, which is a spoolway placeholder rather than a \
                  model — put your own local model's name in the pipeline file",
                 unset.join(", "),
                 crate::models::PLACEHOLDER
@@ -1412,6 +1420,34 @@ mod tests {
             assert!(note.contains(".spoolway/pipelines/"), "{note}");
             assert!(!note.contains(" in pipeline.yml"), "{note}");
         }
+    }
+
+    #[test]
+    fn an_attended_synthetic_blocked_step_needs_no_model() {
+        let mut pipelines = crate::pipeline::Pipelines::builtin();
+        for pipeline in pipelines.pipelines.values_mut() {
+            pipeline
+                .steps
+                .iter_mut()
+                .find(|step| step.id == crate::pipeline::BLOCKED)
+                .unwrap()
+                .model = None;
+        }
+        let mut config = Config::default();
+        config.unattended.blocked_model.clear();
+
+        let attended = agent_checks(&pipelines, &config);
+        assert!(attended.iter().all(|finding| match finding {
+            Finding::Check(label, result) if label.ends_with("has a model") => result.is_ok(),
+            _ => true,
+        }));
+
+        config.unattended.enabled = true;
+        let unattended = agent_checks(&pipelines, &config);
+        assert!(unattended.iter().any(|finding| match finding {
+            Finding::Check(label, result) if label.ends_with("has a model") => result.is_err(),
+            _ => false,
+        }));
     }
 
     /// One note per `[models]` entry that sets `slots` or `exclusive` without

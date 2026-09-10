@@ -13,18 +13,11 @@ use super::*;
 /// is not asked what kind its lanes run, because `init` is not going to rewrite
 /// that file and the answer would be taken and dropped.
 struct Answers {
-    /// The coding agent a person plans in. Always settled — installing skills
-    /// is worth doing for a project that has everything else already.
+    /// The coding agent a person plans in and a fresh scaffold runs. Always
+    /// settled — installing skills is worth doing for an established project.
     provider: Provider,
-    /// The kind `agents.pi` runs, or `None` when the config is staying as it
-    /// is.
-    agent: Option<String>,
-    /// What the pipelines' local steps name instead of the placeholder, or
-    /// `None` to leave the placeholder standing.
-    model: Option<String>,
     /// The tracker `[issue_tracking]` names — `Tracker::None` when the
-    /// config is staying as it is, the same "nothing to land" reasoning as
-    /// `agent` and `model`.
+    /// config is staying as it is, because there is nothing to land it in.
     tracker: Tracker,
     /// The project the tracker's tickets open into. Blank whenever `tracker`
     /// is, and always blank on a config that is staying as it is.
@@ -46,14 +39,14 @@ impl Answers {
             None => {
                 // Straight off clap's own list, so the menu and `--provider`
                 // cannot come to offer different things.
-                let providers = <Provider as clap::ValueEnum>::value_variants();
+                let providers = <PlanningAgent as clap::ValueEnum>::value_variants();
                 let notes: Vec<String> = providers
                     .iter()
                     .map(|provider| {
                         // Against the project's own root, so the note names the
                         // directory that will actually be written, separators
                         // and all.
-                        let dir = provider.skills_dir(root);
+                        let dir = provider.provider().skills_dir(root);
                         format!("skills go in {}", crate::platform::relative(root, &dir))
                     })
                     .collect();
@@ -64,65 +57,38 @@ impl Answers {
                     .collect();
                 providers[crate::ask::choose("Which coding agent will you plan in?", &menu, 0)?]
             }
-        };
-
-        // Checked before anything is decided, and whether or not the answer can
-        // land: a kind that does not exist is a typo either way, and a run that
-        // discarded the flag *and* the mistake in it would be the one place a
-        // person could misspell a kind and never hear about it.
-        if let Some(kind) = &args.agent
-            && crate::agent::adapter(kind).is_none_or(|adapter| !adapter.launches())
-        {
-            bail!(
-                "spoolway cannot launch agent kind `{kind}` — try one of: {}",
-                launchable().join(", ")
-            );
         }
+        .provider();
 
-        // Only asked, and only applied, for a config that is going to be
-        // written. Both of these are answers about how lanes run, and a project
-        // that has been running lanes for a month has already settled them.
-        //
-        // Said out loud rather than dropped quietly: a person who typed
-        // `--agent codex` at an existing project has asked for something that
-        // is not going to happen, and finding that out from the config a week
-        // later is the kind of silence this whole command is against.
+        // Tracker and project key are only asked and applied when a config is
+        // going to be written. An established project's issue integration is
+        // not replaced merely because init was run to add another skill copy.
         if !fresh {
-            if args.agent.is_some()
-                || args.model.is_some()
-                || args.tracker.is_some()
-                || args.project_key.is_some()
-            {
+            if args.tracker.is_some() || args.project_key.is_some() {
                 println!(
-                    "  note  this project has a config already, so --agent/--model/--tracker/\
-                     --project-key were not applied — change them with `spoolway config set`, \
+                    "  note  this project has a config already, so --tracker/--project-key \
+                     were not applied — change them with `spoolway config set`, \
                      or re-run with --force to take the shipped config back"
                 );
             }
             return Ok(Self {
                 provider,
-                agent: None,
-                model: None,
                 tracker: Tracker::None,
                 project_key: String::new(),
             });
         }
 
         let (tracker, project_key) = Self::tracker(args)?;
-        let (agent, model) = (Self::agent(args)?, Self::model(args)?);
 
         Ok(Self {
             provider,
-            agent,
-            model,
             tracker,
             project_key,
         })
     }
 
     /// The tracker `[issue_tracking]` names, and the project it files into —
-    /// off the flags, or off a menu the same shape [`Self::agent`]'s own
-    /// takes.
+    /// off the flags, or off a menu the provider question's own takes.
     ///
     /// The note beside each entry is whether its command-line tool is on
     /// `PATH`, so choosing Jira without `acli` installed says so at the
@@ -181,89 +147,20 @@ impl Answers {
         Ok((tracker, project_key))
     }
 
-    /// The kind the local profile runs, off the flag or off a menu of every
-    /// kind spoolway can actually launch.
+    /// Point a bundled pipeline at this project's one profile.
     ///
-    /// The note beside each is whether the binary is on `PATH` — derived rather
-    /// than written, and the one fact a person choosing here wants, since a
-    /// kind that is not installed is a dispatcher that fails at its first lane.
-    /// The flag has already been checked against the adapter table by
-    /// [`gather`](Self::gather); this only chooses.
-    fn agent(args: &InitArgs) -> Result<Option<String>> {
-        if args.agent.is_some() {
-            return Ok(args.agent.clone());
-        }
-        if !crate::ask::interactive() {
-            return Ok(None);
-        }
-
-        let kinds = launchable();
-        let notes: Vec<String> = kinds
-            .iter()
-            .map(|kind| match which(kind) {
-                Some(path) => format!("on PATH, at {path}"),
-                None => "not on PATH — install it before dispatching".to_string(),
-            })
-            .collect();
-        let menu: Vec<(&str, &str)> = kinds
-            .iter()
-            .zip(&notes)
-            .map(|(kind, note)| (*kind, note.as_str()))
-            .collect();
-        // The default is whatever the shipped config already names, so that
-        // pressing enter and never running `init` interactively at all leave a
-        // project in the same state.
-        let default = Config::default()
-            .agents
-            .get(LOCAL_PROFILE)
-            .and_then(|profile| kinds.iter().position(|kind| *kind == profile.kind))
-            .unwrap_or(0);
-
-        // The question names the profile, not the project, because the
-        // difference is the one a person gets wrong here: this settles
-        // `agents.pi` alone, and a pipeline is free to name a step onto any
-        // other profile of any other kind — the shipped config already carries
-        // `agents.claude` on claude. A menu that read "which agent will this
-        // project use" would be asking for a decision spoolway does not make.
-        let chosen = crate::ask::choose(
-            "Which agent runs the `pi` profile? (Other steps can name other \
-             profiles, of any kind.)",
-            &menu,
-            default,
-        )?;
-        Ok(Some(kinds[chosen].to_string()))
-    }
-
-    /// The model those steps name. No menu, because spoolway names no model of
-    /// its own and cannot know what this machine serves.
-    fn model(args: &InitArgs) -> Result<Option<String>> {
-        if args.model.is_some() {
-            return Ok(args.model.clone());
-        }
-        crate::ask::line(
-            "Which model do those steps run? Leave blank to fill it in later.",
-            &format!("model name, default `{}`", crate::models::PLACEHOLDER),
-        )
-    }
-
-    /// This project's model written into a shipped pipeline, or the pipeline
-    /// untouched.
-    ///
-    /// A plain substitution of the placeholder, which is what `doctor` already
-    /// looks for by name — so a project that answered and a project that did
-    /// not are the same file with one word different, and the one that did not
-    /// still gets told.
+    /// The assets use Claude as their parseable default so the binary can use
+    /// them as test fixtures before a project exists. Init owns the one textual
+    /// substitution that turns that default into the selected identity.
     fn fill<'a>(&self, body: &'a str) -> std::borrow::Cow<'a, str> {
-        match &self.model {
-            Some(model) => body.replace(crate::models::PLACEHOLDER, model).into(),
-            None => body.into(),
+        if self.provider == Provider::Claude {
+            body.into()
+        } else {
+            body.replace("agent: claude", &format!("agent: {}", self.provider.name()))
+                .into()
         }
     }
 }
-
-/// The profile the shipped pipelines run their local steps on, and the one
-/// `init` asks about. `claude` is left alone: it names a hosted model deliberately.
-const LOCAL_PROFILE: &str = "pi";
 
 /// The file naming which checkout a project's home directory belongs to.
 const PROJECT_FILE: &str = "project.toml";
@@ -474,15 +371,17 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
 
     let state = root.join(STATE_DIR);
     let mut config = Config::default();
-    if let Some(kind) = &answers.agent {
-        // The profile is the shipped one either way; only its kind is the
-        // project's answer. A `pi` that somehow is not there is not worth an
-        // error — the config is spoolway's own default, and the next line
-        // renders it whatever happened here.
-        if let Some(profile) = config.agents.get_mut(LOCAL_PROFILE) {
-            profile.kind = kind.clone();
-        }
-    }
+    let profile = answers.provider.name();
+    // A fresh scaffold has one identity, not a menu of hypothetical profiles:
+    // that makes the first answer sufficient to understand every agent name
+    // written below. The defaults contain this profile by construction.
+    config.agents.retain(|name, _| name == profile);
+    config.pipeline_gen.pipeline_agent = profile.to_string();
+    config.unattended.blocked_agent = profile.to_string();
+    // An unblocker is an agent step too. Leaving both knobs blank avoids
+    // silently choosing more for it than init chooses for declared steps.
+    config.unattended.blocked_model.clear();
+    config.unattended.blocked_effort.clear();
     // Blank on a config that is staying as it is, which matches the
     // rendered default already sitting in `config` unmodified — writing it
     // through here rather than skipping it is one fewer branch to keep in
@@ -654,6 +553,10 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     crate::install::report(installed);
     if !already_initialized {
         println!("Project initialized successfully.");
+        println!(
+            "Set model and effort on every agent step in .spoolway/pipelines/*.yml before \
+             dispatching."
+        );
     }
     Ok(())
 }
@@ -707,10 +610,8 @@ mod tests {
         all
     }
 
-    /// The property the whole of [`crate::ask`] exists for: with no terminal —
-    /// which is every test, every script and every CI run — `init` asks
-    /// nothing, blocks nowhere, and lands exactly what it landed before it
-    /// could ask anything at all.
+    /// With no terminal — every script and CI run — init asks nothing and
+    /// chooses Claude, while still leaving the per-step choices visible.
     ///
     /// Worth a test of its own because the failure is not a wrong file, it is a
     /// hang: an `init` that reads stdin in a suite that gives it none waits
@@ -719,87 +620,53 @@ mod tests {
     fn init_with_nobody_to_ask_takes_every_default() {
         let root = scaffold("defaults", &InitArgs::default());
 
-        let config = std::fs::read_to_string(Config::path_in(&root)).unwrap();
-        let shipped = &Config::default().agents[LOCAL_PROFILE].kind;
-        assert!(
-            config.contains(&format!("kind = \"{shipped}\"")),
-            "the local profile should still be the shipped kind:\n{config}"
-        );
+        let config = Config::load(&root).unwrap();
+        assert_eq!(config.agents.len(), 1);
+        assert_eq!(config.agents["claude"].kind, "claude");
+        assert_eq!(config.pipeline_gen.pipeline_agent, "claude");
+        assert_eq!(config.unattended.blocked_agent, "claude");
+        assert!(config.unattended.blocked_model.is_empty());
 
-        // The placeholder survives, because spoolway has no model to put there
-        // and inventing one is how a project comes to look configured and is
-        // not. `doctor` is what tells them; this is what leaves it something to
-        // tell them about.
-        assert!(
-            pipelines_on_disk(&root).contains(crate::models::PLACEHOLDER),
-            "the model placeholder should still be standing"
-        );
+        let pipelines = pipelines_on_disk(&root);
+        assert!(!pipelines.contains("agent: pi"), "{pipelines}");
+        assert!(pipelines.contains("agent: claude"), "{pipelines}");
+        assert!(pipelines.contains("model: \"\""), "{pipelines}");
+        assert!(pipelines.contains("effort: \"\""), "{pipelines}");
 
         // And the default provider's skills, installed rather than suggested.
         assert!(root.join(".claude").join("skills").is_dir());
     }
 
-    /// The two answers that are not spoolway's to choose, each landing in the
-    /// file it belongs in: the kind in the config, the model in the pipelines.
-    /// Given as flags here, which is the same path the answers take — a menu
-    /// choice becomes one of these before anything is written.
+    /// The planning-agent answer supplies the profile, every step reference,
+    /// the unattended unblocker, and the skills convention as one decision.
     #[test]
-    fn the_kind_and_model_asked_for_reach_the_files_they_belong_in() {
+    fn the_provider_answer_reaches_every_file_it_controls() {
         let root = scaffold(
             "answered",
             &InitArgs {
-                agent: Some("codex".into()),
-                model: Some("some-local-model".into()),
-                provider: Some(Provider::Codex),
+                provider: Some(PlanningAgent::Codex),
                 ..InitArgs::default()
             },
         );
 
-        let config = std::fs::read_to_string(Config::path_in(&root)).unwrap();
-        assert!(config.contains("kind = \"codex\""), "{config}");
+        let config = Config::load(&root).unwrap();
+        assert_eq!(config.agents.len(), 1);
+        assert!(config.agents.contains_key("codex"));
+        assert_eq!(config.pipeline_gen.pipeline_agent, "codex");
+        assert_eq!(config.unattended.blocked_agent, "codex");
+        assert!(config.unattended.blocked_model.is_empty());
+        assert!(config.unattended.blocked_effort.is_empty());
 
         let pipelines = pipelines_on_disk(&root);
-        assert!(pipelines.contains("some-local-model"), "{pipelines}");
-        assert!(
-            !pipelines.contains(crate::models::PLACEHOLDER),
-            "no step should still name the placeholder"
-        );
-
-        // The cloud step is left alone: it names a hosted model deliberately,
-        // and a substitution that took it too would quietly move every step
-        // onto one machine.
-        assert!(pipelines.contains("claude-opus-5"), "{pipelines}");
+        assert!(pipelines.contains("agent: codex"), "{pipelines}");
+        assert!(!pipelines.contains("agent: claude"), "{pipelines}");
+        assert!(!pipelines.contains("agent: pi"), "{pipelines}");
 
         assert!(root.join(".agents").join("skills").is_dir());
         assert!(
             !root.join(".claude").exists(),
             "only one provider was asked for"
         );
-    }
-
-    /// A kind nothing can start is refused where it was typed. Left to stand it
-    /// renders into the config and is next heard about from a lane that will
-    /// not launch, several commands and one dispatcher away.
-    #[test]
-    fn init_refuses_an_agent_kind_it_cannot_launch() {
-        let root = crate::scratch::root("init-unlaunchable");
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        crate::scratch::git_init(&root, &["-b", "plan/demo"]);
-
-        let err = run_init(
-            &root,
-            &InitArgs {
-                agent: Some("gemini".into()),
-                ..InitArgs::default()
-            },
-        )
-        .expect_err("a kind with no launch row must be refused");
-        let message = err.to_string();
-        assert!(message.contains("gemini"), "{message}");
-        // And it says what would have worked, since the whole failure is that
-        // the person did not know the list.
-        assert!(message.contains("claude"), "{message}");
     }
 
     /// `init` run again is a project asking for skills, not for its settings
@@ -811,8 +678,7 @@ mod tests {
         let root = scaffold(
             "twice",
             &InitArgs {
-                agent: Some("codex".into()),
-                provider: Some(Provider::Claude),
+                provider: Some(PlanningAgent::Claude),
                 ..InitArgs::default()
             },
         );
@@ -821,8 +687,7 @@ mod tests {
         run_init(
             &root,
             &InitArgs {
-                agent: Some("pi".into()),
-                provider: Some(Provider::Pi),
+                provider: Some(PlanningAgent::Codex),
                 ..InitArgs::default()
             },
         )
@@ -833,17 +698,13 @@ mod tests {
             std::fs::read_to_string(Config::path_in(&root)).unwrap(),
             "the second run must not rewrite a config the project has been using"
         );
-        assert!(root.join(".pi").join("skills").is_dir());
+        assert!(root.join(".agents").join("skills").is_dir());
         assert!(root.join(".claude").join("skills").is_dir());
     }
 
     /// Everything that resolves a prompt path has to agree with what `init`
-    /// wrote, and there is more than one caller: the dispatcher before it starts
-    /// a lane, `pipeline check`, `doctor`, the observer. Each used to build the
-    /// path itself, so moving prompts into directories left five of them
-    /// looking for a file `init` no longer writes — every step reported as
-    /// missing, and no unit test noticed because each half was right about
-    /// itself.
+    /// wrote. Each caller used to build the path itself, so moving prompts into
+    /// directories left them looking for a file init no longer writes.
     ///
     /// So this asserts the two halves against each other rather than against a
     /// literal: init the real thing, then resolve every prompt the builtin
@@ -865,12 +726,6 @@ mod tests {
         };
 
         let pipelines = Pipelines::builtin();
-
-        // The command whose whole job is to refuse a pipeline it cannot run.
-        // It probes every step's prompt and the observer's, so a lookup that
-        // disagrees with `init` surfaces here as a bail rather than at dispatch.
-        pipeline_check(&repo, Ok(pipelines.clone()), false)
-            .expect("a freshly initialised project passes its own pipeline check");
 
         // Every step a shipped pipeline runs has prose on disk after `init`.
         for pipeline in pipelines.pipelines.values() {

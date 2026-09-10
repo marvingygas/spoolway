@@ -351,6 +351,13 @@ say "spoolway init"
 # and with no terminal to ask it takes claude — which is what this scaffold
 # wanted anyway and used to ask for on its own line.
 spoolway init >/dev/null
+# This observed runtime deliberately remains a Pi project. Fresh init no
+# longer invents that profile, so add the existing-project shape explicitly.
+cat >> .spoolway/config.toml <<'PROFILE'
+
+[agents.pi]
+kind = "pi"
+PROFILE
 
 # ------------------------------------------------------------------- the runtime
 
@@ -394,8 +401,8 @@ spoolway config set dispatch.interval 10s
 
 # `blocked` is no longer a step end-to-end.yml declares; `Pipelines::assemble`
 # materialises it from these four keys instead. Kept on `pi` and this
-# project's own local model, same as every other step here — the shipped
-# `claude`/`claude-opus-5` default would spend a real cloud model on a plan
+# project's own local model, same as every other step here — leaving the fresh
+# scaffold's Claude identity in place would spend a real cloud agent on a plan
 # run whose whole point is watching the multiplexer for free.
 spoolway config set unattended.blocked_agent pi
 spoolway config set unattended.blocked_prompt unblocker

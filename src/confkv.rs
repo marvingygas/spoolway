@@ -286,16 +286,16 @@ pub const REFERENCE: &[Reference] = &[
     Reference {
         key: "agents.<profile>.concurrency",
         values: "<n>",
-        default: "1 (cloud), unset elsewhere — omitted means no cap",
+        default: "unset — omitted means no cap",
         sentence: "Most lanes of this profile running at once; 0 is unlimited. A cap on the \
                    harness — a local model's own count is `models.<glob>.slots`.",
     },
     Reference {
         key: "agents.<profile>.session_reuse_ctx",
-        values: "1..=100",
-        default: "50",
+        values: "0, 1..=100",
+        default: "0",
         sentence: "How large a carried session may be, as a percentage of the model's \
-                    context window, before a fresh one opens instead.",
+                    context window, before a fresh one opens instead; 0 is off.",
     },
     Reference {
         key: "agents.<profile>.session_blocked_ctx",
@@ -303,8 +303,8 @@ pub const REFERENCE: &[Reference] = &[
         default: "0",
         sentence: "Percentage of the model's context window a *running* lane's last turn may \
                     reach before the dispatcher stops it and blocks the task; 0 is off. Must be \
-                    above `session_reuse_ctx`. The reading is only taken at turn boundaries, so \
-                    the ceiling can be overshot.",
+                    above `session_reuse_ctx` when both are nonzero. The reading is only taken \
+                    at turn boundaries, so the ceiling can be overshot.",
     },
     Reference {
         key: "agents.<profile>.quota_ceiling",
@@ -757,9 +757,10 @@ pub fn set(config: &Config, key: &str, input: &str) -> Result<Config> {
         profile
             .permission_mode_status()
             .with_context(|| format!("`agents.{name}.permission_mode`"))?;
-        if !(1..=100).contains(&profile.session_reuse_ctx) {
+        if profile.session_reuse_ctx != 0 && !(1..=100).contains(&profile.session_reuse_ctx) {
             bail!(
-                "`agents.{name}.session_reuse_ctx` must be between 1 and 100 (1..=100), got {}",
+                "`agents.{name}.session_reuse_ctx` must be 0 (off) or between 1 and 100 \
+                 (1..=100), got {}",
                 profile.session_reuse_ctx
             );
         }
@@ -783,7 +784,8 @@ pub fn set(config: &Config, key: &str, input: &str) -> Result<Config> {
         // the ceiling would have the very session that just blocked it
         // carried right back in — `carried_session` reuses anything at or
         // under `session_reuse_ctx` — and block again on the next turn.
-        if profile.session_blocked_ctx != 0
+        if profile.session_reuse_ctx != 0
+            && profile.session_blocked_ctx != 0
             && profile.session_blocked_ctx <= profile.session_reuse_ctx
         {
             bail!(
@@ -997,12 +999,11 @@ mod tests {
         assert!(keys.contains(&"agents.claude.permission_mode"));
         assert!(!keys.contains(&"agents.pi.permission_mode"));
 
-        // `concurrency` is listed for the profile that has one and not for the
-        // profiles that do not: it is omitted wherever it would be zero, which
-        // is every local profile spoolway ships. `set` still creates it — see
+        // `concurrency` is absent for every shipped profile: it is omitted
+        // wherever it would be zero. `set` still creates it — see
         // `a_concurrency_can_be_set_on_a_profile_that_omits_it` below — so the
         // key being absent from this list costs nothing but the row.
-        assert!(keys.contains(&"agents.claude.concurrency"));
+        assert!(!keys.contains(&"agents.claude.concurrency"));
         assert!(!keys.contains(&"agents.pi.concurrency"));
 
         // Retired: no longer in the file at all, so nothing here to get or set.
@@ -1205,7 +1206,7 @@ mod tests {
         let entries = entries(&config).unwrap();
         let kind = |key: &str| entries.iter().find(|e| e.key == key).unwrap().kind;
 
-        assert_eq!(kind("agents.claude.concurrency"), Kind::Number);
+        assert_eq!(kind("agents.claude.session_reuse_ctx"), Kind::Number);
         assert_eq!(kind("agents.pi.kind"), Kind::Text);
         assert_eq!(kind("skills"), Kind::List);
         assert_eq!(kind("update.check"), Kind::Bool);
@@ -1246,7 +1247,7 @@ mod tests {
 
         let reparsed: Config = toml::from_str(&text).unwrap();
         assert_eq!(reparsed.agents["pi"].concurrency, 0);
-        assert_eq!(reparsed.agents["claude"].concurrency, 1);
+        assert_eq!(reparsed.agents["claude"].concurrency, 0);
     }
 
     #[test]
@@ -1311,13 +1312,12 @@ mod tests {
     /// `session_reuse_ctx`, so the range is enforced here, at the moment a
     /// person is typing the value and can fix it.
     #[test]
-    fn a_session_reuse_ctx_outside_its_range_is_refused() {
+    fn a_session_reuse_ctx_accepts_off_and_refuses_values_above_its_range() {
         let config = Config::default();
 
-        let err = set(&config, "agents.claude.session_reuse_ctx", "0")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("1..=100"), "{err}");
+        let off = set(&config, "agents.claude.session_reuse_ctx", "0")
+            .map(|c| c.agents["claude"].session_reuse_ctx);
+        assert_eq!(off.ok(), Some(0), "0 is off, and always allowed");
 
         let err = set(&config, "agents.claude.session_reuse_ctx", "101")
             .unwrap_err()
@@ -1327,15 +1327,19 @@ mod tests {
         assert!(set(&config, "agents.claude.session_reuse_ctx", "75").is_ok());
     }
 
-    /// The mockup's own scenario: `session_reuse_ctx` ships at 50, and a
-    /// ceiling set at or under it is refused with the exact wording the task
-    /// draws — both directions of the same rule, since either edit puts the
-    /// same session past the ceiling right back in.
+    /// When both guards are enabled, a blocked ceiling set at or under the
+    /// reuse ceiling is refused in both edit directions: either edit would put
+    /// the same oversized session straight back into the task.
     // covers: agents.<profile>.session_blocked_ctx — the ceiling on a running lane's size
     #[test]
     fn a_session_blocked_ctx_at_or_under_the_reuse_threshold_is_refused() {
         let config = Config::default();
-        assert_eq!(config.agents["claude"].session_reuse_ctx, 50);
+        assert_eq!(config.agents["claude"].session_reuse_ctx, 0);
+        // With reuse off there is no reuse threshold for the blocked ceiling
+        // to sit above.
+        assert!(set(&config, "agents.claude.session_blocked_ctx", "1").is_ok());
+
+        let config = set(&config, "agents.claude.session_reuse_ctx", "50").unwrap();
 
         let err = set(&config, "agents.claude.session_blocked_ctx", "40")
             .unwrap_err()
