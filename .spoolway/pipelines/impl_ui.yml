@@ -20,7 +20,7 @@
 #                                        Absent: the step id.
 #   model             <name>             Model this step runs. Required on an agent step.
 #   effort            <string>           Passed to the agent kind's effort flag.
-#                                        Absent: no flag is sent.
+#                                        Blank or absent: no flag is sent.
 #   skills            <a, b, c>          Skills invoked at the top of this step's
 #                                        opening prompt. Comma separated, leading
 #                                        slash optional, names only.
