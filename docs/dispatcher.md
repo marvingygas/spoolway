@@ -297,52 +297,62 @@ board changes. The key-hint line under the footer,
 `[↑↓] row   [o] open   [r/R] resume / all   [p/P] pause / all   [u/U] unqueue / all`, draws on
 every frame of a driving board, whether or not any row can use any of it this frame.
 
-`p` and `P` both open a panel first wherever what they are about to do is not free to undo —
-interrupting a live turn, or killing a command step's run outright.
+`p` and `P` both park unconditionally: `p` parks the cursor's own task, `P` parks every eligible
+task in the run. Neither touches anything until it has first opened a confirm panel, and a panel
+is opened only when pausing would cut something short for that scope. For `p` that is the
+cursor's own task being on an agent turn mid-turn or on a command step whose run is in flight;
+for `P`, anything live anywhere in the queue. With nothing live for that scope — a queued row, a
+row parked on a quota clock, a row sitting on a real step between two lanes — the key just parks
+with no panel at all, and a `paused` or `blocked` row is a no-op whichever key you press, both
+already stopped and already waiting on a person rather than a state to park over again.
 
-`p` interrupts the cursor's own task, if this run owns a live agent lane for it, and parks it
-on `paused`, `parked_from` naming the step it was on. Under a multiplexer the interrupt is a
-keystroke — Escape, sent the way `enter` sends a prompt — which leaves the session itself
-intact for a later resume to find exactly as it left it; headless has no keyboard to reach a
-running turn with, so there the lane's process is stopped outright, the same as `stop_lane`.
-If the cursor's own task is itself on a running command step, `p` also opens a panel naming it,
-titled with the task's id:
-
-```
-┌─ pause gate-board ─────────────────────────────────┐
-│  1 command step is running:                        │
-│                                                    │
-│  gate-board · test    4m 12s                       │
-│                                                    │
-│  Killing it stops this task now. A killed step     │
-│  runs again in full when you resume.               │
-│                                                    │
-│  [k] kill it   [l] leave it running   [esc] cancel │
-└────────────────────────────────────────────────────┘
-```
-
-`P` does the same over the whole run rather than one row: it interrupts every live agent lane
-the run owns and parks each of their tasks, then — if any command step anywhere in the queue is
-running — opens the same kind of panel, titled `pause all` and worded in the plural:
+When a panel is due `p` opens it titled with the task's id, naming the one step pausing would
+abort — its step, its kind, and how long it has been running, off the same clock the board's TIME
+column reads:
 
 ```
-┌─ pause all ─────────────────────────────────────────────┐
-│  2 command steps are running:                           │
-│                                                         │
-│  gate-board · test    4m 12s                            │
-│  quiet-pane · suite   1m 03s                            │
-│                                                         │
-│  Killing them stops the run now. A killed step          │
-│  runs again in full when you resume.                    │
-│                                                         │
-│  [k] kill them   [l] leave them running   [esc] cancel  │
-└─────────────────────────────────────────────────────────┘
+┌─ pause login ──────────────────────────┐
+│  Pausing aborts the step it is on:     │
+│                                        │
+│  deploy    agent    4m 20s             │
+│                                        │
+│  The turn is interrupted, not killed.  │
+│  Resuming picks the session back up.   │
+│                                        │
+│  [enter] pause it   [esc] cancel       │
+└────────────────────────────────────────┘
 ```
 
-`[k]` stops the command step or steps the panel names and parks each of their tasks the same
-way an interrupted agent lane already was; `[l]` and `[esc]` both leave every one of them
-running. Whichever agent lane `p` or `P` owns is interrupted and parked whether or not its
-panel ends up opening — only a running command step waits on an answer.
+The body's last two lines say what pausing does to whatever it names. An agent turn is interrupted,
+not killed: under a multiplexer the interrupt is a keystroke, Escape, sent the way `enter` sends a
+prompt, which leaves the session itself intact for a later resume to pick back up; headless has no
+keyboard to reach a running turn with, so there the lane's process is stopped outright, the same as
+`stop_lane`. A command step is the opposite — its run is killed, and runs again in full when you
+resume — and its panel carries the same two lines in place of the ones above.
+
+`P` opens the same kind of panel over the whole run, titled `pause all`, listing every abort it
+would cut short — one line each, task and step, kind, and elapsed time — and closing with how many
+further tasks park with nothing interrupted:
+
+```
+┌─ pause all ─────────────────────────────┐
+│  Pausing aborts 2 running steps:        │
+│                                         │
+│  login · deploy      agent      4m 20s  │
+│  gate-board · test   command    4m 12s  │
+│                                         │
+│  3 more tasks pause with nothing        │
+│  interrupted.                           │
+│                                         │
+│  [enter] pause the run   [esc] cancel   │
+└─────────────────────────────────────────┘
+```
+
+`enter` on either panel carries the pause out: every named abort, an agent turn interrupted through
+`Mux::interrupt_lane` or a command run stopped through `Runs::stop`, and the task behind each
+parked on `paused`; `P`'s panel then parks the rest of the run that had nothing live to abort.
+`esc` leaves the task, every lane and every run exactly as they were. Any key other than `enter`
+or `esc` is ignored and leaves the panel open.
 
 `R` resumes every paused task whose own resume key is live, through the same `spoolway resume`
 a single row's `r` runs. If any paused task carries `paused_at` — a
@@ -617,7 +627,7 @@ blocked on rather than `blocked` itself. `spoolway resume` on it reaches the des
 from `blocked` would have — carrying the task past that step, not back onto it.
 
 The board's own `p` and `P` keys (see [Reading the state](#reading-the-state)) park a task on
-`paused` too, `parked_from` naming the step it was interrupted at rather than one it gated on —
+`paused` too, `parked_from` naming the step it was on rather than one it gated on —
 a plain park, with no `paused_at` and no `blocked_from`, telling it apart from both a genuine
 gate and a real block. `R` and a row's own `r` both read that difference: only a task carrying
 `paused_at` is confirmed past with a named panel before it resumes. Resuming a park is not a lap

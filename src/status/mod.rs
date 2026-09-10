@@ -489,8 +489,8 @@ impl Board {
         // fighting the borrow checker over `self.mode` at the same time.
         match std::mem::take(&mut self.mode) {
             BoardMode::Browsing => self.on_key_browsing(repo, pipelines, key),
-            BoardMode::ConfirmPause { running, scope } => {
-                self.on_key_pause_confirm(repo, running, scope, key)
+            BoardMode::ConfirmPause { aborts, scope } => {
+                self.on_key_pause_confirm(repo, aborts, scope, key)
             }
             BoardMode::ConfirmResume(gated) => {
                 self.on_key_resume_confirm(repo, pipelines, gated, key)
@@ -573,42 +573,43 @@ impl Board {
         resume_task(repo, pipelines, &id)
     }
 
-    /// `P`: interrupt every live agent lane this run owns and park each of
-    /// their tasks, then — only if a command step is running somewhere in
-    /// the queue — open [`BoardMode::ConfirmPause`], scoped to the whole
-    /// run, to ask what to do with it. The agent lanes are parked whether or
-    /// not that panel ends up opening: nothing about resuming a command step
-    /// later is reversible the way an interrupted turn is, so only the
-    /// irreversible half waits on a person.
+    /// `P`: park every task in the run, opening [`BoardMode::ConfirmPause`]
+    /// first — scoped to the whole run, and naming every live agent turn and
+    /// command run it would abort, plus a count of the tasks that would park
+    /// with nothing interrupted — whenever anything is live anywhere in the
+    /// queue. Nothing is touched until that panel is answered: unlike the
+    /// old shape, an agent lane is no longer interrupted ahead of the panel,
+    /// since `esc` has to be able to leave the *whole* keypress undone, not
+    /// just the half of it a command step's kill would have covered.
     fn begin_pause_all(&mut self, repo: &Repo, pipelines: &Pipelines) -> Result<()> {
-        let mut tasks = repo.tasks()?;
+        let tasks = repo.tasks()?;
         let mux = crate::mux::backend(repo);
         let lanes = mux.list_lanes().unwrap_or_default();
-        for i in live_agent_lane_tasks(repo, &tasks, pipelines, &lanes) {
-            let name = crate::mux::lane_name(tasks[i].stage(), tasks[i].id());
-            // Best-effort: a lane that has already gone quiet on its own has
-            // nothing left to interrupt, and one lane's failure here must
-            // never stop the rest of the run from parking.
-            let _ = mux.interrupt_lane(&name);
-            park(&mut tasks[i], "paused from the board");
-            tasks[i].save()?;
+        let aborts = live_aborts(repo, &tasks, pipelines, &lanes);
+        if aborts.is_empty() {
+            park_every_pausable(tasks)?;
+            return Ok(());
         }
-        let running = running_command_steps(repo, &tasks, pipelines);
-        if !running.is_empty() {
-            self.mode = BoardMode::ConfirmPause {
-                running,
-                scope: PauseScope::All,
-            };
-        }
+        // How many more tasks this keypress would park without cutting
+        // anything short — the count the panel names beside the list of
+        // aborts, so the whole of what `P` is about to do is on screen
+        // before it happens. Every task `park_every_pausable` would reach
+        // less the ones already named as an abort.
+        let further = pausable_tasks(&tasks).count() - aborts.len();
+        self.mode = BoardMode::ConfirmPause {
+            aborts,
+            scope: PauseScope::All(further),
+        };
         Ok(())
     }
 
-    /// `p`: the same interrupt-and-park `P` does, narrowed to the cursor's
-    /// own task — a no-op with no cursor, or with the cursor on a row this
-    /// run owns no live agent lane for. Opens [`BoardMode::ConfirmPause`],
-    /// titled with the task's id, only if that task's own step is itself a
-    /// running command step — the case a plain interrupt cannot reach,
-    /// exactly as `P` reaches it for the whole run.
+    /// `p`: park the cursor's own task, opening [`BoardMode::ConfirmPause`]
+    /// first — titled with its id — only when that task's own step has an
+    /// agent turn or a command run live right now. A no-op with no cursor, a
+    /// cursor on a row the queue no longer has, or a cursor on a `paused` or
+    /// `blocked` row: both are already stopped and already waiting on a
+    /// person, so parking either again would only overwrite `parked_from`
+    /// with the state it is already stuck in.
     fn begin_pause_cursor(&mut self, repo: &Repo, pipelines: &Pipelines) -> Result<()> {
         let Some(id) = self.cursor.clone() else {
             return Ok(());
@@ -617,53 +618,84 @@ impl Board {
         let Some(i) = tasks.iter().position(|t| t.id() == id) else {
             return Ok(());
         };
+        if tasks[i].stage() == crate::pipeline::PAUSED
+            || tasks[i].stage() == crate::pipeline::BLOCKED
+        {
+            return Ok(());
+        }
         let mux = crate::mux::backend(repo);
         let lanes = mux.list_lanes().unwrap_or_default();
-        if live_agent_lane_tasks(repo, &tasks, pipelines, &lanes).contains(&i) {
-            let name = crate::mux::lane_name(tasks[i].stage(), tasks[i].id());
-            let _ = mux.interrupt_lane(&name);
+        let aborts: Vec<Abort> = live_aborts(repo, &tasks, pipelines, &lanes)
+            .into_iter()
+            .filter(|a| a.task == id)
+            .collect();
+        if aborts.is_empty() {
             park(&mut tasks[i], "paused from the board");
             tasks[i].save()?;
+            return Ok(());
         }
-        let running: Vec<CommandRunning> = running_command_steps(repo, &tasks, pipelines)
-            .into_iter()
-            .filter(|cr| cr.task == id)
-            .collect();
-        if !running.is_empty() {
-            self.mode = BoardMode::ConfirmPause {
-                running,
-                scope: PauseScope::Cursor(id),
-            };
-        }
+        self.mode = BoardMode::ConfirmPause {
+            aborts,
+            scope: PauseScope::Cursor(id),
+        };
         Ok(())
     }
 
     fn on_key_pause_confirm(
         &mut self,
         repo: &Repo,
-        running: Vec<CommandRunning>,
+        aborts: Vec<Abort>,
         scope: PauseScope,
         key: crate::screen::Key,
     ) -> Result<()> {
         use crate::screen::Key;
         match key {
-            // Killing them is what stops the run for good: their tasks are
-            // parked exactly as the agent lanes already were, `parked_from`
-            // naming the step whose run this took down.
-            Key::Char('k') => {
+            // The one thing either panel does: abort what it named — an
+            // agent turn interrupted through `Mux::interrupt_lane`, a
+            // command run stopped through `Runs::stop` — and park every task
+            // that named abort belongs to. `P`'s panel then goes on to park
+            // whatever else in the run had nothing live to abort, which is
+            // exactly the count its own body already promised.
+            Key::Enter => {
+                let mux = crate::mux::backend(repo);
                 let runs = crate::command_step::Runs::new(&repo.commands_dir());
-                for cr in &running {
-                    runs.stop(&crate::command_step::Runs::key(&cr.step, &cr.task));
-                    let mut task = repo.task(&cr.task)?;
+                for abort in &aborts {
+                    match abort.kind {
+                        // Best-effort: a lane that has already gone quiet on
+                        // its own has nothing left to interrupt, and one
+                        // lane's failure here must never leave the rest of
+                        // the panel's own promise half kept.
+                        AbortKind::Agent => {
+                            let name = crate::mux::lane_name(&abort.step, &abort.task);
+                            let _ = mux.interrupt_lane(&name);
+                        }
+                        AbortKind::Command => {
+                            runs.stop(&crate::command_step::Runs::key(&abort.step, &abort.task));
+                        }
+                    }
+                    let mut task = repo.task(&abort.task)?;
                     park(&mut task, "paused from the board");
                     task.save()?;
                 }
+                if matches!(scope, PauseScope::All(_)) {
+                    // Read fresh rather than trusting the queue as it stood
+                    // when the panel opened: the same reason every other
+                    // confirm panel here re-reads at answer time, and the
+                    // loop above may itself have just moved some of these
+                    // tasks off their own step and onto `paused`.
+                    let rest: Vec<crate::task::Task> = repo
+                        .tasks()?
+                        .into_iter()
+                        .filter(|t| !aborts.iter().any(|a| a.task == t.id()))
+                        .collect();
+                    park_every_pausable(rest)?;
+                }
             }
-            // Declining, or backing out with `esc`, leaves every one of them
-            // exactly as it was — nothing here to undo, since nothing was
-            // touched while the panel was open.
-            Key::Char('l') | Key::Esc => {}
-            _ => self.mode = BoardMode::ConfirmPause { running, scope },
+            // Backing out with `esc` leaves the task, every lane and every
+            // run exactly as they were — nothing here to undo, since nothing
+            // was touched while the panel was open.
+            Key::Esc => {}
+            _ => self.mode = BoardMode::ConfirmPause { aborts, scope },
         }
         Ok(())
     }
@@ -842,15 +874,14 @@ pub(crate) fn editor_command(path: &Path) -> String {
 enum BoardMode {
     #[default]
     Browsing,
-    /// `p` or `P` found a command step running: what it would kill, named,
-    /// and nothing acted on yet. `[k]` stops them and parks their tasks too;
-    /// `[l]` and `[esc]` both leave them exactly as they are — whatever
-    /// agent lane this run owns for that scope was already interrupted and
-    /// parked before this panel ever opens, so there is nothing about it
-    /// left to decide. `scope` says whether this is `P`'s whole-run panel or
-    /// `p`'s, narrowed to one task.
+    /// `p` or `P` found an agent turn or a command run live for its scope:
+    /// what pausing would abort, named, and nothing acted on yet. `[enter]`
+    /// carries the pause out — every named abort, plus, for `P`, every other
+    /// task in the run that has nothing live to abort — and `[esc]` leaves
+    /// the task, every lane and every run exactly as they were. `scope` says
+    /// whether this is `P`'s whole-run panel or `p`'s, narrowed to one task.
     ConfirmPause {
-        running: Vec<CommandRunning>,
+        aborts: Vec<Abort>,
         scope: PauseScope,
     },
     /// `R` found a paused task still waiting at a gate, named so that
@@ -875,7 +906,7 @@ impl BoardMode {
     fn panel(&self) -> Option<Vec<String>> {
         match self {
             BoardMode::Browsing => None,
-            BoardMode::ConfirmPause { running, scope } => Some(pause_confirm_panel(running, scope)),
+            BoardMode::ConfirmPause { aborts, scope } => Some(pause_confirm_panel(aborts, scope)),
             BoardMode::ConfirmResume(gated) => Some(resume_confirm_panel(gated)),
             BoardMode::ConfirmUnqueue { id, dir } => Some(unqueue_confirm_panel(id, dir)),
             BoardMode::ConfirmUnqueueAll(ids) => Some(unqueue_all_confirm_panel(ids)),
@@ -884,26 +915,135 @@ impl BoardMode {
 }
 
 /// Who a [`BoardMode::ConfirmPause`] panel is about — the whole run for `P`,
-/// or one task for `p` — which decides both the panel's title and whether
-/// its body reads "it"/"this task" or "them"/"the run".
+/// carrying how many further tasks would park with nothing interrupted, or
+/// one task for `p`. Decides which of `view`'s two panel builders draws the
+/// panel — `all_pause_panel`'s multi-line list against `cursor_pause_panel`'s
+/// single step — and, for `All`, the "N more tasks pause with nothing
+/// interrupted" line the run-wide one closes with.
 enum PauseScope {
-    All,
+    All(usize),
     Cursor(String),
 }
 
 /// One command step `p` or `P` found running, named for
-/// [`BoardMode::ConfirmPause`]'s panel — the task it belongs to, the step,
-/// and how long it has been going, off the same clock the board's own TIME
-/// column reads.
+/// `commands::queue::queue_pause`'s own refusal — the task it belongs to,
+/// the step, and how long it has been going, off the same clock the board's
+/// own TIME column reads.
 ///
-/// `pub(crate)`: `spoolway queue pause` reads the same list, since a running
-/// command step is the one case it cannot just act on without a person
-/// there to answer the board's own confirm panel — see
-/// `commands::queue::queue_pause`.
+/// `pub(crate)`: `spoolway queue pause` reads [`running_command_steps`]
+/// directly, since a running command step is the one case it cannot just act
+/// on without a person there to answer a confirm panel — see
+/// `commands::queue::queue_pause`. The board itself no longer holds a
+/// `CommandRunning` list of its own past the moment a panel opens: see
+/// [`Abort`], which folds this together with an agent turn into the one
+/// shape [`BoardMode::ConfirmPause`] actually draws and answers.
 pub(crate) struct CommandRunning {
     pub(crate) task: String,
     pub(crate) step: String,
     pub(crate) elapsed: Option<Duration>,
+}
+
+/// What pausing would cut short if it went ahead right now — an agent turn
+/// mid-turn, or a command step's run in flight — named for
+/// [`BoardMode::ConfirmPause`]'s panel and for carrying out the pause once
+/// `enter` answers it. The one shape both kinds share, in place of the
+/// pre-interrupted agent lane and the still-pending [`CommandRunning`] list
+/// this task replaced: neither an agent lane nor a command run is touched
+/// any more until the panel naming it is actually answered.
+struct Abort {
+    task: String,
+    step: String,
+    kind: AbortKind,
+    /// How long this abort has been running, off the same two clocks the
+    /// board's own TIME column reads: `now - launched_at` for a live agent
+    /// lane, `Runs::elapsed` for a command run. `None` where neither answers.
+    elapsed: Option<Duration>,
+}
+
+/// What kind of thing an [`Abort`] would cut short — read by the panel for
+/// its own `agent`/`command` column, and by [`Board::on_key_pause_confirm`]
+/// for which of `Mux::interrupt_lane` or `Runs::stop` carries the abort out.
+#[derive(Clone, Copy)]
+enum AbortKind {
+    Agent,
+    Command,
+}
+
+impl AbortKind {
+    fn word(self) -> &'static str {
+        match self {
+            AbortKind::Agent => "agent",
+            AbortKind::Command => "command",
+        }
+    }
+}
+
+/// Every live agent turn and running command step across `tasks`, one
+/// [`Abort`] each — [`live_agent_lane_tasks`] and [`running_command_steps`]
+/// folded into the one shape `p` and `P` both draw a panel from and answer
+/// against. Both of those already skip a `paused` or `blocked` task, so
+/// there is nothing further to filter out here.
+fn live_aborts(
+    repo: &Repo,
+    tasks: &[crate::task::Task],
+    pipelines: &Pipelines,
+    lanes: &[crate::mux::Lane],
+) -> Vec<Abort> {
+    let mut out = Vec::new();
+    for i in live_agent_lane_tasks(repo, tasks, pipelines, lanes) {
+        let task = &tasks[i];
+        // The same clock `build_rows` reads for a live row's own TIME column
+        // — the round in flight's own launch, not banked yet.
+        let elapsed = task.front.launched_at.map(|launched| {
+            Duration::from_secs((chrono::Utc::now().timestamp() - launched).max(0) as u64)
+        });
+        out.push(Abort {
+            task: task.id().to_string(),
+            step: task.stage().to_string(),
+            kind: AbortKind::Agent,
+            elapsed,
+        });
+    }
+    for cr in running_command_steps(repo, tasks, pipelines) {
+        out.push(Abort {
+            task: cr.task,
+            step: cr.step,
+            kind: AbortKind::Command,
+            elapsed: cr.elapsed,
+        });
+    }
+    out
+}
+
+/// Whether `task` is one `P` would park — everything but a `paused` or
+/// `blocked` row, both already stopped and already waiting on a person
+/// rather than a state to park. The one predicate [`pausable_tasks`] and
+/// [`park_every_pausable`] both read, so the count the panel names and the
+/// set `enter` actually parks can never drift apart from each other.
+fn is_pausable(task: &crate::task::Task) -> bool {
+    task.stage() != crate::pipeline::PAUSED && task.stage() != crate::pipeline::BLOCKED
+}
+
+/// Every task `P` would park — see [`is_pausable`]. The set
+/// [`Board::begin_pause_all`] counts against `live_aborts`'s own length for
+/// the panel's "N more tasks" line.
+fn pausable_tasks(tasks: &[crate::task::Task]) -> impl Iterator<Item = &crate::task::Task> {
+    tasks.iter().filter(|t| is_pausable(t))
+}
+
+/// Park every task [`is_pausable`] selects, straight onto `paused` with no
+/// panel — what `P` does outright when nothing in the run is live, and what
+/// it does to the rest of the run once its own panel, if one opened, is
+/// answered.
+fn park_every_pausable(tasks: Vec<crate::task::Task>) -> Result<()> {
+    for mut task in tasks {
+        if !is_pausable(&task) {
+            continue;
+        }
+        park(&mut task, "paused from the board");
+        task.save()?;
+    }
+    Ok(())
 }
 
 /// Send one task through `spoolway resume`, exactly as a person typing the
@@ -1107,12 +1247,14 @@ pub(crate) fn live_agent_lane_tasks(
     out
 }
 
-/// Every task on a command step whose run is still going — what `p` shows a
-/// panel about rather than acting on outright, since killing one throws its
-/// work away where interrupting an agent lane does not.
+/// Every task on a command step whose run is still going — one half of what
+/// [`live_aborts`] folds into its own list for the board's confirm panel,
+/// the `AbortKind::Command` entries; the other half is [`live_agent_lane_tasks`].
 ///
-/// `pub(crate)`: `spoolway queue pause` reads it for the same reason, and
-/// refuses rather than showing a panel nobody is there to answer — see
+/// `pub(crate)`: `spoolway queue pause` reads it directly rather than through
+/// [`live_aborts`], since a running command step is the one case it cannot
+/// just act on — killing one throws away whatever it was doing — so it
+/// refuses instead of showing a panel nobody is there to answer; see
 /// `commands::queue::queue_pause`.
 pub(crate) fn running_command_steps(
     repo: &Repo,
@@ -4074,10 +4216,11 @@ mod tests {
         let frame = strip(&board.frame(&repo, &pipelines, Phase::Waiting).unwrap());
         assert!(frame.contains("pause all"), "{frame}");
         assert!(frame.contains("login · checks"), "{frame}");
+        assert!(frame.contains("command"), "{frame}");
 
         // Declining: nothing about the run or the task changes.
         board
-            .on_key(&repo, &pipelines, crate::screen::Key::Char('l'))
+            .on_key(&repo, &pipelines, crate::screen::Key::Esc)
             .unwrap();
         assert_eq!(runs.state(&key), crate::command_step::RunState::Running);
         assert_eq!(repo.task("login").unwrap().stage(), "checks");
@@ -4088,7 +4231,7 @@ mod tests {
             .on_key(&repo, &pipelines, crate::screen::Key::Char('P'))
             .unwrap();
         board
-            .on_key(&repo, &pipelines, crate::screen::Key::Char('k'))
+            .on_key(&repo, &pipelines, crate::screen::Key::Enter)
             .unwrap();
         assert_ne!(runs.state(&key), crate::command_step::RunState::Running);
         let task = repo.task("login").unwrap();
@@ -4127,11 +4270,12 @@ mod tests {
         let frame = strip(&board.frame(&repo, &pipelines, Phase::Waiting).unwrap());
         assert!(frame.contains("pause login"), "{frame}");
         assert!(!frame.contains("pause all"), "{frame}");
-        assert!(frame.contains("login · checks"), "{frame}");
-        assert!(frame.contains("[k] kill it"), "{frame}");
+        assert!(frame.contains("checks"), "{frame}");
+        assert!(frame.contains("command"), "{frame}");
+        assert!(frame.contains("[enter] pause it"), "{frame}");
 
         board
-            .on_key(&repo, &pipelines, crate::screen::Key::Char('k'))
+            .on_key(&repo, &pipelines, crate::screen::Key::Enter)
             .unwrap();
         assert_ne!(runs.state(&key), crate::command_step::RunState::Running);
         let task = repo.task("login").unwrap();
@@ -4144,12 +4288,17 @@ mod tests {
         runs.stop(&key);
     }
 
-    /// `P` interrupts a live agent lane this run owns and parks its task —
-    /// exercised against the headless backend, whose "interrupt" is ending
-    /// the turn's process outright, the same as [`Mux::stop_lane`].
+    /// `P` opens a confirm panel over a live agent lane this run owns —
+    /// naming its turn as an abort just as it would a command run — and only
+    /// `enter` interrupts it and parks its task, exercised against the
+    /// headless backend, whose "interrupt" is ending the turn's process
+    /// outright, the same as [`Mux::stop_lane`]. `esc` leaves the lane
+    /// running untouched, which a plain lane list check alone would not
+    /// catch: the old shape interrupted the lane *before* this panel ever
+    /// opened, so this is also what pins that it no longer does.
     #[test]
     #[cfg(unix)]
-    fn pressing_shift_p_interrupts_a_live_headless_lane_and_parks_its_task() {
+    fn pressing_shift_p_opens_a_panel_over_a_live_headless_lane_and_only_enter_interrupts_it() {
         let mut repo = fixture("pause-live-lane");
         repo.config.dispatch.backend = crate::config::Backend::Headless;
         let pipelines = Pipelines::builtin();
@@ -4162,6 +4311,25 @@ mod tests {
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Char('P'))
             .unwrap();
+        let frame = strip(&board.frame(&repo, &pipelines, Phase::Waiting).unwrap());
+        assert!(frame.contains("pause all"), "{frame}");
+        assert!(frame.contains("login · implement"), "{frame}");
+        assert!(frame.contains("agent"), "{frame}");
+
+        // `esc` first: the lane is still live and the task untouched.
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Esc)
+            .unwrap();
+        assert!(mux.list_lanes().unwrap().iter().any(|l| l.name == name));
+        assert_eq!(repo.task("login").unwrap().stage(), "implement");
+
+        // Asking again and confirming this time interrupts the lane.
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Char('P'))
+            .unwrap();
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Enter)
+            .unwrap();
 
         assert!(
             mux.list_lanes().unwrap().iter().all(|l| l.name != name),
@@ -4171,6 +4339,55 @@ mod tests {
         assert_eq!(task.stage(), crate::pipeline::PAUSED);
         assert_eq!(task.front.parked_from.as_deref(), Some("implement"));
         assert_eq!(task.front.blocked_from, None);
+    }
+
+    /// `p` on the cursor's own live agent turn — the mockup's own panel —
+    /// names the step, the word `agent`, an elapsed time, and the two lines
+    /// that say the turn is interrupted rather than killed. Nothing is
+    /// touched before `enter` answers it: the task file it would write is
+    /// still exactly what it was when the panel opened.
+    #[test]
+    #[cfg(unix)]
+    fn pressing_p_on_a_live_agent_lane_names_the_turn_and_says_it_is_only_interrupted() {
+        let mut repo = fixture("pause-cursor-agent-lane");
+        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], Some("implement"));
+        let mut task = repo.task("login").unwrap();
+        task.front.launched_at = Some(chrono::Utc::now().timestamp() - 260);
+        task.save().unwrap();
+        let before = std::fs::read_to_string(&task.path).unwrap();
+
+        let (_mux, _name) = live_headless_lane(&repo);
+
+        let mut board = Board::for_test();
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Down)
+            .unwrap();
+        assert_eq!(board.cursor.as_deref(), Some("login"));
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Char('p'))
+            .unwrap();
+
+        let frame = strip(&board.frame(&repo, &pipelines, Phase::Waiting).unwrap());
+        assert!(frame.contains("pause login"), "{frame}");
+        assert!(frame.contains("implement"), "{frame}");
+        assert!(frame.contains("agent"), "{frame}");
+        // ~4m20s, off `launched_at` set 260 seconds ago.
+        assert!(frame.contains("4m"), "{frame}");
+        assert!(
+            frame.contains("The turn is interrupted, not killed."),
+            "{frame}"
+        );
+        assert!(
+            frame.contains("Resuming picks the session back up."),
+            "{frame}"
+        );
+
+        // Nothing written until the panel is answered.
+        let after = std::fs::read_to_string(&repo.task("login").unwrap().path).unwrap();
+        assert_eq!(before, after);
+        assert_eq!(repo.task("login").unwrap().stage(), "implement");
     }
 
     /// `o` on a headless run has no pane to open an editor in — headless
@@ -4225,6 +4442,10 @@ mod tests {
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Char('p'))
             .unwrap();
+        // A live agent lane now opens a confirm panel too, same as `P`.
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Enter)
+            .unwrap();
         assert_eq!(repo.task("login").unwrap().stage(), crate::pipeline::PAUSED);
 
         board
@@ -4258,6 +4479,134 @@ mod tests {
         .unwrap();
         let row = rows.iter().find(|r| r.id == "login").unwrap();
         assert!(!row.next.contains("loop"), "{}", row.next);
+    }
+
+    /// `p` on a row with nothing live parks it straight to `paused` with no
+    /// panel at all — from `queued`, from a row parked on a quota clock, and
+    /// from a real step sitting in the gap between two lanes.
+    #[test]
+    fn pressing_p_with_nothing_live_parks_at_once_from_every_such_state() {
+        let repo = fixture("pause-nothing-live");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "queued-task", &[], None);
+        add(&repo, "gap-task", &[], Some("implement"));
+        add(&repo, "quota-task", &[], Some("implement"));
+        let mut quota = repo.task("quota-task").unwrap();
+        quota.front.parked_until = Some(chrono::Utc::now().timestamp() + 3600);
+        quota.front.parked_window = crate::quota::Window::FiveHour.key().to_string();
+        quota.save().unwrap();
+
+        let mut board = Board::for_test();
+        let cases = [
+            ("queued-task", "queued"),
+            ("gap-task", "implement"),
+            ("quota-task", "implement"),
+        ];
+        for (id, from) in cases {
+            board.cursor = Some(id.to_string());
+            board
+                .on_key(&repo, &pipelines, crate::screen::Key::Char('p'))
+                .unwrap();
+            // No panel opened — the mode never left `Browsing`.
+            assert!(matches!(board.mode, BoardMode::Browsing), "pausing {id}");
+            let task = repo.task(id).unwrap();
+            assert_eq!(task.stage(), crate::pipeline::PAUSED, "pausing {id}");
+            assert_eq!(
+                task.front.parked_from.as_deref(),
+                Some(from),
+                "pausing {id}"
+            );
+        }
+    }
+
+    /// `p` and `P` are both no-ops on a `paused` row and on a `blocked` row —
+    /// both already stopped and already waiting on a person, not states to
+    /// park over again.
+    #[test]
+    fn pressing_p_or_shift_p_on_a_paused_or_blocked_row_does_nothing() {
+        let repo = fixture("pause-noop-states");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "already-paused", &[], None);
+        let mut paused = repo.task("already-paused").unwrap();
+        paused.front.paused_at = Some("implement".into());
+        paused.set_stage(crate::pipeline::PAUSED, None);
+        paused.save().unwrap();
+
+        add(
+            &repo,
+            "already-blocked",
+            &[],
+            Some(crate::pipeline::BLOCKED),
+        );
+
+        let mut board = Board::for_test();
+        for id in ["already-paused", "already-blocked"] {
+            let before = std::fs::read_to_string(repo.task(id).unwrap().path).unwrap();
+            board.cursor = Some(id.to_string());
+            board
+                .on_key(&repo, &pipelines, crate::screen::Key::Char('p'))
+                .unwrap();
+            assert!(matches!(board.mode, BoardMode::Browsing), "p on {id}");
+            let after = std::fs::read_to_string(repo.task(id).unwrap().path).unwrap();
+            assert_eq!(before, after, "p on {id}");
+        }
+
+        // `P` across the run touches neither: both stages survive whole.
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Char('P'))
+            .unwrap();
+        assert_eq!(
+            repo.task("already-paused").unwrap().stage(),
+            crate::pipeline::PAUSED
+        );
+        assert_eq!(
+            repo.task("already-blocked").unwrap().stage(),
+            crate::pipeline::BLOCKED
+        );
+    }
+
+    /// `P` with one thing live and one thing not: the panel names the one
+    /// abort and counts the other task as pausing with nothing interrupted,
+    /// and answering `enter` parks both — the live one through its own
+    /// abort, the idle one straight onto `paused`.
+    #[test]
+    fn pressing_shift_p_with_one_live_and_one_idle_task_counts_and_parks_both() {
+        let repo = fixture("pause-all-mixed");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], Some("checks"));
+        add(&repo, "idle", &[], Some("implement"));
+
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("checks", "login");
+        runs.start(&key, "sleep 30", &repo.root, &BTreeMap::new())
+            .unwrap();
+
+        let mut board = Board::for_test();
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Char('P'))
+            .unwrap();
+        let frame = strip(&board.frame(&repo, &pipelines, Phase::Waiting).unwrap());
+        assert!(frame.contains("login · checks"), "{frame}");
+        // The singular reads as a sentence: one task *pauses*, several
+        // tasks *pause*.
+        assert!(frame.contains("1 more task pauses with nothing"), "{frame}");
+
+        // A stray key neither `enter` nor `esc` leaves the panel open and
+        // nothing acted on.
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Char('x'))
+            .unwrap();
+        assert!(!matches!(board.mode, BoardMode::Browsing));
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Running);
+
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Enter)
+            .unwrap();
+        assert_ne!(runs.state(&key), crate::command_step::RunState::Running);
+        assert_eq!(repo.task("login").unwrap().stage(), crate::pipeline::PAUSED);
+        assert_eq!(repo.task("idle").unwrap().stage(), crate::pipeline::PAUSED);
+
+        runs.stop(&key);
     }
 
     /// `u` on a queued row with nothing depending on it opens a panel naming

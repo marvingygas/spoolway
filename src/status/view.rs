@@ -241,37 +241,99 @@ impl Verdict {
     }
 }
 
-pub(super) fn pause_confirm_panel(running: &[CommandRunning], scope: &PauseScope) -> Vec<String> {
-    let (title, pronoun, target) = match scope {
-        PauseScope::All => ("pause all".to_string(), "them", "the run"),
-        PauseScope::Cursor(id) => (format!("pause {id}"), "it", "this task"),
-    };
+/// [`BoardMode::ConfirmPause`]'s panel — `p`'s own single-abort mockup for
+/// [`PauseScope::Cursor`], `P`'s multi-line one for [`PauseScope::All`]. Both
+/// read `aborts` off the same [`Abort`] shape; which panel is drawn is
+/// [`PauseScope`] alone; there is always at least one abort by the time this
+/// is called, since [`Board::begin_pause_cursor`] and
+/// [`Board::begin_pause_all`] both park with no panel at all rather than
+/// call this with none.
+pub(super) fn pause_confirm_panel(aborts: &[Abort], scope: &PauseScope) -> Vec<String> {
+    match scope {
+        PauseScope::Cursor(id) => cursor_pause_panel(id, &aborts[0]),
+        PauseScope::All(further) => all_pause_panel(aborts, *further),
+    }
+}
+
+/// `p`'s own panel: one abort, so the body names the step it is on directly
+/// rather than repeating the task id the title already carries, and closes
+/// with the two lines that distinguish an interrupted turn from a killed
+/// run — the one thing a person answering `enter` needs to know before they
+/// do.
+fn cursor_pause_panel(id: &str, abort: &Abort) -> Vec<String> {
+    let time = abort
+        .elapsed
+        .map(|d| human_secs(d.as_secs() as i64))
+        .unwrap_or_else(|| NOTHING.to_string());
+    let mut body = vec![
+        "Pausing aborts the step it is on:".to_string(),
+        String::new(),
+        format!("{}    {}    {time}", abort.step, abort.kind.word()),
+        String::new(),
+    ];
+    match abort.kind {
+        AbortKind::Agent => {
+            body.push("The turn is interrupted, not killed.".to_string());
+            body.push("Resuming picks the session back up.".to_string());
+        }
+        AbortKind::Command => {
+            body.push("A killed step runs again in full".to_string());
+            body.push("when you resume.".to_string());
+        }
+    }
+    crate::screen::panel(
+        &format!("pause {id}"),
+        &body,
+        "[enter] pause it   [esc] cancel",
+    )
+}
+
+/// `P`'s own panel: one line per abort, columns lined up on the widest task
+/// · step label and the widest kind word so `agent` and `command` read as a
+/// column rather than a run-on phrase — the same reason [`GUTTER`] separates
+/// every other column on the board — closed with the count of tasks that
+/// pause with nothing interrupted, which is the only thing left to say about
+/// the rest of the run.
+fn all_pause_panel(aborts: &[Abort], further: usize) -> Vec<String> {
     let mut body = vec![
         format!(
-            "{} command step{} {} running:",
-            running.len(),
-            if running.len() == 1 { "" } else { "s" },
-            if running.len() == 1 { "is" } else { "are" }
+            "Pausing aborts {} running step{}:",
+            aborts.len(),
+            if aborts.len() == 1 { "" } else { "s" }
         ),
         String::new(),
     ];
-    for cr in running {
-        let time = cr
+    let labels: Vec<String> = aborts
+        .iter()
+        .map(|a| format!("{} · {}", a.task, a.step))
+        .collect();
+    let label_width = labels.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    let kind_width = aborts
+        .iter()
+        .map(|a| a.kind.word().chars().count())
+        .max()
+        .unwrap_or(0);
+    for (abort, label) in aborts.iter().zip(&labels) {
+        let time = abort
             .elapsed
             .map(|d| human_secs(d.as_secs() as i64))
             .unwrap_or_else(|| NOTHING.to_string());
-        body.push(format!("{} · {}    {time}", cr.task, cr.step));
+        body.push(format!(
+            "{}{GUTTER}{}{GUTTER}{time}",
+            crate::screen::pad_to(label, label_width),
+            crate::screen::pad_to(abort.kind.word(), kind_width),
+        ));
     }
     body.push(String::new());
-    body.push(format!(
-        "Killing {pronoun} stops {target} now. A killed step"
-    ));
-    body.push("runs again in full when you resume.".to_string());
-    crate::screen::panel(
-        &title,
-        &body,
-        &format!("[k] kill {pronoun}   [l] leave {pronoun} running   [esc] cancel"),
-    )
+    // Written out both ways rather than pluralised with a suffix: the verb
+    // has to agree with the noun, and "1 more task pause" is what a suffix
+    // on the noun alone leaves behind.
+    body.push(match further {
+        1 => "1 more task pauses with nothing".to_string(),
+        n => format!("{n} more tasks pause with nothing"),
+    });
+    body.push("interrupted.".to_string());
+    crate::screen::panel("pause all", &body, "[enter] pause the run   [esc] cancel")
 }
 
 pub(super) fn resume_confirm_panel(gated: &[String]) -> Vec<String> {

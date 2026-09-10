@@ -1332,14 +1332,12 @@ pub fn queue_conflicts(repo: &Repo, pipelines: &Pipelines) -> Result<()> {
 /// then park it on `paused` — always, not only when something was actually
 /// interrupted.
 ///
-/// This is not quite what the board's `p` does: `Board::begin_pause_cursor`
-/// only calls `park` inside its own `if live_agent_lane_tasks(...)` branch,
-/// so `p` on a task with no live lane and no running command step does
-/// nothing at all. A script naming a task by id has already decided it wants
-/// that task paused, whatever state it happens to be in right now — a queued
-/// task included — so this parks unconditionally rather than silently
-/// declining the one case a person watching the board would notice and
-/// press `p` again for.
+/// The board's own `p` now parks unconditionally too — see
+/// `Board::begin_pause_cursor` — so the two agree on every state but one: a
+/// running command step. There, `p` opens a confirm panel and waits on a
+/// person to answer it, which a script has nobody to do; this refuses
+/// outright instead, unless `--force` says the caller already knows what it
+/// is choosing.
 ///
 /// Interrupting a live agent lane is best-effort and always allowed — an
 /// interrupted turn is not lost work, only a turn that ends early — the same
