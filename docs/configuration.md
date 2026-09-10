@@ -299,7 +299,23 @@ no longer be named. The refusal says so, naming the age, whenever `retention.day
 zero; with it at `0` the same missing dependency is reported the plain way, since sweeping
 cannot be why.
 
-## `[pipeline_gen]` — generating a pipeline
+## `[prices]` — how stale the shared price table may be before it is mentioned
+
+```toml
+[prices]
+max_age_days = 30
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `max_age_days` | `30` | How many days the active shared price table may be before `spoolway doctor` notes it. `0` turns the note off entirely — the table is never mentioned, however old it gets |
+
+The age is taken from whichever table actually answered model lookups: the machine-wide
+`~/.spoolway/model-prices.json` when it parses, the built-in table otherwise. It is reported,
+never acted on — a `note` in `spoolway doctor`, never a fetch and never a failed check. The note
+fires only once the table is past the limit, so a table inside it is never mentioned, and `0`
+means the note never fires at all. Making the table current stays the explicit
+`spoolway models refresh`, however old it has become. See [Pricing](cost.md#pricing).
 
 ```toml
 [pipeline_gen]

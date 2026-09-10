@@ -267,7 +267,10 @@ nobody has published a price for still resolves to nothing, and is reported as u
 than folded into a total as zero — a model in none of the three tables has an unknown cost, not
 a free one. `spoolway models` lists every model this project's pipelines name, its window, its
 rates, its own `slots` and `exclusive` (see [`[models."<glob>"]`](configuration.md#modelsglob--what-a-model-costs-and-how-big-its-window-is)),
-and which of the three tables answered — or `unknown`, where none did.
+and which of the three tables answered — or `unknown`, where none did. It closes with the age
+of whichever table actually answered — the machine-wide refreshed file when it parses, the
+built-in otherwise — naming its `generated` date, its age in whole days, and `spoolway models
+refresh` as the way to make it current.
 
 Renamed from `[pricing]`, which held the same five rates without the window; an old `[pricing]`
 table is read into this same field and written back under the new name.
@@ -299,8 +302,10 @@ distilled from roughly 2,200 priced chat models down to the six fields spoolway 
 compiled into the binary. `spoolway models refresh --vendor` is how it is refreshed: it fetches
 the upstream file through curl, distils it to the same six fields, and writes
 `assets/model-prices.json`; the diff is reviewed and committed like any other vendored
-dependency. There is no schedule, no check on startup, and no warning that it has gone stale:
-staleness is the price of the binary never calling out at all.
+dependency. There is no schedule and no check on startup. A stale table is never fetched for
+and never fails a check; the only thing it does is earn a `spoolway doctor` note once it passes
+`max_age_days` — advisory, never a failure. That is the whole of what the binary calls out about
+a stale table, and it is the price of the binary never calling out at any other time.
 
 ### Why cache writes are two rates
 

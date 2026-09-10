@@ -382,7 +382,29 @@ fn config_checks(
             false => Ok(None),
         },
     ));
+    if let Some(note) = current_price_table_age_note(config.prices.max_age_days) {
+        findings.push(Finding::Note(note));
+    }
     findings
+}
+
+/// The old table is advisory state: it is a note rather than a check, and a
+/// zero limit suppresses even the table read so "off" stays wholly silent.
+fn current_price_table_age_note(max_age_days: u64) -> Option<String> {
+    if max_age_days == 0 {
+        return None;
+    }
+    price_table_age_note(max_age_days, crate::models::price_table_age().days)
+}
+
+fn price_table_age_note(max_age_days: u64, age_days: u64) -> Option<String> {
+    (max_age_days > 0 && age_days > max_age_days).then(|| {
+        format!(
+            "the price table was generated {} days ago, past the {max_age_days} in \
+             `prices.max_age_days` — `spoolway models refresh` takes litellm's current prices",
+            age_days
+        )
+    })
 }
 
 /// Everything `[issue_tracking]` can get wrong on its own, independent of the
@@ -1330,6 +1352,20 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+
+    #[test]
+    fn price_table_age_is_noted_only_after_the_enabled_limit() {
+        assert!(price_table_age_note(0, 300).is_none());
+        assert!(price_table_age_note(30, 30).is_none());
+        assert!(price_table_age_note(30, 29).is_none());
+        assert_eq!(
+            price_table_age_note(30, 31).as_deref(),
+            Some(
+                "the price table was generated 31 days ago, past the 30 in \
+                 `prices.max_age_days` — `spoolway models refresh` takes litellm's current prices"
+            )
+        );
+    }
 
     /// Two directories, each holding its own `.spoolway/config.toml` with one
     /// key the other's file does not have — standing in for a project's root

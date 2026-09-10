@@ -138,6 +138,9 @@ pub struct Config {
     /// How long a byproduct directory keeps what it holds before
     /// [`crate::retain`] deletes it. See [`RetentionConfig`].
     pub retention: RetentionConfig,
+    /// When the shared model-price table is old enough to mention. See
+    /// [`PricesConfig`].
+    pub prices: PricesConfig,
     /// Where an old `[plans]` table lands so an existing config still
     /// parses. See [`LegacyPlans`]; the binary keeps no notion of a plan
     /// store any more — spoolway-plan writes its page wherever it is told
@@ -230,6 +233,7 @@ impl Default for Config {
             update: UpdateConfig::default(),
             calibrate: CalibrateConfig::default(),
             retention: RetentionConfig::default(),
+            prices: PricesConfig::default(),
             plans: LegacyPlans::default(),
             docs: LegacyDocs::default(),
             stack: StackConfig::default(),
@@ -431,6 +435,25 @@ impl Default for RetentionConfig {
         // ever having to, while still bounding a home that otherwise grows
         // without end — see the plan's own cost line on the archive.
         Self { days: 30 }
+    }
+}
+
+/// The shared model-price tables' own freshness setting.
+///
+/// One key, on purpose: age is only reported, never a trigger for a fetch or
+/// a reason for a command to fail. Refreshing remains the explicit
+/// `spoolway models refresh` command however old the active table becomes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PricesConfig {
+    /// How old the table may be before `spoolway doctor` notes it. `0` turns
+    /// the note off without changing which table answers model lookups.
+    pub max_age_days: u64,
+}
+
+impl Default for PricesConfig {
+    fn default() -> Self {
+        Self { max_age_days: 30 }
     }
 }
 
@@ -2038,6 +2061,20 @@ mod tests {
         // Every model your pipelines name is already covered by the built-in
         // table once it exists; nothing here is a guess spoolway made for you.
         assert!(parsed.models.is_empty());
+        assert_eq!(parsed.prices.max_age_days, 30);
+    }
+
+    #[test]
+    fn written_config_explains_the_price_age_key_and_round_trips_it() {
+        let mut config = Config::default();
+        config.prices.max_age_days = 7;
+        let rendered = config.render().unwrap();
+        assert!(rendered.contains("prices.max_age_days"));
+        assert!(rendered.contains("before `spoolway doctor` says so"));
+        assert!(rendered.contains("[prices]\nmax_age_days = 7"));
+
+        let parsed: Config = toml::from_str(&rendered).unwrap();
+        assert_eq!(parsed.prices.max_age_days, 7);
     }
 
     /// A setting that changes nothing at runtime is exactly the one people

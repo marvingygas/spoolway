@@ -41,6 +41,7 @@
 # covers: issue_tracking.on_fail — a non-zero exit under "pause" holds the task on `queued` and `done`, and only records the failure on `blocked` and `paused`
 # covers: issue_tracking.key_in_names — with it on and the hook answering slug=, `queue add` writes `group: <slug>-<group>` and `branch: task/<slug>-<id>` and stores the hook's url=
 # covers: retention.days — an entry past the age is swept from a byproduct directory, and never from queue/, however old
+# covers: prices.max_age_days — doctor notes only a table older than the configured limit; 0 is covered by the unit boundary test
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=../lib.sh
@@ -97,6 +98,32 @@ else
   bad "models reads the new row back with SOURCE refreshed"
   sed 's/^/        /' "$MODELS_OUT"
 fi
+REFRESHED_GENERATED=$(jq -r '.generated' "$HOME/.spoolway/model-prices.json")
+MODELS_FOOTER=$(tail -n 1 "$MODELS_OUT")
+MODELS_FOOTER_PATTERN="^Prices generated ${REFRESHED_GENERATED}, [0-9]+ days ago\\. Refresh with "
+MODELS_FOOTER_PATTERN+='`spoolway models refresh`\.$'
+if grep -qE "$MODELS_FOOTER_PATTERN" <<<"$MODELS_FOOTER"; then
+  ok "models closes with the active table's date, whole-day age, and refresh command"
+else
+  bad "models closes with the active table's date, whole-day age, and refresh command"
+  printf '        %s\n' "$MODELS_FOOTER"
+fi
+
+# Rewrite only the fixture header: the same valid refreshed table continues
+# answering model lookup, while doctor sees each side of the configured age
+# boundary without a network call or a clock-dependent sleep.
+PRICE_TABLE="$HOME/.spoolway/model-prices.json"
+jq '.generated = "2000-01-01"' "$PRICE_TABLE" >"$PRICE_TABLE.tmp"
+mv "$PRICE_TABLE.tmp" "$PRICE_TABLE"
+must "price age limit is set for the doctor boundary" \
+  "$SPOOLWAY" config set prices.max_age_days 30
+says "doctor notes a refreshed table past the age limit" \
+  'past the 30 in `prices.max_age_days`' "$SPOOLWAY" doctor
+
+jq --arg today "$(date -u +%F)" '.generated = $today' "$PRICE_TABLE" >"$PRICE_TABLE.tmp"
+mv "$PRICE_TABLE.tmp" "$PRICE_TABLE"
+silent_about "doctor stays quiet for a refreshed table inside the age limit" \
+  'past the 30 in `prices.max_age_days`' "$SPOOLWAY" doctor
 
 BODY="$LIVE/body.md"
 task_body "$BODY"

@@ -19,9 +19,10 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Context, Result, bail};
+use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 
 use crate::cli::ModelsRefreshArgs;
@@ -51,7 +52,7 @@ const BUILTIN_JSON: &str = include_str!("../assets/model-prices.json");
 struct BuiltinFile {
     source: String,
     license: String,
-    generated: String,
+    generated: NaiveDate,
     models: BTreeMap<String, ModelPrice>,
 }
 
@@ -125,7 +126,7 @@ pub fn refresh(repo: &Repo, args: &ModelsRefreshArgs) -> Result<()> {
     let file = BuiltinFile {
         source: SOURCE_PAGE.to_string(),
         license: SOURCE_LICENSE.to_string(),
-        generated: chrono::Utc::now().format("%Y-%m-%d").to_string(),
+        generated: chrono::Utc::now().date_naive(),
         models,
     };
     let mut contents = serde_json::to_vec_pretty(&file).context("encoding the distilled table")?;
@@ -294,19 +295,22 @@ fn per_million(per_token: f64) -> f64 {
 /// Parsed once. `assets/model-prices.json` is vendored, not user input, so a
 /// parse failure here is a build-time mistake, not a runtime one — panicking
 /// says so plainly instead of silently pricing nothing.
-fn builtin() -> &'static BTreeMap<String, ModelPrice> {
-    static TABLE: OnceLock<BTreeMap<String, ModelPrice>> = OnceLock::new();
+fn builtin_file() -> &'static BuiltinFile {
+    static TABLE: OnceLock<BuiltinFile> = OnceLock::new();
     TABLE.get_or_init(|| {
-        serde_json::from_str::<BuiltinFile>(BUILTIN_JSON)
+        serde_json::from_str(BUILTIN_JSON)
             .expect("assets/model-prices.json is vendored and must parse")
-            .models
     })
+}
+
+fn builtin() -> &'static BTreeMap<String, ModelPrice> {
+    &builtin_file().models
 }
 
 struct RefreshedCache {
     path: std::path::PathBuf,
     contents: Vec<u8>,
-    models: BTreeMap<String, ModelPrice>,
+    file: Arc<BuiltinFile>,
 }
 
 /// Read the optional machine-wide table before consulting its parsed cache.
@@ -314,7 +318,7 @@ struct RefreshedCache {
 /// file unreadable, and serving its cached row then would defeat the silent
 /// built-in fallback promised for that failure. Comparing bytes still avoids
 /// reparsing an unchanged table on every frame of a long-running `status`.
-fn refreshed_price(model: &str) -> Option<ModelPrice> {
+fn refreshed_file() -> Option<Arc<BuiltinFile>> {
     let path = crate::mux::home().join(".spoolway/model-prices.json");
     let contents = fs::read(&path).ok()?;
 
@@ -327,22 +331,48 @@ fn refreshed_price(model: &str) -> Option<ModelPrice> {
         .as_ref()
         .is_some_and(|cached| cached.path == path && cached.contents == contents)
     {
-        return cached.as_ref()?.models.get(model).copied();
+        return Some(Arc::clone(&cached.as_ref()?.file));
     }
     drop(cached);
 
-    let models = serde_json::from_slice::<BuiltinFile>(&contents)
-        .ok()?
-        .models;
-    let answer = models.get(model).copied();
+    let file = Arc::new(serde_json::from_slice::<BuiltinFile>(&contents).ok()?);
     *cache
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(RefreshedCache {
         path,
         contents,
-        models,
+        file: Arc::clone(&file),
     });
-    answer
+    Some(file)
+}
+
+fn refreshed_price(model: &str) -> Option<ModelPrice> {
+    refreshed_file()?.models.get(model).copied()
+}
+
+/// The generated date and whole-day age of the table resolution currently
+/// prefers. A refreshed file wins only when the complete file parses; an
+/// unusable optional file therefore cannot make the footer and model rows
+/// describe different layers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PriceTableAge {
+    pub generated: NaiveDate,
+    pub days: u64,
+}
+
+pub(crate) fn price_table_age() -> PriceTableAge {
+    price_table_age_at(chrono::Utc::now().date_naive())
+}
+
+fn price_table_age_at(today: NaiveDate) -> PriceTableAge {
+    let generated = refreshed_file()
+        .map(|file| file.generated)
+        .unwrap_or_else(|| builtin_file().generated);
+    // A future date can only come from a hand-written refreshed file or a
+    // clock correction. It is not an old table, so report zero rather than a
+    // negative age that would read as stale arithmetic.
+    let days = today.signed_duration_since(generated).num_days().max(0) as u64;
+    PriceTableAge { generated, days }
 }
 
 /// Where a resolved answer came from — what `spoolway models` prints in its
@@ -482,6 +512,7 @@ pub fn run(repo: &Repo, pipelines: &Pipelines, json: bool) -> Result<()> {
 
     if rows.is_empty() {
         println!("No agent step in this project's pipelines names a model.");
+        println!("\n{}", price_table_footer(price_table_age()));
         return Ok(());
     }
 
@@ -539,7 +570,16 @@ pub fn run(repo: &Repo, pipelines: &Pipelines, json: bool) -> Result<()> {
         println!("Add one with `spoolway config set models.'<model-glob>'.input <usd per 1M>`.");
     }
 
+    println!("\n{}", price_table_footer(price_table_age()));
+
     Ok(())
+}
+
+fn price_table_footer(age: PriceTableAge) -> String {
+    format!(
+        "Prices generated {}, {} days ago. Refresh with `spoolway models refresh`.",
+        age.generated, age.days
+    )
 }
 
 #[cfg(test)]
@@ -553,10 +593,18 @@ mod tests {
     }
 
     fn write_refreshed(home: &std::path::Path, models: serde_json::Value) {
+        write_refreshed_generated(home, "2026-09-09", models);
+    }
+
+    fn write_refreshed_generated(
+        home: &std::path::Path,
+        generated: &str,
+        models: serde_json::Value,
+    ) {
         let table = serde_json::json!({
             "source": "fixture",
             "license": "MIT",
-            "generated": "2026-09-09",
+            "generated": generated,
             "models": models,
         });
         fs::write(
@@ -716,6 +764,48 @@ mod tests {
     #[test]
     fn the_builtin_table_parses_and_is_not_empty() {
         assert!(!builtin().is_empty());
+    }
+
+    #[test]
+    fn table_age_uses_the_refreshed_date_and_falls_back_as_a_whole_file() {
+        let home = fixture_home("models-table-age");
+        crate::platform::test_home::with_home(&home, || {
+            let today = NaiveDate::from_ymd_opt(2026, 9, 10).unwrap();
+            assert_eq!(
+                price_table_age_at(today),
+                PriceTableAge {
+                    generated: NaiveDate::from_ymd_opt(2026, 8, 9).unwrap(),
+                    days: 32,
+                }
+            );
+
+            write_refreshed_generated(&home, "2026-09-01", serde_json::json!({}));
+            assert_eq!(
+                price_table_age_at(today),
+                PriceTableAge {
+                    generated: NaiveDate::from_ymd_opt(2026, 9, 1).unwrap(),
+                    days: 9,
+                }
+            );
+
+            // An invalid header makes the optional file unusable, just like
+            // an invalid model row: both model lookup and age fall back to
+            // the complete vendored table rather than mixing the layers.
+            write_refreshed_generated(&home, "not-a-date", serde_json::json!({}));
+            assert_eq!(price_table_age_at(today).days, 32);
+        });
+    }
+
+    #[test]
+    fn table_footer_names_the_date_age_and_explicit_refresh() {
+        let age = PriceTableAge {
+            generated: NaiveDate::from_ymd_opt(2026, 8, 9).unwrap(),
+            days: 31,
+        };
+        assert_eq!(
+            price_table_footer(age),
+            "Prices generated 2026-08-09, 31 days ago. Refresh with `spoolway models refresh`."
+        );
     }
 
     /// The three models this project's own steps run (see
