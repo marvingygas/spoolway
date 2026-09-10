@@ -88,7 +88,7 @@ pub enum Command {
     #[command(
         long_about = "Every model an agent step of this project's pipelines names, resolved.\n\n\
             Resolution is this project's own `[models]` table first, by glob, then litellm's \
-            vendored table by exact name, then nothing — a model in neither is `unknown`, never \
+            refreshed and vendored tables by exact name, then nothing — a model in none is `unknown`, never \
             free. `spoolway doctor` reports the same gap; this is where to see it in full.\n\n\
             Nothing here estimates or edits a price. Set one with:\n  \
             spoolway config set models.'<model-glob>'.input <usd per 1M>"

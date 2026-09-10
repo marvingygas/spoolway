@@ -2,19 +2,20 @@
 //!
 //! `[models]` in `config.toml` is a project's own word on a model, by glob,
 //! and it is empty by default: spoolway does not know what you run. Behind
-//! it sits one more table nobody has to write — litellm's own price map,
-//! vendored into `assets/model-prices.json` and distilled to the six numbers
-//! [`crate::usage::ModelPrice`] holds. [`resolve`] is the one place that
-//! order is applied: a project's own glob first, the vendored table by exact
-//! name second, and nothing after that.
+//! it sit two tables nobody has to write — a refreshed copy of litellm's price
+//! map under `~/.spoolway/`, then the copy vendored into the binary. Both are
+//! distilled to the six numbers [`crate::usage::ModelPrice`] holds. [`resolve`]
+//! is the one place that order is applied: a project's own glob first, each
+//! price table by exact name after that, and nothing last.
 //!
-//! The vendored table is compiled in with [`include_str!`] and parsed once.
-//! Nothing here — and nothing in the binary anywhere — fetches it: refreshing
-//! it is `scripts/refresh-model-prices.mjs`, run by hand, whose own header
-//! explains why.
+//! The refreshed table is optional user-state: an absent, unreadable, or bad
+//! file is ignored. The vendored table is compiled in with [`include_str!`]
+//! and parsed once, so that optional layer can never take away a shipped row.
+//! Nothing here fetches either table.
 
 use std::collections::BTreeMap;
-use std::sync::OnceLock;
+use std::fs;
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -51,6 +52,65 @@ struct BuiltinFile {
     models: BTreeMap<String, ModelPrice>,
 }
 
+/// Distill litellm's raw, provider-wide price map into the rows spoolway uses.
+///
+/// litellm includes embeddings, image models, and descriptive sample rows in
+/// the same map. A chat row without both prices is no price at all, so it is
+/// dropped rather than becoming a misleading zero-cost model.
+// The refresh command is deliberately the next task: keep its pure half here
+// without inventing a runtime caller before that command exists.
+#[allow(dead_code)]
+pub(crate) fn distill(raw: &BTreeMap<String, serde_json::Value>) -> BTreeMap<String, ModelPrice> {
+    raw.iter()
+        .filter_map(|(name, value)| {
+            let row = value.as_object()?;
+            if row.get("mode")?.as_str()? != "chat" {
+                return None;
+            }
+            let input = finite_number(row.get("input_cost_per_token")?)?;
+            let output = finite_number(row.get("output_cost_per_token")?)?;
+
+            Some((
+                name.clone(),
+                ModelPrice {
+                    context_window: window(row.get("max_input_tokens"))
+                        .or_else(|| window(row.get("max_tokens")))
+                        .unwrap_or(0),
+                    input: per_million(input),
+                    output: per_million(output),
+                    cache_read: optional_rate(row.get("cache_read_input_token_cost")),
+                    cache_write_5m: optional_rate(row.get("cache_creation_input_token_cost")),
+                    cache_write_1h: optional_rate(
+                        row.get("cache_creation_input_token_cost_above_1hr"),
+                    ),
+                    ..Default::default()
+                },
+            ))
+        })
+        .collect()
+}
+
+fn finite_number(value: &serde_json::Value) -> Option<f64> {
+    value.as_f64().filter(|number| number.is_finite())
+}
+
+fn window(value: Option<&serde_json::Value>) -> Option<usize> {
+    usize::try_from(value?.as_u64()?).ok()
+}
+
+fn optional_rate(value: Option<&serde_json::Value>) -> f64 {
+    value
+        .and_then(finite_number)
+        .map(per_million)
+        .unwrap_or(0.0)
+}
+
+/// Per-million prices are persisted and compared, so round away the binary
+/// float noise introduced by scaling a per-token decimal.
+fn per_million(per_token: f64) -> f64 {
+    (per_token * 1_000_000.0 * 1_000_000.0).round() / 1_000_000.0
+}
+
 /// Parsed once. `assets/model-prices.json` is vendored, not user input, so a
 /// parse failure here is a build-time mistake, not a runtime one — panicking
 /// says so plainly instead of silently pricing nothing.
@@ -63,6 +123,48 @@ fn builtin() -> &'static BTreeMap<String, ModelPrice> {
     })
 }
 
+struct RefreshedCache {
+    path: std::path::PathBuf,
+    contents: Vec<u8>,
+    models: BTreeMap<String, ModelPrice>,
+}
+
+/// Read the optional machine-wide table before consulting its parsed cache.
+/// The read has to come first: permissions can make an otherwise unchanged
+/// file unreadable, and serving its cached row then would defeat the silent
+/// built-in fallback promised for that failure. Comparing bytes still avoids
+/// reparsing an unchanged table on every frame of a long-running `status`.
+fn refreshed_price(model: &str) -> Option<ModelPrice> {
+    let path = crate::mux::home().join(".spoolway/model-prices.json");
+    let contents = fs::read(&path).ok()?;
+
+    static CACHE: OnceLock<Mutex<Option<RefreshedCache>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    let cached = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if cached
+        .as_ref()
+        .is_some_and(|cached| cached.path == path && cached.contents == contents)
+    {
+        return cached.as_ref()?.models.get(model).copied();
+    }
+    drop(cached);
+
+    let models = serde_json::from_slice::<BuiltinFile>(&contents)
+        .ok()?
+        .models;
+    let answer = models.get(model).copied();
+    *cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(RefreshedCache {
+        path,
+        contents,
+        models,
+    });
+    answer
+}
+
 /// Where a resolved answer came from — what `spoolway models` prints in its
 /// `SOURCE` column, and what `spoolway eval --by` and `spoolway doctor` tell apart
 /// a project's own word on a model from litellm's.
@@ -71,9 +173,11 @@ fn builtin() -> &'static BTreeMap<String, ModelPrice> {
 pub enum Source {
     /// Matched a glob in this project's own `[models]` table.
     Config,
+    /// Not configured, but the refreshed table knows this exact name.
+    Refreshed,
     /// Not configured, but the vendored table knows this exact name.
     Builtin,
-    /// In neither. Unpriced and unsized — not free, not zero.
+    /// No config, refreshed, or built-in row. Unpriced — not free, not zero.
     Unknown,
 }
 
@@ -81,6 +185,7 @@ impl Source {
     pub fn label(self) -> &'static str {
         match self {
             Source::Config => "config",
+            Source::Refreshed => "refreshed",
             Source::Builtin => "built-in",
             Source::Unknown => "unknown",
         }
@@ -95,9 +200,9 @@ pub struct Resolved {
 
 /// Resolve `model`: this project's own `[models]` table first, by glob —
 /// [`crate::usage::best_match`], the same rule `spoolway eval --by` always used —
-/// then the vendored built-in table by exact name, then nothing.
+/// then the refreshed and vendored tables by exact name, then nothing.
 ///
-/// Exact name on the built-in side because it holds real model names, not
+/// Exact names in the price files because they hold real model names, not
 /// patterns someone wrote to match a family; a project that wants a glob to
 /// win writes one in `[models]`, which is checked first for exactly that
 /// reason.
@@ -106,6 +211,12 @@ pub fn resolve(config_models: &BTreeMap<String, ModelPrice>, model: &str) -> Res
         return Resolved {
             price: Some(*entry),
             source: Source::Config,
+        };
+    }
+    if let Some(entry) = refreshed_price(model) {
+        return Resolved {
+            price: Some(entry),
+            source: Source::Refreshed,
         };
     }
     if let Some(entry) = builtin().get(model) {
@@ -255,6 +366,87 @@ pub fn run(repo: &Repo, pipelines: &Pipelines, json: bool) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn fixture_home(name: &str) -> std::path::PathBuf {
+        let home = crate::scratch::root(name);
+        fs::create_dir_all(home.join(".spoolway")).unwrap();
+        home
+    }
+
+    fn write_refreshed(home: &std::path::Path, models: serde_json::Value) {
+        let table = serde_json::json!({
+            "source": "fixture",
+            "license": "MIT",
+            "generated": "2026-09-09",
+            "models": models,
+        });
+        fs::write(
+            home.join(".spoolway/model-prices.json"),
+            serde_json::to_vec(&table).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn litellm_rows_are_filtered_scaled_and_rounded() {
+        let raw: BTreeMap<String, serde_json::Value> = serde_json::from_value(serde_json::json!({
+            "kept": {
+                "mode": "chat",
+                "max_input_tokens": 123456,
+                "max_tokens": 9,
+                "input_cost_per_token": 0.000004999999999999,
+                "output_cost_per_token": 0.000025,
+                "cache_read_input_token_cost": 0.000000499999999999,
+                "cache_creation_input_token_cost": 0.00000625,
+                "cache_creation_input_token_cost_above_1hr": 0.00001
+            },
+            "fallback-window": {
+                "mode": "chat",
+                "max_input_tokens": "not a number",
+                "max_tokens": 8192,
+                "input_cost_per_token": 0.000001,
+                "output_cost_per_token": 0.000002
+            },
+            "no-window": {
+                "mode": "chat",
+                "input_cost_per_token": 0.000001,
+                "output_cost_per_token": 0.000002
+            },
+            "embedding": {
+                "mode": "embedding",
+                "input_cost_per_token": 0.000001,
+                "output_cost_per_token": 0.000002
+            },
+            "missing-output": {
+                "mode": "chat",
+                "input_cost_per_token": 0.000001
+            },
+            "wrong-input-type": {
+                "mode": "chat",
+                "input_cost_per_token": "0.000001",
+                "output_cost_per_token": 0.000002
+            }
+        }))
+        .unwrap();
+
+        let table = distill(&raw);
+        assert_eq!(table.len(), 3);
+        assert_eq!(
+            table["kept"],
+            ModelPrice {
+                context_window: 123456,
+                input: 5.0,
+                output: 25.0,
+                cache_read: 0.5,
+                cache_write_5m: 6.25,
+                cache_write_1h: 10.0,
+                ..Default::default()
+            }
+        );
+        assert_eq!(table["fallback-window"].context_window, 8192);
+        assert_eq!(table["fallback-window"].cache_read, 0.0);
+        assert_eq!(table["no-window"].context_window, 0);
+    }
+
     /// The vendored table is real data, not a fixture — this is the one test
     /// that would catch it failing to parse at all.
     #[test]
@@ -298,16 +490,116 @@ mod tests {
 
     #[test]
     fn the_builtin_table_answers_a_model_config_does_not_name() {
-        let resolved = resolve(&BTreeMap::new(), "claude-opus-5");
-        assert_eq!(resolved.source, Source::Builtin);
-        assert!(resolved.price.unwrap().input > 0.0);
+        let home = fixture_home("models-builtin-fallback");
+        crate::platform::test_home::with_home(&home, || {
+            let resolved = resolve(&BTreeMap::new(), "claude-opus-5");
+            assert_eq!(resolved.source, Source::Builtin);
+            assert!(resolved.price.unwrap().input > 0.0);
+        });
     }
 
     #[test]
     fn a_model_in_neither_resolves_to_nothing() {
-        let resolved = resolve(&BTreeMap::new(), "not-a-real-model");
-        assert_eq!(resolved.source, Source::Unknown);
-        assert!(resolved.price.is_none());
+        let home = fixture_home("models-unknown");
+        crate::platform::test_home::with_home(&home, || {
+            let resolved = resolve(&BTreeMap::new(), "not-a-real-model");
+            assert_eq!(resolved.source, Source::Unknown);
+            assert!(resolved.price.is_none());
+        });
+    }
+
+    #[test]
+    fn config_then_refreshed_then_builtin_are_checked_per_model() {
+        let home = fixture_home("models-resolution-layers");
+        write_refreshed(
+            &home,
+            serde_json::json!({
+                "claude-opus-5": { "input": 2.0 },
+                "refreshed-only": { "input": 3.0 },
+                "looks-*": { "input": 4.0 }
+            }),
+        );
+        let config = BTreeMap::from([(
+            "claude-*".to_string(),
+            ModelPrice {
+                input: 1.0,
+                ..Default::default()
+            },
+        )]);
+
+        crate::platform::test_home::with_home(&home, || {
+            let configured = resolve(&config, "claude-opus-5");
+            assert_eq!(configured.source, Source::Config);
+            assert_eq!(configured.price.unwrap().input, 1.0);
+
+            let refreshed = resolve(&config, "refreshed-only");
+            assert_eq!(refreshed.source, Source::Refreshed);
+            assert_eq!(refreshed.price.unwrap().input, 3.0);
+
+            let exact_only = resolve(&config, "looks-like-a-glob");
+            assert_eq!(exact_only.source, Source::Unknown);
+
+            // This row is deliberately absent from the refreshed fixture: a
+            // newer partial table must not erase what the binary still knows.
+            let vendored = resolve(&config, "gpt-5.6-sol");
+            assert_eq!(vendored.source, Source::Builtin);
+        });
+    }
+
+    #[test]
+    fn unusable_refreshed_files_are_silent_fallbacks() {
+        for (name, contents) in [
+            ("missing", None),
+            ("malformed", Some(b"not json".as_slice())),
+        ] {
+            let home = fixture_home(&format!("models-refreshed-{name}"));
+            if let Some(contents) = contents {
+                fs::write(home.join(".spoolway/model-prices.json"), contents).unwrap();
+            }
+            crate::platform::test_home::with_home(&home, || {
+                assert_eq!(
+                    resolve(&BTreeMap::new(), "claude-opus-5").source,
+                    Source::Builtin
+                );
+            });
+        }
+
+        let home = fixture_home("models-refreshed-unreadable");
+        fs::create_dir(home.join(".spoolway/model-prices.json")).unwrap();
+        crate::platform::test_home::with_home(&home, || {
+            assert_eq!(
+                resolve(&BTreeMap::new(), "claude-opus-5").source,
+                Source::Builtin
+            );
+        });
+    }
+
+    /// Losing read permission changes neither a file's contents nor the
+    /// modification timestamp used by the old cache. Resolution still has to
+    /// notice that the optional layer is no longer readable and fall back.
+    #[cfg(unix)]
+    #[test]
+    fn a_cached_refreshed_file_that_becomes_unreadable_is_not_served() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = fixture_home("models-refreshed-cached-unreadable");
+        write_refreshed(
+            &home,
+            serde_json::json!({ "claude-opus-5": { "input": 2.0 } }),
+        );
+        let path = home.join(".spoolway/model-prices.json");
+
+        crate::platform::test_home::with_home(&home, || {
+            assert_eq!(
+                resolve(&BTreeMap::new(), "claude-opus-5").source,
+                Source::Refreshed
+            );
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+            assert_eq!(
+                resolve(&BTreeMap::new(), "claude-opus-5").source,
+                Source::Builtin
+            );
+        });
     }
 
     /// Every agent step in the shipped pipelines names a model — the previous
@@ -326,6 +618,7 @@ mod tests {
     fn every_real_model_the_shipped_pipelines_name_resolves() {
         let pipelines = Pipelines::builtin();
         let no_config = BTreeMap::new();
+        let home = fixture_home("models-shipped-pipelines");
 
         let real_models: Vec<&str> = named(&pipelines)
             .into_keys()
@@ -336,15 +629,17 @@ mod tests {
             "no real model names in the shipped pipelines to check"
         );
 
-        for model in real_models {
-            let resolved = resolve(&no_config, model);
-            let price = resolved.price.unwrap_or_else(|| {
-                panic!("`{model}`, named by a shipped pipeline step, resolves to nothing")
-            });
-            assert!(
-                price.context_window > 0,
-                "`{model}`, named by a shipped pipeline step, resolves to a price with no window"
-            );
-        }
+        crate::platform::test_home::with_home(&home, || {
+            for model in real_models {
+                let resolved = resolve(&no_config, model);
+                let price = resolved.price.unwrap_or_else(|| {
+                    panic!("`{model}`, named by a shipped pipeline step, resolves to nothing")
+                });
+                assert!(
+                    price.context_window > 0,
+                    "`{model}`, named by a shipped pipeline step, resolves to a price with no window"
+                );
+            }
+        });
     }
 }

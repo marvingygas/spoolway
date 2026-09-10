@@ -145,7 +145,7 @@ pub const REFERENCE: &[Reference] = &[
         values: "<dollars>",
         default: "0",
         sentence: "Dollars one unattended run may spend before the dispatcher stops \
-                    starting work, priced off assets/model-prices.json; 0 is no ceiling.",
+                    starting work, priced from the resolved model table; 0 is no ceiling.",
     },
     Reference {
         key: "unattended.skip_blocked_lane",

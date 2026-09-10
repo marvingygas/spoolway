@@ -784,8 +784,9 @@ never reads — it prints the `-C <project>` invocation that would land in the r
 
 Every model an agent step of this project's pipelines names, resolved: window, per-1M rates,
 its own `SLOTS` and `EXCL`, and which table answered — this project's own `[models]`, the
-built-in one, or `unknown` where neither has heard of it. `spoolway doctor` reports the same
-gap in passing; this is where to see it in full.
+machine-wide refreshed table at `~/.spoolway/model-prices.json`, the built-in one, or
+`unknown` where none has heard of it. `spoolway doctor` reports the same gap in passing; this
+is where to see it in full.
 
 See [Pricing](cost.md#pricing).
 

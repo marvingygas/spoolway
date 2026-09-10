@@ -81,7 +81,7 @@ first table alone, with `total` on its last row.
 `IN`, `OUT`, `CACHE R` and `CACHE W` are the four priced token classes, and they are
 disjoint. `WALL` is how long lanes were open, not model time.
 
-A cost of `—` means the model resolved to nothing in either price table — see
+A cost of `—` means the model resolved to nothing in any of the price tables — see
 [Pricing](#pricing). A group where only some of its lanes could be priced still prints the
 plain number it priced, a floor rather than a total; the report's own footer names the model
 responsible. A line that spent no tokens at all — the zero-token line a session is enrolled
@@ -256,21 +256,29 @@ spoolway config set models.'<model-glob>'.input <usd per 1M>
 ```
 
 The table is **empty by default** — spoolway does not know what you run — but it is not the
-only place a model can be priced from. Behind it sits a built-in table, vendored from
-litellm's own price map and distilled to the same six numbers, checked by the model's exact
-name when nothing in `[models]` matches it by glob. A step naming `claude-opus-5` is priced
-from that table the moment it runs, with nothing to configure; a step naming a local model
+only place a model can be priced from. Resolution is three tables deep, checked one model at a
+time: behind the project's own sits a machine-wide table at `~/.spoolway/model-prices.json`, a
+refreshed copy of litellm's price map distilled to the same six numbers, and behind that a
+built-in table vendored from the same map into the binary. Each price table is matched by the
+model's exact name when nothing in `[models]` matched it by glob, and a project's own glob
+still wins over either of them. A step naming `claude-opus-5` is priced from the first table
+that knows it the moment it runs, with nothing to configure; a step naming a local model
 nobody has published a price for still resolves to nothing, and is reported as unpriced rather
-than folded into a total as zero — a model in neither table has an unknown cost, not a free
-one. `spoolway models` lists every model this project's pipelines name, its window, its rates,
-its own `slots` and `exclusive` (see [`[models."<glob>"]`](configuration.md#modelsglob--what-a-model-costs-and-how-big-its-window-is)),
-and which of the two tables answered — or `unknown`, where neither did.
+than folded into a total as zero — a model in none of the three tables has an unknown cost, not
+a free one. `spoolway models` lists every model this project's pipelines name, its window, its
+rates, its own `slots` and `exclusive` (see [`[models."<glob>"]`](configuration.md#modelsglob--what-a-model-costs-and-how-big-its-window-is)),
+and which of the three tables answered — or `unknown`, where none did.
 
 Renamed from `[pricing]`, which held the same five rates without the window; an old `[pricing]`
 table is read into this same field and written back under the new name.
 
 The built-in table is a vendored file, not a live lookup: nothing in the binary fetches
 anything, ever, at any point — see [Where the built-in table comes from](#where-the-built-in-table-comes-from).
+
+The refreshed table in between is optional user-state, written by the refresh command a later
+task adds and read here only by name. An absent, unreadable, or unparseable file is silently
+skipped, so a partial refresh never erases what the built-in table still holds for a model it
+doesn't list and a broken file never breaks `spoolway models`.
 
 ### Who prices what
 
