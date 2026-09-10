@@ -11,15 +11,20 @@
 //! The refreshed table is optional user-state: an absent, unreadable, or bad
 //! file is ignored. The vendored table is compiled in with [`include_str!`]
 //! and parsed once, so that optional layer can never take away a shipped row.
-//! Nothing here fetches either table.
+//! [`refresh`] is the only network edge: it shells out to curl, distils the
+//! answer completely, and only then atomically replaces one of those tables.
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::cli::ModelsRefreshArgs;
 use crate::pipeline::{Pipelines, StepKind};
 use crate::repo::Repo;
 use crate::usage::ModelPrice;
@@ -39,27 +44,32 @@ pub const PLACEHOLDER: &str = "your-local-model";
 /// litellm's price map, vendored and distilled. See the module docs.
 const BUILTIN_JSON: &str = include_str!("../assets/model-prices.json");
 
-/// The shape `scripts/refresh-model-prices.mjs` writes: a short header saying
-/// where the numbers came from, then one row per priced chat model.
-#[derive(Deserialize)]
+/// The price-table file: a short header saying where the numbers came from,
+/// then one row per priced chat model. The same shape is read at both layers
+/// and written by [`refresh`], so they cannot drift into separate contracts.
+#[derive(Deserialize, Serialize)]
 struct BuiltinFile {
-    #[allow(dead_code)]
     source: String,
-    #[allow(dead_code)]
     license: String,
-    #[allow(dead_code)]
     generated: String,
     models: BTreeMap<String, ModelPrice>,
 }
+
+const SOURCE_URL: &str =
+    "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
+const SOURCE_PAGE: &str =
+    "https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json";
+const SOURCE_LICENSE: &str = "MIT";
+/// The fetch seam for an offline suite. Production leaves it unset; like
+/// `SPOOLWAY_GH` for the stack command, the override changes the external
+/// input without giving the command a second implementation.
+const SOURCE_URL_ENV: &str = "SPOOLWAY_MODEL_PRICES_URL";
 
 /// Distill litellm's raw, provider-wide price map into the rows spoolway uses.
 ///
 /// litellm includes embeddings, image models, and descriptive sample rows in
 /// the same map. A chat row without both prices is no price at all, so it is
 /// dropped rather than becoming a misleading zero-cost model.
-// The refresh command is deliberately the next task: keep its pure half here
-// without inventing a runtime caller before that command exists.
-#[allow(dead_code)]
 pub(crate) fn distill(raw: &BTreeMap<String, serde_json::Value>) -> BTreeMap<String, ModelPrice> {
     raw.iter()
         .filter_map(|(name, value)| {
@@ -88,6 +98,176 @@ pub(crate) fn distill(raw: &BTreeMap<String, serde_json::Value>) -> BTreeMap<Str
             ))
         })
         .collect()
+}
+
+/// Fetch and replace the machine-wide or vendored price table.
+///
+/// Every fallible operation through parsing the response happens before the
+/// destination is opened. In particular, a missing curl, an HTTP failure, or
+/// invalid JSON cannot truncate the last usable table.
+pub fn refresh(repo: &Repo, args: &ModelsRefreshArgs) -> Result<()> {
+    let target = refresh_target(repo, args.vendor)?;
+    let source_url = std::env::var(SOURCE_URL_ENV).unwrap_or_else(|_| SOURCE_URL.to_string());
+    let response = fetch(&source_url, args.vendor)?;
+    if !args.vendor {
+        println!("  fetched  {}", display_url(&source_url));
+    }
+
+    let raw: BTreeMap<String, serde_json::Value> = serde_json::from_slice(&response)
+        .with_context(|| format!("parsing litellm's price response from {source_url}"))?;
+    let raw_count = raw.len();
+    let models = distill(&raw);
+    // The machine-wide layer may not exist yet. In that case the active table
+    // it is replacing is the built-in one, so reporting every current model as
+    // newly added would hide the small upstream delta a refresh is for.
+    let old = existing_models(&target).unwrap_or_else(|| builtin().clone());
+    let changes = Changes::between(&old, &models);
+    let file = BuiltinFile {
+        source: SOURCE_PAGE.to_string(),
+        license: SOURCE_LICENSE.to_string(),
+        generated: chrono::Utc::now().format("%Y-%m-%d").to_string(),
+        models,
+    };
+    let mut contents = serde_json::to_vec_pretty(&file).context("encoding the distilled table")?;
+    contents.push(b'\n');
+    crate::task::write_atomic(&target, contents)
+        .with_context(|| format!("writing {}", target.display()))?;
+
+    for line in success_lines(
+        repo,
+        &target,
+        args.vendor,
+        file.models.len(),
+        raw_count - file.models.len(),
+        &changes,
+    ) {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+fn refresh_target(repo: &Repo, vendor: bool) -> Result<PathBuf> {
+    if !vendor {
+        return Ok(crate::mux::home().join(".spoolway/model-prices.json"));
+    }
+    let path = repo.checkout.join("assets/model-prices.json");
+    if !path.is_file() {
+        bail!(vendor_missing_message());
+    }
+    Ok(path)
+}
+
+fn fetch(source_url: &str, vendor: bool) -> Result<Vec<u8>> {
+    let output = match Command::new("curl")
+        .args(["-fsSL", "--max-time", "30", source_url])
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            bail!(curl_missing_message(vendor))
+        }
+        Err(err) => return Err(err).context("running curl to fetch litellm's prices"),
+    };
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr);
+        let detail = detail.trim();
+        if detail.is_empty() {
+            bail!("curl failed fetching {source_url} ({})", output.status);
+        }
+        bail!("curl failed fetching {source_url}: {detail}");
+    }
+    Ok(output.stdout)
+}
+
+fn curl_missing_message(vendor: bool) -> String {
+    let unchanged = if vendor {
+        "assets/model-prices.json"
+    } else {
+        "~/.spoolway/model-prices.json"
+    };
+    format!("curl is not on PATH; spoolway fetches prices by running it\n{unchanged} is unchanged")
+}
+
+fn vendor_missing_message() -> &'static str {
+    "--vendor writes assets/model-prices.json, and this project has no such file\nnothing written"
+}
+
+fn display_url(url: &str) -> &str {
+    url.strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url)
+}
+
+fn existing_models(path: &Path) -> Option<BTreeMap<String, ModelPrice>> {
+    // A malformed optional table is already ignored by resolution. Return no
+    // comparison table here too: the caller then compares with the built-in
+    // fallback while still letting refresh repair the bad file in one step.
+    fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<BuiltinFile>(&bytes).ok())
+        .map(|file| file.models)
+}
+
+fn report_path(repo: &Repo, target: &Path, vendor: bool) -> String {
+    if vendor {
+        return target
+            .strip_prefix(&repo.checkout)
+            .unwrap_or(target)
+            .display()
+            .to_string();
+    }
+    let home = crate::mux::home();
+    target
+        .strip_prefix(&home)
+        .map(|path| format!("~/{}", path.display()))
+        .unwrap_or_else(|_| target.display().to_string())
+}
+
+fn success_lines(
+    repo: &Repo,
+    target: &Path,
+    vendor: bool,
+    kept: usize,
+    dropped_rows: usize,
+    changes: &Changes,
+) -> Vec<String> {
+    let wrote = format!("  wrote    {}", report_path(repo, target, vendor));
+    if vendor {
+        // Vendoring is deliberately quiet enough to paste into release work:
+        // the one path changed is the whole report drawn by the command.
+        return vec![wrote];
+    }
+    vec![
+        wrote,
+        format!("  models   {kept} priced chat rows kept, {dropped_rows} other rows dropped"),
+        format!(
+            "  changed  {} added, {} repriced, {} unchanged, {} dropped",
+            changes.added, changes.repriced, changes.unchanged, changes.dropped
+        ),
+    ]
+}
+
+#[derive(Default)]
+struct Changes {
+    added: usize,
+    repriced: usize,
+    unchanged: usize,
+    dropped: usize,
+}
+
+impl Changes {
+    fn between(old: &BTreeMap<String, ModelPrice>, new: &BTreeMap<String, ModelPrice>) -> Self {
+        let mut changes = Self::default();
+        for (name, price) in new {
+            match old.get(name) {
+                None => changes.added += 1,
+                Some(old_price) if old_price == price => changes.unchanged += 1,
+                Some(_) => changes.repriced += 1,
+            }
+        }
+        changes.dropped = old.keys().filter(|name| !new.contains_key(*name)).count();
+        changes
+    }
 }
 
 fn finite_number(value: &serde_json::Value) -> Option<f64> {
@@ -445,6 +625,90 @@ mod tests {
         assert_eq!(table["fallback-window"].context_window, 8192);
         assert_eq!(table["fallback-window"].cache_read, 0.0);
         assert_eq!(table["no-window"].context_window, 0);
+    }
+
+    #[test]
+    fn refresh_changes_compare_names_and_complete_prices() {
+        let old = BTreeMap::from([
+            (
+                "same".to_string(),
+                ModelPrice {
+                    input: 1.0,
+                    ..Default::default()
+                },
+            ),
+            (
+                "repriced".to_string(),
+                ModelPrice {
+                    input: 2.0,
+                    ..Default::default()
+                },
+            ),
+            ("gone".to_string(), ModelPrice::default()),
+        ]);
+        let new = BTreeMap::from([
+            (
+                "same".to_string(),
+                ModelPrice {
+                    input: 1.0,
+                    ..Default::default()
+                },
+            ),
+            (
+                "repriced".to_string(),
+                ModelPrice {
+                    input: 3.0,
+                    ..Default::default()
+                },
+            ),
+            ("new".to_string(), ModelPrice::default()),
+        ]);
+
+        let changes = Changes::between(&old, &new);
+        assert_eq!(changes.added, 1);
+        assert_eq!(changes.repriced, 1);
+        assert_eq!(changes.unchanged, 1);
+        assert_eq!(changes.dropped, 1);
+    }
+
+    #[test]
+    fn vendor_success_reports_only_the_written_path() {
+        let checkout = crate::scratch::root("models-vendor-report");
+        let repo = Repo {
+            root: checkout.clone(),
+            checkout: checkout.clone(),
+            config: Default::default(),
+            home: checkout.join("state"),
+        };
+        let lines = success_lines(
+            &repo,
+            &checkout.join("assets/model-prices.json"),
+            true,
+            12,
+            3,
+            &Changes {
+                added: 1,
+                repriced: 2,
+                unchanged: 9,
+                dropped: 4,
+            },
+        );
+
+        assert_eq!(lines, ["  wrote    assets/model-prices.json"]);
+    }
+
+    #[test]
+    fn no_write_failures_match_the_two_line_command_report() {
+        assert_eq!(
+            curl_missing_message(false),
+            "curl is not on PATH; spoolway fetches prices by running it\n\
+             ~/.spoolway/model-prices.json is unchanged"
+        );
+        assert_eq!(
+            vendor_missing_message(),
+            "--vendor writes assets/model-prices.json, and this project has no such file\n\
+             nothing written"
+        );
     }
 
     /// The vendored table is real data, not a fixture — this is the one test

@@ -64,6 +64,40 @@ new_repo "$LIVE/proj"
 configure_project plan/live "$LIVE/worktrees"
 publish plan/live
 
+# ---------------------------------------------------------- model price refresh
+# A file URL still travels through curl, but never leaves the fixture. Keeping
+# the raw litellm shape here (rather than copying spoolway's output shape) also
+# proves the command's distilling half is on the path the real binary runs.
+PRICE_FIXTURE="$LIVE/model-prices-raw.json"
+cat >"$PRICE_FIXTURE" <<'JSON'
+{
+  "fake-local": {
+    "mode": "chat",
+    "max_input_tokens": 12345,
+    "input_cost_per_token": 0.000001,
+    "output_cost_per_token": 0.000002
+  },
+  "not-chat": {
+    "mode": "embedding",
+    "input_cost_per_token": 0.000001,
+    "output_cost_per_token": 0.000002
+  }
+}
+JSON
+must "models refresh fetches and distils a local fixture through curl" \
+  env SPOOLWAY_MODEL_PRICES_URL="file://$PRICE_FIXTURE" "$SPOOLWAY" models refresh
+works "the refreshed machine-wide table is valid JSON" \
+  jq -e '.source and .license == "MIT" and .generated and .models["fake-local"].input == 1' \
+  "$HOME/.spoolway/model-prices.json"
+MODELS_OUT="$LIVE/models-refreshed.out"
+"$SPOOLWAY" models >"$MODELS_OUT"
+if grep -qE '^fake-local[[:space:]].*[[:space:]]refreshed[[:space:]]' "$MODELS_OUT"; then
+  ok "models reads the new row back with SOURCE refreshed"
+else
+  bad "models reads the new row back with SOURCE refreshed"
+  sed 's/^/        /' "$MODELS_OUT"
+fi
+
 BODY="$LIVE/body.md"
 task_body "$BODY"
 

@@ -61,7 +61,7 @@ use anyhow::Result;
 
 use cli::{
     AgentCommand, Cli, Command, ConfigCommand, GroupCommand, IssueCommand, JobsCommand,
-    PipelineCommand, PromptCommand, QueueCommand, TaskCommand,
+    ModelsCommand, PipelineCommand, PromptCommand, QueueCommand, TaskCommand,
 };
 use pipeline::Pipelines;
 use repo::Repo;
@@ -259,7 +259,10 @@ fn run() -> Result<()> {
                     unreachable!("handled above")
                 }
 
-                Command::Models => models::run(&repo, routing(&graph)?, cli.json),
+                Command::Models { command: None } => models::run(&repo, routing(&graph)?, cli.json),
+                Command::Models {
+                    command: Some(ModelsCommand::Refresh(args)),
+                } => models::refresh(&repo, args),
                 // Bare `spoolway eval`, none of `eval`'s own flags and no
                 // `--json`: the screen. Any of `eval`'s own flags — including
                 // one spelled out to its own default — takes the printing

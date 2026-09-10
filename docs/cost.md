@@ -1,6 +1,6 @@
 ---
 domain: cost
-covers: ["src/usage.rs", "src/spend.rs", "src/models.rs", "assets/model-prices.json", "scripts/refresh-model-prices.mjs"]
+covers: ["src/usage.rs", "src/spend.rs", "src/models.rs", "assets/model-prices.json"]
 ---
 
 # Cost accounting
@@ -272,11 +272,12 @@ and which of the three tables answered — or `unknown`, where none did.
 Renamed from `[pricing]`, which held the same five rates without the window; an old `[pricing]`
 table is read into this same field and written back under the new name.
 
-The built-in table is a vendored file, not a live lookup: nothing in the binary fetches
-anything, ever, at any point — see [Where the built-in table comes from](#where-the-built-in-table-comes-from).
+The built-in table is a vendored file, not a live lookup: it is compiled into the binary and
+never fetched at runtime. The one network edge in this file is refresh, which shells out to
+curl — see [Where the built-in table comes from](#where-the-built-in-table-comes-from).
 
-The refreshed table in between is optional user-state, written by the refresh command a later
-task adds and read here only by name. An absent, unreadable, or unparseable file is silently
+The refreshed table in between is optional user-state, written by `spoolway models refresh`
+and read here only by name. An absent, unreadable, or unparseable file is silently
 skipped, so a partial refresh never erases what the built-in table still holds for a model it
 doesn't list and a broken file never breaks `spoolway models`.
 
@@ -295,11 +296,11 @@ doesn't list and a broken file never breaks `spoolway models`.
 
 `assets/model-prices.json` is litellm's `model_prices_and_context_window.json` (MIT licensed),
 distilled from roughly 2,200 priced chat models down to the six fields spoolway uses, and
-compiled into the binary. `scripts/refresh-model-prices.mjs` is how it is refreshed — a person
-runs it by hand, it fetches the upstream file, and the diff to `assets/model-prices.json` is
-reviewed and committed like any other vendored dependency. There is no schedule, no check on
-startup, and no warning that it has gone stale: staleness is the price of the binary never
-calling out at all.
+compiled into the binary. `spoolway models refresh --vendor` is how it is refreshed: it fetches
+the upstream file through curl, distils it to the same six fields, and writes
+`assets/model-prices.json`; the diff is reviewed and committed like any other vendored
+dependency. There is no schedule, no check on startup, and no warning that it has gone stale:
+staleness is the price of the binary never calling out at all.
 
 ### Why cache writes are two rates
 
