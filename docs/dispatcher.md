@@ -518,13 +518,21 @@ one-second redraw, and much cheaper than reading a megabyte of conversation per 
 The footer shows one line per agent profile that carries a cap, its name and `slots <live>/<cap>`.
 Quota-capable profiles also show `quota off`, or `quota ceiling <percent>%` when enabled. A
 cap is either the profile's own `concurrency`, or a model the profile runs that carries
-`slots` of its own — and that model is resolved from whichever of the profile's live lanes or
-a queued task's pipeline steps names it. A profile whose model
-has `slots` of its own so shows up the moment a task routes onto a pipeline that names it, with
-nothing running on it at all. Where the model a profile runs has `slots` of its own — from a
-lane it has live or from a step a queued task's pipeline runs for it — the figure counts
-against the model's own cap instead of the profile's `concurrency` — a smaller local model
-swapped in shrinks that line on its own, with nobody touching `[agents.pi]`. What a run has spent lives on the board itself now, in each group's
+`slots` of its own — resolved from whichever of the profile's live lanes or a queued task's
+pipeline steps names it. A profile whose model has `slots` of its own shows up the moment a
+task routes onto a pipeline that names it, with nothing running on it at all. Where the model
+a profile runs has `slots` of its own — from a lane it has live or from a step a queued task's
+pipeline runs for it — the figure counts against the model's own cap instead of the profile's
+`concurrency` — a smaller local model swapped in shrinks that line on its own, with nobody
+touching `[agents.pi]`.
+
+A profile that names more than one pooled model draws one line per model, each reading
+`slots <live>/<cap>` with that model's own name printed after the figures, each figure counted
+against that model's own cap. A profile whose steps name two pooled models prints its name and
+quota on the first line and leaves the name column blank on the rest. Two model names that
+match the same `[models."<glob>"]` entry collapse to one line, since they are the same pool.
+A profile that names no pooled model keeps the single line it always drew, with no model name
+after the figures. What a run has spent lives on the board itself now, in each group's
 own total line, rather than summed once across every group at the foot of the frame.
 
 One more line joins the footer whenever an `[issue_tracking]` hook has failed:

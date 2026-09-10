@@ -532,21 +532,28 @@ tail -n +"$((BEFORE + 1))" "$E2E_DISPATCH_LOG" > "$LIVE/local-pool.out"
 # `implement` lane may or may not have been dispatched yet by this point,
 # and either way is beside what this case is about: the `/3` cap is there
 # at all, off the queued pipeline's own step, whether or not a lane is live.
-if python3 - "$LIVE/local-pool.out" <<'PY'
+# The model itself is asserted, though — `pool-line-per-model` puts one line
+# per pooled model on the footer, the model's own name printed after its
+# figures, and the local notice below it is the standing reminder that this
+# same model's line is undercounting whoever else is running it by hand.
+if python3 - "$LIVE/local-pool.out" "$LOCAL_MODEL" <<'PY'
 import re
 import sys
 
 data = open(sys.argv[1], "rb").read()
+model = sys.argv[2].encode()
 frames = data.split(b"\x1b[2J\x1b[H")[1:]
 notice = b"not considered by the slots pool"
-pool_line = re.compile(rb"\x1b\[1mpi\s*\x1b\[0m {3}\x1b\[2mslots\x1b\[0m \d+/3")
+pool_line = re.compile(
+    rb"\x1b\[1mpi\s*\x1b\[0m {3}\x1b\[2mslots\x1b\[0m \d+/3 {3}" + re.escape(model)
+)
 ok = any(notice in f and pool_line.search(f) for f in frames)
 sys.exit(0 if ok else 1)
 PY
 then
-  ok "the same frame also carries the pool line for that model"
+  ok "the same frame also carries the pool line naming that model"
 else
-  bad "the same frame also carries the pool line for that model"
+  bad "the same frame also carries the pool line naming that model"
   sed 's/^/        /' "$LIVE/local-pool.out"
 fi
 one_shot_stop "$BOARD_PID"

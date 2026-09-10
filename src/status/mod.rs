@@ -1411,6 +1411,12 @@ fn render(
 /// it. `agents` and `models` stay live-only — the footer's `used` and
 /// `model_used` must keep agreeing with the dispatcher about what is
 /// actually running.
+///
+/// A profile's entry holds every distinct model name its steps — live or
+/// queued — name, in the order first seen, rather than only the first: a
+/// pipeline may run two pooled models on the same profile's different agent
+/// steps, and `footer` draws one line per name here, not one for the whole
+/// profile.
 fn slots_used<'a>(
     repo: &Repo,
     tasks: &[crate::task::Task],
@@ -1449,7 +1455,10 @@ fn slots_used<'a>(
             // rationed, not the binary that talks to it.
             if let Some(model) = step.model.as_deref().filter(|m| !m.trim().is_empty()) {
                 *out.models.entry(model).or_default() += 1;
-                out.agent_model.entry(agent).or_insert(model);
+                let models = out.agent_model.entry(agent).or_default();
+                if !models.contains(&model) {
+                    models.push(model);
+                }
             }
         }
     }
@@ -1460,10 +1469,11 @@ fn slots_used<'a>(
     // whose model carries its own `slots` is then a pool the footer can show
     // as soon as some task's pipeline routes onto it, rather than only once a
     // lane is actually open — see the footer section of `docs/dispatcher.md`
-    // for what a slots line means. `or_insert` never overwrites an entry a
-    // live lane above already set: the live lane is the truth about what is
-    // actually running, and a step that has since moved the model on must not
-    // un-count it.
+    // for what a slots line means. A model a live lane above already named is
+    // skipped rather than pushed again — the live lane is the truth about
+    // what is actually running, already first in the list, and a step that
+    // has since moved the model on must not un-count it or duplicate its
+    // line.
     for task in tasks {
         let Ok(pipeline) = pipelines.for_task(task) else {
             continue;
@@ -1478,7 +1488,10 @@ fn slots_used<'a>(
             let Some(model) = step.model.as_deref().filter(|m| !m.trim().is_empty()) else {
                 continue;
             };
-            out.agent_model.entry(agent).or_insert(model);
+            let models = out.agent_model.entry(agent).or_default();
+            if !models.contains(&model) {
+                models.push(model);
+            }
         }
     }
     out
@@ -1534,11 +1547,11 @@ struct SlotsUsed<'a> {
     agents: BTreeMap<&'a str, usize>,
     /// Live lanes per model, against that model's own `slots`.
     models: BTreeMap<&'a str, usize>,
-    /// The model each profile is running — a live lane's model, first one
-    /// wins, else the model named by some task's own pipeline for that
-    /// profile's step. A live lane always wins where both name one: see
-    /// [`slots_used`].
-    agent_model: BTreeMap<&'a str, &'a str>,
+    /// Every distinct model each profile is running or queued to run — a live
+    /// lane's models first, in the order their lanes were found, then any
+    /// further model named by some task's own pipeline for that profile's
+    /// step. See [`slots_used`].
+    agent_model: BTreeMap<&'a str, Vec<&'a str>>,
 }
 
 /// What a row shows that the ledger does not hold yet: the spend of the step
@@ -2483,8 +2496,45 @@ mod tests {
         let used = slots_used(&repo, &tasks, &pipelines, &[]);
 
         assert_eq!(
-            used.agent_model.get("pi").copied(),
-            Some(crate::models::PLACEHOLDER),
+            used.agent_model.get("pi").cloned(),
+            Some(vec![crate::models::PLACEHOLDER]),
+            "{:#?}",
+            used.agent_model
+        );
+    }
+
+    /// A profile whose steps name two different pooled models widens
+    /// `agent_model` with both, in the order their steps are found, rather
+    /// than keeping only the first — the fact `footer` draws its second pool
+    /// line from.
+    #[test]
+    fn agent_model_widens_with_every_pooled_model_a_profiles_steps_name() {
+        let repo = fixture("queued-agent-model-two-pools");
+        let pipeline = crate::pipeline::Pipeline::parse(
+            "impl_ui",
+            "steps:\n\
+             \x20 - id: implement\n\
+             \x20   agent: pi\n\
+             \x20   model: ornith/Ornith-1.5-35B-A3B\n\
+             \x20   on_pass: review\n\
+             \x20 - id: review\n\
+             \x20   agent: pi\n\
+             \x20   model: qwen/Qwen3.6-35B-A3B\n\
+             \x20   on_pass: done\n",
+        )
+        .unwrap();
+        let pipelines = Pipelines {
+            default: "impl_ui".to_string(),
+            pipelines: [("impl_ui".to_string(), pipeline)].into_iter().collect(),
+        };
+        add(&repo, "login", &[], Some("implement"));
+        let tasks = repo.tasks().unwrap();
+
+        let used = slots_used(&repo, &tasks, &pipelines, &[]);
+
+        assert_eq!(
+            used.agent_model.get("pi").cloned(),
+            Some(vec!["ornith/Ornith-1.5-35B-A3B", "qwen/Qwen3.6-35B-A3B"]),
             "{:#?}",
             used.agent_model
         );
