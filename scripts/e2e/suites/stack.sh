@@ -259,14 +259,14 @@ fi
 STUBBIN="$LIVE/stub-bin"
 mkdir -p "$STUBBIN"
 SUMMARY_PROMPT_LOG="$LIVE/summary-prompt.txt"
-cat > "$STUBBIN/pi" <<'STUB'
+cat > "$STUBBIN/claude" <<'STUB'
 #!/usr/bin/env bash
 set -u
 echo "${@: -1}" > "$SUMMARY_PROMPT_LOG"
 printf '%s\n' "spool-turns: turn the spool while the queue moves"
 printf '\n## Why\n\nThe masthead was a still logo.\n'
 STUB
-chmod +x "$STUBBIN/pi"
+chmod +x "$STUBBIN/claude"
 export SUMMARY_PROMPT_LOG
 PATH="$STUBBIN:$PATH"
 
@@ -289,7 +289,7 @@ set_stack_summary() {
 }
 
 # ---------------------------------------------------------- both set: the model runs
-set_stack_summary .spoolway/config.toml pi fake-model
+set_stack_summary .spoolway/config.toml claude fake-model
 must "the model-mode config" git add .spoolway/config.toml
 must "the model-mode config" git commit -qm "config: turn on [stack.summary]"
 
@@ -338,7 +338,7 @@ else
 fi
 
 # ------------------------------------------------- exactly one of the two set
-set_stack_summary .spoolway/config.toml pi ""
+set_stack_summary .spoolway/config.toml claude ""
 must "the half-set config" git add .spoolway/config.toml
 must "the half-set config" git commit -qm "config: agent without a model"
 
@@ -382,7 +382,7 @@ fi
 
 # --------------------------------------------------- both set, no template
 must "the template is removed" git rm -q .spoolway/templates/pull-request.md
-set_stack_summary .spoolway/config.toml pi fake-model
+set_stack_summary .spoolway/config.toml claude fake-model
 must "the no-template config" git add .spoolway/config.toml
 must "the no-template commit" git commit -qm "config: model summary, no template"
 

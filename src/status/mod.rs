@@ -2428,12 +2428,21 @@ mod tests {
     fn queued_local_models_names_a_local_model_a_queued_task_will_run() {
         let mut repo = fixture("queued-local-models");
         add(&repo, "login", &[], Some("implement"));
-        let pipelines = Pipelines::builtin();
+        let mut pipelines = Pipelines::builtin();
         let tasks = repo.tasks().unwrap();
 
-        // The shipped `default` pipeline's local steps carry the placeholder,
-        // so flagging that name `local` is the whole of what a real project's
-        // own model name would do here.
+        // Fresh shipped steps are blank. Give this fixture the local model a
+        // configured project would have chosen before asking what the footer
+        // reports about it.
+        pipelines
+            .pipelines
+            .get_mut("default")
+            .unwrap()
+            .steps
+            .iter_mut()
+            .find(|step| step.id == "implement")
+            .unwrap()
+            .model = Some(crate::models::PLACEHOLDER.to_string());
         repo.config.models.insert(
             crate::models::PLACEHOLDER.to_string(),
             crate::usage::ModelPrice {

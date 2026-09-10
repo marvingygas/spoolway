@@ -135,6 +135,19 @@ configure_project() {
   local branch=${1:-plan/demo} worktrees=${2:-}
   shift $(( $# > 2 ? 2 : $# ))
   must "spoolway init" "$SPOOLWAY" init "$@"
+  # Fresh init deliberately writes only the selected profile and points every
+  # scaffolded step at it. The dispatcher suites also exercise the older
+  # mixed-profile shape, because existing projects keep supporting Pi: restore
+  # that fixture-specific shape explicitly rather than relying on init.
+  cat >> .spoolway/config.toml <<'PROFILE'
+
+[agents.pi]
+kind = "pi"
+PROFILE
+  for file in .spoolway/pipelines/*.yml; do
+    [ -f "$file" ] || continue
+    sed -i '/^[[:space:]]*agent: claude[[:space:]]*$/{N;/prompt: \(implementer\|reproducer\|archivist\)[[:space:]]*$/s/agent: claude/agent: pi/;P;D;}' "$file"
+  done
   agent_models
   own_prompts
   must "the headless backend" "$SPOOLWAY" config set dispatch.backend headless
@@ -384,13 +397,12 @@ set_loop_of() {
 # Point every step at the model this run's agents answer to.
 #
 # A model is a pipeline fact now — each step names its own — so this rewrites
-# the pipeline files rather than setting a config key. The shipped pipelines
-# carry exactly two names: `your-local-model`, the placeholder for whatever a
-# project's own server serves, and `claude-opus-5` on the one cloud step.
+# the pipeline files rather than setting a config key. Fresh pipelines carry
+# explicit blank models. This fixture restored the old mixed profile shape
+# above, so Pi steps take the local stand-in and Claude steps the cloud one.
 #
-# `blocked` is the exception: it is not in any pipeline file for a `sed` to
-# find, so `unattended.blocked_model` — `claude-opus-5` by default, the same
-# name every pipeline's cloud step carries — is rewritten with `spoolway
+# `blocked` is the exception: it is not in any pipeline file for an `awk` to
+# find, so its blank `unattended.blocked_model` is rewritten with `spoolway
 # config set` instead.
 #
 # The check at the end is the point of doing it this way rather than with a
@@ -402,16 +414,22 @@ set_models() {
   for file in .spoolway/pipelines/*.yml; do
     [ -f "$file" ] || continue
     found=1
-    sed -i \
-      -e "s|^\([[:space:]]\+\)model:[[:space:]]*your-local-model[[:space:]]*$|\1model: $local_model|" \
-      -e "s|^\([[:space:]]\+\)model:[[:space:]]*claude-opus-5[[:space:]]*$|\1model: $cloud_model|" \
-      "$file"
+    awk -v local_model="$local_model" -v cloud_model="$cloud_model" '
+      /^[[:space:]]+agent:[[:space:]]*/ { agent = $2 }
+      /^[[:space:]]+model:[[:space:]]*""[[:space:]]*$/ {
+        match($0, /^[[:space:]]*/)
+        model = agent == "pi" ? local_model : cloud_model
+        print substr($0, 1, RLENGTH) "model: " model
+        next
+      }
+      { print }
+    ' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
   done
   [ -n "$found" ] || { echo "no pipelines to point at a model" >&2; return 1; }
   must "the unblocker's model" "$SPOOLWAY" config set unattended.blocked_model "$cloud_model"
-  if grep -rlE "^[[:space:]]+model:[[:space:]]*(your-local-model|claude-opus-5)[[:space:]]*$" \
+  if grep -rlE '^[[:space:]]+model:[[:space:]]*""[[:space:]]*$' \
        .spoolway/pipelines/ >&2; then
-    echo "a shipped model name survived set_models (files above)" >&2
+    echo "a scaffold model blank survived set_models (files above)" >&2
     return 1
   fi
   return 0

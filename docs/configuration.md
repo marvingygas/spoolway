@@ -370,7 +370,9 @@ ids only spoolway computes.
 
 Three profiles ship, each named after the kind it runs: `pi`, `codex` and
 `claude` — see [Profiles](agents.md#profiles) for why a profile is named for its binary
-rather than for a role. `pi` and `codex` run against a local server and share one set of
+rather than for a role. A fresh scaffold keeps only the one you plan in: `spoolway init`
+retains just that profile and drops the others, so a freshly initialized project carries a
+single `[agents.*]` row. All three remain the built-in defaults an existing project keeps. `pi` and `codex` run against a local server and share one set of
 limits; `claude` is a cloud kind with no local option — see [Concurrency and the model
 server](agents.md#concurrency-and-the-model-server) for why no shipped profile asserts a
 harness cap of its own. `codex` is referenced by no

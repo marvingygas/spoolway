@@ -324,6 +324,7 @@ pub struct Step {
     /// How hard `model:` thinks, handed straight through to the flag its
     /// agent kind carries an effort on — `--effort` for claude, dropped
     /// entirely for a kind with none, such as pi.
+    /// Blank is the explicit form of no effort choice and sends no flag.
     ///
     /// A free string, not a closed set: which levels a model accepts is the
     /// model's own fact, changes when the model does, and a copy of that list
@@ -1954,11 +1955,33 @@ impl Pipelines {
     /// disk and falls back to the same files; this is the test fixture.
     #[cfg(test)]
     pub fn builtin() -> Pipelines {
-        Pipelines::assemble(
+        let mut pipelines = Pipelines::assemble(
             builtin_pipelines().expect("built-in pipelines must parse"),
             &crate::config::Config::default(),
         )
-        .expect("built-in pipelines must be valid")
+        .expect("built-in pipelines must be valid");
+
+        // Most dispatcher tests need a runnable pipeline fixture, while the
+        // assets now deliberately scaffold explicit blanks. Hydrate only this
+        // test helper with representative choices; production always loads a
+        // project's specialized files from disk.
+        for pipeline in pipelines.pipelines.values_mut() {
+            for step in &mut pipeline.steps {
+                if step.kind() != StepKind::Agent || step.id == BLOCKED {
+                    continue;
+                }
+                if step.id == "review" {
+                    step.agent = Some("claude".into());
+                    step.model = Some("claude-opus-5".into());
+                    step.effort = Some("high".into());
+                } else {
+                    step.agent = Some("pi".into());
+                    step.model = Some(crate::models::PLACEHOLDER.into());
+                    step.effort = None;
+                }
+            }
+        }
+        pipelines
     }
 
     /// The two shipped pipelines, assembled against `config` rather than the
@@ -2100,10 +2123,8 @@ mod tests {
         }
     }
 
-    /// `handover` is a command step in one shipped pipeline and a model step
-    /// in another, and `spoolway doctor` asks about it by id across all of
-    /// them. A `run:` step names no model on purpose, so counting it as a
-    /// missing one would report a perfectly runnable agent as unrunnable.
+    /// A command step names no model on purpose, so it does not make a
+    /// configured agent step sharing an id read as model-less.
     // covers: step.run — a command step runs no agent, so it carries no model to be missing
     #[test]
     fn a_command_step_does_not_count_as_a_step_missing_its_model() {
@@ -2121,8 +2142,8 @@ mod tests {
             "the shipped set should still have a command `handover`: {command_steps:?}"
         );
 
-        // Every agent a shipped pipeline names has a model for every step it
-        // really runs — the command steps sharing those ids change nothing.
+        // `Pipelines::builtin` hydrates the scaffold for dispatcher tests;
+        // command steps sharing ids do not erase those fixture models.
         for (agent, steps) in pipelines.referenced_agents() {
             for step in steps {
                 assert!(

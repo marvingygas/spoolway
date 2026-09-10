@@ -619,15 +619,20 @@ fn show_one(pipeline: &Pipeline, default: &str) -> Result<()> {
 /// a missing prompt file, a blank model, an `effort:`/`session:`/`skills:`
 /// the step's agent kind cannot carry.
 ///
-/// Pulled out of `pipeline_check` so the same rigor runs twice: once against
-/// whatever `.spoolway/pipelines/` this project loaded, and once against the
-/// two shipped pipelines regardless of whether an override shadows them —
-/// see [`pipeline_check`].
-fn step_problems(repo: &Repo, pipelines: &Pipelines) -> Vec<String> {
+/// Pulled out of `pipeline_check` so the same rigor runs twice. Shipped assets
+/// are checked against the default profile table because init has not yet
+/// specialized their Claude scaffold identity, and their intentional blank
+/// models are exempted; every other disk and kind check is identical.
+fn step_problems(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    config: &Config,
+    allow_blank_models: bool,
+) -> Vec<String> {
     let mut problems = Vec::new();
 
     for (agent, steps) in pipelines.referenced_agents() {
-        if !repo.config.agents.contains_key(agent) {
+        if !config.agents.contains_key(agent) {
             problems.push(format!(
                 "agent profile `{agent}` is not defined in config, and {steps:?} run on it"
             ));
@@ -684,14 +689,25 @@ fn step_problems(repo: &Repo, pipelines: &Pipelines) -> Vec<String> {
 
             // spoolway names no model of its own: a step that names none, or
             // names blank, has nothing to launch.
-            if step.model.as_deref().is_none_or(|m| m.trim().is_empty()) {
+            let model_is_blank = step.model.as_deref().is_some_and(|m| m.trim().is_empty());
+            let model_is_missing = step.model.is_none();
+            // `blocked` is assembled from `[unattended]` even for an attended
+            // run, where it is a parking state and starts no lane. Its blank
+            // model becomes a real staffing error only when unattended mode
+            // turns that synthetic step into a lane.
+            let unstaffed_blocked =
+                step.id == crate::pipeline::BLOCKED && !config.unattended.enabled;
+            if !unstaffed_blocked && (model_is_missing || (model_is_blank && !allow_blank_models)) {
                 problems.push(format!(
                     "`{}`/`{}` names no model: — give it one",
                     pipeline.name, step.id
                 ));
             }
 
-            if let Some(effort) = &step.effort {
+            // Init writes an explicit blank so every step shows the choice a
+            // person still has to make. A blank means no effort argument; it
+            // is not an unsupported level on kinds without an effort flag.
+            if let Some(effort) = step.effort.as_deref().filter(|e| !e.trim().is_empty()) {
                 if effort.trim().eq_ignore_ascii_case("auto") {
                     problems.push(format!(
                         "`{}`/`{}` sets `effort: auto` — spoolway resolved that itself once, \
@@ -703,7 +719,7 @@ fn step_problems(repo: &Repo, pipelines: &Pipelines) -> Vec<String> {
                     let carries_effort = step
                         .agent
                         .as_deref()
-                        .and_then(|agent| repo.config.agent(agent).ok())
+                        .and_then(|agent| config.agent(agent).ok())
                         .is_some_and(|profile| {
                             crate::agent::adapter(&profile.kind)
                                 .is_some_and(|adapter| adapter.effort.is_some())
@@ -723,7 +739,7 @@ fn step_problems(repo: &Repo, pipelines: &Pipelines) -> Vec<String> {
                 let kind = step
                     .agent
                     .as_deref()
-                    .and_then(|agent| repo.config.agent(agent).ok())
+                    .and_then(|agent| config.agent(agent).ok())
                     .map(|profile| profile.kind.as_str());
                 let resumes = kind
                     .and_then(crate::agent::adapter)
@@ -749,7 +765,7 @@ fn step_problems(repo: &Repo, pipelines: &Pipelines) -> Vec<String> {
                 let kind = step
                     .agent
                     .as_deref()
-                    .and_then(|agent| repo.config.agent(agent).ok())
+                    .and_then(|agent| config.agent(agent).ok())
                     .map(|profile| profile.kind.clone());
                 let loads = kind
                     .as_deref()
@@ -783,6 +799,21 @@ fn step_problems(repo: &Repo, pipelines: &Pipelines) -> Vec<String> {
     }
 
     problems
+}
+
+/// The config shipped asset steps mean before init specializes them.
+///
+/// Keep the project's other profiles because the assembled `blocked` step can
+/// name one of them, but pin the assets' placeholder `claude` profile to the
+/// shipped Claude definition. Otherwise a Codex-only fresh config would make
+/// the unspecialized asset look broken before init's substitution runs.
+fn shipped_step_config(config: &Config) -> Config {
+    let mut validation = config.clone();
+    let claude = crate::config::AgentProfile::defaults()
+        .remove("claude")
+        .expect("the shipped profile table has claude");
+    validation.agents.insert("claude".into(), claude);
+    validation
 }
 
 /// Whether any shipped step's `run:` names a path that only exists inside
@@ -831,8 +862,9 @@ pub fn pipeline_check(repo: &Repo, pipelines: Result<Pipelines>, json: bool) -> 
         Err(err) => {
             let mut problems = vec![format!("pipelines do not load: {err:#}")];
             if let Ok(shipped) = Pipelines::shipped(&repo.config) {
+                let shipped_config = shipped_step_config(&repo.config);
                 problems.extend(
-                    step_problems(repo, &shipped)
+                    step_problems(repo, &shipped, &shipped_config, true)
                         .into_iter()
                         .map(|problem| format!("shipped pipeline {problem}")),
                 );
@@ -862,17 +894,17 @@ pub fn pipeline_check(repo: &Repo, pipelines: Result<Pipelines>, json: bool) -> 
         gate_warnings.extend(pipeline.description_warnings());
     }
 
-    let mut problems = step_problems(repo, pipelines);
+    let mut problems = step_problems(repo, pipelines, &repo.config, false);
 
-    // The two shipped pipelines, checked the same way as whatever this
-    // project's own `.spoolway/pipelines/` loaded — even when an override
-    // shadows them and `pipelines` above is not this set at all. Nothing
-    // used to validate `assets/pipelines/*.yml` against a real config once a
-    // project had its own directory, which is exactly how a `run:` line
-    // naming a path that only exists in this repository shipped unnoticed.
+    // The two shipped pipelines are checked even when an override shadows
+    // them. Their parseable Claude identity is checked against the matching
+    // default profile because init specializes it later; only their deliberate
+    // blank models are exempted. Prompts, skeletons, kind capabilities and
+    // command paths retain the same checks as project pipelines.
     let shipped = Pipelines::shipped(&repo.config)?;
+    let shipped_config = shipped_step_config(&repo.config);
     problems.extend(
-        step_problems(repo, &shipped)
+        step_problems(repo, &shipped, &shipped_config, true)
             .into_iter()
             .map(|problem| format!("shipped pipeline {problem}")),
     );
@@ -1450,6 +1482,43 @@ mod tests {
         );
     }
 
+    /// Shipped assets are templates before init substitutes the selected
+    /// profile and leave their models blank on purpose. Those two facts must
+    /// not hide the other shipped checks an override used to bypass.
+    #[test]
+    fn shipped_scaffold_exemptions_keep_other_step_checks() {
+        let root = crate::scratch::root("commands-shipped-scaffold-checks");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        crate::scratch::git_init(&root, &["-b", "main"]);
+        init_at(&root);
+
+        let mut config = Config::default();
+        config.agents.retain(|name, _| name == "codex");
+        config.unattended.blocked_agent = "codex".into();
+        config.unattended.blocked_model.clear();
+        let repo = Repo {
+            home: root.join(".home"),
+            checkout: root.clone(),
+            root,
+            config: config.clone(),
+        };
+        let shipped = Pipelines::shipped(&config).unwrap();
+        let validation = shipped_step_config(&config);
+
+        let problems = step_problems(&repo, &shipped, &validation, true);
+        assert!(problems.is_empty(), "{problems:?}");
+
+        std::fs::remove_file(crate::prompt::path_for(&repo, "reviewer")).unwrap();
+        let problems = step_problems(&repo, &shipped, &validation, true);
+        assert_eq!(
+            problems.len(),
+            2,
+            "one reviewer step per shipped pipeline: {problems:?}"
+        );
+        assert!(problems.iter().all(|problem| problem.contains("reviewer")));
+    }
+
     /// A gate with no `on_fail` is a warning, not a refusal: `Pipeline::validate`
     /// already accepts the shape, and `pipeline_check` must not start failing a
     /// pipeline that has always been legal just because it now also names the
@@ -1770,6 +1839,14 @@ mod tests {
         crate::scratch::git_init(&root, &["-b", "main"]);
         init_at(&root);
 
+        // Fresh scaffolds deliberately carry blank model choices and therefore
+        // fail `pipeline check` until a person fills them in. This test is
+        // about the runnable annotated template, so keep only the file it is
+        // about rather than asking those fresh scaffold files to be runnable.
+        for (name, _) in crate::pipeline::BUILTIN_PIPELINES {
+            std::fs::remove_file(Pipelines::file_in(&root, name)).unwrap();
+        }
+
         let text = template();
         for key in STEP_KEYS {
             assert!(
@@ -1778,7 +1855,7 @@ mod tests {
             );
         }
 
-        std::fs::write(Pipelines::file_in(&root, "demo"), &text).unwrap();
+        std::fs::write(Pipelines::file_in(&root, "default"), &text).unwrap();
 
         let repo = Repo {
             home: root.join(".home"),

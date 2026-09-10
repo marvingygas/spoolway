@@ -109,8 +109,8 @@ way to give a pipeline a shape of its own, and costs no configuration at all.
 | `run` | — | A command line. **Its presence makes this a command step** |
 | `end` | `false` | **`true` makes this a terminal step**: the task stops here |
 | `prompt` | the step id | Prompt file under the prompts directory |
-| `model` | — | The model this step runs, by name. **Required on every agent step** — spoolway names none of its own, so `pipeline check` and `doctor` refuse a step whose model is missing or blank |
-| `effort` | — | How hard `model:` thinks, handed straight to the flag its agent kind carries an effort on. A free string — see [Effort](agents.md#effort) — dropped entirely on a kind with no such flag |
+| `model` | — | The model this step runs, by name. **Required on every agent step** — spoolway names none of its own, so `pipeline check` and `doctor` refuse a project's own step whose model is missing or blank. The shipped pipelines carry an explicit blank (`model: ""`) on every agent step as the starting point a fresh project fills in; see [The shipped `default` pipeline](#the-shipped-default-pipeline) |
+| `effort` | — | How hard `model:` thinks, handed straight to the flag its agent kind carries an effort on. A free string — see [Effort](agents.md#effort) — dropped entirely on a kind with no such flag. An explicit blank (`effort: ""`) is the same as absent: no flag is sent, which is how a fresh scaffold writes the choice down without choosing it
 | `skills` | — | Skills invoked at the top of this step's opening prompt, one `/name` per line in declaration order. Comma-separated, leading slash optional, names only |
 | `session` | `false` | Whether this step resumes its prompt's earlier conversation on the task instead of opening fresh. How far one may carry is the profile's — see [A step that carries its own session](dispatcher.md#a-step-that-carries-its-own-session) |
 | `slot` | `true` | Whether running this consumes one of the profile's lanes. The profile's budget only: a model's own `slots` and `exclusive` hold for every step naming it, `slot: false` included — see [Dispatcher](dispatcher.md) |
@@ -829,8 +829,8 @@ step now tells you whether the step gates.
 
 | Step | Runs | Uses the forge |
 |---|---|---|
-| `implement` | the implementer, on the `pi` profile, keeping its session for the round trip back | no |
-| `review` | the reviewer, on the `claude` profile, at `effort: high`; a failure goes back to `implement`, once | no |
+| `implement` | the implementer, on the `claude` profile, keeping its session for the round trip back | no |
+| `review` | the reviewer, on the `claude` profile, at a blank `effort`; a failure goes back to `implement`, once | no |
 | `document` | the archivist, on this task's own diff | no |
 | `handover` | `run: spoolway stack`, `headless: true` — commit, squash, push, open the pull request; a failure routes straight to `blocked` | **yes** |
 | `checks` | `run: gh pr checks --watch --fail-fast`, `timeout: 45m` — wait for the checks on it; red routes straight to `blocked` | **yes** |
@@ -891,6 +891,12 @@ None of the three is drift. One is the mechanical verdict a project can only wri
 itself; another is this repository having no forge-side checks to wait on; the third is that
 only this repository's own `test` step ever puts a binary at that repo-local path.
 
+Every agent step in the shipped files runs on the `claude` profile with a blank `model` and
+`effort` written down explicitly. That Claude identity is a parseable default so the binary can
+use the shipped files as test fixtures before any project exists; `spoolway init` specializes
+them, rewriting every `agent: claude` to the profile you plan in. A Codex scaffold therefore
+ships every agent step running on `codex`.
+
 The review step runs on the `claude` profile so that reviews queue on their own concurrency
 rather than competing with local lanes for the model server.
 
@@ -926,7 +932,7 @@ the same repro *passing* is.
 |---|---|---|
 | `reproduce` | the reproducer — capture the bug, and see it fail | no |
 | `fix` | the implementer, keeping its session across the round trips back | no |
-| `review` | the reviewer, on the `claude` profile, at `effort: high`; a failure goes back to `fix`, once | no |
+| `review` | the reviewer, on the `claude` profile, at a blank `effort`; a failure goes back to `fix`, once | no |
 | `reproduce-again` | the same reproducer file — same work, opposite expectation; a failure goes back to `fix`, and arrivals here from `review` are bounded at two | no |
 | `document` | the archivist, on this fix's own diff | no |
 | `handover` | `run: spoolway stack`, `headless: true` — commit, squash, push, open the pull request; a failure routes straight to `blocked` | **yes** |

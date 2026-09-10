@@ -1229,10 +1229,9 @@ impl Default for AgentProfile {
 }
 
 impl AgentProfile {
-    /// The profiles a scaffolded project starts with: `pi` and `claude`,
-    /// which the built-in pipelines reference, plus `codex`, which is there
-    /// so pointing a step at it is an edit to a step's `agent:` rather than a
-    /// profile somebody has to write first.
+    /// The built-in profile definitions. Fresh-project init retains only the
+    /// selected Claude or Codex row; defaults kept in memory still include Pi
+    /// for older projects and test/runtime assembly.
     ///
     /// None carries a `concurrency`: a fresh project does not know the
     /// account or model capacity it would need to assert one. See the field's
@@ -1418,7 +1417,10 @@ impl AgentProfile {
     /// on a kind with no such flag, the same way an unset `permission_mode`
     /// is: `pipeline check` is where that mismatch is refused, not here.
     pub fn effort_args(&self, effort: Option<&str>) -> Vec<String> {
-        let Some(effort) = effort else {
+        // Scaffolded pipelines write the choice down explicitly as `""`.
+        // Treat that visible blank exactly like an absent key instead of
+        // launching a CLI with an effort flag whose value is empty.
+        let Some(effort) = effort.filter(|value| !value.trim().is_empty()) else {
             return Vec::new();
         };
         let Some(row) = crate::agent::adapter(&self.kind).and_then(|a| a.effort.as_ref()) else {
@@ -2230,6 +2232,8 @@ mod tests {
         assert_eq!(cloud.kind, "claude");
         assert_eq!(cloud.effort_args(Some("high")), ["--effort", "high"]);
         assert!(cloud.effort_args(None).is_empty());
+        assert!(cloud.effort_args(Some("")).is_empty());
+        assert!(cloud.effort_args(Some("   ")).is_empty());
     }
 
     /// pi's `--thinking` is a token budget, not a named level — a different

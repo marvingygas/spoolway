@@ -68,7 +68,7 @@ BODY="$LIVE/body.md"
 task_body "$BODY"
 
 # --------------------------------------------------------------- scaffolding
-# `init` asks five questions at a terminal and none anywhere else, which is
+# `init` asks three questions at a terminal and none anywhere else, which is
 # exactly the distinction a shell suite is the right place to hold: everything
 # below runs with no tty, so an `init` that ever read stdin here would hang the
 # suite rather than fail it. In its own directory — this is a project being
@@ -77,28 +77,28 @@ INITDIR="$LIVE/init"
 mkdir -p "$INITDIR/asked" && (cd "$INITDIR/asked" && git init -q -b main .)
 works "init scaffolds a project with the answers given as flags" \
   env -C "$INITDIR/asked" "$SPOOLWAY" init \
-  --provider pi --agent codex --model e2e-local-model
+  --provider codex --tracker none
 
-has "the kind asked for is what the local profile runs" 'kind = "codex"' \
+has "the selected provider names the fresh profile" '[agents.codex]' \
   "$INITDIR/asked/.spoolway/config.toml"
-has "the model asked for is what a local step names" "model: e2e-local-model" \
+has "every model choice is left explicit and blank" 'model: ""' \
   "$INITDIR/asked/.spoolway/pipelines/default.yml"
 works "and the provider's skills are installed, not suggested" \
-  test -f "$INITDIR/asked/.pi/skills/spoolway-plan/SKILL.md"
+  test -f "$INITDIR/asked/.agents/skills/spoolway-plan/SKILL.md"
 works "including the task-cutting skill spoolway-plan's step 7 invokes" \
-  test -f "$INITDIR/asked/.pi/skills/spoolway-tasks/SKILL.md"
+  test -f "$INITDIR/asked/.agents/skills/spoolway-tasks/SKILL.md"
 works "and spoolway-calibrate, which hands its own kept findings to it" \
-  test -f "$INITDIR/asked/.pi/skills/spoolway-calibrate/SKILL.md"
+  test -f "$INITDIR/asked/.agents/skills/spoolway-calibrate/SKILL.md"
 works "in that provider's directory alone" \
   test ! -e "$INITDIR/asked/.claude"
 
 # The path every script and CI runner takes. Nothing is asked, so the shipped
-# defaults stand — including the model placeholder, which has to survive for
-# `doctor` to have anything to report.
+# defaults stand, including the explicit model and effort blanks a person must
+# fill before dispatching.
 mkdir -p "$INITDIR/unasked" && (cd "$INITDIR/unasked" && git init -q -b main .)
 works "init with no terminal asks nothing and takes the defaults" \
   env -C "$INITDIR/unasked" "$SPOOLWAY" init
-has "so the model placeholder is still standing" "model: your-local-model" \
+has "so the model choice is visibly blank" 'model: ""' \
   "$INITDIR/unasked/.spoolway/pipelines/default.yml"
 works "and claude's skills are what a run with nobody to ask installs" \
   test -f "$INITDIR/unasked/.claude/skills/spoolway-plan/SKILL.md"
@@ -107,8 +107,8 @@ works "spoolway-tasks lands beside it" \
 works "and spoolway-calibrate lands too" \
   test -f "$INITDIR/unasked/.claude/skills/spoolway-calibrate/SKILL.md"
 
-refuses "a kind spoolway cannot launch is refused at init, not at the first lane" \
-  "cannot launch" env -C "$INITDIR/unasked" "$SPOOLWAY" init --agent gemini
+refuses "the retired agent answer is no longer accepted" \
+  "unexpected argument '--agent'" env -C "$INITDIR/unasked" "$SPOOLWAY" init --agent gemini
 
 # `[stack.summary]` is a table every config now carries, blank `agent` and
 # `model` included — a project whose config predates it never wrote the
@@ -141,16 +141,16 @@ works "so the table's blank values are exactly what they were" \
 # Run again for a second provider: the skills land, and the config the project
 # has been running on is not rewritten around it.
 works "a second init installs another provider's skills" \
-  env -C "$INITDIR/asked" "$SPOOLWAY" init --provider pi
+  env -C "$INITDIR/asked" "$SPOOLWAY" init --provider claude
 works "without disturbing the first" \
-  test -f "$INITDIR/asked/.pi/skills/spoolway-plan/SKILL.md"
+  test -f "$INITDIR/asked/.agents/skills/spoolway-plan/SKILL.md"
 works "and spoolway-tasks is among the second provider's skills too" \
-  test -f "$INITDIR/asked/.pi/skills/spoolway-tasks/SKILL.md"
+  test -f "$INITDIR/asked/.claude/skills/spoolway-tasks/SKILL.md"
 works "spoolway-calibrate as well" \
-  test -f "$INITDIR/asked/.pi/skills/spoolway-calibrate/SKILL.md"
-has "and without rewriting the config" 'kind = "codex"' \
+  test -f "$INITDIR/asked/.claude/skills/spoolway-calibrate/SKILL.md"
+has "and without rewriting the Codex config" '[agents.codex]' \
   "$INITDIR/asked/.spoolway/config.toml"
-says "pi's skills come with the one thing the file list cannot say" \
+says "Pi remains available through standalone install for established projects" \
   "only once the project is trusted" \
   env -C "$INITDIR/asked" "$SPOOLWAY" install pi
 
@@ -614,7 +614,7 @@ cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
 {
   printf '\n  - id: e2e\n'
   printf "    description: A stand-in for a mechanical gate's own agent step.\n"
-  printf '    agent: pi\n    prompt: implementer\n    model: your-local-model\n'
+  printf '    agent: pi\n    prompt: implementer\n    model: fake-local\n'
   printf '    loop:\n      gate: 1\n'
   printf '    on_loop_max: blocked\n    on_pass: gate\n    on_fail: blocked\n'
   printf '\n  - id: gate\n'
@@ -652,7 +652,7 @@ cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
 {
   printf '\n  - id: e2e\n'
   printf "    description: A stand-in for a mechanical gate's own agent step.\n"
-  printf '    agent: pi\n    prompt: implementer\n    model: your-local-model\n'
+  printf '    agent: pi\n    prompt: implementer\n    model: fake-local\n'
   printf '    loop:\n      gate: 2\n'
   printf '    on_loop_max: blocked\n    on_pass: gate\n    on_fail: blocked\n'
   printf '\n  - id: gate\n'
