@@ -346,13 +346,19 @@ fn shorten_home(path: &std::path::Path) -> String {
     }
 }
 
-/// What one agent profile has to show for this run: its name and its worker
-/// slots, and nothing else — the spend moved onto the board itself, as a
+/// What one agent profile has to show for this run: its name, its worker
+/// slots and nothing else — the spend moved onto the board itself, as a
 /// total line closing each group.
 struct Spend {
     name: String,
-    slots: String,
     quota: String,
+    /// One line per pooled model this profile's steps name — a figure and the
+    /// model it counts against — or, when it names none, the single line the
+    /// profile drew before pooling existed: a figure with no model beside it,
+    /// counted against the profile's own `concurrency` instead. Always at
+    /// least one entry, since a `Spend` with none earns no line at all and is
+    /// filtered out before this is built.
+    lines: Vec<(String, Option<String>)>,
 }
 
 /// One line per agent profile, its worker slots and nothing else — then, when
@@ -376,7 +382,7 @@ pub(super) fn footer(
     pipelines: &Pipelines,
     used: &BTreeMap<&str, usize>,
     model_used: &BTreeMap<&str, usize>,
-    agent_model: &BTreeMap<&str, &str>,
+    agent_model: &BTreeMap<&str, Vec<&str>>,
     local_models: &[String],
 ) -> Vec<String> {
     // Which profiles this project could actually start a lane on. Config
@@ -392,23 +398,40 @@ pub(super) fn footer(
         .agents
         .iter()
         .filter_map(|(name, profile)| {
-            // A model naming its own `slots` replaces this profile's
-            // `concurrency` — and the count it is checked against is the
-            // model's own live lanes, not the profile's.
-            let model_slots = agent_model.get(name.as_str()).and_then(|model| {
-                crate::models::resolve(&repo.config.models, model)
+            // Every model this profile's steps name that carries its own
+            // `slots`, one entry per pool — but two names that match the same
+            // `[models."<glob>"]` entry collapse to the one entry, since they
+            // are the same pool being rationed and must draw only one line.
+            // `best_match` is what `resolve` itself matches a glob through,
+            // so comparing the pointer it returns is comparing pool identity
+            // exactly as `resolve` sees it, not merely equal numbers two
+            // unrelated entries could share by coincidence.
+            let mut pools: Vec<(&str, u32)> = Vec::new();
+            let mut seen_entries: Vec<*const crate::usage::ModelPrice> = Vec::new();
+            for model in agent_model.get(name.as_str()).into_iter().flatten() {
+                let Some(slots) = crate::models::resolve(&repo.config.models, model)
                     .price
                     .filter(|p| p.slots > 0)
-                    .map(|p| (*model, p.slots))
-            });
+                    .map(|p| p.slots)
+                else {
+                    continue;
+                };
+                if let Some(entry) = crate::usage::best_match(&repo.config.models, model) {
+                    let ptr = entry as *const _;
+                    if seen_entries.contains(&ptr) {
+                        continue;
+                    }
+                    seen_entries.push(ptr);
+                }
+                pools.push((model, slots));
+            }
             let live = used.get(name.as_str()).copied().unwrap_or(0);
             // Which profiles are worth a line. A cap is: one the profile
-            // asserts, or one the model its live lanes are running does. A
-            // profile with neither is not hidden — it is only hidden when it
-            // also has nothing live, which is what keeps the profiles that
-            // ship for the sake of being pointed at off a board nothing has
-            // been started on.
-            if profile.concurrency == 0 && model_slots.is_none() && live == 0 {
+            // asserts, or one a model it names does. A profile with neither
+            // is not hidden — it is only hidden when it also has nothing
+            // live, which is what keeps the profiles that ship for the sake
+            // of being pointed at off a board nothing has been started on.
+            if profile.concurrency == 0 && pools.is_empty() && live == 0 {
                 return None;
             }
             // A cap on a profile no step names rations nothing. The line
@@ -420,19 +443,26 @@ pub(super) fn footer(
             if live == 0 && !runnable.contains_key(name.as_str()) {
                 return None;
             }
-            let slots = match model_slots {
-                Some((model, slots)) => {
-                    format!("{}/{slots}", model_used.get(model).copied().unwrap_or(0))
-                }
+            let lines = if pools.is_empty() {
                 // `∞` rather than the profile's `0`: unlimited is what zero
                 // means here, and printing `1/0` reads as a cap already
                 // breached.
-                None if profile.concurrency == 0 => format!("{live}/∞"),
-                None => format!("{live}/{}", profile.concurrency),
+                let slots = match profile.concurrency {
+                    0 => format!("{live}/∞"),
+                    cap => format!("{live}/{cap}"),
+                };
+                vec![(slots, None)]
+            } else {
+                pools
+                    .into_iter()
+                    .map(|(model, slots)| {
+                        let live = model_used.get(model).copied().unwrap_or(0);
+                        (format!("{live}/{slots}"), Some(model.to_string()))
+                    })
+                    .collect()
             };
             Some(Spend {
                 name: name.clone(),
-                slots,
                 quota: match profile.quota_ceiling {
                     0 if crate::agent::adapter(&profile.kind)
                         .is_some_and(|a| a.quota.is_some()) =>
@@ -442,6 +472,7 @@ pub(super) fn footer(
                     0 => String::new(),
                     ceiling => format!(" · quota ceiling {ceiling}%"),
                 },
+                lines,
             })
         })
         .collect();
@@ -449,15 +480,27 @@ pub(super) fn footer(
     let width = |of: &dyn Fn(&Spend) -> usize| spends.iter().map(of).max().unwrap_or(0);
     let name_w = width(&|s| s.name.chars().count());
 
-    let mut lines: Vec<String> = spends
-        .iter()
-        .map(|spend| {
-            format!(
-                "{BOLD}{:<name_w$}{RESET}{GUTTER}{DIM}slots{RESET} {}{}",
-                spend.name, spend.slots, spend.quota
-            )
-        })
-        .collect();
+    // One rendered line per `(figure, model)` pair a profile carries — the
+    // profile's own name and quota print once, on the first, and every line
+    // after it leaves that column blank, exactly as a group's own rows leave
+    // a repeated value off every line but their first.
+    let mut lines: Vec<String> =
+        spends
+            .iter()
+            .flat_map(|spend| {
+                spend.lines.iter().enumerate().map(move |(i, (slots, model))| {
+                let name = if i == 0 { spend.name.as_str() } else { "" };
+                let quota = if i == 0 { spend.quota.as_str() } else { "" };
+                let pool = match model {
+                    Some(model) => format!("{GUTTER}{model}"),
+                    None => String::new(),
+                };
+                format!(
+                    "{BOLD}{name:<name_w$}{RESET}{GUTTER}{DIM}slots{RESET} {slots}{quota}{pool}"
+                )
+            })
+            })
+            .collect();
 
     // One line, only when something has actually failed — absent entirely
     // otherwise, the same as every other figure this footer only prints when
@@ -2571,9 +2614,8 @@ mod tests {
     }
 
     /// A model's own `slots` replaces its profile's `concurrency` in the
-    /// footer's figure — unnamed now, since the footer carries no model name
-    /// at all, but still counted against the model's own cap rather than the
-    /// profile's.
+    /// footer's figure, named beside it, and is counted against the model's
+    /// own cap rather than the profile's.
     #[test]
     fn a_models_own_slots_are_counted_in_the_footer() {
         let mut repo = fixture("footer-model-slots");
@@ -2592,8 +2634,8 @@ mod tests {
         used.insert("pi", 1);
         let mut model_used: BTreeMap<&str, usize> = BTreeMap::new();
         model_used.insert("small-local", 1);
-        let mut agent_model: BTreeMap<&str, &str> = BTreeMap::new();
-        agent_model.insert("pi", "small-local");
+        let mut agent_model: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        agent_model.insert("pi", vec!["small-local"]);
 
         let pipelines = Pipelines::builtin();
         let lines: Vec<String> = footer(&repo, &pipelines, &used, &model_used, &agent_model, &[])
@@ -2609,6 +2651,113 @@ mod tests {
         // A profile whose live lanes name no model with its own `slots` is
         // unaffected: its usual `used`/`concurrency` reading stands.
         assert!(line("claude").contains("slots 0/1"), "{lines:#?}");
+    }
+
+    /// A profile whose steps name two different pooled models draws two
+    /// lines, each with its own live count and cap — the profile's own name
+    /// and quota on the first, and the second left blank under it.
+    #[test]
+    fn a_profile_naming_two_pooled_models_draws_two_pool_lines() {
+        let mut repo = fixture("footer-two-pools");
+        repo.config.models.insert(
+            "ornith/Ornith-1.5-35B-A3B".to_string(),
+            crate::usage::ModelPrice {
+                slots: 3,
+                ..Default::default()
+            },
+        );
+        repo.config.models.insert(
+            "qwen/Qwen3.6-35B-A3B".to_string(),
+            crate::usage::ModelPrice {
+                slots: 3,
+                ..Default::default()
+            },
+        );
+
+        let mut model_used: BTreeMap<&str, usize> = BTreeMap::new();
+        model_used.insert("qwen/Qwen3.6-35B-A3B", 1);
+        let mut agent_model: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        agent_model.insert(
+            "pi",
+            vec!["ornith/Ornith-1.5-35B-A3B", "qwen/Qwen3.6-35B-A3B"],
+        );
+
+        let pipelines = Pipelines::builtin();
+        let lines: Vec<String> = footer(
+            &repo,
+            &pipelines,
+            &BTreeMap::new(),
+            &model_used,
+            &agent_model,
+            &[],
+        )
+        .iter()
+        .map(|l| strip(l))
+        .collect();
+
+        // `claude` also draws a line here — its own `concurrency` is nonzero
+        // — so `pi`'s lines are everything from its own name onward.
+        let pi_lines: Vec<&String> = lines.iter().skip_while(|l| !l.starts_with("pi")).collect();
+        assert_eq!(pi_lines.len(), 2, "{lines:#?}");
+        assert!(
+            pi_lines[0].starts_with("pi") && pi_lines[0].contains("slots 0/3"),
+            "{lines:#?}"
+        );
+        assert!(
+            pi_lines[0].contains("ornith/Ornith-1.5-35B-A3B"),
+            "{lines:#?}"
+        );
+        // The second line leaves the name column blank rather than repeating
+        // `pi`.
+        assert!(!pi_lines[1].trim_start().starts_with("pi"), "{lines:#?}");
+        assert!(
+            pi_lines[1].contains("slots 1/3") && pi_lines[1].contains("qwen/Qwen3.6-35B-A3B"),
+            "{lines:#?}"
+        );
+    }
+
+    /// Two model names matching the same `[models."<glob>"]` entry draw one
+    /// line, not two — the pool is the config entry, not the literal name a
+    /// step happens to spell.
+    #[test]
+    fn two_names_resolving_to_the_same_pool_draw_one_line() {
+        let mut repo = fixture("footer-shared-glob");
+        repo.config.models.insert(
+            "ornith/*".to_string(),
+            crate::usage::ModelPrice {
+                slots: 3,
+                ..Default::default()
+            },
+        );
+
+        let mut model_used: BTreeMap<&str, usize> = BTreeMap::new();
+        model_used.insert("ornith/Ornith-1.5-35B-A3B", 2);
+        let mut agent_model: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        // Two different names, both matching the one `ornith/*` glob.
+        agent_model.insert(
+            "pi",
+            vec![
+                "ornith/Ornith-1.5-35B-A3B",
+                "ornith/Ornith-1.5-35B-A3B-alias",
+            ],
+        );
+
+        let pipelines = Pipelines::builtin();
+        let lines: Vec<String> = footer(
+            &repo,
+            &pipelines,
+            &BTreeMap::new(),
+            &model_used,
+            &agent_model,
+            &[],
+        )
+        .iter()
+        .map(|l| strip(l))
+        .collect();
+
+        let pi_lines: Vec<&String> = lines.iter().skip_while(|l| !l.starts_with("pi")).collect();
+        assert_eq!(pi_lines.len(), 1, "{lines:#?}");
+        assert!(pi_lines[0].contains("slots 2/3"), "{lines:#?}");
     }
 
     /// One `local` model a queued task routes onto draws one line, below the
