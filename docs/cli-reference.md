@@ -785,8 +785,18 @@ never reads — it prints the `-C <project>` invocation that would land in the r
 
 Every model an agent step of this project's pipelines names, resolved: window, per-1M rates,
 its own `SLOTS` and `EXCL`, and which table answered — this project's own `[models]`, the
-built-in one, or `unknown` where neither has heard of it. `spoolway doctor` reports the same
-gap in passing; this is where to see it in full.
+machine-wide refreshed table at `~/.spoolway/model-prices.json`, the built-in one, or
+`unknown` where none has heard of it. `spoolway doctor` reports the same gap in passing; this
+is where to see it in full.
+
+`refresh` fetches litellm's current price map through `curl -fsSL --max-time 30`, distils it to
+the same six numbers, and atomically replaces the table it writes. By default it replaces the
+machine-wide table at `~/.spoolway/model-prices.json` and prints what it fetched, how many rows
+it kept and dropped, and how the table changed; `--vendor` instead replaces this checkout's
+`assets/model-prices.json` and reports only the path written. The source URL honours the
+`SPOOLWAY_MODEL_PRICES_URL` override, the same way `SPOOLWAY_GH` overrides the `gh` binary, so a
+suite can point it at a local fixture. A missing curl, a non-zero curl exit, or a response that
+does not parse each exits non-zero and leaves any existing table untouched.
 
 See [Pricing](cost.md#pricing).
 

@@ -438,9 +438,9 @@ impl ModelPrice {
 /// Price `tokens` for `model`, or `None` if it resolves to nothing.
 ///
 /// Resolves this project's own `[models]` table first, by glob, then falls
-/// back to `crate::models`' vendored built-in table by exact name — see
+/// back to `crate::models`' refreshed and vendored tables by exact name — see
 /// [`crate::models::resolve`], which this defers to. Returning `None` rather
-/// than zero is deliberate: a model in neither has an unknown cost, not a free
+/// than zero is deliberate: a model in none has an unknown cost, not a free
 /// one, and `spoolway eval --by` says which models those are instead of quietly
 /// under-reporting a total.
 pub fn price(prices: &BTreeMap<String, ModelPrice>, model: &str, tokens: &Tokens) -> Option<f64> {
@@ -453,7 +453,7 @@ pub fn price(prices: &BTreeMap<String, ModelPrice>, model: &str, tokens: &Tokens
 /// the pattern is literal. `claude-opus-5` beats `claude-*` for an exact model.
 ///
 /// Crate-visible so `crate::models::resolve` can check this project's own
-/// `[models]` table before falling back to the built-in one.
+/// `[models]` table before falling back to the exact-name price files.
 pub(crate) fn best_match<'a>(
     prices: &'a BTreeMap<String, ModelPrice>,
     model: &str,
@@ -2761,18 +2761,21 @@ mod tests {
         assert_eq!(price(&prices(), "Qwen3.6-35B-A3B", &tokens), None);
     }
 
-    /// A model this project never configured a glob for is still priced, from
-    /// the vendored built-in table — the whole point of shipping one.
+    /// A model this project never configured a glob for is still priced from
+    /// the vendored table when no refreshed file exists.
     #[test]
     fn a_model_no_glob_names_still_prices_from_the_built_in_table() {
         let tokens = Tokens {
             input: 1_000_000,
             ..Tokens::default()
         };
-        assert_eq!(
-            price(&BTreeMap::new(), "claude-haiku-4-5-20251001", &tokens),
-            Some(1.0)
-        );
+        let home = crate::scratch::root("usage-built-in-model-price");
+        crate::platform::test_home::with_home(&home, || {
+            assert_eq!(
+                price(&BTreeMap::new(), "claude-haiku-4-5-20251001", &tokens),
+                Some(1.0)
+            );
+        });
     }
 
     #[test]

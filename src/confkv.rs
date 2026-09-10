@@ -145,7 +145,7 @@ pub const REFERENCE: &[Reference] = &[
         values: "<dollars>",
         default: "0",
         sentence: "Dollars one unattended run may spend before the dispatcher stops \
-                    starting work, priced off assets/model-prices.json; 0 is no ceiling.",
+                    starting work, priced from the resolved model table; 0 is no ceiling.",
     },
     Reference {
         key: "unattended.skip_blocked_lane",
@@ -247,6 +247,13 @@ pub const REFERENCE: &[Reference] = &[
                     and archive/ keep an entry before it is deleted; 0 keeps \
                     everything forever. queue/, pending/, worktrees/ and plans/ are \
                     never swept.",
+    },
+    Reference {
+        key: "prices.max_age_days",
+        values: "<days>",
+        default: "30",
+        sentence: "How old the active shared price table may be before `spoolway doctor` says so; \
+                    0 disables the note.",
     },
     Reference {
         key: "stack.summary.agent",
@@ -1439,5 +1446,15 @@ mod tests {
 
         let ninety = set(&off, "retention.days", "90").unwrap();
         assert_eq!(ninety.retention.days, 90);
+    }
+
+    #[test]
+    fn price_table_age_round_trips_and_zero_means_quiet() {
+        let config = Config::default();
+        assert_eq!(get(&config, "prices.max_age_days").unwrap(), "30");
+
+        let off = set(&config, "prices.max_age_days", "0").unwrap();
+        assert_eq!(off.prices.max_age_days, 0);
+        assert_eq!(get(&off, "prices.max_age_days").unwrap(), "0");
     }
 }

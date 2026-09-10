@@ -213,7 +213,7 @@ every other key there applies whether or not a person is watching.
 |---|---|---|
 | `enabled` | `false` | Whether this run stops for a person, or for nobody — see [Unattended runs](pipelines.md#unattended-runs). `true` sends no task to `blocked` at all: every block resumes the lane that hit it, in the same session, with its round budgets handed back. A step's `loop` stops applying, since it exists to hand a decision to somebody who is not there, and the launch ceiling that parks a task whose lane keeps dying backs off instead — `gate:` still holds, and parks the task on `paused` for a person regardless. What else still holds is every check that catches a lane going wrong rather than a person being needed: the reminder loop, and a command step's own `timeout:`. `spoolway dispatch --unattended` / `--attended` decides it for one run without editing this |
 | `max_output_tokens` | `0` | Output tokens one **unattended** run may spend before the dispatcher stops starting work; `0` is no ceiling. Ignored when `enabled` is off — an attended run has you and `ctrl-c`. Output alone of the four token classes, for the reason the board's footer counts it: it tracks work done rather than context carried. Reaching it starts no further lane and lets whatever is live finish; the queue keeps its place for the next run |
-| `max_cost_usd` | `0.0` | Dollars one **unattended** run may spend before the dispatcher stops starting work; `0.0` is no ceiling. `max_output_tokens`'s own counterpart in money, priced off `assets/model-prices.json` the same way every other cost figure is — see [Cost accounting](cost.md) — a model neither that table nor `[models]` prices contributes nothing to the sum, never estimated. Set alongside `max_output_tokens` and whichever ceiling is reached first stops the run; either alone is enough |
+| `max_cost_usd` | `0.0` | Dollars one **unattended** run may spend before the dispatcher stops starting work; `0.0` is no ceiling. `max_output_tokens`'s own counterpart in money, priced the same way every other cost figure is — see [Cost accounting](cost.md) — a model neither `[models]` nor either price table prices contributes nothing to the sum, never estimated. Set alongside `max_output_tokens` and whichever ceiling is reached first stops the run; either alone is enough |
 | `skip_blocked_lane` | `true` | Whether clearing a block carries the task past the step it blocked on, on the grounds that the unblocker did that step's work, or hands it back to that step instead. See [Staffing `blocked`](pipelines.md#staffing-blocked) |
 | `blocked_agent` | `claude` | Which `[agents.*]` profile staffs `blocked` in an unattended run. `Pipelines::assemble` builds the `blocked` step from these five keys for every pipeline that does not declare its own; a pipeline may override `agent`, `model`, `effort`, `session` and `prompt` for its own `blocked` step, and nothing else |
 | `blocked_model` | `claude-opus-5` | The model that profile runs, staffing `blocked` — see `blocked_agent`. Starting an unattended run with this blank is refused: with nobody staffing `blocked`, a run has no way to clear one |
@@ -299,7 +299,23 @@ no longer be named. The refusal says so, naming the age, whenever `retention.day
 zero; with it at `0` the same missing dependency is reported the plain way, since sweeping
 cannot be why.
 
-## `[pipeline_gen]` — generating a pipeline
+## `[prices]` — how stale the shared price table may be before it is mentioned
+
+```toml
+[prices]
+max_age_days = 30
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `max_age_days` | `30` | How many days the active shared price table may be before `spoolway doctor` notes it. `0` turns the note off entirely — the table is never mentioned, however old it gets |
+
+The age is taken from whichever table actually answered model lookups: the machine-wide
+`~/.spoolway/model-prices.json` when it parses, the built-in table otherwise. It is reported,
+never acted on — a `note` in `spoolway doctor`, never a fetch and never a failed check. The note
+fires only once the table is past the limit, so a table inside it is never mentioned, and `0`
+means the note never fires at all. Making the table current stays the explicit
+`spoolway models refresh`, however old it has become. See [Pricing](cost.md#pricing).
 
 ```toml
 [pipeline_gen]

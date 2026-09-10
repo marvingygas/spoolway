@@ -1,6 +1,6 @@
 ---
 domain: cost
-covers: ["src/usage.rs", "src/spend.rs", "src/models.rs", "assets/model-prices.json", "scripts/refresh-model-prices.mjs"]
+covers: ["src/usage.rs", "src/spend.rs", "src/models.rs", "assets/model-prices.json"]
 ---
 
 # Cost accounting
@@ -81,7 +81,7 @@ first table alone, with `total` on its last row.
 `IN`, `OUT`, `CACHE R` and `CACHE W` are the four priced token classes, and they are
 disjoint. `WALL` is how long lanes were open, not model time.
 
-A cost of `—` means the model resolved to nothing in either price table — see
+A cost of `—` means the model resolved to nothing in any of the price tables — see
 [Pricing](#pricing). A group where only some of its lanes could be priced still prints the
 plain number it priced, a floor rather than a total; the report's own footer names the model
 responsible. A line that spent no tokens at all — the zero-token line a session is enrolled
@@ -256,21 +256,33 @@ spoolway config set models.'<model-glob>'.input <usd per 1M>
 ```
 
 The table is **empty by default** — spoolway does not know what you run — but it is not the
-only place a model can be priced from. Behind it sits a built-in table, vendored from
-litellm's own price map and distilled to the same six numbers, checked by the model's exact
-name when nothing in `[models]` matches it by glob. A step naming `claude-opus-5` is priced
-from that table the moment it runs, with nothing to configure; a step naming a local model
+only place a model can be priced from. Resolution is three tables deep, checked one model at a
+time: behind the project's own sits a machine-wide table at `~/.spoolway/model-prices.json`, a
+refreshed copy of litellm's price map distilled to the same six numbers, and behind that a
+built-in table vendored from the same map into the binary. Each price table is matched by the
+model's exact name when nothing in `[models]` matched it by glob, and a project's own glob
+still wins over either of them. A step naming `claude-opus-5` is priced from the first table
+that knows it the moment it runs, with nothing to configure; a step naming a local model
 nobody has published a price for still resolves to nothing, and is reported as unpriced rather
-than folded into a total as zero — a model in neither table has an unknown cost, not a free
-one. `spoolway models` lists every model this project's pipelines name, its window, its rates,
-its own `slots` and `exclusive` (see [`[models."<glob>"]`](configuration.md#modelsglob--what-a-model-costs-and-how-big-its-window-is)),
-and which of the two tables answered — or `unknown`, where neither did.
+than folded into a total as zero — a model in none of the three tables has an unknown cost, not
+a free one. `spoolway models` lists every model this project's pipelines name, its window, its
+rates, its own `slots` and `exclusive` (see [`[models."<glob>"]`](configuration.md#modelsglob--what-a-model-costs-and-how-big-its-window-is)),
+and which of the three tables answered — or `unknown`, where none did. It closes with the age
+of whichever table actually answered — the machine-wide refreshed file when it parses, the
+built-in otherwise — naming its `generated` date, its age in whole days, and `spoolway models
+refresh` as the way to make it current.
 
 Renamed from `[pricing]`, which held the same five rates without the window; an old `[pricing]`
 table is read into this same field and written back under the new name.
 
-The built-in table is a vendored file, not a live lookup: nothing in the binary fetches
-anything, ever, at any point — see [Where the built-in table comes from](#where-the-built-in-table-comes-from).
+The built-in table is a vendored file, not a live lookup: it is compiled into the binary and
+never fetched at runtime. The one network edge in this file is refresh, which shells out to
+curl — see [Where the built-in table comes from](#where-the-built-in-table-comes-from).
+
+The refreshed table in between is optional user-state, written by `spoolway models refresh`
+and read here only by name. An absent, unreadable, or unparseable file is silently
+skipped, so a partial refresh never erases what the built-in table still holds for a model it
+doesn't list and a broken file never breaks `spoolway models`.
 
 ### Who prices what
 
@@ -287,11 +299,13 @@ anything, ever, at any point — see [Where the built-in table comes from](#wher
 
 `assets/model-prices.json` is litellm's `model_prices_and_context_window.json` (MIT licensed),
 distilled from roughly 2,200 priced chat models down to the six fields spoolway uses, and
-compiled into the binary. `scripts/refresh-model-prices.mjs` is how it is refreshed — a person
-runs it by hand, it fetches the upstream file, and the diff to `assets/model-prices.json` is
-reviewed and committed like any other vendored dependency. There is no schedule, no check on
-startup, and no warning that it has gone stale: staleness is the price of the binary never
-calling out at all.
+compiled into the binary. `spoolway models refresh --vendor` is how it is refreshed: it fetches
+the upstream file through curl, distils it to the same six fields, and writes
+`assets/model-prices.json`; the diff is reviewed and committed like any other vendored
+dependency. There is no schedule and no check on startup. A stale table is never fetched for
+and never fails a check; the only thing it does is earn a `spoolway doctor` note once it passes
+`max_age_days` — advisory, never a failure. That is the whole of what the binary calls out about
+a stale table, and it is the price of the binary never calling out at any other time.
 
 ### Why cache writes are two rates
 

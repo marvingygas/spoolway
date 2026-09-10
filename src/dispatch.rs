@@ -3877,13 +3877,13 @@ impl<'a> Dispatcher<'a> {
     /// than tokens — see `unattended.max_cost_usd`.
     ///
     /// Priced the same way every ledger line already is: `crate::usage::price`
-    /// against `assets/model-prices.json`, vendored into the binary — the
-    /// premise `max_output_tokens` was written against, that `[models]` ships
-    /// empty and a priced ceiling would silently never fire, stopped holding
-    /// the moment that table shipped. A line this run's own `record_usage`
-    /// could not price at all — a model the table has never heard of, with
-    /// nothing in `[models]` either — contributes nothing to the sum rather
-    /// than being estimated, the same rule `Entry::cost_usd` follows
+    /// through project config, the refreshed table, then the one vendored into
+    /// the binary. The premise `max_output_tokens` was written against — that
+    /// `[models]` ships empty and a priced ceiling would silently never fire —
+    /// stopped holding the moment that table shipped. A line this run's own
+    /// `record_usage` could not price at all — a model the tables have never
+    /// heard of, with nothing in `[models]` either — contributes nothing to the
+    /// sum rather than being estimated, the same rule `Entry::cost_usd` follows
     /// everywhere else: never invented, only read.
     fn over_cost_ceiling(&mut self) -> Option<String> {
         if !self.unattended {
@@ -11567,7 +11567,7 @@ mod tests {
     }
 
     /// An enabled size bound needs a model with a known window to measure against —
-    /// a model neither `[models]` nor the built-in table prices has nothing
+    /// a model neither `[models]` nor either shared price table prices has nothing
     /// to compare the transcript to, so the step opens fresh rather than
     /// guessing. A zero bound is the explicit unbounded form and is covered
     /// separately above.

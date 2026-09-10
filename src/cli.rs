@@ -84,16 +84,19 @@ pub enum Command {
     /// Run the pipeline: a loop that draws the live board until the queue empties.
     Dispatch(DispatchArgs),
 
-    /// Every model this project's pipelines name: window, per-1M rates, source.
+    /// Read the model price table, or refresh it from litellm.
     #[command(
         long_about = "Every model an agent step of this project's pipelines names, resolved.\n\n\
             Resolution is this project's own `[models]` table first, by glob, then litellm's \
-            vendored table by exact name, then nothing — a model in neither is `unknown`, never \
+            refreshed and vendored tables by exact name, then nothing — a model in none is `unknown`, never \
             free. `spoolway doctor` reports the same gap; this is where to see it in full.\n\n\
-            Nothing here estimates or edits a price. Set one with:\n  \
+            Nothing here estimates a price. Set a project override with:\n  \
             spoolway config set models.'<model-glob>'.input <usd per 1M>"
     )]
-    Models,
+    Models {
+        #[command(subcommand)]
+        command: Option<ModelsCommand>,
+    },
 
     /// Read the lane ledger: what versions came to.
     Eval(EvalArgs),
@@ -217,6 +220,21 @@ pub struct DoctorArgs {
     /// List every check that ran, not only the failures and the notes.
     #[arg(long, short)]
     pub verbose: bool,
+}
+
+/// Operations on the model price table.
+#[derive(Debug, Subcommand)]
+pub enum ModelsCommand {
+    /// Fetch litellm's current prices and replace the refreshed table.
+    Refresh(ModelsRefreshArgs),
+}
+
+/// Where `models refresh` writes the distilled table.
+#[derive(Debug, Args)]
+pub struct ModelsRefreshArgs {
+    /// Replace this checkout's vendored table instead of the machine-wide one.
+    #[arg(long)]
+    pub vendor: bool,
 }
 
 /// The top-level help, grouped by who types the command and why.
