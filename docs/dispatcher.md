@@ -141,6 +141,8 @@ from `base:`, so there is no base branch left to fall behind. A task with no dep
 still cut from `base:` exactly as before. Either way `base:` keeps recording the branch the
 group lands in, and there is no rebase left for `handover` to run.
 
+A group whose branch has diverged holds back its own dependents and nobody else's.
+
 ## What runs next
 
 When more work is ready than there are slots, three rules decide, in order:
@@ -1390,8 +1392,8 @@ Cleanup commits whatever the worktree still holds before it removes anything, th
 `wip(<task>): <step>` backstop `spoolway report` runs. If that commit cannot be made — a git
 command fails, or `dispatch.auto_commit` is off and the lane left work behind — the task is
 held at `blocked` instead of archived, with a `## Status Log` line saying why, so a person
-sees the worktree before it is gone. Residue a lane deliberately left is not this: it is on
-this machine's mirror and named in the log, and cleanup proceeds.
+sees the worktree before it is gone. Residue a lane deliberately left is not this: it is
+named in the log, and cleanup proceeds.
 
 A finished task's own branch is kept alive past that cleanup while anything still queued names
 it in `depends_on` — that branch is what the dependent's worktree gets cut from. It is freed by

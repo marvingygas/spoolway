@@ -901,31 +901,6 @@ narrowing which rows are included the same way it does in text. In a linked work
 prints two separate JSON documents on stdout, the checkout note first and the report second —
 the same shape `config show --json` and `config get --json` use.
 
-## Working with someone else
-
-### `spoolway handover`
-
-Mirror this queue to your own ref, so a colleague can adopt from it. The only thing that
-mirrors: run it before handing work over, and again after a colleague has adopted, so this
-machine lets go of what they took.
-
-| Flag | Meaning |
-|---|---|
-| `--group <GROUP>` | Hand over only this group's tasks |
-| `--reset-unpublished` | Send tasks that never reached `handover` back to the start of their pipeline |
-
-See [Collaboration](collaboration.md).
-
-### `spoolway adopt --from <email>`
-
-Take a colleague's in-flight tasks into this queue. A move, not a copy.
-
-| Flag | Meaning |
-|---|---|
-| `--from <EMAIL>` | Whose mirror to take from: their git `user.email` |
-| `--group <GROUP>` | Take every task of this group |
-| `<tasks…>` | Take these tasks by id. Without either filter, takes everything |
-
 ## Called by lanes, not by you
 
 These are called by prompts. You rarely run them yourself.

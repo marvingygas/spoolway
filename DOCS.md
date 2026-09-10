@@ -34,7 +34,6 @@ pages themselves live in [`docs/`](docs/README.md) and each one can be read on i
 |---|---|
 | [Cost accounting](docs/cost.md) | The ledger, model pricing, and reading what a run came to |
 | [Comparing versions](docs/eval.md) | What editing a prompt or a pipeline did to what the work costs, and reading a trial's arms |
-| [Collaboration](docs/collaboration.md) | Handing in-flight work to a colleague, and adopting theirs |
 
 ## Reference
 
