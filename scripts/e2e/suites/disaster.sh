@@ -509,6 +509,11 @@ one_shot_stop "$BOARD_PID"
 
 # Flagged, the same queued task's route now draws one line naming the model.
 must "flag the model local" "$SPOOLWAY" config set "models.$LOCAL_MODEL.local" true
+# Given a pool of its own, `pi` — the profile `localnote`'s `implement` step
+# names — earns a slots line on the very same frame, with no lane of its own
+# ever started: `slots_used` now widens `agent_model` over every queued
+# task's whole pipeline, not only its live lanes.
+must "give the model a pool" "$SPOOLWAY" config set "models.$LOCAL_MODEL.slots" 3
 BEFORE=$(wc -l < "$E2E_DISPATCH_LOG" 2>/dev/null || echo 0)
 BOARD_PID=$(one_shot_start_board)
 if wait_for_text 20 "$E2E_DISPATCH_LOG" \
@@ -517,6 +522,32 @@ if wait_for_text 20 "$E2E_DISPATCH_LOG" \
 else
   bad "the board names a local model a queued task routes onto"
   tail -n +"$((BEFORE + 1))" "$E2E_DISPATCH_LOG" | sed 's/^/        /'
+fi
+tail -n +"$((BEFORE + 1))" "$E2E_DISPATCH_LOG" > "$LIVE/local-pool.out"
+# Split back into frames — see the `h`-cycle case in commands.sh for why a
+# single grep over the whole file cannot tell "the same frame" from "some
+# frame, eventually": both lines must land on the frame that carries the
+# notice.
+# The live count in `pi`'s own line is not asserted — `localnote`'s hung
+# `implement` lane may or may not have been dispatched yet by this point,
+# and either way is beside what this case is about: the `/3` cap is there
+# at all, off the queued pipeline's own step, whether or not a lane is live.
+if python3 - "$LIVE/local-pool.out" <<'PY'
+import re
+import sys
+
+data = open(sys.argv[1], "rb").read()
+frames = data.split(b"\x1b[2J\x1b[H")[1:]
+notice = b"not considered by the slots pool"
+pool_line = re.compile(rb"\x1b\[1mpi\s*\x1b\[0m {3}\x1b\[2mslots\x1b\[0m \d+/3")
+ok = any(notice in f and pool_line.search(f) for f in frames)
+sys.exit(0 if ok else 1)
+PY
+then
+  ok "the same frame also carries the pool line for that model"
+else
+  bad "the same frame also carries the pool line for that model"
+  sed 's/^/        /' "$LIVE/local-pool.out"
 fi
 one_shot_stop "$BOARD_PID"
 forget localnote

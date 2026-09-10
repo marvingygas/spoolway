@@ -1403,6 +1403,14 @@ fn render(
 ///   saying no work can start while the dispatcher starts some. A staffed
 ///   `blocked` lane is not parked at all — see
 ///   [`crate::pipeline::Pipeline::blocked_is_staffed`] — and does count.
+///
+/// `agent_model`, on its own, is wider than the other two: after the live
+/// walk above it is widened again over every task's whole pipeline, so a
+/// profile whose model carries its own `slots` gets a footer line as soon as
+/// some task's pipeline names it, not only once a lane is actually open on
+/// it. `agents` and `models` stay live-only — the footer's `used` and
+/// `model_used` must keep agreeing with the dispatcher about what is
+/// actually running.
 fn slots_used<'a>(
     repo: &Repo,
     tasks: &[crate::task::Task],
@@ -1443,6 +1451,34 @@ fn slots_used<'a>(
                 *out.models.entry(model).or_default() += 1;
                 out.agent_model.entry(agent).or_insert(model);
             }
+        }
+    }
+
+    // Widen `agent_model` past the live lanes above with every agent step of
+    // every task's own pipeline, whatever stage that task sits on — the same
+    // whole-pipeline walk [`queued_local_models`] already makes. A profile
+    // whose model carries its own `slots` is then a pool the footer can show
+    // as soon as some task's pipeline routes onto it, rather than only once a
+    // lane is actually open — see the footer section of `docs/dispatcher.md`
+    // for what a slots line means. `or_insert` never overwrites an entry a
+    // live lane above already set: the live lane is the truth about what is
+    // actually running, and a step that has since moved the model on must not
+    // un-count it.
+    for task in tasks {
+        let Ok(pipeline) = pipelines.for_task(task) else {
+            continue;
+        };
+        for step in &pipeline.steps {
+            if step.kind() != crate::pipeline::StepKind::Agent {
+                continue;
+            }
+            let Some(agent) = step.agent.as_deref() else {
+                continue;
+            };
+            let Some(model) = step.model.as_deref().filter(|m| !m.trim().is_empty()) else {
+                continue;
+            };
+            out.agent_model.entry(agent).or_insert(model);
         }
     }
     out
@@ -1498,7 +1534,10 @@ struct SlotsUsed<'a> {
     agents: BTreeMap<&'a str, usize>,
     /// Live lanes per model, against that model's own `slots`.
     models: BTreeMap<&'a str, usize>,
-    /// The model each profile's live lanes are running, first one wins.
+    /// The model each profile is running — a live lane's model, first one
+    /// wins, else the model named by some task's own pipeline for that
+    /// profile's step. A live lane always wins where both name one: see
+    /// [`slots_used`].
     agent_model: BTreeMap<&'a str, &'a str>,
 }
 
@@ -2418,6 +2457,37 @@ mod tests {
 
         assert_eq!(used.agents.get("claude").copied(), Some(1), "{used:#?}");
         assert_eq!(used.agents.get("pi").copied(), None, "{used:#?}");
+    }
+
+    /// A profile whose model carries its own `slots` gets a footer entry
+    /// straight off a queued task's own pipeline, with no live lane anywhere
+    /// to have counted it instead — the walk this task widens `agent_model`
+    /// with. The built-in `default` pipeline's `implement` step already names
+    /// `pi` and the placeholder, so a sized placeholder and queuing a task
+    /// onto it is the whole of the setup.
+    #[test]
+    fn agent_model_names_a_queued_pipelines_model_with_no_live_lane() {
+        let mut repo = fixture("queued-agent-model");
+        add(&repo, "login", &[], Some("implement"));
+        let pipelines = Pipelines::builtin();
+        let tasks = repo.tasks().unwrap();
+
+        repo.config.models.insert(
+            crate::models::PLACEHOLDER.to_string(),
+            crate::usage::ModelPrice {
+                slots: 3,
+                ..Default::default()
+            },
+        );
+
+        let used = slots_used(&repo, &tasks, &pipelines, &[]);
+
+        assert_eq!(
+            used.agent_model.get("pi").copied(),
+            Some(crate::models::PLACEHOLDER),
+            "{:#?}",
+            used.agent_model
+        );
     }
 
     /// A queued task whose pipeline names a `local` model puts that model's
