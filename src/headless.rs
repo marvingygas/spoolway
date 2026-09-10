@@ -56,10 +56,12 @@ use crate::platform::Shell;
 /// The dialect a turn's script is written in.
 ///
 /// `Shell::Posix` rather than `Shell::CURRENT`, and not an oversight: this
-/// backend reads `/proc` for liveness and needs `setsid` to detach a turn, so it
-/// is a Linux backend today whatever the shell could be told to do. Naming the
-/// dialect it actually emits keeps that honest, rather than implying a Windows
-/// path that `alive` would not survive.
+/// backend has no Windows arm at all — detaching a turn is `libc::setsid()`,
+/// which exists only on Unix, and [`Headless::is_available`] refuses to start
+/// one anywhere else. `crate::command_step` answers the same need on Windows
+/// through a process group and a named job object instead. Naming the dialect
+/// it actually emits keeps that honest, rather than implying a Windows path
+/// this backend never takes.
 const SH: Shell = Shell::Posix;
 
 /// Where lane records and logs live, under the project's home directory —
@@ -306,20 +308,13 @@ impl Headless {
         // Last, so that its existence means the turn is genuinely over.
         script.push_str(&format!("echo $? >{exit_path}\n"));
 
-        // `setsid`, so the turn outlives the dispatcher that started it. It also
-        // makes the shell a process-group leader, which is what lets `stop_lane`
-        // take the agent down with it instead of orphaning it. What we address
-        // the turn by afterwards is the pid its own shell writes down.
-        let spawned = std::process::Command::new("setsid")
-            .arg("sh")
-            .arg("-c")
-            .arg(&script)
-            .current_dir(&record.cwd)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .context("could not spawn a lane: `setsid` is needed to detach it from this process")?;
+        // `libc::setsid()`, called in the child between fork and exec, so the
+        // turn outlives the dispatcher that started it. It also makes the shell
+        // a process-group leader, which is what lets `stop_lane` take the agent
+        // down with it instead of orphaning it. What we address the turn by
+        // afterwards is the pid its own shell writes down.
+        let spawned =
+            spawn_detached_shell(&script, &record.cwd).context("could not spawn a lane")?;
         reap_when_it_ends(spawned);
 
         match await_pid_file(|| self.read_pid(&record.name)) {
@@ -346,10 +341,11 @@ impl Headless {
 
 /// Collect a detached child once its turn is over, without waiting here.
 ///
-/// `setsid` puts the turn in its own session, but it only *forks* when its
-/// caller is already a process-group leader — and a dispatcher is not one. So
-/// what it does instead is exec the shell in place, and the turn is this
-/// process's own direct child however detached its session is.
+/// `libc::setsid()` runs inside the same fork `Command::spawn` already makes,
+/// right before it execs into `sh` — there is no second process the way the
+/// external `setsid(1)` binary sometimes forked one, so the turn is
+/// unconditionally this process's own direct child, however detached its
+/// session is.
 ///
 /// A child nobody ever waits on becomes a zombie when it exits: the processes
 /// are gone, the pid is not. That cost nothing while a pass was its own
@@ -371,12 +367,13 @@ pub(crate) fn reap_when_it_ends(mut child: std::process::Child) {
 /// Wait briefly for a detached process to write its pid file, `None` if it
 /// never does.
 ///
-/// The other half of the `setsid` handshake, shared with
-/// [`crate::command_step`] like [`reap_when_it_ends`] is: the shell writes its
-/// own pid because `setsid` may fork, so the pid spawned here is not reliably
-/// the group that will later need signalling. Five seconds is far past a
-/// shell's startup and far short of a person noticing; the caller says what
-/// never arriving means.
+/// Shared with [`crate::command_step`], the same way [`reap_when_it_ends`]
+/// is: the shell writes its own pid to disk because a pid known only to the
+/// `Child` this process holds cannot be read by a *different* process on a
+/// later pass, which is exactly who needs it — this process already has it,
+/// straight off the `Child` [`Headless::spawn`] just got back. Five seconds is
+/// far past a shell's startup and far short of a person noticing; the caller
+/// says what never arriving means.
 pub(crate) fn await_pid_file(mut read: impl FnMut() -> Option<u32>) -> Option<u32> {
     let started = std::time::Instant::now();
     while started.elapsed() < std::time::Duration::from_secs(5) {
@@ -386,6 +383,56 @@ pub(crate) fn await_pid_file(mut read: impl FnMut() -> Option<u32>) -> Option<u3
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     None
+}
+
+/// Why this backend refuses to start anywhere but Unix, and what to do
+/// instead — the same shape [`crate::mux::Herdr::unavailable`] and
+/// [`crate::tmux::Tmux::unavailable`] already answer with: what is missing,
+/// and the `dispatch.backend` that works in its place. Shared between
+/// [`Headless::unavailable`] and `spawn_detached_shell`'s `#[cfg(not(unix))]`
+/// stub below, which can only be reached if `is_available` answered wrongly —
+/// the same sentence either way it is read.
+const NOT_UNIX: &str = "headless lanes need `libc::setsid()` to detach a turn, and this \
+     platform has no such syscall. Dispatch through a multiplexer instead: set \
+     `dispatch.backend = \"herdr\"` or `\"tmux\"`.";
+
+/// Spawn `sh -c script` detached in `cwd`: `libc::setsid()`, called in the
+/// child between fork and exec — see [`crate::command_step`]'s own copy of
+/// this for why the syscall replaces the `setsid(1)` binary macOS does not
+/// ship. `pub(crate)` rather than private: [`crate::dispatch`]'s own test
+/// double for a paned backend detaches its fake run the same way, so it
+/// exercises this real code path instead of a second copy of it. Only ever
+/// reached on Unix in production: [`Headless::is_available`] refuses this
+/// backend everywhere else.
+#[cfg(unix)]
+pub(crate) fn spawn_detached_shell(script: &str, cwd: &Path) -> Result<std::process::Child> {
+    use std::os::unix::process::CommandExt;
+
+    let mut command = std::process::Command::new("sh");
+    command.arg("-c").arg(script);
+    // SAFETY: `setsid()` only detaches the child into its own session; it
+    // touches nothing this process holds, and runs after `fork` so a failure
+    // in it cannot affect this process either.
+    unsafe {
+        command.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    command
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(Into::into)
+}
+
+/// See the Unix arm's doc — never called in production: [`Headless::is_available`]
+/// refuses this backend everywhere but Unix.
+#[cfg(not(unix))]
+pub(crate) fn spawn_detached_shell(_script: &str, _cwd: &Path) -> Result<std::process::Child> {
+    bail!("{NOT_UNIX}")
 }
 
 /// End the whole process group `pid` leads, insisting only if asking fails.
@@ -688,22 +735,21 @@ impl Mux for Headless {
 
     fn is_available(&self) -> bool {
         // Nothing to connect to — the question is only whether a lane could be
-        // written down and detached. `setsid` is the one thing here that is not
-        // guaranteed to exist, and a pipeline that discovers it is missing one
-        // lane at a time is a pipeline that discovers it too late.
-        std::fs::create_dir_all(self.lane_dir()).is_ok()
-            && std::process::Command::new("setsid")
-                .arg("true")
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .is_ok()
+        // written down and detached. Detaching is `libc::setsid()` now, a
+        // syscall rather than a binary on PATH, so the only way left for this
+        // backend to be unavailable is a lane directory it cannot write to.
+        // It is still Unix-only: `spawn_detached_shell` has nothing to call on
+        // Windows, which detaches through a process group and a named job
+        // object instead — see `crate::command_step`'s own Windows arm.
+        cfg!(unix) && std::fs::create_dir_all(self.lane_dir()).is_ok()
     }
 
     fn unavailable(&self) -> String {
+        if !cfg!(unix) {
+            return NOT_UNIX.to_string();
+        }
         format!(
-            "headless lanes cannot be started here: `{}` must be writable and `setsid` must be \
-             on PATH (it detaches a turn so it outlives the dispatcher)",
+            "headless lanes cannot be started here: `{}` must be writable",
             self.lane_dir().display()
         )
     }
@@ -1006,12 +1052,12 @@ mod tests {
     /// reads their real output; nothing here talks to a model.
     ///
     /// Which is why the tests that take a turn are `#[cfg(unix)]`. A turn is
-    /// `setsid sh -c`, its liveness is `/proc`, and the stand-in agent is a
-    /// `#!/bin/sh` script — the module doc says outright that this is a Linux
-    /// backend, and `is_available` refuses to start a lane anywhere `setsid`
-    /// is missing. What is left running on Windows is everything that decides
-    /// something without launching anything: the id round trips, the branch
-    /// slug, where worktrees are cut, and the refusals.
+    /// `sh -c` detached with `libc::setsid()`, and the stand-in agent is a
+    /// `#!/bin/sh` script — a syscall with no Windows equivalent, which is why
+    /// `is_available` refuses to start a lane there at all. What is left
+    /// running on Windows is everything that decides something without
+    /// launching anything: the id round trips, the branch slug, where
+    /// worktrees are cut, and the refusals.
     struct Fixture {
         root: PathBuf,
         #[cfg_attr(not(unix), allow(dead_code))]
@@ -1370,15 +1416,7 @@ mod tests {
         let pidfile = dir.join("pid");
 
         let script = format!("echo $$ >{}; trap '' TERM; sleep 60", pidfile.display());
-        let spawned = std::process::Command::new("setsid")
-            .arg("sh")
-            .arg("-c")
-            .arg(&script)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap();
+        let spawned = spawn_detached_shell(&script, &dir).unwrap();
         reap_when_it_ends(spawned);
 
         let pid = await_pid_file(|| std::fs::read_to_string(&pidfile).ok()?.trim().parse().ok())
@@ -1413,15 +1451,7 @@ mod tests {
             leader_pidfile.display(),
             orphan_pidfile.display()
         );
-        let spawned = std::process::Command::new("setsid")
-            .arg("sh")
-            .arg("-c")
-            .arg(&script)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap();
+        let spawned = spawn_detached_shell(&script, &dir).unwrap();
         reap_when_it_ends(spawned);
 
         let leader = await_pid_file(|| {

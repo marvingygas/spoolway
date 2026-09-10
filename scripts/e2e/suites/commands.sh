@@ -853,6 +853,102 @@ else
   bad "cleanup stops a background command rather than orphaning it (pid $BENCH_PID)"
 fi
 
+# ----------------------------------------------------------- headless, no setsid
+# The reason this task exists: detaching a headless command step used to run
+# `setsid sh -c`, and macOS ships no `setsid` binary. It now calls
+# `libc::setsid()` itself, in the child between fork and exec, so it owes
+# nothing to PATH — proven here by building a PATH with every real command
+# symlinked in except that one, and running the dispatcher through it.
+NO_SETSID_BIN="$LIVE/no-setsid-bin"
+mkdir -p "$NO_SETSID_BIN"
+IFS=: read -ra _real_path_dirs <<<"$PATH"
+for _dir in "${_real_path_dirs[@]}"; do
+  [ -d "$_dir" ] || continue
+  for _bin in "$_dir"/*; do
+    [ -e "$_bin" ] || continue
+    _name=$(basename "$_bin")
+    [ "$_name" = setsid ] && continue
+    [ -e "$NO_SETSID_BIN/$_name" ] && continue
+    ln -s "$_bin" "$NO_SETSID_BIN/$_name" 2>/dev/null
+  done
+done
+unset _dir _bin _name _real_path_dirs
+if PATH="$NO_SETSID_BIN" command -v setsid >/dev/null 2>&1; then
+  bad "the stand-in PATH really has no setsid on it"
+else
+  ok "the stand-in PATH really has no setsid on it"
+fi
+
+# A wrapper binary rather than exporting PATH for the whole suite: what has to
+# lose `setsid` is the dispatcher and everything it forks, not `lib.sh`'s own
+# `dispatcher_start`, which detaches its supervisor with a literal `setsid`
+# of its own — a harness concern, not the thing this task changed.
+NO_SETSID_SPOOLWAY="$LIVE/spoolway-no-setsid"
+cat >"$NO_SETSID_SPOOLWAY" <<SHIM
+#!/bin/sh
+PATH="$NO_SETSID_BIN"
+export PATH
+exec "$SPOOLWAY" "\$@"
+SHIM
+chmod +x "$NO_SETSID_SPOOLWAY"
+
+cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
+add_command_step default nosetsid \
+  "sleep 20; echo 'no-setsid done' > \"\$SPOOLWAY_REPO/no-setsid-done.txt\"" \
+  review --background
+must "marking it headless: true" \
+  sed -i 's|^    background: true$|    background: true\n    headless: true|' \
+  .spoolway/pipelines/default.yml
+works "a headless background command step checks out" "$SPOOLWAY" pipeline check
+
+REAL_SPOOLWAY="$SPOOLWAY"
+SPOOLWAY="$NO_SETSID_SPOOLWAY"
+dispatcher_restart   # both the new step and the setsid-less binary are new
+task_doc "$LIVE/nosetsid.md" nosetsid "$BODY" "group: live" \
+  "touches: [notes/nosetsid.md]"
+must "a task with a headless step, dispatched with no setsid on PATH" \
+  "$SPOOLWAY" queue add --from "$LIVE/nosetsid.md"
+
+# Watched by hand for the same reason `bench` above is: the pid has to be
+# read while the run is still going. Stopped the moment the pid file
+# appears, rather than waiting for the task to finish — a background step's
+# whole task can archive inside the same pass that started it, and cleanup
+# at archival is what takes the process down (see the `bench` case above),
+# so waiting past that point would be checking the wrong thing.
+NOSETSID_PID=""
+for _ in $(seq 1 300); do
+  if [ -s "$SPOOLWAY_PROJECT_HOME/commands/nosetsid · nosetsid.pid" ]; then
+    NOSETSID_PID=$(cat "$SPOOLWAY_PROJECT_HOME/commands/nosetsid · nosetsid.pid")
+    break
+  fi
+  sleep 0.2
+done
+
+if [ -n "$NOSETSID_PID" ]; then
+  ok "a headless command step still starts and writes its pid with no setsid on PATH"
+else
+  bad "a headless command step still starts and writes its pid with no setsid on PATH"
+fi
+# Caught right as the pid file appears: the process is up on its own, with
+# nobody waiting on it, which is what outliving the pass that spawned it
+# means.
+if [ -n "$NOSETSID_PID" ] && [ -d "/proc/$NOSETSID_PID" ]; then
+  ok "and it outlives the pass that started it"
+else
+  bad "and it outlives the pass that started it (pid $NOSETSID_PID)"
+fi
+# Cleaned up the same way `bench` is, rather than left running into whatever
+# this suite does next.
+if [ -n "$NOSETSID_PID" ] && poll_while 10 test -d "/proc/$NOSETSID_PID"; then
+  ok "and cleanup stops it once the task is done, same as any other background run"
+else
+  bad "and cleanup stops it once the task is done, same as any other background run (pid $NOSETSID_PID)"
+fi
+
+# Back to the real binary before anything later in this suite reads $SPOOLWAY.
+SPOOLWAY="$REAL_SPOOLWAY"
+dispatcher_restart
+
 # -------------------------------------------------------------------- timeout
 # The hang. A blocking command that never ends would park its task for as long
 # as the dispatcher runs — no other clock in a pass has an opinion about a

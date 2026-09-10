@@ -266,13 +266,19 @@ pub fn newer() -> Option<String> {
 /// script on Unix and something else on Windows unless the program doing it is
 /// this one.
 ///
-/// Through `setsid` where there is one, for the reason [`crate::headless`]
-/// spawns lanes that way: a child that merely has no terminal on its file
-/// descriptors is still in this session, and gets `SIGHUP` when the terminal
-/// closes. `spoolway queue list` in a window somebody shuts a second later is
-/// exactly the case — the lookup takes seconds and the window does not wait
-/// for it. Without a session of its own the cache would never fill on such a
-/// machine, and the notice would never appear.
+/// Through `libc::setsid()` on Unix, called in the child between fork and
+/// exec, for the reason [`crate::headless`] detaches lanes the same way: a
+/// child that merely has no terminal on its file descriptors is still in this
+/// session, and gets `SIGHUP` when the terminal closes. `spoolway queue list`
+/// in a window somebody shuts a second later is exactly the case — the lookup
+/// takes seconds and the window does not wait for it. Without a session of
+/// its own the cache would never fill on such a machine, and the notice would
+/// never appear.
+///
+/// On Windows there is no such syscall, and none of this module's other
+/// Windows work needs one: a plain child is better than no child, and still
+/// refreshes the cache whenever this command was not the last thing a
+/// terminal did.
 ///
 /// Nothing is waited on, so the child is reaped by init once this process
 /// exits. A failure to spawn at all is the same as a failure to look up:
@@ -287,20 +293,18 @@ fn spawn_refresh() {
         return;
     };
 
-    let on_path = |program: &str| {
-        std::env::var_os("PATH").and_then(|path| crate::platform::which(program, &path))
-    };
-    let mut command = match cfg!(unix) && on_path("setsid").is_some() {
-        true => {
-            let mut setsid = Command::new("setsid");
-            setsid.arg(exe);
-            setsid
-        }
-        // Windows, or a Unix without `setsid`. A plain child is better than no
-        // child: it still refreshes the cache whenever this command was not
-        // the last thing a terminal did.
-        false => Command::new(exe),
-    };
+    let mut command = Command::new(exe);
+    // SAFETY: `setsid()` only detaches the child into its own session; it
+    // touches nothing this process holds, and runs after `fork` so a failure
+    // in it cannot affect this process either.
+    #[cfg(unix)]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        command.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
 
     let _ = command
         .arg(REFRESH_COMMAND)

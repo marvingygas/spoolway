@@ -7586,9 +7586,9 @@ mod tests {
     // The `[issue_tracking]` open hook: `queue add` runs it once per document
     // before anything is queued, writes `epic:`/`ticket:` into the result,
     // and refuses the whole batch — while saving what already succeeded —
-    // the moment one call fails. A hook run is `setsid sh -c` under the
-    // hood, the same Unix-only path `command_step` and `tracking` themselves
-    // are — see their own test modules for why.
+    // the moment one call fails. A hook run is `sh -c` under `libc::setsid()`
+    // under the hood, the same Unix-only path `command_step` and `tracking`
+    // themselves are — see their own test modules for why.
     #[cfg(unix)]
     mod open_hook {
         use super::*;
