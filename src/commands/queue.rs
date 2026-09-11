@@ -573,8 +573,9 @@ fn queue_add_documents(
     println!("  based on `{base}`");
 
     // Nothing is banked here any more. Queueing used to be the one path a
-    // planning session's spend had onto the ledger; every command has one now,
-    // and this one is not special — see `usage::bank_ambient`.
+    // planning session's spend had onto the ledger; an interactive session's
+    // spend is not banked from any command any more, and this one was never
+    // special.
     Ok(())
 }
 

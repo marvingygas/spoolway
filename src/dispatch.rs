@@ -1926,8 +1926,8 @@ impl<'a> Dispatcher<'a> {
     /// **Not under [`crate::lock::LedgerLock`].** The append below is
     /// unlocked, and the diff is against this pass's [`Dispatcher::ledger`]
     /// snapshot rather than a fresh read — criterion 3's one-read-per-pass.
-    /// The lock covers the paths that are *not* the dispatcher: `bank_ambient`,
-    /// `sweep`, and `bank_lane` (a `queue pause` or board `p`/`P` in another
+    /// The lock covers the paths that are *not* the dispatcher: `sweep` and
+    /// `bank_lane` (a `queue pause` or board `p`/`P` in another
     /// process). The dispatcher is the only writer of lane lines in the common
     /// case, so its own appends are serial. The one gap is a `bank_lane`
     /// racing this call for the *same carried session* — a narrow window
@@ -2027,9 +2027,6 @@ impl<'a> Dispatcher<'a> {
             outcome,
             run: task.and_then(|t| t.front.run.clone()),
             trial: task.and_then(|t| t.front.trial.clone()),
-            // A lane ran a step, not a skill. Absent here is what tells the
-            // two kinds of line apart everywhere they are read.
-            skill: None,
             // Never written: the ledger's own location says which project this
             // is, and only a reader spanning several needs the answer.
             project: String::new(),
@@ -3552,10 +3549,10 @@ impl<'a> Dispatcher<'a> {
     /// dispatcher restart and let a run that has already spent the budget
     /// spend it again.
     ///
-    /// **Lane entries only.** The ledger also carries the operator's own
-    /// interactive session — `usage::bank_ambient` banks planning and
-    /// queueing against the project, which is right, and those lines have no
-    /// `task`. Summed with the rest they make the one brake an unattended run
+    /// **Lane entries only.** An older ledger can still carry the operator's
+    /// own interactive sessions — planning and queueing banked against the
+    /// project before that path was removed — and those lines have no `task`.
+    /// Summed with the rest they make the one brake an unattended run
     /// has answer to whoever is *watching* it: sit in a Claude session reading
     /// an overnight run and your own context reads stop the dispatcher starting
     /// work. The ceiling is documented as the output tokens one unattended run
@@ -9732,7 +9729,6 @@ mod tests {
                 outcome: None,
                 run: None,
                 trial: None,
-                skill: None,
                 project: String::new(),
             },
         )
@@ -9768,7 +9764,6 @@ mod tests {
                 outcome: None,
                 run: None,
                 trial: None,
-                skill: None,
                 project: String::new(),
             },
         )
@@ -9778,12 +9773,12 @@ mod tests {
     /// The one brake an unattended run has must measure the run, and the
     /// operator's own interactive session is not the run.
     ///
-    /// `usage::bank_ambient` banks planning and queueing against the
-    /// project, correctly — it is real spend on real work. Summed into the
-    /// ceiling it meant that sitting in a Claude session *watching* an overnight
-    /// run stopped the dispatcher starting any: 20 of the 38 ledger entries a
-    /// plan run left behind were the session driving it, ~50k output tokens
-    /// against lanes that spent nothing but GPU time.
+    /// An older ledger can carry planning and queueing banked against the
+    /// project this way, before that path was removed — real spend on real
+    /// work. Summed into the ceiling it meant that sitting in a Claude session
+    /// *watching* an overnight run stopped the dispatcher starting any: 20 of
+    /// the 38 ledger entries a plan run left behind were the session driving
+    /// it, ~50k output tokens against lanes that spent nothing but GPU time.
     // covers: unattended.max_output_tokens — the ceiling counts what lanes spend, and stops the run starting more work
     #[test]
     fn the_output_ceiling_counts_lanes_and_not_the_person_watching() {
@@ -9841,7 +9836,6 @@ mod tests {
                 outcome: None,
                 run: None,
                 trial: None,
-                skill: None,
                 project: String::new(),
             },
         )

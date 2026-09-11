@@ -187,17 +187,6 @@ pub struct Config {
     #[serde(alias = "pricing")]
     pub models: BTreeMap<String, crate::usage::ModelPrice>,
 
-    /// Which skills `spoolway eval` gives a block of their own, named the way
-    /// the ledger banks them — a `spoolway-` prefix already stripped. Every
-    /// other name the ledger holds, including `interactive`, is left off
-    /// `spoolway eval` entirely rather than growing the table by one block
-    /// per skill anybody has ever typed; its spend still reaches
-    /// `spoolway eval --by`, which never consults this list.
-    ///
-    /// Tracked, so naming a skill here is itself an edit that mints a new
-    /// version — the same as editing a prompt or a pipeline is.
-    pub skills: Vec<String>,
-
     /// Where a project's issue tracker lives, so the dispatcher can tell it
     /// about a task's arrival at `queued`, `blocked`, `paused` or `done` — the
     /// four states nothing inside a pipeline file can already put a `run:`
@@ -247,12 +236,6 @@ impl Default for Config {
             // already covered by the built-in table once it exists — a row
             // here only corrects one, or prices a model nobody publishes.
             models: BTreeMap::new(),
-            // Only `spoolway-plan` is worth a block of its own — the others
-            // spoolway ships are queried, not edited, and drift far less
-            // often than the prompt a planning session shapes. Named in
-            // full, the same string the slash command has: the ledger banks
-            // whatever ran, unrewritten.
-            skills: vec!["spoolway-plan".to_string()],
             issue_tracking: IssueTrackingConfig::default(),
             extra: BTreeMap::new(),
         }
@@ -2660,6 +2643,19 @@ mod tests {
         let rendered = toml::to_string(&config).unwrap();
         assert!(!rendered.contains("blocked_on_write"));
         assert!(!rendered.contains("blocked_on_overreach"));
+    }
+
+    /// A config written before `skills` was retired — skill spend is no
+    /// longer a `spoolway eval` reader's to bucket by name — must still open,
+    /// the key ignored and gone on the next save, the same shape every other
+    /// retired key takes.
+    #[test]
+    fn an_old_skills_list_still_parses_and_drops_on_the_next_save() {
+        let raw = "skills = [\"spoolway-plan\", \"code-review\"]\n";
+        let config: Config =
+            toml::from_str(raw).expect("a config naming `skills` must still parse");
+        let rendered = toml::to_string(&config).unwrap();
+        assert!(!rendered.contains("skills"));
     }
 
     /// A config written by a binary newer than this one must still parse,

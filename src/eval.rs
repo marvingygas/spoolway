@@ -12,7 +12,6 @@
 //! who sees a `PASS` of 79% next to a `RUNS` of two can discount it
 //! themselves, and will do it better than a threshold could.
 
-use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use anyhow::{Context, Result, bail};
@@ -68,12 +67,13 @@ pub fn run(repo: &Repo, args: &EvalArgs, json: bool) -> Result<()> {
     let (mut entries, scope) =
         crate::spend::collect_scoped(repo, args.project.as_deref(), args.all)?;
 
-    // A skill session is a conversation, not a lane: it reports no outcome and
-    // belongs to no task, so counting it would put lanes in the table that
-    // nothing in the table's columns describes. Held aside rather than dropped
-    // — it gets a block of its own, under the pipeline blocks.
-    let skills: Vec<Entry> = entries.iter().filter(|e| e.is_skill()).cloned().collect();
-    entries.retain(|entry| !entry.is_skill());
+    // An interactive line is a conversation, not a lane: it reports no
+    // outcome and belongs to no task, so counting it would put a session in
+    // the table that nothing in the table's columns describes. Historical
+    // interactive lines stay on disk; this is where every view below skips
+    // them, in place of the `is_skill()` check that used to hold them aside
+    // for a block of their own. See `Entry::is_lane`.
+    entries.retain(Entry::is_lane);
 
     // Derived from the whole scope, before the window/step/pipeline filters
     // below narrow `entries` further — so a historical run's id is the same
@@ -82,10 +82,6 @@ pub fn run(repo: &Repo, args: &EvalArgs, json: bool) -> Result<()> {
 
     let window = crate::spend::window_of(None, args.since.as_deref(), args.until.as_deref())?;
     entries.retain(|entry| window.contains(&entry.ts));
-    let skills: Vec<Entry> = skills
-        .into_iter()
-        .filter(|entry| window.contains(&entry.ts))
-        .collect();
 
     if let Some(step) = &args.step {
         let before = entries.len();
@@ -99,16 +95,7 @@ pub fn run(repo: &Repo, args: &EvalArgs, json: bool) -> Result<()> {
         entries.retain(|entry| &entry.pipeline == pipeline);
     }
 
-    // Whether the skills block is this view's to print at all: it is a cut of
-    // no pipeline, so it belongs beside the whole table and nowhere a pipeline
-    // or a step has already narrowed the screen to one slice of it.
-    let skills_eligible = args.pipeline.is_none() && args.step.is_none() && !args.runs;
-
     if entries.is_empty() {
-        if skills_eligible && !json && !args.csv && !skills.is_empty() {
-            print_skills(&skills, &repo.config.skills, args.limit());
-            return Ok(());
-        }
         println!("Nothing to compare in {} yet.", scope.what);
         println!(
             "A version is recorded when a step finishes, so this fills up as `spoolway \
@@ -149,14 +136,7 @@ pub fn run(repo: &Repo, args: &EvalArgs, json: bool) -> Result<()> {
     let blocks = pipeline_blocks(&entries, args.limit());
 
     if json {
-        return print_json(
-            &entries,
-            &skills,
-            &blocks,
-            skills_eligible,
-            &fallback,
-            &repo.config.models,
-        );
+        return print_json(&entries, &blocks, &fallback, &repo.config.models);
     }
 
     if args.csv {
@@ -184,11 +164,6 @@ pub fn run(repo: &Repo, args: &EvalArgs, json: bool) -> Result<()> {
     }
 
     footer(&entries, &blocks, &fallback);
-
-    if skills_eligible && !skills.is_empty() {
-        println!();
-        print_skills(&skills, &repo.config.skills, args.limit());
-    }
 
     Ok(())
 }
@@ -959,190 +934,9 @@ fn print_block(
     }
 }
 
-// ------------------------------------------------------------------- skills
-
-/// What one bucket's one version's skill sessions came to.
-///
-/// The unit is the distinct **session**, not the ledger row: one session banks
-/// a line every time it is swept. There is no `RUNS` and no `PASS` here — a
-/// conversation is judged by nobody and belongs to no task.
-struct SkillVersion {
-    name: String,
-    since: String,
-    sessions: usize,
-    cost: f64,
-    /// Sessions nothing could price. Cost is a floor when this is above zero.
-    unpriced: usize,
-}
-
-impl SkillVersion {
-    /// What one session of this version cost on average, or `None` when
-    /// nothing here could be priced at all.
-    fn per_session(&self) -> Option<f64> {
-        match self.sessions > self.unpriced {
-            true => Some(self.cost / self.sessions as f64),
-            false => None,
-        }
-    }
-}
-
-/// One named skill's block: its versions, newest first, and its total cost —
-/// what orders it against the other blocks.
-struct SkillBlock {
-    name: String,
-    total_cost: f64,
-    versions: Vec<SkillVersion>,
-}
-
-/// Bucket every skill line by [`crate::config::Config::skills`]: a name on
-/// that list gets its own block, and every other name — including
-/// `interactive` — is left out of `spoolway eval` entirely. Its spend still
-/// reaches `spoolway eval --by`, which counts every skill whether or not it is
-/// registered here.
-fn skill_blocks(entries: &[Entry], configured: &[String], limit: usize) -> Vec<SkillBlock> {
-    let mut buckets: HashMap<String, Vec<&Entry>> = HashMap::new();
-    for entry in entries {
-        let Some(label) = entry.skill_label() else {
-            continue;
-        };
-        if !configured.iter().any(|name| name == label) {
-            continue;
-        }
-        buckets.entry(label.to_string()).or_default().push(entry);
-    }
-
-    let mut blocks: Vec<SkillBlock> = buckets
-        .into_iter()
-        .map(|(name, lines)| {
-            let total_cost: f64 = lines.iter().filter_map(|e| e.cost_usd).sum();
-            SkillBlock {
-                versions: skill_versions(&lines, limit),
-                name,
-                total_cost,
-            }
-        })
-        .collect();
-
-    // Biggest spender first — there is no `other` catch-all left to sort
-    // last regardless of what it cost.
-    blocks.sort_by(|a, b| {
-        b.total_cost
-            .partial_cmp(&a.total_cost)
-            .unwrap_or(Ordering::Equal)
-    });
-    blocks
-}
-
-/// Group one bucket's skill lines by the version they ran under, newest
-/// first.
-fn skill_versions(entries: &[&Entry], limit: usize) -> Vec<SkillVersion> {
-    let mut order: Vec<String> = Vec::new();
-    let mut first: HashMap<String, String> = HashMap::new();
-    let mut sessions: HashMap<String, HashSet<String>> = HashMap::new();
-    let mut unpriced: HashMap<String, HashSet<String>> = HashMap::new();
-    let mut cost: HashMap<String, f64> = HashMap::new();
-
-    for entry in entries {
-        let name = version_of(entry).to_string();
-        if !first.contains_key(&name) {
-            order.push(name.clone());
-            first.insert(name.clone(), entry.ts.clone());
-        }
-        sessions
-            .entry(name.clone())
-            .or_default()
-            .insert(entry.session.clone());
-        match entry.cost_usd {
-            Some(usd) => *cost.entry(name).or_default() += usd,
-            // A zero-token line spends nothing, so it must not mark its whole
-            // session unpriced — the same rule `spoolway eval --by` follows.
-            None if entry.tokens.is_zero() => {}
-            // A session is unpriced if any of its lines was: what is missing
-            // from the total is that whole session's unknown spend.
-            None => {
-                unpriced
-                    .entry(name)
-                    .or_default()
-                    .insert(entry.session.clone());
-            }
-        }
-    }
-
-    order.reverse();
-    order.truncate(limit.max(1));
-    order
-        .into_iter()
-        .map(|name| SkillVersion {
-            since: first
-                .get(&name)
-                .map(|ts| local_date(ts))
-                .unwrap_or_default(),
-            sessions: sessions.get(&name).map(HashSet::len).unwrap_or(0),
-            unpriced: unpriced.get(&name).map(HashSet::len).unwrap_or(0),
-            cost: cost.get(&name).copied().unwrap_or(0.0),
-            name,
-        })
-        .collect()
-}
-
-fn print_skills(entries: &[Entry], configured: &[String], limit: usize) {
-    let blocks = skill_blocks(entries, configured, limit);
-    if blocks.is_empty() {
-        return;
-    }
-
-    let vw = blocks
-        .iter()
-        .flat_map(|b| b.versions.iter())
-        .map(|r| r.name.len())
-        .max()
-        .unwrap_or(8)
-        .max("VERSION".len());
-
-    println!("{}", paint("skills", "1"));
-    for (n, block) in blocks.iter().enumerate() {
-        if n > 0 {
-            println!();
-        }
-        println!("{}", paint(&block.name, "1"));
-        let head = format!(
-            "{:<vw$}   {:<10}  {:>8}  {:>8}  {:>11}",
-            "VERSION", "SINCE", "SESSIONS", "COST USD", "USD/SESSION"
-        );
-        use std::io::IsTerminal;
-        println!(
-            "{}",
-            match std::io::stdout().is_terminal() {
-                true => format!("{HEAD}{head}\x1b[0m"),
-                false => head,
-            }
-        );
-
-        for row in &block.versions {
-            let cost = cost_of(row.cost, row.sessions, row.unpriced);
-            // A per-session figure is a floor exactly when `row.unpriced` is
-            // above zero — the same condition `cost` above just resolved
-            // through `cost_of` — but printed plain either way; the note
-            // below the block says once that some of this block's spend has
-            // no price, rather than marking every affected cell.
-            let per_session = row
-                .per_session()
-                .map_or_else(|| "—".to_string(), |usd| crate::fmt::money_plain(Some(usd)));
-            println!(
-                "{:<vw$}   {:<10}  {:>8}  {:>8}  {:>11}",
-                row.name, row.since, row.sessions, cost, per_session,
-            );
-        }
-    }
-
-    if let Some(note) = unpriced_note(entries.iter()) {
-        println!("\n{note}");
-    }
-}
-
 /// "Cost is a floor" note, naming every model with no configured price among
-/// `entries`. Shared between the pipeline footer and the skills block, so the
-/// two say it the same way.
+/// `entries`. Shared by the pipeline footer and the screen's own note, so
+/// every reader of the ledger says it the same way.
 fn unpriced_note<'a>(entries: impl Iterator<Item = &'a Entry>) -> Option<String> {
     // A line that spent nothing is missing nothing from the total, whatever
     // it says about a price — an enrolment line names no model at all, and
@@ -1163,9 +957,7 @@ fn unpriced_note<'a>(entries: impl Iterator<Item = &'a Entry>) -> Option<String>
 
 fn print_json(
     entries: &[Entry],
-    skills: &[Entry],
     blocks: &[PipelineBlock],
-    skills_eligible: bool,
     fallback: &HashMap<(String, String), String>,
     models: &BTreeMap<String, ModelPrice>,
 ) -> Result<()> {
@@ -1174,28 +966,6 @@ fn print_json(
         for version in &block.versions {
             let m = Metrics::for_row(entries, &block.name, &version.name, fallback, models);
             rows.push(json_row(&block.name, version, &m));
-        }
-    }
-
-    // Skill spend is not a version row: it has no lanes, no pass share and no
-    // task to divide by, and inventing those fields to fit the array would be
-    // a shape that means something different for half the rows. The ledger
-    // lines go out as they are written instead, `skill` label and all, so
-    // nothing this view holds back is lost to a reader — and a consumer tells
-    // the two apart by that field.
-    if skills_eligible {
-        for entry in skills {
-            // `Entry::project` is `#[serde(skip)]` — the ledger's own path says
-            // which project a line is, so it is never written to disk. But a
-            // `--all` read spans projects and fills it in, and the pipeline
-            // rows above already carry it, so a skill row that dropped it could
-            // not be attributed across two projects (review finding 46). Add it
-            // back on the way out.
-            let mut row = serde_json::to_value(entry)?;
-            if let Some(map) = row.as_object_mut() {
-                map.insert("project".to_string(), entry.project.clone().into());
-            }
-            rows.push(row);
         }
     }
 
@@ -1343,22 +1113,20 @@ fn footer(
 //
 // Every view is a second look at rows this file already knows how to build:
 // the pipelines view is `pipeline_blocks` and `Metrics::for_row`, the runs
-// view is `list_runs`, the skills view is `skill_blocks` — the screen adds a
-// `Metrics::for_step` for the steps view and nothing else reads the ledger a
-// second way. Rendered without colour throughout, unlike the printing path:
-// `pad_to` counts every byte of a string as one column, and an ANSI escape
-// slipped into a row would throw the frame's own border out of line with it.
+// view is `list_runs` — the screen adds a `Metrics::for_step` for the steps
+// view and nothing else reads the ledger a second way. Rendered without
+// colour throughout, unlike the printing path: `pad_to` counts every byte of
+// a string as one column, and an ANSI escape slipped into a row would throw
+// the frame's own border out of line with it.
 
-/// Which of the four views is on screen. `Tab` cycles through them in this
+/// Which of the three views is on screen. `Tab` cycles through them in this
 /// order, which is also the order their rows read most naturally: the whole
-/// pipeline, then one step of it, then one run, then what ran outside any
-/// pipeline at all.
+/// pipeline, then one step of it, then one run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum View {
     Pipelines,
     Steps,
     Runs,
-    Skills,
 }
 
 impl View {
@@ -1366,8 +1134,7 @@ impl View {
         match self {
             View::Pipelines => View::Steps,
             View::Steps => View::Runs,
-            View::Runs => View::Skills,
-            View::Skills => View::Pipelines,
+            View::Runs => View::Pipelines,
         }
     }
 
@@ -1376,7 +1143,6 @@ impl View {
             View::Pipelines => "pipelines",
             View::Steps => "steps",
             View::Runs => "runs",
-            View::Skills => "skills",
         }
     }
 }
@@ -1455,22 +1221,15 @@ fn non_empty(s: &str) -> Option<&str> {
 /// filter narrows it further. Reloaded on `r`, and every time the filter
 /// panel's `enter` commits a change to `scope`, `since` or `until`.
 struct Loaded {
-    /// Every non-skill lane in scope and window, unfiltered by pipeline or
-    /// step — filter-value cycling reads its pipeline and step candidate
-    /// lists off of this, so the values on offer are always the project's
-    /// own rather than whatever the current view happens to already be
-    /// narrowed to.
+    /// Every lane in scope and window, unfiltered by pipeline or step —
+    /// filter-value cycling reads its pipeline and step candidate lists off
+    /// of this, so the values on offer are always the project's own rather
+    /// than whatever the current view happens to already be narrowed to. An
+    /// interactive line never reaches here at all — see `Entry::is_lane`.
     entries: Vec<Entry>,
-    skills: Vec<Entry>,
     fallback: HashMap<(String, String), String>,
     models: BTreeMap<String, ModelPrice>,
     scope_label: String,
-    /// `Config::skills` — which names `skill_blocks` gives their own block.
-    /// The screen's skills view reads the same list `spoolway eval` prints
-    /// against, rather than inventing a wider one of its own: registering a
-    /// skill is what makes it worth comparing across versions, on the screen
-    /// exactly as in the table.
-    configured_skills: Vec<String>,
 }
 
 fn load(repo: &Repo, filters: &Filters) -> Result<Loaded> {
@@ -1483,31 +1242,25 @@ fn load(repo: &Repo, filters: &Filters) -> Result<Loaded> {
     };
     let (mut entries, _scope) = crate::spend::collect_scoped(repo, project, all)?;
 
-    let mut skills: Vec<Entry> = entries.iter().filter(|e| e.is_skill()).cloned().collect();
-    entries.retain(|entry| !entry.is_skill());
+    entries.retain(Entry::is_lane);
 
     let fallback = fallback_keys(&entries);
 
     let window =
         crate::spend::window_of(None, non_empty(&filters.since), non_empty(&filters.until))?;
     entries.retain(|entry| window.contains(&entry.ts));
-    skills.retain(|entry| window.contains(&entry.ts));
     entries.sort_by(|a, b| a.ts.cmp(&b.ts));
 
     Ok(Loaded {
         entries,
-        skills,
         fallback,
         models: repo.config.models.clone(),
         scope_label: filters.scope.label(repo),
-        configured_skills: repo.config.skills.clone(),
     })
 }
 
 /// `entries`, narrowed by the pipeline and step filters — the input every
-/// view except skills is built from. Skills reads `loaded.skills` directly
-/// instead: a skill session belongs to no pipeline and no step, the same
-/// reasoning `run` applies to `skills_eligible`.
+/// view is built from.
 fn scoped_entries<'a>(loaded: &'a Loaded, filters: &Filters) -> Vec<&'a Entry> {
     loaded
         .entries
@@ -1779,9 +1532,8 @@ fn steps_lines(entries: &[&Entry], loaded: &Loaded, pipelines: &Pipelines) -> Ve
     let owned: Vec<Entry> = entries.iter().map(|e| (*e).clone()).collect();
     let blocks = step_blocks(&owned, &loaded.fallback, &loaded.models, pipelines);
 
-    // Measured across every block on screen, the same way `skills_lines`
-    // measures `VERSION` — so `reproduce-again` in one pipeline's block
-    // still lines up with a shorter name in another's.
+    // Measured across every block on screen — so `reproduce-again` in one
+    // pipeline's block still lines up with a shorter name in another's.
     let sw = blocks
         .iter()
         .flat_map(|b| b.rows.iter())
@@ -1877,59 +1629,6 @@ fn runs_lines(entries: &[&Entry], loaded: &Loaded) -> Vec<Line> {
     out
 }
 
-// ------------------------------------------------------------------ skills
-
-fn skills_header_plain(vw: usize) -> String {
-    format!(
-        "{:<vw$}   {:<10}  {:>8}  {:>8}  {:>11}",
-        "VERSION", "SINCE", "SESSIONS", "COST USD", "USD/SESSION"
-    )
-}
-
-fn skills_row_line(row: &SkillVersion, vw: usize) -> String {
-    let cost = cost_of(row.cost, row.sessions, row.unpriced);
-    let per_session = row
-        .per_session()
-        .map_or_else(|| "—".to_string(), |usd| crate::fmt::money_plain(Some(usd)));
-    format!(
-        "{:<vw$}   {:<10}  {:>8}  {:>8}  {:>11}",
-        row.name, row.since, row.sessions, cost, per_session,
-    )
-}
-
-/// The skills view of the screen — the same `Config::skills` list and the
-/// same [`skill_blocks`] bucketing `spoolway eval`'s own skills block prints,
-/// so a name is worth its own row here exactly when it is worth one there.
-fn skills_lines(loaded: &Loaded, filters: &Filters) -> Vec<Line> {
-    let blocks = skill_blocks(&loaded.skills, &loaded.configured_skills, filters.limit);
-    if blocks.is_empty() {
-        return vec![Line::Text("No skill sessions in that window.".to_string())];
-    }
-    let vw = blocks
-        .iter()
-        .flat_map(|b| b.versions.iter())
-        .map(|r| r.name.len())
-        .max()
-        .unwrap_or(8)
-        .max("VERSION".len());
-
-    let mut out = Vec::new();
-    for (n, block) in blocks.iter().enumerate() {
-        if n > 0 {
-            out.push(Line::Text(String::new()));
-        }
-        out.push(Line::Text(block.name.clone()));
-        out.push(Line::Text(skills_header_plain(vw)));
-
-        for row in &block.versions {
-            out.push(Line::Row(Row {
-                text: skills_row_line(row, vw),
-            }));
-        }
-    }
-    out
-}
-
 // ---------------------------------------------------------------- one view
 
 fn view_lines(loaded: &Loaded, filters: &Filters, pipelines: &Pipelines, view: View) -> Vec<Line> {
@@ -1937,7 +1636,6 @@ fn view_lines(loaded: &Loaded, filters: &Filters, pipelines: &Pipelines, view: V
         View::Pipelines => pipelines_lines(&scoped_entries(loaded, filters), loaded, filters),
         View::Steps => steps_lines(&scoped_entries(loaded, filters), loaded, pipelines),
         View::Runs => runs_lines(&scoped_entries(loaded, filters), loaded),
-        View::Skills => skills_lines(loaded, filters),
     }
 }
 
@@ -2012,18 +1710,6 @@ fn export_rows(
             let lines = rows.iter().map(csv_run_row).collect();
             (header, lines)
         }
-        View::Skills => {
-            let blocks = skill_blocks(&loaded.skills, &loaded.configured_skills, filters.limit);
-            let header =
-                "skill,version,since,sessions,cost_usd,cost_per_session,unpriced".to_string();
-            let mut rows = Vec::new();
-            for block in &blocks {
-                for version in &block.versions {
-                    rows.push(csv_skill_row(&block.name, version));
-                }
-            }
-            (header, rows)
-        }
     }
 }
 
@@ -2093,21 +1779,6 @@ fn csv_run_row(row: &RunRow) -> String {
         csv_cost(row.cost, row.lanes, row.unpriced),
         row.unpriced,
         row.time_s.max(0),
-    )
-}
-
-fn csv_skill_row(name: &str, row: &SkillVersion) -> String {
-    let per_session = row
-        .per_session()
-        .map_or(String::new(), |usd| format!("{usd:.2}"));
-    let name = csv_field(name);
-    format!(
-        "{name},{},{},{},{},{per_session},{}",
-        csv_field(&row.name),
-        csv_field(&row.since),
-        row.sessions,
-        csv_cost(row.cost, row.sessions, row.unpriced),
-        row.unpriced,
     )
 }
 
@@ -2433,12 +2104,9 @@ fn draw(
 /// The same "Cost is a floor" note the printed tables carry, over whichever
 /// rows are actually on screen: the current view's own entries, narrowed by
 /// the current filters — not the whole ledger `loaded` holds, which may name
-/// a model nowhere in view. Skills reads `loaded.skills` directly, the same
-/// way `skills_lines` does, since a skill session belongs to no pipeline or
-/// step for `scoped_entries` to narrow.
+/// a model nowhere in view.
 fn screen_unpriced_note(loaded: &Loaded, filters: &Filters, view: View) -> Option<String> {
     match view {
-        View::Skills => unpriced_note(loaded.skills.iter()),
         // Steps and runs show every step or run their own filters admit —
         // neither view truncates by `filters.limit` — so the plain scoped
         // entries are exactly what is on screen.
@@ -3007,29 +2675,6 @@ fn step_calendar_month(year: &mut i32, month: &mut u32, day: &mut u32, delta: i3
 mod tests {
     use super::*;
 
-    // Regression for the review finding that the skills view's header and row
-    // drew to different widths, throwing the frame's right border out of
-    // line. Pinned as a property rather than an eyeballed string.
-    #[test]
-    fn skills_header_and_row_draw_to_the_same_width() {
-        let row = SkillVersion {
-            name: "b210d1a8".into(),
-            since: "2026-08-15".into(),
-            sessions: 4,
-            cost: 12.0,
-            unpriced: 0,
-        };
-        let vw = row.name.len().max("VERSION".len());
-        let header = skills_header_plain(vw);
-        let line = skills_row_line(&row, vw);
-
-        assert_eq!(
-            header.chars().count(),
-            line.chars().count(),
-            "header: {header:?}\nrow:    {line:?}"
-        );
-    }
-
     // The same regression, for the steps view's own `STEP` column now that
     // its width is measured rather than fixed.
     #[test]
@@ -3071,7 +2716,6 @@ mod tests {
             outcome: outcome.map(str::to_string),
             run: None,
             trial: None,
-            skill: None,
             project: "demo".into(),
         }
     }
@@ -3542,30 +3186,6 @@ mod tests {
         assert!(line.contains("pass -100pp"), "{line:?}");
         assert!(line.contains("cost +$2.00"), "{line:?}");
     }
-
-    // covers: skills — a named skill gets a block of its own and every other folds into `other`
-
-    #[test]
-    fn a_skill_named_in_config_gets_its_own_block_and_the_rest_are_left_out_entirely() {
-        let mut plan = lane("", "", "v1", 0, None);
-        plan.skill = Some("spoolway-plan".to_string());
-        plan.cost_usd = Some(2.0);
-        let mut named = lane("", "", "v1", 0, None);
-        named.session = "s2".into();
-        named.skill = Some("code-review".to_string());
-        named.cost_usd = Some(1.0);
-
-        let entries = vec![plan, named];
-        let configured = vec!["spoolway-plan".to_string()];
-        let blocks = skill_blocks(&entries, &configured, 10);
-
-        let names: Vec<&str> = blocks.iter().map(|b| b.name.as_str()).collect();
-        assert_eq!(
-            names,
-            vec!["spoolway-plan"],
-            "code-review is not configured, and there is no `other` to catch it"
-        );
-    }
 }
 
 #[cfg(test)]
@@ -3602,7 +3222,6 @@ mod screen_tests {
             outcome: Some("pass".into()),
             run: None,
             trial: None,
-            skill: None,
             project: "demo".into(),
         }
     }
@@ -3645,7 +3264,6 @@ mod screen_tests {
                 outcome: outcome.map(str::to_string),
                 run: Some(format!("r-{task}")),
                 trial: None,
-                skill: None,
                 project: String::new(),
             },
         )
@@ -3691,10 +3309,8 @@ mod screen_tests {
         Loaded {
             fallback: fallback_keys(&entries),
             entries,
-            skills: Vec::new(),
             models: BTreeMap::new(),
             scope_label: "demo".to_string(),
-            configured_skills: Vec::new(),
         }
     }
 
@@ -3714,6 +3330,47 @@ mod screen_tests {
             Some("pass"),
         );
         repo
+    }
+
+    /// `load` retains only `Entry::is_lane` over the real ledger, in place of
+    /// the `is_skill()` check every view used to run instead — pinned
+    /// against a fixture repo holding both an interactive line and a lane
+    /// line, on disk, so deleting `load`'s own retain breaks this rather
+    /// than an out-of-band replay of the same predicate.
+    #[test]
+    fn load_never_returns_an_interactive_line() {
+        let repo = fixture_with_one_run("load-excludes-interactive");
+        crate::usage::append(
+            &repo,
+            &Entry {
+                ts: "2026-08-01T09:30:00+00:00".into(),
+                task: String::new(),
+                plan: None,
+                step: String::new(),
+                pipeline: String::new(),
+                agent: crate::usage::INTERACTIVE_AGENT.into(),
+                kind: "claude".into(),
+                model: "claude-opus-5".into(),
+                session: "interactive-s".into(),
+                round: 1,
+                wall_s: 0,
+                turns: 1,
+                tokens: crate::usage::Tokens::default(),
+                cost_usd: Some(2.0),
+                ctx_peak: None,
+                version: None,
+                commit: None,
+                outcome: None,
+                run: None,
+                trial: None,
+                project: String::new(),
+            },
+        )
+        .unwrap();
+
+        let loaded = load(&repo, &no_filters()).unwrap();
+        assert_eq!(loaded.entries.len(), 1, "the interactive line stayed out");
+        assert!(loaded.entries.iter().all(Entry::is_lane));
     }
 
     /// Runs the screen against `repo` with the default args, feeding it
@@ -3977,13 +3634,13 @@ mod screen_tests {
         assert!(text.contains("Nothing to compare"), "{text}");
     }
 
-    /// `tab` cycles through all four views without panicking on any of
+    /// `tab` cycles through all three views without panicking on any of
     /// them, and `q` ends the screen from browsing mode.
     #[test]
     fn tab_cycles_every_view_and_q_quits() {
         let repo = fixture_with_one_run("screen-tab");
-        let text = screen(&repo, "\t\t\t\tq");
-        for label in ["pipelines", "steps", "runs", "skills"] {
+        let text = screen(&repo, "\t\t\tq");
+        for label in ["pipelines", "steps", "runs"] {
             assert!(text.contains(&format!("eval · {label}")), "{label}\n{text}");
         }
     }
@@ -4021,7 +3678,6 @@ mod screen_tests {
                 outcome: Some("pass".into()),
                 run: Some("r-a".into()),
                 trial: None,
-                skill: None,
                 project: String::new(),
             },
         )

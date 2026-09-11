@@ -178,18 +178,6 @@ pub struct Entry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trial: Option<String>,
 
-    /// Which skill was running when this was spent, for a line banked from an
-    /// interactive session rather than a lane: `plan`, `queue`, `prompt`, or
-    /// [`INTERACTIVE_SKILL`] for the stretches with no skill in the chair.
-    ///
-    /// Absent on every lane line, which is what tells the two apart — see
-    /// [`Entry::skill_label`], which also reads the planning lines written
-    /// before this field existed. Deliberately not folded into `step`: a
-    /// pipeline is free to declare a step called `plan`, and the two must
-    /// never merge into one row.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub skill: Option<String>,
-
     /// Which project this lane ran in. Never written to disk — a ledger lives
     /// inside its project, so storing the answer in every line would be a
     /// thousand copies of the file's own path. Filled in at load time, and only
@@ -198,29 +186,10 @@ pub struct Entry {
     pub project: String,
 }
 
-/// The agent name every interactive line carries, lane or no lane.
+/// The agent name historical interactive lines carry — nothing writes one any
+/// more, but the ledger is append-only, so old ones stay on disk. A lane line
+/// never carries this: [`Entry::is_lane`]'s whole correctness rests on that.
 pub const INTERACTIVE_AGENT: &str = "interactive";
-
-/// What the one stretch of an interactive session with no command in the
-/// chair yet is labelled — turns before the transcript's first marker. Every
-/// slash command after that banks under its own name, `skill_of`'s.
-pub const INTERACTIVE_SKILL: &str = "interactive";
-
-/// The planning skill's real name, and what every older shape of a planning
-/// line is read as.
-///
-/// Two older shapes reach this. `queue add --plan` banked a whole planning
-/// session under a step called `plan`, before [`Entry::skill`] existed at
-/// all, so those lines carry no skill; and [`skill_of`] used to strip a
-/// `spoolway-` prefix, so lines it wrote carry the bare `plan`. The ledger is
-/// append-only, so neither is rewritten — both are *read* as
-/// `spoolway-plan`, which is what keeps an existing ledger totalling to the
-/// same money under the name the config now uses.
-const PLANNING_SKILL: &str = "spoolway-plan";
-
-/// The bare name the stripping [`skill_of`] used to write, and the step name
-/// `queue add --plan` banked under. Never written again; only read.
-const LEGACY_PLANNING_SKILL: &str = "plan";
 
 /// The model name Claude Code writes on a message it generated locally, not
 /// one a model answered: a spend-limit notice, an API error, an interrupt.
@@ -232,25 +201,13 @@ const LEGACY_PLANNING_SKILL: &str = "plan";
 const SYNTHETIC_MODEL: &str = "<synthetic>";
 
 impl Entry {
-    /// Which skill this line is spend for, or `None` for a lane.
-    ///
-    /// The one place the legacy shape is understood, so that everything
-    /// grouping, sweeping or totalling over the ledger asks the same question
-    /// and gets the same answer.
-    pub fn skill_label(&self) -> Option<&str> {
-        match self.skill.as_deref() {
-            // A line the stripping `skill_of` wrote. `plan` was never a
-            // command anybody typed, so reading it back under the planning
-            // skill's real name cannot shadow a project's own skill.
-            Some(LEGACY_PLANNING_SKILL) => Some(PLANNING_SKILL),
-            Some(skill) => Some(skill),
-            None => (self.agent == INTERACTIVE_AGENT).then_some(PLANNING_SKILL),
-        }
-    }
-
-    /// Whether this line is a skill session's rather than a lane's.
-    pub fn is_skill(&self) -> bool {
-        self.skill_label().is_some()
+    /// Whether this line belongs to a lane, and so is worth a row in
+    /// `spoolway eval` or `spoolway spend`: every reader over those two asks
+    /// this. Historical interactive lines — nothing writes one any more, but
+    /// the ledger is append-only, so old ones stay on disk — are the one
+    /// thing this skips.
+    pub fn is_lane(&self) -> bool {
+        self.agent != INTERACTIVE_AGENT
     }
 }
 
@@ -709,6 +666,13 @@ pub fn kind(name: &str) -> Option<&'static crate::agent::Accounting> {
 /// would mean the outer session — first in the table, and the one *not* doing
 /// the work — silently swallowed the enrolment of the inner. Banking is a
 /// per-session delta, so enrolling both counts each once and neither twice.
+///
+/// Nothing calls this now that the interactive banking path is gone — its one
+/// caller, the enrolment this used to feed, is removed. Kept public and
+/// tested rather than removed: [`crate::agent::Accounting::session_env`], the
+/// field this reads, is a fact about the agent that outlives any one caller
+/// of it, and this is the one place that reads it back off the environment.
+#[allow(dead_code)]
 pub fn ambient_sessions() -> Vec<(&'static str, String)> {
     crate::agent::ADAPTERS
         .iter()
@@ -946,45 +910,25 @@ fn harvest_file(kind: &str, path: &Path) -> Option<Harvest> {
     read_transcript(kind, path).total
 }
 
-/// One stretch of a transcript, and what it came to.
+/// A transcript read once, totalled and sized.
 ///
-/// A session is not one thing. It runs a skill, finishes, sits idle, runs
-/// another — and the transcript says so, in file order, which is the whole
-/// reason spoolway needs no cooperation from a skill to label its spend.
-pub struct Segment {
-    /// The skill running when this stretch was spent, or
-    /// [`INTERACTIVE_SKILL`].
-    pub skill: String,
-    pub harvest: Harvest,
-}
-
-/// A transcript read once: the whole thing, and the same thing partitioned.
-///
-/// Both come out of one pass because they are one pass — the dedupe of a
-/// request repeated across content blocks has to be global, or a request whose
-/// blocks straddle a marker would be banked in two segments.
+/// One pass because both readings need the same dedupe of a request repeated
+/// across content blocks — Claude Code writes an assistant line per content
+/// block and repeats that request's usage verbatim on each, so counting every
+/// line would roughly double a lane's reported spend.
 struct Transcript {
     /// `None` when the file holds no assistant turn at all.
     total: Option<Harvest>,
-    segments: Vec<Segment>,
     /// The last turn's own size — its input, cache read and cache write, which
     /// is what resuming this conversation would resend. Not derivable from
     /// [`total`](Transcript::total), which sums every turn: see [`last_turn`].
     context: u64,
 }
 
-/// The skill markers, and the totals, of one transcript.
-///
-/// The cursor starts at [`INTERACTIVE_SKILL`] and is moved by every slash
-/// command in the file, to that command's own name — stripped of a
-/// `spoolway-` prefix where it has one, kept as typed otherwise. A marker
-/// says where a skill *started* and never where it ended, so a session that
-/// carries on after one keeps attributing to it until the next marker
-/// arrives.
+/// The totals of one transcript, deduped by request.
 fn read_transcript(kind: &str, path: &Path) -> Transcript {
     let none = Transcript {
         total: None,
-        segments: Vec::new(),
         context: 0,
     };
     let Some(values) = records_at(kind, path) else {
@@ -1017,21 +961,10 @@ fn read_transcript(kind: &str, path: &Path) -> Transcript {
     // seen so far, because two *different* requests that happen to cost the
     // same are not the repeat this exists to catch.
     let mut last_unidentified: Option<(String, Tokens, Option<f64>)> = None;
-
-    // Kept in first-appearance order rather than a map: a reader of the ledger
-    // sees the skills in the order the session ran them.
-    let mut segments: Vec<Segment> = Vec::new();
-    let mut cursor = INTERACTIVE_SKILL.to_string();
-    // The model a kind announces beside its turns rather than on them. Moves
-    // like `cursor` does, and for the same reason: the line that says it is not
-    // the line that spends.
+    // The model a kind announces beside its turns rather than on them.
     let mut announced = String::new();
 
     for value in values {
-        if let Some(command) = slash_command(kind, &value) {
-            cursor = skill_of(&command);
-            continue;
-        }
         if let Some(model) = turn_model(kind, &value) {
             announced = model;
             continue;
@@ -1077,35 +1010,6 @@ fn read_transcript(kind: &str, path: &Path) -> Transcript {
             reported += cost;
             any_cost = true;
         }
-
-        let segment = match segments.iter_mut().find(|s| s.skill == cursor) {
-            Some(segment) => segment,
-            None => {
-                segments.push(Segment {
-                    skill: cursor.clone(),
-                    harvest: Harvest {
-                        model: String::new(),
-                        tokens: Tokens::default(),
-                        turns: 0,
-                        cost_usd: None,
-                        // Nothing reads a per-skill peak today — only the
-                        // whole-transcript `total` below feeds the ledger's
-                        // `ctx_peak` — so it is left at zero rather than
-                        // tracked and unused.
-                        ctx_peak: 0,
-                    },
-                });
-                segments.last_mut().expect("just pushed")
-            }
-        };
-        segment.harvest.tokens.add(&turn.tokens);
-        segment.harvest.turns += 1;
-        if !turn.model.is_empty() {
-            segment.harvest.model = turn.model;
-        }
-        if let Some(cost) = turn.cost {
-            segment.harvest.cost_usd = Some(segment.harvest.cost_usd.unwrap_or(0.0) + cost);
-        }
     }
 
     if turns == 0 {
@@ -1120,71 +1024,8 @@ fn read_transcript(kind: &str, path: &Path) -> Transcript {
             ctx_peak,
             cost_usd: any_cost.then_some(reported),
         }),
-        segments,
         context,
     }
-}
-
-/// The skill a slash command names: whatever the command is actually called.
-/// `spoolway-plan` is `spoolway-plan`, `my-plan` is `my-plan`, `clear` is
-/// `clear` — nothing is rewritten on the way in, so the name in the ledger is
-/// the name a person types. Which of those get a block of their own under
-/// `spoolway eval` is a later decision, [`crate::config::Config::skills`]'s
-/// to make; this only records what actually ran, so a name left off that list
-/// today is still banked under its real name and can be promoted to a block
-/// just by adding it.
-///
-/// A `spoolway-` prefix used to be stripped here, so that `/spoolway-plan`
-/// banked as `plan`. It meant `config.toml` named one skill by a name that
-/// appeared nowhere else — not on the command, not in `.claude/skills/`. The
-/// lines that shape wrote are still read as `spoolway-plan`, in
-/// [`Entry::skill_label`], so an existing ledger still totals to the same
-/// money.
-fn skill_of(command: &str) -> String {
-    command.to_string()
-}
-
-/// The slash command a transcript record announces, if it announces one.
-///
-/// Claude Code writes an invocation as an ordinary timestamped user record
-/// whose content carries `<command-name>/spoolway-plan</command-name>`, ahead
-/// of the assistant turns that command spent. pi's transcript carries no such
-/// marker, so a pi session is one undivided `interactive` stretch.
-fn slash_command(kind_name: &str, value: &serde_json::Value) -> Option<String> {
-    if kind(kind_name)?.format != Format::AnthropicApi {
-        return None;
-    }
-    if value.get("type")?.as_str()? != "user" {
-        return None;
-    }
-    let content = value.get("message")?.get("content")?;
-    // A user message is a string, or a list of blocks. Only a text block can
-    // carry the marker — a tool result is a block too, and a `grep` for
-    // `<command-name>` is a thing a session really does.
-    let text = match content.as_str() {
-        Some(text) => text.to_string(),
-        None => content
-            .as_array()?
-            .iter()
-            .filter(|block| block.get("type").and_then(|t| t.as_str()) == Some("text"))
-            .filter_map(|block| block.get("text").and_then(|t| t.as_str()))
-            .collect::<Vec<_>>()
-            .join("\n"),
-    };
-
-    // The whole record is the command envelope, not prose that mentions one.
-    // Which of `<command-name>` and `<command-message>` comes first has
-    // changed between Claude Code versions, so this matches the envelope
-    // rather than either order of it.
-    if !text.trim_start().starts_with("<command-") {
-        return None;
-    }
-
-    let open = "<command-name>";
-    let start = text.find(open)? + open.len();
-    let end = text[start..].find("</command-name>")? + start;
-    let name = text[start..end].trim().trim_start_matches('/').trim();
-    (!name.is_empty()).then(|| name.to_string())
 }
 
 struct Turn {
@@ -1347,9 +1188,8 @@ fn read_turn(kind_name: &str, value: &serde_json::Value) -> Option<Turn> {
 ///
 /// codex's `token_count` carries no model; the `turn_context` record that
 /// precedes each turn does, and it is per-turn rather than per-session because
-/// a session really can change model partway. Read the same way
-/// [`slash_command`] is — a line that moves a cursor rather than one that is a
-/// turn.
+/// a session really can change model partway. A record like this one moves
+/// `announced` in [`read_transcript`]'s loop rather than being a turn itself.
 fn turn_model(kind_name: &str, value: &serde_json::Value) -> Option<String> {
     if kind(kind_name)?.format != Format::Codex {
         return None;
@@ -2108,177 +1948,15 @@ pub mod registry {
 
 /// Whether this spoolway process is a lane's rather than a person's.
 ///
-/// A lane is itself a claude session and exports a session id of its own, so
-/// without this guard every lane would bank its own spend a second time — once
-/// as the step it ran, and once as skill spend. `dispatch::ENV_STEP` is the
-/// one fact only a lane's environment carries.
+/// A lane has no business writing to the project ledger on its own — that is
+/// the dispatcher's job, done through `Dispatcher::record_usage` and
+/// `bank_lane_at` under the pass's own snapshot — so a command run from
+/// inside a lane's own environment takes no part in a [`sweep`] at all,
+/// whatever [`crate::dispatch::live_lane_sessions`] would separately have
+/// excluded it for. `dispatch::ENV_STEP` is the one fact only a lane's
+/// environment carries.
 fn in_lane() -> bool {
     std::env::var_os(crate::dispatch::ENV_STEP).is_some_and(|value| !value.is_empty())
-}
-
-/// Bank what one interactive session has spent since it was last banked, one
-/// line per skill segment, and return what was appended.
-///
-/// Unlike a lane, this session is **still running** when it is read — so what
-/// lands is a running total caught up, not a closed account. What it is *not*
-/// is double counted: the ledger is the record of what was banked, so it is
-/// also the check, and re-reading a session that is fully banked appends
-/// nothing. That is what makes this safe to call on every command and every
-/// read.
-///
-/// Takes the transcript and an already-read ledger rather than looking either
-/// up, so the banking rules are testable without a home directory full of real
-/// sessions, and so [`bank_ambient`] and [`sweep`] can read the ledger once
-/// for a whole batch and hand the same copy to every session — a `spend` over
-/// hundreds of sessions then parses the file once, not once per session
-/// (review finding 17). The caller holds [`crate::lock::LedgerLock`] across
-/// that read and the appends this makes, so two commands banking one session
-/// cannot both diff against the same total and append the same delta (review
-/// finding 15).
-fn bank_session_at(
-    repo: &Repo,
-    kind_name: &str,
-    session: &str,
-    path: &Path,
-    ledger: &[Entry],
-) -> Vec<Entry> {
-    let segments = read_transcript(kind_name, path).segments;
-
-    // What this session has already been banked for, keyed the same way the
-    // transcript's own segments are — by the raw command name. `skill_label`
-    // folds an older bare `plan` line onto `spoolway-plan` for display and
-    // grouping, but a project with its own `/plan` skill banks that segment
-    // under `plan`; keying this map by the folded name would never match it,
-    // so the whole segment would re-bank on every command — review finding 16.
-    let mut banked: BTreeMap<String, (Tokens, u32, f64)> = BTreeMap::new();
-    // Whether this ledger has ever heard of the session at all, which is a
-    // different question from what it has been banked for: a session enrolled
-    // and not yet spending has a line and no tokens on it.
-    let mut enrolled = false;
-    for entry in ledger {
-        if entry.session != session {
-            continue;
-        }
-        enrolled = true;
-        // Not one of this session's skill lines — a lane's, or a line carried
-        // for a kind whose accounting row is gone.
-        if entry.skill_label().is_none() {
-            continue;
-        }
-        let Some(raw) = entry.skill.as_deref() else {
-            // A line from before skills were labelled: the whole session was
-            // banked under one label, so its segments cannot be told apart
-            // from what is already on the ledger. Re-banking any of them would
-            // count that session twice, and the old line is not rewritten —
-            // leave the session alone, in full.
-            return Vec::new();
-        };
-        let slot = banked.entry(raw.to_string()).or_default();
-        slot.0.add(&entry.tokens);
-        slot.1 += entry.turns;
-        slot.2 += entry.cost_usd.unwrap_or(0.0);
-    }
-
-    let stamp = crate::version::stamp(repo);
-    // One line of this session, however it came to be banked. A closure rather
-    // than two constructions, because every field below is a property of *the
-    // session* — which task it belongs to (none), what it reports (nothing) —
-    // and the two paths must not be able to drift on any of them.
-    let line = |skill: &str, model: String, turns: u32, tokens: Tokens, cost_usd: Option<f64>| {
-        Entry {
-            ts: chrono::Utc::now().to_rfc3339(),
-            // A skill session belongs to no task, and the transcript says
-            // which skill ran but never which plan it was about.
-            task: String::new(),
-            plan: None,
-            // Left empty rather than reused: a pipeline is free to declare a
-            // step called `plan`, and the two must never merge into one row.
-            step: String::new(),
-            pipeline: String::new(),
-            agent: INTERACTIVE_AGENT.to_string(),
-            kind: kind_name.to_string(),
-            model,
-            session: session.to_string(),
-            round: 0,
-            // A session's wall time is how long you had the window open, which
-            // is not a measure of anything. Left at zero rather than invented.
-            wall_s: 0,
-            turns,
-            tokens,
-            cost_usd,
-            // A skill session is banked per segment, not per lane — nothing
-            // reads a peak for one, so it is left absent the way a line
-            // written before this field existed is.
-            ctx_peak: None,
-            version: Some(stamp.version.clone()),
-            commit: stamp.commit.clone(),
-            // A conversation reports no outcome, and inventing a `pass` would
-            // put work in the pass rate that was never judged.
-            outcome: None,
-            // It belongs to no task, so it belongs to no run either.
-            run: None,
-            trial: None,
-            skill: Some(skill.to_string()),
-            project: String::new(),
-        }
-    };
-
-    // A transcript with no turn spoolway can read yet — and a session that has
-    // never been banked, so nothing will come back for it.
-    //
-    // This is not a hypothetical. codex writes a turn's `token_count` when the
-    // turn *ends*, and a command run from inside that turn is by definition
-    // running before it does: a rollout read at that moment carries the session
-    // and not one usage record. Without a line here, the first command in a
-    // codex session banks nothing, [`sweep`] never learns the session exists,
-    // and the whole conversation goes unaccounted on the strength of *when* it
-    // was asked rather than what it spent.
-    //
-    // So the enrolment is separated from the spend: a zero line, written once,
-    // saying only that this session is one to keep counting. It invents no
-    // number — the tokens really are the ones read, and every later sweep banks
-    // the deltas on top of it as usual.
-    if segments.is_empty() {
-        if enrolled {
-            return Vec::new();
-        }
-        let entry = line(INTERACTIVE_SKILL, String::new(), 0, Tokens::default(), None);
-        return match append(repo, &entry) {
-            Ok(()) => vec![entry],
-            Err(_) => Vec::new(),
-        };
-    }
-
-    let mut written = Vec::new();
-    for segment in segments {
-        let (already, turns, cost) = banked.get(&segment.skill).cloned().unwrap_or_default();
-        let tokens = segment.harvest.tokens.since(&already);
-        if tokens.is_zero() {
-            // Nothing has happened under this skill since it was last banked.
-            continue;
-        }
-
-        let model = segment.harvest.model.clone();
-        // Prices are linear in tokens, so pricing the delta is the same as
-        // differencing two priced totals — and it stays right when the agent
-        // reports its own cost instead.
-        let cost_usd = match segment.harvest.cost_usd {
-            Some(total) => Some((total - cost).max(0.0)),
-            None => price(&repo.config.models, &model, &tokens),
-        };
-
-        let entry = line(
-            &segment.skill,
-            model,
-            segment.harvest.turns.saturating_sub(turns),
-            tokens,
-            cost_usd,
-        );
-        if append(repo, &entry).is_ok() {
-            written.push(entry);
-        }
-    }
-    written
 }
 
 /// Bank one lane's spend from outside a dispatch pass, appending only what the
@@ -2407,7 +2085,6 @@ fn bank_lane_at(
         outcome: None,
         run: carry.and_then(|c| c.run.clone()),
         trial: carry.and_then(|c| c.trial.clone()),
-        skill: None,
         project: String::new(),
     };
     append(repo, &entry).ok()?;
@@ -2430,8 +2107,7 @@ fn catch_up_settled_lane(
 }
 
 /// [`catch_up_settled_lane`] against a transcript already located, so a test
-/// drives it without a home directory full of sessions — the same split
-/// [`bank_session_at`] has from [`sweep`].
+/// drives it without a home directory full of sessions.
 fn catch_up_settled_lane_at(
     repo: &Repo,
     kind: &str,
@@ -2467,7 +2143,7 @@ fn catch_up_settled_lane_at(
     let carry = ledger
         .iter()
         .rev()
-        .find(|entry| entry.session == session && !entry.is_skill())?;
+        .find(|entry| entry.session == session && entry.is_lane())?;
     bank_lane_at(
         repo,
         kind,
@@ -2481,63 +2157,21 @@ fn catch_up_settled_lane_at(
     )
 }
 
-/// Enrol the session this command is running in, by banking what it has spent
-/// so far.
+/// Catch the settled lane sessions this ledger names up to their transcripts,
+/// and return what that appended.
 ///
-/// Called on every command, because nothing else tells spoolway that a session
-/// exists at all: a banked line *is* the enrolment, and [`sweep`] catches the
-/// session up afterwards from anywhere. Silent, and best-effort — a person
-/// running `spoolway queue list` is not asking about money.
-pub fn bank_ambient(repo: &Repo) -> Vec<Entry> {
-    if in_lane() {
-        return Vec::new();
-    }
-    let sessions = ambient_sessions();
-    if sessions.is_empty() {
-        return Vec::new();
-    }
-    // One lock and one read for every ambient session, held across the appends
-    // so a command racing this one banks against what it wrote — see
-    // [`bank_session_at_locked`]. A batch that cannot take the lock defers
-    // rather than reading and appending unlocked: whoever holds it is doing
-    // this same catch-up, and a later command (or [`sweep`]) picks up
-    // anything this one skipped.
-    let Ok(_lock) = crate::lock::LedgerLock::acquire(&repo.ledger_lock_file()) else {
-        return Vec::new();
-    };
-    let ledger = read(repo).unwrap_or_default();
-    sessions
-        .into_iter()
-        .filter_map(|(kind, session)| {
-            let path = session_file(kind, &session)?;
-            Some(bank_session_at(repo, kind, &session, &path, &ledger))
-        })
-        .flatten()
-        .collect()
-}
-
-/// Catch the sessions this ledger names up to their transcripts, and return
-/// what that appended.
+/// Through [`catch_up_settled_lane`], one line for the turns that landed in a
+/// lane's transcript after the dispatcher tore it down. A lane
+/// [`crate::dispatch::live_lane_sessions`] still names is left out — it is the
+/// dispatcher's to bank at teardown — and a lane whose transcript has not
+/// moved since its last banked line is not even read. A session is skipped
+/// when its `kind` carries no accounting row — one spoolway never knew, or a
+/// kind whose row was removed under a ledger that still holds its old lines —
+/// since there is then no transcript format to read it back in.
 ///
-/// Two populations, read two ways. A session of either kind is skipped when its
-/// `kind` carries no accounting row — one spoolway never knew, or a kind whose
-/// row was removed under a ledger that still holds its old lines — since there
-/// is then no transcript format to read it back in.
-///
-/// - **Interactive sessions**, through [`bank_session_at`], one line per skill
-///   segment. This is what makes reading the ledger enough: a session is
-///   enrolled by the first spoolway command run in it and swept by every read
-///   afterwards, so a plan that was never queued — and the hour of
-///   conversation after the last command — are still counted.
-/// - **Settled lane sessions**, through [`catch_up_settled_lane`], one line for
-///   the turns that landed in a lane's transcript after the dispatcher tore it
-///   down. A lane [`crate::dispatch::live_lane_sessions`] still names is left
-///   out — it is the dispatcher's to bank at teardown — and a lane whose
-///   transcript has not moved since its last banked line is not even read.
-///
-/// Idempotent either way: [`bank_session_at`] and [`catch_up_settled_lane`]
-/// both bank only the delta since this session was last banked, and the
-/// settled-lane read is gated on the transcript's mtime as well.
+/// Idempotent: [`catch_up_settled_lane`] banks only the delta since this
+/// session was last banked, and the read is gated on the transcript's mtime
+/// as well.
 ///
 /// This project's ledger only. A `--all` read spans projects, but writing to
 /// another project's ledger from a command run here is not something a read
@@ -2547,11 +2181,8 @@ pub fn sweep(repo: &Repo) -> Vec<Entry> {
         return Vec::new();
     }
 
-    // One lock and one read for the whole sweep. `bank_session_at` used to
-    // re-read and re-parse the entire ledger once per known session, so a
-    // `spend` or `eval` on a large ledger cost O(sessions × ledger) full JSON
-    // parses — review finding 17. The lock is held across every append so a
-    // command racing this one still banks only its own delta.
+    // One lock and one read for the whole sweep, held across every append so
+    // a command racing this one still banks only its own delta.
     //
     // A sweep over many large transcripts can outlast [`LedgerLock::WAIT`]
     // without having stalled, so this defers on a lock it cannot take rather
@@ -2568,16 +2199,10 @@ pub fn sweep(repo: &Repo) -> Vec<Entry> {
     // then — see [`crate::dispatch::live_lane_sessions`].
     let live = crate::dispatch::live_lane_sessions(repo);
 
-    let mut seen: HashSet<(&str, &str)> = HashSet::new();
-    let mut skill_sessions: Vec<(&str, &str)> = Vec::new();
-    // Settled lane sessions the ledger names, kept apart from the skill ones:
-    // a lane line is caught up by a different reader — [`catch_up_settled_lane`]
-    // — than the per-skill [`bank_session_at`] an interactive session's line
-    // goes through.
     let mut lane_seen: HashSet<(&str, &str)> = HashSet::new();
     let mut lane_sessions: Vec<(&str, &str)> = Vec::new();
     for entry in &ledger {
-        if entry.session.is_empty() {
+        if entry.session.is_empty() || !entry.is_lane() {
             continue;
         }
         // A kind with no accounting row has no transcript to catch up to —
@@ -2587,24 +2212,12 @@ pub fn sweep(repo: &Repo) -> Vec<Entry> {
             continue;
         }
         let key = (entry.kind.as_str(), entry.session.as_str());
-        if entry.is_skill() {
-            if seen.insert(key) {
-                skill_sessions.push(key);
-            }
-        } else if !live.contains(&entry.session) && lane_seen.insert(key) {
+        if !live.contains(&entry.session) && lane_seen.insert(key) {
             lane_sessions.push(key);
         }
     }
 
-    let mut appended: Vec<Entry> = skill_sessions
-        .into_iter()
-        .filter_map(|(kind, session)| {
-            let path = session_file(kind, session)?;
-            Some(bank_session_at(repo, kind, session, &path, &ledger))
-        })
-        .flatten()
-        .collect();
-
+    let mut appended = Vec::new();
     for (kind, session) in lane_sessions {
         if let Some(entry) = catch_up_settled_lane(repo, kind, session, &ledger) {
             appended.push(entry);
@@ -2648,17 +2261,6 @@ mod tests {
     fn last_turn_size_at(kind: &str, path: &Path) -> Option<u64> {
         let tokens = last_turn_at(kind, path)?.tokens;
         Some(tokens.input + tokens.cache_read + tokens.cache_write())
-    }
-
-    /// Bank an explicit transcript under the ledger lock — read fresh, diff,
-    /// append — so a test can write more of a transcript and bank again to
-    /// see only the delta land, and so the concurrency test exercises the
-    /// real lock. Scratch paths are never contended, so this proceeds
-    /// unlocked on the (unreachable) `Err`.
-    fn bank_at(repo: &Repo, kind: &str, session: &str, path: &Path) -> Vec<Entry> {
-        let _lock = crate::lock::LedgerLock::acquire(&repo.ledger_lock_file());
-        let ledger = read(repo).unwrap_or_default();
-        bank_session_at(repo, kind, session, path, &ledger)
     }
 
     /// [`catch_up_settled_lane_at`] with the watermark a real sweep would take
@@ -3568,7 +3170,6 @@ mod tests {
             outcome: Some("pass".into()),
             run: Some("r00001".into()),
             trial: None,
-            skill: None,
             project: String::new(),
         };
         let line = serde_json::to_string(&entry).unwrap();
@@ -3608,7 +3209,6 @@ mod tests {
             outcome: None,
             run: None,
             trial: None,
-            skill: None,
             project: String::new(),
         }
     }
@@ -3994,8 +3594,11 @@ mod tests {
 
     // ------------------------------------------------------------ skills
 
-    /// A transcript in the shape Claude Code writes: a slash command as a user
-    /// record, then the assistant turns it spent.
+    /// A transcript in the shape Claude Code writes: a slash command as a
+    /// user record, then the assistant turns it spent. The command markers
+    /// are no longer read for anything — [`read_transcript`] only totals —
+    /// but the settled-lane tests below still use this to build a transcript
+    /// with more than one turn in it.
     fn transcript(records: &[(&str, u64)]) -> String {
         let mut out = String::new();
         for (n, (marker, output)) in records.iter().enumerate() {
@@ -4024,6 +3627,20 @@ mod tests {
         out
     }
 
+    /// Taken by every test that touches a variable the process environment
+    /// carries or swaps the home directory out from under.
+    ///
+    /// The environment belongs to the process, not to a test, so two of these
+    /// running at once read each other's values and each other's restores —
+    /// which is a failure in whichever one happened to look while the other was
+    /// putting the variable back, and never in the one at fault. There is no
+    /// per-test environment to hand out, so they take turns instead.
+    ///
+    /// Poison is stepped over deliberately: a test that failed while holding
+    /// this has already reported itself, and failing the others as well would
+    /// bury it.
+    static AMBIENT_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn fixture(name: &str) -> (Repo, PathBuf) {
         let root = crate::scratch::root(&format!("skill-{name}"));
         let _ = std::fs::remove_dir_all(&root);
@@ -4049,193 +3666,32 @@ mod tests {
         )
     }
 
-    /// The whole mechanism, in one file: the markers say which skill was in
-    /// the chair, and every turn after one belongs to it until the next.
-    #[test]
-    fn a_transcript_is_partitioned_by_the_skill_markers_in_it() {
-        let (_, path) = fixture("segments");
-        std::fs::write(
-            &path,
-            transcript(&[
-                // Before any marker at all.
-                ("", 1),
-                ("/spoolway-plan", 2),
-                // No marker: still planning, because a marker says where a
-                // skill started and never where it ended.
-                ("", 4),
-                // A slash command that is not a spoolway skill ends it, and
-                // banks under its own real name — as, now, does the spoolway
-                // one above, rather than falling back to `interactive`.
-                ("/clear", 8),
-                ("/spoolway-queue", 16),
-            ]),
-        )
-        .unwrap();
-
-        let read = read_transcript("claude", &path);
-        let by_skill: BTreeMap<&str, u64> = read
-            .segments
-            .iter()
-            .map(|s| (s.skill.as_str(), s.harvest.tokens.output))
-            .collect();
-
-        assert_eq!(
-            by_skill["spoolway-plan"], 6,
-            "the turn after the marker is still planning, under the command's full name"
-        );
-        assert_eq!(
-            by_skill["spoolway-queue"], 16,
-            "the `spoolway-` prefix is no longer stripped"
-        );
-        assert_eq!(by_skill["clear"], 8, "a command banks under its own name");
-        assert_eq!(
-            by_skill["interactive"], 1,
-            "only the stretch before the first marker"
-        );
-        // The whole file still totals to the whole file.
-        assert_eq!(read.total.unwrap().tokens.output, 31);
-    }
-
-    /// A session's turns land under `interactive` when no skill has been
-    /// invoked, which is what keeps an ordinary conversation accounted for.
-    #[test]
-    fn a_transcript_with_no_marker_is_one_interactive_stretch() {
-        let (_, path) = fixture("plain");
-        std::fs::write(&path, transcript(&[("", 3), ("", 5)])).unwrap();
-
-        let segments = read_transcript("claude", &path).segments;
-        assert_eq!(segments.len(), 1);
-        assert_eq!(segments[0].skill, INTERACTIVE_SKILL);
-        assert_eq!(segments[0].harvest.turns, 2);
-    }
-
-    /// A session that greps its own transcript is a session this feature was
-    /// built in. A marker is a command envelope, not any text that names one.
-    #[test]
-    fn a_tool_result_that_quotes_a_marker_is_not_one() {
-        let (_, path) = fixture("quoted");
-        let quoted = serde_json::json!({
-            "type": "user",
-            "message": {"role": "user", "content": [{
-                "type": "tool_result",
-                "tool_use_id": "toolu_1",
-                "content": "usage.rs:12: <command-name>/spoolway-plan</command-name>",
-            }]},
-        });
-        // A text block that merely mentions one, too.
-        let mentioned = serde_json::json!({
-            "type": "user",
-            "message": {"role": "user", "content": [{
-                "type": "text",
-                "text": "the marker looks like <command-name>/spoolway-queue</command-name>",
-            }]},
-        });
-        std::fs::write(
-            &path,
-            format!("{quoted}\n{mentioned}\n{}", transcript(&[("", 5)])),
-        )
-        .unwrap();
-
-        let segments = read_transcript("claude", &path).segments;
-        assert_eq!(segments.len(), 1);
-        assert_eq!(segments[0].skill, INTERACTIVE_SKILL);
-    }
-
-    /// The envelope Claude Code actually writes, in both the orders it has
-    /// written it in.
-    #[test]
-    fn a_marker_is_read_whichever_way_round_the_envelope_is() {
-        for content in [
-            "<command-name>/spoolway-plan</command-name>\n<command-message>spoolway-plan</command-message>",
-            "<command-message>spoolway-plan</command-message>\n<command-name>/spoolway-plan</command-name>\n<command-args>go</command-args>",
-        ] {
-            let value = serde_json::json!({
-                "type": "user",
-                "message": {"role": "user", "content": content},
-            });
-            assert_eq!(
-                slash_command("claude", &value).as_deref(),
-                Some("spoolway-plan")
-            );
+    /// A ledger line with only the fields a test overrides left to say —
+    /// everything else is the quietest value that parses.
+    fn plain_entry() -> Entry {
+        Entry {
+            ts: "2026-08-04T06:14:15+00:00".into(),
+            task: String::new(),
+            plan: None,
+            step: String::new(),
+            pipeline: String::new(),
+            agent: "claude".into(),
+            kind: "claude".into(),
+            model: "claude-opus-5".into(),
+            session: "s".into(),
+            round: 0,
+            wall_s: 0,
+            turns: 1,
+            tokens: Tokens::default(),
+            cost_usd: None,
+            ctx_peak: None,
+            version: None,
+            commit: None,
+            outcome: None,
+            run: None,
+            trial: None,
+            project: String::new(),
         }
-    }
-
-    /// The first command in a session, run before that session's first turn
-    /// has been written down.
-    ///
-    /// codex writes a turn's `token_count` when the turn ends, and a command
-    /// run from inside the turn runs before that — so the rollout it reads
-    /// carries the session and no usage at all. Banking nothing there would
-    /// leave the session unenrolled, and [`sweep`] only ever comes back for a
-    /// session the ledger already names: the whole conversation would go
-    /// unaccounted for having been asked a turn too early.
-    #[test]
-    fn a_session_with_nothing_readable_yet_is_still_enrolled() {
-        let (repo, path) = fixture("enrol");
-        // A rollout as it stands mid-turn: codex has opened the session and
-        // named its model, and neither line is a turn.
-        std::fs::write(
-            &path,
-            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"019ffa92\"}}\n\
-             {\"type\":\"turn_context\",\"payload\":{\"model\":\"Muse-Glimmer-30B\"}}\n",
-        )
-        .unwrap();
-
-        let enrolled = bank_at(&repo, "codex", "019ffa92", &path);
-        assert_eq!(enrolled.len(), 1, "the session has to be on the ledger");
-        assert!(enrolled[0].tokens.is_zero(), "and it has spent nothing yet");
-        assert_eq!(enrolled[0].turns, 0);
-        assert_eq!(enrolled[0].cost_usd, None, "no spend, and no price for it");
-        assert!(enrolled[0].is_skill(), "it is a session, not a lane");
-        // Enrolled once. A session that stays quiet does not grow a line per
-        // command run in it.
-        assert!(bank_at(&repo, "codex", "019ffa92", &path).is_empty());
-
-        // And when the turn does land, it is banked in full on top — the zero
-        // line consumed none of it.
-        std::fs::write(&path, CODEX_TRANSCRIPT).unwrap();
-        let banked = bank_at(&repo, "codex", "019ffa92", &path);
-        assert_eq!(banked.len(), 1);
-        assert_eq!(banked[0].tokens.output, 76 + 42);
-        assert_eq!(banked[0].turns, 2);
-        assert_eq!(banked[0].model, "Muse-Glimmer-30B");
-    }
-
-    /// Banking is a delta, per (session, skill), so a command run twice with
-    /// nothing in between is a command that writes nothing.
-    #[test]
-    fn banking_a_session_again_appends_only_what_is_new() {
-        let (repo, path) = fixture("delta");
-        std::fs::write(&path, transcript(&[("/spoolway-plan", 100)])).unwrap();
-
-        let first = bank_at(&repo, "claude", "s1", &path);
-        assert_eq!(first.len(), 1);
-        assert_eq!(first[0].skill.as_deref(), Some("spoolway-plan"));
-        assert_eq!(first[0].tokens.output, 100);
-        assert_eq!(first[0].step, "", "a skill is never filed as a step");
-        assert_eq!(first[0].task, "");
-        assert_eq!(first[0].cost_usd, Some(100.0 * 10.0 / 1_000_000.0));
-
-        // Read again with nothing new in the transcript.
-        assert!(bank_at(&repo, "claude", "s1", &path).is_empty());
-
-        // A new skill, and more of an old one.
-        std::fs::write(
-            &path,
-            transcript(&[("/spoolway-plan", 100), ("", 50), ("/spoolway-queue", 7)]),
-        )
-        .unwrap();
-        let again = bank_at(&repo, "claude", "s1", &path);
-        let banked: BTreeMap<&str, u64> = again
-            .iter()
-            .map(|e| (e.skill.as_deref().unwrap(), e.tokens.output))
-            .collect();
-        assert_eq!(banked["spoolway-plan"], 50, "only the delta");
-        assert_eq!(banked["spoolway-queue"], 7);
-
-        // And the ledger totals to the transcript, not to twice it.
-        let total: u64 = read(&repo).unwrap().iter().map(|e| e.tokens.output).sum();
-        assert_eq!(total, 157);
     }
 
     /// Banking a lane from outside a pass — the headless interrupt's path —
@@ -4272,7 +3728,6 @@ mod tests {
             ("demo", "implement")
         );
         assert_eq!(first.tokens.input, 1_000);
-        assert!(first.skill.is_none(), "a lane line, not a skill line");
 
         // The turn kept running: a second bank adds only what came after.
         let more = bank_lane_from(
@@ -4312,191 +3767,47 @@ mod tests {
         assert_eq!(banked, 1_600, "totals to the transcript, not past it");
     }
 
-    /// A project with its own `/plan` skill. The banked-totals map and the
-    /// transcript's segments are both keyed by the raw command name, so a
-    /// `plan` segment finds what was already banked for it and re-banks
-    /// nothing — review finding 16. Keyed through `skill_label` instead, the
-    /// lookup missed and the whole segment re-banked on every command.
+    /// A newly written line has no `skill` key at all — nothing writes one any
+    /// more, and the field itself is gone from [`Entry`].
     #[test]
-    fn a_skill_literally_named_plan_is_banked_once_not_on_every_command() {
-        let (repo, path) = fixture("plan-skill");
-        std::fs::write(&path, transcript(&[("/plan", 100)])).unwrap();
-
-        let first = bank_at(&repo, "claude", "s1", &path);
-        assert_eq!(first.len(), 1);
-        assert_eq!(first[0].skill.as_deref(), Some("plan"));
-        assert_eq!(first[0].tokens.output, 100);
-
-        // Nothing new in the transcript, so nothing new on the ledger.
+    fn a_new_line_serialises_with_no_skill_key() {
+        let json = serde_json::to_string(&plain_entry()).unwrap();
         assert!(
-            bank_at(&repo, "claude", "s1", &path).is_empty(),
-            "the `plan` segment must not re-bank against its own earlier line"
-        );
-        let total: u64 = read(&repo).unwrap().iter().map(|e| e.tokens.output).sum();
-        assert_eq!(total, 100, "banked once, not once per command");
-    }
-
-    /// Two commands banking the same session at the same instant. The ledger
-    /// lock serialises the read-diff-append, so the session's cost lands once
-    /// rather than being counted twice — review finding 15.
-    #[test]
-    fn two_concurrent_banks_record_the_session_once() {
-        let (repo, path) = fixture("concurrent");
-        std::fs::write(&path, transcript(&[("/spoolway-plan", 1000)])).unwrap();
-
-        std::thread::scope(|scope| {
-            for _ in 0..2 {
-                scope.spawn(|| {
-                    bank_at(&repo, "claude", "s1", &path);
-                });
-            }
-        });
-
-        let lines: Vec<u64> = read(&repo)
-            .unwrap()
-            .iter()
-            .filter(|e| e.session == "s1")
-            .map(|e| e.tokens.output)
-            .collect();
-        assert_eq!(
-            lines.iter().sum::<u64>(),
-            1000,
-            "the session's 1000 output tokens, banked once across both threads: {lines:?}"
+            !json.contains("\"skill\""),
+            "a freshly written line must carry no skill key: {json}"
         );
     }
 
-    /// A ledger line with only the fields a test overrides left to say —
-    /// everything else is the quietest value that parses.
-    fn plain_entry() -> Entry {
-        Entry {
-            ts: "2026-08-04T06:14:15+00:00".into(),
-            task: String::new(),
-            plan: None,
-            step: String::new(),
-            pipeline: String::new(),
-            agent: "claude".into(),
-            kind: "claude".into(),
-            model: "claude-opus-5".into(),
-            session: "s".into(),
-            round: 0,
-            wall_s: 0,
-            turns: 1,
-            tokens: Tokens::default(),
-            cost_usd: None,
-            ctx_peak: None,
-            version: None,
-            commit: None,
-            outcome: None,
-            run: None,
-            trial: None,
-            skill: None,
-            project: String::new(),
-        }
+    /// The ledger is append-only, so a line an old build banked with a
+    /// `skill` key on it — from the interactive banking path this task
+    /// removes — must still parse. The extra key is simply not there to read
+    /// back: nothing under `Entry` names it any more.
+    #[test]
+    fn a_line_with_a_skill_key_still_parses() {
+        let line = r#"{"ts":"2026-08-04T06:14:15+00:00","task":"","step":"","pipeline":"","agent":"interactive","kind":"claude","model":"","session":"s1","tokens":{"input":0,"output":0,"cache_read":0,"cache_write_5m":0,"cache_write_1h":0,"reasoning":0},"skill":"spoolway-plan"}"#;
+        let entry: Entry = serde_json::from_str(line).expect("an old skill line must still parse");
+        assert_eq!(entry.session, "s1");
+        assert!(!entry.is_lane(), "an interactive line, not a lane's");
     }
 
-    /// A line written before skills were labelled banked a whole session under
-    /// one label. Re-segmenting it now would count that session twice, so the
-    /// session is left exactly as it was banked.
+    /// `is_lane` is what `spoolway eval` and `spoolway spend` filter the
+    /// ledger through — pinned against both an interactive line and a lane
+    /// line so the two never trade places.
     #[test]
-    fn a_session_banked_under_the_old_planning_path_is_left_alone() {
-        let (repo, path) = fixture("legacy");
-        std::fs::write(&path, transcript(&[("/spoolway-plan", 60), ("/clear", 40)])).unwrap();
-
-        let legacy = Entry {
-            ts: chrono::Utc::now().to_rfc3339(),
-            task: "auth".into(),
-            plan: Some("auth".into()),
-            step: "plan".into(),
-            agent: INTERACTIVE_AGENT.into(),
-            session: "s1".into(),
-            turns: 2,
-            tokens: Tokens {
-                output: 100,
-                ..Tokens::default()
-            },
-            cost_usd: Some(1.0),
-            ..plain_entry()
-        };
-        append(&repo, &legacy).unwrap();
-
-        // It reads back under the planning skill's real name even though
-        // nothing wrote the field.
-        assert_eq!(read(&repo).unwrap()[0].skill_label(), Some("spoolway-plan"));
-        assert!(bank_at(&repo, "claude", "s1", &path).is_empty());
-        assert_eq!(read(&repo).unwrap().len(), 1);
-    }
-
-    /// The stripping `skill_of` wrote `plan` for `/spoolway-plan`. The ledger
-    /// is append-only, so those lines still say `plan`; reading them under the
-    /// command's real name is what keeps an existing eval table whole.
-    #[test]
-    fn a_line_banked_under_the_stripped_name_reads_as_the_full_one() {
-        let labelled = |skill: &str| Entry {
-            ts: chrono::Utc::now().to_rfc3339(),
-            agent: INTERACTIVE_AGENT.into(),
-            session: "s1".into(),
-            skill: Some(skill.to_string()),
-            ..plain_entry()
-        };
-
-        assert_eq!(labelled("plan").skill_label(), Some("spoolway-plan"));
-        // Only that one name is remapped. A project's own skill keeps its own.
-        assert_eq!(labelled("my-plan").skill_label(), Some("my-plan"));
-    }
-
-    /// Taken by every test that touches a variable the ambient lookup reads —
-    /// `CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`, `CODEX_HOME`.
-    ///
-    /// The environment belongs to the process, not to a test, so two of these
-    /// running at once read each other's values and each other's restores —
-    /// which is a failure in whichever one happened to look while the other was
-    /// putting the variable back, and never in the one at fault. There is no
-    /// per-test environment to hand out, so they take turns instead.
-    ///
-    /// Poison is stepped over deliberately: a test that failed while holding
-    /// this has already reported itself, and failing the others as well would
-    /// bury it.
-    static AMBIENT_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// A lane is itself a claude session. Without this guard every lane would
-    /// bank its own spend a second time, as skill spend.
-    #[test]
-    fn a_command_inside_a_lane_banks_no_skill_line() {
-        let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
-        let (repo, path) = fixture("lane");
-        std::fs::write(&path, transcript(&[("/spoolway-plan", 10)])).unwrap();
-
-        let previous = std::env::var_os("CLAUDE_CODE_SESSION_ID");
-        crate::platform::set_test_env("CLAUDE_CODE_SESSION_ID", "s1");
-        crate::platform::set_test_env(crate::dispatch::ENV_STEP, "implement");
-
-        assert!(bank_ambient(&repo).is_empty());
-        assert!(sweep(&repo).is_empty());
-        assert!(read(&repo).unwrap().is_empty());
-
-        crate::platform::remove_test_env(crate::dispatch::ENV_STEP);
-        // Out of a lane, the same session banks — so what the guard turned off
-        // is the lane, not the mechanism.
-        assert!(!bank_at(&repo, "claude", "s1", &path).is_empty());
-
-        match previous {
-            Some(value) => crate::platform::set_test_env("CLAUDE_CODE_SESSION_ID", value),
-            None => crate::platform::remove_test_env("CLAUDE_CODE_SESSION_ID"),
-        }
-    }
-
-    /// A lane's line carries no skill, and nothing reads one onto it.
-    #[test]
-    fn a_lane_line_is_not_a_skill_line() {
+    fn is_lane_tells_a_lane_from_an_interactive_session() {
         let lane = Entry {
             task: "login".into(),
             step: "review".into(),
             pipeline: "default".into(),
-            wall_s: 10,
             ..plain_entry()
         };
-        assert_eq!(lane.skill_label(), None);
-        assert!(!lane.is_skill());
+        assert!(lane.is_lane());
+
+        let interactive = Entry {
+            agent: INTERACTIVE_AGENT.into(),
+            ..plain_entry()
+        };
+        assert!(!interactive.is_lane());
     }
 
     // ------------------------------------------------ settled lanes, swept
@@ -4529,7 +3840,7 @@ mod tests {
         let first = catch_up(&repo, "claude", "s", &path, &ledger).expect("the catch-up line");
         assert_eq!(first.tokens.output, 40, "only what the ledger had not seen");
         assert_eq!(first.session, "s");
-        assert!(first.skill.is_none(), "a lane line, not a skill line");
+        assert!(first.is_lane(), "a lane line, not an interactive one");
 
         // Read again with nothing new in the transcript.
         let ledger = read(&repo).unwrap();
@@ -4579,7 +3890,7 @@ mod tests {
         assert_eq!(appended[0].tokens.output, 500);
         assert_eq!(appended[0].step, "implement", "the lane's own step");
         assert_eq!(appended[0].pipeline, "impl_tdd");
-        assert!(appended[0].skill.is_none());
+        assert!(appended[0].is_lane());
 
         let again = crate::platform::test_home::with_home(&home, || out_of_lane(|| sweep(&repo)));
         assert!(again.is_empty(), "idempotent");

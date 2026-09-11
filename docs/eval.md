@@ -54,15 +54,13 @@ is a real tty in raw mode or a pipe, ending the moment either runs out — and s
 reader with it through `src/screen.rs`. It never starts a dispatcher: this reads a ledger, it
 does not queue work.
 
-`tab` cycles four views, named in the top border along with every filter currently applied:
+`tab` cycles three views, named in the top border along with every filter currently applied:
 
 | View | What it shows |
 |---|---|
 | `pipelines` | The same block-per-pipeline table the printing path draws |
 | `steps` | Per pipeline, one row per step, aggregated over the whole window and the current filters |
 | `runs` | One row per run, newest first |
-| `skills` | The same skill blocks `spoolway eval` prints below the pipelines |
-
 `↑↓` moves a cursor over the rows.
 
 `f` opens a filter panel of four rows: `pipeline`, `step`, `since`, `until`. `scope` and
@@ -103,7 +101,7 @@ leaves the table exactly as it was.
 
 `e` writes the rows on screen, in whichever view they are in, to
 `.spoolway/evals/eval-<view>-YYYY-MM-DD-HHMMSS.csv`. The `<view>` part is the name of the
-view the rows came from — `pipelines`, `steps`, `runs` or `skills`. The stamp runs to the
+view the rows came from — `pipelines`, `steps`, `runs`. The stamp runs to the
 second, and a `-2`, `-3` and so on is appended when a file of that name is already there, so
 two exports in the same second and tabbing between views to export each both keep every file.
 The pipelines view uses the same header `--csv` writes. The other three build a header from
@@ -135,8 +133,8 @@ thing that can disagree with git.
 One fingerprint covers every pipeline in the project, so the same version can appear in more
 than one block: a config edit mints one version, and it is the version every pipeline reports
 under until the next edit. Naming the pipeline in a column would repeat it down every row and
-still leave the reader sorting; naming it once, over a block, is what the skills table below
-already does.
+still leave the reader sorting; naming it once, over a block, is what the version key printed
+over each block already does.
 
 Blocks lead with the pipeline whose newest version is newest, so this morning's work heads the
 stack, whatever pipeline it ran on. The key prints even where `--pipeline` has left one block
@@ -302,8 +300,8 @@ never both at once.
 ## Spend, by `spoolway spend`
 
 Every flag above reads the ledger as a version comparison. `spoolway spend` reads the same
-ledger a different way: a spend table, grouped by task, group, step, model, project, month or
-skill, or one row per lane with `spoolway spend lane`.
+ledger a different way: a spend table, grouped by task, group, step, model, project, month, or
+one row per lane with `spoolway spend lane`.
 
 ```
 spoolway spend step
@@ -319,50 +317,6 @@ pipeline         17     118.4k     339.9k     36.57M     683.2k       31.12     
 `eval --by` still works as a deprecated alias for `spoolway spend`, with a note to stderr
 pointing there. How a figure gets there, how a model is priced, what a skill session is, and
 the rest of what the table can group and window by — see [Cost accounting](cost.md).
-
-## Skills, a block each
-
-```
-spoolway eval
-```
-
-```
-skills
-spoolway-plan
-VERSION   SINCE       SESSIONS  COST USD  USD/SESSION
-04712e02  2026-08-16        12     14.16         1.18
-b210d1a8  2026-08-15         5     12.00         2.40
-```
-
-What deciding the work cost, under each version — see [Skill
-sessions](cost.md#skill-sessions). It answers the question the pipeline blocks answer for
-prompts, asked of the skills instead: did editing a skill make that skill cheaper.
-
-The ledger banks whatever slash command actually ran, under its own full name — so
-`/spoolway-plan`, `/my-plan` and `/code-review` are recorded as themselves rather than folded
-into one `interactive` bucket. Which of those names get a block of their own is `skills` in
-`config.toml`, a list of names — defaulting to `["spoolway-plan"]`, the one spoolway skill
-whose own editing is worth watching the cost of. Every other name, `interactive` included, is
-left off `spoolway eval`'s skills block entirely: it is still counted in full in the ledger,
-which never consults this list.
-
-```
-skills = ["spoolway-plan", "my-plan", "grilling"]
-```
-
-Blocks are ordered by total cost, biggest spender first. Each block is a bold key, then that
-key's versions newest first — the same block shape the pipelines above it use. There is no
-`RUNS` and no `PASS` here: a conversation is judged by nobody and belongs to no task. `COST USD`
-sits beside `USD/SESSION` because a version's total spend and its average both matter, and
-neither one alone tells you which changed.
-
-Registering a skill later still explains every session swept since — the ledger already banked
-it under its real name, `skills` only decides whether it gets a block. Lines already banked as
-`interactive`, from before a command's real name was recorded, stay that way: the ledger is
-append-only, and the command they came from was never written down.
-
-The block prints only on the plain table, not under `--pipeline` or `--step` — a skill session
-belongs to no pipeline at all.
 
 ## The honest limit
 

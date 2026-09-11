@@ -504,33 +504,6 @@ An old config still naming either key still parses, and both are dropped on the 
 A pipeline file still naming `blocked_on_write:` at either level still parses too, the key
 ignored the same way.
 
-## `skills` — which skills get a block of their own under `spoolway eval`
-
-```toml
-skills = ["spoolway-plan"]
-```
-
-A list of skill names, written in full — the same string the slash command has, and the same
-string the ledger banks. `spoolway eval` gives every name on this list a block of its own;
-every other name the ledger holds — including `interactive`, the stretches of a session with
-no skill in the chair — is left off `spoolway eval` entirely rather than folding into a
-catch-all row. Its spend still reaches the ledger, which counts every skill whether or not it
-is registered here.
-
-Defaults to `["spoolway-plan"]`, the one skill whose own editing is worth watching the cost of.
-Naming your own — `my-plan`, `code-review`, whatever a project has written — gives it a block
-from the next `spoolway eval` onward; the ledger already banked its sessions under that name,
-this only decides which names are worth a row of their own. See [Skills, a block
-each](eval.md#skills-a-block-each).
-
-A `spoolway-` prefix used to be stripped before banking, so this list named the planning skill
-`plan`. Lines written that way are still read as `spoolway-plan`, so an existing ledger totals
-to the same money under the new name; a config still naming `plan` matches nothing and should
-be changed to `spoolway-plan`.
-
-Tracked, so editing this list is itself a change to the setup — the same as editing a prompt
-or a pipeline — and mints a new version.
-
 ## Retired: `[sandbox]`
 
 Lanes were once confined by the kernel — Landlock, through a shim on every lane's `PATH` —

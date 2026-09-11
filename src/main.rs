@@ -228,16 +228,6 @@ fn run() -> Result<()> {
             // of them would be one more thing to rule out.
             retain::sweep_once(&repo);
 
-            // Enrol the session this command is running in. Nothing else tells
-            // spoolway that an interactive session exists at all — a banked
-            // line is the enrolment — and doing it here, once, is what keeps
-            // every skill counted without a single skill having to cooperate.
-            // A no-op inside a lane, and for an agent that exports no session
-            // id. See `usage::bank_ambient`. Ahead of the pipelines rather
-            // than behind them: whether a session existed is not a fact about
-            // whether the project's graph parses.
-            usage::bank_ambient(&repo);
-
             // The graph that *routes* the queue is the project's, read from
             // `repo.root` — never the checkout's. A lane reports from inside
             // its own worktree, and a worktree's committed pipelines are not

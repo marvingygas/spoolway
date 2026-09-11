@@ -37,6 +37,38 @@ pub fn run(repo: &Repo, args: &SpendArgs, json: bool) -> Result<()> {
     print(repo, args.by, &filters, json, args.csv)
 }
 
+/// Every lane in `filters`' scope and window, read off the ledger and swept
+/// up to date first. Pulled out of [`print`] so a test can drive the real
+/// filter over a real, on-disk ledger without capturing what `print` itself
+/// writes to stdout.
+fn lanes_in_scope(
+    repo: &Repo,
+    filters: &Filters,
+) -> Result<(Vec<crate::usage::Entry>, Scope, bool)> {
+    // Reading is also what catches the ledger up: a lane the dispatcher tore
+    // down can still have its transcript grow a little after — the turns a
+    // person's Escape or a late tool result left behind — so this banks a
+    // catch-up line for it (`crate::usage::catch_up_settled_lane`) before
+    // anything below is grouped or totalled.
+    crate::usage::sweep(repo);
+
+    let (mut entries, scope) = collect(repo, filters)?;
+
+    // An interactive line is a conversation, not a lane: it reports no
+    // outcome and belongs to no task, so it never earns a row here — see
+    // `Entry::is_lane`. Historical interactive lines stay on disk; this is
+    // where every table below skips them, in place of the `is_skill()`
+    // partition that used to hold them for a block of their own.
+    entries.retain(crate::usage::Entry::is_lane);
+
+    let window = window_of(filters.month, filters.since, filters.until)?;
+    let bounded = window.from.is_some() || window.until.is_some();
+    entries.retain(|entry| window.contains(&entry.ts));
+    entries.sort_by(|a, b| a.ts.cmp(&b.ts));
+
+    Ok((entries, scope, bounded))
+}
+
 /// What the pipeline has spent, read back out of the lane ledger.
 ///
 /// Every figure here is collected, never estimated: token counts come from the
@@ -54,18 +86,7 @@ pub fn print(
     json: bool,
     csv: bool,
 ) -> Result<()> {
-    // Reading is also what catches the ledger up: an interactive session is
-    // enrolled by the first spoolway command run in it and swept by every read
-    // afterwards, so what a skill has spent since then is on the ledger before
-    // anything is grouped. Idempotent, and to this project's ledger only.
-    crate::usage::sweep(repo);
-
-    let (mut entries, scope) = collect(repo, filters)?;
-
-    let window = window_of(filters.month, filters.since, filters.until)?;
-    let bounded = window.from.is_some() || window.until.is_some();
-    entries.retain(|entry| window.contains(&entry.ts));
-    entries.sort_by(|a, b| a.ts.cmp(&b.ts));
+    let (entries, scope, bounded) = lanes_in_scope(repo, filters)?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&entries)?);
@@ -94,25 +115,13 @@ pub fn print(
         false => SpendBy::Step,
     });
 
-    // Two tables, two units. A skill line has no run, no outcome and no wall
-    // time, so filing it in the STEP column would put it under headings that
-    // describe none of it — it goes in a block of its own, below. The `skill`
-    // cut asks for the opposite, and folds the whole pipeline into a single
-    // row so the skills can be compared against it.
-    let (skills, lanes): (Vec<&crate::usage::Entry>, Vec<&crate::usage::Entry>) =
-        entries.iter().partition(|entry| entry.is_skill());
-    let mixed = by != SpendBy::Skill && !skills.is_empty();
-
     // Group in a BTreeMap so rows come out in a stable order whatever the
-    // ledger's write order was.
+    // ledger's write order was. `entries` is lanes only — see the `is_lane`
+    // retain in `lanes_in_scope` — so there is no second population to hold
+    // apart the way a skill line once had to be.
     let mut groups: std::collections::BTreeMap<String, Totals> = std::collections::BTreeMap::new();
     let mut all = Totals::default();
-    let everything: Vec<&crate::usage::Entry> = entries.iter().collect();
-    let grouped: &[&crate::usage::Entry] = match by {
-        SpendBy::Skill => &everything,
-        _ => &lanes,
-    };
-    for entry in grouped {
+    for entry in &entries {
         let key = match by {
             SpendBy::Task => entry.task.clone(),
             // `entry.plan` is the ledger's own field name — it carries a
@@ -123,30 +132,11 @@ pub fn print(
             SpendBy::Model => entry.model.clone(),
             SpendBy::Project => entry.project.clone(),
             SpendBy::Month => crate::usage::month_of(&entry.ts),
-            // Every lane, whatever it ran, in one row: this cut is about the
-            // skills, and the pipeline is the thing they are measured against.
-            SpendBy::Skill => match entry.skill_label() {
-                Some(skill) => skill.to_string(),
-                None => "pipeline".to_string(),
-            },
             // Resolved above, and `Lane` returned before this loop.
             SpendBy::Lane => unreachable!(),
         };
         groups.entry(key).or_default().add(entry);
         all.add(entry);
-    }
-
-    // Distinct sessions, not rows: one session banks a line every time it is
-    // swept, so counting rows would report a single afternoon as six.
-    let mut by_skill: std::collections::BTreeMap<String, Totals> =
-        std::collections::BTreeMap::new();
-    let mut skills_total = Totals::default();
-    if mixed {
-        for entry in &skills {
-            let key = entry.skill_label().unwrap_or_default().to_string();
-            by_skill.entry(key).or_default().add(entry);
-            skills_total.add(entry);
-        }
     }
 
     let label = match by {
@@ -156,92 +146,34 @@ pub fn print(
         SpendBy::Model => "MODEL",
         SpendBy::Project => "PROJECT",
         SpendBy::Month => "MONTH",
-        SpendBy::Skill => "SKILL",
         SpendBy::Lane => unreachable!(),
     };
-    // Only the labels that will actually be printed: a ledger with no skill
-    // line on it must not have its columns widened by the words `pipeline` and
-    // `skills`, which it will never show.
-    let mut longest = groups
+    let width = groups
         .keys()
-        .chain(by_skill.keys())
         .map(String::len)
         .max()
         .unwrap_or(5)
         .max(label.len())
         .max("total".len());
-    if mixed {
-        longest = longest.max("pipeline".len()).max("skills".len());
-    }
-    // A table counted in sessions borrows three characters of the label column
-    // for its wider heading, so the label column has to have three to spare —
-    // see `session_head`. Only where such a table is printed at all, which is
-    // what keeps a ledger with no skill line on it printing what it always
-    // printed.
-    let width = match by == SpendBy::Skill || mixed {
-        true => longest + 3,
-        false => longest,
-    };
 
     // The flat export a person actually pastes into a spreadsheet: one row
     // per group already computed above, whatever `by` cut them by. No colour,
     // no `+?` — `Totals::csv_cost` says a floor the plain way a CSV cell can,
     // by naming the row's own unpriced count instead.
     if csv {
-        return print_group_csv(by, &groups, &all, mixed, &by_skill, &skills_total);
+        return print_group_csv(&groups, &all);
     }
 
-    // the `skill` cut is the one grouping whose rows are not lanes, so it counts
-    // the session and drops WALL — the same unit the skills block uses, for
-    // the same reason, since it is the same question asked the other way
-    // round.
-    if by == SpendBy::Skill {
-        println!("{}", session_head(label, width));
-        for (key, totals) in &groups {
-            println!("{}", totals.session_row(key, width));
-        }
-        println!("{}", all.session_row("total", width));
-    } else if !groups.is_empty() {
-        println!(
-            "{:<width$}  {:>5}  {:>9}  {:>9}  {:>9}  {:>9}  {:>10}  {:>8}",
-            label, "LANES", "IN", "OUT", "CACHE R", "CACHE W", "COST USD", "WALL"
-        );
-        for (key, totals) in &groups {
-            println!("{}", totals.row(key, width));
-        }
+    println!(
+        "{:<width$}  {:>5}  {:>9}  {:>9}  {:>9}  {:>9}  {:>10}  {:>8}",
+        label, "LANES", "IN", "OUT", "CACHE R", "CACHE W", "COST USD", "WALL"
+    );
+    for (key, totals) in &groups {
+        println!("{}", totals.row(key, width));
     }
-
-    if by == SpendBy::Skill {
-        // One table, already totalled.
-    } else if groups.is_empty() {
-        // A project that has planned but never dispatched. There is no
-        // pipeline table to put a subtotal under, and the skills block is
-        // then the whole report — so it carries the total itself.
-        println!("{}", session_head("SKILL", width));
-        for (key, totals) in &by_skill {
-            println!("{}", totals.session_row(key, width));
-        }
-        println!("{}", skills_total.session_row("total", width));
-    } else if !mixed {
-        // The only table there is, so its last row is the grand total — which
-        // is exactly what a project with no skill line on its ledger prints.
-        println!("{}", all.row("total", width));
-    } else {
-        println!("{}", all.row("pipeline", width));
-        println!();
-        println!("{}", session_head("SKILL", width));
-        for (key, totals) in &by_skill {
-            println!("{}", totals.session_row(key, width));
-        }
-        println!("{}", skills_total.session_row("skills", width));
-
-        // One grand total over both tables. No count and no WALL: neither
-        // column means the same thing on both sides of it.
-        let mut both = all.clone();
-        both.merge(&skills_total);
-        println!();
-        println!("{}", both.plain_row("total", width));
-    }
+    // The only table there is, so its last row is the grand total — there is
+    // no skills block left to hold a second one apart from.
+    println!("{}", all.row("total", width));
 
     // Say plainly which part of that total is a guess-free blank rather than a
     // zero, and what to do about it.
@@ -266,25 +198,6 @@ pub fn print(
     }
 
     Ok(())
-}
-
-/// The header over a table counted in sessions rather than lanes.
-///
-/// SESSIONS is three characters wider than LANES, and is written into the
-/// label column's own slack rather than given a column of its own — so the
-/// token columns stay in line with the pipeline table above it.
-fn session_head(label: &str, width: usize) -> String {
-    format!(
-        "{:<label_w$}  {:>8}  {:>9}  {:>9}  {:>9}  {:>9}  {:>10}",
-        label,
-        "SESSIONS",
-        "IN",
-        "OUT",
-        "CACHE R",
-        "CACHE W",
-        "COST USD",
-        label_w = width - 3,
-    )
 }
 
 /// A one-line note that this report is not everything, when that is true.
@@ -488,17 +401,13 @@ fn nothing_to_report(repo: &Repo, filters: &Filters, scope: &Scope, bounded: boo
 
 /// The STEP column's own width: the widest label actually printed there,
 /// never the fixed twelve characters a hardcoded `{:<12}` used to hold. A
-/// skill line's STEP is the skill name — `spoolway-plan`, `spoolway-calibrate`
-/// — which routinely runs past twelve, and every column right of a fixed
-/// width shifted out of line for it. Computed the same way TASK's own width
-/// already was.
+/// step's own name routinely runs past twelve, and every column right of a
+/// fixed width shifted out of line for it. Computed the same way TASK's own
+/// width already was.
 fn step_width(entries: &[crate::usage::Entry]) -> usize {
     entries
         .iter()
-        .map(|e| match e.skill_label() {
-            Some(skill) => skill.len(),
-            None => e.step.len(),
-        })
+        .map(|e| e.step.len())
         .max()
         .unwrap_or(4)
         .max(4)
@@ -534,19 +443,12 @@ fn runs_row(
         false => String::new(),
     };
     let when = entry.ts.get(..19).unwrap_or(&entry.ts).replace('T', " ");
-    // A skill line has no task and no step. What it *was* goes in the STEP
-    // column all the same — a row that says only when and how much says
-    // nothing at the grain this view exists for.
-    let (task, step) = match entry.skill_label() {
-        Some(skill) => ("—", skill),
-        None => (entry.task.as_str(), entry.step.as_str()),
-    };
     format!(
         "{:<19}  {}{:<width$}  {:<sw$}  {:>5}  {:>9}  {:>10}",
         when,
         project(&entry.project),
-        task,
-        step,
+        entry.task,
+        entry.step,
         entry.turns,
         tokens_human(entry.tokens.total()),
         money(entry.cost_usd),
@@ -581,16 +483,12 @@ fn print_runs(entries: &[crate::usage::Entry], with_project: bool) -> Result<()>
 fn print_runs_csv(entries: &[crate::usage::Entry]) -> Result<()> {
     println!("when,project,task,step,turns,tokens,cost");
     for entry in entries {
-        let (task, step) = match entry.skill_label() {
-            Some(skill) => ("—", skill),
-            None => (entry.task.as_str(), entry.step.as_str()),
-        };
         println!(
             "{},{},{},{},{},{},{}",
             csv_field(&entry.ts),
             csv_field(&entry.project),
-            csv_field(task),
-            csv_field(step),
+            csv_field(&entry.task),
+            csv_field(&entry.step),
             entry.turns,
             entry.tokens.total(),
             entry.cost_usd.map_or(String::new(), |c| format!("{c:.2}")),
@@ -600,33 +498,20 @@ fn print_runs_csv(entries: &[crate::usage::Entry]) -> Result<()> {
 }
 
 /// `spoolway spend --csv`: one row per group already computed for the plain
-/// table, flattened the same way [`print_runs_csv`] flattens the lane table —
-/// a `kind` column tells a pipeline row from a skill row apart when the two
-/// tables are mixed, since a CSV has no second heading to say so instead.
+/// table, flattened the same way [`print_runs_csv`] flattens the lane table.
+/// The `kind` column is always `pipeline` now that there is no second,
+/// skill-shaped population of rows for it to tell apart from — kept rather
+/// than dropped, so a script already parsing it by that column keeps
+/// working.
 fn print_group_csv(
-    by: SpendBy,
     groups: &std::collections::BTreeMap<String, Totals>,
     all: &Totals,
-    mixed: bool,
-    by_skill: &std::collections::BTreeMap<String, Totals>,
-    skills_total: &Totals,
 ) -> Result<()> {
     println!("kind,cut,lanes,sessions,in,out,cache_r,cache_w,cost,wall_s");
-    let kind = if by == SpendBy::Skill {
-        "skill"
-    } else {
-        "pipeline"
-    };
     for (key, totals) in groups {
-        println!("{}", totals.csv_row(kind, key));
+        println!("{}", totals.csv_row("pipeline", key));
     }
-    println!("{}", all.csv_row(kind, "total"));
-    if mixed {
-        for (key, totals) in by_skill {
-            println!("{}", totals.csv_row("skill", key));
-        }
-        println!("{}", skills_total.csv_row("skill", "total"));
-    }
+    println!("{}", all.csv_row("pipeline", "total"));
     Ok(())
 }
 
@@ -669,18 +554,6 @@ impl Totals {
             None if entry.tokens.is_zero() => {}
             None => self.unpriced += 1,
         }
-    }
-
-    /// Fold another group in whole. Used for the one grand total that spans
-    /// the pipeline table and the skills block.
-    fn merge(&mut self, other: &Totals) {
-        self.lanes += other.lanes;
-        self.tokens.add(&other.tokens);
-        self.wall_s += other.wall_s;
-        self.cost += other.cost;
-        self.priced += other.priced;
-        self.unpriced += other.unpriced;
-        self.sessions.extend(other.sessions.iter().cloned());
     }
 
     /// This group's cost, plain — the currency is named once in the column's
@@ -735,37 +608,6 @@ impl Totals {
             crate::config::format_duration(std::time::Duration::from_secs(
                 self.wall_s.max(0) as u64
             )),
-        )
-    }
-
-    /// A skills-block row: counted in sessions, and with no WALL — a session's
-    /// open hours are how long you had the window up, not model time.
-    fn session_row(&self, key: &str, width: usize) -> String {
-        format!(
-            "{:<label$}  {:>8}  {:>9}  {:>9}  {:>9}  {:>9}  {:>10}",
-            key,
-            self.sessions.len(),
-            tokens_human(self.tokens.input),
-            tokens_human(self.tokens.output),
-            tokens_human(self.tokens.cache_read),
-            tokens_human(self.tokens.cache_write()),
-            self.money(),
-            label = width - 3,
-        )
-    }
-
-    /// The grand total over two tables whose units differ: tokens and money
-    /// only, since those are all that mean the same thing on both sides.
-    fn plain_row(&self, key: &str, width: usize) -> String {
-        format!(
-            "{:<width$}  {:>5}  {:>9}  {:>9}  {:>9}  {:>9}  {:>10}",
-            key,
-            "",
-            tokens_human(self.tokens.input),
-            tokens_human(self.tokens.output),
-            tokens_human(self.tokens.cache_read),
-            tokens_human(self.tokens.cache_write()),
-            self.money(),
         )
     }
 }
@@ -830,6 +672,44 @@ mod tests {
         assert!(row.starts_with("pipeline,review,1,"), "row was: {row:?}");
     }
 
+    /// `lanes_in_scope` — the function `print` itself calls — retains only
+    /// `Entry::is_lane`, in place of the `is_skill()` partition this table
+    /// used to run into a block of its own. Pinned against a fixture repo
+    /// holding both an interactive line and a lane line, on disk, so
+    /// deleting that retain breaks this test rather than an out-of-band
+    /// replay of the same predicate.
+    #[test]
+    fn an_interactive_line_never_reaches_a_group_or_the_total() {
+        let repo = fixture("spend-excludes-interactive");
+        crate::usage::append(&repo, &lane(Some(2.5))).unwrap();
+
+        let mut interactive = lane(Some(99.0));
+        interactive.agent = crate::usage::INTERACTIVE_AGENT.into();
+        interactive.task = String::new();
+        interactive.step = String::new();
+        interactive.session = "interactive-s".into();
+        crate::usage::append(&repo, &interactive).unwrap();
+
+        let filters = Filters {
+            since: None,
+            until: None,
+            month: None,
+            all: false,
+            project: None,
+        };
+        let (entries, _scope, _bounded) = lanes_in_scope(&repo, &filters).unwrap();
+
+        assert_eq!(entries.len(), 1, "the interactive line stayed out");
+        assert!(entries.iter().all(|e| e.is_lane()));
+
+        let mut all = Totals::default();
+        for entry in &entries {
+            all.add(entry);
+        }
+        assert_eq!(all.lanes, 1);
+        assert_eq!(all.cost, 2.5);
+    }
+
     /// Local lanes really are free, and that has to read as a fact rather than
     /// as a missing figure.
     #[test]
@@ -863,15 +743,14 @@ mod tests {
     #[test]
     fn the_step_column_is_as_wide_as_its_widest_label() {
         let mut short = lane(Some(1.0));
-        short.skill = None;
         short.task = "login".into();
         short.step = "review".into();
         let mut long = lane(Some(2.0));
-        long.skill = Some("spoolway-calibrate".into());
+        long.step = "reproduce-again".into();
 
         let entries = vec![short, long];
         let sw = step_width(&entries);
-        assert_eq!(sw, "spoolway-calibrate".len());
+        assert_eq!(sw, "reproduce-again".len());
 
         let width = "login".len();
         let header = runs_header(false, 7, width, sw);

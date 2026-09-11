@@ -62,19 +62,13 @@ implement         4      52.2k      15.4k     794.4k          0           0     
 review            4        536     222.1k     27.22M     568.3k       24.85       53m
 pipeline         17     118.4k     339.9k     36.57M     683.2k       31.12     3h29m
 
-SKILL      SESSIONS         IN        OUT    CACHE R    CACHE W    COST USD
-plan              3       9.1k      41.2k     18.44M      92.0k        8.30
-queue             2       1.4k       6.7k      3.12M      11.4k        1.21
-skills            6      12.7k      59.8k     27.64M     128.3k       12.15
-
 total                    131.1k     399.7k     64.21M     811.5k       43.27
 ```
 
-Two tables, two units, one grand total — see [Skill sessions](#skill-sessions). Each table
-closes with its own subtotal, `pipeline` under the lanes and `skills` under the sessions, and
-`total` is the one line that spans both — carrying no count and no `WALL`, since neither column
-means the same thing on both sides of it. A project whose ledger holds no skill line prints the
-first table alone, with `total` on its last row.
+One table and one total. The rows are the ledger grouped by the named cut; the last row, `total`,
+is the sum of every row above it — the same columns, all of them filled, with no second
+population left to hold apart. Every line of spend that is not a lane is skipped wherever this
+table is read, so it shows lanes only.
 
 ### Reading a row
 
@@ -92,17 +86,12 @@ group into a floor on its own.
 ### Grouping
 
 The cut is a plain positional argument: `task`, `group`, `step`, `model`, `project`, `month`,
-`skill`, `lane`. Each answers a different question — `step` says where the pipeline's spend
-goes, `model` what each one costs to run, `task` and `group` what a piece of work came to.
-`skill` cuts the ledger the other way, folding every lane into a single `pipeline` row so the
-skills can be compared against it. `lane` is the one cut that prints a different table
-entirely: one row per lane, newest last, instead of a grouped summary.
+`lane`. Each answers a different question — `step` says where the pipeline's spend goes,
+`model` what each one costs to run, `task` and `group` what a piece of work came to. `lane` is
+the one cut that prints a different table entirely: one row per lane, newest last, instead of a
+grouped summary.
 
 It defaults to `step`, or to `project` when more than one project is in scope.
-
-A skill line carries no task and no group, so it appears in the skills block rather than in a
-`--by task` or `--by group` row: the transcript says which skill ran, never which group it was
-about.
 
 Under the global `--json`, `spoolway spend` does not honour the cut at all: it dumps the
 matching ledger entries themselves, raw and ungrouped, whatever cut was named. A script wanting
@@ -110,72 +99,6 @@ the grouped figures reads the plain table, or `--csv`, instead — `--json` and 
 refused together, since they are two different exports of the same rows. In `--csv`, a name
 that holds a comma, a double quote or a newline is double-quoted the RFC 4180 way, so a
 project directory called `foo, bar` does not shift every column after it.
-
-### Skill sessions
-
-The lanes are not where all the money goes. Planning, queueing and reshaping a prompt happen
-in **your own** session, and that session's transcript already says which skill was running
-when each turn was spent: Claude Code writes a slash command as a user record, ahead of the
-assistant turns it spent. spoolway partitions the transcript on those markers and banks each
-stretch as an ordinary ledger line carrying a `skill` label — the command's own full name, so
-`/spoolway-plan`, `/my-plan` and `/code-review` are recorded as themselves rather than folded
-into one bucket the moment they are not one of spoolway's own.
-`interactive` is left for the one stretch no command ever names: before the first marker in the
-transcript.
-
-Which session that is comes from the environment: `$CLAUDE_CODE_SESSION_ID` for claude,
-`$CODEX_THREAD_ID` for codex. Both, when there are both — a codex session started from inside
-a claude one is really inside both, and each is enrolled and banked on its own. A codex
-rollout carries no command envelope spoolway reads, so a codex session banks entirely under
-`interactive`: the spend is counted, the skill that spent it is not.
-
-No skill has to cooperate. Nothing is added to a `SKILL.md`, nothing has to be remembered at
-the end of a session, and a skill written next month is counted from its first run.
-
-Two halves make that work, and they are deliberately apart:
-
-| Half | What it does |
-|---|---|
-| **Enrol** | Any spoolway command run in an interactive session banks what it has spent so far. That line is how spoolway learns the session exists at all — and a session whose transcript carries no turn yet is enrolled with a zero line rather than skipped, because a session nothing enrols is a session nothing ever comes back for. codex writes a turn's usage when the turn *ends*, so the first command in one really does read an empty rollout |
-| **Sweep** | Reading the ledger — `spoolway eval` or `spoolway spend` — re-reads every session it names, and appends what has arrived since. So a plan you never queued, and the hour of conversation after your last command, are still counted |
-
-Both bank only the **delta** since that session was last banked, per skill — so reading twice
-with nothing in between appends nothing, and the ledger totals to the session rather than to a
-multiple of it. This does mean reading the ledger writes before it prints: idempotent, and to
-this project's ledger only, never to another project's under `--all`.
-
-A skill line is counted in **distinct sessions**, not rows: one session banks a line every
-time it is swept. It carries no run, no outcome and `wall_s: 0` — a session's open hours
-measure how long you had the window up, not model time — which is why the skills block has no
-WALL column, and why `spoolway eval` keeps skill spend out of the pipeline blocks entirely.
-
-Every command's real name reaches the ledger, but not every name earns a block of its own on
-`spoolway eval` — `skills` in `config.toml` decides that, defaulting to `["spoolway-plan"]`.
-A name left off that list is still counted in full in the ledger; only `spoolway eval` narrows
-to what is registered. See [Naming your own
-skills](configuration.md#skills--which-skills-get-a-block-of-their-own-under-spoolway-eval).
-
-What it cannot do:
-
-- A marker says where a skill *started*, never where it ended, so a session that carries on
-  after one is charged to it until the next marker arrives.
-- Skill labels are claude's alone. A codex session is counted in full, but every line of it
-  reads `interactive`: its rollout carries no command envelope to partition on.
-- `pi` is left out entirely — it exports no session id, so an interactive session of it goes
-  unaccounted. If it ever does, the `session_env` line of its row in `agent::ADAPTERS` is the
-  only thing to change.
-
-  That is a gap in *enrolment*, not in metering. Every shipped kind is metered and `spoolway
-  eval` is a view over the ledger with no notion of kind, so every kind is evaluable. What only
-  a cloud model carries is a **price**: the vendored litellm table prices what the providers
-  publish and nothing else, so a local model reads as tokens at zero cost — by design, not by
-  omission. `pi` is the one kind you point at your own server; `claude` and `codex` are the two
-  that arrive priced. A project that wants its local model priced
-  writes a glob in `[models]`, which already wins over the vendored table — see
-  [Pricing](#pricing).
-- A session that never runs a single spoolway command is never enrolled, and never counted.
-- A lane is itself an agent session, so a lane's own spoolway commands bank nothing: the
-  `SPOOLWAY_STEP` in a lane's environment is what tells the two apart.
 
 ### Settled lanes
 
