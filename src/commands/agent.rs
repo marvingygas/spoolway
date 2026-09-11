@@ -1687,12 +1687,27 @@ mod tests {
         std::fs::write(dir.join("rollout-fixture.jsonl"), line.replace('\n', "")).unwrap();
     }
 
-    const REAL_SHAPED_RATE_LIMITS: &str = r#"{"limit_id":"codex","limit_name":null,
-        "primary":{"used_percent":5.0,"window_minutes":300,"resets_at":1788611977},
-        "secondary":{"used_percent":2.0,"window_minutes":10080,"resets_at":1789151593},
-        "credits":{"has_credits":false,"unlimited":false,"balance":"0"},
+    /// codex's own `rate_limits` payload, shaped exactly as a real rollout
+    /// writes one. The two `resets_at` are pinned whole days ahead of now
+    /// rather than kept at the capture's own epoch seconds: `quota_clause`
+    /// drops the `MM-DD` prefix for a reset that falls on today, so a fixed
+    /// timestamp quietly changes the expected line on whichever day the
+    /// suite happens to run through it. Returned alongside the two instants
+    /// so a caller can format the same reset it just wrote.
+    fn real_shaped_rate_limits() -> (String, i64, i64) {
+        let now = chrono::Utc::now();
+        let five_hour = (now + chrono::Duration::days(3)).timestamp();
+        let seven_day = (now + chrono::Duration::days(6)).timestamp();
+        let json = format!(
+            r#"{{"limit_id":"codex","limit_name":null,
+        "primary":{{"used_percent":5.0,"window_minutes":300,"resets_at":{five_hour}}},
+        "secondary":{{"used_percent":2.0,"window_minutes":10080,"resets_at":{seven_day}}},
+        "credits":{{"has_credits":false,"unlimited":false,"balance":"0"}},
         "individual_limit":null,"spend_control_reached":null,"plan_type":"plus",
-        "rate_limit_reached_type":null}"#;
+        "rate_limit_reached_type":null}}"#
+        );
+        (json, five_hour, seven_day)
+    }
 
     const NULL_RATE_LIMITS: &str = r#"{"limit_id":"codex","limit_name":null,"primary":null,
         "secondary":null,"credits":null,"individual_limit":null,
@@ -1707,18 +1722,15 @@ mod tests {
     fn quota_clause_on_a_fresh_codex_reading_reports_both_windows_like_the_mockup() {
         let home = crate::scratch::root("agent-verify-quota-codex-fresh");
         std::fs::create_dir_all(&home).unwrap();
-        write_codex_rollout(
-            &home,
-            &chrono::Utc::now().to_rfc3339(),
-            REAL_SHAPED_RATE_LIMITS,
-        );
+        let (rate_limits, five_hour_at, seven_day_at) = real_shaped_rate_limits();
+        write_codex_rollout(&home, &chrono::Utc::now().to_rfc3339(), &rate_limits);
         crate::platform::test_home::with_home(&home, || {
             let adapter = crate::agent::adapter("codex").expect("codex is a real adapter");
-            let five_hour_resets = chrono::DateTime::from_timestamp(1788611977, 0)
+            let five_hour_resets = chrono::DateTime::from_timestamp(five_hour_at, 0)
                 .unwrap()
                 .with_timezone(&chrono::Local)
                 .format("%m-%d %H:%M");
-            let seven_day_resets = chrono::DateTime::from_timestamp(1789151593, 0)
+            let seven_day_resets = chrono::DateTime::from_timestamp(seven_day_at, 0)
                 .unwrap()
                 .with_timezone(&chrono::Local)
                 .format("%m-%d %H:%M");
@@ -1749,18 +1761,15 @@ mod tests {
     fn agent_verify_prints_codexs_quota_row_exactly_as_the_mockup_draws_it() {
         let home = crate::scratch::root("agent-verify-quota-codex-exact");
         std::fs::create_dir_all(&home).unwrap();
-        write_codex_rollout(
-            &home,
-            &chrono::Utc::now().to_rfc3339(),
-            REAL_SHAPED_RATE_LIMITS,
-        );
+        let (rate_limits, five_hour_at, seven_day_at) = real_shaped_rate_limits();
+        write_codex_rollout(&home, &chrono::Utc::now().to_rfc3339(), &rate_limits);
         crate::platform::test_home::with_home(&home, || {
             let adapter = crate::agent::adapter("codex").expect("codex is a real adapter");
-            let five_hour_resets = chrono::DateTime::from_timestamp(1788611977, 0)
+            let five_hour_resets = chrono::DateTime::from_timestamp(five_hour_at, 0)
                 .unwrap()
                 .with_timezone(&chrono::Local)
                 .format("%m-%d %H:%M");
-            let seven_day_resets = chrono::DateTime::from_timestamp(1789151593, 0)
+            let seven_day_resets = chrono::DateTime::from_timestamp(seven_day_at, 0)
                 .unwrap()
                 .with_timezone(&chrono::Local)
                 .format("%m-%d %H:%M");

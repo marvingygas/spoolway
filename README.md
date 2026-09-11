@@ -129,7 +129,7 @@ Every task on the board is in one of a few states:
 | State | Meaning |
 |---|---|
 | `queued` | Waiting for its dependencies and a free slot. |
-| `running` | An agent is working the task's current step right now. |
+| `running` | An agent is working the task's current step, or it has just moved there and a lane is starting. |
 | `waiting on you` | A lane ended its turn on a question; answering it is what moves the task. |
 | `paused` | Passed a gated step; you decide whether it goes on. |
 | `blocked` | Something needs a person. |

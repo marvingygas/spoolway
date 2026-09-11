@@ -280,6 +280,12 @@ impl Row {
 pub struct Board {
     /// Task id → the stage it was on at the last frame.
     stages: BTreeMap<String, String>,
+    /// Task id → when its row's stage was last seen to change, alongside
+    /// `stages` above. `build_rows`' state arm reads this back to tell a task
+    /// that just handed off to a new step, with no lane up for it yet, apart
+    /// from one that has genuinely run out of workers to pick it up: the two
+    /// look identical on disk, and only this clock tells them apart.
+    arrived: BTreeMap<String, Instant>,
     recent: VecDeque<RecentEvent>,
     /// Whether the queue as it stood at the first frame has been taken as the
     /// starting point. Without this every task already in flight is announced
@@ -321,6 +327,7 @@ impl Board {
     fn with_term(term: crate::platform::TermGuard) -> Board {
         Board {
             stages: BTreeMap::new(),
+            arrived: BTreeMap::new(),
             recent: VecDeque::new(),
             adopted: false,
             _term: term,
@@ -398,6 +405,7 @@ impl Board {
             phase,
             self.watching,
             &mut self.stages,
+            &mut self.arrived,
             &mut self.recent,
             self.cursor.as_deref(),
             &mut self.jobs_next,
@@ -1184,7 +1192,13 @@ pub fn rows(repo: &Repo, pipelines: &Pipelines) -> Result<Vec<Row>> {
     let mux = crate::mux::backend(repo);
     let lanes = mux.list_lanes().unwrap_or_default();
     let ledger = crate::usage::read_cached(repo);
-    build_rows(repo, &tasks, pipelines, &graph, &waiting, &lanes, &ledger)
+    // A plain snapshot, not the live board: it holds no memory of a task's
+    // last stage between calls, so it has nothing to tell "just arrived"
+    // apart from "genuinely queued" with, and keeps reading the latter —
+    // see `Board::arrived`.
+    build_rows(
+        repo, &tasks, pipelines, &graph, &waiting, &lanes, &ledger, None,
+    )
 }
 
 // Every argument is a distinct piece of the board's own state that `frame`
@@ -1198,6 +1212,7 @@ fn render(
     phase: Phase,
     watching: bool,
     stages: &mut BTreeMap<String, String>,
+    arrived: &mut BTreeMap<String, Instant>,
     recent: &mut VecDeque<RecentEvent>,
     cursor: Option<&str>,
     jobs_next: &mut Option<crate::jobs::StayingUpMemo>,
@@ -1232,14 +1247,32 @@ fn render(
                 recent,
                 arrival_event(&now, id, was, stage, &tasks, pipelines),
             );
+            // Starts this row's grace clock: `build_rows`' state arm reads it
+            // back to tell a task that just handed off, with no lane up for
+            // it yet, apart from one genuinely out of workers.
+            arrived.insert(id.clone(), Instant::now());
         }
     }
     *stages = current;
+    // Dropped alongside `stages` above rather than left to grow forever: a
+    // task done or archived never clears its own entry, and the dispatcher
+    // stays up for weeks (the same kind of leak `forget_dead_live_sessions`,
+    // below, prunes for the session cache).
+    arrived.retain(|id, _| stages.contains_key(id));
 
     // Read once and shared: the rows want it for the OUT column and the footer
     // wants it for the spend, and it is the largest file the board opens.
     let ledger = crate::usage::read_cached(repo);
-    let active_rows = build_rows(repo, &tasks, pipelines, &graph, &waiting, &lanes, &ledger)?;
+    let active_rows = build_rows(
+        repo,
+        &tasks,
+        pipelines,
+        &graph,
+        &waiting,
+        &lanes,
+        &ledger,
+        Some(&*arrived),
+    )?;
 
     // Archived tasks stay on the board, dimmed, only as long as their group
     // still has something in the queue — so the groups worth pulling from the
@@ -1296,9 +1329,12 @@ fn render(
     // stays untouched: `init` prints its banner through the same function and
     // must not gain a line it never asked for.
     frame.push('\n');
-    // The spool only turns while something on the board is actually running —
-    // a lane or a command step — so a queue with nothing to do prints the
-    // still mark rather than an animation with nothing behind it.
+    // The spool only turns while something on the board reads `Running` — a
+    // lane, a command step, or a row still inside its own handoff grace
+    // window — so a queue with nothing to do, and nothing about to, prints
+    // the still mark instead. A mid-handoff row turning the spool with
+    // neither a lane nor a command step behind it is that third case working
+    // as the mockup intends, not an animation with nothing behind it.
     let running = rows.iter().any(|row| row.state == State::Running);
     frame.push_str(&masthead(&header.join(" · "), pane, spool_frame(running)));
     frame.push('\n');
@@ -1625,6 +1661,16 @@ fn paused_next(
 
 /// The rows themselves, from state already read. Split out so the board can
 /// read the queue and the lane list once per frame and share both.
+///
+/// `grace` is [`Board`]'s per-task memory of when a row's stage last changed
+/// — `Some` only from the live `Board::frame`, so a task fresh off a handoff
+/// with no lane up yet reads `Running` rather than `Queued` for one ordinary
+/// gap. `rows()`'s one-shot snapshot, and every test call here, pass `None`
+/// and keep the plain `Queued` reading — there is no such memory to read.
+///
+/// Every argument is a distinct piece of state already read once per frame
+/// — the same reasoning `render`'s own `too_many_arguments` allow gives.
+#[allow(clippy::too_many_arguments)]
 fn build_rows(
     repo: &Repo,
     tasks: &[crate::task::Task],
@@ -1633,6 +1679,7 @@ fn build_rows(
     waiting: &std::collections::BTreeSet<String>,
     lanes: &[crate::mux::Lane],
     ledger: &[crate::usage::Entry],
+    grace: Option<&BTreeMap<String, Instant>>,
 ) -> Result<Vec<Row>> {
     // The dispatcher's own record of what it has started outside a lane. Built
     // once: it is a handle on a directory, and every task below asks it the
@@ -1829,7 +1876,18 @@ fn build_rows(
                 false,
             ),
             Some(step) => {
-                let state = match live || command_run.is_some() {
+                // A handoff just landed and no lane is up for it yet — the
+                // ordinary gap between `spoolway report` writing the new
+                // stage and the dispatcher's next pass starting a lane
+                // there. Indistinguishable on disk from a task genuinely out
+                // of workers, so only the board's own memory of when this
+                // row's stage last changed can tell the two apart; a task
+                // still on `queued` has no such memory to consult in the
+                // first place, since that arm above never reaches here.
+                let mid_handoff = grace
+                    .and_then(|arrived| arrived.get(task.id()))
+                    .is_some_and(|since| since.elapsed() < repo.config.dispatch.interval * 2);
+                let state = match live || command_run.is_some() || mid_handoff {
                     true => State::Running,
                     false => State::Queued,
                 };
@@ -2905,8 +2963,17 @@ mod tests {
 
         let mut working = lane("login · implement", &repo.root);
         working.status = crate::mux::LaneStatus::Working;
-        let rows =
-            build_rows(&repo, &tasks, &pipelines, &graph, &waiting, &[working], &[]).unwrap();
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &waiting,
+            &[working],
+            &[],
+            None,
+        )
+        .unwrap();
         let row = rows.iter().find(|r| r.id == "login").unwrap();
         assert!(matches!(row.state, State::Running), "{}", row.next);
 
@@ -2914,8 +2981,17 @@ mod tests {
         // says where to go and answer it.
         let mut settled = lane("login · implement", &repo.root);
         settled.status = crate::mux::LaneStatus::Done;
-        let rows =
-            build_rows(&repo, &tasks, &pipelines, &graph, &waiting, &[settled], &[]).unwrap();
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &waiting,
+            &[settled],
+            &[],
+            None,
+        )
+        .unwrap();
         let row = rows.iter().find(|r| r.id == "login").unwrap();
         assert!(matches!(row.state, State::WaitingOnYou));
         assert!(row.next.contains("login · implement"), "{}", row.next);
@@ -2947,6 +3023,7 @@ mod tests {
             &BTreeSet::new(),
             &[],
             &[],
+            None,
         )
         .unwrap();
         let row = rows.iter().find(|r| r.id == "login").unwrap();
@@ -2991,6 +3068,7 @@ mod tests {
             &BTreeSet::new(),
             &[],
             &[],
+            None,
         )
         .unwrap();
 
@@ -3036,6 +3114,7 @@ mod tests {
             &BTreeSet::new(),
             &[],
             &[],
+            None,
         )
         .unwrap();
 
@@ -3081,6 +3160,7 @@ mod tests {
             &BTreeSet::new(),
             &[],
             &[],
+            None,
         )
         .unwrap();
 
@@ -3122,6 +3202,7 @@ mod tests {
             &BTreeSet::new(),
             &[],
             &[],
+            None,
         )
         .unwrap();
 
@@ -3145,7 +3226,17 @@ mod tests {
         let graph = Graph::build(&tasks, &pipelines, &repo.archive_dir());
         let waiting = BTreeSet::new();
         let lanes = [lane("login · implement", &repo.root)];
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &waiting, &lanes, &[]).unwrap();
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &waiting,
+            &lanes,
+            &[],
+            None,
+        )
+        .unwrap();
 
         let row = rows.iter().find(|r| r.id == "login").unwrap();
         let secs = row.lane_time.expect("a live lane answers");
@@ -3171,7 +3262,7 @@ mod tests {
         // Nothing started yet: the step is where the task sits, not what it is
         // doing, so this half is what the running half below is measured
         // against.
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &waiting, &[], &[]).unwrap();
+        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &waiting, &[], &[], None).unwrap();
         let row = rows.iter().find(|r| r.id == "login").unwrap();
         assert!(matches!(row.state, State::Queued));
 
@@ -3187,12 +3278,67 @@ mod tests {
         )
         .unwrap();
 
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &waiting, &[], &[]).unwrap();
+        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &waiting, &[], &[], None).unwrap();
         let row = rows.iter().find(|r| r.id == "login").unwrap();
         assert!(matches!(row.state, State::Running));
         // Its own clock, off the pid file, and not the last lane's
         // `launched_at` — which this task never set at all.
         assert!(row.lane_time.is_some(), "a run in flight answers with one");
+    }
+
+    /// A task fresh off a handoff, with no lane up for it yet, reads
+    /// `Running` for the ordinary gap before the dispatcher's next pass
+    /// starts one there — the same gap `spoolway report` opens by writing
+    /// the new stage the instant a lane's turn ends. Once the grace window
+    /// (two `dispatch.interval`s) has passed with still no lane, the row
+    /// falls back to reading `Queued`, honestly. Faked forward by moving the
+    /// clock in `grace` back rather than sleeping through it for real.
+    #[test]
+    fn a_stage_that_just_changed_reads_running_until_the_grace_window_passes() {
+        let repo = fixture("mid-handoff-grace");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], Some("implement"));
+
+        let tasks = repo.tasks().unwrap();
+        let graph = Graph::build(&tasks, &pipelines, &repo.archive_dir());
+        let waiting = BTreeSet::new();
+        let window = repo.config.dispatch.interval * 2;
+
+        // Just arrived: well inside the window, no lane anywhere.
+        let mut grace = BTreeMap::new();
+        grace.insert("login".to_string(), Instant::now());
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &waiting,
+            &[],
+            &[],
+            Some(&grace),
+        )
+        .unwrap();
+        let row = rows.iter().find(|r| r.id == "login").unwrap();
+        assert!(matches!(row.state, State::Running), "{}", row.next);
+
+        // The same row, the window already spent — still no lane.
+        grace.insert(
+            "login".to_string(),
+            Instant::now() - window - Duration::from_secs(1),
+        );
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &waiting,
+            &[],
+            &[],
+            Some(&grace),
+        )
+        .unwrap();
+        let row = rows.iter().find(|r| r.id == "login").unwrap();
+        assert!(matches!(row.state, State::Queued), "{}", row.next);
     }
 
     /// `launch_landed` forgives `attempts` the first pass that sees a lane
@@ -3217,7 +3363,17 @@ mod tests {
         let graph = Graph::build(&tasks, &pipelines, &repo.archive_dir());
         let waiting = BTreeSet::new();
         let lanes = [lane("login · implement", &repo.root)];
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &waiting, &lanes, &[]).unwrap();
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &waiting,
+            &lanes,
+            &[],
+            None,
+        )
+        .unwrap();
 
         let row = rows.iter().find(|r| r.id == "login").unwrap();
         let secs = row
@@ -3787,6 +3943,7 @@ mod tests {
             &BTreeSet::new(),
             &[],
             &[],
+            None,
         )
         .unwrap();
         let row = rows.iter().find(|r| r.id == "gate-board").unwrap();
@@ -3825,6 +3982,7 @@ mod tests {
             &BTreeSet::new(),
             &[busy],
             &[],
+            None,
         )
         .unwrap();
         let row = rows.iter().find(|r| r.id == "gate-board").unwrap();
@@ -3842,6 +4000,7 @@ mod tests {
             &BTreeSet::new(),
             &[settled],
             &[],
+            None,
         )
         .unwrap();
         let row = rows.iter().find(|r| r.id == "gate-board").unwrap();
@@ -3875,6 +4034,7 @@ mod tests {
             &BTreeSet::new(),
             &[],
             &[],
+            None,
         )
         .unwrap();
         let row = rows.iter().find(|r| r.id == "wall").unwrap();
@@ -4254,6 +4414,7 @@ mod tests {
             &BTreeSet::new(),
             &[],
             &[],
+            None,
         )
         .unwrap();
         let row = rows.iter().find(|r| r.id == "login").unwrap();
