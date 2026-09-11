@@ -135,6 +135,16 @@ impl Shell {
         format!("'{}'", self.escape_single_quoted(value))
     }
 
+    /// One assignment, in this dialect's own syntax — the piece
+    /// [`Shell::env_export`] and [`Shell::env_export_lines`] both build on,
+    /// so the quoting is written once whichever shape the caller needs.
+    fn env_assignment(self, key: &str, value: &str) -> String {
+        match self {
+            Shell::Posix => format!("{key}={}", self.quote(value)),
+            Shell::PowerShell => format!("$env:{key}={}", self.quote(value)),
+        }
+    }
+
     /// The lane's environment, as one line.
     ///
     /// One command, not one per variable: consecutive sends race the shell's
@@ -146,7 +156,7 @@ impl Shell {
             Shell::Posix => {
                 let pairs = env
                     .iter()
-                    .map(|(key, value)| format!("{key}={}", self.quote(value)))
+                    .map(|(key, value)| self.env_assignment(key, value))
                     .collect::<Vec<_>>()
                     .join(" ");
                 format!("export {pairs}")
@@ -155,10 +165,55 @@ impl Shell {
             // joined with `;` to stay a single line.
             Shell::PowerShell => env
                 .iter()
-                .map(|(key, value)| format!("$env:{key}={}", self.quote(value)))
+                .map(|(key, value)| self.env_assignment(key, value))
                 .collect::<Vec<_>>()
                 .join("; "),
         }
+    }
+
+    /// The same environment as [`Shell::env_export`], one assignment per
+    /// line rather than joined onto one — for a file [`crate::mux::Herdr::hand_environment`]
+    /// writes rather than types into a pane, where `env_export`'s own reason
+    /// for staying on one line does not apply: nothing about a file races a
+    /// shell's paste-readiness, and one `export` per line is what the task's
+    /// own mockup draws and what a person opening the file actually reads.
+    pub fn env_export_lines(self, env: &BTreeMap<String, String>) -> String {
+        env.iter()
+            .map(|(key, value)| match self {
+                Shell::Posix => format!("export {}", self.env_assignment(key, value)),
+                Shell::PowerShell => self.env_assignment(key, value),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The extension a file has to carry to be dot-sourceable in this
+    /// dialect. PowerShell refuses to dot-source anything not named `.ps1`
+    /// — "the name must end in .ps1" — the same rule `commands::init` and
+    /// `assets` already ship `.sh` and `.ps1` pairs for; POSIX `sh` places
+    /// no such restriction on itself, so `.env` stays free to say what the
+    /// file actually holds.
+    pub fn source_extension(self) -> &'static str {
+        match self {
+            Shell::Posix => "env",
+            Shell::PowerShell => "ps1",
+        }
+    }
+
+    /// The one command that reads an environment [`Shell::env_export_lines`]
+    /// wrote to a file, rather than typing it into a pane directly. `path`
+    /// must already carry [`Shell::source_extension`]'s own extension, or
+    /// PowerShell refuses to run it at all.
+    ///
+    /// Both dialects dot-source the same way: `. <path>` runs `path`'s lines
+    /// in the calling shell rather than a subshell that would take the
+    /// exports nowhere, and neither needs anything past that one line —
+    /// which is the whole point. A herdr pane cuts an `export` (or
+    /// `$env:…=`) line mid-value past some length and then waits forever on
+    /// the unterminated quote it left behind; a `.` command naming a file is
+    /// short no matter how large the environment inside it is.
+    pub fn source_command(self, path: &Path) -> String {
+        format!(". {}", self.quote(&path.display().to_string()))
     }
 
     /// The one export that is not a plain value: the directory is quoted, but
@@ -356,6 +411,49 @@ mod tests {
         // doubling the quote is the only way to get a literal one.
         assert_eq!(Shell::PowerShell.quote("plain"), "'plain'");
         assert_eq!(Shell::PowerShell.quote("it's"), "'it''s'");
+    }
+
+    #[test]
+    fn the_source_command_is_a_short_dot_command_in_either_dialect() {
+        assert_eq!(
+            Shell::Posix.source_command(Path::new("/repo/.spoolway/commands/demo.env")),
+            ". '/repo/.spoolway/commands/demo.env'"
+        );
+        assert_eq!(
+            Shell::Posix.source_command(Path::new("/it's here/x.env")),
+            r". '/it'\''s here/x.env'"
+        );
+        // `.ps1`, not `.env`: PowerShell refuses to dot-source anything
+        // else, so a caller building this path for `Shell::PowerShell` must
+        // already have named it with `Shell::source_extension`'s own
+        // answer — a fixture ending in `.env` here would pass while the
+        // real thing fails against a real PowerShell.
+        assert_eq!(
+            Shell::PowerShell.source_command(Path::new(r"C:\it's here\x.ps1")),
+            r". 'C:\it''s here\x.ps1'"
+        );
+    }
+
+    #[test]
+    fn the_source_extension_is_what_each_dialect_will_actually_dot_source() {
+        assert_eq!(Shell::Posix.source_extension(), "env");
+        assert_eq!(Shell::PowerShell.source_extension(), "ps1");
+    }
+
+    #[test]
+    fn env_export_lines_is_one_assignment_per_line() {
+        let env = BTreeMap::from([
+            ("SPOOLWAY_STEP".to_string(), "implement".to_string()),
+            ("SPOOLWAY_TASK".to_string(), "add-endpoint".to_string()),
+        ]);
+        assert_eq!(
+            Shell::Posix.env_export_lines(&env),
+            "export SPOOLWAY_STEP='implement'\nexport SPOOLWAY_TASK='add-endpoint'"
+        );
+        assert_eq!(
+            Shell::PowerShell.env_export_lines(&env),
+            "$env:SPOOLWAY_STEP='implement'\n$env:SPOOLWAY_TASK='add-endpoint'"
+        );
     }
 
     #[test]

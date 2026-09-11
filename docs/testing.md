@@ -146,7 +146,7 @@ spends nothing when its models resolve to a local endpoint — see
 | Suite | Covers | Why not a unit test |
 |---|---|---|
 | `flow` | A task's whole life: queued → implement → review → handover → archived, including its command run files under `commands/` being reclaimed once it archives | Real detached processes, a real worktree, a real pull request |
-| `commands` | Command steps: a `run:` line in the graph, its exit code routing, `background:`, `timeout:`, and that nothing confines it; the queue screen submitting a group and clearing its documents from the pending directory; `issue_tracking.key_in_names` prefixing the group and branch and storing the `slug:`/`url:`, through the real binary and a real `open` hook | A real spawned process with a pid, a log and an exit file; real keystrokes piped into the real binary |
+| `commands` | Command steps: a `run:` line in the graph, its exit code routing, `background:`, `timeout:`, and that nothing confines it; the queue screen submitting a group and clearing its documents from the pending directory; `issue_tracking.key_in_names` prefixing the group and branch and storing the `slug:`/`url:`, through the real binary and a real `open` hook | A real spawned process with a pid, a log and an exit file; real keystrokes piped into the real binary; and, for its pane cases, a real tmux server of its own and a herdr double whose panes are real shells |
 | `stacking` | Three chained tasks: each pull request targets the branch it is cut from, and really sits on it — the third names both earlier ones and is cut from, and stacks on, the deeper of the two | A real rebase, in a real git repository |
 | `stack` | `spoolway stack` itself: the squash to one commit and that a rejecting `commit-msg` hook cannot strand it, a refused lease, the empty-diff refusal, a `branch:` that is neither `task/<id>` nor a slug-prefixed `task/<slug>-<id>` refused when the task loads, and `[stack.summary]`'s modes — the body taken verbatim from the task file, a model turn's printed output as the whole body, and the refusals for a half-set table or a missing template | Real git, and a forge double the command really shells out to |
 | `conflicts` | A base that moves under a waiting branch, and the rebase that rescues it | The same, with the base actually moving |
@@ -319,9 +319,12 @@ the project root. No spoolway feature is behind it; that is the whole mechanism.
 
 A hollow suite is worse than none, so two domains are covered elsewhere:
 
-- **Backend parity.** Comparing `herdr` against `headless` needs a multiplexer, and these suites
-  have to pass on a machine with none. The backend's behaviour is unit-tested in
-  `src/headless.rs`; what a multiplexer actually does is `scripts/e2e/plans/`.
+- **Backend parity.** Comparing `herdr` against `headless` needs a multiplexer, and most of the
+  suites have to pass on a machine with none. The backend's behaviour is unit-tested in
+  `src/headless.rs`; what a multiplexer actually does is `scripts/e2e/plans/`. Two cases are the
+  exception: `commands.sh` opens a real tmux server of its own for the question "did a command
+  step get a pane at all", and runs the herdr handover against `scripts/e2e/herdr-stub.sh`, whose
+  header says why there is no isolated herdr server to use instead.
 - **The board.** What a dispatch run draws between passes is rendering, not routing: the pieces
   with any logic in them are unit-tested in `src/status.rs`.
 - **A herdr multiplexer dying.** `disaster` proves the heal path — a workspace verified live

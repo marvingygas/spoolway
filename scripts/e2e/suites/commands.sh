@@ -1124,6 +1124,128 @@ else
   must "back to headless" "$SPOOLWAY" config set dispatch.backend headless
 fi
 
+# ---------------------------------------------- a big environment, handed over
+# A pane's shell does not inherit the dispatcher's environment: it belongs to
+# the multiplexer's server, so whatever a command step needs has to be carried
+# across deliberately. herdr's way in is typing at the pane's prompt, and a
+# whole inherited environment typed as one `export` line is longer than herdr
+# will carry — it used to cut mid-value, leaving the pane's shell waiting
+# forever on an unterminated quote, with no pid ever written and no log to
+# read. It is written to a file and sourced now, and this is that, end to end.
+#
+# Against `scripts/e2e/herdr-stub.sh` rather than a real server — its header
+# says why there is no isolated herdr to run this on, and which half of the
+# behaviour a double can still be honest about. The short version: each pane
+# there is a real long-lived shell started under `env -i`, so a variable that
+# reaches the command got there because spoolway carried it.
+HSTATE="$LIVE/herdr-stub"
+HERDRBIN="$LIVE/herdr-bin"
+mkdir -p "$HSTATE" "$HERDRBIN"
+install -m 755 "$HERE/../herdr-stub.sh" "$HERDRBIN/herdr"
+export HERDR_STUB_STATE="$HSTATE"
+# Saved so the teardown below can put it back — a `herdr` left first on PATH
+# refuses to run at all once HERDR_STUB_STATE is unset, which would break the
+# first later case that so much as checks the backend is available.
+PATH_BEFORE_HERDR_STUB="$PATH"
+PATH="$HERDRBIN:$PATH"; export PATH
+
+must "the herdr backend" "$SPOOLWAY" config set dispatch.backend herdr
+must "herdr gives each task a workspace" "$SPOOLWAY" config set dispatch.herdr_mode split
+
+# The two variables this case is about, both set before the dispatcher starts
+# so they are really part of the environment it inherited.
+#
+# The bulk one is the point: eight kilobytes in a single value, comfortably
+# past the length a pane's prompt used to cut an `export` line at. The marker
+# is how a false pass is ruled out — nothing on the harness's own PATH carries
+# it, and the pane's shell is started with no environment at all.
+export SPOOLWAY_E2E_PANE_ENV_MARKER="from-the-dispatchers-own-environment"
+SPOOLWAY_E2E_PANE_BULK=$(head -c 8000 /dev/zero | tr '\0' 'x'); export SPOOLWAY_E2E_PANE_BULK
+
+# A pipeline of one paned command step, so this case needs no agent lane and
+# the double needs no agent to start. The step reads both variables back out.
+cat > .spoolway/pipelines/herdrpane.yml <<'YML'
+description: One paned command step, for the environment a pane is handed.
+
+steps:
+  - id: carry
+    description: Read back the environment the dispatcher was started with.
+    run: 'echo "env:$SPOOLWAY_E2E_PANE_ENV_MARKER"; echo "bulk:${#SPOOLWAY_E2E_PANE_BULK}"'
+    on_pass: done
+    on_fail: blocked
+YML
+works "a one-step paned pipeline checks out" "$SPOOLWAY" pipeline check
+
+dispatcher_restart
+task_doc "$LIVE/carried.md" carried "$BODY" "group: live" \
+  "pipeline: herdrpane" "touches: [notes/carried.md]"
+must "a task through a paned command step on herdr" \
+  "$SPOOLWAY" queue add --from "$LIVE/carried.md"
+
+records "the pane's own output is on the record" "env:" \
+  "$SPOOLWAY_PROJECT_HOME/commands/carried · carry.log" carried
+has "a variable only the dispatcher's own environment carried reached the herdr pane" \
+  "env:from-the-dispatchers-own-environment" \
+  "$SPOOLWAY_PROJECT_HOME/commands/carried · carry.log.kept"
+has "and the eight-kilobyte value arrived whole, not cut mid-quote" \
+  "bulk:8000" \
+  "$SPOOLWAY_PROJECT_HOME/commands/carried · carry.log.kept"
+
+# The other half: it arrived that way *because nothing long was typed*. The
+# environment is a file beside the run's own bookkeeping, and what went to the
+# pane is the one `.` command that sources it.
+HANDOVER="$SPOOLWAY_PROJECT_HOME/commands/carried · handover.env"
+works "the environment was written down beside the run" test -f "$HANDOVER"
+has "with the dispatcher's own value in it" \
+  "from-the-dispatchers-own-environment" "$HANDOVER"
+if [ "$(wc -c <"$HANDOVER")" -gt 8000 ]; then
+  ok "and it is the big one — past what a prompt would have carried"
+else
+  bad "and it is the big one — past what a prompt would have carried"
+fi
+
+# `herdr-stub.sh` keeps every string spoolway typed into a pane, with its
+# length. The environment is 8KB; nothing typed may be anywhere near that.
+TYPED_MAX=$(awk -F'\t' 'BEGIN{m=0} $2>m {m=$2} END{print m+0}' "$HSTATE/typed.index")
+if [ "$TYPED_MAX" -lt 2000 ]; then
+  ok "and no single line typed into a pane was longer than $TYPED_MAX bytes"
+else
+  bad "nothing long is typed into a pane (longest was $TYPED_MAX bytes)"
+  cut -f1,2 "$HSTATE/typed.index"
+fi
+if grep -rqF -- ". '$HANDOVER'" "$HSTATE/typed"; then
+  ok "and one of them is the dot command that sources the file"
+else
+  bad "and one of them is the dot command that sources the file"
+fi
+
+# The pane spoolway recorded is the one herdr's own `pane list` agrees with —
+# the split's reply alone is not enough to record, and `split_pane` refuses
+# rather than write an id the multiplexer has never heard of.
+RECORDED=$(cat "$SPOOLWAY_PROJECT_HOME/commands/carried · carry.pane" 2>/dev/null || true)
+if [ -n "$RECORDED" ] && grep -q "^$RECORDED	" "$HSTATE/panes"; then
+  ok "the recorded pane id is one the multiplexer itself lists"
+else
+  bad "the recorded pane id is one the multiplexer itself lists (recorded \"$RECORDED\")"
+fi
+
+if drive carried gone 60; then ok "the task carries on once the paned command has passed"
+else bad "the task carries on once the paned command has passed (at \`$(stage_of carried)\`)"; fi
+
+unset SPOOLWAY_E2E_PANE_ENV_MARKER SPOOLWAY_E2E_PANE_BULK
+rm -f .spoolway/pipelines/herdrpane.yml
+must "back to headless again" "$SPOOLWAY" config set dispatch.backend headless
+# Every pane of the double is a real shell with a real process holding its
+# fifo open. A suite that walked away would leave both behind. All of this
+# teardown runs *before* `dispatcher_restart` below: that call starts the
+# long-lived dispatcher every later case in this suite shares, and it must
+# inherit the real PATH, not the stub's — a dispatcher started one line too
+# early here is exactly the half of the PATH fix that used to not land.
+"$HERDRBIN/herdr" shutdown state >/dev/null 2>&1 || true
+unset HERDR_STUB_STATE
+PATH="$PATH_BEFORE_HERDR_STUB"; export PATH
+dispatcher_restart
+
 # ------------------------------------------------------ config follows the checkout
 # `config get`/`show`/`path` read `repo.checkout` now — the worktree actually
 # in front of a command — while `config set` still writes only `repo.root`,

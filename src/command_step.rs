@@ -194,6 +194,13 @@ impl Runs {
         // `>>` append below needs: a fresh run must not open onto the tail of
         // the last one.
         let _ = std::fs::rename(self.log_path(key), self.prev_log_path(key));
+        // Created here, before anything is spawned, rather than left for the
+        // wrapper's own `>>` redirect to bring into existence: a wrapper that
+        // never got as far as running at all — no `sh` on PATH, a backend
+        // that dropped the script on the floor — used to leave no file behind,
+        // so [`Runs::await_started`]'s error named a path that did not exist.
+        std::fs::File::create(self.log_path(key))
+            .with_context(|| format!("creating {}", self.log_path(key).display()))?;
         Ok(())
     }
 
@@ -669,6 +676,17 @@ mod tests {
         assert_eq!(f.settle("build-demo"), RunState::Exited(0));
         let log = std::fs::read_to_string(f.runs.log_path("build-demo")).unwrap();
         assert!(log.contains("built"), "the run's output is its log: {log}");
+    }
+
+    /// `await_started`'s own error names `log_path` as a file that exists —
+    /// so `prepare` has to create it before anything is spawned, rather than
+    /// leaving it for the wrapper's own `>>` redirect: a wrapper that never
+    /// ran at all would otherwise leave no file for that error to point at.
+    #[test]
+    fn prepare_creates_the_log_before_anything_is_spawned() {
+        let f = Fixture::new("prepare-creates-log");
+        f.runs.prepare("build-demo").unwrap();
+        assert!(f.runs.log_path("build-demo").exists());
     }
 
     /// The routing decision itself: the exit code reaches the dispatcher intact,
