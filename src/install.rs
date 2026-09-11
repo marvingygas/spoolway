@@ -101,7 +101,9 @@ const SKILLS: &[Skill] = &[
     // Reshaping the flow itself: the graph, and the prompts its agent steps
     // run. One skill rather than two, because a step and the role that runs it
     // are halves of the same decision and changing either usually moves the
-    // other. It ships no assets any more: the format it once copied from
+    // other. It carries no `disable-model-invocation` either: `spoolway-
+    // calibrate` hands a shape finding straight to it, so it has to be
+    // reachable from inside another skill's own procedure. It ships no assets any more: the format it once copied from
     // lives in `spoolway pipeline contract` and `spoolway prompt contract`
     // now, fetched at runtime instead of drifting from the binary that
     // enforces it.
@@ -449,11 +451,13 @@ mod tests {
                     skill_md.contains(&format!("name: {name}")),
                     "{name}'s {provider} copy has a frontmatter name that does not match its file"
                 );
-                // Every skill here is human-triggered, except spoolway-tasks: it
-                // is called from inside another skill's own procedure (see
-                // spoolway-plan's step 7), and `disable-model-invocation: true`
-                // would make a skill unreachable from there.
-                if name == "spoolway-tasks" {
+                // Every skill here is human-triggered, except spoolway-tasks
+                // and spoolway-pipeline: both are called from inside another
+                // skill's own procedure (spoolway-plan's step 7, and
+                // spoolway-calibrate's step 7), and
+                // `disable-model-invocation: true` would make a skill
+                // unreachable from there.
+                if matches!(name, "spoolway-tasks" | "spoolway-pipeline") {
                     assert!(
                         !skill_md.contains("disable-model-invocation"),
                         "{name}'s {provider} copy must stay reachable from another skill's own \

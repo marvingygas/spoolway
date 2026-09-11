@@ -1,7 +1,6 @@
 ---
 name: spoolway-pipeline
-description: Build or change a spoolway pipeline — the graph of steps in `.spoolway/pipelines/<name>.yml`, and the prompts its agent steps run. Fetches the format from the binary itself, works out the graph, writes the YAML and any prompt it needs, then checks the two agree. Triggered by a human who wants a new flow, a change to one they already run, or a new kind of lane in it.
-disable-model-invocation: true
+description: Build or change a spoolway pipeline — the graph of steps in `.spoolway/pipelines/<name>.yml`, and the prompts its agent steps run. Fetches the format from the binary itself, works out the graph, writes the YAML and any prompt it needs, then checks the two agree. Triggered by a human who wants a new flow, a change to one they already run, or a new kind of lane in it — or by `spoolway-calibrate`, handing over a step that runs hot on context and wants splitting, or a lap that wants a step of its own.
 ---
 
 # spoolway-pipeline

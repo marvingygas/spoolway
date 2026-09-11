@@ -129,13 +129,14 @@ each time:
 |---|---|
 | `spoolway-plan` | Turns one goal into a reviewable plan page, then — once you approve it — cuts the task breakdown into the project's pending directory as one document per task. Queues nothing; `spoolway queue`, the screen, does that |
 | `spoolway-tasks` | The task-cutting procedure `spoolway-plan`'s own step 7 invokes: settle the pipeline, decompose against the window its implementing step runs on, offer the shape, write and prove the documents. A second skill that cuts a breakdown calls it too, rather than carrying its own copy |
-| `spoolway-pipeline` | Turns a workflow you describe into a pipeline, or changes one you have, and writes any prompt its steps need — against the contract `spoolway prompt contract` prints |
+| `spoolway-pipeline` | Turns a workflow you describe into a pipeline, or changes one you have, and writes any prompt its steps need — against the contract `spoolway prompt contract` prints. `spoolway-calibrate` hands it a shape finding too |
 | `spoolway-doctor` | Runs every read-only check, collects the findings into one report, and changes nothing until you pick |
-| `spoolway-calibrate` | Reads a window of archived tasks and the spend ledger, turns what actually cost loops and money into findings with the fix's exact lines, and walks them one at a time so the person sends each to `spoolway-tasks`, to `spoolway-plan`, or nowhere |
+| `spoolway-calibrate` | Reads a window of archived tasks and the spend ledger, turns what actually cost loops and money — a line that should go, a step running hot on context, a lap no step owns — into findings, and walks them one at a time so the person sends each to `spoolway-tasks`, `spoolway-plan`, `spoolway-pipeline`, or nowhere |
 
-Four of these are human-invoked only — none of them fires on its own. `spoolway-tasks` is the
-exception: it carries no `disable-model-invocation`, because it has to stay reachable from
-inside another skill's own procedure, not only from a person's own prompt. Each lands as
+Three of these are human-invoked only — none of them fires on its own. `spoolway-tasks` and
+`spoolway-pipeline` are the exceptions: they carry no `disable-model-invocation`, because both
+have to stay reachable from inside another skill's own procedure, not only from a person's own
+prompt. Each lands as
 `<provider's directory>/<name>/SKILL.md`: one directory per skill, which is the layout all
 three providers discover. None brings any file beside it — `spoolway-pipeline` used to ship an
 annotated pipeline to copy from, but that template is now printed by `spoolway pipeline
