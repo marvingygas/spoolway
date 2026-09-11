@@ -149,9 +149,11 @@ pub fn report(
     let mut destination = if current == crate::pipeline::BLOCKED && outcome == Outcome::Pass {
         // `blocked` declares no `on_pass` of its own — where its pass goes is
         // read from the task's own record of where it stopped, by
-        // `cleared_block_target`, and under the default that is one step *past*
-        // there rather than back onto it. The unblocker did that step's work,
-        // so arriving back on it would pay for the work twice.
+        // `cleared_block_target`. For an agent step, that is one step *past*
+        // there under the default rather than back onto it: the unblocker did
+        // that step's work, so arriving back on it would pay for the work
+        // twice. A command step has no such trade — see `cleared_block_target`'s
+        // own doc for why it is always handed back to itself.
         //
         // Either way this goes through the same `resume_at` that
         // `spoolway resume` performs by hand: the loop budgets out of the step
@@ -713,12 +715,15 @@ pub fn resume_target(task: &Task, pipeline: &Pipeline) -> String {
 /// whose work is already done. Handing it back costs a second full turn on the
 /// same step to reach the same verdict.
 ///
-/// **A command step is carried past too, and nothing re-checks it.** A task
-/// blocked on `test` resumes at whatever `test` passes to, on the unblocker's
-/// word that the build is green. That is the trade
-/// `unattended.skip_blocked_lane` names rather than hides: skipping the
-/// re-run is the saving, an unverified claim reaching the next step is the
-/// cost, and `false` buys the claim back.
+/// **A command step is never carried past — it is handed back to itself.**
+/// The unblocker's word is good for an agent step, whose whole output is the
+/// claim it makes in its report. A command step's output is a `git push` or a
+/// pull request opened, and "I did that step's work" from an unblocker does
+/// not make either one exist; only running the command does. So a task
+/// blocked on a command step resumes on that same step, whatever
+/// `unattended.skip_blocked_lane` says — the setting only ever decided what
+/// an *agent* step's take-over was worth, and a command step was never
+/// eligible for it.
 ///
 /// Two cases hand back whatever the setting says, because there is nothing to
 /// carry the task to: an origin the pipeline no longer has, and an origin that
@@ -728,10 +733,13 @@ pub fn cleared_block_target(task: &Task, pipeline: &Pipeline, takes_over: bool) 
     if !takes_over {
         return origin;
     }
-    pipeline
-        .step(&origin)
-        .and_then(|step| step.on_pass.clone())
-        .unwrap_or(origin)
+    let Some(step) = pipeline.step(&origin) else {
+        return origin;
+    };
+    if step.kind() != crate::pipeline::StepKind::Agent {
+        return origin;
+    }
+    step.on_pass.clone().unwrap_or(origin)
 }
 
 /// Set a stopped task up to carry on from `target`, and say which loop budgets
@@ -1665,6 +1673,40 @@ mod tests {
         assert_eq!(
             task.front.resume, None,
             "`done` has no lane of `work`'s to continue"
+        );
+        assert_eq!(task.front.blocked_from, None, "nothing is blocked any more");
+    }
+
+    /// The same shape, but the step that blocked is a command step rather
+    /// than an agent one. `skip_blocked_lane` still reads `true`, but a
+    /// command step is never eligible for the take-over it names: the
+    /// unblocker's word is not what a `git push` or a pull request needs, so
+    /// the pass hands the task back to the step itself rather than past it.
+    #[test]
+    fn a_staffed_blocked_steps_pass_hands_a_command_step_back_to_itself() {
+        let repo = unattended_fixture("staffed-blocked-command-pass");
+        let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+        add(&repo, "stuck", &[]);
+        let yaml = "steps:\n  - id: work\n    run: 'true'\n    on_pass: done\n  \
+                     - id: blocked\n    agent: pi\n    session: true\n";
+        let pipeline = crate::pipeline::Pipeline::parse("default", yaml).unwrap();
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert("default".into(), pipeline);
+
+        let mut task = queued(&repo, "stuck");
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        task.front.blocked_from = Some("work".into());
+        task.save().unwrap();
+
+        report_outcome(&repo, &pipelines, "stuck", Outcome::Pass);
+        let task = queued(&repo, "stuck");
+        assert_eq!(
+            task.stage(),
+            "work",
+            "a command step is handed back to itself, never past it: {task:?}"
         );
         assert_eq!(task.front.blocked_from, None, "nothing is blocked any more");
     }

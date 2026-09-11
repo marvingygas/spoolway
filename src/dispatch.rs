@@ -3507,6 +3507,23 @@ impl<'a> Dispatcher<'a> {
                             .unwrap_or_else(|| crate::pipeline::BLOCKED.to_string()),
                     ),
                 };
+                // Named on the task, not only in this pass's own report: a
+                // failure here used to leave the task file saying only that
+                // it moved to `blocked`, with the reason living solely in a
+                // pass report nobody clearing the block reads. `Runs::forget`
+                // above keeps the log on disk on purpose, so the step, the
+                // code and that path are what the lane sent in to clear the
+                // block needs to see what actually broke.
+                if code != 0 {
+                    task.append_to_section(
+                        "## Status Log",
+                        &format!(
+                            "- `{}` exited {code} — see {}\n",
+                            step.id,
+                            runs.log_path(&key).display()
+                        ),
+                    );
+                }
                 report.actions.push(format!(
                     "{id}: `{}` exited {code} — {}",
                     step.id,
@@ -14012,6 +14029,53 @@ mod tests {
             report.actions.iter().any(|a| a.contains("exited 2")),
             "the exit code is what the decision was made on, so it is said: {:?}",
             report.actions
+        );
+    }
+
+    /// The exit code used to live only in this pass's own report, which the
+    /// lane sent in to clear the block never reads. A non-zero exit now also
+    /// writes the step, the code and the log path onto the task itself, so
+    /// that lane can see what actually broke.
+    #[cfg(unix)]
+    // covers: the `run:` step exiting non-zero — what it leaves on the task
+    #[test]
+    fn a_failing_command_writes_the_step_code_and_log_onto_the_task() {
+        let repo = fixture("command-fail-onto-task");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]);
+        let pipelines = pipelines_running("exit 2", false);
+
+        drive(&repo, &pipelines, &mux, &path, "blocked");
+
+        let task = reload(&path);
+        let log = task.section("## Status Log").unwrap_or_default();
+        assert!(
+            log.contains("`implement` exited 2"),
+            "names the step and the code: {log}"
+        );
+        assert!(
+            log.contains("demo · implement.log"),
+            "names the log a person or lane would read: {log}"
+        );
+    }
+
+    /// A clean exit writes nothing onto the task — there is no failure to
+    /// carry forward, and every ordinary pass would otherwise grow the file.
+    #[cfg(unix)]
+    #[test]
+    fn a_clean_command_exit_writes_nothing_onto_the_task() {
+        let repo = fixture("command-pass-writes-nothing");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]);
+        let pipelines = pipelines_running("exit 0", false);
+
+        drive(&repo, &pipelines, &mux, &path, "review");
+
+        let task = reload(&path);
+        let log = task.section("## Status Log").unwrap_or_default();
+        assert!(
+            !log.contains("exited 0"),
+            "a pass is not a failure to record: {log}"
         );
     }
 

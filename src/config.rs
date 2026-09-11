@@ -869,19 +869,16 @@ pub struct UnattendedConfig {
     /// The unblocker is told to *do the blocked step's work* — write the code,
     /// fix the check, make the call. If it did, then handing the task back to
     /// that step re-runs work that is already finished, and re-running an agent
-    /// step means paying for it a second time. So a pass here takes the task to
-    /// wherever the blocked step's `on_pass` pointed, one step past where it
-    /// stopped.
+    /// step means paying for it a second time. So a pass here takes an *agent*
+    /// step's task to wherever the blocked step's `on_pass` pointed, one step
+    /// past where it stopped. Set `false` to hand it back to the step it
+    /// blocked on instead, which is what spoolway did before this key existed.
     ///
-    /// **This includes command steps, deliberately.** A task blocked on `test`
-    /// resumes at whatever `test` passes to, without `test` running again — so
-    /// the unblocker's word that the build is green is taken on trust and
-    /// nothing re-checks it. That is the trade this key names: skipping the
-    /// re-run is the saving, and an unverified claim reaching the next step is
-    /// what it costs. Set it `false` where the claim matters more than the lap.
-    ///
-    /// Set `false` to hand the task back to the step it blocked on instead,
-    /// which is what spoolway did before this key existed.
+    /// **A command step ignores this key.** Its output is a `git push` or a
+    /// pull request opened, and the unblocker's word that it happened does
+    /// not make either one exist — only running the command does. So a task
+    /// blocked on a command step is always handed back to that step to run
+    /// again, whatever this says.
     ///
     /// Two things are unaffected either way. A task with no recorded origin
     /// still has nowhere forward to go, so it is not carried anywhere — see

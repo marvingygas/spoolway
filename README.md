@@ -267,7 +267,7 @@ auto_commit = true
 [unattended]
 enabled = true               # the overnight switch
 max_output_tokens = 0        # spend ceiling for a run with nobody watching; 0 is none
-skip_blocked_lane = true     # a cleared block carries the task past the step it blocked on
+skip_blocked_lane = true     # an agent step's cleared block carries the task past the step it blocked on
 blocked_agent = "claude"     # who staffs `blocked` when nobody is at the keyboard
 blocked_model = "claude-opus-5"
 blocked_effort = "medium"

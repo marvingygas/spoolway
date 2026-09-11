@@ -363,15 +363,18 @@ when the thing genuinely cannot be done — pauses it for a person with `spoolwa
 `blocked` itself; a pause parks the task on `paused` with the same destination a pass would
 have reached, `spoolway resume` carries it there, and there is no round trip left to bound.
 
-A pass carries the task **past** the step it blocked on, to that step's own `on_pass`. The
+An agent step's pass carries the task **past** it, to that step's own `on_pass`. The
 unblocker prompt is told to do the blocked step's work, so its pass is read as that step's
 pass, and handing the task back would pay an agent to reach a verdict that already exists.
-
-This applies to command steps as well. A task blocked on `test` resumes at whatever `test`
-passes to, without `test` running again, on the unblocker's word that the build is green.
 Set `unattended.skip_blocked_lane = false` where that claim matters more than the extra lap:
 the task then lands back on the step it blocked on, which is where `spoolway resume` sends
 it by hand, and the lane already there is continued rather than replaced.
+
+A command step is never carried past — it is handed back to itself, whatever the setting
+says. Its output is a `git push` or a pull request opened, and the unblocker's word that it
+happened does not make either one exist — only running the command does. So a task blocked
+on `test` resumes on `test` itself, and the lane already there is continued rather than
+replaced. The setting only ever decided what an agent step's take-over was worth.
 
 `blocked_session = true` resumes the prompt's own earlier session on this task — the same
 conversation that read the first blocker is the one asked to look at the second, if there is

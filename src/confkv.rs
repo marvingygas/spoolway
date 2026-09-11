@@ -151,9 +151,10 @@ pub const REFERENCE: &[Reference] = &[
         key: "unattended.skip_blocked_lane",
         values: "true, false",
         default: "true",
-        sentence: "Whether clearing a block carries the task past the step it blocked on, \
-                    on the grounds that the unblocker did that step's work; false hands it \
-                    back to that step instead.",
+        sentence: "Whether clearing a block on an agent step carries the task past the step \
+                    it blocked on, on the grounds that the unblocker did that step's work; \
+                    false hands it back to that step instead. A command step is always \
+                    handed back to itself, whatever this says.",
     },
     Reference {
         key: "unattended.blocked_agent",
