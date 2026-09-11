@@ -393,8 +393,8 @@ Read the lane ledger back out as a spend summary: what the pipeline has spent, g
 task, group, step, model, project, month, or one row per lane with `lane`. Bare, with no cut
 named, this still picks one: `step`, or `project` when more than one project is in scope. It
 reads lanes only — every line that is not a lane is skipped — and sweeps this project's
-interactive sessions onto the ledger before it prints — see [Skill
-sessions](cost.md#skill-sessions).
+interactive sessions onto the ledger before it prints — see [Settled
+lanes](cost.md#settled-lanes).
 
 | Flag | Meaning |
 |---|---|

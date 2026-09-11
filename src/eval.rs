@@ -2716,7 +2716,6 @@ mod tests {
             outcome: outcome.map(str::to_string),
             run: None,
             trial: None,
-            skill: None,
             project: "demo".into(),
         }
     }
@@ -3223,7 +3222,6 @@ mod screen_tests {
             outcome: Some("pass".into()),
             run: None,
             trial: None,
-            skill: None,
             project: "demo".into(),
         }
     }
@@ -3266,7 +3264,6 @@ mod screen_tests {
                 outcome: outcome.map(str::to_string),
                 run: Some(format!("r-{task}")),
                 trial: None,
-                skill: None,
                 project: String::new(),
             },
         )
@@ -3366,7 +3363,6 @@ mod screen_tests {
                 outcome: None,
                 run: None,
                 trial: None,
-                skill: Some("clear".into()),
                 project: String::new(),
             },
         )
@@ -3682,7 +3678,6 @@ mod screen_tests {
                 outcome: Some("pass".into()),
                 run: Some("r-a".into()),
                 trial: None,
-                skill: None,
                 project: String::new(),
             },
         )

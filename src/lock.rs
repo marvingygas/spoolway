@@ -264,10 +264,10 @@ impl Drop for TaskLock {
 /// - A single append — [`crate::usage::bank_lane`], the headless interrupt's
 ///   path — proceeds unlocked. Losing that turn's tokens is worse than a rare
 ///   double-count, and one append rarely reaches the bound anyway.
-/// - A batch — [`crate::usage::sweep`], [`crate::usage::bank_ambient`] —
-///   defers instead: it holds the lock across every session's transcript read
-///   and append, so it can legitimately outlast the bound, and whoever holds
-///   the lock is running the same catch-up. A later `spend`/`eval` re-runs it.
+/// - A batch — [`crate::usage::sweep`] — defers instead: it holds the lock
+///   across every session's transcript read and append, so it can legitimately
+///   outlast the bound, and whoever holds the lock is running the same
+///   catch-up. A later `spend`/`eval` re-runs it.
 pub struct LedgerLock {
     path: PathBuf,
 }

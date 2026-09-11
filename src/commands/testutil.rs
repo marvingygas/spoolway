@@ -72,7 +72,6 @@ pub fn lane(cost: Option<f64>) -> crate::usage::Entry {
         outcome: Some("pass".into()),
         run: None,
         trial: None,
-        skill: None,
         project: "demo".into(),
     }
 }
