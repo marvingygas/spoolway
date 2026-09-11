@@ -208,6 +208,14 @@ pub struct DoctorArgs {
     /// List every check that ran, not only the failures and the notes.
     #[arg(long, short)]
     pub verbose: bool,
+
+    /// Skip opening a throwaway pane to prove a lane can really start.
+    ///
+    /// Every other check still runs. For a machine where that pane is slow
+    /// or noisy to open — CI, say — but the rest of `doctor` is still worth
+    /// running.
+    #[arg(long)]
+    pub no_live: bool,
 }
 
 /// Operations on the model price table.

@@ -1,6 +1,6 @@
 ---
 domain: testing
-covers: ["scripts/e2e/**", "scripts/e2e-*.sh", ".github/workflows/**"]
+covers: ["scripts/e2e/**", "scripts/e2e-*.sh", ".github/workflows/**", "src/scratch.rs"]
 ---
 
 # Testing
@@ -153,12 +153,23 @@ spends nothing when its models resolve to a local endpoint — see
 | `routines` | The repeatable documents under `.spoolway/routines/`, through the queue screen's `r` pane and `s` panel: `enter` lands the right task files under minted ids with their bodies untouched, and `s` copies a pending group's documents back into the checkout | The same, against a real tracked `.spoolway/routines/` tree |
 | `jobs` | A cron job in a store, fired by a real dispatcher pass against a matching minute: the routine's documents reach the queue under minted ids with `depends_on` remapped and the job's pipeline set, the routine tree is left untouched, and `spoolway doctor` names a job whose expression will not parse, never comes round, points at a missing routine, or names an undefined pipeline | A real dispatcher driving a real `.spoolway/routines/` tree |
 | `jobs-screen` | The `spoolway jobs` screen writing a job: the routine/schedule/pipeline walk lands a `[jobs.<name>]` table in the user store with the typed expression, the picked routine and the default pipeline, `jobs list` then shows it, `space` pauses and resumes it, and `x` then `y` deletes it | Real keystrokes piped into the real binary, against a real store file on disk |
-| `restart` | `spoolway dispatch`'s restart guard: four starts in a row against a held lock each report exit 4, a fifth is refused with exit 5, `--force` starts one anyway and clears the count, and an empty queue reports exit 3 without ever tripping the guard | A real lock file, and real process exit codes across repeated real invocations |
+| `restart` | `spoolway dispatch`'s restart guard: four starts in a row against a held lock each report exit 4, a fifth is refused with exit 5, `--force` starts one anyway and clears the count, and an empty queue reports exit 3 without ever tripping the guard. It also proves a start that would actually commit but has no git identity is refused outright (exit 1) rather than starting, and that this refusal is told apart from the empty-queue exit 3 by its exit code | A real lock file, an identity unset on the checkout, and real process exit codes across repeated real invocations |
 | `warmth` | **cloud tier only.** Real `claude-haiku-4-5` lanes, because a stand-in's transcript agrees with the parser by construction | A real model writes the transcript |
 | `live` | **live tier only.** The real `codex` binary through `agent verify --live` — a turn, then a resume — because a stand-in written from the adapter row cannot notice a CLI changing its flag grammar | The real binary |
 
 Each suite runs in a process and a scratch tree of its own, so a suite that ends in `blocked`
 on purpose — several do — cannot make the next one's assertions a fiction.
+
+### Scratch directories
+
+Every fixture builds its world under a directory in `/tmp`, named after the caller and unique
+within the process — `src/scratch.rs` — so two `cargo test` processes walking the same suite
+side by side never share a directory. The name still leads, so a directory left by a crashed
+run is still legible; and nothing reclaimed them, so one machine reached a few hundred thousand
+of them. The first `root` of each process therefore sweeps up to 2,000 finished runs'
+directories out of the system temporary directory. That sweep is a side effect of the shipped
+binary as well as the tests: the `spoolway doctor` live pane check opens a scratch directory on a
+real machine, so an ordinary `spoolway doctor` pays the same cost.
 
 ### A suite writes its own prompts
 

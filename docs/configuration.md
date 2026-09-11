@@ -288,7 +288,7 @@ checkout holds the project's tracked prompt templates, and nothing here touches 
 old a template file is.
 
 The sweep runs at most once per process, gated by the same `Once`-and-budget shape
-`src/scratch.rs` uses for its own test-fixture sweep, and stops at a deletion budget so a
+`src/scratch.rs` uses for its own sweep, and stops at a deletion budget so a
 long-neglected home drains its backlog over several runs rather than stalling the first command
 that trips it.
 

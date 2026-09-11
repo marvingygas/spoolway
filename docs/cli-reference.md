@@ -916,6 +916,14 @@ project's. When the project's own `config.toml` fails to parse, that is reported
 finding of its own, naming the project's file, so the dispatcher's copy is never checked
 silently against defaults.
 
+One check goes past what is configured. It opens a throwaway pane on a scratch
+directory, runs a trivial command in it, waits for that command to start, and
+closes everything again — so it proves a lane can *really* start rather than
+only that the backend answers. It reports the pane id and how long the whole
+check took. On a backend with no real pane to run a command in — headless,
+whose panes are names rather than processes — that row is a note rather than a
+check.
+
 By default it reports only what needs your attention: any failing check, any note such as
 a file that has fallen behind `spoolway update`, and a closing line such as `28 checks
 passed. Everything checks out.` A failing run instead prints each `FAIL` line, then `N of M
@@ -924,6 +932,7 @@ checks passed.`, and exits non-zero.
 | Flag | Meaning |
 |---|---|
 | `-v`, `--verbose` | Print every check, in the order it runs, including the ones that passed |
+| `--no-live` | Skip the one check that opens a throwaway pane to prove a lane can really start. Every other check still runs |
 
 Under `-v`, a prompt referenced by several pipeline steps prints as a single row —
 ``prompt `archivist``` — rather than once per step; a missing prompt file still fails,
