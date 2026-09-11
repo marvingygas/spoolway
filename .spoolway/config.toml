@@ -1,7 +1,6 @@
 # Full reference: docs/configuration.md
 #
 # Key                                   Values                 Default                                                 Meaning
-# skills                                <names>                spoolway-plan                                           Which skills `spoolway eval` gives a block of their own; every other name is left off the table.
 # dispatch.backend                      herdr, tmux, headless  herdr                                                   Where lanes run: a real pane you can watch, or no multiplexer at all.
 # dispatch.herdr_mode                   grouped, split         grouped                                                 How a herdr run is laid out: a pane per task in its project's shared tab, or a row of its own per task.
 # dispatch.tmux_mode                    grouped, split         grouped                                                 How a tmux run is laid out: one session for the whole run, or a session per task.
@@ -12,11 +11,10 @@
 # dispatch.auto_commit                  true, false            true                                                    Whether spoolway commits a lane's leftover work when its step settles.
 # dispatch.priority                     group, any             group                                                   Whether a free slot is filled from every ready task, or from the group already landing first.
 # dispatch.lane_child_ceiling           <duration>             1h                                                      How long a lane may be excused for a process it started that is still running before the reminder loop treats it as silent anyway.
-# dispatch.tear_lanes_on_stop           true, false            true                                                    Whether stopping the dispatcher ends the run's live lanes and takes their worktrees with them; branches and a task on `blocked` are never swept.
 # unattended.enabled                    true, false            false                                                   Whether this run stops for a person, or resumes every block itself with `max_output_tokens` as the only brake.
 # unattended.max_output_tokens          <tokens>               0                                                       Output tokens one unattended run may spend before the dispatcher stops starting work; 0 is no ceiling.
 # unattended.max_cost_usd               <dollars>              0                                                       Dollars one unattended run may spend before the dispatcher stops starting work, priced from the resolved model table; 0 is no ceiling.
-# unattended.skip_blocked_lane          true, false            true                                                    Whether clearing a block carries the task past the step it blocked on, on the grounds that the unblocker did that step's work; false hands it back to that step instead.
+# unattended.skip_blocked_lane          true, false            true                                                    Whether clearing a block on an agent step carries the task past the step it blocked on, on the grounds that the unblocker did that step's work; false hands it back to that step instead. A command step is always handed back to itself, whatever this says.
 # unattended.blocked_agent              <profile>              claude                                                  Which `[agents.*]` profile staffs `blocked` in an unattended run, for every pipeline that does not declare its own `blocked` step.
 # unattended.blocked_model              <model>                claude-opus-5                                           The model that profile runs, staffing `blocked`. Blank refuses to start an unattended run: nobody would be able to clear a block.
 # unattended.blocked_effort             <level>                (blank)                                                 How hard that model thinks, staffing `blocked`.
@@ -55,8 +53,6 @@
 # issue_tracking.project_key            <string>               (blank)                                                 Opaque to spoolway — `owner/repo` on github, a project key on jira — handed to the hook verbatim as `SPOOLWAY_PROJECT_KEY`.
 # issue_tracking.on_fail                ignore, pause          ignore                                                  What a non-zero hook exit does: `ignore` only records it, `pause` also holds the task — on `queued` to `paused`, on `done` out of the archive.
 # issue_tracking.key_in_names           true, false            false                                                   Whether a `slug=` the hook answers prefixes the group, branch and worktree name `queue add` generates — `task/<slug>-<id>`. Off changes nothing.
-
-skills = ["spoolway-plan"]
 
 [dispatch]
 backend = "herdr"

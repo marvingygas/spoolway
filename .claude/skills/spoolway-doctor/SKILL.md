@@ -119,7 +119,7 @@ turning each into a fix concrete enough to approve.
 | note: `n prompt finding(s)` | prose a lane will act on that its step does not permit, or a command this spoolway does not have | report what `spoolway prompt check` printed, not the count | decision |
 | ``prompt names `spoolway <verb>` `` | that lane runs a command this release does not have, and finds out mid-run | fix the prose, or `spoolway update --replace .spoolway/prompts/<name>/PROMPT.md` to take the shipped one | decision — it is their text |
 | `queue list --json`: `"state": "blocked"` | it is out of the pipeline until someone puts it back | address the blocker it names, then `spoolway resume <task>` | decision |
-| `queue list --json`: `"state": "waiting_on_you"` | a lane asked a question and is holding its pane | answer it in the pane | theirs |
+| `queue list --json`: `"state": "paused"` with `"next"` naming a pane | a lane asked a question and is holding its pane | look at the pane | theirs |
 | `queue list --json`: `"laps"` non-null | a task looping between two steps | say how many rounds and on which step; the cause is in the lane's log | decision |
 | `queue conflicts` | two lanes would edit the same files | add `depends_on` to the later task's frontmatter | decision |
 | `spend`: unpriced models | spend that cannot be seen | price the model in config, or accept it knowingly | decision |

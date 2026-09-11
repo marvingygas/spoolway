@@ -44,15 +44,13 @@
 #                     on_pass <default>  It carries on, findings and all.
 #   timeout           <duration>         How long a command step may run, e.g. `90s`.
 #                                        Absent: 30m.
-#   background        true               The task moves on; `on_fail` is refused.
+#   background        true               The task moves on; `on_fail` routes it later.
 #                     false <default>    The task waits for the command.
 #   headless          true               The command runs detached, with no pane.
 #                     false <default>    It runs in a pane of its own.
 #   last              true               Only the last task of a chain runs this
 #                                        command; the rest walk past to `on_pass`.
 #                     false <default>    Every task runs it.
-#   cleanup           true               Removes the worktree, branch and task file.
-#                     false <default>    Leaves them.
 # <<< spoolway <<<
 
 
