@@ -100,14 +100,6 @@ struct QueueRowJson {
     out_tokens: Option<u64>,
     cost_usd: Option<f64>,
     lane_time_s: Option<i64>,
-    /// The recheck clock retained for compatibility with the original JSON
-    /// schema. This is not the elapsed age drawn by the board.
-    parked_until: Option<String>,
-    /// How long a `state: "parked"` row has been held — `now - parked_at`,
-    /// already formatted (`"8m"`, `"1h 04m"`). `None` on every other
-    /// state, and on a legacy park with no recorded start. Mirrors
-    /// `Row::parked_display`.
-    parked_age: Option<String>,
 }
 
 impl From<&crate::status::Row> for QueueRowJson {
@@ -127,8 +119,6 @@ impl From<&crate::status::Row> for QueueRowJson {
             out_tokens: row.out,
             cost_usd: row.cost,
             lane_time_s: row.lane_time,
-            parked_until: row.parked_until_display.clone(),
-            parked_age: row.parked_display.clone(),
         }
     }
 }
@@ -143,7 +133,6 @@ fn state_label(state: crate::status::State) -> &'static str {
         Blocked => "blocked",
         Unreachable => "unreachable",
         Queued => "queued",
-        Parked => "parked",
         Done => "done",
     }
 }
@@ -390,6 +379,13 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: &str) -> Result<Task
         serde_norway::from_value(serde_norway::Value::Mapping(mapping))
             .with_context(|| format!("{name}: frontmatter is not valid task YAML"))?;
 
+    // The retired quota-and-usage-limit park fields, same as `Task::parse`
+    // strips them for a file already on disk — a submitted document copied
+    // from an older task carries them just as easily.
+    for key in crate::task::RETIRED_PARK_KEYS {
+        front.extra.remove(*key);
+    }
+
     if front.id.trim().is_empty() {
         bail!("{name}: a document must set `id:`");
     }
@@ -422,6 +418,7 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: &str) -> Result<Task
     front.last_report = None;
     front.blocked_from = None;
     front.parked_from = None;
+    front.escalated = false;
     front.resume = None;
     front.branch = Some(format!("task/{}", front.id));
     front.base = Some(base.to_string());
@@ -436,11 +433,6 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: &str) -> Result<Task
     front.pane_id = None;
     front.tab_id = None;
     front.attempts = 0;
-    front.usage_limit_hold = false;
-    front.quota_retries = 0;
-    front.parked_until = None;
-    front.parked_window = String::new();
-    front.parked_at = None;
     front.paused_at = None;
     front.launched_at = None;
     front.prompts = Default::default();
@@ -1387,7 +1379,7 @@ pub fn queue_pause(repo: &Repo, pipelines: &Pipelines, id: &str, force: bool) ->
         }
     }
 
-    crate::status::park(&mut tasks[idx], "paused via `spoolway queue pause`");
+    crate::status::park(&mut tasks[idx], "paused via `spoolway queue pause`", false);
     tasks[idx].save()?;
     println!("paused `{id}`");
     Ok(())
@@ -4179,12 +4171,12 @@ mod tests {
     /// a question-held one — `State::WaitingOnYou` is gone — while `next`
     /// still carries the wording that tells the two apart and `resumable` is
     /// `true` on both: a question-held row offers the same `[r]` a gate does,
-    /// alongside the pane it names. A parked row carries its elapsed age as
-    /// additive `parked_age`, while the existing `parked_until` clock keeps
-    /// its name and meaning. Nothing emits the old `waiting_on_you` state
-    /// label.
+    /// alongside the pane it names. Nothing emits the old `waiting_on_you`
+    /// state label, and nothing emits `parked` either — that state left with
+    /// the fields behind it, and a lane that stops reporting now reads as an
+    /// ordinary `paused` row like these two.
     #[test]
-    fn queue_json_reports_paused_and_a_parked_age() {
+    fn queue_json_reports_paused_for_both_a_gate_and_a_question() {
         use crate::status::State;
         use crate::status::testutil::row;
 
@@ -4198,13 +4190,7 @@ mod tests {
         question.resumable = true;
         question.next = "look at pane `question · implement` — [r] resumes it".into();
 
-        let mut parked = row("job-engine");
-        parked.state = State::Parked;
-        parked.parked_display = Some("42m".into());
-        parked.parked_reason = Some("quota unavailable".into());
-        parked.parked_until_display = Some("23:05".into());
-
-        let json: Vec<QueueRowJson> = [&gate, &question, &parked]
+        let json: Vec<QueueRowJson> = [&gate, &question]
             .iter()
             .map(|r| QueueRowJson::from(*r))
             .collect();
@@ -4217,17 +4203,10 @@ mod tests {
             json[1].next,
             "look at pane `question · implement` — [r] resumes it"
         );
-        assert_eq!(json[2].state, "parked");
-        assert_eq!(json[2].parked_until.as_deref(), Some("23:05"));
-        assert_eq!(json[2].parked_age.as_deref(), Some("42m"));
 
-        let rendered = serde_json::to_string(&json[2]).unwrap();
-        assert!(
-            rendered.contains("\"parked_until\":\"23:05\""),
-            "{rendered}"
-        );
-        assert!(rendered.contains("\"parked_age\":\"42m\""), "{rendered}");
+        let rendered = serde_json::to_string(&json[1]).unwrap();
         assert!(!rendered.contains("waiting_on_you"), "{rendered}");
+        assert!(!rendered.contains("parked"), "{rendered}");
     }
 
     #[test]
@@ -5014,20 +4993,22 @@ mod tests {
         assert_eq!(task.front.base.as_deref(), Some("plan/live"));
     }
 
-    /// The park fields are the dispatcher's, not a document's — a submission
-    /// that carries `parked_at:` (or the deadline beside it) from an earlier
-    /// run has them wiped, the same as `attempts:` or `launched_at:`.
+    /// The retired quota-and-usage-limit park fields have no struct home any
+    /// more — a submission that still carries one from an earlier run has it
+    /// dropped on parse, the same as any other document `Task::parse` refuses
+    /// to round-trip.
     #[test]
-    fn a_document_carrying_park_fields_has_them_reset() {
+    fn a_document_carrying_park_fields_has_them_dropped() {
         let text = document(
             "demo",
             "group: demo\nparked_at: 1788793980\nparked_until: 1788801180\nparked_window: five_hour\n",
             BODY,
         );
         let task = parse_submission("mine.md", &text, "plan/demo").unwrap();
-        assert_eq!(task.front.parked_at, None);
-        assert_eq!(task.front.parked_until, None);
-        assert_eq!(task.front.parked_window, "");
+        let rendered = task.render().unwrap();
+        assert!(!rendered.contains("parked_at"), "{rendered}");
+        assert!(!rendered.contains("parked_until"), "{rendered}");
+        assert!(!rendered.contains("parked_window"), "{rendered}");
     }
 
     /// A repeat submission is refused whether the id is still in the queue —

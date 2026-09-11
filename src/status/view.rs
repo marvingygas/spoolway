@@ -143,7 +143,6 @@ impl State {
             State::Blocked => "● blocked",
             State::Unreachable => "● unreachable",
             State::Queued => "○ queued",
-            State::Parked => "● parked",
             State::Done => "● done",
         }
     }
@@ -159,9 +158,6 @@ impl State {
             State::Blocked => format!("{ORANGE}{word}{RESET}"),
             State::Unreachable => format!("{RED}{word}{RESET}"),
             State::Queued => format!("{DIM}{word}{RESET}"),
-            // Dim like `Queued`, not amber like `Paused`: nothing is waiting
-            // on a person here, only a clock.
-            State::Parked => format!("{DIM}{word}{RESET}"),
             State::Done => format!("{DIM}{word}{RESET}"),
         }
     }
@@ -1168,32 +1164,21 @@ pub(super) fn table(
     out
 }
 
-/// The full text of a row's STATE cell: the state's own word, plus an
-/// optional unavailable-reading reason and `· <age>` suffix on a `Parked`
-/// row — the one state whose meaning includes per-row context and elapsed
-/// duration. Kept off [`State::word`] itself, which returns `&'static str`
-/// and so cannot carry either value.
+/// The full text of a row's STATE cell: the state's own word, with nothing
+/// after it. Kept as its own function, rather than a direct call to
+/// [`State::word`] at each of its two call sites, for the plain-text and
+/// coloured cells to stay the same shape — no board row draws a `· <clock>`
+/// or a reason after its state word any more; that suffix belonged to
+/// `Parked`, which left with the park fields behind it.
 fn state_cell_text(row: &Row) -> String {
-    let word = row.state.word();
-    match (&row.state, &row.parked_reason, &row.parked_display) {
-        (State::Parked, Some(reason), Some(age)) => format!("{word} · {reason} · {age}"),
-        (State::Parked, Some(reason), None) => format!("{word} · {reason}"),
-        (State::Parked, None, Some(age)) => format!("{word} · {age}"),
-        _ => word.to_string(),
-    }
+    row.state.word().to_string()
 }
 
 impl Style {
     fn paint_state(&self, row: &Row) -> String {
-        let dot = match self.colour {
+        match self.colour {
             true => row.state.dot(),
             false => row.state.word().to_string(),
-        };
-        match (&row.state, &row.parked_reason, &row.parked_display) {
-            (State::Parked, Some(reason), Some(age)) => format!("{dot} · {reason} · {age}"),
-            (State::Parked, Some(reason), None) => format!("{dot} · {reason}"),
-            (State::Parked, None, Some(age)) => format!("{dot} · {age}"),
-            _ => dot,
         }
     }
 
@@ -1548,19 +1533,6 @@ pub(crate) fn human_secs(total: i64) -> String {
     match (h, m) {
         (0, 0) => format!("{s}s"),
         (0, _) => format!("{m}m {s:02}s"),
-        _ => format!("{h}h {m:02}m"),
-    }
-}
-
-/// A park age changes at the precision a person needs on the board: seconds
-/// while it is less than a minute, whole minutes below an hour, then hours
-/// and minutes. Unlike [`human_secs`], this deliberately does not let a
-/// minute-scale hold make the STATE column tick every second.
-pub(crate) fn park_age(total: i64) -> String {
-    let (h, m, s) = (total / 3600, (total % 3600) / 60, total % 60);
-    match (h, m) {
-        (0, 0) => format!("{s}s"),
-        (0, _) => format!("{m}m"),
         _ => format!("{h}h {m:02}m"),
     }
 }
@@ -2827,28 +2799,6 @@ mod tests {
         assert_eq!(human_secs(47), "47s");
         assert_eq!(human_secs(723), "12m 03s");
         assert_eq!(human_secs(3840), "1h 04m");
-    }
-
-    /// Parked STATE cells use stable minute precision rather than the lane
-    /// timer's seconds, matching the board contract exactly at 42 minutes.
-    #[test]
-    fn parked_state_cell_renders_a_whole_minute_age() {
-        let parked = Row {
-            state: State::Parked,
-            parked_display: Some(park_age(42 * 60)),
-            ..row("job-engine")
-        };
-
-        assert_eq!(state_cell_text(&parked), "● parked · 42m");
-        let plain = plain_table(&[parked]);
-        let rendered = plain
-            .lines()
-            .find(|line| line.contains("job-engine"))
-            .unwrap_or_else(|| panic!("parked row in {plain:?}"));
-        assert_eq!(
-            rendered,
-            "   job-engine   default    implement   ● parked · 42m   "
-        );
     }
 
     /// The ticker is the section that gives when the pane is short, and what

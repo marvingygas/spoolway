@@ -1064,7 +1064,7 @@ fn prompt_checks(repo: &Repo, pipelines: &Pipelines) -> Vec<Finding> {
         Err(err) => findings.push(Finding::Note(format!("prompts could not be read: {err:#}"))),
     }
 
-    // Same read, over the six typed messages a lane's pane receives rather
+    // Same read, over the seven typed messages a lane's pane receives rather
     // than a role's own prose — see `crate::lane_prompts`. A section that
     // names none of the placeholders its state needs, or names one this
     // binary does not substitute, is a finding here too.

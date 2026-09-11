@@ -76,12 +76,13 @@
       "id": "quiet",
       "context": [
         "This task is a test of spoolway: the behaviour asked for below is the work.",
-        "A lane that ends its turn without calling `spoolway report` is reminded to, through the same pane, up to three times \u2014 one per pass \u2014 and the task blocks once a reminder goes unanswered. No duration governs any of it: it is a count, the same on every project.",
+        "A lane that ends its turn without calling `spoolway report` is reminded to, through the same pane, up to three times \u2014 one per pass \u2014 and the task lands on `paused`, with `parked_from` naming this step, once a reminder goes unanswered. No duration governs any of it: it is a count, the same on every project.",
         "The reminder resumes your own session and repeats the report contract; answering it with anything other than `spoolway report` is still not reporting, however many tokens the reply spends."
       ],
       "goal": "Never call `spoolway report` \u2014 not on this turn, and not on any turn you are resumed into afterwards.",
       "criteria": [
-        "the lane is reminded to report at least once, and the task blocks on its own once the reminders run out",
+        "the lane is reminded to report at least once, and the task lands on `paused` on its own once the reminders run out",
+        "the task file's `parked_from` names `quiet`, and the lane's pane is still there to read — no `blocked` step is ever reached",
         "no file in the worktree changed"
       ],
       "non_goals": [
@@ -574,7 +575,7 @@ td code { font-family: var(--mono); font-size: 0.85em; color: var(--accent); }
   <main class="doc">
 
     <h1>Three ways a task stops, watched in the panes</h1>
-    <p class="standfirst">A block, a review that never passes and a lane that goes quiet — the three roads to <code>blocked</code>, run for real so that what the multiplexer does about each of them can be looked at rather than inferred.</p>
+    <p class="standfirst">A block, a review that never passes and a lane that goes quiet — two roads to <code>blocked</code> and one straight to <code>paused</code>, run for real so that what the multiplexer does about each of them can be looked at rather than inferred.</p>
 
     <!-- WHAT THIS PLAN REACHES. Every plan under scripts/e2e/plans/ carries one,
          and it is the block a person reads before choosing which plan to queue.
@@ -590,7 +591,7 @@ td code { font-family: var(--mono); font-size: 0.85em; color: var(--accent); }
 <pre>
 covers: unattended.enabled — off, `bails` parks on `blocked` and its pane is kept; watch `spoolway resume` continue that same lane
 covers: step.loop — `loops` fails review until the map's route runs out
-covers: the reminder ceiling — `quiet` never reports, and its own pane shows a reminder landing up to three times before the task blocks
+covers: the reminder ceiling — `quiet` never reports, and its own pane shows a reminder landing up to three times before the task lands on `paused`
 covers: agents.pi.session_reuse_ctx — `loops` resumes one conversation until a real turn crosses 5% of the window, then opens fresh
 covers: step.session — the resumed lane is told it is continuing, not briefed again; read its first line
 covers: herdr focus — the pane of a blocked lane is brought to the front
@@ -602,13 +603,13 @@ config: agents.pi.session_reuse_ctx 5
 
     <h2 id="context">Context</h2>
 
-    <p>Every road to <code>blocked</code> is decided headlessly and is already a case in
+    <p>Every road these four tasks take is decided headlessly and is already a case in
     <code>src/dispatch.rs</code>'s own unit tests. What no suite can say is what a person
     <em>sees</em>: which pane comes forward, what the board says while it happens, and whether
-    the lane a block leaves behind is still readable an hour later. This plan is those three
+    the lane an escalation leaves behind is still readable an hour later. This plan is those three
     roads, run at the speed a person can watch — plus a fourth, run in a second pass: what an
     unattended run's own <code>blocked</code> step looks like staffed by a real model running the
-    shipped <code>unblocker</code> prompt, rather than parked for a person who was never coming.</p>
+    shipped <code>unblocker</code> prompt, rather than left for a person who was never coming.</p>
 
     <ul class="refs">
       <li><code>src/dispatch.rs</code> — the same four roads, decided from files and exit codes, in its own unit tests</li>
@@ -624,7 +625,7 @@ config: agents.pi.session_reuse_ctx 5
 
       <figure>
         <div class="frame">
-          <svg viewBox="0 0 800 240" role="img" aria-label="Three tasks, each ending at a different escalation road: a block, rounds exhausted, and reminders ignored">
+          <svg viewBox="0 0 800 260" role="img" aria-label="Three tasks, each ending at a different escalation road: a block and rounds exhausted both land on blocked, reminders ignored lands straight on paused">
             <rect class="node" x="24" y="30" width="150" height="44" rx="3"/>
             <text x="99" y="50" text-anchor="middle" font-size="12.5">bails</text>
             <text class="sub" x="99" y="66" text-anchor="middle">report --block</text>
@@ -648,14 +649,24 @@ config: agents.pi.session_reuse_ctx 5
             <text x="351" y="118" text-anchor="middle" font-size="12.5">blocked</text>
             <text class="sub" x="351" y="134" text-anchor="middle">unattended = false</text>
 
+            <rect class="node" x="266" y="166" width="170" height="46" rx="3"/>
+            <text x="351" y="186" text-anchor="middle" font-size="12.5">paused</text>
+            <text class="sub" x="351" y="202" text-anchor="middle">parked_from: quiet</text>
+
             <path class="mark" d="M436 121 H520"/>
             <polygon class="tip" points="520,116 532,121 520,126"/>
             <rect class="node" x="536" y="86" width="240" height="70" rx="3"/>
             <text x="656" y="112" text-anchor="middle" font-size="12.5">a pane, brought to the front</text>
             <text class="sub" x="656" y="132" text-anchor="middle">the part no suite can assert</text>
+
+            <path class="mark" d="M436 189 H520"/>
+            <polygon class="tip" points="520,184 532,189 520,194"/>
+            <rect class="node" x="536" y="176" width="240" height="70" rx="3"/>
+            <text x="656" y="202" text-anchor="middle" font-size="12.5">the same pane, never a new one</text>
+            <text class="sub" x="656" y="222" text-anchor="middle">no blocked step is ever reached</text>
           </svg>
         </div>
-        <figcaption>The left column is what the tasks ask for; the right is the only thing this plan is actually watching.</figcaption>
+        <figcaption>The left column is what the tasks ask for; the right is the only thing this plan is actually watching. <code>bails</code> and <code>loops</code> both land on <code>blocked</code>; <code>quiet</code> goes straight to <code>paused</code> and never opens a <code>blocked</code> pane at all.</figcaption>
       </figure>
 
       <p>Every criterion above is checkable by reading the task file and the board. Nothing here asks whether the model wrote good code, because nothing here asks it to write any.</p>
@@ -668,7 +679,7 @@ config: agents.pi.session_reuse_ctx 5
         <h3>What you see</h3>
         <ul class="cons">
           <li><code>bails</code> blocks within a minute of the run starting, so the pane a block leaves behind is the first thing to look at rather than the last — and it is still there to read, which is the whole claim.</li>
-          <li><code>quiet</code> settles without ever calling <code>spoolway report</code>, and its own pane is where the reminder lands: the same report contract, typed back into the pane the lane already left, up to three times before the task blocks on its own — the same <code>(1/3)</code>, <code>(2/3)</code> counting <code>staffed</code> is watched for below, arriving in a lane that never asked anything at all.</li>
+          <li><code>quiet</code> settles without ever calling <code>spoolway report</code>, and its own pane is where the reminder lands: the same report contract, typed back into the pane the lane already left, up to three times before the task lands on <code>paused</code> on its own — the same <code>(1/3)</code>, <code>(2/3)</code> counting <code>staffed</code> is watched for below, arriving in a lane that never asked anything at all. No <code>blocked</code> pane ever opens for it; the pane it already had is the one left readable.</li>
           <li><code>staffed</code>, queued into a second, unattended pass, blocks the same way <code>bails</code> did — but this time <code>bails</code>' pane is long closed, and a new one opens on <code>blocked</code> instead: the shipped <code>unblocker</code>, reading the block in its own words and reporting <code>--pause</code> once. Watch the task land on <code>paused</code> after that one turn, rather than a person ever being fetched or a second pane opening on <code>blocked</code>.</li>
           <li>And watch that the pane does not come back. <code>--pause</code> from <code>blocked</code> moves the stage to <code>paused</code> the same way every other road moves it, so a second pane opening on <code>blocked</code> for this task is the failure, not the pattern. A single pane held open, or told it has not reported after it has, is the loop this step used to fall into.</li>
         </ul>
@@ -677,7 +688,7 @@ config: agents.pi.session_reuse_ctx 5
         <h3>What it costs</h3>
         <ul class="cons">
           <li class="cost">A run of this plan reaches <code>done</code> for no task: all three escalate by design, so the closeout steps never run and the plan is torn down rather than landed.</li>
-          <li class="cost"><code>quiet</code> spends up to four turns of one profile's lane budget — the original and up to three reminders resuming the same session — proving nothing rather than doing work, before the task blocks on its own.</li>
+          <li class="cost"><code>quiet</code> spends up to four turns of one profile's lane budget — the original and up to three reminders resuming the same session — proving nothing rather than doing work, before the task pauses on its own.</li>
         </ul>
       </section>
 
@@ -748,12 +759,13 @@ config: agents.pi.session_reuse_ctx 5
           <h3>quiet</h3>
           <span class="waits">waits on loops</span>
         </header>
-        <p>Never reports, and is reminded up to three times before the task blocks on its own.</p>
+        <p>Never reports, and is reminded up to three times before the task lands on <code>paused</code> on its own — no <code>blocked</code> pane ever opens for it.</p>
         <div class="lists">
           <div>
             <h4>Done when</h4>
             <ul>
               <li>the lane is reminded to report at least once</li>
+              <li>the task lands on <code>paused</code> with <code>parked_from</code> naming <code>quiet</code>, and its pane is still there to read</li>
               <li>no file changed</li>
             </ul>
           </div>

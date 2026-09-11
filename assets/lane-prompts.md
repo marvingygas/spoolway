@@ -50,6 +50,15 @@ has put you back. Nothing was blocked and nothing changed: no work of yours
 was undone, nothing was added to the task, nothing new is in your way. Same
 session, continued: pick up where the interrupt cut you off.
 
+## park-escalated
+
+You went quiet and never reported, so spoolway reminded you and, when
+nothing followed, tore your lane down and put the task back here. Nothing
+failed a check — this is not a block — but something was written down while
+you were gone: the last `## Status Log` entry in {task_file} says why, and
+`## Blocker` may carry the last of what your pane said. Same session,
+continued: read those, then carry on.
+
 ## reminder
 
 `{step}` ended its turn without reporting. Here is the report contract

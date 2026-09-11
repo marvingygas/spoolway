@@ -180,9 +180,8 @@ the fields a script would actually want, rather than the board's own row shape. 
 row and a gate-held paused row both emit `"state": "paused"` and both carry the `[r]` resume
 key — the difference is the route, not the key: the question-held row's `next` names the pane
 to look at (``look at pane `<lane>``` — [r] resumes it), the gate-held row's names the resume
-route (`→ handover — [r] resumes it`). Parked rows
-retain the `parked_until` recheck clock for compatibility and add `parked_age`, the formatted
-elapsed duration from `parked_at` (`null` for a legacy park without that timestamp).
+route (`→ handover — [r] resumes it`). No row emits a `parked` state: a lane that stopped
+reporting lands on `paused` too, so `paused` covers a gate, a question, and a quiet lane alike.
 
 ### `spoolway queue show <task>`
 

@@ -470,22 +470,6 @@ floor. `N` is the laps this task has taken from the step it arrived here from, `
 route's own budget, the same pair `apply_loop_budget` compares before it lets another one
 through. A step with no declared budget for that route shows a bare step id.
 
-A task holding a park reads its elapsed age from the fixed `parked_at:` timestamp, on the
-board and in `spoolway queue list` alike. `parked_until:` beside it is the deadline, not a
-moving figure — the age counts from `parked_at` the whole time the park stands, and is only
-reprobed once that deadline has passed. A park without `parked_at:` gets no invented age.
-
-```
-TASK       PIPELINE  STEP       STATE                                  NEXT
-wire-up    impl      implement  ● parked · 8m                           review
-legacy     impl      implement  ● parked                                review
-log-view   impl      implement  ● running                               review
-```
-
-Re-queueing a document clears `parked_until:` along with the `usage_limit_hold` beside it, the
-same way it clears every other field the dispatcher stamped on the earlier run — so a task can
-be taken off a park without waiting the clock out.
-
 `deploy` there is a project's own gated step — no step of any shipped pipeline declares
 `gate:`, because a pull request is already the checkpoint. A task that has passed one reads
 `● paused`, with `→` and the step passing the gate would carry it to in the NEXT column, and
@@ -696,7 +680,7 @@ to answer the question keeps today's behaviour exactly, transcript alone.
 One exit bounds the loop besides the count, and it is counted too, not timed. A lane that goes
 fully quiet *after* a reminder — nothing further in its transcript — is the dead session no
 reminder can reach: due for another reminder is one comparison, whether the transcript has
-written since the last one, and a lane that has not is blocked on that very pass rather than
+written since the last one, and a lane that has not is paused on that very pass rather than
 given a clock to wait out. There the task carries the reason and the last of what the pane said,
 its session is closed and its worker slot goes back, and `spoolway resume` resumes it at the
 step it never reported from, as the session it was — see

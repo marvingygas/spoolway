@@ -891,6 +891,7 @@ fn back_onto_its_step(
     // would still name the step on a later, ordinary retry, and `start_one`
     // would read that retry as a continued park rather than what it is.
     task.front.parked_from = None;
+    task.front.escalated = false;
     task.set_stage(&target, Some(&message));
     task.save()?;
 
@@ -904,17 +905,18 @@ fn back_onto_its_step(
     Ok(())
 }
 
-/// Put a `p`-parked task back on the step it never left — the road
+/// Put a `parked_from` task back on the step it never left — the road
 /// `back_onto_its_step` takes instead of `resume_at` when nothing actually
-/// stopped the task, just a person's own keypress. One code path either way
-/// in: the board's `enter` and `R` call this same `resume` with no `--stage`
-/// of their own, the same as a bare `spoolway resume <task>` does, and
-/// `back_onto_its_step` is what finds `parked_from` and lands here.
+/// failed a check: a person's own keypress or Escape, or a lane
+/// `escalate_clock` gave up on. One code path either way in: the board's
+/// `enter` and `R` call this same `resume` with no `--stage` of their own,
+/// the same as a bare `spoolway resume <task>` does, and `back_onto_its_step`
+/// is what finds `parked_from` and lands here.
 ///
-/// `parked_from` is left in the task file rather than cleared here — the
-/// launch that actually continues this step is what learns whether a
-/// session was there to carry, and `Dispatcher::start_one` in
-/// `src/dispatch.rs` is what spends the flag once that answer is known, the
+/// `parked_from` (and `escalated` beside it) are left in the task file rather
+/// than cleared here — the launch that actually continues this step is what
+/// learns whether a session was there to carry, and `Dispatcher::start_one`
+/// in `src/dispatch.rs` is what spends both once that answer is known, the
 /// same moment it spends `resume`.
 fn unpark(repo: &Repo, pipelines: &Pipelines, mut task: Task) -> Result<()> {
     let step = task
