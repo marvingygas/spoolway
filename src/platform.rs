@@ -555,7 +555,9 @@ mod tests {
 /// A dispatcher spends nearly all its life asleep between passes, so the run
 /// almost always ends with a `Ctrl-C` landing in that sleep. Left to itself
 /// that kills the process where it stands, which is fine for the loop and not
-/// fine for anything the run was holding — see `dispatch.tear_lanes_on_stop`.
+/// fine for the run's own accounting — see
+/// `crate::dispatch::Dispatcher::sweep_on_stop`, which banks an interrupted
+/// lane's spend and forgives its launch counter before the process exits.
 ///
 /// So the signal is caught, turned into a flag, and the loop is left to notice
 /// it and unwind normally. A handler may do almost nothing safely — storing to

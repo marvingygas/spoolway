@@ -287,13 +287,12 @@ pub fn report(
         task.append_to_section("## Status Log", &format!("- {note}\n"));
     }
 
-    // Reaching a cleanup terminal tears the worktree down on arrival — the
-    // reserved `done` always, a declared terminal when it sets `cleanup:` (see
-    // `dispatch::route_reserved_stage`). It must not run while the tree holds
-    // work `auto_commit` above could not record: that terminal "cannot delete
-    // work that was never recorded" (review finding 4), and a git failure
-    // leaves exactly that. Held at `blocked` instead, so a person sees the
-    // worktree before it is gone.
+    // Reaching the reserved `done` stage tears the worktree down on arrival
+    // (see `dispatch::route_reserved_stage`). It must not run while the tree
+    // holds work `auto_commit` above could not record: that terminal "cannot
+    // delete work that was never recorded" (review finding 4), and a git
+    // failure leaves exactly that. Held at `blocked` instead, so a person
+    // sees the worktree before it is gone.
     //
     // Only `Unrecorded` — not residue a lane deliberately left, which is named
     // in the status log and backed up nowhere. Cleanup knowingly discards that
@@ -302,8 +301,7 @@ pub fn report(
     // the same check for the road every shipped pipeline actually takes to
     // `done`, from a command step rather than from this report; this covers a
     // pipeline whose agent step routes `on_pass: done` directly.
-    let routes_to_cleanup = destination == crate::pipeline::DONE
-        || pipeline.step(&destination).is_some_and(|step| step.cleanup);
+    let routes_to_cleanup = destination == crate::pipeline::DONE;
     let held_dirty =
         routes_to_cleanup && commit_note.as_ref().is_some_and(AutoCommit::is_unrecorded);
     if held_dirty {
@@ -1348,24 +1346,6 @@ mod tests {
     /// from that, and without it the task restarts at the pipeline's entry —
     /// which for a task that blocked at `pr` means a second branch push and a
     /// second pull request.
-    /// The toggle is the whole of the deal: off, a stopped run leaves every
-    /// worktree, branch and workspace exactly where it stood.
-    #[test]
-    fn tear_lanes_on_stop_is_what_decides_whether_a_stop_sweeps() {
-        assert!(
-            crate::config::DispatchConfig::default().tear_lanes_on_stop,
-            "on by default — a run that finished should not leave its lanes and worktrees behind"
-        );
-
-        let mut config = crate::config::Config::default();
-        config.dispatch.tear_lanes_on_stop = false;
-        let rendered = toml::to_string(&config).unwrap();
-        assert!(
-            rendered.contains("tear_lanes_on_stop = false"),
-            "it has to survive a round trip through the file: {rendered}"
-        );
-    }
-
     #[test]
     fn a_reported_block_records_the_step_it_stopped_on() {
         // Both roads out of a block read this: `spoolway resume` by hand, and

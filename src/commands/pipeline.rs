@@ -106,17 +106,24 @@ const STEP_KEYS: &[&str] = &[
     "headless",
     "last",
     "end",
-    "cleanup",
 ];
 
 /// Keys `deny_unknown_fields` refuses outright: two retired spellings of
-/// `loop:`, kept on [`Step`] only so a file still naming them gets a message
-/// pointing at the replacement rather than serde's own "unknown field", and
-/// two struct fields that answer a fact about where a `Pipeline` came from
-/// rather than something a file could ever set — [`Pipeline::name`], because
-/// the file name is the name, and [`Pipeline::blocked_declared`], set only
-/// by [`Pipelines::assemble`] once a file is read.
-const REFUSED_KEYS: &[&str] = &["name", "blocked_declared", "max_new_sessions", "max_rounds"];
+/// `loop:` and the retired `cleanup:`, kept on [`Step`] only so a file still
+/// naming them gets a message pointing at the replacement — or, for
+/// `cleanup:`, saying why there is none — rather than serde's own "unknown
+/// field", and two struct fields that answer a fact about where a `Pipeline`
+/// came from rather than something a file could ever set —
+/// [`Pipeline::name`], because the file name is the name, and
+/// [`Pipeline::blocked_declared`], set only by [`Pipelines::assemble`] once a
+/// file is read.
+const REFUSED_KEYS: &[&str] = &[
+    "name",
+    "blocked_declared",
+    "max_new_sessions",
+    "max_rounds",
+    "cleanup",
+];
 
 /// One sentence per key a pipeline file may actually set — [`PIPELINE_KEYS`]
 /// and [`STEP_KEYS`] together — written from the doc comment already on the
@@ -238,11 +245,6 @@ const FIELD_SENTENCES: &[(&str, &str)] = &[
         "end",
         "The task stops here — nothing is scheduled for it again. May name no \
          agent, no command and no transition.",
-    ),
-    (
-        "cleanup",
-        "Tear down the task's worktree and branch, and archive its file, on \
-         arrival. Only meaningful on a terminal step.",
     ),
 ];
 
@@ -469,8 +471,7 @@ fn template() -> String {
          \x20\x20# A terminal step: the task stops here. `end: true` is declared rather\n\
          \x20\x20# than inferred, so a mistyped `agnet:` is an error instead of a silent stop.\n\
          \x20\x20# - id: shipped\n\
-         \x20\x20#   end: true\n\
-         \x20\x20#   cleanup: true            remove the worktree, delete the local branch, archive the file\n",
+         \x20\x20#   end: true\n",
         local_model = crate::models::PLACEHOLDER,
         hosted_model = "claude-opus-5",
     )
@@ -580,14 +581,10 @@ fn show_one(pipeline: &Pipeline, default: &str) -> Result<()> {
             println!("             run: {run}");
         }
         match step.kind() {
-            StepKind::Terminal => {
-                if step.cleanup {
-                    println!(
-                        "             on arrival: remove worktree, delete local branch, \
-                         archive task"
-                    );
-                }
-            }
+            // Nothing to say on arrival: a declared terminal simply stops the
+            // task there. Only the reserved `done` stage tears a checkout
+            // down, and `pipeline show` never lists that stage as a step.
+            StepKind::Terminal => {}
             // `blocked` declares neither: where its pass goes is read from the
             // step the task stopped on rather than from here, and anything
             // else — a fail, a block, or a pause — parks the task on `paused`

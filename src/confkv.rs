@@ -119,14 +119,6 @@ pub const REFERENCE: &[Reference] = &[
                     running before the reminder loop treats it as silent anyway.",
     },
     Reference {
-        key: "dispatch.tear_lanes_on_stop",
-        values: "true, false",
-        default: "true",
-        sentence: "Whether stopping the dispatcher ends the run's live lanes and takes \
-                    their worktrees with them; branches and a task on `blocked` are never \
-                    swept.",
-    },
-    Reference {
         key: "unattended.enabled",
         values: "true, false",
         default: "false",
@@ -487,22 +479,18 @@ pub fn entries(config: &Config) -> Result<Vec<Entry>> {
     Ok(out)
 }
 
-/// The three flat `[dispatch]` keys `get` and `set` accept that [`entries`]
+/// The two flat `[dispatch]` keys `get` and `set` accept that [`entries`]
 /// never lists, because they are skipped from the file while they hold their
 /// default — see [`unset_value`], which resolves each. [`all_settings`] adds
 /// these plus the per-entry omissions (`[models]` zeros, an absent
 /// `agents.<profile>.concurrency`) for every profile and model glob the
 /// config already carries; only a `[models]` glob nobody has named yet stays
 /// off the list, and no list could show that open-ended keyspace.
-pub const OMITTED_DEFAULT_KEYS: &[&str] = &[
-    "dispatch.tear_lanes_on_stop",
-    "dispatch.lane_child_ceiling",
-    "dispatch.priority",
-];
+pub const OMITTED_DEFAULT_KEYS: &[&str] = &["dispatch.lane_child_ceiling", "dispatch.priority"];
 
 /// Every scalar setting `config get`/`set` resolves for a key that already
 /// names something: [`entries`] plus the omitted-default keys it skips — the
-/// three flat [`OMITTED_DEFAULT_KEYS`], the `concurrency` of every profile
+/// two flat [`OMITTED_DEFAULT_KEYS`], the `concurrency` of every profile
 /// that omits it, and every price/limit field of every `[models]` glob the
 /// config already carries. This is the list `spoolway config list` prints, so
 /// its promise to name every settable scalar key holds for every key that
@@ -643,15 +631,12 @@ pub fn get(config: &Config, key: &str) -> Result<String> {
 ///
 /// `None` for anything else, which is how a typo stays a typo.
 fn unset_value(config: &Config, key: &str) -> Option<String> {
-    // A `[dispatch]` bool that is skipped on the way out while it holds its
+    // A `[dispatch]` value that is skipped on the way out while it holds its
     // default. Absence *is* the default here rather than a zero, so this reads
     // the value off the struct: a reader who asks what the setting currently is
-    // gets `true`, not "no such key". The write path needs it too — `set`
+    // gets its default, not "no such key". The write path needs it too — `set`
     // refuses a key that does not resolve, so without this the key would be
     // documented in the reference table and settable by nothing.
-    if key == "dispatch.tear_lanes_on_stop" {
-        return Some(config.dispatch.tear_lanes_on_stop.to_string());
-    }
     if key == "dispatch.lane_child_ceiling" {
         return Some(crate::config::format_duration(
             config.dispatch.lane_child_ceiling,
@@ -867,7 +852,6 @@ fn ensure_dispatch_default(value: &mut Value, key: &str, config: &Config) {
         return;
     };
     let seed = match field {
-        "tear_lanes_on_stop" => Value::Boolean(config.dispatch.tear_lanes_on_stop),
         "priority" => Value::try_from(config.dispatch.priority)
             .expect("Priority always serialises to a string"),
         "lane_child_ceiling" => Value::String(crate::config::format_duration(
@@ -1131,24 +1115,13 @@ mod tests {
         assert!(on.unattended.skip_blocked_lane);
     }
 
-    /// The same read/write-while-absent mechanism, for `tear_lanes_on_stop`.
+    /// A config naming the retired `dispatch.tear_lanes_on_stop` is refused
+    /// outright — `get`/`set` never resolve it, so this reaches `config.rs`'s
+    /// own refusal on load rather than confkv's read/write-while-absent path.
     #[test]
-    fn tear_lanes_on_stop_is_readable_and_writable_while_absent() {
-        let config = Config::default();
-        assert_eq!(get(&config, "dispatch.tear_lanes_on_stop").unwrap(), "true");
-        assert!(
-            !toml::to_string(&config)
-                .unwrap()
-                .contains("tear_lanes_on_stop")
-        );
-
-        let off = set(&config, "dispatch.tear_lanes_on_stop", "false").unwrap();
-        assert!(!off.dispatch.tear_lanes_on_stop);
-        assert_eq!(get(&off, "dispatch.tear_lanes_on_stop").unwrap(), "false");
-
-        let on = set(&off, "dispatch.tear_lanes_on_stop", "true").unwrap();
-        assert!(on.dispatch.tear_lanes_on_stop);
-        assert!(!toml::to_string(&on).unwrap().contains("tear_lanes_on_stop"));
+    fn tear_lanes_on_stop_is_refused_rather_than_resolved() {
+        let err = get(&Config::default(), "dispatch.tear_lanes_on_stop").unwrap_err();
+        assert!(err.to_string().contains("no config key"), "{err}");
     }
 
     /// The same read/write-while-absent mechanism, for `lane_child_ceiling`.

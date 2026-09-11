@@ -84,10 +84,6 @@ that claim it:
 ```
 settings:
   dispatch.auto_commit         off, a lane's leftovers are reported and not committed
-  dispatch.tear_lanes_on_stop  a stop with the teardown off leaves every worktree and lane
-                                exactly where it stood
-                               a stop with the teardown on ends the lane before it takes the
-                                worktree, and keeps the branch
   models                       a model with no window is never sized, and says so
                                a window from the project's own table beats the built-in one
   ...
@@ -151,7 +147,7 @@ spends nothing when its models resolve to a local endpoint — see
 | `stack` | `spoolway stack` itself: the squash to one commit and that a rejecting `commit-msg` hook cannot strand it, a refused lease, the empty-diff refusal, a `branch:` that is neither `task/<id>` nor a slug-prefixed `task/<slug>-<id>` refused when the task loads, and `[stack.summary]`'s modes — the body taken verbatim from the task file, a model turn's printed output as the whole body, and the refusals for a half-set table or a missing template | Real git, and a forge double the command really shells out to |
 | `conflicts` | A base that moves under a waiting branch, and the rebase that rescues it | The same, with the base actually moving |
 | `forge` | The `gh` test double, and a hand-off that hands nothing over | A real forge interaction |
-| `disaster` | The ways a run ends badly: a hard kill with lanes live, the stale lock it leaves, a restart over a still-running lane, a lane that reports with nobody listening, a stop that sweeps and one that does not, a retention sweep that spares a still-queued task's scratch tree and headless record, an `eval` read that banks no catch-up line for a lane still in flight, and a multiplexer that dies under worktrees that outlive it | Real detached processes, a real lock file, and — for the last case — a real tmux server on a scratch socket of its own |
+| `disaster` | The ways a run ends badly: a hard kill with lanes live, the stale lock it leaves, a restart over a still-running lane, a lane that reports with nobody listening, a stop with live lanes that leaves every worktree and lane standing and the next run resuming the same lane, a retention sweep that spares a still-queued task's scratch tree and headless record, an `eval` read that banks no catch-up line for a lane still in flight, and a multiplexer that dies under worktrees that outlive it | Real detached processes, a real lock file, and — for the last case — a real tmux server on a scratch socket of its own |
 | `lock` | `run.sh`'s own `pr`-tier lock: a second `--tier pr` invocation blocks until the first releases it, rather than running beside it and contending for the same disk and CPU | Two real `run.sh` invocations, pointed at a lock file of their own through `SPOOLWAY_E2E_PR_LOCK` so the suite never nests against the lock the run driving it is already holding |
 | `trials` | One task forked across two pipelines from the queue screen's own `p` picker: an arm per pipeline lands in the queue directory under a minted id, with the right `pipeline:`, `skip:` and `group:` on it. Nothing here drives a dispatcher | Real keystrokes piped into the real binary — `run_screen` is exercised headlessly in Rust, but never as the whole binary reading a real pipe |
 | `routines` | The repeatable documents under `.spoolway/routines/`, through the queue screen's `r` pane and `s` panel: `enter` lands the right task files under minted ids with their bodies untouched, and `s` copies a pending group's documents back into the checkout | The same, against a real tracked `.spoolway/routines/` tree |

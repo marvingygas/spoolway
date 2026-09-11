@@ -588,10 +588,20 @@ pub struct Step {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub last: bool,
 
-    /// Tear down the task's worktree and branch, and archive its file, on
-    /// arrival. Only meaningful on a terminal step.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub cleanup: bool,
+    /// Retired: used to tear the task's worktree and branch down, and archive
+    /// its file, on arrival at a declared terminal step — reaching the
+    /// reserved `done` stage does this unconditionally now, at
+    /// [`crate::dispatch::Dispatcher::clean_up`], so there was no second value
+    /// this key ever chose between. Kept only so a file still naming it is
+    /// refused by name, the way [`Step::max_new_sessions`] and
+    /// [`Step::max_rounds`] are.
+    #[serde(
+        default,
+        skip_serializing,
+        deserialize_with = "deserialize_retired_cleanup"
+    )]
+    #[allow(dead_code)]
+    pub cleanup: Option<serde_norway::Value>,
 
     /// Where an old `blocked_on_write:` on this step lands so an existing
     /// pipeline file still parses. Retired along with the check that read
@@ -704,6 +714,21 @@ fn deserialize_max_rounds<'de, D: serde::Deserializer<'de>>(
         "`max_rounds:` is now `loop:` — it bounds how many times a task may arrive at this \
          step from a given one. Rename the key, and consider raising the number: what it \
          counts has changed twice since",
+    ))
+}
+
+/// The retired `cleanup:` key, kept only so that a file still naming it is
+/// refused by name rather than serde's own list of every other key a step
+/// may carry.
+fn deserialize_retired_cleanup<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Option<serde_norway::Value>, D::Error> {
+    let _ = serde_norway::Value::deserialize(d)?;
+    Err(serde::de::Error::custom(
+        "`cleanup:` is retired — reaching the reserved `done` stage already tears a task's \
+         worktree and branch down and archives its file, which was the only value this key \
+         ever carried on a shipped or project pipeline. Delete it; a step that wants the \
+         task to end names `end: true` and nothing else",
     ))
 }
 
@@ -1293,14 +1318,6 @@ impl Pipeline {
                     );
                 }
             }
-            if step.cleanup && kind != StepKind::Terminal {
-                bail!(
-                    "step `{}` declares `cleanup:` but is a {} step — a worktree torn down \
-                     under a task still running is a task with nowhere to work",
-                    step.id,
-                    kind.as_str()
-                );
-            }
         }
 
         // A `session:` step's conversation is keyed on its prompt — every
@@ -1764,7 +1781,7 @@ fn blocked_step_from_config(unattended: &crate::config::UnattendedConfig) -> Ste
         background: false,
         headless: false,
         last: false,
-        cleanup: false,
+        cleanup: None,
         blocked_on_write: Vec::new(),
     }
 }
@@ -2370,13 +2387,27 @@ mod tests {
             "background",
             "headless",
             "last",
-            "cleanup",
         ] {
             assert!(
                 block.contains(&format!("#   {key} ")),
                 "the key reference says nothing about `{key}`"
             );
         }
+    }
+
+    /// A file still naming the retired `cleanup:` is refused by name, the same
+    /// way `max_rounds:` and `max_new_sessions:` are — reaching `done` already
+    /// does what this key used to opt a declared terminal into.
+    #[test]
+    fn the_retired_cleanup_key_is_refused_by_name() {
+        let err = parse(
+            "steps:\n  - id: a\n    agent: pi\n    on_pass: z\n  \
+             - id: z\n    end: true\n    cleanup: true\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("`cleanup:` is retired"), "{err}");
+        assert!(err.contains("`done`"), "{err}");
     }
 
     /// What the board's NEXT column asks. One hop along `on_pass` — nothing in

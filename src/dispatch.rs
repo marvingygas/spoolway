@@ -945,11 +945,11 @@ impl<'a> Dispatcher<'a> {
                 .map(|(_, _, lane)| *lane);
 
             match step.kind() {
-                StepKind::Terminal => {
-                    if step.cleanup && self.clean_up(&mut tasks[index], owned, report)? {
-                        archived.push(tasks[index].id().to_string());
-                    }
-                }
+                // A declared terminal step (`end: true`) that is not the
+                // reserved `done` stage does nothing on arrival — reaching
+                // `done` is the only thing that tears a checkout down, at
+                // `route_reserved_stage` below. The task simply stops here.
+                StepKind::Terminal => {}
 
                 StepKind::Command => {
                     let id = tasks[index].id().to_string();
@@ -1021,12 +1021,6 @@ impl<'a> Dispatcher<'a> {
                         false => {
                             tasks[index].set_stage(&destination, None);
                             self.persist(&mut tasks[index])?;
-                            let cleans = pipeline
-                                .step(&destination)
-                                .is_some_and(|s| s.kind() == StepKind::Terminal && s.cleanup);
-                            if cleans && self.clean_up(&mut tasks[index], owned, report)? {
-                                archived.push(id);
-                            }
                         }
                     }
                 }
@@ -6577,23 +6571,28 @@ mod tests {
         .is_ok()
     }
 
-    /// Interrupted, not finished: the checkout goes back but the task file stays
-    /// in the queue, so the next run picks it up instead of treating it as done.
+    /// Interrupted, not finished: the checkout is left exactly where it was
+    /// and the task file stays in the queue, so the next run picks the same
+    /// lane back up rather than either archiving it or cutting a fresh one.
     ///
-    /// And it picks it up *where it was*. The branch outlives the worktree that
-    /// held it, because those commits are the only record of what the agent got
-    /// done before the run stopped — a sweep that deleted it would reset the
-    /// task to base while its file still claimed to be mid-step.
+    /// Nothing about the checkout moves — not the workspace, not the pane, not
+    /// the worktree on disk, not the branch — because none of it is torn down
+    /// on a stop any more. Only the accounting changes: the launch counter is
+    /// forgiven, so the task is not `blocked` on a launch that never actually
+    /// failed the moment the next run starts.
     #[test]
-    fn an_interrupted_task_gives_its_checkout_back_but_keeps_its_branch() {
+    fn an_interrupted_task_is_left_exactly_where_it_stood() {
         let repo = fixture("stop-inflight");
         crate::repo::run(&repo.root, "git", &["branch", "task/demo"]).unwrap();
-        let path = add_task(&repo, "demo", "implement");
-        let mut task = reload(&path);
-        task.front.workspace_id = Some("w1".into());
-        task.front.worktree_path = Some(PathBuf::from("/tmp/spoolway-fake-worktree"));
-        task.front.branch = Some("task/demo".into());
-        task.save().unwrap();
+        let path = add_task_with(&repo, "demo", "implement", |f| {
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+            f.tab_id = Some("w1:t1".into());
+            f.worktree_path = Some(PathBuf::from("/tmp/spoolway-fake-worktree"));
+            f.branch = Some("task/demo".into());
+            f.attempts = MAX_LAUNCHES;
+            f.launched_at = Some(now_secs());
+        });
 
         let mux = FakeMux::new(vec![]);
         let mut report = Report::default();
@@ -6601,237 +6600,32 @@ mod tests {
             .sweep_on_stop(&mut report)
             .unwrap();
 
-        assert_eq!(mux.did("remove_workspace"), ["remove_workspace w1"]);
+        assert!(
+            mux.calls().is_empty(),
+            "a stop must ask the multiplexer for nothing at all: {:?}",
+            mux.calls()
+        );
         assert!(path.exists(), "an interrupted task is not archived");
         let task = reload(&path);
         assert_eq!(task.stage(), "implement", "and it keeps its place");
-        assert_eq!(task.front.workspace_id, None, "but holds no checkout now");
+        assert_eq!(
+            task.front.workspace_id.as_deref(),
+            Some("w1"),
+            "the checkout is not given back"
+        );
+        assert!(task.front.worktree_path.is_some());
         assert!(
             has_branch(&repo, "task/demo"),
             "the interrupted work is still on its branch"
         );
-        assert_eq!(
-            task.front.branch.as_deref(),
-            Some("task/demo"),
-            "and the task still points at it, or the next run cuts a new one"
-        );
-    }
-
-    /// The multiplexer's one call that was meant to take a checkout and the
-    /// row above it together can simply refuse: herdr holds that pair only for
-    /// a workspace it opened *onto* the checkout, and answers
-    /// `not_linked_worktree` for any other row pointed at one — a task resumed
-    /// by an older build, a row someone reopened by hand.
-    ///
-    /// The refusal used to be dropped on the floor, which left a finished task
-    /// holding both its worktree and a stray workspace for good. Now it is read,
-    /// and the two are taken apart separately: git removes the checkout, which
-    /// needs no such binding, and the row is closed on its own.
-    #[test]
-    fn a_workspace_that_lost_its_checkout_still_gives_both_back() {
-        let repo = fixture("stop-unbound");
-        crate::repo::run(&repo.root, "git", &["branch", "task/demo"]).unwrap();
-        let path = add_task(&repo, "demo", "implement");
-        let mut task = reload(&path);
-        task.front.workspace_id = Some("w1".into());
-        task.front.worktree_path = Some(PathBuf::from("/tmp/spoolway-fake-worktree"));
-        task.front.branch = Some("task/demo".into());
-        task.save().unwrap();
-
-        let mux = FakeMux::new(vec![]).with_unbound_workspace();
-        let mut report = Report::default();
-        Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
-            .sweep_on_stop(&mut report)
-            .unwrap();
-
-        assert_eq!(mux.did("remove_workspace"), ["remove_workspace w1"]);
-        assert_eq!(
-            mux.did("remove_checkout"),
-            ["remove_checkout /tmp/spoolway-fake-worktree"],
-            "the worktree goes with git when the multiplexer will not take it"
-        );
-        assert_eq!(
-            mux.did("close_workspace"),
-            ["close_workspace w1"],
-            "and the row it was under goes too, rather than standing for ever"
-        );
-    }
-
-    /// A borrowed checkout is somebody else's, and the fallback above must
-    /// never reach it. Its row is closed and its worktree is left exactly where
-    /// it stands.
-    #[test]
-    fn a_borrowed_checkout_is_never_removed_by_the_fallback() {
-        let repo = fixture("stop-borrowed-unbound");
-        crate::repo::run(&repo.root, "git", &["branch", "task/demo"]).unwrap();
-        let path = add_task(&repo, "demo", "implement");
-        let mut task = reload(&path);
-        task.front.workspace_id = Some("w1".into());
-        task.front.tab_id = Some("w1:t1".into());
-        task.front.worktree_path = Some(PathBuf::from("/tmp/spoolway-fake-worktree"));
-        task.front.branch = Some("task/demo".into());
-        task.front.borrowed = true;
-        task.save().unwrap();
-
-        let mux = FakeMux::new(vec![]).with_unbound_workspace();
-        let mut report = Report::default();
-        Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
-            .sweep_on_stop(&mut report)
-            .unwrap();
-
-        assert!(mux.did("remove_workspace").is_empty(), "{:?}", mux.calls());
-        assert!(mux.did("remove_checkout").is_empty(), "{:?}", mux.calls());
-        assert_eq!(mux.did("close_tab"), ["close_tab w1:t1"]);
-    }
-
-    /// A task holding a worktree with no workspace recorded against it — its
-    /// row was closed by hand, or the multiplexer lost it — used to have
-    /// nowhere to hang the removal, so the checkout stayed behind. The worktree
-    /// is spoolway's own cut either way, and goes back with git.
-    #[test]
-    fn a_checkout_with_no_workspace_left_is_still_given_back() {
-        let repo = fixture("stop-no-workspace");
-        crate::repo::run(&repo.root, "git", &["branch", "task/demo"]).unwrap();
-        let path = add_task(&repo, "demo", "implement");
-        let mut task = reload(&path);
-        task.front.worktree_path = Some(PathBuf::from("/tmp/spoolway-fake-worktree"));
-        task.front.branch = Some("task/demo".into());
-        task.save().unwrap();
-
-        let mux = FakeMux::new(vec![]);
-        let mut report = Report::default();
-        Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
-            .sweep_on_stop(&mut report)
-            .unwrap();
-
-        assert_eq!(
-            mux.did("remove_checkout"),
-            ["remove_checkout /tmp/spoolway-fake-worktree"]
-        );
-    }
-
-    /// Where a task is a *pane* in its project's shared tab, tearing it down
-    /// must remove only its checkout by hand — with git, since its
-    /// project's shared tab holds no worktree of its own to remove one from —
-    /// and touch neither that tab nor the workspace behind it: both hold
-    /// every other lane.
-    #[test]
-    fn a_task_that_shares_its_project_tab_gives_back_only_its_checkout() {
-        let repo = fixture("stop-tabbed");
-        crate::repo::run(&repo.root, "git", &["branch", "task/demo"]).unwrap();
-        add_task_with(&repo, "demo", "implement", |f| {
-            f.workspace_id = Some("wD".into());
-            f.tab_id = Some("wD:t2".into());
-            f.worktree_path = Some(PathBuf::from("/tmp/spoolway-fake-worktree"));
-            f.branch = Some("task/demo".into());
-        });
-
-        let mux = FakeMux::new(vec![]).tabs_in_one_workspace();
-        let mut report = Report::default();
-        Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
-            .sweep_on_stop(&mut report)
-            .unwrap();
-
-        assert_eq!(
-            mux.did("remove_checkout"),
-            ["remove_checkout /tmp/spoolway-fake-worktree"]
-        );
-        assert!(
-            mux.did("remove_workspace").is_empty(),
-            "the run's workspace is not this task's to remove: {:?}",
-            mux.calls()
-        );
-        assert!(
-            mux.did("close_workspace").is_empty(),
-            "nor to close: {:?}",
-            mux.calls()
-        );
-        // The project's own tab goes with the sweep's very last step, not
-        // with this task's own teardown — see
-        // `a_projects_tab_closes_only_when_nothing_was_spared`.
-        assert_eq!(mux.did("close_tab"), ["close_tab wD:t2"]);
-    }
-
-    /// The fault this task fixes: under `grouped`, tearing a checkout down is
-    /// nothing but `git worktree remove --force` on the directory, which
-    /// never touches the pane. A stop has to end the lane itself first, or
-    /// the agent keeps running against a directory that no longer exists.
-    #[test]
-    fn stopping_ends_a_lane_before_it_removes_the_checkout_under_grouped() {
-        let repo = fixture("stop-ends-lane");
-        crate::repo::run(&repo.root, "git", &["branch", "task/demo"]).unwrap();
-        add_task_with(&repo, "demo", "implement", |f| {
-            f.workspace_id = Some("wD".into());
-            f.tab_id = Some("wD:t2".into());
-            f.worktree_path = Some(PathBuf::from("/tmp/spoolway-fake-worktree"));
-            f.branch = Some("task/demo".into());
-        });
-
-        let lane = Lane {
-            name: "demo · implement".into(),
-            kind: "claude".into(),
-            status: LaneStatus::Working,
-            pane_id: "wD:p9".into(),
-            tab_id: "wD:t2".into(),
-            workspace_id: "wD".into(),
-            cwd: PathBuf::from("/tmp/spoolway-fake-worktree"),
-        };
-        let mux = FakeMux::new(vec![lane]).tabs_in_one_workspace();
-        let mut report = Report::default();
-        Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
-            .sweep_on_stop(&mut report)
-            .unwrap();
-
-        let calls = mux.calls();
-        let stop_at = calls.iter().position(|c| c == "stop demo · implement");
-        let remove_at = calls.iter().position(|c| c.starts_with("remove_checkout"));
-        assert!(
-            stop_at.is_some() && remove_at.is_some(),
-            "both calls must happen: {calls:?}"
-        );
-        assert!(
-            stop_at < remove_at,
-            "the lane must be ended before its checkout goes: {calls:?}"
-        );
+        assert_eq!(task.front.attempts, 0, "the launch counter is forgiven");
         assert_eq!(
             report.actions,
-            ["stopping: ended 1 lane(s) and gave back 1 worktree(s)"]
+            [
+                "stopping: 1 lane(s) left standing — their worktrees, panes and agents are \
+              where they were"
+            ]
         );
-    }
-
-    /// The same layout, with a checkout the task only borrowed: nothing here
-    /// is this task's to give back at all — its pane is already stopped, the
-    /// checkout is a person's, and the project's shared tab is not this
-    /// task's to close.
-    #[test]
-    fn a_borrowed_task_under_a_shared_tab_gives_back_nothing_of_its_own() {
-        let repo = fixture("stop-tabbed-borrowed");
-        let path = add_task(&repo, "demo", "implement");
-        let mut task = reload(&path);
-        task.front.workspace_id = Some("wD".into());
-        task.front.tab_id = Some("wD:t2".into());
-        task.front.borrowed = true;
-        task.front.worktree_path = Some(repo.root.clone());
-        task.save().unwrap();
-
-        let mux = FakeMux::new(vec![]).tabs_in_one_workspace();
-        let mut report = Report::default();
-        Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
-            .sweep_on_stop(&mut report)
-            .unwrap();
-
-        assert!(
-            mux.did("remove_checkout").is_empty(),
-            "a borrowed checkout is never removed: {:?}",
-            mux.calls()
-        );
-        assert!(
-            mux.did("close_workspace").is_empty(),
-            "and the run's workspace stays: {:?}",
-            mux.calls()
-        );
-        // Only the sweep's final step touches the project's tab.
-        assert_eq!(mux.did("close_tab"), ["close_tab wD:t2"]);
     }
 
     /// The other half of that deal, so sparing the interrupted case does not
@@ -6861,14 +6655,85 @@ mod tests {
         );
     }
 
-    /// A project's tab is worth keeping open for exactly one reason:
-    /// something of it is blocked and still in it. Emptied by the sweep
-    /// otherwise, and closed with it — but the shared workspace behind it is
-    /// never spoolway's to close; see
-    /// [`a_stop_never_closes_the_shared_workspace`].
+    /// The multiplexer's one call that was meant to take a checkout and the
+    /// row above it together can simply refuse: herdr holds that pair only for
+    /// a workspace it opened *onto* the checkout, and answers
+    /// `not_linked_worktree` for any other row pointed at one — a task resumed
+    /// by an older build, a row someone reopened by hand.
+    ///
+    /// The refusal used to be dropped on the floor, which left a finished task
+    /// holding both its worktree and a stray workspace for good. Now it is read,
+    /// and the two are taken apart separately: git removes the checkout, which
+    /// needs no such binding, and the row is closed on its own.
+    ///
+    /// Reached only from `clean_up`, on a task that reaches `done` — a stop
+    /// never calls `tear_down_checkout` at all any more.
     #[test]
-    fn a_projects_tab_closes_only_when_nothing_was_spared() {
-        for (stage, closes) in [("implement", true), (crate::pipeline::BLOCKED, false)] {
+    fn a_workspace_that_lost_its_checkout_still_gives_both_back() {
+        let repo = fixture("stop-unbound");
+        crate::repo::run(&repo.root, "git", &["branch", "task/demo"]).unwrap();
+        let mut task = reload(&add_task(&repo, "demo", "implement"));
+        task.front.workspace_id = Some("w1".into());
+        task.front.worktree_path = Some(PathBuf::from("/tmp/spoolway-fake-worktree"));
+        task.front.branch = Some("task/demo".into());
+        task.save().unwrap();
+
+        let mux = FakeMux::new(vec![]).with_unbound_workspace();
+        let mut report = Report::default();
+        let archived = Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
+            .clean_up(&mut task, &[], &mut report)
+            .unwrap();
+
+        assert!(archived);
+        assert_eq!(mux.did("remove_workspace"), ["remove_workspace w1"]);
+        assert_eq!(
+            mux.did("remove_checkout"),
+            ["remove_checkout /tmp/spoolway-fake-worktree"],
+            "the worktree goes with git when the multiplexer will not take it"
+        );
+        assert_eq!(
+            mux.did("close_workspace"),
+            ["close_workspace w1"],
+            "and the row it was under goes too, rather than standing for ever"
+        );
+    }
+
+    /// A task holding a worktree with no workspace recorded against it — its
+    /// row was closed by hand, or the multiplexer lost it — used to have
+    /// nowhere to hang the removal, so the checkout stayed behind. The worktree
+    /// is spoolway's own cut either way, and goes back with git.
+    ///
+    /// Reached only from `clean_up`, on a task that reaches `done` — a stop
+    /// never calls `tear_down_checkout` at all any more.
+    #[test]
+    fn a_checkout_with_no_workspace_left_is_still_given_back() {
+        let repo = fixture("stop-no-workspace");
+        crate::repo::run(&repo.root, "git", &["branch", "task/demo"]).unwrap();
+        let mut task = reload(&add_task(&repo, "demo", "implement"));
+        task.front.worktree_path = Some(PathBuf::from("/tmp/spoolway-fake-worktree"));
+        task.front.branch = Some("task/demo".into());
+        task.save().unwrap();
+
+        let mux = FakeMux::new(vec![]);
+        let mut report = Report::default();
+        let archived = Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
+            .clean_up(&mut task, &[], &mut report)
+            .unwrap();
+
+        assert!(archived);
+        assert_eq!(
+            mux.did("remove_checkout"),
+            ["remove_checkout /tmp/spoolway-fake-worktree"]
+        );
+    }
+
+    /// A project's shared tab — and the workspace behind it — used to close
+    /// once the sweep emptied it, and stay open when something was spared for
+    /// a person to read. Now a stop tears nothing down at all, so neither
+    /// ever closes, whether or not a sibling task is parked.
+    #[test]
+    fn a_stop_closes_neither_a_projects_tab_nor_its_shared_workspace() {
+        for stage in ["implement", crate::pipeline::BLOCKED] {
             let repo = fixture(&format!("stop-close-{stage}"));
             let path = add_task(&repo, "demo", stage);
             let mut task = reload(&path);
@@ -6883,46 +6748,8 @@ mod tests {
                 .sweep_on_stop(&mut report)
                 .unwrap();
 
-            assert_eq!(
-                mux.did("close_tab") == ["close_tab wD:t7"],
-                closes,
-                "stage {stage}: {:?}",
-                mux.calls()
-            );
+            assert!(mux.calls().is_empty(), "stage {stage}: {:?}", mux.calls());
         }
-    }
-
-    /// The shared workspace is never spoolway's to close — only a person's,
-    /// by hand — because another project's lanes may be live in it. Only the
-    /// project's own tab, once the sweep has emptied it, ever closes.
-    #[test]
-    fn a_stop_never_closes_the_shared_workspace() {
-        let repo = fixture("stop-close-self");
-        let path = add_task(&repo, "demo", "implement");
-        let mut task = reload(&path);
-        task.front.workspace_id = Some("wD".into());
-        task.front.tab_id = Some("wD:t7".into());
-        task.front.branch = Some("task/demo".into());
-        task.save().unwrap();
-
-        let mux = FakeMux::new(vec![]).tabs_in_one_workspace();
-        let mut report = Report::default();
-        Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
-            .sweep_on_stop(&mut report)
-            .unwrap();
-
-        assert_eq!(
-            mux.did("close_workspace"),
-            Vec::<String>::new(),
-            "{:?}",
-            mux.calls()
-        );
-        assert_eq!(
-            mux.did("close_tab"),
-            ["close_tab wD:t7"],
-            "the project's tab goes back: {:?}",
-            mux.calls()
-        );
     }
 
     /// A run that opened no tab of its own must not open one on its way out
@@ -11565,8 +11392,10 @@ mod tests {
             .expect("the interrupted lane banked nothing");
         assert_eq!(entry.step, "implement");
         assert_eq!(entry.tokens.input, 4_242);
-        // And its record is gone, so a later dispatcher cannot bank it twice.
-        assert!(!load_lane_records(&repo).contains_key("demo · implement"));
+        // And its record survives: the lane it tracks is left running, so
+        // the next dispatcher's own reminder loop needs the same bookkeeping
+        // rather than treating it as a lane nobody has heard from yet.
+        assert!(load_lane_records(&repo).contains_key("demo · implement"));
     }
 
     /// The ledger used to be parsed on hot paths every pass — the ceiling
@@ -13635,9 +13464,9 @@ mod tests {
         );
     }
 
-    // covers: step.cleanup — a terminal step that cleans up takes the worktree, the branch and the task file
+    // covers: the reserved `done` stage — reaching it takes the worktree, the branch and the task file
     #[test]
-    fn reaching_a_cleanup_step_tears_down_and_archives() {
+    fn reaching_the_done_stage_tears_down_and_archives() {
         let repo = fixture("cleanup");
         let path = add_task_with(&repo, "demo", "done", |f| {
             f.workspace_id = Some("w1".into());

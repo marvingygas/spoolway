@@ -123,7 +123,6 @@ way to give a pipeline a shape of its own, and costs no configuration at all.
 | `headless` | `false` | Command steps only: run detached, with no pane, instead of in a pane of its own |
 | `last` | `false` | Command steps only: run this only on the last task of a chain — see [`last:` — a step the chain runs once](#last--a-step-the-chain-runs-once) |
 | `timeout` | `30m` | Command steps only: how long the command may run before it is killed |
-| `cleanup` | `false` | Terminal steps only: remove the worktree, delete the local branch, archive the task file. Reaching `done` already does this |
 
 A step with id `blocked` routes itself — a pass is read from the step the task blocked on,
 a fail or a block parks the task on `paused` for a person instead — so `pipeline check` refuses
@@ -160,7 +159,8 @@ reading that as an ending would turn a typo into a task that silently stops. End
 declaring.
 
 **`end`, not `terminal`.** The old set mixed two nouns and an adjective. A verb-shaped flag
-reads correctly beside `cleanup: true`, which is a terminal's key anyway.
+reads correctly beside the reserved `done` stage, which is the only step that removes a
+worktree anyway.
 
 ### The four states nobody declares
 
@@ -353,7 +353,7 @@ itself, naming only the keys it wants to change:
 
 Every key left off — here, `agent`, `session` and `prompt` — falls back to `[unattended]`,
 exactly as if the pipeline had named it explicitly. Any key besides those five is refused by
-name: `description`, `run`, `timeout`, `background`, `headless`, `last`, `cleanup`, `slot`,
+name: `description`, `run`, `timeout`, `background`, `headless`, `last`, `slot`,
 `loop`, `on_pass`, `on_fail`, `on_loop_max`, `gate` and `end` all mean something on an ordinary step,
 and none of them is one `Pipelines::assemble` merges — so `pipeline check` refuses the file
 rather than silently ignoring a key that would otherwise do nothing. `blocked` routes itself,
@@ -971,8 +971,8 @@ every task now working only in its own worktree,
 and what is left is the ordinary case of a person having a task's branch out while spoolway
 reaches it. It also
 decides what cleanup may touch: a borrowed checkout and the branch in it were somebody
-else's before the task started and are still theirs after it, so a terminal step with
-`cleanup: true` removes neither. The task file records which it was, as `borrowed:`, because
+else's before the task started and are still theirs after it, so the reserved `done`
+stage removes neither. The task file records which it was, as `borrowed:`, because
 afterwards the two look identical to git.
 
 ## Working with pipelines

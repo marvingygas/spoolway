@@ -538,7 +538,7 @@ above — and `spoolway queue show <task>` is how anyone else reads it back.
 
 ## Archiving
 
-A terminal step with cleanup enabled removes the task's worktree and branch and moves its
-file into the archive directory. The usage ledger is not archived with it — one line per
-lane was appended when the lane settled, and that record outlives the task file deliberately,
-so cost history survives cleanup.
+The reserved `done` stage removes the task's worktree and branch and moves its file into the
+archive directory. The usage ledger is not archived with it — one line per lane was appended
+when the lane settled, and that record outlives the task file deliberately, so cost history
+survives cleanup.

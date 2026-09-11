@@ -51,8 +51,6 @@
 #   last              true               Only the last task of a chain runs this
 #                                        command; the rest walk past to `on_pass`.
 #                     false <default>    Every task runs it.
-#   cleanup           true               Removes the worktree, branch and task file.
-#                     false <default>    Leaves them.
 # <<< spoolway <<<
 
 description: >-

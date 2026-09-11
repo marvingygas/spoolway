@@ -76,9 +76,9 @@ no enabled job will ever fire, the `next:` line reads `no job will fire — run 
 doctor` instead.
 
 With no job enabled, nothing changes. An empty queue still stops the run, a cold start with
-nothing queued still exits 3, `ctrl-c` still stops a resident run, and
-`dispatch.tear_lanes_on_stop` still applies when it does. See
-[When it stops](dispatcher.md#when-it-stops).
+nothing queued still exits 3, `ctrl-c` still stops a resident run, and a stop still banks
+each still-running lane's spend and forgives its launch counter without tearing anything
+down. See [When it stops](dispatcher.md#when-it-stops).
 
 ## The jobs screen
 

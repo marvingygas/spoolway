@@ -241,9 +241,10 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // Not for `--dry-run`, which is a person already looking at one pass, and
     // not for `--plain`, which is a person who would rather have the log — a
     // pipe, a CI job, a terminal that mangles the redraw.
-    // From here the run holds live lanes and worktrees, so it has something to
-    // end and give back on the way out. Caught rather than left to kill the
-    // process where it stands — see `dispatch.tear_lanes_on_stop`.
+    // From here the run holds live lanes, so an interrupted one's spend and
+    // launch counter still have to be settled on the way out. Caught rather
+    // than left to kill the process where it stands — see
+    // `crate::dispatch::Dispatcher::sweep_on_stop`.
     if !args.dry_run {
         crate::platform::stop::catch_interrupt();
     }
@@ -494,16 +495,16 @@ fn watch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Result<()> 
     Ok(())
 }
 
-/// Give back what the run was holding, and draw the last frame.
+/// Settle the books on what the run was holding, and draw the last frame.
 ///
 /// Both ways a dispatcher ends come through here — the queue emptying, and a
 /// person asking it to stop — because they leave the same things behind and
-/// differ only in how much of it there is. Whether anything is actually swept
-/// is `dispatch.tear_lanes_on_stop`'s to say.
+/// differ only in how much of it there is. Nothing is torn down either way:
+/// see [`crate::dispatch::Dispatcher::sweep_on_stop`].
 ///
-/// A sweep that fails is reported and not raised: the run is over either way,
-/// and a teardown error is a worktree to remove by hand, not a reason to exit
-/// non-zero.
+/// A settle that fails is reported and not raised: the run is over either
+/// way, and an unbanked lane is something to catch up by hand, not a reason
+/// to exit non-zero.
 fn stop(
     repo: &Repo,
     pipelines: &Pipelines,
@@ -512,7 +513,7 @@ fn stop(
     out: &mut std::io::Stdout,
     args: &DispatchArgs,
 ) -> Result<()> {
-    if repo.config.dispatch.tear_lanes_on_stop && !args.dry_run {
+    if !args.dry_run {
         let mut dispatcher = crate::dispatch::Dispatcher::new(repo, pipelines, mux, args.dry_run);
         let mut report = crate::dispatch::Report::default();
         match dispatcher.sweep_on_stop(&mut report) {
@@ -521,7 +522,7 @@ fn stop(
                     println!("  {action}");
                 }
             }
-            Err(err) => println!("  ! could not give back this run's worktrees: {err:#}"),
+            Err(err) => println!("  ! could not settle this run's lanes: {err:#}"),
         }
     }
 
