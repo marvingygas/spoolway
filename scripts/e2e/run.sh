@@ -64,9 +64,15 @@ REPO=$(cd "$E2E_DIR/../.." && pwd)
 #               these suites must run without one. The backend's own behaviour
 #               is unit-tested in src/headless.rs, and what a multiplexer
 #               actually does is scripts/e2e/plans/.
-#   status      the --watch board is rendering, not routing: unit tests cover
-#               it through a real pass. An e2e version would re-assert the same
-#               branches through a slower path.
+#   status      the board's *rendering* — every column, every row state, the
+#               read-only `--watch` board entire: unit tests cover it through
+#               a real pass, and an e2e version would re-assert the same
+#               branches through a slower path. The board's keys are a
+#               different question and do have a suite: `board-pause` drives
+#               `p`, `P` and `U` as real keystrokes into a real dispatcher,
+#               because those interrupt a live lane, write or move a task
+#               file, and answer only to `enter`/`esc` once a panel is open —
+#               none of which a frame comparison can see.
 #
 # And two tiers that are in none of the others, because each needs something a
 # task's own gate cannot assume:
@@ -84,8 +90,8 @@ REPO=$(cd "$E2E_DIR/../.." && pwd)
 #               model (SPOOLWAY_E2E_CODEX_MODEL); pointed at a local endpoint
 #               it spends nothing.
 smoke_suites=(flow)
-pr_suites=(flow commands stacking stack conflicts forge disaster lock trials routines jobs jobs-screen restart)
-nightly_suites=(flow commands stacking stack conflicts forge disaster lock trials routines jobs jobs-screen restart)
+pr_suites=(flow commands stacking stack conflicts forge disaster lock trials routines jobs jobs-screen board-pause restart)
+nightly_suites=(flow commands stacking stack conflicts forge disaster lock trials routines jobs jobs-screen board-pause restart)
 cloud_suites=(warmth)
 live_suites=(live)
 

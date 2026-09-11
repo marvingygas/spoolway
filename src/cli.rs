@@ -933,14 +933,13 @@ pub enum QueueCommand {
     Conflicts,
 
     /// Interrupt any live agent lane the task owns, then park it on `paused`
-    /// — the same interrupt-and-park `p` does on the board, but unconditional
-    /// rather than skipped when there was nothing live to interrupt: a
-    /// script naming a task has already decided it wants it paused, whatever
-    /// state it is in.
+    /// — the same thing `p` does on the board for every state but one: a
+    /// running command step, which the board asks a person about with its
+    /// own confirm panel.
     ///
     /// A running command step is refused rather than acted on, unless
-    /// `--force` says to kill it — the board asks a person which with its own
-    /// confirm panel, and a script has nobody there to ask.
+    /// `--force` says to kill it — a script has nobody there to answer that
+    /// panel, so this refuses instead of opening one.
     Pause(QueuePauseArgs),
 
     /// What the board's `r` key does to one row, from a script: send it past
