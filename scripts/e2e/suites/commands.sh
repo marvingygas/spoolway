@@ -803,6 +803,83 @@ fi
 counter "and the counter agrees: two laps banked, not one" \
   rounds "gate->e2e" 2 $SPOOLWAY_PROJECT_HOME/queue/gated-twice.md
 
+# --------------------------------------------------------- a launch that never succeeds
+# The other half of a command step's own trouble: not one that ran and
+# failed, like `build` and `gate` above, but one that never got to run at
+# all. Before `nothing-starts-silently`, a `Fresh` arrival that could not
+# even start stayed `Fresh` forever — the same arrival, retried every pass
+# for the life of the run, with the same line landing in the problem log
+# every single time. Now it is bounded the same way a loop is: three
+# attempts, then routed to the step's own `on_fail` exactly as a failing
+# exit code would be.
+#
+# The obstruction is a directory sitting where the run's own log file needs
+# to go, with its `.prev.log` slot pre-occupied too so `Runs::prepare`'s own
+# roll-aside cannot clear it out of the way — a spawn that never starts
+# because its bookkeeping cannot be written, which needs no multiplexer and
+# no missing binary to reproduce.
+cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
+add_command_step default launchfail "echo should-never-run" review ""
+works "a pipeline with a step whose launch can fail checks out" \
+  "$SPOOLWAY" pipeline check
+
+KEY="cant-launch · launchfail"
+mkdir -p "$SPOOLWAY_PROJECT_HOME/commands"
+mkdir -p "$SPOOLWAY_PROJECT_HOME/commands/$KEY.log"
+mkdir -p "$SPOOLWAY_PROJECT_HOME/commands/$KEY.prev.log"
+touch "$SPOOLWAY_PROJECT_HOME/commands/$KEY.prev.log/keep-this-slot-occupied"
+
+task_doc "$LIVE/cant-launch.md" cant-launch "$BODY" "group: live" \
+  "touches: [notes/cant-launch.md]"
+must "a task whose command step can never even start" \
+  "$SPOOLWAY" queue add --from "$LIVE/cant-launch.md"
+
+if drive cant-launch blocked 60; then
+  ok "three failed launches in a row park the task rather than retrying forever"
+else
+  bad "three failed launches in a row park the task rather than retrying forever \
+(at \`$(stage_of cant-launch)\`)"
+fi
+has "routed to the step's own on_fail, same as a failing exit code would be" \
+  "→ \`blocked\`" $SPOOLWAY_PROJECT_HOME/queue/cant-launch.md
+has "blocked_from names the step that could not start, for a resume to reach" \
+  "blocked_from: launchfail" $SPOOLWAY_PROJECT_HOME/queue/cant-launch.md
+counter "and the launch-failure count agrees: three, not one per pass forever" \
+  launch_failures launchfail 3 $SPOOLWAY_PROJECT_HOME/queue/cant-launch.md
+
+REASON="could not be started after 3 attempts"
+STATUS_HITS=$(grep -c "$REASON" "$SPOOLWAY_PROJECT_HOME/queue/cant-launch.md" 2>/dev/null || echo 0)
+if [ "$STATUS_HITS" -eq 1 ]; then
+  ok "the reason lands on the task's own Status Log exactly once"
+else
+  bad "the reason lands on the task's own Status Log exactly once (found $STATUS_HITS)"
+fi
+
+PROBLEM_LOG="$HOME/.spoolway/logs/$(basename "$LIVE/proj").log"
+PROBLEM_HITS=$(grep -c "$REASON" "$PROBLEM_LOG" 2>/dev/null || echo 0)
+if [ "$PROBLEM_HITS" -eq 1 ]; then
+  ok "and once in the project's problem log — not once per one of the three attempts"
+else
+  bad "and once in the project's problem log — not once per one of the three attempts \
+(found $PROBLEM_HITS in $PROBLEM_LOG)"
+fi
+
+# Parked, so the dispatcher has nothing left to do here for the rest of the
+# run — this is what "the run ends" means for a step that can never launch:
+# not the process exiting (a person still has to clear a block), but the
+# retry loop itself stopping rather than spending another pass on the same
+# dead end. A few more passes with the obstruction still in place, and
+# neither the count nor the reason moves again.
+sleep 3
+counter "further passes spend nothing more on it — the count does not move" \
+  launch_failures launchfail 3 $SPOOLWAY_PROJECT_HOME/queue/cant-launch.md
+PROBLEM_HITS_AFTER=$(grep -c "$REASON" "$PROBLEM_LOG" 2>/dev/null || echo 0)
+if [ "$PROBLEM_HITS_AFTER" -eq 1 ]; then
+  ok "nor does the problem log grow while it sits blocked"
+else
+  bad "nor does the problem log grow while it sits blocked (found $PROBLEM_HITS_AFTER)"
+fi
+
 # ------------------------------------------------------------------- background
 # The other half: the task does not wait, and the command is still going after
 # it has moved on.

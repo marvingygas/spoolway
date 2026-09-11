@@ -67,6 +67,7 @@ const IGNORED_KEYS: &[&str] = &[
     "parked_at",
     "prompts",
     "rounds",
+    "launch_failures",
     "arrived_from",
 ];
 

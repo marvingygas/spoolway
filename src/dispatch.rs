@@ -49,6 +49,23 @@ pub(crate) const LANES_FILE: &str = "lanes.json";
 /// instead — see [`relaunch_backoff`].
 const MAX_LAUNCHES: u32 = 1;
 
+/// How many launches in a row that could not even *start* — never a lane or
+/// a command process that ran and failed, only one that never got going at
+/// all — are retried before the step is treated as one that ran and failed.
+///
+/// Distinct from [`MAX_LAUNCHES`] beside it: that one counts a lane that
+/// *did* start and left nothing behind, and stops for a person because more
+/// launches of a dead binary are not going to fix it. This counts a launch
+/// that [`crate::mux::Mux::start_lane`] or a command's own start refused
+/// outright — a tab with no panes to split, a worktree that could not be
+/// prepared — and the task is retried a few times first, on the chance the
+/// obstacle was transient, before it is routed to `on_fail` like any other
+/// failed step. See [`Dispatcher::note_launch_failure`].
+///
+/// Three, the same patience [`MAX_REMINDERS`] gives a silent lane: enough to
+/// rule out a one-off blip without leaving a broken tab retried forever.
+const MAX_LAUNCH_FAILURES: u32 = 3;
+
 /// How many times [`Dispatcher::check_unreported`] reminds a settled lane
 /// before giving up and escalating instead of sending a fourth.
 ///
@@ -930,6 +947,18 @@ impl<'a> Dispatcher<'a> {
                     else {
                         continue;
                     };
+                    // A launch-failure ceiling is the one road here
+                    // `run_command` never narrates for itself — see
+                    // `Dispatcher::note_launch_failure`, which cannot say
+                    // where the task is *finally* going until
+                    // `apply_loop_budget` below has had its say. An exited
+                    // or timed-out command already says its own piece inside
+                    // `run_command`, and neither ever touches this counter,
+                    // so finding it spent here is an unambiguous sign of
+                    // which of the three this destination came from.
+                    let launch_failed = tasks[index].front.launch_failures.get(&step.id)
+                        == Some(&MAX_LAUNCH_FAILURES);
+
                     // A command step's own `on_fail` is a route like any
                     // other, and a mechanical gate's whole point is to fail
                     // back to the step behind it — so its arrival is bound by
@@ -942,6 +971,13 @@ impl<'a> Dispatcher<'a> {
                         destination,
                         self.unattended,
                     );
+
+                    if launch_failed {
+                        report.actions.push(format!(
+                            "{id}: `{}` could not be started — moving to `{destination}`",
+                            step.id
+                        ));
+                    }
 
                     // The third road to `blocked`, and the one nothing used to
                     // write an origin for. `report` records it on its own route
@@ -2862,6 +2898,83 @@ impl<'a> Dispatcher<'a> {
         self.escalate(task, pipeline, step, reason)
     }
 
+    /// Count one launch of `step` that could not even start, and say whether
+    /// that spent [`MAX_LAUNCH_FAILURES`] — the caller's cue to route the task
+    /// on exactly as it would a step that ran and reported failure, rather
+    /// than leave it retrying the same step forever.
+    ///
+    /// Shared by the two roads a launch takes: an agent lane's start in
+    /// [`Dispatcher::start_lanes`], and a command step's `Fresh` arm in
+    /// [`Dispatcher::run_command`]. `verb` is the one word that differs
+    /// between them — "start" for a lane, "run" for a command — so the two
+    /// keep the wording `report.problems` used to carry before this existed.
+    ///
+    /// Every attempt, ceiling one included, gets its own bounded notice
+    /// (`! task: could not <verb> ... (attempt N of 3)`) on `report.actions`
+    /// rather than `report.problems` — so it still prints every pass, the way
+    /// `report.problems` always did under `--plain`, but does *not* reach the
+    /// project's problem log every pass the way a `report.problems` line
+    /// always does; see `src/commands/dispatch.rs`'s unconditional `for
+    /// problem in &report.problems`.
+    ///
+    /// Below the ceiling this is the whole of it: `None`, and the task stays
+    /// on `step` for the next pass to try again. At the ceiling the reason is
+    /// written once more, in full — to the task's own `## Status Log`,
+    /// directly, the same way [`crate::commands::apply_loop_budget`] writes
+    /// its own spent-budget note before handing back a destination for the
+    /// caller's own `set_stage` to log a second, generic arrival line over —
+    /// and once to the project's problem log, by a direct call here rather
+    /// than through the per-pass mechanism above. Guarded on `attempt ==
+    /// MAX_LAUNCH_FAILURES` rather than folded into the `< MAX_LAUNCH_FAILURES`
+    /// check above: [`Task::bump_launch_failures`] cannot climb past the
+    /// ceiling in practice, since arriving at `step` again clears its count
+    /// (see [`Task::set_stage`]), but this is what keeps that true rather
+    /// than assumed — a count that somehow did climb past it returns the
+    /// same destination without writing the reason a second time.
+    ///
+    /// Returns `step.on_fail`, or `blocked` when it names none — the same
+    /// resolution an exited command's failing arm and a timed-out one already
+    /// use — but never announces it: a command step's destination still has
+    /// [`crate::commands::apply_loop_budget`] to pass through, which can
+    /// redirect it, so only a caller holding the truly final answer says
+    /// where the task is going. `blocked_from`, the same way: set by the
+    /// caller, because only the caller knows whether that is already handled
+    /// by something it goes on to do (`run_command`'s result flows through
+    /// the same `StepKind::Command` routing every other command destination
+    /// does, which sets it already) or has to be set here (`start_lanes`,
+    /// which has no such routing to fall through to).
+    fn note_launch_failure(
+        &self,
+        task: &mut Task,
+        step: &Step,
+        verb: &str,
+        err: &anyhow::Error,
+        report: &mut Report,
+    ) -> Option<String> {
+        let attempt = task.bump_launch_failures(&step.id);
+        report.actions.push(format!(
+            "! {}: could not {verb} `{}`: {err:#} (attempt {attempt} of {MAX_LAUNCH_FAILURES})",
+            task.id(),
+            step.id,
+        ));
+        if attempt < MAX_LAUNCH_FAILURES {
+            return None;
+        }
+        let destination = step
+            .on_fail
+            .clone()
+            .unwrap_or_else(|| crate::pipeline::BLOCKED.to_string());
+        if attempt == MAX_LAUNCH_FAILURES {
+            let reason = format!(
+                "`{}` could not be started after {MAX_LAUNCH_FAILURES} attempts: {err:#}",
+                step.id
+            );
+            task.append_to_section("## Status Log", &format!("- {reason}\n"));
+            crate::problem_log::append(self.repo, &reason);
+        }
+        Some(destination)
+    }
+
     /// Start as many lanes as each candidate's cap allows — a resolved
     /// model's own `slots` when it has any, its profile's `concurrency`
     /// otherwise — and refuse a candidate whose model is `exclusive` while a
@@ -3354,6 +3467,15 @@ impl<'a> Dispatcher<'a> {
             }
             match outcome {
                 Ok(started) => {
+                    // The launch actually started, so whatever this step's
+                    // last few could-not-start attempts counted is over. Its
+                    // own persist already ran, inside `start_one`, so
+                    // clearing here needs one of its own — but only when
+                    // there is a count to clear, the same way every other
+                    // pass-that-changed-nothing here skips its write.
+                    if task.clear_launch_failures(&step.id) {
+                        self.persist(task)?;
+                    }
                     let name = started.name;
                     let action = match &started.note {
                         Some(note) => format!("started {name} — {note}"),
@@ -3387,11 +3509,35 @@ impl<'a> Dispatcher<'a> {
                     }
                     report.actions.push(action);
                 }
-                Err(err) => report.problems.push(format!(
-                    "{}: could not start `{}`: {err:#}",
-                    task.id(),
-                    step.id
-                )),
+                Err(err) => {
+                    // A launch that never got going at all — see
+                    // [`Dispatcher::note_launch_failure`]. Below the ceiling
+                    // the task stays a candidate for the next pass; at it,
+                    // `run_command`'s `Fresh` arm has an outer `StepKind::
+                    // Command` match to fall through to for this — an agent
+                    // lane's start has none, so `blocked_from` and the stage
+                    // move are this arm's own to make.
+                    if let Some(destination) =
+                        self.note_launch_failure(task, &step, "start", &err, report)
+                    {
+                        // Final as computed — nothing downstream of this arm
+                        // redirects it further, unlike a command step's own
+                        // destination, which still has `apply_loop_budget`
+                        // ahead of it — so this is the one caller that can
+                        // print where the task is going and be sure it is
+                        // right.
+                        report.actions.push(format!(
+                            "{}: `{}` could not be started — moving to `{destination}`",
+                            task.id(),
+                            step.id
+                        ));
+                        if destination == crate::pipeline::BLOCKED {
+                            crate::commands::set_blocked_from(task, &step.id);
+                        }
+                        task.set_stage(&destination, None);
+                    }
+                    self.persist(task)?;
+                }
             }
         }
 
@@ -3592,12 +3738,24 @@ impl<'a> Dispatcher<'a> {
                     self.start_command_in_pane(task, &key, &run, &worktree, &env, &runs)
                 };
                 match started {
-                    Ok(_) => {}
+                    Ok(_) => {
+                        // The launch actually started — see the matching
+                        // comment in `start_lanes`'s own `Ok` arm.
+                        if task.clear_launch_failures(&step.id) {
+                            self.persist(task)?;
+                        }
+                    }
                     Err(err) => {
-                        report
-                            .problems
-                            .push(format!("{id}: could not run `{}`: {err:#}", step.id));
-                        return Ok(None);
+                        // A launch that never got going at all — see
+                        // [`Dispatcher::note_launch_failure`]. `None` leaves
+                        // the task on this step for the next pass to retry;
+                        // `Some` is a destination for the outer `StepKind::
+                        // Command` match to route through exactly as it
+                        // would an exited or timed-out command — including
+                        // `blocked_from`, which that routing already sets.
+                        let destination = self.note_launch_failure(task, step, "run", &err, report);
+                        self.persist(task)?;
+                        return Ok(destination);
                     }
                 }
 
@@ -6118,6 +6276,7 @@ mod tests {
             launched_at: None,
             prompts: Default::default(),
             rounds: Default::default(),
+            launch_failures: Default::default(),
             arrived_from: None,
             extra: Default::default(),
         };
@@ -7085,11 +7244,17 @@ mod tests {
 
         let report = run_pass(&repo, &mux);
 
-        assert_eq!(report.problems.len(), 1);
+        // Below the launch-failure ceiling this is a bounded notice on
+        // `report.actions`, not `report.problems` — see
+        // [`Dispatcher::note_launch_failure`].
+        assert_eq!(report.problems.len(), 0, "{:?}", report.problems);
         assert!(
-            report.problems[0].contains("does not know agent kind"),
-            "{}",
-            report.problems[0]
+            report
+                .actions
+                .iter()
+                .any(|a| a.contains("does not know agent kind")),
+            "{:?}",
+            report.actions
         );
         assert!(mux.did("launch demo · implement").is_empty());
     }
@@ -7176,11 +7341,14 @@ mod tests {
             .unwrap();
 
         assert!(mux.did("start").is_empty(), "no lane should have started");
-        assert_eq!(report.problems.len(), 1);
+        // Below the launch-failure ceiling this is a bounded notice on
+        // `report.actions`, not `report.problems` — see
+        // [`Dispatcher::note_launch_failure`].
+        assert_eq!(report.problems.len(), 0, "{:?}", report.problems);
         assert!(
-            report.problems[0].contains("has no model"),
-            "the problem must say how to fix it: {}",
-            report.problems[0]
+            report.actions.iter().any(|a| a.contains("has no model")),
+            "the notice must say how to fix it: {:?}",
+            report.actions
         );
     }
 
@@ -7776,8 +7944,10 @@ mod tests {
         );
     }
 
-    /// Every failed start would otherwise leave a pane behind, and a step that
-    /// keeps failing is retried every dispatch pass.
+    /// Every failed start would otherwise leave a pane behind — and, below
+    /// the launch-failure ceiling, is retried on the next dispatch pass; see
+    /// `ceiling_on_launch_failures_parks_an_agent_step` for what happens once
+    /// three passes in a row fail the same way.
     #[test]
     fn a_start_that_fails_takes_its_pane_back_with_it() {
         let repo = fixture("pane-leak");
@@ -7791,13 +7961,109 @@ mod tests {
         // pane rather than one just split off it.
         assert!(mux.did("split_pane").is_empty(), "{:?}", mux.calls());
         assert_eq!(mux.did("close_pane"), ["close_pane w9:p1"]);
+        // Below the launch-failure ceiling this is a bounded notice on
+        // `report.actions`, not `report.problems` — see
+        // [`Dispatcher::note_launch_failure`].
         assert!(
             report
-                .problems
+                .actions
                 .iter()
-                .any(|p| p.contains("agent_start_failed")),
-            "problems: {:?}",
-            report.problems
+                .any(|a| a.contains("agent_start_failed")),
+            "actions: {:?}",
+            report.actions
+        );
+    }
+
+    /// The whole arc [`Dispatcher::note_launch_failure`] exists for, on the
+    /// agent-lane road: three passes in a row that cannot even start `demo`'s
+    /// lane park the task on `implement`'s own `on_fail` — `blocked`, in the
+    /// shipped pipeline — with `blocked_from` naming the step it never got
+    /// running, the reason on the task's own `## Status Log` exactly once,
+    /// and the same reason in the project's problem log exactly once, not
+    /// once per one of the three passes it took to get there.
+    #[test]
+    fn ceiling_on_launch_failures_parks_an_agent_step() {
+        let repo = fixture("agent-launch-ceiling");
+        let path = add_task(&repo, "demo", "queued");
+        let mux = FakeMux::new(vec![]).refusing_to_start();
+        let home = crate::scratch::root("agent-launch-ceiling-home");
+
+        for attempt in 1..=2 {
+            let report = with_home(&home, || run_pass(&repo, &mux));
+            let task = reload(&path);
+            assert_eq!(
+                task.stage(),
+                "queued",
+                "attempt {attempt}: a launch that never started never left the step"
+            );
+            assert_eq!(
+                task.front.launch_failures.get("implement"),
+                Some(&attempt),
+                "attempt {attempt}"
+            );
+            assert!(
+                report
+                    .actions
+                    .iter()
+                    .any(|a| a.contains(&format!("(attempt {attempt} of 3)"))),
+                "attempt {attempt}: {:?}",
+                report.actions
+            );
+            assert!(
+                report.problems.is_empty(),
+                "attempt {attempt}: a bounded notice is never a problem: {:?}",
+                report.problems
+            );
+        }
+
+        let report = with_home(&home, || run_pass(&repo, &mux));
+        let task = reload(&path);
+        assert_eq!(task.stage(), "blocked", "the third failure parks it");
+        assert_eq!(task.front.blocked_from.as_deref(), Some("implement"));
+        // The mockup draws the third attempt's own bounded notice too, right
+        // above the line that says where the task is going — this is not a
+        // silent jump straight from "attempt 2 of 3" to "moving to `blocked`".
+        assert!(
+            report
+                .actions
+                .iter()
+                .any(|a| a.contains("(attempt 3 of 3)")),
+            "{:?}",
+            report.actions
+        );
+        assert!(
+            report
+                .actions
+                .iter()
+                .any(|a| a.contains("could not be started — moving to `blocked`")),
+            "{:?}",
+            report.actions
+        );
+
+        let status_log_hits = task
+            .body
+            .matches("could not be started after 3 attempts")
+            .count();
+        assert_eq!(
+            status_log_hits, 1,
+            "the reason lands on the Status Log exactly once: {}",
+            task.body
+        );
+
+        // `problem_log::path` reads the home the same way every write did —
+        // through the thread-local override, not the real one — so the read
+        // has to be inside `with_home` too, or it would look in the wrong
+        // place entirely.
+        let logged = with_home(&home, || {
+            std::fs::read_to_string(crate::problem_log::path(&repo))
+        })
+        .unwrap();
+        let problem_log_hits = logged
+            .matches("could not be started after 3 attempts")
+            .count();
+        assert_eq!(
+            problem_log_hits, 1,
+            "and once in the project's problem log, not once per pass: {logged}"
         );
     }
 
@@ -7826,13 +8092,16 @@ mod tests {
             ["stop demo · implement"],
             "and it is torn down again rather than left sitting at an empty input box"
         );
+        // Below the launch-failure ceiling this is a bounded notice on
+        // `report.actions`, not `report.problems` — see
+        // [`Dispatcher::note_launch_failure`].
         assert!(
             report
-                .problems
+                .actions
                 .iter()
-                .any(|p| p.contains("submission stalled")),
-            "problems: {:?}",
-            report.problems
+                .any(|a| a.contains("submission stalled")),
+            "actions: {:?}",
+            report.actions
         );
 
         // What the retry is paced by: the launch was banked before the prompt
@@ -8273,10 +8542,13 @@ mod tests {
         let report = with_home(&home, || run_pass(&repo, &mux));
         std::fs::remove_dir_all(&home).ok();
 
+        // Below the launch-failure ceiling this is a bounded notice on
+        // `report.actions`, not `report.problems` — see
+        // [`Dispatcher::note_launch_failure`].
         assert!(
-            report.problems.iter().any(|p| p.contains("held")),
+            report.actions.iter().any(|p| p.contains("held")),
             "the launch was attempted and refused: {:?}",
-            report.problems
+            report.actions
         );
         let task = reload(&path);
         assert_eq!(
@@ -8300,10 +8572,11 @@ mod tests {
     }
 
     /// The other placement shape: a workspace that is already valid, so
-    /// `ensure_workspace` persists nothing at all and a refused start
-    /// returns without writing the task. The whole hold — park fields and
-    /// `quota_retries` — is still on disk because nothing touched it, and
-    /// it matches the stale-workspace outcome field for field.
+    /// `ensure_workspace` persists nothing of its own. The refused start
+    /// still writes once — `Dispatcher::note_launch_failure` banks the
+    /// attempt so a restart does not lose the count — but the whole hold —
+    /// park fields and `quota_retries` — rides through that write untouched,
+    /// and matches the stale-workspace outcome field for field.
     #[test]
     fn a_refused_start_with_a_valid_workspace_keeps_the_whole_park() {
         let mut repo = fixture("quota-refused-start-valid-ws");
@@ -8330,21 +8603,18 @@ mod tests {
             10,
             "2099-01-08T00:00:00Z",
         );
-        let before = std::fs::read(&path).unwrap();
         let mux = FakeMux::new(vec![]).refusing_to_start();
         let report = with_home(&home, || run_pass(&repo, &mux));
         std::fs::remove_dir_all(&home).ok();
         std::fs::remove_dir_all(&worktree).ok();
 
+        // Below the launch-failure ceiling this is a bounded notice on
+        // `report.actions`, not `report.problems` — see
+        // [`Dispatcher::note_launch_failure`].
         assert!(
-            report.problems.iter().any(|p| p.contains("held")),
+            report.actions.iter().any(|p| p.contains("held")),
             "the launch was attempted and refused: {:?}",
-            report.problems
-        );
-        assert_eq!(
-            std::fs::read(&path).unwrap(),
-            before,
-            "a refused start on a valid placement writes the task file not at all"
+            report.actions
         );
         let task = reload(&path);
         assert_eq!(
@@ -8360,6 +8630,11 @@ mod tests {
         assert_eq!(
             task.front.quota_retries, 4,
             "same final state as the stale-workspace shape — placement did not decide it"
+        );
+        assert_eq!(
+            task.front.launch_failures.get("review"),
+            Some(&1),
+            "the one write this refused start does make is its own attempt count"
         );
     }
 

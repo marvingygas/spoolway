@@ -533,6 +533,34 @@ pub struct Frontmatter {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub rounds: BTreeMap<String, u32>,
 
+    /// How many consecutive launches at each step could not even start —
+    /// never a lane or a command process that ran and failed, only one that
+    /// [`crate::mux::Mux::start_lane`], [`crate::command_step::Runs::start`]
+    /// or `start_command_in_pane` refused outright. Keyed by step rather than
+    /// by route, unlike [`Self::rounds`] and [`Self::prompts`] beside it: a
+    /// launch that never started never had a route to be counted against.
+    ///
+    /// Bumped by `Dispatcher::note_launch_failure` in `src/dispatch.rs`,
+    /// shared by both roads a launch takes: an agent lane's start in
+    /// `start_lanes`, and a command step's `Fresh` arm in `run_command`.
+    ///
+    /// Cleared two ways, for two different moments a stale count would
+    /// otherwise survive. [`Task::clear_launch_failures`] forgives it the
+    /// instant a launch of the same step actually starts — a launch that
+    /// gets as far as running is not the failure this counts, whatever it
+    /// goes on to do, and this is the only writer for a step the task never
+    /// actually leaves (a command step whose process just spawned, still
+    /// sitting on that very step waiting for its exit code). [`Task::
+    /// set_stage`] and [`Task::set_stage_unbanked`] forgive it the other
+    /// way, on arrival: a step's own count means nothing once the task has
+    /// moved off it and come back, so a *later* visit starts counting from
+    /// zero rather than inheriting whatever an earlier one left behind —
+    /// without this, a step whose `on_fail` loops back to the step behind
+    /// it (`review`'s own `on_fail: implement` in the shipped pipeline)
+    /// would ceiling on its first failure the second time around.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub launch_failures: BTreeMap<String, u32>,
+
     /// The step this task last moved here from, written by [`Task::set_stage`]
     /// and read by the dispatcher to key the two counters above.
     ///
@@ -684,6 +712,25 @@ impl Task {
         *self.front.prompts.entry(key).or_insert(0) += 1;
     }
 
+    /// Count one more launch of `step` that could not even start, and return
+    /// the new count — see [`Frontmatter::launch_failures`].
+    pub fn bump_launch_failures(&mut self, step: &str) -> u32 {
+        let count = self
+            .front
+            .launch_failures
+            .entry(step.to_string())
+            .or_insert(0);
+        *count += 1;
+        *count
+    }
+
+    /// Forgive `step`'s launch-failure count: a launch of it just started.
+    /// Answers whether there was anything to forgive, so a caller that reads
+    /// this on every successful launch writes only the file that changed.
+    pub fn clear_launch_failures(&mut self, step: &str) -> bool {
+        self.front.launch_failures.remove(step).is_some()
+    }
+
     pub fn load(path: &Path) -> Result<Task> {
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("reading task file {}", path.display()))?;
@@ -766,6 +813,14 @@ impl Task {
         self.front.parked_window = String::new();
         self.front.parked_at = None;
         self.front.launched_at = None;
+        // A fresh arrival at `stage` has nothing to do with whatever a much
+        // earlier visit there once counted against `Self::launch_failures` —
+        // see [`Frontmatter::launch_failures`]'s own doc for the loop this
+        // closes: a step whose `on_fail` routes back to the very step behind
+        // it (`review`'s own `on_fail: implement` in the shipped pipeline)
+        // would otherwise ceiling on its *first* failure the second time
+        // around, having inherited a count nothing had reset.
+        self.front.launch_failures.remove(stage);
 
         let stamp: DateTime<Utc> = Utc::now();
         let line = match message {
@@ -789,9 +844,10 @@ impl Task {
     /// routed. See [`Task::set_stage`], which this deliberately does not
     /// call: `rounds` and `arrived_from` are left exactly as they were, and
     /// `attempts`, `usage_limit_hold`, `parked_until`, `parked_window`,
-    /// `parked_at` and `launched_at` are reset the same way `set_stage`
-    /// resets them, since neither a parked task nor the lane it is handed
-    /// back to has anything of those left to mean.
+    /// `parked_at`, `launched_at` and `stage`'s own entry in
+    /// `launch_failures` are reset the same way `set_stage` resets them,
+    /// since neither a parked task nor the lane it is handed back to has
+    /// anything of those left to mean.
     pub fn set_stage_unbanked(&mut self, stage: &str, message: &str) {
         self.front.stage = stage.to_string();
         self.front.attempts = 0;
@@ -801,6 +857,7 @@ impl Task {
         self.front.parked_window = String::new();
         self.front.parked_at = None;
         self.front.launched_at = None;
+        self.front.launch_failures.remove(stage);
 
         let stamp: DateTime<Utc> = Utc::now();
         let line = format!(
@@ -1285,6 +1342,49 @@ mod tests {
         assert!(log.contains("→ `paused`: paused from the board"));
         assert!(log.contains("→ `implement`: put back from the board"));
         assert!(!log.to_lowercase().contains("unblocked"));
+    }
+
+    /// A step whose `on_fail` loops back to the step behind it — `review`'s
+    /// own `on_fail: implement` in the shipped pipeline — sends a ceilinged
+    /// task away and, sooner or later, some other route sends it back. That
+    /// second visit must not inherit the first one's spent count: arriving
+    /// fresh clears it, the same way `set_stage` already clears `attempts`
+    /// and the rest of a step's launch state on every arrival — cleared for
+    /// the step just *reached*, not the one just left, since a route away
+    /// from a ceilinged step leaves that step's count exactly where a later
+    /// return visit needs to find it: spent, until arriving there again is
+    /// itself what clears it.
+    #[test]
+    fn set_stage_clears_the_arriving_steps_launch_failures() {
+        let mut task = Task::parse(PathBuf::from("demo.md"), SAMPLE).unwrap();
+        task.front.launch_failures.insert("review".into(), 3);
+
+        // Routed away from `review` after it ceilinged. Nothing arrived at
+        // `review` this move, so its count rides through untouched — this is
+        // the state a later return visit has to find it in.
+        task.set_stage("implement", None);
+        assert_eq!(task.front.launch_failures.get("review"), Some(&3));
+
+        // Later, `review` is reached again — this arrival is what clears it,
+        // so a first failure this time around is attempt one, not four.
+        task.set_stage("review", None);
+        assert_eq!(task.front.launch_failures.get("review"), None);
+    }
+
+    /// `set_stage_unbanked`'s own round trip — a person parking a task from
+    /// the board and releasing it — forgives the same way, for the same
+    /// reason: the lane handed back has nothing left to mean by a count from
+    /// before the interruption.
+    #[test]
+    fn set_stage_unbanked_clears_the_arriving_steps_launch_failures() {
+        let mut task = Task::parse(PathBuf::from("demo.md"), SAMPLE).unwrap();
+        task.set_stage("implement", None);
+        task.front.launch_failures.insert("implement".into(), 2);
+
+        task.set_stage_unbanked("paused", "paused from the board");
+        task.set_stage_unbanked("implement", "put back from the board");
+
+        assert_eq!(task.front.launch_failures.get("implement"), None);
     }
 
     /// `launch_landed` forgives the launch counter but leaves `launched_at`

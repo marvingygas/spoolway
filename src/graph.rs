@@ -611,6 +611,7 @@ mod tests {
                 launched_at: None,
                 prompts: Default::default(),
                 rounds: Default::default(),
+                launch_failures: Default::default(),
                 arrived_from: None,
                 extra: Default::default(),
             },

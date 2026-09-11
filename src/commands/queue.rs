@@ -440,6 +440,7 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: &str) -> Result<Task
     front.launched_at = None;
     front.prompts = Default::default();
     front.rounds = Default::default();
+    front.launch_failures = Default::default();
     front.arrived_from = None;
 
     let body = ends_with_newline(body.to_string());
@@ -4928,6 +4929,26 @@ mod tests {
         assert_eq!(task.front.parked_at, None);
         assert_eq!(task.front.parked_until, None);
         assert_eq!(task.front.parked_window, "");
+    }
+
+    /// `launch_failures` is a dispatcher-owned counter too — see
+    /// `IGNORED_KEYS` in `src/commands/task.rs` — and a document that carries
+    /// one in from an earlier run must not have it survive back into the
+    /// queue: a re-queued task that parked with a step's count already at
+    /// the ceiling would otherwise write the very first failure of its next
+    /// run as the fourth attempt, past `MAX_LAUNCH_FAILURES`, and park again
+    /// without ever writing why — the reason-writing guard in
+    /// `Dispatcher::note_launch_failure` fires only on the attempt that
+    /// exactly spends the ceiling, and a count that starts at 3 skips it.
+    #[test]
+    fn a_document_carrying_launch_failures_has_them_reset() {
+        let text = document(
+            "demo",
+            "group: demo\nlaunch_failures:\n  implement: 3\n",
+            BODY,
+        );
+        let task = parse_submission("mine.md", &text, "plan/demo").unwrap();
+        assert!(task.front.launch_failures.is_empty());
     }
 
     /// A repeat submission is refused whether the id is still in the queue —
