@@ -6421,6 +6421,23 @@ mod tests {
         .is_ok()
     }
 
+    /// Stand in for a real `git push`: a remote-tracking ref pointing at
+    /// `branch`'s own tip, which is all `Dispatcher::branch_fully_pushed`
+    /// ever reads. No actual remote is needed for that check to answer yes.
+    fn mark_pushed(repo: &Repo, branch: &str) {
+        let sha = crate::repo::run(&repo.root, "git", &["rev-parse", branch]).unwrap();
+        crate::repo::run(
+            &repo.root,
+            "git",
+            &[
+                "update-ref",
+                &format!("refs/remotes/origin/{branch}"),
+                sha.trim(),
+            ],
+        )
+        .unwrap();
+    }
+
     /// Interrupted, not finished: the checkout goes back but the task file stays
     /// in the queue, so the next run picks it up instead of treating it as done.
     ///
@@ -6685,6 +6702,7 @@ mod tests {
     fn a_finished_task_takes_its_branch_with_it() {
         let repo = fixture("cleanup-branch");
         crate::repo::run(&repo.root, "git", &["branch", "task/demo"]).unwrap();
+        mark_pushed(&repo, "task/demo");
         let path = add_task(&repo, "demo", "implement");
         let mut task = reload(&path);
         task.front.workspace_id = Some("w1".into());
@@ -6702,6 +6720,118 @@ mod tests {
         assert!(
             !has_branch(&repo, "task/demo"),
             "and does not leave its branch behind"
+        );
+    }
+
+    /// The whole point of this check: a `handover` that never ran, or a push
+    /// that failed silently, must not turn into the deletion of the only
+    /// copy of a finished task's work. Nothing under `task/demo` is on any
+    /// remote here, so the branch survives its own task's archiving, and the
+    /// reason is on the run's own problem list.
+    #[test]
+    fn a_branch_with_unpushed_commits_survives_its_own_tasks_archiving() {
+        let repo = fixture("cleanup-branch-unpushed");
+        crate::repo::run(&repo.root, "git", &["branch", "task/demo"]).unwrap();
+        let path = add_task(&repo, "demo", "implement");
+        let mut task = reload(&path);
+        task.front.workspace_id = Some("w1".into());
+        task.front.branch = Some("task/demo".into());
+        task.save().unwrap();
+
+        let mux = FakeMux::new(vec![]);
+        let mut report = Report::default();
+        let archived = Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
+            .clean_up(&mut task, &[], &mut report)
+            .unwrap();
+
+        assert!(archived, "the task itself still finishes");
+        assert!(!path.exists(), "and still leaves the queue");
+        assert!(
+            has_branch(&repo, "task/demo"),
+            "but its branch is kept — no remote has its commits"
+        );
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|p| p.contains("demo") && p.contains("task/demo")),
+            "and the reason is recorded on the run's problem list, naming the \
+             task and the branch: {:?}",
+            report.problems
+        );
+    }
+
+    /// The other exemption a finished task's branch gets, and the one no
+    /// existing archiving test reached: a borrowed checkout's branch is
+    /// somebody's own, not spoolway's, whatever `git rev-list` would say
+    /// about it — so it is never even asked.
+    #[test]
+    fn a_borrowed_checkouts_branch_survives_archiving_even_fully_pushed() {
+        let repo = fixture("cleanup-branch-borrowed");
+        crate::repo::run(&repo.root, "git", &["branch", "task/demo"]).unwrap();
+        mark_pushed(&repo, "task/demo");
+        let path = add_task(&repo, "demo", "implement");
+        let mut task = reload(&path);
+        task.front.workspace_id = Some("w1".into());
+        task.front.branch = Some("task/demo".into());
+        task.front.borrowed = true;
+        task.save().unwrap();
+
+        let mux = FakeMux::new(vec![]);
+        let mut report = Report::default();
+        let archived = Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
+            .clean_up(&mut task, &[], &mut report)
+            .unwrap();
+
+        assert!(archived);
+        assert!(!path.exists(), "a finished task leaves the queue");
+        assert!(
+            has_branch(&repo, "task/demo"),
+            "a borrowed checkout's branch is never spoolway's to delete"
+        );
+    }
+
+    /// A branch kept once for lacking a remote is not stuck forever: once it
+    /// is pushed, the next cleanup to pass over it — `sweep_orphaned_branches`,
+    /// run at the end of every `clean_up` — is what frees it, the same way it
+    /// already frees one a queued dependent stopped needing.
+    #[test]
+    fn an_unpushed_branch_is_freed_once_pushed_by_the_next_cleanups_sweep() {
+        let repo = fixture("cleanup-branch-unpushed-then-pushed");
+        crate::repo::run(&repo.root, "git", &["branch", "task/first"]).unwrap();
+        let first = add_task(&repo, "first", "implement");
+        let mut first_task = reload(&first);
+        first_task.front.workspace_id = Some("w1".into());
+        first_task.front.branch = Some("task/first".into());
+        first_task.save().unwrap();
+
+        let mux = FakeMux::new(vec![]);
+        let pipelines = Pipelines::builtin();
+        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux, false);
+        let mut report = Report::default();
+
+        dispatcher
+            .clean_up(&mut first_task, &[], &mut report)
+            .unwrap();
+        assert!(
+            has_branch(&repo, "task/first"),
+            "unpushed, so kept by its own archiving"
+        );
+
+        // The push `handover` should have made, arriving late.
+        mark_pushed(&repo, "task/first");
+
+        // A second, unrelated task finishing is what runs the orphan sweep
+        // next — nothing revisits `first` on its own once it is archived.
+        let second = add_task(&repo, "second", "implement");
+        let mut second_task = reload(&second);
+        dispatcher
+            .clean_up(&mut second_task, &[], &mut report)
+            .unwrap();
+
+        assert!(
+            !has_branch(&repo, "task/first"),
+            "now pushed and nothing needs it, so the orphan sweep frees it"
         );
     }
 
@@ -13143,6 +13273,10 @@ mod tests {
         repo.git(&["commit", "-q", "--allow-empty", "-m", "first"])
             .unwrap();
         repo.git(&["checkout", "-q", "work"]).unwrap();
+        // Pushed already, so the survival this test asserts is the
+        // dependency exemption's doing, not an unpushed branch being kept
+        // for an unrelated reason.
+        mark_pushed(&repo, "task/first");
 
         let first = add_task_with(&repo, "first", "done", |f| {
             f.branch = Some("task/first".into());
@@ -13179,6 +13313,9 @@ mod tests {
         repo.git(&["commit", "-q", "--allow-empty", "-m", "first"])
             .unwrap();
         repo.git(&["checkout", "-q", "work"]).unwrap();
+        // Pushed already, so what frees it once it is orphaned is purely the
+        // dependency going away — the thing this test is actually about.
+        mark_pushed(&repo, "task/first");
 
         let first = add_task_with(&repo, "first", "done", |f| {
             f.branch = Some("task/first".into());
@@ -13227,6 +13364,7 @@ mod tests {
         repo.git(&["commit", "-q", "--allow-empty", "-m", "auth-01"])
             .unwrap();
         repo.git(&["checkout", "-q", "work"]).unwrap();
+        mark_pushed(&repo, "task/proj-12-auth-01");
 
         let first = add_task_with(&repo, "auth-01", "done", |f| {
             f.branch = Some("task/proj-12-auth-01".into());
@@ -13274,6 +13412,10 @@ mod tests {
                 .unwrap();
             repo.git(&["checkout", "-q", "work"]).unwrap();
         }
+        mark_pushed(&repo, "task/proj-old-x");
+        // Pushed too, so `old-x`'s survival below is the still-queued guard's
+        // doing, not the push gate masking it.
+        mark_pushed(&repo, "task/old-x");
 
         // `x` has finished; `old-x` is a different, still-queued task.
         let finished = add_task_with(&repo, "x", "done", |f| {

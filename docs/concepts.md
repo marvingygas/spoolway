@@ -106,7 +106,7 @@ keys — see [Staffing `blocked`](pipelines.md#staffing-blocked).
 | Stage | What it is |
 |---|---|
 | `queued` | Where every task starts. It waits here for its dependencies and a worker slot |
-| `done` | Finished. The worktree is removed, the local branch deleted, the file archived |
+| `done` | Finished. The worktree is removed, the local branch deleted when its commits have reached a remote, the file archived |
 | `paused` | A gate's pass, held for a person. `spoolway resume <task>` sends it on, `spoolway resume --reject` sends it back — see [Gate](#gate) |
 | `blocked` | Needs help. Attended, `spoolway resume <task>` resumes it at the step it stopped on. In an [unattended run](pipelines.md#unattended-runs) a lane is started here instead — every pipeline stages `blocked`, and that lane's pass carries an agent step's task on under `unattended.skip_blocked_lane`, but always hands a command step back to itself |
 

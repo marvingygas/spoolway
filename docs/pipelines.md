@@ -167,7 +167,7 @@ reads correctly beside `cleanup: true`, which is a terminal's key anyway.
 | Stage | What it is |
 |---|---|
 | `queued` | Where every task starts. It waits here for its dependencies and a worker slot, and the dispatcher promotes it to the first step when `depends_on` is satisfied |
-| `done` | The task finished. Its worktree is removed and its file is archived. The local branch spoolway cut for it is deleted too, unless something still queued names it in `depends_on`, in which case it is kept until that stops being true. The published branch is left alone — deleting a merged pull request's head branch is a repository setting the forge applies itself |
+| `done` | The task finished. Its worktree is removed and its file is archived. The local branch spoolway cut for it is deleted too, unless something still queued names it in `depends_on` or some remote still lacks a commit of that branch — the branch is asked directly whether every commit has reached a remote, not trusted to `git`'s own "merged" check, which a squash-merge would lie about — in which case it is kept until the reason is gone, freed by the next cleanup. The published branch is left alone — deleting a merged pull request's head branch is a repository setting the forge applies itself |
 | `blocked` | The task needs help: something stopped it. Attended, `spoolway resume <task>` resumes it at the step it stopped on. Unattended, a lane staffs it instead, configured by `[unattended]`'s `blocked_*` keys in config.toml; see [Staffing `blocked`](#staffing-blocked) |
 | `paused` | The task passed a `gate:` step and needs a person to let it past. `spoolway resume <task>` sends it on. Nothing is wrong with it, and its dependents wait quietly — see [Gates](#gates) |
 

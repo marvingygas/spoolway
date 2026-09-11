@@ -1413,9 +1413,16 @@ held at `blocked` instead of archived, with a `## Status Log` line saying why, s
 sees the worktree before it is gone. Residue a lane deliberately left is not this: it is
 named in the log, and cleanup proceeds.
 
-A finished task's own branch is kept alive past that cleanup while anything still queued names
-it in `depends_on` — that branch is what the dependent's worktree gets cut from. It is freed by
-the next cleanup to run once nothing queued needs it any more.
+A finished task's own branch is kept alive past that cleanup for a reason that is not that the
+work is done: while anything still queued names it in `depends_on` — that branch is what the
+dependent's worktree gets cut from — and while some remote still lacks a commit of its own, the
+branch being asked directly whether every commit on it has reached a remote rather than trusting
+`git`'s own "merged" check, which a squash-merge would lie about. A branch kept for the second
+reason is named on the run's problem list, `"<id>: kept branch <branch> — it has commits no
+remote has"`, so the last thing that used to happen to a finished task — deleting the only copy
+of its work — no longer does. Either way the next cleanup to run frees it once the reason is
+gone: a depended-on branch once the last dependent has been cut, an unpushed one once it is
+pushed and nothing still needs it.
 
 Archiving a task also reclaims the run files and session state named for it. Its hook run
 files under `tracking/` and its command-step run files under `commands/` are deleted, matched
