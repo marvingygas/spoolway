@@ -226,6 +226,7 @@ pub fn doctor(
     config_error: Option<anyhow::Error>,
     verbose: bool,
     json: bool,
+    no_live: bool,
 ) -> Result<()> {
     if let Some(note) = repo.checkout_note()? {
         note.print(json)?;
@@ -234,6 +235,12 @@ pub fn doctor(
         Ok(config) => config,
         Err(err) => return doctor_unconfigured(repo, pipelines, err, verbose, json),
     };
+
+    // Built once and shared by every check below that asks the multiplexer
+    // anything, so `lanes can be started`, the live pane and `backend and
+    // checkout` all read the same backend rather than each constructing —
+    // and possibly disagreeing about — their own.
+    let mux = crate::mux::backend(repo);
 
     let mut report = Report::default();
 
@@ -249,7 +256,7 @@ pub fn doctor(
             report.record_all(config_checks(repo, config_error, &config));
             report.record_all(issue_tracking_checks(repo, &config.issue_tracking));
             report.record_all(retired_key_notes(&repo.checkout));
-            report.record(mux_check(repo));
+            report.record(mux_check(mux.as_ref()));
             doctor_update(repo, &mut report);
             report.record(match crate::lock::Lock::holder(&repo.lock_file())? {
                 Some(pid) => Finding::Note(format!("a dispatcher is running (pid {pid})")),
@@ -276,7 +283,20 @@ pub fn doctor(
         pipelines,
         &config.issue_tracking,
     ));
-    report.record(mux_check(repo));
+    report.record(mux_check(mux.as_ref()));
+    report.record(live_check(mux.as_ref(), no_live));
+    report.record(Finding::Check(
+        "git identity".into(),
+        crate::commands::dispatch::check_git_identity(repo, pipelines, &config),
+    ));
+    report.record(Finding::Check(
+        "no stale .git/index.lock".into(),
+        crate::commands::dispatch::check_index_lock(repo),
+    ));
+    report.record(Finding::Check(
+        "backend and checkout".into(),
+        crate::commands::dispatch::check_backend_checkout(repo, mux.as_ref()),
+    ));
     report.record_all(agent_checks(pipelines, &config));
     report.record_all(model_health_checks(pipelines, &config));
     report.record_all(agent_kind_checks(&config));
@@ -680,8 +700,7 @@ fn branch_and_forge_checks(
 /// Whether a lane can be started at all — the one check that never depends on
 /// the pipeline or the config, only on whether the terminal multiplexer this
 /// machine has is one spoolway knows how to drive.
-fn mux_check(repo: &Repo) -> Finding {
-    let mux = crate::mux::backend(repo);
+fn mux_check(mux: &dyn Mux) -> Finding {
     Finding::Check(
         "lanes can be started".into(),
         if mux.is_available() {
@@ -690,6 +709,91 @@ fn mux_check(repo: &Repo) -> Finding {
             Err(anyhow::anyhow!("{}", mux.unavailable()))
         },
     )
+}
+
+/// Open a throwaway pane on a scratch directory, run a trivial command in
+/// it, wait for the wrapper's own pid file, and close everything again —
+/// the one check here that finds out a lane can *really* start rather than
+/// only that the backend answers. Reuses the same wrapper and wait
+/// [`crate::command_step::Runs`] gives a real command step, so this is
+/// exactly the path a lane's own turn takes, not a stand-in for it.
+///
+/// `no_live` is `--no-live`: skips this row alone, leaving every other check
+/// unchanged, for a machine where opening a real pane is slow or noisy
+/// (CI, say) but the rest of `doctor` is still worth running.
+///
+/// A backend with no real pane to test — headless, whose panes are names
+/// rather than processes — answers with a note instead of a check: nothing
+/// was opened, so there is nothing to say passed or failed.
+fn live_check(mux: &dyn Mux, no_live: bool) -> Finding {
+    if no_live {
+        return Finding::NoteVerbose("--no-live: skipped the live pane check".into());
+    }
+    if !mux.is_available() {
+        // Already a `FAIL` on `lanes can be started` — nothing more to say.
+        return Finding::NoteVerbose("no live pane check: this backend is not available".into());
+    }
+    match live_pane(mux) {
+        Ok(Some(note)) => Finding::Check("a lane really starts".into(), Ok(Some(note))),
+        Ok(None) => Finding::NoteVerbose(format!(
+            "no live pane check: {} has no real pane to run a command in",
+            mux.name()
+        )),
+        Err(err) => Finding::Check("a lane really starts".into(), Err(err)),
+    }
+}
+
+/// The three calls [`live_check`] makes: [`Mux::create_pane`] a throwaway
+/// workspace on a scratch directory, [`Mux::run_in_pane`] to actually run a
+/// trivial command in it, then [`Mux::close_pane`] twice — the split pane
+/// the command ran in, then the workspace's own root pane, which under
+/// every real backend takes its now-empty tab and workspace with it.
+///
+/// `Ok(None)` from a backend whose [`Workspace::tab_id`] is absent —
+/// headless, which hands back a pane id that names no real process — since
+/// there is nothing here for [`Mux::run_in_pane`] to run a script in.
+fn live_pane(mux: &dyn Mux) -> Result<Option<String>> {
+    let dir = crate::scratch::root("doctor-live");
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+
+    let workspace = mux.create_pane(&dir, "doctor")?;
+    let Some(tab_id) = workspace.tab_id.clone() else {
+        return Ok(None);
+    };
+
+    let runs = crate::command_step::Runs::new(&dir);
+    let key = "doctor · live";
+    let env = std::collections::BTreeMap::new();
+    let script = runs.script_for_pane(key, "true", &env)?;
+
+    let started = std::time::Instant::now();
+    let outcome = mux
+        .run_in_pane(&tab_id, &dir, "doctor", &script, &env)
+        .and_then(|pane| {
+            pane.ok_or_else(|| {
+                anyhow::anyhow!("{} reports panes but ran nothing in one", mux.name())
+            })
+        })
+        .and_then(|pane| runs.await_started(key).map(|_pid| pane));
+    runs.forget(key);
+
+    // Best-effort either way: a pane left standing after a failed check is a
+    // worse trail to leave than a close call whose own error is swallowed.
+    if let Ok(pane) = &outcome {
+        let _ = mux.close_pane(pane);
+    }
+    let _ = mux.close_pane(&workspace.pane_id);
+    // Stopped only now, after both closes: the row says how long the whole
+    // check took — opening the pane, running the command, closing
+    // everything again — not just the time to see it start.
+    let elapsed = started.elapsed();
+
+    outcome.map(|pane| {
+        Some(format!(
+            "pane {pane}, closed in {:.1}s",
+            elapsed.as_secs_f64()
+        ))
+    })
 }
 
 /// Per agent profile a pipeline actually references: whether its binary is on
@@ -1154,13 +1258,7 @@ fn jobs_checks(repo: &Repo, pipelines: &Pipelines) -> Vec<Finding> {
 /// with neither will never notice whether `gh` works at all.
 fn reaches_forge(pipelines: &Pipelines, tracking: &crate::config::IssueTrackingConfig) -> bool {
     tracking.hook.trim() == crate::cli::Tracker::Github.hook_name()
-        || pipelines.pipelines.values().any(|pipeline| {
-            pipeline.steps.iter().any(|step| {
-                step.run
-                    .as_deref()
-                    .is_some_and(|run| run.contains("spoolway stack"))
-            })
-        })
+        || crate::commands::dispatch::stack_step(pipelines).is_some()
 }
 
 /// Whether `gh` can actually do what `spoolway stack` needs of it: found on
@@ -1867,5 +1965,44 @@ mod tests {
              \x20         b.md (rewritten)\n\n\
              0 checks passed. Everything checks out.\n"
         );
+    }
+
+    /// A backend built fresh for each call, headless: real, but with no
+    /// panes to test — [`crate::headless::Headless::create_pane`] hands back
+    /// a `tab_id` of `None`, which is exactly the shape `live_check` has to
+    /// answer with a note rather than a check for.
+    fn headless_mux(name: &str) -> crate::headless::Headless {
+        let root = crate::scratch::root(&format!("doctor-live-{name}"));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        crate::headless::Headless::new(
+            &root,
+            &crate::config::DispatchConfig::default(),
+            root.clone(),
+        )
+    }
+
+    /// `--no-live` skips the row outright, without asking the backend
+    /// anything — the row it produces is a note, not a check, so it never
+    /// counts towards `problems()` either way.
+    #[test]
+    fn no_live_skips_the_row_without_touching_the_backend() {
+        let mux = headless_mux("no-live");
+        assert!(matches!(
+            live_check(&mux, true),
+            Finding::NoteVerbose(text) if text.contains("--no-live")
+        ));
+    }
+
+    /// A backend with no real pane — headless — reads as a note explaining
+    /// why, never as a failed check: nothing was opened, so there is
+    /// nothing to say passed or failed.
+    #[test]
+    fn a_backend_with_no_real_pane_is_a_note_not_a_check() {
+        let mux = headless_mux("no-real-pane");
+        assert!(matches!(
+            live_check(&mux, false),
+            Finding::NoteVerbose(text) if text.contains("no real pane")
+        ));
     }
 }

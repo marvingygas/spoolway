@@ -803,6 +803,83 @@ fi
 counter "and the counter agrees: two laps banked, not one" \
   rounds "gate->e2e" 2 $SPOOLWAY_PROJECT_HOME/queue/gated-twice.md
 
+# --------------------------------------------------------- a launch that never succeeds
+# The other half of a command step's own trouble: not one that ran and
+# failed, like `build` and `gate` above, but one that never got to run at
+# all. Before `nothing-starts-silently`, a `Fresh` arrival that could not
+# even start stayed `Fresh` forever — the same arrival, retried every pass
+# for the life of the run, with the same line landing in the problem log
+# every single time. Now it is bounded the same way a loop is: three
+# attempts, then routed to the step's own `on_fail` exactly as a failing
+# exit code would be.
+#
+# The obstruction is a directory sitting where the run's own log file needs
+# to go, with its `.prev.log` slot pre-occupied too so `Runs::prepare`'s own
+# roll-aside cannot clear it out of the way — a spawn that never starts
+# because its bookkeeping cannot be written, which needs no multiplexer and
+# no missing binary to reproduce.
+cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
+add_command_step default launchfail "echo should-never-run" review ""
+works "a pipeline with a step whose launch can fail checks out" \
+  "$SPOOLWAY" pipeline check
+
+KEY="cant-launch · launchfail"
+mkdir -p "$SPOOLWAY_PROJECT_HOME/commands"
+mkdir -p "$SPOOLWAY_PROJECT_HOME/commands/$KEY.log"
+mkdir -p "$SPOOLWAY_PROJECT_HOME/commands/$KEY.prev.log"
+touch "$SPOOLWAY_PROJECT_HOME/commands/$KEY.prev.log/keep-this-slot-occupied"
+
+task_doc "$LIVE/cant-launch.md" cant-launch "$BODY" "group: live" \
+  "touches: [notes/cant-launch.md]"
+must "a task whose command step can never even start" \
+  "$SPOOLWAY" queue add --from "$LIVE/cant-launch.md"
+
+if drive cant-launch blocked 60; then
+  ok "three failed launches in a row park the task rather than retrying forever"
+else
+  bad "three failed launches in a row park the task rather than retrying forever \
+(at \`$(stage_of cant-launch)\`)"
+fi
+has "routed to the step's own on_fail, same as a failing exit code would be" \
+  "→ \`blocked\`" $SPOOLWAY_PROJECT_HOME/queue/cant-launch.md
+has "blocked_from names the step that could not start, for a resume to reach" \
+  "blocked_from: launchfail" $SPOOLWAY_PROJECT_HOME/queue/cant-launch.md
+counter "and the launch-failure count agrees: three, not one per pass forever" \
+  launch_failures launchfail 3 $SPOOLWAY_PROJECT_HOME/queue/cant-launch.md
+
+REASON="could not be started after 3 attempts"
+STATUS_HITS=$(grep -c "$REASON" "$SPOOLWAY_PROJECT_HOME/queue/cant-launch.md" 2>/dev/null || echo 0)
+if [ "$STATUS_HITS" -eq 1 ]; then
+  ok "the reason lands on the task's own Status Log exactly once"
+else
+  bad "the reason lands on the task's own Status Log exactly once (found $STATUS_HITS)"
+fi
+
+PROBLEM_LOG="$HOME/.spoolway/logs/$(basename "$LIVE/proj").log"
+PROBLEM_HITS=$(grep -c "$REASON" "$PROBLEM_LOG" 2>/dev/null || echo 0)
+if [ "$PROBLEM_HITS" -eq 1 ]; then
+  ok "and once in the project's problem log — not once per one of the three attempts"
+else
+  bad "and once in the project's problem log — not once per one of the three attempts \
+(found $PROBLEM_HITS in $PROBLEM_LOG)"
+fi
+
+# Parked, so the dispatcher has nothing left to do here for the rest of the
+# run — this is what "the run ends" means for a step that can never launch:
+# not the process exiting (a person still has to clear a block), but the
+# retry loop itself stopping rather than spending another pass on the same
+# dead end. A few more passes with the obstruction still in place, and
+# neither the count nor the reason moves again.
+sleep 3
+counter "further passes spend nothing more on it — the count does not move" \
+  launch_failures launchfail 3 $SPOOLWAY_PROJECT_HOME/queue/cant-launch.md
+PROBLEM_HITS_AFTER=$(grep -c "$REASON" "$PROBLEM_LOG" 2>/dev/null || echo 0)
+if [ "$PROBLEM_HITS_AFTER" -eq 1 ]; then
+  ok "nor does the problem log grow while it sits blocked"
+else
+  bad "nor does the problem log grow while it sits blocked (found $PROBLEM_HITS_AFTER)"
+fi
+
 # ------------------------------------------------------------------- background
 # The other half: the task does not wait, and the command is still going after
 # it has moved on.
@@ -852,6 +929,78 @@ if [ -n "$BENCH_PID" ] && poll_while 10 test -d "/proc/$BENCH_PID"; then
 else
   bad "cleanup stops a background command rather than orphaning it (pid $BENCH_PID)"
 fi
+
+# --------------------------------------------------------- background, on_fail
+# The refusal `pipeline check` used to make against `background: true` plus
+# `on_fail:` is gone — a background command that fails now routes the task
+# down its `on_fail`, whichever step the task has since reached. Proven with
+# two file gates rather than a sleep, so the assertion does not race the mock
+# pipeline's own speed (the whole thing above ran in under a second): `scratch`
+# only fails once told to, and `hold`, spliced in right after it, only passes
+# once told to — so the task is provably sitting well past `scratch`, still
+# going, when the failure lands.
+cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
+SCRATCH_FAIL="$LIVE/scratch-fail-now"
+SCRATCH_HOLD="$LIVE/scratch-hold-release"
+rm -f "$SCRATCH_FAIL" "$SCRATCH_HOLD"
+{
+  printf '\n  - id: scratch\n'
+  printf '    description: A background step whose command fails once told to.\n'
+  printf '    run: while [ ! -f %q ]; do sleep 0.2; done; echo scratch-failed >&2; exit 1\n' \
+    "$SCRATCH_FAIL"
+  printf '    background: true\n'
+  printf '    on_pass: hold\n'
+  printf '    on_fail: blocked\n'
+  printf '\n  - id: hold\n'
+  printf '    description: Holds the task here so the test can prove it moved past scratch.\n'
+  printf '    run: while [ ! -f %q ]; do sleep 0.2; done\n' "$SCRATCH_HOLD"
+  printf '    on_pass: review\n'
+} >> .spoolway/pipelines/default.yml
+# The same two rewrites `add_command_step` makes for one splice, done by hand
+# for two: `implement`'s own `on_pass: review` becomes the entry into
+# `scratch`, and `review`'s `loop: implement: 2` is renamed to name `hold` —
+# the step that now actually arrives at `review` on every lap.
+sed -i "0,/^    on_pass: review\$/s//    on_pass: scratch/" .spoolway/pipelines/default.yml
+sed -i "0,/^      implement: /s//      hold: /" .spoolway/pipelines/default.yml
+works "a background step that also declares on_fail checks out" "$SPOOLWAY" pipeline check
+
+dispatcher_restart   # the pipeline it is holding has neither new step in it
+task_doc "$LIVE/scratch-fail.md" scratch-fail "$BODY" "group: live" \
+  "touches: [notes/scratch-fail.md]"
+must "a task behind a background step that will later fail" \
+  "$SPOOLWAY" queue add --from "$LIVE/scratch-fail.md"
+
+if drive scratch-fail hold 60; then
+  ok "the task moved on past the background step while its command was still running"
+else
+  bad "the task moved on past the background step while its command was still running \
+(at \`$(stage_of scratch-fail)\`)"
+fi
+
+touch "$SCRATCH_FAIL"
+if drive scratch-fail blocked 60; then
+  ok "the background command's failure still reached the task, at the step it moved on to"
+else
+  bad "the background command's failure still reached the task, at the step it moved on to \
+(at \`$(stage_of scratch-fail)\`)"
+fi
+# The route is narrated on the dispatcher's own record, same as the mockup —
+# not the task's own Status Log, which `set_stage` writes with no message here,
+# the same as every other route a fall-through or a command step's ordinary
+# `on_fail` takes.
+if wait_for_text 20 "$E2E_DISPATCH_LOG" \
+  '`scratch` (background) exited 1 — moving to `blocked`'; then
+  ok "and the route taken is on the record"
+else
+  bad "and the route taken is on the record"
+fi
+has "blocked_from names the step it was actually pulled out of, not \`scratch\` itself" \
+  "blocked_from: hold" $SPOOLWAY_PROJECT_HOME/queue/scratch-fail.md
+
+# Let the stranded `hold` command finish rather than leave it running for the
+# rest of the suite — its own task has already moved on to `blocked`, so
+# nothing is waiting on it any more.
+touch "$SCRATCH_HOLD"
 
 # ----------------------------------------------------------- headless, no setsid
 # The reason this task exists: detaching a headless command step used to run
@@ -1123,6 +1272,128 @@ else
   unset SPOOLWAY_TMUX_SOCKET
   must "back to headless" "$SPOOLWAY" config set dispatch.backend headless
 fi
+
+# ---------------------------------------------- a big environment, handed over
+# A pane's shell does not inherit the dispatcher's environment: it belongs to
+# the multiplexer's server, so whatever a command step needs has to be carried
+# across deliberately. herdr's way in is typing at the pane's prompt, and a
+# whole inherited environment typed as one `export` line is longer than herdr
+# will carry — it used to cut mid-value, leaving the pane's shell waiting
+# forever on an unterminated quote, with no pid ever written and no log to
+# read. It is written to a file and sourced now, and this is that, end to end.
+#
+# Against `scripts/e2e/herdr-stub.sh` rather than a real server — its header
+# says why there is no isolated herdr to run this on, and which half of the
+# behaviour a double can still be honest about. The short version: each pane
+# there is a real long-lived shell started under `env -i`, so a variable that
+# reaches the command got there because spoolway carried it.
+HSTATE="$LIVE/herdr-stub"
+HERDRBIN="$LIVE/herdr-bin"
+mkdir -p "$HSTATE" "$HERDRBIN"
+install -m 755 "$HERE/../herdr-stub.sh" "$HERDRBIN/herdr"
+export HERDR_STUB_STATE="$HSTATE"
+# Saved so the teardown below can put it back — a `herdr` left first on PATH
+# refuses to run at all once HERDR_STUB_STATE is unset, which would break the
+# first later case that so much as checks the backend is available.
+PATH_BEFORE_HERDR_STUB="$PATH"
+PATH="$HERDRBIN:$PATH"; export PATH
+
+must "the herdr backend" "$SPOOLWAY" config set dispatch.backend herdr
+must "herdr gives each task a workspace" "$SPOOLWAY" config set dispatch.herdr_mode split
+
+# The two variables this case is about, both set before the dispatcher starts
+# so they are really part of the environment it inherited.
+#
+# The bulk one is the point: eight kilobytes in a single value, comfortably
+# past the length a pane's prompt used to cut an `export` line at. The marker
+# is how a false pass is ruled out — nothing on the harness's own PATH carries
+# it, and the pane's shell is started with no environment at all.
+export SPOOLWAY_E2E_PANE_ENV_MARKER="from-the-dispatchers-own-environment"
+SPOOLWAY_E2E_PANE_BULK=$(head -c 8000 /dev/zero | tr '\0' 'x'); export SPOOLWAY_E2E_PANE_BULK
+
+# A pipeline of one paned command step, so this case needs no agent lane and
+# the double needs no agent to start. The step reads both variables back out.
+cat > .spoolway/pipelines/herdrpane.yml <<'YML'
+description: One paned command step, for the environment a pane is handed.
+
+steps:
+  - id: carry
+    description: Read back the environment the dispatcher was started with.
+    run: 'echo "env:$SPOOLWAY_E2E_PANE_ENV_MARKER"; echo "bulk:${#SPOOLWAY_E2E_PANE_BULK}"'
+    on_pass: done
+    on_fail: blocked
+YML
+works "a one-step paned pipeline checks out" "$SPOOLWAY" pipeline check
+
+dispatcher_restart
+task_doc "$LIVE/carried.md" carried "$BODY" "group: live" \
+  "pipeline: herdrpane" "touches: [notes/carried.md]"
+must "a task through a paned command step on herdr" \
+  "$SPOOLWAY" queue add --from "$LIVE/carried.md"
+
+records "the pane's own output is on the record" "env:" \
+  "$SPOOLWAY_PROJECT_HOME/commands/carried · carry.log" carried
+has "a variable only the dispatcher's own environment carried reached the herdr pane" \
+  "env:from-the-dispatchers-own-environment" \
+  "$SPOOLWAY_PROJECT_HOME/commands/carried · carry.log.kept"
+has "and the eight-kilobyte value arrived whole, not cut mid-quote" \
+  "bulk:8000" \
+  "$SPOOLWAY_PROJECT_HOME/commands/carried · carry.log.kept"
+
+# The other half: it arrived that way *because nothing long was typed*. The
+# environment is a file beside the run's own bookkeeping, and what went to the
+# pane is the one `.` command that sources it.
+HANDOVER="$SPOOLWAY_PROJECT_HOME/commands/carried · handover.env"
+works "the environment was written down beside the run" test -f "$HANDOVER"
+has "with the dispatcher's own value in it" \
+  "from-the-dispatchers-own-environment" "$HANDOVER"
+if [ "$(wc -c <"$HANDOVER")" -gt 8000 ]; then
+  ok "and it is the big one — past what a prompt would have carried"
+else
+  bad "and it is the big one — past what a prompt would have carried"
+fi
+
+# `herdr-stub.sh` keeps every string spoolway typed into a pane, with its
+# length. The environment is 8KB; nothing typed may be anywhere near that.
+TYPED_MAX=$(awk -F'\t' 'BEGIN{m=0} $2>m {m=$2} END{print m+0}' "$HSTATE/typed.index")
+if [ "$TYPED_MAX" -lt 2000 ]; then
+  ok "and no single line typed into a pane was longer than $TYPED_MAX bytes"
+else
+  bad "nothing long is typed into a pane (longest was $TYPED_MAX bytes)"
+  cut -f1,2 "$HSTATE/typed.index"
+fi
+if grep -rqF -- ". '$HANDOVER'" "$HSTATE/typed"; then
+  ok "and one of them is the dot command that sources the file"
+else
+  bad "and one of them is the dot command that sources the file"
+fi
+
+# The pane spoolway recorded is the one herdr's own `pane list` agrees with —
+# the split's reply alone is not enough to record, and `split_pane` refuses
+# rather than write an id the multiplexer has never heard of.
+RECORDED=$(cat "$SPOOLWAY_PROJECT_HOME/commands/carried · carry.pane" 2>/dev/null || true)
+if [ -n "$RECORDED" ] && grep -q "^$RECORDED	" "$HSTATE/panes"; then
+  ok "the recorded pane id is one the multiplexer itself lists"
+else
+  bad "the recorded pane id is one the multiplexer itself lists (recorded \"$RECORDED\")"
+fi
+
+if drive carried gone 60; then ok "the task carries on once the paned command has passed"
+else bad "the task carries on once the paned command has passed (at \`$(stage_of carried)\`)"; fi
+
+unset SPOOLWAY_E2E_PANE_ENV_MARKER SPOOLWAY_E2E_PANE_BULK
+rm -f .spoolway/pipelines/herdrpane.yml
+must "back to headless again" "$SPOOLWAY" config set dispatch.backend headless
+# Every pane of the double is a real shell with a real process holding its
+# fifo open. A suite that walked away would leave both behind. All of this
+# teardown runs *before* `dispatcher_restart` below: that call starts the
+# long-lived dispatcher every later case in this suite shares, and it must
+# inherit the real PATH, not the stub's — a dispatcher started one line too
+# early here is exactly the half of the PATH fix that used to not land.
+"$HERDRBIN/herdr" shutdown state >/dev/null 2>&1 || true
+unset HERDR_STUB_STATE
+PATH="$PATH_BEFORE_HERDR_STUB"; export PATH
+dispatcher_restart
 
 # ------------------------------------------------------ config follows the checkout
 # `config get`/`show`/`path` read `repo.checkout` now — the worktree actually

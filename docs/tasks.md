@@ -47,6 +47,7 @@ can change with a spoolway release without a single file in your repository havi
 | `prompts` | the dispatcher | Every lane launched, per route, keyed `from->to` — retries included. What the board and the usage ledger read |
 | `rounds` | the dispatcher | How many times the task has arrived at each step, per route, keyed the same way — one per transition, whatever a lane there goes on to do. The only counter a step's `loop` budget is spent from |
 | `arrived_from` | the dispatcher | The step the task last moved here from, which is what keys the two counters above: they are banked at launch, and by then the stage is already the destination |
+| `launch_failures` | the dispatcher | Consecutive launches of a step that never got as far as running, keyed by step id rather than by route — a launch that never started never had a route to count against. Bumped for both roads a launch takes: an agent lane's start, and a command step's first spawn. On the third the task is routed by that step's `on_fail`, defaulting to `blocked`, with `blocked_from` set to the step it could not start, and the reason written once to the task's `## Status Log` and once to the project's problem log. Cleared the instant a launch of that step actually starts, whatever it goes on to do; cleared again on arrival at a step, so a later visit counts from zero instead of inheriting a spent count from an earlier one. Also cleared by re-queueing the document |
 | `last_report` | `spoolway report` | The last outcome a lane reported, with the step it belongs to and when it was banked — what the ledger banks as the lane's verdict, and what a settled lane is checked against to tell a report that has not yet moved the stage apart from a lane that never reported at all |
 | `blocked_from` | the dispatcher | The step the task was on when it was escalated. Clearing the block carries it on from there — see `unattended.skip_blocked_lane` |
 | `parked_from` | the dispatcher | The step a task stopped on without failing a check, for `spoolway resume` to carry it straight back to — set by a person's own keypress (the board's `p`), their own Escape typed straight into the lane's pane, or a lane `escalate_clock` gave up on for going quiet — rather than one it was escalated from (`blocked_from`). Nothing failed, so putting it back banks no lap and gives nothing back, unlike a real block |
@@ -533,9 +534,9 @@ above — and `spoolway queue show <task>` is how anyone else reads it back.
 
 ## Archiving
 
-A terminal step with cleanup enabled removes the task's worktree and branch and moves its
-file into the archive directory — keeping the branch while some remote still lacks a commit
-of it and noting that on the run's problem list, so a task whose `handover` never ran loses
-no copy of its work to its own cleanup. The usage ledger is not archived with it — one line per
-lane was appended when the lane settled, and that record outlives the task file deliberately,
-so cost history survives cleanup.
+The reserved `done` stage removes the task's worktree and branch and moves its file into the
+archive directory — keeping the branch while some remote still lacks a commit of it and noting
+that on the run's problem list, so a task whose `handover` never ran loses no copy of its work
+to its own archiving. The usage ledger is not archived with it — one line per lane was appended
+when the lane settled, and that record outlives the task file deliberately, so cost history
+survives cleanup.

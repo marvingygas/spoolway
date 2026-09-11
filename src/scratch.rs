@@ -1,10 +1,10 @@
-//! A temporary directory no other test can be standing in.
+//! A temporary directory no other caller of [`root`] can be standing in.
 //!
 //! Every fixture in this crate builds its world under a directory in
 //! `/tmp` and wipes that directory on the way in. Naming
 //! one after the test that wanted it — `spoolway-dispatch-warmth` — reads
-//! well and is wrong in exactly one situation, which happens to be the
-//! normal one here: **two `cargo test` processes at once**.
+//! well and is wrong in exactly one situation, which used to be the normal
+//! one here: **two `cargo test` processes at once**.
 //!
 //! The dispatcher runs one `test` step per task lane, and several lanes run
 //! together, so two copies of this binary routinely walk the same suite side
@@ -22,6 +22,14 @@
 //! That leaves nobody to delete a finished run's directory, since no later run
 //! will ever ask for the same name — see [`reclaim_finished_runs`], which is
 //! what stops them accumulating without number.
+//!
+//! [`root`] is not test-only any more: `spoolway doctor`'s own live pane
+//! check opens one on a real machine, to run its trivial command in — see
+//! `commands::doctor::live_pane`. That means an ordinary `spoolway doctor`
+//! now pays [`reclaim_finished_runs`]'s cost too: the first `root` of any
+//! process sweeps up to [`SWEEP_LIMIT`] finished runs' directories out of
+//! the system temporary directory, the same side effect `cargo test` always
+//! had, on a machine that also runs the test suite a lot.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -49,6 +57,7 @@ pub(crate) fn root(name: &str) -> PathBuf {
 /// opening a directory at all takes `FILE_FLAG_BACKUP_SEMANTICS` and
 /// `set_modified` needs `FILE_WRITE_ATTRIBUTES` on the handle whichever kind
 /// of path it is.
+#[cfg(test)]
 pub(crate) fn set_mtime(path: &Path, to: std::time::SystemTime) {
     let mut options = std::fs::File::options();
     #[cfg(windows)]
@@ -210,6 +219,7 @@ fn finished_run_pid(name: &str) -> Option<u32> {
 ///
 /// `args` are appended to `git init -q`, for the `-b <branch>` or `--bare` a
 /// caller wants.
+#[cfg(test)]
 pub(crate) fn git_init(root: &Path, args: &[&str]) {
     let mut init = vec!["init", "-q"];
     init.extend_from_slice(args);

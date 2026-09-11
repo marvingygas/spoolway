@@ -151,6 +151,20 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         bail!("{}", mux.unavailable());
     }
 
+    // The three things that certainly break a run, refused here rather than
+    // left for a lane to discover mid-turn: no git identity where something
+    // is about to commit, a stale index lock that fails every git write
+    // `git status` itself is blind to, and a backend that cannot actually
+    // open this checkout. Ahead of the lock, same as the mux check just
+    // above — a config problem is true whether or not anything is queued,
+    // and letting the run start only for the first lane to hit it means it
+    // has to be found and stopped by hand. `doctor` reports the same three
+    // as rows, off the same functions, so the fix here and the fix there
+    // never drift apart.
+    refuse(check_git_identity(repo, pipelines, &repo.config)).context("refusing to start")?;
+    refuse(check_index_lock(repo)).context("refusing to start")?;
+    refuse(check_backend_checkout(repo, mux.as_ref())).context("refusing to start")?;
+
     // Taken for the whole run. Two dispatchers would both see the same task at
     // the same step and both spawn a lane into its worktree.
     let _lock = crate::lock::Lock::acquire(&repo.lock_file(), unattended)?;
@@ -241,9 +255,10 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // Not for `--dry-run`, which is a person already looking at one pass, and
     // not for `--plain`, which is a person who would rather have the log — a
     // pipe, a CI job, a terminal that mangles the redraw.
-    // From here the run holds live lanes and worktrees, so it has something to
-    // end and give back on the way out. Caught rather than left to kill the
-    // process where it stands — see `dispatch.tear_lanes_on_stop`.
+    // From here the run holds live lanes, so an interrupted one's spend and
+    // launch counter still have to be settled on the way out. Caught rather
+    // than left to kill the process where it stands — see
+    // `crate::dispatch::Dispatcher::sweep_on_stop`.
     if !args.dry_run {
         crate::platform::stop::catch_interrupt();
     }
@@ -459,6 +474,194 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     }
 }
 
+/// The first step, if any, whose `run:` calls `spoolway stack` — the one
+/// command in this project that builds a commit (`commit-tree`, for its
+/// squash) whether or not `dispatch.auto_commit` is on. Named rather than a
+/// bare bool: the git-identity refusal below points at the actual step id
+/// instead of assuming every pipeline still calls it `handover`, and
+/// [`crate::commands::doctor`]'s own `reaches_forge` reuses this same
+/// answer for the other thing that step needs, `gh`.
+pub(crate) fn stack_step(pipelines: &Pipelines) -> Option<&str> {
+    pipelines
+        .pipelines
+        .values()
+        .flat_map(|pipeline| &pipeline.steps)
+        .find(|step| {
+            step.run
+                .as_deref()
+                .is_some_and(|run| run.contains("spoolway stack"))
+        })
+        .map(|step| step.id.as_str())
+}
+
+/// Why this project would ever run `git commit` on its own — `None` for a
+/// project that never does, which is the one case the git-identity check
+/// below must leave alone: requiring an identity from a project that commits
+/// nothing would refuse a start over a setting nobody needs.
+fn commit_reason(pipelines: &Pipelines, config: &Config) -> Option<String> {
+    if let Some(step) = stack_step(pipelines) {
+        return Some(format!("`{step}` runs `spoolway stack`"));
+    }
+    config
+        .dispatch
+        .auto_commit
+        .then(|| "`dispatch.auto_commit` is on".to_string())
+}
+
+/// One of the three things [`check_git_identity`], [`check_index_lock`] and
+/// [`check_backend_checkout`] refuse on.
+///
+/// `reason` is the short fact — `doctor`'s own row, `Report::check`'s `why`
+/// verbatim, and exactly what the task's own mockup draws next to `FAIL`.
+/// `fix` is the rest: why it matters and the command a person pastes to
+/// clear it, added only to `dispatch`'s own refusal below, which is the one
+/// place "what do I type" actually belongs.
+///
+/// A distinct error type, downcast out of the three checks' `?` the same way
+/// [`RestartsRefused`] already is downcast in `crate::main` — plain `?`
+/// alone would flatten this to `reason`, which is right for `doctor` and
+/// wrong for `dispatch`.
+#[derive(Debug)]
+struct Refusal {
+    reason: String,
+    fix: String,
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.reason)
+    }
+}
+
+impl std::error::Error for Refusal {}
+
+/// [`Refusal::fix`] appended to [`Refusal::reason`], for `dispatch`'s own
+/// refusal — the fuller message the task's mockup draws under
+/// `spoolway dispatch`. A `doctor` row never calls this: `Report::check`
+/// reads a [`Refusal`]'s plain `{err:#}`, which is `reason` alone.
+fn refuse(check: Result<Option<String>>) -> Result<Option<String>> {
+    check.map_err(|err| match err.downcast::<Refusal>() {
+        Ok(refusal) => anyhow!("{} — {}", refusal.reason, refusal.fix),
+        Err(err) => err,
+    })
+}
+
+/// Refuse a start (or fail a `doctor` row) when this project is about to
+/// commit and git has nowhere to put a name on the commit.
+///
+/// `dispatch.auto_commit` sweeps a lane's own leftovers into a `wip(...)`
+/// commit on every step, and `spoolway stack`'s squash builds one with
+/// `commit-tree` regardless of that setting — both fail outright with no git
+/// identity configured, and both used to fail silently mid-run, well past
+/// the point a person could fix it without losing anything.
+///
+/// `config` is handed in rather than read off `repo.config`, the same as
+/// [`commit_reason`] already takes it: `doctor` answers every other finding
+/// from the checkout's own loaded copy (see its module doc), and this row
+/// is no exception — a task branch that turns `auto_commit` on in its own
+/// checkout must see this row change, not `repo.root`'s copy silently
+/// standing in for it.
+pub(crate) fn check_git_identity(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    config: &Config,
+) -> Result<Option<String>> {
+    let Some(reason) = commit_reason(pipelines, config) else {
+        return Ok(None);
+    };
+
+    let missing: Vec<&str> = ["user.name", "user.email"]
+        .into_iter()
+        .filter(|key| {
+            repo.git(&["config", key])
+                .unwrap_or_default()
+                .trim()
+                .is_empty()
+        })
+        .collect();
+    if missing.is_empty() {
+        return Ok(None);
+    }
+
+    let (verb, pronoun) = match missing.len() {
+        1 => ("is", "it"),
+        _ => ("are", "them"),
+    };
+    // A placeholder per key: `user.email` reads fine as a bare address, but
+    // handing the same address back for `user.name` would have somebody
+    // paste their commit author name as an email — the defect this once was.
+    let placeholder = |key: &str| match key {
+        "user.name" => "\"Your Name\"",
+        _ => "you@example.com",
+    };
+    let commands = missing
+        .iter()
+        .map(|key| format!("  git config --global {key} {}", placeholder(key)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Err(anyhow::Error::new(Refusal {
+        reason: format!("git {} {verb} not set, and {reason}", missing.join(" and ")),
+        fix: format!("the first commit would fail. Set {pronoun} with:\n\n{commands}"),
+    }))
+}
+
+/// Refuse a start (or fail a `doctor` row) on a leftover `.git/index.lock` —
+/// the one file that fails every git write while `git status` itself
+/// answers normally, so nothing else here would ever notice it.
+///
+/// The real git directory, asked of git rather than assumed to be `.git`:
+/// under a linked worktree it is `.git/worktrees/<name>` instead, and this
+/// runs against `repo.root`, the checkout the dispatcher itself commits in.
+pub(crate) fn check_index_lock(repo: &Repo) -> Result<Option<String>> {
+    let git_dir = repo.git(&["rev-parse", "--git-dir"])?;
+    let lock = repo.root.join(git_dir.trim()).join("index.lock");
+    if lock.exists() {
+        return Err(anyhow::Error::new(Refusal {
+            reason: format!("{} exists", lock.display()),
+            fix: format!(
+                "every git write here fails until it is gone. If nothing is actually \
+                 mid-commit, remove it:\n\n  rm {}",
+                lock.display()
+            ),
+        }));
+    }
+    Ok(None)
+}
+
+/// Refuse a start (or fail a `doctor` row) on a backend that cannot actually
+/// open this checkout — caught here rather than left for the first lane's
+/// own workspace to fail on, since nothing about it is likely to change
+/// between one dispatch pass and the next.
+///
+/// A linked worktree is not this: `Herdr::new` resolves its own
+/// `project_root` through [`crate::repo::main_checkout`] before it ever
+/// opens anything, in `src/mux.rs`, and hands *that* to `worktree open` as
+/// `--cwd` — so herdr is never actually given a linked worktree to refuse.
+/// What it genuinely cannot open is a checkout `main_checkout` cannot
+/// resolve at all, the same call `Herdr::new` itself makes — a bare
+/// repository, or a `.git` too unusual for it to place. Resolved here the
+/// same way, so this only refuses what herdr would too.
+pub(crate) fn check_backend_checkout(
+    repo: &Repo,
+    mux: &dyn crate::mux::Mux,
+) -> Result<Option<String>> {
+    if !mux.is_available() {
+        bail!("{}", mux.unavailable());
+    }
+    if mux.name() == "herdr" && crate::repo::main_checkout(&repo.root).is_none() {
+        return Err(anyhow::Error::new(Refusal {
+            reason: format!(
+                "{} has no main checkout herdr can resolve a workspace onto",
+                repo.root.display()
+            ),
+            fix: "a bare repository, say. Switch backends:\n\n  spoolway config set \
+                  dispatch.backend tmux"
+                .to_string(),
+        }));
+    }
+    Ok(Some(format!("{} · main checkout", mux.name())))
+}
+
 /// Draw the read-only board over a run someone else's process is driving.
 ///
 /// The queue re-reads and the multiplexer call the board already makes are
@@ -494,16 +697,16 @@ fn watch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Result<()> 
     Ok(())
 }
 
-/// Give back what the run was holding, and draw the last frame.
+/// Settle the books on what the run was holding, and draw the last frame.
 ///
 /// Both ways a dispatcher ends come through here — the queue emptying, and a
 /// person asking it to stop — because they leave the same things behind and
-/// differ only in how much of it there is. Whether anything is actually swept
-/// is `dispatch.tear_lanes_on_stop`'s to say.
+/// differ only in how much of it there is. Nothing is torn down either way:
+/// see [`crate::dispatch::Dispatcher::sweep_on_stop`].
 ///
-/// A sweep that fails is reported and not raised: the run is over either way,
-/// and a teardown error is a worktree to remove by hand, not a reason to exit
-/// non-zero.
+/// A settle that fails is reported and not raised: the run is over either
+/// way, and an unbanked lane is something to catch up by hand, not a reason
+/// to exit non-zero.
 fn stop(
     repo: &Repo,
     pipelines: &Pipelines,
@@ -512,7 +715,7 @@ fn stop(
     out: &mut std::io::Stdout,
     args: &DispatchArgs,
 ) -> Result<()> {
-    if repo.config.dispatch.tear_lanes_on_stop && !args.dry_run {
+    if !args.dry_run {
         let mut dispatcher = crate::dispatch::Dispatcher::new(repo, pipelines, mux, args.dry_run);
         let mut report = crate::dispatch::Report::default();
         match dispatcher.sweep_on_stop(&mut report) {
@@ -521,7 +724,7 @@ fn stop(
                     println!("  {action}");
                 }
             }
-            Err(err) => println!("  ! could not give back this run's worktrees: {err:#}"),
+            Err(err) => println!("  ! could not settle this run's lanes: {err:#}"),
         }
     }
 
@@ -706,5 +909,323 @@ mod tests {
             );
         }
         assert!(dispatch(&repo, &Pipelines::builtin(), &args).is_err());
+    }
+
+    /// A pipeline whose only step names no `run:` at all — standing in for a
+    /// project whose pipeline never reaches `spoolway stack`.
+    fn single_step_pipelines() -> Pipelines {
+        let pipeline: Pipeline =
+            serde_norway::from_str("steps:\n  - id: a\n    end: true\n").unwrap();
+        let mut pipelines = std::collections::BTreeMap::new();
+        pipelines.insert("default".to_string(), pipeline);
+        Pipelines {
+            default: "default".to_string(),
+            pipelines,
+        }
+    }
+
+    /// Blank both `user.name` and `user.email` locally, overriding whatever
+    /// the machine running this test has configured globally — the same way
+    /// `git config user.name ""` reads to `check_git_identity` as unset:
+    /// `git config user.name` still exits 0 and prints nothing, and
+    /// `.trim().is_empty()` is exactly what that check reads. Blanking
+    /// locally rather than touching `$HOME` keeps this off the shared,
+    /// process-global state a parallel test run cannot race on.
+    fn blank_git_identity(repo: &Repo) {
+        repo.git(&["config", "user.name", ""]).unwrap();
+        repo.git(&["config", "user.email", ""]).unwrap();
+    }
+
+    /// `stack_step` finds the shipped `handover` step, by name, in both
+    /// built-in pipelines.
+    #[test]
+    fn stack_step_finds_the_shipped_handover_step() {
+        assert_eq!(stack_step(&Pipelines::builtin()), Some("handover"));
+    }
+
+    /// A pipeline with no `spoolway stack` step and `auto_commit` off never
+    /// asks git for anything: this project commits nothing, so an absent
+    /// identity is nobody's problem — the non-goal this check exists to
+    /// leave alone.
+    #[test]
+    fn git_identity_is_not_checked_when_nothing_commits() {
+        let mut repo = fixture("git-identity-nothing-commits");
+        blank_git_identity(&repo);
+        repo.config.dispatch.auto_commit = false;
+        assert!(
+            check_git_identity(&repo, &single_step_pipelines(), &repo.config)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// A blank `user.email`, with the shipped `handover` step reaching
+    /// `spoolway stack`, is refused — naming the missing key and the reason
+    /// in the short form `doctor`'s own row reads (`{err:#}` on the check
+    /// itself, never wrapped through [`refuse`]), and a command that sets
+    /// it once wrapped for `dispatch`'s own refusal.
+    #[test]
+    fn git_identity_is_refused_when_the_shipped_pipeline_reaches_stack() {
+        let repo = fixture("git-identity-missing");
+        blank_git_identity(&repo);
+
+        let bare = format!(
+            "{:#}",
+            check_git_identity(&repo, &Pipelines::builtin(), &repo.config).unwrap_err()
+        );
+        assert!(bare.contains("user.name"), "{bare}");
+        assert!(bare.contains("user.email"), "{bare}");
+        assert!(bare.contains("`handover` runs `spoolway stack`"), "{bare}");
+        assert!(
+            !bare.contains("git config"),
+            "a doctor row must carry the short reason alone, not the fix: {bare}"
+        );
+
+        let refused = format!(
+            "{:#}",
+            refuse(check_git_identity(
+                &repo,
+                &Pipelines::builtin(),
+                &repo.config
+            ))
+            .unwrap_err()
+        );
+        assert!(refused.starts_with(&bare), "{refused}");
+        assert!(
+            refused.contains("git config --global user.name \"Your Name\""),
+            "a name placeholder must read as a name, not an email address: {refused}"
+        );
+        assert!(
+            refused.contains("git config --global user.email you@example.com"),
+            "{refused}"
+        );
+    }
+
+    /// `dispatch.auto_commit` alone — no pipeline step reaching `spoolway
+    /// stack` at all — is reason enough: `auto_commit` commits on its own.
+    #[test]
+    fn git_identity_is_refused_for_auto_commit_alone() {
+        let repo = fixture("git-identity-auto-commit-alone");
+        blank_git_identity(&repo);
+        let err = check_git_identity(&repo, &single_step_pipelines(), &repo.config).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("`dispatch.auto_commit` is on"),
+            "{message}"
+        );
+    }
+
+    /// The identity `git_init` gave the fixture is real, so a project that
+    /// does commit and does have an identity passes clean.
+    #[test]
+    fn git_identity_passes_when_it_is_set() {
+        let repo = fixture("git-identity-set");
+        assert!(
+            check_git_identity(&repo, &Pipelines::builtin(), &repo.config)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// `doctor` reads a checkout's own loaded config, never `repo.config`
+    /// (`repo.root`'s) — see the module doc on `src/commands/doctor.rs`.
+    /// `check_git_identity` takes `Config` as a parameter for exactly that:
+    /// a repo whose own `repo.config` never turned `auto_commit` on still
+    /// gets the row once a *different* config, standing in for the
+    /// checkout's, does.
+    #[test]
+    fn git_identity_reads_the_config_it_is_handed_not_repos_own() {
+        let mut repo = fixture("git-identity-checkout-config");
+        blank_git_identity(&repo);
+        repo.config.dispatch.auto_commit = false;
+        let mut checkout_config = repo.config.clone();
+        checkout_config.dispatch.auto_commit = true;
+
+        assert!(
+            check_git_identity(&repo, &single_step_pipelines(), &repo.config)
+                .unwrap()
+                .is_none(),
+            "repo.config itself never turned auto_commit on"
+        );
+        assert!(
+            check_git_identity(&repo, &single_step_pipelines(), &checkout_config).is_err(),
+            "the config actually handed in did, and must be the one read"
+        );
+    }
+
+    /// A leftover `.git/index.lock` is refused — the short reason names the
+    /// path, and `refuse`'s longer form adds the command to clear it; its
+    /// absence is a pass.
+    #[test]
+    fn index_lock_is_refused_when_present_and_clear_otherwise() {
+        let repo = fixture("index-lock");
+        assert!(check_index_lock(&repo).unwrap().is_none());
+
+        let lock = repo.root.join(".git/index.lock");
+        std::fs::write(&lock, "").unwrap();
+
+        let bare = format!("{:#}", check_index_lock(&repo).unwrap_err());
+        assert!(bare.contains("index.lock"), "{bare}");
+        assert!(
+            !bare.contains("rm "),
+            "a doctor row must carry the short reason alone, not the fix: {bare}"
+        );
+
+        let refused = format!("{:#}", refuse(check_index_lock(&repo)).unwrap_err());
+        assert!(
+            refused.contains(&format!("rm {}", lock.display())),
+            "{refused}"
+        );
+
+        std::fs::remove_file(&lock).unwrap();
+        assert!(check_index_lock(&repo).unwrap().is_none());
+    }
+
+    /// A bare repository stands in for a checkout `main_checkout` cannot
+    /// place — the one case herdr genuinely cannot open a workspace on
+    /// (`Herdr::new` makes the same call before it ever opens anything).
+    fn bare_repo(name: &str) -> Repo {
+        let dir = crate::scratch::root(&format!("bare-checkout-{name}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::repo::run(&dir, "git", &["init", "-q", "--bare"]).unwrap();
+        Repo {
+            root: dir.clone(),
+            checkout: dir.clone(),
+            config: Config::default(),
+            home: dir.join(".home"),
+        }
+    }
+
+    /// A `Mux` standing in for herdr (or anything else), answering only
+    /// `name`/`is_available` for real — the only two [`check_backend_checkout`]
+    /// ever reads — and refusing every other call outright, so a test that
+    /// somehow reached one fails loudly rather than doing something real.
+    struct StubMux {
+        name: &'static str,
+        available: bool,
+    }
+
+    impl Mux for StubMux {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+        fn is_available(&self) -> bool {
+            self.available
+        }
+        fn unavailable(&self) -> String {
+            "the stub backend is never available".into()
+        }
+        fn resident_while_waiting(&self) -> bool {
+            unimplemented!()
+        }
+        fn list_lanes(&self) -> Result<Vec<crate::mux::Lane>> {
+            unimplemented!()
+        }
+        fn create_workspace(
+            &self,
+            _cwd: &std::path::Path,
+            _branch: &str,
+            _base: &str,
+            _label: &str,
+        ) -> Result<crate::mux::Workspace> {
+            unimplemented!()
+        }
+        fn remove_workspace(&self, _workspace_id: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn close_workspace(&self, _workspace_id: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn close_tab(&self, _tab_id: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn create_pane(
+            &self,
+            _cwd: &std::path::Path,
+            _label: &str,
+        ) -> Result<crate::mux::Workspace> {
+            unimplemented!()
+        }
+        fn split_pane(&self, _tab_id: &str, _cwd: &std::path::Path) -> Result<String> {
+            unimplemented!()
+        }
+        fn close_pane(&self, _pane_id: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn start_lane(&self, _spec: &crate::mux::LaneSpec<'_>) -> Result<()> {
+            unimplemented!()
+        }
+        fn prompt(&self, _name: &str, _text: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn read(&self, _name: &str, _lines: usize) -> Result<String> {
+            unimplemented!()
+        }
+        fn interrupt_lane(&self, _name: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn stop_lane(&self, _name: &str, _pane_id: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn focus_lane(&self, _name: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn rename_tab(&self, _tab_id: &str, _label: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn rename_workspace(&self, _workspace_id: &str, _label: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn rename_pane(&self, _pane_id: &str, _label: &str) -> Result<()> {
+            unimplemented!()
+        }
+    }
+
+    /// A backend that is not herdr is never refused over a bare repository:
+    /// only herdr binds a workspace to a resolved main checkout at all.
+    #[test]
+    fn backend_checkout_is_unconcerned_with_a_non_herdr_backend() {
+        let repo = bare_repo("non-herdr");
+        let mux = StubMux {
+            name: "tmux",
+            available: true,
+        };
+        assert!(check_backend_checkout(&repo, &mux).unwrap().is_some());
+    }
+
+    /// herdr against an ordinary checkout — the fixture's own — resolves a
+    /// main checkout fine and passes.
+    #[test]
+    fn backend_checkout_passes_herdr_on_an_ordinary_checkout() {
+        let repo = fixture("herdr-ordinary-checkout");
+        let mux = StubMux {
+            name: "herdr",
+            available: true,
+        };
+        assert!(check_backend_checkout(&repo, &mux).unwrap().is_some());
+    }
+
+    /// herdr against a bare repository — no main checkout `main_checkout`
+    /// can place, so `Herdr::new` itself would fall back to a `--cwd` it
+    /// cannot open either — is refused, naming the path and a way out.
+    #[test]
+    fn backend_checkout_refuses_herdr_on_a_bare_repository() {
+        let repo = bare_repo("herdr-bare");
+        let mux = StubMux {
+            name: "herdr",
+            available: true,
+        };
+        let bare = format!("{:#}", check_backend_checkout(&repo, &mux).unwrap_err());
+        assert!(bare.contains(&repo.root.display().to_string()), "{bare}");
+        assert!(
+            !bare.contains("dispatch.backend"),
+            "a doctor row must carry the short reason alone, not the fix: {bare}"
+        );
+
+        let refused = format!(
+            "{:#}",
+            refuse(check_backend_checkout(&repo, &mux)).unwrap_err()
+        );
+        assert!(refused.contains("dispatch.backend"), "{refused}");
     }
 }

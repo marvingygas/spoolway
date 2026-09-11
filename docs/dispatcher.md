@@ -42,7 +42,27 @@ An enabled job is the one exception. While any job is enabled, the run stays res
 empty queue — on the pass that drains the last task, and on a cold start with nothing
 queued, where it no longer exits 3. It prints why it is staying and when the next job fires,
 then loops on into the wait so it is alive when that window comes round. `ctrl-c` still stops
-it, and `dispatch.tear_lanes_on_stop` still applies. See [Jobs](jobs.md).
+it, banking each still-running lane's spend and forgiving its launch counter on the way out —
+see [Sweeping on stop](#sweeping-on-stop). See [Jobs](jobs.md).
+
+### Sweeping on stop
+
+Both ways a dispatcher ends — the queue emptying, or a `Ctrl-C` — come through the same
+settle before the process exits, and it tears nothing down. Every worktree, workspace, pane
+and tab the run holds is left exactly where it stood, under every backend and layout: a stop
+never closes a tab, removes a checkout, or ends a lane.
+
+Two things still happen, because they are not the checkout's to carry and nothing else banks
+them for this turn. Each still-running lane's spend is banked in the usage ledger, because an
+interrupted lane spent as many tokens as one that finished and they would otherwise leave the
+accounting entirely. And its launch counter is forgiven, because the launch it counted is the
+one still running: without this a task whose lane survives the stop is `blocked` the moment
+the next run starts, on a launch that never actually failed. The lane's ledger record is read
+rather than removed, since the lane it tracks is left running and the next dispatcher needs
+the same bookkeeping.
+
+A task parked in front of a person — `paused`, or `blocked` with nobody staffed to answer it —
+is skipped outright: nothing about it is running, so there is nothing here to bank or forgive.
 
 ### Restarting into a repo that cannot run
 
@@ -584,8 +604,9 @@ when a task finishes or a lane banks a line, not once a second regardless.
 The board draws on the main screen rather than the alternate one: a *second* `ctrl-c` kills
 the process without unwinding, and the last frame simply stays where it is with the shell
 prompt under it. The first `ctrl-c` is caught — it is the board's only control — and unwinds
-through the same stop that an empty queue reaches, sweeping what the run was holding before
-the process exits.
+through the same stop that an empty queue reaches, settling what the run was still holding —
+banking each still-running lane's spend and forgiving its launch counter — before the process
+exits.
 
 While the board is up it holds the terminal: the terminal's own cursor is hidden, and on Unix
 stdin is put in raw-enough mode — no echo, no line buffering, `ctrl-c` deliberately still able
@@ -847,6 +868,7 @@ Three different limits, and they bound three different things:
 | Setting | Bounds | Zeroed by |
 |---|---|---|
 | The launch guard | How many times a lane may be **launched** at the step a task is on | Every transition |
+| The launch-failure ceiling | How many times a step's launch may fail to even start, in a row, before the task routes like a step that ran and failed — to that step's `on_fail`, defaulting to `blocked` | A launch that starts, arriving at the step again, or re-queueing the document |
 | A step's `loop` | How many times a task may **arrive** at that step **from a given step** before escalating — a lap of the loop | A resume, for the loops the step it resumes at can spend. Binds the same in an [unattended run](pipelines.md#unattended-runs): every pipeline stages `blocked`, so an exit that resolves there spends the budget exactly as an attended run's would. `blocked` itself never spends this: see [Escalation](#escalation) — a report from `blocked` always moves the task off it, so it never arrives there from itself |
 | The reminder loop | How many times a settled lane's **transcript** may go unwritten since its last reminder before it is blocked | Anything the lane writes to its transcript |
 | The live-child ceiling | How long a lane may be excused the reminder loop for holding open a process it started before it is escalated anyway | The process exiting, or a backend with no way to check it in the first place |
@@ -875,13 +897,16 @@ The launch guard catches a lane that dies at launch. Such a lane leaves no sessi
 the task looks unstarted again on the next pass — without a budget it would be re-spawned
 forever. It is **not** a retry budget for work that went badly: a lane that ends its turn keeps its
 pane. The counter is forgiven the moment a pass can see the lane the launch produced, so a
-person stopping the dispatcher mid-task no longer blocks that task on the next run — see
-`dispatch.tear_lanes_on_stop`. Never a number
+person stopping the dispatcher mid-task no longer blocks that task on the next run — the
+launch is forgiven on the stop itself, see [`Dispatcher::sweep_on_stop`](#sweeping-on-stop).
+Never a number
 anybody tuned in practice, so it is a constant now — `dispatch::MAX_LAUNCHES`, one launch
 before a person — rather than the old `dispatch.max_launches` setting, which still parses in
 a config that has it and is dropped on the next save. In an [unattended
 run](pipelines.md#unattended-runs) there is no person to hand it to, so it becomes a backoff
 instead: the task keeps its place and is retried on a doubling delay, capped at an hour.
+
+A launch that never even got going is a different failure still, and gets its own limit. A lane that dies at launch leaves no session behind (the guard above); a launch that fails to start leaves nothing at all — the multiplexer refused the tab, the model was unconfigured, the pane could not be split. This is not work that went badly, and unlike the guard above it is not forgiven on sight: a launch that cannot start will not start again next pass either, so letting it retry forever parks nothing and logs nothing. The step's launch is counted, per step, and on the third consecutive failure the task is routed by that step's `on_fail` — `blocked` if it names none — exactly as a step that ran and reported failure is, with `blocked_from` set to the step it could not start, and the reason written once to the task's `## Status Log` and once to the project's problem log. Below the third it is retried, and the count is cleared the moment a launch of that step actually starts, on arrival at the step again so a later visit counts from zero rather than inheriting a spent count, and on re-queueing the document so a re-queued task carries no ceiling into its next run. In an unattended run it routes the same way: the ceiling is a ceiling, not a backoff.
 
 A dispatcher killed between launching a lane and finishing that pass gets one extra pass of
 grace before the guard above applies. `lanes.json` is written back when a pass returns, its
@@ -923,8 +948,9 @@ for `spoolway resume`. In an [unattended run](pipelines.md#unattended-runs) ther
 tell, so a lane is started on `blocked` instead — every pipeline stages it, declared or
 materialised from `[unattended]`'s `blocked_*` keys — and that lane's pass carries the task on
 under `unattended.skip_blocked_lane`. That covers every road to `blocked`, not only a lane's
-own `--block`: a `fail` with nowhere left to route, a silent lane, a dead launch, a live lane
-stopped for reading over its profile's `session_blocked_ctx` ceiling. They are ways of writing
+own `--block`: a `fail` with nowhere left to route, a silent lane, a dead launch, a step whose
+launch never got going after its retries, a live lane stopped for reading over its profile's
+`session_blocked_ctx` ceiling. They are ways of writing
 down one fact —
 this task is not moving without help — and which of them it was is not something anybody
 remembers when the notification arrives.
@@ -1055,11 +1081,10 @@ where you find one an interrupted run left behind.
 
 A step ending closes its own pane, never the tab — the tab is the project's, shared by every
 task of it still running, and outlives any one of them. **A project's tab closes with the
-project**: when its last task is archived, and on a stop once the sweep has emptied it. What is
-left standing is any project with something parked in front of a person in it — paused, or
-blocked with nobody staffed to answer it — that pane is being held open for you to read.
-Never the shared workspace: another project's lanes may still be live in it, so
-only you close that row, by hand.
+project**: when its last task is archived. **A stop never closes it** — a stop tears nothing
+down, so the tab and everything standing in it is left exactly where it stood, and the next
+run picks the queue back up from there. Never the shared workspace: another project's lanes
+may still be live in it, so only you close that row, by hand.
 
 ### `herdr_mode = "split"` — a row per task
 
@@ -1080,18 +1105,18 @@ is on now is the lane's own pane.
 Pick this when a row per task is what you want to look at, and `grouped` when you would
 rather the run were one thing.
 
-**Stopping ends the run's live agents and gives its worktrees back**, if
-[`tear_lanes_on_stop`](configuration.md) says so — every lane the run holds stops, along with
-its background runs, and then the workspace and worktree of every task it cut one for.
-`worktree open` having bound the workspace is what makes the second half work: `worktree
-remove` can find the checkout to take with it, which it could not when the workspace had
-nothing recorded against it. A task that reached `done` already tore its own down on the way,
-and took its local branch with it, so what this catches is whatever was still in flight when
-you stopped.
+**Stopping tears nothing down.** Every lane the run holds keeps its pane and its worktree,
+under both `split` and `grouped`: a stop never closes a tab, workspace, pane or worktree, and
+never removes a checkout. The task stays exactly on the step it was mid-way through, its
+checkout stays where it was cut, and its lane — agent and any `background: true` command
+alike — is left running, whatever backend it runs under. Nothing here is for the next run to
+resume *into*; it is already sitting in it.
 
-Under `grouped` that means each task's checkout is removed with git directly — there is no tab
-or workspace of the task's own to close, since it shared its project's; under `split` the
-task's whole workspace goes, taking the worktree with it.
+Two things still happen on the way out, because they are not the checkout's to carry and
+nothing else ever banks them for this turn: each still-running lane's spend is banked, and its
+launch counter is forgiven, so the next run picks the same lane back up rather than starting a
+second one over the same worktree, or treating a launch that never failed as a failure. See
+[`Dispatcher::sweep_on_stop`](#sweeping-on-stop).
 
 Those tasks stay in the queue rather than being archived: they were interrupted, not
 finished. **Their branches stay too.** The worktree is the thing the run was holding; the
@@ -1099,11 +1124,8 @@ commits on the branch are what the agent got done before you stopped it, and the
 else they exist. The next run finds the branch, cuts a fresh worktree on it, and resumes the
 step on top of that work rather than starting it again from base.
 
-A task parked in front of a person — paused, or blocked with nobody staffed to answer it —
-is never swept. Its pane is being held open for you to read and `spoolway resume` resumes it
-against the checkout underneath, so anything spared is still
-sitting in its tab or workspace when the run is over. `Ctrl-C` is caught to make this happen; a
-second one kills the run outright, and so does anything that stops the process without asking.
+`Ctrl-C` is caught to make this happen; a second one kills the run outright, and so does
+anything that stops the process without asking.
 
 Only sessions spoolway named are spoolway's. A lane is named `<task> · <step>` and matched on
 that name — the same string the pane shows, `spoolway lane` lists, and `spoolway lane -m`
@@ -1351,9 +1373,9 @@ prompts are tracked. The queue is not, deliberately. That is why every command r
 project through git's common directory rather than by walking up for a `.spoolway/`
 directory: the latter would find the worktree and an empty queue.
 
-Worktrees and branches are removed, and the task file archived, when a task reaches a
-terminal step with cleanup enabled — unless the checkout was borrowed, in which case it and
-its branch were somebody else's before the task started and are still theirs after it. The
+Worktrees and branches are removed, and the task file archived, when a task reaches the
+reserved `done` stage — unless the checkout was borrowed, in which case it and its branch
+were somebody else's before the task started and are still theirs after it. The
 task file records which it was, as `borrowed:`, because afterwards the two look identical to
 git.
 

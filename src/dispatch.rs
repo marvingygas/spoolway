@@ -49,6 +49,23 @@ pub(crate) const LANES_FILE: &str = "lanes.json";
 /// instead — see [`relaunch_backoff`].
 const MAX_LAUNCHES: u32 = 1;
 
+/// How many launches in a row that could not even *start* — never a lane or
+/// a command process that ran and failed, only one that never got going at
+/// all — are retried before the step is treated as one that ran and failed.
+///
+/// Distinct from [`MAX_LAUNCHES`] beside it: that one counts a lane that
+/// *did* start and left nothing behind, and stops for a person because more
+/// launches of a dead binary are not going to fix it. This counts a launch
+/// that [`crate::mux::Mux::start_lane`] or a command's own start refused
+/// outright — a tab with no panes to split, a worktree that could not be
+/// prepared — and the task is retried a few times first, on the chance the
+/// obstacle was transient, before it is routed to `on_fail` like any other
+/// failed step. See [`Dispatcher::note_launch_failure`].
+///
+/// Three, the same patience [`MAX_REMINDERS`] gives a silent lane: enough to
+/// rule out a one-off blip without leaving a broken tab retried forever.
+const MAX_LAUNCH_FAILURES: u32 = 3;
+
 /// How many times [`Dispatcher::check_unreported`] reminds a settled lane
 /// before giving up and escalating instead of sending a fourth.
 ///
@@ -862,7 +879,17 @@ impl<'a> Dispatcher<'a> {
                 // the only place left that can. Without it, `background: true`
                 // plus a task that blocks on the way is a process nothing ever
                 // stops.
-                self.reap_stale_runs(&tasks[index], &pipeline, report);
+                //
+                // The same look also finds a background run that has since
+                // exited non-zero and declared `on_fail`. Rerouting it here —
+                // before `this_step` is acted on — is what lets the failure
+                // reach the task wherever this pass finds it, even a step it
+                // is only halfway through; the loop re-reads the stage on
+                // `continue`, same as the `FallThrough::To` arm below.
+                if self.reap_stale_runs(&mut tasks[index], &pipeline, report) {
+                    self.persist(&mut tasks[index])?;
+                    continue;
+                }
 
                 match fall_through(
                     &this_step,
@@ -905,11 +932,11 @@ impl<'a> Dispatcher<'a> {
                 .map(|(_, _, lane)| *lane);
 
             match step.kind() {
-                StepKind::Terminal => {
-                    if step.cleanup && self.clean_up(&mut tasks[index], owned, report)? {
-                        archived.push(tasks[index].id().to_string());
-                    }
-                }
+                // A declared terminal step (`end: true`) that is not the
+                // reserved `done` stage does nothing on arrival — reaching
+                // `done` is the only thing that tears a checkout down, at
+                // `route_reserved_stage` below. The task simply stops here.
+                StepKind::Terminal => {}
 
                 StepKind::Command => {
                     let id = tasks[index].id().to_string();
@@ -917,6 +944,18 @@ impl<'a> Dispatcher<'a> {
                     else {
                         continue;
                     };
+                    // A launch-failure ceiling is the one road here
+                    // `run_command` never narrates for itself — see
+                    // `Dispatcher::note_launch_failure`, which cannot say
+                    // where the task is *finally* going until
+                    // `apply_loop_budget` below has had its say. An exited
+                    // or timed-out command already says its own piece inside
+                    // `run_command`, and neither ever touches this counter,
+                    // so finding it spent here is an unambiguous sign of
+                    // which of the three this destination came from.
+                    let launch_failed = tasks[index].front.launch_failures.get(&step.id)
+                        == Some(&MAX_LAUNCH_FAILURES);
+
                     // A command step's own `on_fail` is a route like any
                     // other, and a mechanical gate's whole point is to fail
                     // back to the step behind it — so its arrival is bound by
@@ -929,6 +968,13 @@ impl<'a> Dispatcher<'a> {
                         destination,
                         self.unattended,
                     );
+
+                    if launch_failed {
+                        report.actions.push(format!(
+                            "{id}: `{}` could not be started — moving to `{destination}`",
+                            step.id
+                        ));
+                    }
 
                     // The third road to `blocked`, and the one nothing used to
                     // write an origin for. `report` records it on its own route
@@ -962,12 +1008,6 @@ impl<'a> Dispatcher<'a> {
                         false => {
                             tasks[index].set_stage(&destination, None);
                             self.persist(&mut tasks[index])?;
-                            let cleans = pipeline
-                                .step(&destination)
-                                .is_some_and(|s| s.kind() == StepKind::Terminal && s.cleanup);
-                            if cleans && self.clean_up(&mut tasks[index], owned, report)? {
-                                archived.push(id);
-                            }
                         }
                     }
                 }
@@ -2665,6 +2705,83 @@ impl<'a> Dispatcher<'a> {
         self.persist(task)
     }
 
+    /// Count one launch of `step` that could not even start, and say whether
+    /// that spent [`MAX_LAUNCH_FAILURES`] — the caller's cue to route the task
+    /// on exactly as it would a step that ran and reported failure, rather
+    /// than leave it retrying the same step forever.
+    ///
+    /// Shared by the two roads a launch takes: an agent lane's start in
+    /// [`Dispatcher::start_lanes`], and a command step's `Fresh` arm in
+    /// [`Dispatcher::run_command`]. `verb` is the one word that differs
+    /// between them — "start" for a lane, "run" for a command — so the two
+    /// keep the wording `report.problems` used to carry before this existed.
+    ///
+    /// Every attempt, ceiling one included, gets its own bounded notice
+    /// (`! task: could not <verb> ... (attempt N of 3)`) on `report.actions`
+    /// rather than `report.problems` — so it still prints every pass, the way
+    /// `report.problems` always did under `--plain`, but does *not* reach the
+    /// project's problem log every pass the way a `report.problems` line
+    /// always does; see `src/commands/dispatch.rs`'s unconditional `for
+    /// problem in &report.problems`.
+    ///
+    /// Below the ceiling this is the whole of it: `None`, and the task stays
+    /// on `step` for the next pass to try again. At the ceiling the reason is
+    /// written once more, in full — to the task's own `## Status Log`,
+    /// directly, the same way [`crate::commands::apply_loop_budget`] writes
+    /// its own spent-budget note before handing back a destination for the
+    /// caller's own `set_stage` to log a second, generic arrival line over —
+    /// and once to the project's problem log, by a direct call here rather
+    /// than through the per-pass mechanism above. Guarded on `attempt ==
+    /// MAX_LAUNCH_FAILURES` rather than folded into the `< MAX_LAUNCH_FAILURES`
+    /// check above: [`Task::bump_launch_failures`] cannot climb past the
+    /// ceiling in practice, since arriving at `step` again clears its count
+    /// (see [`Task::set_stage`]), but this is what keeps that true rather
+    /// than assumed — a count that somehow did climb past it returns the
+    /// same destination without writing the reason a second time.
+    ///
+    /// Returns `step.on_fail`, or `blocked` when it names none — the same
+    /// resolution an exited command's failing arm and a timed-out one already
+    /// use — but never announces it: a command step's destination still has
+    /// [`crate::commands::apply_loop_budget`] to pass through, which can
+    /// redirect it, so only a caller holding the truly final answer says
+    /// where the task is going. `blocked_from`, the same way: set by the
+    /// caller, because only the caller knows whether that is already handled
+    /// by something it goes on to do (`run_command`'s result flows through
+    /// the same `StepKind::Command` routing every other command destination
+    /// does, which sets it already) or has to be set here (`start_lanes`,
+    /// which has no such routing to fall through to).
+    fn note_launch_failure(
+        &self,
+        task: &mut Task,
+        step: &Step,
+        verb: &str,
+        err: &anyhow::Error,
+        report: &mut Report,
+    ) -> Option<String> {
+        let attempt = task.bump_launch_failures(&step.id);
+        report.actions.push(format!(
+            "! {}: could not {verb} `{}`: {err:#} (attempt {attempt} of {MAX_LAUNCH_FAILURES})",
+            task.id(),
+            step.id,
+        ));
+        if attempt < MAX_LAUNCH_FAILURES {
+            return None;
+        }
+        let destination = step
+            .on_fail
+            .clone()
+            .unwrap_or_else(|| crate::pipeline::BLOCKED.to_string());
+        if attempt == MAX_LAUNCH_FAILURES {
+            let reason = format!(
+                "`{}` could not be started after {MAX_LAUNCH_FAILURES} attempts: {err:#}",
+                step.id
+            );
+            task.append_to_section("## Status Log", &format!("- {reason}\n"));
+            crate::problem_log::append(self.repo, &reason);
+        }
+        Some(destination)
+    }
+
     /// Start as many lanes as each candidate's cap allows — a resolved
     /// model's own `slots` when it has any, its profile's `concurrency`
     /// otherwise — and refuse a candidate whose model is `exclusive` while a
@@ -3051,6 +3168,15 @@ impl<'a> Dispatcher<'a> {
             }
             match outcome {
                 Ok(started) => {
+                    // The launch actually started, so whatever this step's
+                    // last few could-not-start attempts counted is over. Its
+                    // own persist already ran, inside `start_one`, so
+                    // clearing here needs one of its own — but only when
+                    // there is a count to clear, the same way every other
+                    // pass-that-changed-nothing here skips its write.
+                    if task.clear_launch_failures(&step.id) {
+                        self.persist(task)?;
+                    }
                     let name = started.name;
                     let action = match &started.note {
                         Some(note) => format!("started {name} — {note}"),
@@ -3084,11 +3210,35 @@ impl<'a> Dispatcher<'a> {
                     }
                     report.actions.push(action);
                 }
-                Err(err) => report.problems.push(format!(
-                    "{}: could not start `{}`: {err:#}",
-                    task.id(),
-                    step.id
-                )),
+                Err(err) => {
+                    // A launch that never got going at all — see
+                    // [`Dispatcher::note_launch_failure`]. Below the ceiling
+                    // the task stays a candidate for the next pass; at it,
+                    // `run_command`'s `Fresh` arm has an outer `StepKind::
+                    // Command` match to fall through to for this — an agent
+                    // lane's start has none, so `blocked_from` and the stage
+                    // move are this arm's own to make.
+                    if let Some(destination) =
+                        self.note_launch_failure(task, &step, "start", &err, report)
+                    {
+                        // Final as computed — nothing downstream of this arm
+                        // redirects it further, unlike a command step's own
+                        // destination, which still has `apply_loop_budget`
+                        // ahead of it — so this is the one caller that can
+                        // print where the task is going and be sure it is
+                        // right.
+                        report.actions.push(format!(
+                            "{}: `{}` could not be started — moving to `{destination}`",
+                            task.id(),
+                            step.id
+                        ));
+                        if destination == crate::pipeline::BLOCKED {
+                            crate::commands::set_blocked_from(task, &step.id);
+                        }
+                        task.set_stage(&destination, None);
+                    }
+                    self.persist(task)?;
+                }
             }
         }
 
@@ -3306,19 +3456,33 @@ impl<'a> Dispatcher<'a> {
                     self.start_command_in_pane(task, &key, &run, &worktree, &env, &runs)
                 };
                 match started {
-                    Ok(_) => {}
+                    Ok(_) => {
+                        // The launch actually started — see the matching
+                        // comment in `start_lanes`'s own `Ok` arm.
+                        if task.clear_launch_failures(&step.id) {
+                            self.persist(task)?;
+                        }
+                    }
                     Err(err) => {
-                        report
-                            .problems
-                            .push(format!("{id}: could not run `{}`: {err:#}", step.id));
-                        return Ok(None);
+                        // A launch that never got going at all — see
+                        // [`Dispatcher::note_launch_failure`]. `None` leaves
+                        // the task on this step for the next pass to retry;
+                        // `Some` is a destination for the outer `StepKind::
+                        // Command` match to route through exactly as it
+                        // would an exited or timed-out command — including
+                        // `blocked_from`, which that routing already sets.
+                        let destination = self.note_launch_failure(task, step, "run", &err, report);
+                        self.persist(task)?;
+                        return Ok(destination);
                     }
                 }
 
-                // A background step is done with the moment it has started: the
-                // task moves on, and the exit code is nobody's to route on —
-                // which is why `on_fail` is refused on one. What it wrote is in
-                // its log either way.
+                // A background step is done with the moment it has started:
+                // the task moves on now, whatever the command goes on to do.
+                // If it declares `on_fail`, [`Dispatcher::reap_stale_runs`] is
+                // what reads the exit code later and routes on it — not here,
+                // since the task may be anywhere by the time it lands. What
+                // the command wrote is in its log either way.
                 if step.background {
                     report.actions.push(format!(
                         "{id}: started `{}` in the background — {}",
@@ -3426,17 +3590,26 @@ impl<'a> Dispatcher<'a> {
         }
     }
 
-    /// Stop any of this task's command runs that have outstayed their step's
-    /// `timeout:` — except the one on the step it is sitting on, which
-    /// [`Dispatcher::run_command`] bounds itself and can say more about.
+    /// Look after every one of this task's command runs except the one on the
+    /// step it is sitting on, which [`Dispatcher::run_command`] watches itself
+    /// and can say more about.
     ///
-    /// In practice this is the background ones. Nothing routes on those, so
-    /// their timeout is not a verdict on the work: it is the only thing standing
-    /// between `background: true` and a process that outlives everything that
-    /// knew about it.
-    fn reap_stale_runs(&self, task: &Task, pipeline: &Pipeline, report: &mut Report) {
+    /// In practice this is the background ones — the step that started each
+    /// one has already walked away from it, so this is the only place left
+    /// that ever looks again. Two things can be found: a run that has
+    /// outstayed its step's `timeout:`, stopped here because nothing else
+    /// would; and a finished run whose step declared `on_fail`, which is
+    /// routed on here because nowhere else asks. A step with no `on_fail`
+    /// keeps behaving exactly as it always has — its exit code is left
+    /// unread, the same as a run still going or one that passed.
+    ///
+    /// Answers whether it moved the task, which happens for at most one run
+    /// per call: rerouting changes what step counts as "the one it is sitting
+    /// on", so a second failure found in the same call is left for the pass
+    /// that follows to pick up against the new stage.
+    fn reap_stale_runs(&self, task: &mut Task, pipeline: &Pipeline, report: &mut Report) -> bool {
         if self.dry_run {
-            return;
+            return false;
         }
         let runs = crate::command_step::Runs::new(&self.repo.commands_dir());
         // A key is `<task> · <step>` — see `crate::command_step::Runs::key`.
@@ -3451,21 +3624,53 @@ impl<'a> Dispatcher<'a> {
             let Some(step) = pipeline.step(step_id) else {
                 continue;
             };
-            if runs.state(&key) != crate::command_step::RunState::Running {
-                continue;
+            match runs.state(&key) {
+                crate::command_step::RunState::Running => {
+                    let limit = step.command_timeout();
+                    if runs.elapsed(&key).unwrap_or_default() < limit {
+                        continue;
+                    }
+                    runs.stop(&key);
+                    report.actions.push(format!(
+                        "{}: background `{step_id}` ran past its timeout of {} and was stopped \
+                         — see {}",
+                        task.id(),
+                        crate::config::human_duration::format(limit),
+                        runs.log_path(&key).display()
+                    ));
+                }
+                // A zero exit is a pass for a step the task already walked
+                // away from — nothing to route on — so it is left exactly as
+                // unread as a step with no `on_fail` leaves every code.
+                crate::command_step::RunState::Exited(code) if code != 0 => {
+                    let Some(destination) = step.on_fail.clone() else {
+                        continue;
+                    };
+                    // Read once and cleared, the same discipline
+                    // `run_command`'s own `Exited` arm keeps: without it a
+                    // step that comes back round to `step_id` later would
+                    // read this stale code and route on it again with
+                    // nothing new having run.
+                    runs.forget(&key);
+                    report.actions.push(format!(
+                        "{}: `{step_id}` (background) exited {code} — moving to `{destination}`",
+                        task.id()
+                    ));
+                    // The step the task was actually pulled out of, not the
+                    // background one that failed — a resume from `blocked`
+                    // carries on from *there*, same as any other block. Read
+                    // before `set_stage` overwrites it.
+                    if destination == crate::pipeline::BLOCKED {
+                        let stopped_on = task.stage().to_string();
+                        crate::commands::set_blocked_from(task, &stopped_on);
+                    }
+                    task.set_stage(&destination, None);
+                    return true;
+                }
+                _ => {}
             }
-            let limit = step.command_timeout();
-            if runs.elapsed(&key).unwrap_or_default() < limit {
-                continue;
-            }
-            runs.stop(&key);
-            report.actions.push(format!(
-                "{}: background `{step_id}` ran past its timeout of {} and was stopped — see {}",
-                task.id(),
-                crate::config::human_duration::format(limit),
-                runs.log_path(&key).display()
-            ));
         }
+        false
     }
 
     /// Move a task to the blocked step and tell a person about it — or, in an
@@ -5807,6 +6012,7 @@ mod tests {
             launched_at: None,
             prompts: Default::default(),
             rounds: Default::default(),
+            launch_failures: Default::default(),
             arrived_from: None,
             extra: Default::default(),
         };
@@ -6071,23 +6277,28 @@ mod tests {
         .unwrap();
     }
 
-    /// Interrupted, not finished: the checkout goes back but the task file stays
-    /// in the queue, so the next run picks it up instead of treating it as done.
+    /// Interrupted, not finished: the checkout is left exactly where it was
+    /// and the task file stays in the queue, so the next run picks the same
+    /// lane back up rather than either archiving it or cutting a fresh one.
     ///
-    /// And it picks it up *where it was*. The branch outlives the worktree that
-    /// held it, because those commits are the only record of what the agent got
-    /// done before the run stopped — a sweep that deleted it would reset the
-    /// task to base while its file still claimed to be mid-step.
+    /// Nothing about the checkout moves — not the workspace, not the pane, not
+    /// the worktree on disk, not the branch — because none of it is torn down
+    /// on a stop any more. Only the accounting changes: the launch counter is
+    /// forgiven, so the task is not `blocked` on a launch that never actually
+    /// failed the moment the next run starts.
     #[test]
-    fn an_interrupted_task_gives_its_checkout_back_but_keeps_its_branch() {
+    fn an_interrupted_task_is_left_exactly_where_it_stood() {
         let repo = fixture("stop-inflight");
         crate::repo::run(&repo.root, "git", &["branch", "task/demo"]).unwrap();
-        let path = add_task(&repo, "demo", "implement");
-        let mut task = reload(&path);
-        task.front.workspace_id = Some("w1".into());
-        task.front.worktree_path = Some(PathBuf::from("/tmp/spoolway-fake-worktree"));
-        task.front.branch = Some("task/demo".into());
-        task.save().unwrap();
+        let path = add_task_with(&repo, "demo", "implement", |f| {
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+            f.tab_id = Some("w1:t1".into());
+            f.worktree_path = Some(PathBuf::from("/tmp/spoolway-fake-worktree"));
+            f.branch = Some("task/demo".into());
+            f.attempts = MAX_LAUNCHES;
+            f.launched_at = Some(now_secs());
+        });
 
         let mux = FakeMux::new(vec![]);
         let mut report = Report::default();
@@ -6095,237 +6306,32 @@ mod tests {
             .sweep_on_stop(&mut report)
             .unwrap();
 
-        assert_eq!(mux.did("remove_workspace"), ["remove_workspace w1"]);
+        assert!(
+            mux.calls().is_empty(),
+            "a stop must ask the multiplexer for nothing at all: {:?}",
+            mux.calls()
+        );
         assert!(path.exists(), "an interrupted task is not archived");
         let task = reload(&path);
         assert_eq!(task.stage(), "implement", "and it keeps its place");
-        assert_eq!(task.front.workspace_id, None, "but holds no checkout now");
+        assert_eq!(
+            task.front.workspace_id.as_deref(),
+            Some("w1"),
+            "the checkout is not given back"
+        );
+        assert!(task.front.worktree_path.is_some());
         assert!(
             has_branch(&repo, "task/demo"),
             "the interrupted work is still on its branch"
         );
-        assert_eq!(
-            task.front.branch.as_deref(),
-            Some("task/demo"),
-            "and the task still points at it, or the next run cuts a new one"
-        );
-    }
-
-    /// The multiplexer's one call that was meant to take a checkout and the
-    /// row above it together can simply refuse: herdr holds that pair only for
-    /// a workspace it opened *onto* the checkout, and answers
-    /// `not_linked_worktree` for any other row pointed at one — a task resumed
-    /// by an older build, a row someone reopened by hand.
-    ///
-    /// The refusal used to be dropped on the floor, which left a finished task
-    /// holding both its worktree and a stray workspace for good. Now it is read,
-    /// and the two are taken apart separately: git removes the checkout, which
-    /// needs no such binding, and the row is closed on its own.
-    #[test]
-    fn a_workspace_that_lost_its_checkout_still_gives_both_back() {
-        let repo = fixture("stop-unbound");
-        crate::repo::run(&repo.root, "git", &["branch", "task/demo"]).unwrap();
-        let path = add_task(&repo, "demo", "implement");
-        let mut task = reload(&path);
-        task.front.workspace_id = Some("w1".into());
-        task.front.worktree_path = Some(PathBuf::from("/tmp/spoolway-fake-worktree"));
-        task.front.branch = Some("task/demo".into());
-        task.save().unwrap();
-
-        let mux = FakeMux::new(vec![]).with_unbound_workspace();
-        let mut report = Report::default();
-        Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
-            .sweep_on_stop(&mut report)
-            .unwrap();
-
-        assert_eq!(mux.did("remove_workspace"), ["remove_workspace w1"]);
-        assert_eq!(
-            mux.did("remove_checkout"),
-            ["remove_checkout /tmp/spoolway-fake-worktree"],
-            "the worktree goes with git when the multiplexer will not take it"
-        );
-        assert_eq!(
-            mux.did("close_workspace"),
-            ["close_workspace w1"],
-            "and the row it was under goes too, rather than standing for ever"
-        );
-    }
-
-    /// A borrowed checkout is somebody else's, and the fallback above must
-    /// never reach it. Its row is closed and its worktree is left exactly where
-    /// it stands.
-    #[test]
-    fn a_borrowed_checkout_is_never_removed_by_the_fallback() {
-        let repo = fixture("stop-borrowed-unbound");
-        crate::repo::run(&repo.root, "git", &["branch", "task/demo"]).unwrap();
-        let path = add_task(&repo, "demo", "implement");
-        let mut task = reload(&path);
-        task.front.workspace_id = Some("w1".into());
-        task.front.tab_id = Some("w1:t1".into());
-        task.front.worktree_path = Some(PathBuf::from("/tmp/spoolway-fake-worktree"));
-        task.front.branch = Some("task/demo".into());
-        task.front.borrowed = true;
-        task.save().unwrap();
-
-        let mux = FakeMux::new(vec![]).with_unbound_workspace();
-        let mut report = Report::default();
-        Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
-            .sweep_on_stop(&mut report)
-            .unwrap();
-
-        assert!(mux.did("remove_workspace").is_empty(), "{:?}", mux.calls());
-        assert!(mux.did("remove_checkout").is_empty(), "{:?}", mux.calls());
-        assert_eq!(mux.did("close_tab"), ["close_tab w1:t1"]);
-    }
-
-    /// A task holding a worktree with no workspace recorded against it — its
-    /// row was closed by hand, or the multiplexer lost it — used to have
-    /// nowhere to hang the removal, so the checkout stayed behind. The worktree
-    /// is spoolway's own cut either way, and goes back with git.
-    #[test]
-    fn a_checkout_with_no_workspace_left_is_still_given_back() {
-        let repo = fixture("stop-no-workspace");
-        crate::repo::run(&repo.root, "git", &["branch", "task/demo"]).unwrap();
-        let path = add_task(&repo, "demo", "implement");
-        let mut task = reload(&path);
-        task.front.worktree_path = Some(PathBuf::from("/tmp/spoolway-fake-worktree"));
-        task.front.branch = Some("task/demo".into());
-        task.save().unwrap();
-
-        let mux = FakeMux::new(vec![]);
-        let mut report = Report::default();
-        Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
-            .sweep_on_stop(&mut report)
-            .unwrap();
-
-        assert_eq!(
-            mux.did("remove_checkout"),
-            ["remove_checkout /tmp/spoolway-fake-worktree"]
-        );
-    }
-
-    /// Where a task is a *pane* in its project's shared tab, tearing it down
-    /// must remove only its checkout by hand — with git, since its
-    /// project's shared tab holds no worktree of its own to remove one from —
-    /// and touch neither that tab nor the workspace behind it: both hold
-    /// every other lane.
-    #[test]
-    fn a_task_that_shares_its_project_tab_gives_back_only_its_checkout() {
-        let repo = fixture("stop-tabbed");
-        crate::repo::run(&repo.root, "git", &["branch", "task/demo"]).unwrap();
-        add_task_with(&repo, "demo", "implement", |f| {
-            f.workspace_id = Some("wD".into());
-            f.tab_id = Some("wD:t2".into());
-            f.worktree_path = Some(PathBuf::from("/tmp/spoolway-fake-worktree"));
-            f.branch = Some("task/demo".into());
-        });
-
-        let mux = FakeMux::new(vec![]).tabs_in_one_workspace();
-        let mut report = Report::default();
-        Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
-            .sweep_on_stop(&mut report)
-            .unwrap();
-
-        assert_eq!(
-            mux.did("remove_checkout"),
-            ["remove_checkout /tmp/spoolway-fake-worktree"]
-        );
-        assert!(
-            mux.did("remove_workspace").is_empty(),
-            "the run's workspace is not this task's to remove: {:?}",
-            mux.calls()
-        );
-        assert!(
-            mux.did("close_workspace").is_empty(),
-            "nor to close: {:?}",
-            mux.calls()
-        );
-        // The project's own tab goes with the sweep's very last step, not
-        // with this task's own teardown — see
-        // `a_projects_tab_closes_only_when_nothing_was_spared`.
-        assert_eq!(mux.did("close_tab"), ["close_tab wD:t2"]);
-    }
-
-    /// The fault this task fixes: under `grouped`, tearing a checkout down is
-    /// nothing but `git worktree remove --force` on the directory, which
-    /// never touches the pane. A stop has to end the lane itself first, or
-    /// the agent keeps running against a directory that no longer exists.
-    #[test]
-    fn stopping_ends_a_lane_before_it_removes_the_checkout_under_grouped() {
-        let repo = fixture("stop-ends-lane");
-        crate::repo::run(&repo.root, "git", &["branch", "task/demo"]).unwrap();
-        add_task_with(&repo, "demo", "implement", |f| {
-            f.workspace_id = Some("wD".into());
-            f.tab_id = Some("wD:t2".into());
-            f.worktree_path = Some(PathBuf::from("/tmp/spoolway-fake-worktree"));
-            f.branch = Some("task/demo".into());
-        });
-
-        let lane = Lane {
-            name: "demo · implement".into(),
-            kind: "claude".into(),
-            status: LaneStatus::Working,
-            pane_id: "wD:p9".into(),
-            tab_id: "wD:t2".into(),
-            workspace_id: "wD".into(),
-            cwd: PathBuf::from("/tmp/spoolway-fake-worktree"),
-        };
-        let mux = FakeMux::new(vec![lane]).tabs_in_one_workspace();
-        let mut report = Report::default();
-        Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
-            .sweep_on_stop(&mut report)
-            .unwrap();
-
-        let calls = mux.calls();
-        let stop_at = calls.iter().position(|c| c == "stop demo · implement");
-        let remove_at = calls.iter().position(|c| c.starts_with("remove_checkout"));
-        assert!(
-            stop_at.is_some() && remove_at.is_some(),
-            "both calls must happen: {calls:?}"
-        );
-        assert!(
-            stop_at < remove_at,
-            "the lane must be ended before its checkout goes: {calls:?}"
-        );
+        assert_eq!(task.front.attempts, 0, "the launch counter is forgiven");
         assert_eq!(
             report.actions,
-            ["stopping: ended 1 lane(s) and gave back 1 worktree(s)"]
+            [
+                "stopping: 1 lane(s) left standing — their worktrees, panes and agents are \
+              where they were"
+            ]
         );
-    }
-
-    /// The same layout, with a checkout the task only borrowed: nothing here
-    /// is this task's to give back at all — its pane is already stopped, the
-    /// checkout is a person's, and the project's shared tab is not this
-    /// task's to close.
-    #[test]
-    fn a_borrowed_task_under_a_shared_tab_gives_back_nothing_of_its_own() {
-        let repo = fixture("stop-tabbed-borrowed");
-        let path = add_task(&repo, "demo", "implement");
-        let mut task = reload(&path);
-        task.front.workspace_id = Some("wD".into());
-        task.front.tab_id = Some("wD:t2".into());
-        task.front.borrowed = true;
-        task.front.worktree_path = Some(repo.root.clone());
-        task.save().unwrap();
-
-        let mux = FakeMux::new(vec![]).tabs_in_one_workspace();
-        let mut report = Report::default();
-        Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
-            .sweep_on_stop(&mut report)
-            .unwrap();
-
-        assert!(
-            mux.did("remove_checkout").is_empty(),
-            "a borrowed checkout is never removed: {:?}",
-            mux.calls()
-        );
-        assert!(
-            mux.did("close_workspace").is_empty(),
-            "and the run's workspace stays: {:?}",
-            mux.calls()
-        );
-        // Only the sweep's final step touches the project's tab.
-        assert_eq!(mux.did("close_tab"), ["close_tab wD:t2"]);
     }
 
     /// The other half of that deal, so sparing the interrupted case does not
@@ -6468,14 +6474,85 @@ mod tests {
         );
     }
 
-    /// A project's tab is worth keeping open for exactly one reason:
-    /// something of it is blocked and still in it. Emptied by the sweep
-    /// otherwise, and closed with it — but the shared workspace behind it is
-    /// never spoolway's to close; see
-    /// [`a_stop_never_closes_the_shared_workspace`].
+    /// The multiplexer's one call that was meant to take a checkout and the
+    /// row above it together can simply refuse: herdr holds that pair only for
+    /// a workspace it opened *onto* the checkout, and answers
+    /// `not_linked_worktree` for any other row pointed at one — a task resumed
+    /// by an older build, a row someone reopened by hand.
+    ///
+    /// The refusal used to be dropped on the floor, which left a finished task
+    /// holding both its worktree and a stray workspace for good. Now it is read,
+    /// and the two are taken apart separately: git removes the checkout, which
+    /// needs no such binding, and the row is closed on its own.
+    ///
+    /// Reached only from `clean_up`, on a task that reaches `done` — a stop
+    /// never calls `tear_down_checkout` at all any more.
     #[test]
-    fn a_projects_tab_closes_only_when_nothing_was_spared() {
-        for (stage, closes) in [("implement", true), (crate::pipeline::BLOCKED, false)] {
+    fn a_workspace_that_lost_its_checkout_still_gives_both_back() {
+        let repo = fixture("stop-unbound");
+        crate::repo::run(&repo.root, "git", &["branch", "task/demo"]).unwrap();
+        let mut task = reload(&add_task(&repo, "demo", "implement"));
+        task.front.workspace_id = Some("w1".into());
+        task.front.worktree_path = Some(PathBuf::from("/tmp/spoolway-fake-worktree"));
+        task.front.branch = Some("task/demo".into());
+        task.save().unwrap();
+
+        let mux = FakeMux::new(vec![]).with_unbound_workspace();
+        let mut report = Report::default();
+        let archived = Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
+            .clean_up(&mut task, &[], &mut report)
+            .unwrap();
+
+        assert!(archived);
+        assert_eq!(mux.did("remove_workspace"), ["remove_workspace w1"]);
+        assert_eq!(
+            mux.did("remove_checkout"),
+            ["remove_checkout /tmp/spoolway-fake-worktree"],
+            "the worktree goes with git when the multiplexer will not take it"
+        );
+        assert_eq!(
+            mux.did("close_workspace"),
+            ["close_workspace w1"],
+            "and the row it was under goes too, rather than standing for ever"
+        );
+    }
+
+    /// A task holding a worktree with no workspace recorded against it — its
+    /// row was closed by hand, or the multiplexer lost it — used to have
+    /// nowhere to hang the removal, so the checkout stayed behind. The worktree
+    /// is spoolway's own cut either way, and goes back with git.
+    ///
+    /// Reached only from `clean_up`, on a task that reaches `done` — a stop
+    /// never calls `tear_down_checkout` at all any more.
+    #[test]
+    fn a_checkout_with_no_workspace_left_is_still_given_back() {
+        let repo = fixture("stop-no-workspace");
+        crate::repo::run(&repo.root, "git", &["branch", "task/demo"]).unwrap();
+        let mut task = reload(&add_task(&repo, "demo", "implement"));
+        task.front.worktree_path = Some(PathBuf::from("/tmp/spoolway-fake-worktree"));
+        task.front.branch = Some("task/demo".into());
+        task.save().unwrap();
+
+        let mux = FakeMux::new(vec![]);
+        let mut report = Report::default();
+        let archived = Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
+            .clean_up(&mut task, &[], &mut report)
+            .unwrap();
+
+        assert!(archived);
+        assert_eq!(
+            mux.did("remove_checkout"),
+            ["remove_checkout /tmp/spoolway-fake-worktree"]
+        );
+    }
+
+    /// A project's shared tab — and the workspace behind it — used to close
+    /// once the sweep emptied it, and stay open when something was spared for
+    /// a person to read. Now a stop tears nothing down at all, so neither
+    /// ever closes, whether or not a sibling task is parked.
+    #[test]
+    fn a_stop_closes_neither_a_projects_tab_nor_its_shared_workspace() {
+        for stage in ["implement", crate::pipeline::BLOCKED] {
             let repo = fixture(&format!("stop-close-{stage}"));
             let path = add_task(&repo, "demo", stage);
             let mut task = reload(&path);
@@ -6490,46 +6567,8 @@ mod tests {
                 .sweep_on_stop(&mut report)
                 .unwrap();
 
-            assert_eq!(
-                mux.did("close_tab") == ["close_tab wD:t7"],
-                closes,
-                "stage {stage}: {:?}",
-                mux.calls()
-            );
+            assert!(mux.calls().is_empty(), "stage {stage}: {:?}", mux.calls());
         }
-    }
-
-    /// The shared workspace is never spoolway's to close — only a person's,
-    /// by hand — because another project's lanes may be live in it. Only the
-    /// project's own tab, once the sweep has emptied it, ever closes.
-    #[test]
-    fn a_stop_never_closes_the_shared_workspace() {
-        let repo = fixture("stop-close-self");
-        let path = add_task(&repo, "demo", "implement");
-        let mut task = reload(&path);
-        task.front.workspace_id = Some("wD".into());
-        task.front.tab_id = Some("wD:t7".into());
-        task.front.branch = Some("task/demo".into());
-        task.save().unwrap();
-
-        let mux = FakeMux::new(vec![]).tabs_in_one_workspace();
-        let mut report = Report::default();
-        Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
-            .sweep_on_stop(&mut report)
-            .unwrap();
-
-        assert_eq!(
-            mux.did("close_workspace"),
-            Vec::<String>::new(),
-            "{:?}",
-            mux.calls()
-        );
-        assert_eq!(
-            mux.did("close_tab"),
-            ["close_tab wD:t7"],
-            "the project's tab goes back: {:?}",
-            mux.calls()
-        );
     }
 
     /// A run that opened no tab of its own must not open one on its way out
@@ -6904,11 +6943,17 @@ mod tests {
 
         let report = run_pass(&repo, &mux);
 
-        assert_eq!(report.problems.len(), 1);
+        // Below the launch-failure ceiling this is a bounded notice on
+        // `report.actions`, not `report.problems` — see
+        // [`Dispatcher::note_launch_failure`].
+        assert_eq!(report.problems.len(), 0, "{:?}", report.problems);
         assert!(
-            report.problems[0].contains("does not know agent kind"),
-            "{}",
-            report.problems[0]
+            report
+                .actions
+                .iter()
+                .any(|a| a.contains("does not know agent kind")),
+            "{:?}",
+            report.actions
         );
         assert!(mux.did("launch demo · implement").is_empty());
     }
@@ -6995,11 +7040,14 @@ mod tests {
             .unwrap();
 
         assert!(mux.did("start").is_empty(), "no lane should have started");
-        assert_eq!(report.problems.len(), 1);
+        // Below the launch-failure ceiling this is a bounded notice on
+        // `report.actions`, not `report.problems` — see
+        // [`Dispatcher::note_launch_failure`].
+        assert_eq!(report.problems.len(), 0, "{:?}", report.problems);
         assert!(
-            report.problems[0].contains("has no model"),
-            "the problem must say how to fix it: {}",
-            report.problems[0]
+            report.actions.iter().any(|a| a.contains("has no model")),
+            "the notice must say how to fix it: {:?}",
+            report.actions
         );
     }
 
@@ -7595,8 +7643,10 @@ mod tests {
         );
     }
 
-    /// Every failed start would otherwise leave a pane behind, and a step that
-    /// keeps failing is retried every dispatch pass.
+    /// Every failed start would otherwise leave a pane behind — and, below
+    /// the launch-failure ceiling, is retried on the next dispatch pass; see
+    /// `ceiling_on_launch_failures_parks_an_agent_step` for what happens once
+    /// three passes in a row fail the same way.
     #[test]
     fn a_start_that_fails_takes_its_pane_back_with_it() {
         let repo = fixture("pane-leak");
@@ -7610,13 +7660,109 @@ mod tests {
         // pane rather than one just split off it.
         assert!(mux.did("split_pane").is_empty(), "{:?}", mux.calls());
         assert_eq!(mux.did("close_pane"), ["close_pane w9:p1"]);
+        // Below the launch-failure ceiling this is a bounded notice on
+        // `report.actions`, not `report.problems` — see
+        // [`Dispatcher::note_launch_failure`].
         assert!(
             report
-                .problems
+                .actions
                 .iter()
-                .any(|p| p.contains("agent_start_failed")),
-            "problems: {:?}",
-            report.problems
+                .any(|a| a.contains("agent_start_failed")),
+            "actions: {:?}",
+            report.actions
+        );
+    }
+
+    /// The whole arc [`Dispatcher::note_launch_failure`] exists for, on the
+    /// agent-lane road: three passes in a row that cannot even start `demo`'s
+    /// lane park the task on `implement`'s own `on_fail` — `blocked`, in the
+    /// shipped pipeline — with `blocked_from` naming the step it never got
+    /// running, the reason on the task's own `## Status Log` exactly once,
+    /// and the same reason in the project's problem log exactly once, not
+    /// once per one of the three passes it took to get there.
+    #[test]
+    fn ceiling_on_launch_failures_parks_an_agent_step() {
+        let repo = fixture("agent-launch-ceiling");
+        let path = add_task(&repo, "demo", "queued");
+        let mux = FakeMux::new(vec![]).refusing_to_start();
+        let home = crate::scratch::root("agent-launch-ceiling-home");
+
+        for attempt in 1..=2 {
+            let report = with_home(&home, || run_pass(&repo, &mux));
+            let task = reload(&path);
+            assert_eq!(
+                task.stage(),
+                "queued",
+                "attempt {attempt}: a launch that never started never left the step"
+            );
+            assert_eq!(
+                task.front.launch_failures.get("implement"),
+                Some(&attempt),
+                "attempt {attempt}"
+            );
+            assert!(
+                report
+                    .actions
+                    .iter()
+                    .any(|a| a.contains(&format!("(attempt {attempt} of 3)"))),
+                "attempt {attempt}: {:?}",
+                report.actions
+            );
+            assert!(
+                report.problems.is_empty(),
+                "attempt {attempt}: a bounded notice is never a problem: {:?}",
+                report.problems
+            );
+        }
+
+        let report = with_home(&home, || run_pass(&repo, &mux));
+        let task = reload(&path);
+        assert_eq!(task.stage(), "blocked", "the third failure parks it");
+        assert_eq!(task.front.blocked_from.as_deref(), Some("implement"));
+        // The mockup draws the third attempt's own bounded notice too, right
+        // above the line that says where the task is going — this is not a
+        // silent jump straight from "attempt 2 of 3" to "moving to `blocked`".
+        assert!(
+            report
+                .actions
+                .iter()
+                .any(|a| a.contains("(attempt 3 of 3)")),
+            "{:?}",
+            report.actions
+        );
+        assert!(
+            report
+                .actions
+                .iter()
+                .any(|a| a.contains("could not be started — moving to `blocked`")),
+            "{:?}",
+            report.actions
+        );
+
+        let status_log_hits = task
+            .body
+            .matches("could not be started after 3 attempts")
+            .count();
+        assert_eq!(
+            status_log_hits, 1,
+            "the reason lands on the Status Log exactly once: {}",
+            task.body
+        );
+
+        // `problem_log::path` reads the home the same way every write did —
+        // through the thread-local override, not the real one — so the read
+        // has to be inside `with_home` too, or it would look in the wrong
+        // place entirely.
+        let logged = with_home(&home, || {
+            std::fs::read_to_string(crate::problem_log::path(&repo))
+        })
+        .unwrap();
+        let problem_log_hits = logged
+            .matches("could not be started after 3 attempts")
+            .count();
+        assert_eq!(
+            problem_log_hits, 1,
+            "and once in the project's problem log, not once per pass: {logged}"
         );
     }
 
@@ -7645,13 +7791,16 @@ mod tests {
             ["stop demo · implement"],
             "and it is torn down again rather than left sitting at an empty input box"
         );
+        // Below the launch-failure ceiling this is a bounded notice on
+        // `report.actions`, not `report.problems` — see
+        // [`Dispatcher::note_launch_failure`].
         assert!(
             report
-                .problems
+                .actions
                 .iter()
-                .any(|p| p.contains("submission stalled")),
-            "problems: {:?}",
-            report.problems
+                .any(|a| a.contains("submission stalled")),
+            "actions: {:?}",
+            report.actions
         );
 
         // What the retry is paced by: the launch was banked before the prompt
@@ -9964,8 +10113,10 @@ mod tests {
             .expect("the interrupted lane banked nothing");
         assert_eq!(entry.step, "implement");
         assert_eq!(entry.tokens.input, 4_242);
-        // And its record is gone, so a later dispatcher cannot bank it twice.
-        assert!(!load_lane_records(&repo).contains_key("demo · implement"));
+        // And its record survives: the lane it tracks is left running, so
+        // the next dispatcher's own reminder loop needs the same bookkeeping
+        // rather than treating it as a lane nobody has heard from yet.
+        assert!(load_lane_records(&repo).contains_key("demo · implement"));
     }
 
     /// The ledger used to be parsed on hot paths every pass — the ceiling
@@ -12089,9 +12240,9 @@ mod tests {
         );
     }
 
-    // covers: step.cleanup — a terminal step that cleans up takes the worktree, the branch and the task file
+    // covers: the reserved `done` stage — reaching it takes the worktree, the branch and the task file
     #[test]
-    fn reaching_a_cleanup_step_tears_down_and_archives() {
+    fn reaching_the_done_stage_tears_down_and_archives() {
         let repo = fixture("cleanup");
         let path = add_task_with(&repo, "demo", "done", |f| {
             f.workspace_id = Some("w1".into());
@@ -12357,8 +12508,10 @@ mod tests {
         // trip back from `review`.
         step.session = false;
         if background {
-            // Refused at load, and the fixture must not build a graph a project
-            // could not actually write.
+            // Cleared rather than left at the shipped `implement.on_fail:
+            // blocked`: most background fixtures are not about routing on a
+            // failure, and a caller that does want it declares it itself,
+            // same as any other project would.
             step.on_fail = None;
         }
         pipelines
@@ -13013,6 +13166,147 @@ mod tests {
             "the task moved on but the command did not survive it"
         );
         runs.stop(&key);
+    }
+
+    /// The whole point of the feature: a background command that fails routes
+    /// its task down that step's `on_fail`, on the pass that finds the exit
+    /// code — wherever the task has reached by then, not only where it stood
+    /// when the command started.
+    ///
+    /// `reap_stale_runs` is called directly rather than through a second
+    /// `pass()`: a second real pass would also re-examine `review`, the agent
+    /// step the task moved on to, and a `review` that has been started once
+    /// with no session ever reported for it is — correctly, and for reasons
+    /// this test has nothing to do with — an agent that died at launch, which
+    /// escalates on its own. Calling the function under test directly is what
+    /// isolates one behaviour from the other.
+    #[cfg(unix)]
+    #[test]
+    fn a_background_commands_failure_routes_the_task_wherever_it_has_moved_on() {
+        let repo = fixture("command-background-fail");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]);
+        let mut pipelines = pipelines_running("exit 1", true);
+        let name = pipelines.default.clone();
+        pipelines
+            .pipelines
+            .get_mut(&name)
+            .unwrap()
+            .steps
+            .iter_mut()
+            .find(|s| s.id == "implement")
+            .unwrap()
+            .on_fail = Some(crate::pipeline::BLOCKED.to_string());
+
+        Dispatcher::new(&repo, &pipelines, &mux, false)
+            .pass()
+            .unwrap();
+        let mut task = reload(&path);
+        assert_eq!(
+            task.stage(),
+            "review",
+            "the task must have moved on before the command's failure is even possible to read"
+        );
+        // Moved on further still, by hand — proving the reroute reaches
+        // wherever the task actually is, not only the step right after the
+        // one that failed.
+        task.set_stage("document", None);
+
+        let key = crate::command_step::Runs::key("implement", "demo");
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        for _ in 0..50 {
+            if runs.state(&key) != crate::command_step::RunState::Running {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Exited(1));
+
+        let pipeline = pipelines.pipelines.get(&name).unwrap();
+        let mut report = Report::default();
+        let rerouted = Dispatcher::new(&repo, &pipelines, &mux, false).reap_stale_runs(
+            &mut task,
+            pipeline,
+            &mut report,
+        );
+
+        assert!(
+            rerouted,
+            "a non-zero exit with on_fail declared must reroute the task"
+        );
+        assert_eq!(task.stage(), "blocked");
+        assert_eq!(
+            task.front.blocked_from.as_deref(),
+            Some("document"),
+            "blocked_from names the step the task was actually pulled out of, not the \
+             background step that failed"
+        );
+        assert!(
+            report
+                .actions
+                .iter()
+                .any(|a| a.contains("`implement` (background) exited 1")
+                    && a.contains("moving to `blocked`")),
+            "{:?}",
+            report.actions
+        );
+    }
+
+    /// The other half: a background command that passes, or one still going,
+    /// changes nothing about where the task is — a zero exit is left exactly
+    /// as unread as a step with no `on_fail` leaves every code.
+    #[cfg(unix)]
+    #[test]
+    fn a_background_commands_success_leaves_the_task_where_it_already_is() {
+        let repo = fixture("command-background-pass");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]);
+        let mut pipelines = pipelines_running("exit 0", true);
+        let name = pipelines.default.clone();
+        pipelines
+            .pipelines
+            .get_mut(&name)
+            .unwrap()
+            .steps
+            .iter_mut()
+            .find(|s| s.id == "implement")
+            .unwrap()
+            .on_fail = Some(crate::pipeline::BLOCKED.to_string());
+
+        Dispatcher::new(&repo, &pipelines, &mux, false)
+            .pass()
+            .unwrap();
+        let mut task = reload(&path);
+        assert_eq!(task.stage(), "review");
+
+        let key = crate::command_step::Runs::key("implement", "demo");
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        for _ in 0..50 {
+            if runs.state(&key) != crate::command_step::RunState::Running {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Exited(0));
+
+        let pipeline = pipelines.pipelines.get(&name).unwrap();
+        let mut report = Report::default();
+        let rerouted = Dispatcher::new(&repo, &pipelines, &mux, false).reap_stale_runs(
+            &mut task,
+            pipeline,
+            &mut report,
+        );
+
+        assert!(
+            !rerouted,
+            "a zero exit must not move a task that already moved on"
+        );
+        assert_eq!(task.stage(), "review");
+        assert_eq!(
+            runs.state(&key),
+            crate::command_step::RunState::Exited(0),
+            "a zero exit is left exactly as unread as a step with no on_fail leaves it"
+        );
     }
 
     /// A task standing on a background step whose run is already going moves

@@ -123,7 +123,6 @@ way to give a pipeline a shape of its own, and costs no configuration at all.
 | `headless` | `false` | Command steps only: run detached, with no pane, instead of in a pane of its own |
 | `last` | `false` | Command steps only: run this only on the last task of a chain — see [`last:` — a step the chain runs once](#last--a-step-the-chain-runs-once) |
 | `timeout` | `30m` | Command steps only: how long the command may run before it is killed |
-| `cleanup` | `false` | Terminal steps only: remove the worktree, delete the local branch, archive the task file. Reaching `done` already does this |
 
 A step with id `blocked` routes itself — a pass is read from the step the task blocked on,
 a fail or a block parks the task on `paused` for a person instead — so `pipeline check` refuses
@@ -160,7 +159,8 @@ reading that as an ending would turn a typo into a task that silently stops. End
 declaring.
 
 **`end`, not `terminal`.** The old set mixed two nouns and an adjective. A verb-shaped flag
-reads correctly beside `cleanup: true`, which is a terminal's key anyway.
+reads correctly beside the reserved `done` stage, which is the only step that removes a
+worktree anyway.
 
 ### The four states nobody declares
 
@@ -353,7 +353,7 @@ itself, naming only the keys it wants to change:
 
 Every key left off — here, `agent`, `session` and `prompt` — falls back to `[unattended]`,
 exactly as if the pipeline had named it explicitly. Any key besides those five is refused by
-name: `description`, `run`, `timeout`, `background`, `headless`, `last`, `cleanup`, `slot`,
+name: `description`, `run`, `timeout`, `background`, `headless`, `last`, `slot`,
 `loop`, `on_pass`, `on_fail`, `on_loop_max`, `gate` and `end` all mean something on an ordinary step,
 and none of them is one `Pipelines::assemble` merges — so `pipeline check` refuses the file
 rather than silently ignoring a key that would otherwise do nothing. `blocked` routes itself,
@@ -477,15 +477,18 @@ worker slot either — nothing is competing for the model server.
 |---|---|---|
 | The next step | starts when the command exits | starts immediately |
 | Routing | exit 0 → `on_pass`, else `on_fail` | `on_pass`, taken at once |
-| `on_fail` | where a failure goes | **refused at load** |
-| `timeout` | routes to `on_fail` | the run is killed, and nothing routes |
+| `on_fail` | where a failure goes | the task goes there on the pass that finds the exit code, wherever the task has reached |
+| `timeout` | routes to `on_fail` | the run is killed with no exit code left, so nothing routes |
 | The output | `<task> · <step>.log`, under the project's own home | the same |
 
-`on_fail` on a background step is refused rather than ignored, and that is the whole design of
-the key: by the time the command exits the task has been somewhere else for minutes, and a
-route nothing can take reads as a handled failure while handling nothing. What the command
-wrote is in its log either way, and a run still going when the task is cleaned up is stopped
-with it rather than left writing into a worktree that has been removed.
+A background step that declares `on_fail` sends the task there on the pass that finds the run
+exited non-zero — wherever the task has reached by then, even a step further down the pipeline
+than this one. The task left this step on an earlier pass, so the dispatcher's own look after
+straggling runs (`Dispatcher::reap_stale_runs`) is what reads the exit code again and routes on
+it, the same look that stops a run past its timeout. A run that exits zero, or is still going
+when the task is cleaned up, changes nothing about where the task is. What the command wrote is
+in its log either way, and a run still going at cleanup is stopped with it rather than left
+writing into a worktree that has been removed.
 
 ### Watching, or not
 
@@ -585,9 +588,11 @@ nothing else: no worker slot, no model, no other task held up. So the default si
 above what real work takes, and a step that knows better says so — `timeout: 2h` for a
 nightly, `timeout: 60s` for a lint that should never take longer.
 
-A background command is bounded by the same key, even though nothing routes on its outcome.
-There the timeout is not a verdict on the work: it is what stops a process outliving
-everything that knew about it, on a task that blocked on its way to cleanup.
+A background command is bounded by the same key. A run that declares `on_fail` is routed on
+when it exits non-zero, but one stopped at its timeout leaves no exit code behind, so there is
+no verdict for `on_fail` to route on. There the timeout is not a verdict on the work: it is
+what stops a process outliving everything that knew about it, on a task that blocked on its
+way to cleanup.
 
 ### Which shell, and nothing to configure
 
@@ -969,8 +974,8 @@ every task now working only in its own worktree,
 and what is left is the ordinary case of a person having a task's branch out while spoolway
 reaches it. It also
 decides what cleanup may touch: a borrowed checkout and the branch in it were somebody
-else's before the task started and are still theirs after it, so a terminal step with
-`cleanup: true` removes neither. The task file records which it was, as `borrowed:`, because
+else's before the task started and are still theirs after it, so the reserved `done`
+stage removes neither. The task file records which it was, as `borrowed:`, because
 afterwards the two look identical to git.
 
 ## Working with pipelines

@@ -583,10 +583,10 @@ pub struct DispatchConfig {
     /// child is still found the same afternoon.
     ///
     /// **Not written to `config.toml` while it holds its default**, for the
-    /// same reason as [`Self::tear_lanes_on_stop`] below: a lane here
-    /// routinely runs a binary built from a branch behind main, and
-    /// `deny_unknown_fields` makes an unknown key a hard parse error rather
-    /// than something to ignore.
+    /// same reason as [`Self::priority`] below: a lane here routinely runs a
+    /// binary built from a branch behind main, and `deny_unknown_fields`
+    /// makes an unknown key a hard parse error rather than something to
+    /// ignore.
     #[serde(
         with = "human_duration",
         skip_serializing_if = "is_default_lane_child_ceiling"
@@ -668,56 +668,48 @@ pub struct DispatchConfig {
     /// already landing first. See [`Priority`].
     ///
     /// Not written to `config.toml` while it holds its default, for the same
-    /// reason as [`Self::tear_lanes_on_stop`] below: a lane here routinely
+    /// reason as [`Self::lane_child_ceiling`] above: a lane here routinely
     /// runs a binary built from a branch behind main, and
     /// `deny_unknown_fields` makes an unknown key a hard parse error rather
     /// than something to ignore.
     #[serde(skip_serializing_if = "Priority::is_group")]
     pub priority: Priority,
 
-    /// Whether stopping the dispatcher ends the run's live lanes and takes
-    /// their worktrees with it.
-    ///
-    /// A task that reaches `done` already tears its own worktree and branch
-    /// down, so what this sweeps is whatever the run was still holding when it
-    /// stopped: every live lane the run holds and its background runs, then
-    /// the workspace and worktree of every task spoolway cut one for, and then
-    /// the dispatch workspace behind them.
-    ///
-    /// **Branches are not swept.** A task interrupted mid-step keeps its place
-    /// in the queue, and the commits on its branch are the only record of what
-    /// its agent got done — so the branch outlives the worktree, and the next
-    /// run cuts a fresh one on it and carries on from there. Only a task that
-    /// *finished* takes its local branch with it, on the way to the archive.
-    ///
-    /// **A task on `blocked` is never swept.** Its pane is being kept for a
-    /// person to read, and `spoolway resume` needs the checkout underneath it —
-    /// so anything spared keeps the dispatch workspace open too. That is also
-    /// the only case this fires in at all: a blocked task keeps the loop
-    /// running, so a dispatcher that stops on its own has nothing left to sweep.
-    ///
-    /// Nothing on a remote is touched, and neither is a borrowed checkout: that
-    /// branch was cut by a person and the worktree is theirs.
-    ///
-    /// **Not written to `config.toml` while it holds its default**, for the
-    /// same reason as [`UnattendedConfig::skip_blocked_lane`] below: a lane
-    /// here routinely runs a binary built from a branch behind main, and
-    /// `deny_unknown_fields` makes an unknown key a hard parse error rather
-    /// than something to ignore.
-    ///
-    /// Renamed from `cleanup_on_stop`, which described the mechanism —
-    /// tidying up worktrees — rather than what changed when the key fired: a
-    /// task's live agent stopped running out from under a directory that was
-    /// about to disappear. `#[serde(alias)]` keeps the old spelling parseable
-    /// so an un-upgraded config file still loads.
-    #[serde(alias = "cleanup_on_stop", skip_serializing_if = "is_yes")]
-    pub tear_lanes_on_stop: bool,
+    /// Retired: whether stopping the dispatcher ended the run's live lanes
+    /// and took their worktrees with it. Stopping never does that any more —
+    /// see [`crate::dispatch::Dispatcher::sweep_on_stop`] — so there is no
+    /// longer a second value for this key to choose between: every
+    /// interrupted lane is left exactly where it stood, with its spend
+    /// banked and its launch counter forgiven, whichever way the run stopped.
+    /// A config still naming it, under this spelling or its own predecessor
+    /// `cleanup_on_stop`, is refused by name rather than silently dropped —
+    /// silence would read as a promise this binary no longer keeps.
+    #[serde(
+        alias = "cleanup_on_stop",
+        default,
+        skip_serializing,
+        deserialize_with = "deserialize_retired_tear_lanes_on_stop"
+    )]
+    #[allow(dead_code)]
+    pub tear_lanes_on_stop: Option<toml::Value>,
 }
 
-/// Skips a `true` on the way out — see [`DispatchConfig::tear_lanes_on_stop`]
-/// for why a key that holds its default is better off absent here.
-fn is_yes(value: &bool) -> bool {
-    *value
+/// The retired `tear_lanes_on_stop` (and its own predecessor
+/// `cleanup_on_stop`), kept on [`DispatchConfig`] only so a config still
+/// naming either spelling is refused by name rather than by
+/// `deny_unknown_fields`'s own "unknown key" — which would say the key is
+/// wrong without saying that stopping the dispatcher no longer has a second
+/// behavior for it to choose.
+fn deserialize_retired_tear_lanes_on_stop<'de, D: Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Option<toml::Value>, D::Error> {
+    let _ = toml::Value::deserialize(d)?;
+    Err(serde::de::Error::custom(
+        "`tear_lanes_on_stop` is retired — stopping the dispatcher no longer removes a \
+         worktree, workspace, pane or tab, so there is no second value left for this key to \
+         pick between. Delete it: every interrupted lane is left standing, its spend banked \
+         and its launch counter forgiven, so the next run resumes it where it stood",
+    ))
 }
 
 /// Skips an hour on the way out — see [`DispatchConfig::lane_child_ceiling`]
@@ -750,7 +742,7 @@ impl Default for DispatchConfig {
             default_pipeline: "default".into(),
             auto_commit: true,
             priority: Priority::default(),
-            tear_lanes_on_stop: true,
+            tear_lanes_on_stop: None,
         }
     }
 }
@@ -2540,30 +2532,33 @@ mod tests {
         );
     }
 
-    /// `tear_lanes_on_stop` is the renamed `cleanup_on_stop`: a defaulted
-    /// config renders no line for it, and a file still holding the old
-    /// spelling parses to the same value the new one would.
+    /// A config naming `tear_lanes_on_stop`, or its own predecessor
+    /// `cleanup_on_stop`, is refused by name rather than by
+    /// `deny_unknown_fields`'s own "unknown key" — the rename is the message,
+    /// so both spellings are refused the same way.
     #[test]
-    fn tear_lanes_on_stop_stays_out_of_a_defaulted_config_and_aliases_the_old_name() {
-        let config = Config::default();
-        let rendered = toml::to_string(&config).unwrap();
+    fn the_retired_tear_lanes_on_stop_key_is_refused_by_either_spelling() {
+        let err = toml::from_str::<Config>("[dispatch]\ntear_lanes_on_stop = false\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("`tear_lanes_on_stop` is retired"), "{err}");
+
+        let old_err = toml::from_str::<Config>("[dispatch]\ncleanup_on_stop = false\n")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            old_err.contains("`tear_lanes_on_stop` is retired"),
+            "{old_err}"
+        );
+
+        let rendered = toml::to_string(&Config::default()).unwrap();
         assert!(!rendered.contains("tear_lanes_on_stop"), "{rendered}");
         assert!(!rendered.contains("cleanup_on_stop"), "{rendered}");
-
-        let old: Config = toml::from_str("[dispatch]\ncleanup_on_stop = false\n").unwrap();
-        assert!(!old.dispatch.tear_lanes_on_stop);
-
-        let new: Config = toml::from_str("[dispatch]\ntear_lanes_on_stop = false\n").unwrap();
-        assert_eq!(
-            old.dispatch.tear_lanes_on_stop,
-            new.dispatch.tear_lanes_on_stop
-        );
     }
 
-    /// `lane_child_ceiling` stays out of a defaulted config the same way
-    /// `tear_lanes_on_stop` does, so a lane running a binary behind main —
-    /// one that predates this key entirely — still parses the file. Setting
-    /// it away from its default puts it back.
+    /// `lane_child_ceiling` stays out of a defaulted config so a lane running
+    /// a binary behind main — one that predates this key entirely — still
+    /// parses the file. Setting it away from its default puts it back.
     #[test]
     fn lane_child_ceiling_stays_out_of_a_defaulted_config() {
         let config = Config::default();
@@ -2587,7 +2582,7 @@ mod tests {
     }
 
     /// `dispatch.priority` parses from TOML, defaults to `group`, and stays
-    /// out of a defaulted config the same way `tear_lanes_on_stop` does —
+    /// out of a defaulted config the same way `lane_child_ceiling` does —
     /// so a lane behind main on this key still loads the file.
     #[test]
     fn priority_parses_defaults_to_group_and_stays_out_of_a_defaulted_config() {

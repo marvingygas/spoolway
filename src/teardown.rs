@@ -1,49 +1,29 @@
 //! Giving a task's checkout back: panes and workspaces closed, worktrees
-//! removed, branches deleted or kept.
+//! removed, its branch deleted.
 //!
-//! Two moments call this, and they disagree on one thing: a task that
-//! reached `done` has finished, so its branch is spent litter the moment
-//! nothing else still needs it and every commit on it has reached a remote
-//! ([`Branch::Delete`], from [`Dispatcher::clean_up`]); a task swept because
-//! the run itself is stopping has not finished, so its file stays queued and
-//! the branch that holds its commits must stay too, unconditionally
-//! ([`Branch::Keep`], from [`Dispatcher::sweep_on_stop`]). A branch
-//! `Branch::Delete` would otherwise take is spared the same way `Branch::Keep`
-//! always is when no remote yet has its commits — see the push check in
-//! [`Dispatcher::tear_down_checkout`] below. Everything below either function
-//! calls is shared between the two: which parts of a checkout exist to give
-//! back, and in what order.
+//! One moment calls this: a task that reached `done` has finished, so its
+//! branch is spent litter the moment nothing else still needs it — see
+//! [`Dispatcher::clean_up`]. Stopping the dispatcher itself never reaches
+//! here any more; [`Dispatcher::sweep_on_stop`] banks an interrupted lane's
+//! spend and forgives its launch counter without touching its checkout,
+//! since the task has not finished and the next run resumes it exactly where
+//! it stood. Even a finished task's branch is spared while some remote still
+//! lacks a commit of it — the keep is named on the run's problem list — see
+//! the push check in [`Dispatcher::tear_down_checkout`] below. Everything
+//! below is which parts of a checkout exist to give back, and in what order.
 //!
 //! Kept apart from the rest of [`crate::dispatch`] because this is the one
-//! cluster of it that ends a task's residence in the queue (or the run's
-//! hold on it) rather than moving it along a pipeline — reconciling stage
-//! against pipeline is `dispatch`'s job, and undoing what a checkout holds
-//! is this module's.
+//! cluster of it that ends a task's residence in the queue rather than
+//! moving it along a pipeline — reconciling stage against pipeline is
+//! `dispatch`'s job, and undoing what a checkout holds is this module's.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
 use crate::dispatch::{Dispatcher, LaneRecord, Report, measure_patch, now_secs, save_lane_records};
-use crate::mux::{Lane, lane_name, parse_lane_name};
+use crate::mux::{Lane, lane_name};
 use crate::task::Task;
-
-/// What becomes of a task's branch when its checkout is given back.
-///
-/// The distinction is whether the task *finished*. Once its work is merged or
-/// published the branch is a spent local ref, and leaving it behind is litter.
-/// Interrupt the same task mid-step and that branch is the only place its
-/// commits exist — deleting it there throws the work away silently, since the
-/// task file stays in the queue and says nothing about having been reset.
-#[derive(PartialEq, Eq)]
-pub(crate) enum Branch {
-    /// The task is done and is being archived.
-    Delete,
-    /// The task was interrupted and stays queued. The next run finds the branch
-    /// still there and cuts a fresh worktree on it rather than from base, so the
-    /// step resumes on top of what it had rather than starting over.
-    Keep,
-}
 
 impl<'a> Dispatcher<'a> {
     /// A task reached a terminal step that cleans up: bank whatever its lanes
@@ -183,7 +163,7 @@ impl<'a> Dispatcher<'a> {
             task.save()?;
         }
 
-        self.tear_down_checkout(task, Branch::Delete, report);
+        self.tear_down_checkout(task, report);
 
         let destination = self.repo.archive_dir().join(format!("{}.md", task.id()));
         std::fs::create_dir_all(self.repo.archive_dir())?;
@@ -261,22 +241,17 @@ impl<'a> Dispatcher<'a> {
     }
 
     /// Give back everything a task's checkout is holding: its workspace, the
-    /// worktree under it, and — if [`Branch::Delete`] says so and every
-    /// commit on it has reached a remote — the local branch it was cut on.
+    /// worktree under it, and — if every commit on it has reached a remote —
+    /// the local branch it was cut on.
     ///
-    /// Split out of [`Dispatcher::clean_up`] because the stop sweep needs
-    /// exactly this and none of the rest of it: a task swept because the run
-    /// was interrupted has not *finished*, so its file stays in the queue to be
-    /// picked up again rather than being archived as though it had.
+    /// Called only from [`Dispatcher::clean_up`], once a task has actually
+    /// finished — stopping the dispatcher never reaches here any more, since
+    /// [`Dispatcher::sweep_on_stop`] leaves an interrupted task's checkout
+    /// exactly where it stood.
     ///
     /// `report` is where a branch kept because it is not fully pushed gets
     /// named — see the comment on the delete itself, below.
-    pub(crate) fn tear_down_checkout(
-        &mut self,
-        task: &mut Task,
-        branch: Branch,
-        report: &mut Report,
-    ) {
+    pub(crate) fn tear_down_checkout(&mut self, task: &mut Task, report: &mut Report) {
         // Whether the workspace recorded on this task is the task's own or the
         // one the whole run shares — see [`Mux::task_owns_workspace`]. Under
         // `grouped` every task is a pane in the tab its project shares, so
@@ -371,8 +346,8 @@ impl<'a> Dispatcher<'a> {
         // `Dispatcher::branch_still_needed`. Deleting it now would leave that
         // dependent with nothing to start from; `Dispatcher::sweep_orphaned_branches`
         // is what frees it later, once the last such task has been cut.
-        let depended_on = branch == Branch::Delete && self.branch_still_needed(task.id());
-        let made_its_branch = !task.front.borrowed && branch == Branch::Delete && !depended_on;
+        let depended_on = self.branch_still_needed(task.id());
+        let made_its_branch = !task.front.borrowed && !depended_on;
         if let Some(branch) = task.front.branch.clone().filter(|_| made_its_branch) {
             // `-D` rather than `-d`: the branch may have been squash-merged, so
             // git considers it "not fully merged" even though its content is in
@@ -564,107 +539,69 @@ impl<'a> Dispatcher<'a> {
         let _ = self.repo.git(&["worktree", "prune"]);
     }
 
-    /// Give back what the run is still holding, because it is stopping.
+    /// Settle the books on what the run was still holding, because it is
+    /// stopping — without touching any of it.
     ///
-    /// A task that reached `done` tore its own checkout down on the way, so
-    /// what is left here is whatever was still in flight when the person
-    /// stopped — and one kind of leftover is deliberate. **A task parked in
-    /// front of a person — `paused`, or `blocked` with nobody staffed to
-    /// answer it — is kept whole.** Its pane is being held open for someone
-    /// to read, and `spoolway resume` resumes it against the checkout
-    /// underneath: sweeping that would answer a question by deleting it.
-    /// See [`Dispatcher::parked_for_a_person`].
+    /// A task that reached `done` tore its own checkout down already, so what
+    /// is left here is whatever was still in flight when the run stopped. None
+    /// of it is removed: no worktree, no workspace, no pane, no tab. The task
+    /// stays exactly on the stage it was mid-step on, its checkout stays where
+    /// it was cut, and its lane — agent and any `background: true` command
+    /// alike — is left running, whatever backend it runs under. There is
+    /// nothing here for the next run to resume *into*; it is already sitting
+    /// in it.
     ///
-    /// Nothing swept here is archived, and nothing swept here loses its work. A
-    /// task that was interrupted has not finished, so its file stays in the
-    /// queue and its branch stays in the repository: the worktree is what the
-    /// run was holding, and the commits on that branch are what the agent got
-    /// done before you stopped it. The next run cuts a fresh worktree on the
-    /// branch it finds — see [`Branch::Keep`].
+    /// Two things still have to happen before the process exits, because they
+    /// are not the checkout's to carry and nothing else will ever bank them
+    /// for this turn. The lane's spend is banked, because an interrupted lane
+    /// spent exactly as many tokens as one that finished and they would
+    /// otherwise leave the accounting entirely. And the launch counter is
+    /// forgiven — see [`Task::launch_landed`] — because the launch it counted
+    /// is the one still running: without this, a task whose lane survives the
+    /// stop is `blocked` the moment the next run starts, on a launch that
+    /// never actually failed.
     ///
-    /// The dispatch workspace goes last, and only if nothing was spared: a
-    /// blocked lane still in it is the whole reason the workspace is worth
-    /// keeping open.
-    ///
-    /// **The lane itself is ended before its checkout goes**, the same order
-    /// [`Dispatcher::clean_up`] uses for a task that reaches `done`. Under
-    /// `grouped` tearing the checkout down is nothing but `git worktree
-    /// remove --force` — it never touches the pane — so without this an
-    /// agent still running there would find its directory gone out from
-    /// under it, and any `background: true` command it started would keep
-    /// running there too. Only `split`, where taking the workspace apart
-    /// happens to take the pane with it, ever got away without this.
-    ///
-    /// Two things travel with the worktree, and both used to be dropped here.
-    /// The lane's spend is banked before its record goes, because an
-    /// interrupted lane spent exactly as many tokens as one that finished and
-    /// they were otherwise lost from the accounting entirely. And the launch
-    /// counter is forgiven, because the lane it counted is one this sweep is
-    /// taking apart — see [`Task::launch_landed`]. Without that, every task in
-    /// flight when a person stops a dispatcher is `blocked` when they start the
-    /// next one, which is the opposite of what `dispatch.tear_lanes_on_stop`
-    /// promises.
+    /// **A task parked in front of a person** — `paused`, or `blocked` with
+    /// nobody staffed to answer it — **is skipped outright.** Nothing about it
+    /// is running, so there is nothing here to bank or forgive; see
+    /// [`Dispatcher::parked_for_a_person`].
     pub fn sweep_on_stop(&mut self, report: &mut Report) -> Result<()> {
         if self.dry_run {
             return Ok(());
         }
 
         let mut tasks = self.repo.tasks()?;
-
-        // The live lanes this run owns, read fresh from the multiplexer the
-        // same way `pass` does — `self.lanes` is only the usage bookkeeping,
-        // and has no pane id to stop a lane with.
-        let step_ids = self.pipelines.all_step_ids();
-        let all_lanes = self.mux.list_lanes()?;
-        let mine = crate::dispatch::our_checkouts(self.repo, &tasks);
-        let owned: Vec<(String, &Lane)> = all_lanes
-            .iter()
-            .filter(|lane| crate::dispatch::owns_cwd(&mine, &lane.cwd))
-            .filter_map(|lane| {
-                parse_lane_name(&lane.name, &step_ids).map(|(_, task)| (task.to_string(), lane))
-            })
-            .collect();
-
-        let mut spared = 0usize;
-        let mut swept = 0usize;
-        let mut ended = 0usize;
-        // The project's shared tab is closed once the sweep has emptied it,
-        // and kept the moment any task is spared: the tab is where that
-        // parked lane — paused, or blocked with nobody staffed to answer it —
-        // is being held open for a person to read. Every task left in this
-        // repo's queue is this one project's, so there is only ever the one
-        // tab to track.
-        let mut project_tab_id: Option<String> = None;
-        let mut kept_any = false;
+        let mut left_standing = 0usize;
 
         for task in &mut tasks {
             if self.parked_for_a_person(task) {
-                // Only counts as something to keep the workspace open for if it
-                // is actually in there — a parked task that never got as far
-                // as a checkout is holding nothing.
-                spared += usize::from(task.front.workspace_id.is_some());
-                kept_any = true;
                 continue;
             }
             if task.front.workspace_id.is_none() && task.front.worktree_path.is_none() {
                 continue;
             }
 
-            // Before the teardown: `record_usage` reads the task for the plan
-            // and the step's own verdict, and the step is the stage this task
-            // is about to be left sitting on.
+            // `record_usage` reads the task for the plan and the step's own
+            // verdict, and the step is the stage this task is still sitting on.
             let step_id = task.stage().to_string();
             let name = lane_name(&step_id, task.id());
-            // `readopted` rather than a plain fallback to a blank record: this
-            // stop's own dispatcher may itself be a restart of one that died
-            // mid-pass, in which case `self.lanes` never had this lane's
-            // record to begin with — see `LaneRecord::readopted`.
-            // `record_usage` is a safe no-op either way, on the blank session
-            // a lane the ledger has genuinely never heard from still gets.
+            // Read rather than removed: the lane this record tracks is left
+            // running, so its bookkeeping — `notified`, `reminded_at` and the
+            // rest of what the reminder loop reads — has to survive into the
+            // next dispatcher's own `self.lanes`, the same as everything
+            // `save_lane_records` below carries across for a lane nobody
+            // touched at all this pass. `readopted` covers the one case a
+            // plain lookup cannot: this stop's own dispatcher may itself be a
+            // restart of one that died mid-pass, in which case `self.lanes`
+            // never had this lane's record to begin with — see
+            // `LaneRecord::readopted`. `record_usage` is a safe no-op either
+            // way, on the blank session a lane the ledger has genuinely never
+            // heard from still gets.
             let ledger = self.ledger();
             let record = self
                 .lanes
-                .remove(&name)
+                .get(&name)
+                .cloned()
                 .unwrap_or_else(|| LaneRecord::readopted(&name, now_secs(), &ledger));
             let pipeline = self
                 .pipelines
@@ -673,65 +610,21 @@ impl<'a> Dispatcher<'a> {
                 .unwrap_or_default();
             self.record_usage(&record, task.id(), &step_id, Some(task), &pipeline);
 
-            // The lane and any background command it left running, stopped
-            // before the checkout under them goes — see [`Dispatcher::clean_up`],
-            // which this copies the order of.
-            for (_, lane) in owned.iter().filter(|(task_id, _)| task_id == task.id()) {
-                let _ = self.mux.stop_lane(&lane.name, &lane.pane_id);
-                ended += 1;
-            }
-            let runs = crate::command_step::Runs::new(&self.repo.commands_dir());
-            for key in runs.keys_for_task(task.id()) {
-                if let Some(pane) = runs.pane(&key) {
-                    let _ = self.mux.close_pane(&pane);
-                    runs.forget_pane(&key);
-                }
-                runs.stop(&key);
-            }
-
-            self.tear_down_checkout(task, Branch::Keep, report);
-            if let Some(tab_id) = task.front.tab_id.clone() {
-                project_tab_id = Some(tab_id);
-            }
-            task.front.workspace_id = None;
-            task.front.pane_id = None;
-            task.front.tab_id = None;
-            task.front.worktree_path = None;
             task.launch_landed();
             task.save()?;
-            swept += 1;
+            left_standing += 1;
         }
 
-        // The records the sweep consumed are gone from memory; the file they
-        // came from is what the next dispatcher reads. Nothing else writes it
-        // on this path — a stop happens between passes, and `pass` is what
-        // ordinarily saves them.
+        // Whatever this pass banked, or any other lane's own bookkeeping —
+        // untouched above — is what the next dispatcher reads. Nothing else
+        // writes this file on this path: a stop happens between passes, and
+        // `pass` is what ordinarily saves it.
         save_lane_records(self.repo, &self.lanes)?;
 
-        if swept > 0 {
+        if left_standing > 0 {
             report.actions.push(format!(
-                "stopping: ended {ended} lane(s) and gave back {swept} worktree(s)"
-            ));
-        }
-
-        // The project's tab closes only once the sweep has emptied it and
-        // nothing of it was spared — never the shared workspace itself,
-        // which may hold another project's live lanes, and only a person
-        // closes that row.
-        //
-        // Under `split` there is no project tab to close: a task's own
-        // workspace went with its teardown, and `tab_id` there names a tab
-        // of its own that went with it.
-        if !self.mux.task_owns_workspace()
-            && !kept_any
-            && let Some(tab_id) = project_tab_id
-        {
-            let _ = self.mux.close_tab(&tab_id);
-        }
-
-        if spared > 0 {
-            report.actions.push(format!(
-                "stopping: left {spared} blocked task(s) and the project's tab holding them"
+                "stopping: {left_standing} lane(s) left standing — their worktrees, panes \
+                 and agents are where they were"
             ));
         }
 

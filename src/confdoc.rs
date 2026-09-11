@@ -404,12 +404,12 @@ interval = \"10s\"
         text.push_str("\n[sandbox]\nenabled = true\n");
 
         let mut current: Config = toml::from_str(&text).unwrap();
-        current.dispatch.tear_lanes_on_stop = false;
+        current.dispatch.auto_commit = false;
         let rewritten = current.render().unwrap();
         current.agrees_with(&rewritten).unwrap();
 
         assert!(rewritten.contains("interval = \"45s\""));
-        assert!(rewritten.contains("tear_lanes_on_stop = false"));
+        assert!(rewritten.contains("auto_commit = false"));
         assert!(!rewritten.contains("[sandbox]"));
     }
 }

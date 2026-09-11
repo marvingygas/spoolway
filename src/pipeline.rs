@@ -267,7 +267,9 @@ pub enum StepKind {
     ///
     /// Blocking by default: the task sits here until the process ends, and its
     /// exit code picks `on_pass` or `on_fail`. With `background: true` the task
-    /// leaves on the same pass it started, and the process runs on unwatched.
+    /// leaves on the same pass it started, and the process runs on; if it
+    /// declares `on_fail`, a later pass that finds it exited non-zero routes
+    /// the task there, wherever it has reached by then.
     Command,
 }
 
@@ -515,9 +517,11 @@ pub struct Step {
     /// looks exactly like a slow one. What tells them apart is a number
     /// somebody wrote down.
     ///
-    /// It bounds a background run too, which nothing routes on — there the
-    /// alternative is a process outliving the task that started it, on a task
-    /// that never reaches cleanup because it blocked on the way.
+    /// It bounds a background run too, but stopping one at its timeout is not
+    /// a verdict `on_fail` can route on — the process is killed with no exit
+    /// code left behind, the same as one interrupted any other way. What it
+    /// stops is a process outliving the task that started it, on a task that
+    /// never reaches cleanup because it blocked on the way.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -527,11 +531,12 @@ pub struct Step {
 
     /// Let the task move on while the command keeps running.
     ///
-    /// The exit code is nobody's to route on afterwards — the task is already
-    /// somewhere else — so [`Pipeline::validate`] refuses `on_fail` here rather
-    /// than let a file read as though a late failure were handled. What the
-    /// command wrote is in its log, and a run still going at cleanup is stopped
-    /// with the task.
+    /// If the step declares `on_fail`, a later pass that finds the run exited
+    /// non-zero routes the task there — wherever it has reached by then, even
+    /// a step further down the pipeline than this one. A run that exits zero,
+    /// or is still going, changes nothing about where the task is. What the
+    /// command wrote is in its log either way, and a run still going at
+    /// cleanup is stopped with the task.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub background: bool,
 
@@ -583,10 +588,20 @@ pub struct Step {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub last: bool,
 
-    /// Tear down the task's worktree and branch, and archive its file, on
-    /// arrival. Only meaningful on a terminal step.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub cleanup: bool,
+    /// Retired: used to tear the task's worktree and branch down, and archive
+    /// its file, on arrival at a declared terminal step — reaching the
+    /// reserved `done` stage does this unconditionally now, at
+    /// [`crate::dispatch::Dispatcher::clean_up`], so there was no second value
+    /// this key ever chose between. Kept only so a file still naming it is
+    /// refused by name, the way [`Step::max_new_sessions`] and
+    /// [`Step::max_rounds`] are.
+    #[serde(
+        default,
+        skip_serializing,
+        deserialize_with = "deserialize_retired_cleanup"
+    )]
+    #[allow(dead_code)]
+    pub cleanup: Option<serde_norway::Value>,
 
     /// Where an old `blocked_on_write:` on this step lands so an existing
     /// pipeline file still parses. Retired along with the check that read
@@ -699,6 +714,21 @@ fn deserialize_max_rounds<'de, D: serde::Deserializer<'de>>(
         "`max_rounds:` is now `loop:` — it bounds how many times a task may arrive at this \
          step from a given one. Rename the key, and consider raising the number: what it \
          counts has changed twice since",
+    ))
+}
+
+/// The retired `cleanup:` key, kept only so that a file still naming it is
+/// refused by name rather than serde's own list of every other key a step
+/// may carry.
+fn deserialize_retired_cleanup<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Option<serde_norway::Value>, D::Error> {
+    let _ = serde_norway::Value::deserialize(d)?;
+    Err(serde::de::Error::custom(
+        "`cleanup:` is retired — reaching the reserved `done` stage already tears a task's \
+         worktree and branch down and archives its file, which was the only value this key \
+         ever carried on a shipped or project pipeline. Delete it; a step that wants the \
+         task to end names `end: true` and nothing else",
     ))
 }
 
@@ -1220,10 +1250,6 @@ impl Pipeline {
                             step.id
                         );
                     }
-                    // A background command's exit code arrives after the task
-                    // has gone, so there is nothing left to route. Refused
-                    // rather than ignored: an `on_fail` here reads as a handled
-                    // failure and handles nothing.
                     // `timeout: 0s` reads as "no limit" and means the opposite:
                     // every run of it is over the bound the moment it starts.
                     if step.timeout == Some(Duration::ZERO) {
@@ -1231,14 +1257,6 @@ impl Pipeline {
                             "step `{}` sets `timeout: 0s`, which would kill the command as soon \
                              as it started. There is no way to say `no limit` here — write the \
                              longest this command may reasonably take",
-                            step.id
-                        );
-                    }
-                    if step.background && step.on_fail.is_some() {
-                        bail!(
-                            "step `{}` is `background: true` and declares `on_fail` — the task \
-                             has already moved on by the time it exits, so nothing could route \
-                             there. Drop `background:` to wait for it, or drop `on_fail:`",
                             step.id
                         );
                     }
@@ -1301,14 +1319,6 @@ impl Pipeline {
                         step.id
                     );
                 }
-            }
-            if step.cleanup && kind != StepKind::Terminal {
-                bail!(
-                    "step `{}` declares `cleanup:` but is a {} step — a worktree torn down \
-                     under a task still running is a task with nowhere to work",
-                    step.id,
-                    kind.as_str()
-                );
             }
         }
 
@@ -1773,7 +1783,7 @@ fn blocked_step_from_config(unattended: &crate::config::UnattendedConfig) -> Ste
         background: false,
         headless: false,
         last: false,
-        cleanup: false,
+        cleanup: None,
         blocked_on_write: Vec::new(),
     }
 }
@@ -2379,13 +2389,27 @@ mod tests {
             "background",
             "headless",
             "last",
-            "cleanup",
         ] {
             assert!(
                 block.contains(&format!("#   {key} ")),
                 "the key reference says nothing about `{key}`"
             );
         }
+    }
+
+    /// A file still naming the retired `cleanup:` is refused by name, the same
+    /// way `max_rounds:` and `max_new_sessions:` are — reaching `done` already
+    /// does what this key used to opt a declared terminal into.
+    #[test]
+    fn the_retired_cleanup_key_is_refused_by_name() {
+        let err = parse(
+            "steps:\n  - id: a\n    agent: pi\n    on_pass: z\n  \
+             - id: z\n    end: true\n    cleanup: true\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("`cleanup:` is retired"), "{err}");
+        assert!(err.contains("`done`"), "{err}");
     }
 
     /// What the board's NEXT column asks. One hop along `on_pass` — nothing in
@@ -2783,22 +2807,6 @@ mod tests {
             message.contains("names both `run:` and `agent:`"),
             "{message}"
         );
-    }
-
-    /// The one that would otherwise read as a handled failure: by the time a
-    /// background command exits, the task has been somewhere else for a while
-    /// and nothing could route on it.
-    #[test]
-    fn rejects_a_background_command_that_declares_on_fail() {
-        let err = parse(
-            "steps:\n  - id: a\n    run: ./bench.sh\n    \
-             background: true\n    on_pass: z\n    on_fail: z\n  - id: z\n    end: true\n",
-        )
-        .unwrap_err();
-        let message = err.to_string();
-        assert!(message.contains("already moved on"), "{message}");
-        // And it says what to do about it, both ways round.
-        assert!(message.contains("Drop `background:`"), "{message}");
     }
 
     /// A command step starts no lane, so every key that configures one is a key

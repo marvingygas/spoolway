@@ -1,6 +1,6 @@
 ---
 domain: testing
-covers: ["scripts/e2e/**", "scripts/e2e-*.sh", ".github/workflows/**"]
+covers: ["scripts/e2e/**", "scripts/e2e-*.sh", ".github/workflows/**", "src/scratch.rs"]
 ---
 
 # Testing
@@ -84,10 +84,6 @@ that claim it:
 ```
 settings:
   dispatch.auto_commit         off, a lane's leftovers are reported and not committed
-  dispatch.tear_lanes_on_stop  a stop with the teardown off leaves every worktree and lane
-                                exactly where it stood
-                               a stop with the teardown on ends the lane before it takes the
-                                worktree, and keeps the branch
   models                       a model with no window is never sized, and says so
                                a window from the project's own table beats the built-in one
   ...
@@ -146,23 +142,34 @@ spends nothing when its models resolve to a local endpoint — see
 | Suite | Covers | Why not a unit test |
 |---|---|---|
 | `flow` | A task's whole life: queued → implement → review → handover → archived, including its command run files under `commands/` being reclaimed once it archives | Real detached processes, a real worktree, a real pull request |
-| `commands` | Command steps: a `run:` line in the graph, its exit code routing, `background:`, `timeout:`, and that nothing confines it; the queue screen submitting a group and clearing its documents from the pending directory; `issue_tracking.key_in_names` prefixing the group and branch and storing the `slug:`/`url:`, through the real binary and a real `open` hook | A real spawned process with a pid, a log and an exit file; real keystrokes piped into the real binary |
+| `commands` | Command steps: a `run:` line in the graph, its exit code routing, `background:`, `timeout:`, and that nothing confines it; the queue screen submitting a group and clearing its documents from the pending directory; `issue_tracking.key_in_names` prefixing the group and branch and storing the `slug:`/`url:`, through the real binary and a real `open` hook | A real spawned process with a pid, a log and an exit file; real keystrokes piped into the real binary; and, for its pane cases, a real tmux server of its own and a herdr double whose panes are real shells |
 | `stacking` | Three chained tasks: each pull request targets the branch it is cut from, and really sits on it — the third names both earlier ones and is cut from, and stacks on, the deeper of the two | A real rebase, in a real git repository |
 | `stack` | `spoolway stack` itself: the squash to one commit and that a rejecting `commit-msg` hook cannot strand it, a refused lease, the empty-diff refusal, a `branch:` that is neither `task/<id>` nor a slug-prefixed `task/<slug>-<id>` refused when the task loads, and `[stack.summary]`'s modes — the body taken verbatim from the task file, a model turn's printed output as the whole body, and the refusals for a half-set table or a missing template | Real git, and a forge double the command really shells out to |
 | `conflicts` | A base that moves under a waiting branch, and the rebase that rescues it | The same, with the base actually moving |
 | `forge` | The `gh` test double, and a hand-off that hands nothing over | A real forge interaction |
-| `disaster` | The ways a run ends badly: a hard kill with lanes live, the stale lock it leaves, a restart over a still-running lane, a lane that reports with nobody listening, a stop that sweeps and one that does not, a retention sweep that spares a still-queued task's scratch tree and headless record, an `eval` read that banks no catch-up line for a lane still in flight, and a multiplexer that dies under worktrees that outlive it | Real detached processes, a real lock file, and — for the last case — a real tmux server on a scratch socket of its own |
+| `disaster` | The ways a run ends badly: a hard kill with lanes live, the stale lock it leaves, a restart over a still-running lane, a lane that reports with nobody listening, a stop with live lanes that leaves every worktree and lane standing and the next run resuming the same lane, a retention sweep that spares a still-queued task's scratch tree and headless record, an `eval` read that banks no catch-up line for a lane still in flight, and a multiplexer that dies under worktrees that outlive it | Real detached processes, a real lock file, and — for the last case — a real tmux server on a scratch socket of its own |
 | `lock` | `run.sh`'s own `pr`-tier lock: a second `--tier pr` invocation blocks until the first releases it, rather than running beside it and contending for the same disk and CPU | Two real `run.sh` invocations, pointed at a lock file of their own through `SPOOLWAY_E2E_PR_LOCK` so the suite never nests against the lock the run driving it is already holding |
 | `trials` | One task forked across two pipelines from the queue screen's own `p` picker: an arm per pipeline lands in the queue directory under a minted id, with the right `pipeline:`, `skip:` and `group:` on it. Nothing here drives a dispatcher | Real keystrokes piped into the real binary — `run_screen` is exercised headlessly in Rust, but never as the whole binary reading a real pipe |
 | `routines` | The repeatable documents under `.spoolway/routines/`, through the queue screen's `r` pane and `s` panel: `enter` lands the right task files under minted ids with their bodies untouched, and `s` copies a pending group's documents back into the checkout | The same, against a real tracked `.spoolway/routines/` tree |
 | `jobs` | A cron job in a store, fired by a real dispatcher pass against a matching minute: the routine's documents reach the queue under minted ids with `depends_on` remapped and the job's pipeline set, the routine tree is left untouched, and `spoolway doctor` names a job whose expression will not parse, never comes round, points at a missing routine, or names an undefined pipeline | A real dispatcher driving a real `.spoolway/routines/` tree |
 | `jobs-screen` | The `spoolway jobs` screen writing a job: the routine/schedule/pipeline walk lands a `[jobs.<name>]` table in the user store with the typed expression, the picked routine and the default pipeline, `jobs list` then shows it, `space` pauses and resumes it, and `x` then `y` deletes it | Real keystrokes piped into the real binary, against a real store file on disk |
-| `restart` | `spoolway dispatch`'s restart guard: four starts in a row against a held lock each report exit 4, a fifth is refused with exit 5, `--force` starts one anyway and clears the count, and an empty queue reports exit 3 without ever tripping the guard | A real lock file, and real process exit codes across repeated real invocations |
+| `restart` | `spoolway dispatch`'s restart guard: four starts in a row against a held lock each report exit 4, a fifth is refused with exit 5, `--force` starts one anyway and clears the count, and an empty queue reports exit 3 without ever tripping the guard. It also proves a start that would actually commit but has no git identity is refused outright (exit 1) rather than starting, and that this refusal is told apart from the empty-queue exit 3 by its exit code | A real lock file, an identity unset on the checkout, and real process exit codes across repeated real invocations |
 | `warmth` | **cloud tier only.** Real `claude-haiku-4-5` lanes, because a stand-in's transcript agrees with the parser by construction | A real model writes the transcript |
 | `live` | **live tier only.** The real `codex` binary through `agent verify --live` — a turn, then a resume — because a stand-in written from the adapter row cannot notice a CLI changing its flag grammar | The real binary |
 
 Each suite runs in a process and a scratch tree of its own, so a suite that ends in `blocked`
 on purpose — several do — cannot make the next one's assertions a fiction.
+
+### Scratch directories
+
+Every fixture builds its world under a directory in `/tmp`, named after the caller and unique
+within the process — `src/scratch.rs` — so two `cargo test` processes walking the same suite
+side by side never share a directory. The name still leads, so a directory left by a crashed
+run is still legible; and nothing reclaimed them, so one machine reached a few hundred thousand
+of them. The first `root` of each process therefore sweeps up to 2,000 finished runs'
+directories out of the system temporary directory. That sweep is a side effect of the shipped
+binary as well as the tests: the `spoolway doctor` live pane check opens a scratch directory on a
+real machine, so an ordinary `spoolway doctor` pays the same cost.
 
 ### A suite writes its own prompts
 
@@ -319,9 +326,12 @@ the project root. No spoolway feature is behind it; that is the whole mechanism.
 
 A hollow suite is worse than none, so two domains are covered elsewhere:
 
-- **Backend parity.** Comparing `herdr` against `headless` needs a multiplexer, and these suites
-  have to pass on a machine with none. The backend's behaviour is unit-tested in
-  `src/headless.rs`; what a multiplexer actually does is `scripts/e2e/plans/`.
+- **Backend parity.** Comparing `herdr` against `headless` needs a multiplexer, and most of the
+  suites have to pass on a machine with none. The backend's behaviour is unit-tested in
+  `src/headless.rs`; what a multiplexer actually does is `scripts/e2e/plans/`. Two cases are the
+  exception: `commands.sh` opens a real tmux server of its own for the question "did a command
+  step get a pane at all", and runs the herdr handover against `scripts/e2e/herdr-stub.sh`, whose
+  header says why there is no isolated herdr server to use instead.
 - **The board.** What a dispatch run draws between passes is rendering, not routing: the pieces
   with any logic in them are unit-tested in `src/status.rs`.
 - **A herdr multiplexer dying.** `disaster` proves the heal path — a workspace verified live

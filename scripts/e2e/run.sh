@@ -63,7 +63,12 @@ REPO=$(cd "$E2E_DIR/../.." && pwd)
 #   backends    parity between `herdr` and `headless` needs a multiplexer, and
 #               these suites must run without one. The backend's own behaviour
 #               is unit-tested in src/headless.rs, and what a multiplexer
-#               actually does is scripts/e2e/plans/.
+#               actually does is scripts/e2e/plans/. Two things are the
+#               exception, because neither can be asked of anything but a real
+#               pane: `commands.sh` opens a real tmux server of its own for
+#               the question "did a command step get a pane at all", and runs
+#               the herdr handover against `herdr-stub.sh`, whose header says
+#               why there is no isolated herdr server to use instead.
 #   status      the board's *rendering* — every column, every row state, the
 #               read-only `--watch` board entire: unit tests cover it through
 #               a real pass, and an e2e version would re-assert the same

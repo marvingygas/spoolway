@@ -76,4 +76,41 @@ for n in 1 2 3 4 5 6; do
     "$SPOOLWAY" dispatch --plain
 done
 
+# --------------------------------------------- refused before the lock: git identity
+# A start that would actually try to run something and cannot — no git
+# identity, and the shipped `handover` step reaches `spoolway stack`, which
+# builds its squash commit with `commit-tree` whether or not
+# `dispatch.auto_commit` is on — is refused outright, exit 1, and is not to
+# be confused with the ordinary "nothing queued" ending above, exit 3. `git
+# init` gave this checkout a local identity; unset it rather than reach for
+# `--global`, since `new_repo` already pointed `$HOME` at a scratch
+# directory with no `~/.gitconfig` of its own for a global unset to fall
+# through to.
+git config --unset user.email
+git config --unset user.name
+
+cat > identity-body.md <<'BODY'
+## Goal
+
+Add `src/notes.md`: one sentence saying what this repository is.
+
+## Acceptance criteria
+
+- `src/notes.md` exists
+
+## References
+
+- `docs/cli.md` — what this repository is
+BODY
+task_doc identity.md identity identity-body.md "group: demo" \
+  "touches: [src/notes.md]"
+must "a task queues" "$SPOOLWAY" queue add --from identity.md
+
+exit_code "no git identity refuses outright, not an empty queue" 1 \
+  "$SPOOLWAY" dispatch --plain
+says "refusing to start" "refusing to start" "$SPOOLWAY" dispatch --plain
+says "naming the missing key" "user.email" "$SPOOLWAY" dispatch --plain
+says "and a command that sets it" "git config --global user.email" \
+  "$SPOOLWAY" dispatch --plain
+
 finish

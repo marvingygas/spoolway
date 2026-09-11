@@ -409,9 +409,14 @@ pub trait Mux {
     /// suite's own forge stub, among it — the way a headless run's child
     /// process does by ordinary inheritance. Applied by the backend before
     /// the script runs, and both backends have to write it out rather than
-    /// hand it across some other way: typed as a shell export ahead of the
-    /// script under herdr, and as `-e KEY=VALUE` flags on the respawn itself
-    /// under tmux — a person watching a herdr pane sees it land.
+    /// hand it across some other way: written to a file beside the run's
+    /// other bookkeeping and sourced with one `.` command under herdr — see
+    /// [`Herdr::run_in_pane`] — and as `-e KEY=VALUE` flags on the respawn
+    /// itself under tmux. A person watching a herdr pane sees the `.`
+    /// command land, not the environment itself; typing the whole thing in,
+    /// as one `export` line, is exactly what this is avoiding — herdr cuts
+    /// that line mid-value past some length and the pane's shell then waits
+    /// forever on the unterminated quote it left behind.
     ///
     /// `script` itself is not built from this full map:
     /// [`crate::command_step::script_for_pane`] writes only the step's own
@@ -584,6 +589,18 @@ pub struct Herdr {
     /// `MuxMode::Split` task is cut from: the project root.
     pub cwd: PathBuf,
 
+    /// The main checkout of the repository `cwd` belongs to — a third value,
+    /// never [`crate::repo::Repo::root`] or [`crate::repo::Repo::checkout`]
+    /// under a new name. Equal to `cwd` in the ordinary case; only differs
+    /// when this project's `.spoolway/` sits inside a linked worktree, where
+    /// `Repo::root`'s own ancestor search finds the worktree itself rather
+    /// than the main checkout. Given to herdr as the `--cwd` of every
+    /// `worktree open` — see [`Herdr::open_worktree_workspace`] — because
+    /// that is the one thing herdr resolves the repository a row nests under
+    /// from, and it refuses a `--cwd` that is itself a linked worktree with
+    /// `linked_worktree_source`.
+    project_root: PathBuf,
+
     /// How this run is laid out — see [`MuxMode`], which is the one thing
     /// deciding whether a task cuts a workspace of its own or shares its
     /// project's pane in the run's one shared workspace.
@@ -609,6 +626,7 @@ impl Herdr {
     pub fn new(cwd: &Path, config: &DispatchConfig) -> Herdr {
         Herdr {
             cwd: cwd.to_path_buf(),
+            project_root: crate::repo::main_checkout(cwd).unwrap_or_else(|| cwd.to_path_buf()),
             mode: config.herdr_mode,
             worktree_root: worktree_root(cwd, config),
             root_tab: RefCell::new(None),
@@ -766,8 +784,20 @@ impl Herdr {
     /// of those panes are free to give up their space: a command step's pane
     /// runs a shell script rather than an agent, so it reads as agentless and
     /// is a valid target, same as any pane whose agent has already exited.
-    fn pane_to_split(&self, tab_id: &str) -> Result<SplitTarget> {
+    ///
+    /// Also answers the tab's own pane ids, read off this same `pane
+    /// layout` call rather than a fourth one — see [`Herdr::split_pane`],
+    /// which needs exactly this set, from exactly this moment, to tell
+    /// which pane the split actually made.
+    fn pane_to_split(&self, tab_id: &str) -> Result<(SplitTarget, HashSet<String>)> {
         let list: PaneList = self.call(&["pane", "list"])?;
+        // Read off this same `pane list` reply, before it is consumed below
+        // — see [`Herdr::split_pane`], which needs this tab's pane ids from
+        // *this* moment. Taken from `pane list` rather than the `pane
+        // layout` call two lines down: the two are different herdr
+        // commands, and a before/after comparison is only meaningful when
+        // both sides come from the same one.
+        let before = pane_ids_in_tab(&list, tab_id);
         let any = list
             .panes
             .into_iter()
@@ -781,7 +811,9 @@ impl Herdr {
             .filter(|raw| raw.agent.is_some())
             .map(|raw| raw.pane_id)
             .collect();
-        choose_split(layout.layout, &agent_panes).context("this tab has no panes to split")
+        let target =
+            choose_split(layout.layout, &agent_panes).context("this tab has no panes to split")?;
+        Ok((target, before))
     }
 
     /// Open a workspace on a checkout this project owns, bound to the project
@@ -799,7 +831,10 @@ impl Herdr {
     /// time.
     fn open_worktree_workspace(&self, checkout: &Path, label: &str) -> Result<Workspace> {
         let path = checkout.display().to_string();
-        let root = self.cwd.display().to_string();
+        // The main checkout, not `self.cwd` outright: see [`Herdr::project_root`]'s
+        // own doc for the one case they differ, which is exactly the case
+        // this call exists to get right.
+        let root = self.project_root.display().to_string();
         let argv = worktree_open_argv(&root, &path, label);
         let args: Vec<&str> = argv.iter().map(String::as_str).collect();
         let created: WorkspaceCreated = self.call(&args)?;
@@ -854,6 +889,55 @@ impl Herdr {
             .agents
             .iter()
             .any(|raw| raw.pane_id == pane_id && raw.agent.is_some()))
+    }
+
+    /// Write `env` to `<project home>/<dir_name>/<key>.<ext>` and answer the
+    /// one `.` command that sources it — the file [`Mux::run_in_pane`] and
+    /// [`Herdr::start_lane`] hand a pane instead of typing the environment in
+    /// directly.
+    ///
+    /// `dir_name` puts the file beside whichever bookkeeping the caller
+    /// already keeps: [`crate::command_step::RUN_DIR`] for a command step's
+    /// run, [`crate::dispatch::SYSTEM_PROMPTS_DIR`] for a lane, next to its
+    /// own composed system prompt. Overwritten on every call rather than
+    /// rolled aside the way a log is — see
+    /// [`crate::command_step::Runs::prev_log_path`] — because nothing here
+    /// is ever read a second time: the one `.` command that follows is the
+    /// file's only reader, and a fresh pane always wants the current
+    /// environment, never a generation back.
+    ///
+    /// Written one assignment per line — [`crate::platform::Shell::env_export_lines`],
+    /// not the single-line `env_export` a pane is typed — matching the
+    /// task's own mockup, and named with [`crate::platform::Shell::source_extension`]'s
+    /// own answer for the dialect: PowerShell refuses to dot-source a file
+    /// not named `.ps1`.
+    ///
+    /// This is the dispatcher's whole inherited environment for a command
+    /// step — see [`crate::dispatch::Dispatcher::start_command_in_pane`] —
+    /// so whatever secret it was started with (a forge token, an API key)
+    /// lands in this file too. Created `0600` on Unix, right after writing
+    /// it, so a shared machine's other users see a directory listing and
+    /// nothing more; Windows ACLs already restrict a user's own `~` to
+    /// itself, which is the platform's own answer to the same question.
+    fn hand_environment(
+        &self,
+        dir_name: &str,
+        key: &str,
+        env: &BTreeMap<String, String>,
+    ) -> Result<String> {
+        let dir = project_home(&self.cwd).join(dir_name);
+        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        let sh = crate::platform::Shell::CURRENT;
+        let path = dir.join(format!("{key}.{}", sh.source_extension()));
+        std::fs::write(&path, format!("{}\n", sh.env_export_lines(env)))
+            .with_context(|| format!("writing {}", path.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                .with_context(|| format!("restricting {}", path.display()))?;
+        }
+        Ok(sh.source_command(&path))
     }
 }
 
@@ -927,6 +1011,58 @@ fn find_tab_id(tabs: TabList, label: &str) -> Option<String> {
         .into_iter()
         .find(|t| t.label.as_deref() == Some(label))
         .map(|t| t.tab_id)
+}
+
+/// Every pane `pane list` says sits in `tab_id`, right now — the account
+/// [`Herdr::split_pane`] takes both before and after a split, so the pane
+/// that *appeared* between the two readings is the one it trusts, rather
+/// than the split's own JSON reply. Its own function, like [`choose_split`]
+/// and [`find_tab_id`], so the rule can be read against a captured `pane
+/// list` payload rather than only against a live herdr.
+fn pane_ids_in_tab(list: &PaneList, tab_id: &str) -> HashSet<String> {
+    list.panes
+        .iter()
+        .filter(|p| p.tab_id.as_deref() == Some(tab_id))
+        .map(|p| p.pane_id.clone())
+        .collect()
+}
+
+/// Which pane a split actually made, confirmed against the multiplexer's
+/// own account rather than trusted from the split's own reply.
+///
+/// `before` and `after` are [`pane_ids_in_tab`]'s answer for the same tab,
+/// read from two separate `pane list` calls straddling the split; `reported`
+/// is the pane id the split's own JSON reply claimed. Its own function, like
+/// [`choose_split`] and [`find_tab_id`], so each of the three ways this can
+/// refuse — nothing new appeared, more than one pane appeared, or the one
+/// that did disagrees with the reply — has a test of its own, rather than
+/// living only inline in [`Herdr::split_pane`] where nothing exercises the
+/// refusals directly.
+fn confirm_split(
+    before: &HashSet<String>,
+    after: &HashSet<String>,
+    reported: &str,
+) -> Result<String> {
+    let mut appeared = after.difference(before);
+    let confirmed = match (appeared.next(), appeared.next()) {
+        (Some(only), None) => only.clone(),
+        (None, _) => bail!(
+            "herdr pane split reported pane `{reported}`, but no new pane appeared — \
+             refusing to record a pane id that might not exist"
+        ),
+        (Some(_), Some(_)) => bail!(
+            "herdr pane split left more than one new pane behind — refusing to guess \
+             which one is `{reported}`"
+        ),
+    };
+    if confirmed != reported {
+        bail!(
+            "herdr pane split reported pane `{reported}`, but the pane that actually \
+             appeared is `{confirmed}` — refusing to record a pane id that disagrees with \
+             the multiplexer's own pane list"
+        );
+    }
+    Ok(confirmed)
 }
 
 /// Which pane [`Herdr::split_pane`] should split, and along which side.
@@ -1381,7 +1517,7 @@ impl Mux for Herdr {
 
     fn split_pane(&self, tab_id: &str, cwd: &Path) -> Result<String> {
         let path = cwd.display().to_string();
-        let target = self.pane_to_split(tab_id)?;
+        let (target, before) = self.pane_to_split(tab_id)?;
         // `--pane`, never the positional `pane split <id>`: the positional form
         // splits the *focused* pane and ignores the one it was given, which
         // silently splits a pane in whatever workspace a person is looking at.
@@ -1396,7 +1532,16 @@ impl Mux for Herdr {
             &path,
             "--no-focus",
         ])?;
-        Ok(created.pane.pane_id)
+        let reported = created.pane.pane_id;
+        // Read back from `pane list` rather than trusted outright: a `.pane`
+        // file once held `w8:p4` while herdr had `w8:p5`, because the split's
+        // own JSON reply had already drifted from the multiplexer's own
+        // bookkeeping by the time this ran. `confirm_split` takes it from
+        // there — see its own doc for what it checks and why it is a
+        // function of its own rather than living inline here.
+        let list: PaneList = self.call(&["pane", "list"])?;
+        let after = pane_ids_in_tab(&list, tab_id);
+        confirm_split(&before, &after, &reported)
     }
 
     fn run_in_pane(
@@ -1413,14 +1558,16 @@ impl Mux for Herdr {
         // an existing tab instead of a fresh pane of its own.
         let pane = self.split_pane(tab_id, cwd)?;
         self.rename_pane(&pane, label)?;
-        // Exported into the pane's shell before the script runs, exactly as
-        // `Herdr::start_lane` exports a lane's own environment — herdr has no
-        // per-command `-e` the way tmux's `respawn-pane` does, so a shell
-        // `export` typed ahead of the script is the only way to hand this
-        // pane an environment the server did not start it with.
+        // Written to a file and sourced, rather than typed ahead of the
+        // script as one `export` line — see [`hand_environment`]'s own doc
+        // for why: this map is the dispatcher's whole inherited environment,
+        // large enough that a herdr pane has cut it mid-value before, and a
+        // shell left waiting on the unterminated quote that leaves behind
+        // never gets as far as the script line below it.
         if !env.is_empty() {
-            let exports = crate::platform::Shell::CURRENT.env_export(env);
-            self.call_ignoring_result(&["pane", "run", &pane, &exports])?;
+            let key = format!("{} · handover", lane_task(label));
+            let source = self.hand_environment(crate::command_step::RUN_DIR, &key, env)?;
+            self.call_ignoring_result(&["pane", "run", &pane, &source])?;
         }
         self.call_ignoring_result(&["pane", "run", &pane, script])?;
         Ok(Some(pane))
@@ -1448,12 +1595,19 @@ impl Mux for Herdr {
             self.call_ignoring_result(&["pane", "run", spec.pane_id, &export])?;
         }
 
-        // Export the lane's environment into the pane's shell first. The agent
-        // inherits it at startup, which is how `spoolway report` inside the lane
-        // knows which task it is working on without being told in the prompt.
+        // The lane's environment reaches the pane's shell first, so the agent
+        // inherits it at startup — which is how `spoolway report` inside the
+        // lane knows which task it is working on without being told in the
+        // prompt. Written to a file beside this lane's own composed system
+        // prompt and sourced, rather than typed in as one `export` line — see
+        // [`hand_environment`]'s own doc for why: a herdr pane cuts that line
+        // mid-value past some length, and the pane's shell then waits
+        // forever on the unterminated quote it left behind, with no agent
+        // ever started to notice.
         if !spec.env.is_empty() {
-            let exports = crate::platform::Shell::CURRENT.env_export(spec.env);
-            self.call_ignoring_result(&["pane", "run", spec.pane_id, &exports])?;
+            let source =
+                self.hand_environment(crate::dispatch::SYSTEM_PROMPTS_DIR, spec.name, spec.env)?;
+            self.call_ignoring_result(&["pane", "run", spec.pane_id, &source])?;
         }
 
         let handle = to_agent_name(spec.name);
@@ -1981,6 +2135,190 @@ mod tests {
         // as tall as it is wide.
         assert_eq!(chosen.pane_id, "w5S:p1C");
         assert_eq!(chosen.direction, "down");
+    }
+
+    /// The failure this check exists for: a `.pane` file once held `w8:p4`
+    /// while herdr had `w8:p5`. `pane list` is the multiplexer's own account,
+    /// so a pane split's reply is trusted only once it agrees with it.
+    #[test]
+    fn a_split_reply_is_confirmed_against_the_multiplexers_own_pane_list() {
+        let before: HashSet<String> = ["w8:p1".to_string()].into_iter().collect();
+
+        let after: PaneList = serde_json::from_str(
+            r#"{"panes": [
+                {"pane_id": "w8:p1", "tab_id": "w8:t1"},
+                {"pane_id": "w8:p5", "tab_id": "w8:t1"},
+                {"pane_id": "w8:p9", "tab_id": "w8:t2"}
+            ]}"#,
+        )
+        .expect("a live pane list parses");
+        // Filtered by tab first — `w8:p9` belongs to a different tab and
+        // must never count as this split's new pane, whatever appeared
+        // there in the meantime.
+        let after = pane_ids_in_tab(&after, "w8:t1");
+
+        assert_eq!(
+            confirm_split(&before, &after, "w8:p5").unwrap(),
+            "w8:p5",
+            "the pane that appeared agrees with the reply, so it is confirmed"
+        );
+    }
+
+    /// The failure the check above exists for: herdr's own reply named
+    /// `w8:p4`, but the pane that actually appeared in the tab is `w8:p5` —
+    /// `confirm_split` has to notice the two disagree rather than recording
+    /// the reply outright.
+    #[test]
+    fn a_disagreeing_reply_is_refused_rather_than_recorded() {
+        let before: HashSet<String> = ["w8:p1".to_string()].into_iter().collect();
+        let after: HashSet<String> = ["w8:p1".to_string(), "w8:p5".to_string()]
+            .into_iter()
+            .collect();
+
+        let err = confirm_split(&before, &after, "w8:p4").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("w8:p5"),
+            "the error names the pane that actually appeared: {err:#}"
+        );
+    }
+
+    /// The split's reply named a pane, but `pane list` shows nothing new in
+    /// the tab at all — herdr answered, and the multiplexer's own account
+    /// disagrees about whether anything happened.
+    #[test]
+    fn no_new_pane_is_refused_rather_than_guessed_at() {
+        let before: HashSet<String> = ["w8:p1".to_string()].into_iter().collect();
+        let after = before.clone();
+
+        assert!(confirm_split(&before, &after, "w8:p4").is_err());
+    }
+
+    /// Two panes appeared between the two readings — a person split the
+    /// same tab by hand in the moment between them, say — and there is no
+    /// safe way to guess which one this split actually made.
+    #[test]
+    fn more_than_one_new_pane_is_refused_rather_than_guessed_at() {
+        let before: HashSet<String> = ["w8:p1".to_string()].into_iter().collect();
+        let after: HashSet<String> = [
+            "w8:p1".to_string(),
+            "w8:p5".to_string(),
+            "w8:p6".to_string(),
+        ]
+        .into_iter()
+        .collect();
+
+        assert!(confirm_split(&before, &after, "w8:p5").is_err());
+    }
+
+    /// The bug the task's own context names: a project whose `.spoolway/`
+    /// sits inside a linked worktree finds that worktree, not the main
+    /// checkout, when [`crate::repo::Repo::root`]'s own ancestor search runs
+    /// — and handing that straight to herdr's `worktree open --cwd` gets
+    /// refused with `linked_worktree_source`. `Herdr::new` has to resolve
+    /// past it on its own; real git, since this is exactly the case a
+    /// hand-rolled `.git`-ancestor walk gets wrong.
+    #[test]
+    fn herdr_resolves_its_project_root_to_the_main_checkout() {
+        let base = crate::scratch::root("mux-test-project-root");
+        let _ = std::fs::remove_dir_all(&base);
+        let work = base.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let git = |dir: &Path, args: &[&str]| crate::repo::run(dir, "git", args).unwrap();
+        git(&work, &["init", "-q", "-b", "main"]);
+        git(&work, &["config", "user.email", "t@example.com"]);
+        git(&work, &["config", "user.name", "t"]);
+        std::fs::write(work.join("README"), "hi\n").unwrap();
+        git(&work, &["add", "-A"]);
+        git(&work, &["commit", "-q", "-m", "root"]);
+
+        let wt = base.join("wt");
+        git(
+            &work,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "task/a",
+                wt.to_str().unwrap(),
+            ],
+        );
+
+        let config = crate::config::DispatchConfig::default();
+        let ordinary = Herdr::new(&work, &config);
+        assert_eq!(
+            ordinary.project_root.canonicalize().unwrap(),
+            work.canonicalize().unwrap(),
+            "the main checkout resolves to itself"
+        );
+
+        let from_worktree = Herdr::new(&wt, &config);
+        assert_eq!(
+            from_worktree.project_root.canonicalize().unwrap(),
+            work.canonicalize().unwrap(),
+            "a linked worktree resolves to the main checkout, not itself"
+        );
+
+        git(
+            &work,
+            &["worktree", "remove", "--force", wt.to_str().unwrap()],
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// The file [`Mux::run_in_pane`] and [`Herdr::start_lane`] hand a pane
+    /// instead of typing the environment in directly: written where it says,
+    /// and answering with a `.` command short enough that herdr never has a
+    /// value long enough to cut mid-quote.
+    #[test]
+    fn hand_environment_writes_the_file_and_answers_a_short_source_command() {
+        let base = crate::scratch::root("mux-test-hand-environment");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        // `hand_environment` writes under `project_home`, which reads off
+        // this thread's own home — see [`crate::platform::test_home`] — so
+        // this stands in for `~` rather than actually writing there.
+        crate::platform::test_home::with_home(&base, || {
+            let config = crate::config::DispatchConfig::default();
+            let herdr = Herdr::new(&base, &config);
+            let sh = crate::platform::Shell::CURRENT;
+            let env = BTreeMap::from([
+                ("SPOOLWAY_TASK".to_string(), "demo".to_string()),
+                ("SPOOLWAY_STEP".to_string(), "implement".to_string()),
+            ]);
+
+            let source = herdr
+                .hand_environment("system-prompts", "demo · implement", &env)
+                .unwrap();
+
+            // Named with the dialect's own extension, not a plain `.env` —
+            // PowerShell refuses to dot-source anything else.
+            let path = project_home(&base)
+                .join("system-prompts")
+                .join(format!("demo · implement.{}", sh.source_extension()));
+            assert_eq!(
+                source,
+                sh.source_command(&path),
+                "the pane is told to source exactly the file that was written"
+            );
+            let written = std::fs::read_to_string(&path).unwrap();
+            assert_eq!(
+                written,
+                format!("{}\n", sh.env_export_lines(&env)),
+                "one assignment per line, as the mockup draws it — not env_export's \
+                 single-line pane form, which nothing here needs to race against"
+            );
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+                assert_eq!(mode, 0o600, "the file carries this process's own secrets");
+            }
+        });
+
+        std::fs::remove_dir_all(&base).ok();
     }
 
     /// A full-screen tab's first split: one pane, 173x50, halves to two

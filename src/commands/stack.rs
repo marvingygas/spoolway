@@ -111,7 +111,39 @@ pub fn stack(repo: &Repo, args: &StackArgs) -> Result<()> {
     // offline) is exactly what the diff below will fail loudly on if it
     // actually matters.
     let _ = crate::repo::run(&worktree, "git", &["fetch", "origin", &cut_from]);
-    let cut_ref = remote_ref(&worktree, &cut_from);
+    // A `cut_from` that no longer resolves anywhere is the ordinary end of a
+    // stack, not a broken task: once the dependency's own pull request lands,
+    // its branch is deleted local and remote, and every task still cut from
+    // it is left naming a ref nothing can look up. Its commits are in `base`
+    // by then, so the three-dot diff against `base` is exactly this branch's
+    // own work — the same answer the dependency's branch would have given
+    // while it still existed. Without this fall-through, `handover` fails
+    // permanently the moment a dependency merges, which is the one thing
+    // every stacked task is waiting for.
+    let (cut_from, cut_ref) = match resolved_ref(&worktree, &cut_from) {
+        Some(cut_ref) => (cut_from, cut_ref),
+        None => {
+            let base = task.front.base.clone().filter(|base| base != &cut_from);
+            let landed = base.and_then(|base| {
+                let _ = crate::repo::run(&worktree, "git", &["fetch", "origin", &base]);
+                resolved_ref(&worktree, &base).map(|cut_ref| (base, cut_ref))
+            });
+            match landed {
+                Some((base, cut_ref)) => {
+                    report_line(
+                        "base",
+                        format!("`{cut_from}` has landed — against `{base}`"),
+                    );
+                    (base, cut_ref)
+                }
+                None => bail!(
+                    "task `{id}` is cut from `{cut_from}`, which resolves to nothing — no \
+                     `origin/{cut_from}` and no local branch — and its `base:` does not \
+                     resolve either, so there is nothing to diff this branch against"
+                ),
+            }
+        }
+    };
 
     // The three-dot diff: what this branch changed since it diverged from
     // its cut point, ignoring anything the cut point picked up afterwards.
@@ -253,6 +285,30 @@ pub fn stack(repo: &Repo, args: &StackArgs) -> Result<()> {
 /// name otherwise — used both for the diff's cut point and for a candidate
 /// stack-mate's branch, neither of which this process is guaranteed to have
 /// fetched under a name that resolves any other way.
+/// The ref to diff against for `branch`, or `None` when it names nothing at
+/// all — no `origin/<branch>` and no local branch of that name.
+///
+/// Separate from [`remote_ref`], which answers a bare branch name when the
+/// remote one is missing. That is the right answer for a branch that exists
+/// only locally, and the wrong one for a branch that has been deleted
+/// everywhere: it hands back a name `git diff` then fails on. This asks the
+/// question that has a "nothing" answer.
+fn resolved_ref(worktree: &Path, branch: &str) -> Option<String> {
+    let candidate = remote_ref(worktree, branch);
+    crate::repo::run(
+        worktree,
+        "git",
+        &[
+            "rev-parse",
+            "--verify",
+            "-q",
+            &format!("{candidate}^{{commit}}"),
+        ],
+    )
+    .ok()
+    .map(|_| candidate)
+}
+
 fn remote_ref(worktree: &Path, branch: &str) -> String {
     let remote = format!("origin/{branch}");
     match crate::repo::run(
@@ -901,6 +957,41 @@ fn parse_owner_repo(url: &str) -> Option<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The question `handover` asks of its `cut_from` once a dependency has
+    /// landed: a branch that exists answers with a ref to diff against, and
+    /// one that has been deleted everywhere answers with nothing rather than
+    /// with its own name. `remote_ref` hands back the bare name in both
+    /// cases, which is what made `git diff` fail with `ambiguous argument`
+    /// instead of falling through to `base`.
+    #[test]
+    fn a_cut_from_deleted_everywhere_resolves_to_nothing_rather_than_its_own_name() {
+        let repo = crate::commands::testutil::fixture("stack-resolved-ref");
+        std::fs::write(repo.root.join("file.txt"), "one\n").unwrap();
+        crate::repo::run(&repo.root, "git", &["add", "-A"]).unwrap();
+        crate::repo::run(&repo.root, "git", &["commit", "-q", "-m", "seed"]).unwrap();
+        crate::repo::run(&repo.root, "git", &["branch", "task/dep"]).unwrap();
+
+        let live = resolved_ref(&repo.root, "task/dep");
+        assert_eq!(
+            live,
+            Some("task/dep".to_string()),
+            "a branch that exists resolves to itself"
+        );
+
+        crate::repo::run(&repo.root, "git", &["branch", "-D", "task/dep"]).unwrap();
+        assert_eq!(
+            resolved_ref(&repo.root, "task/dep"),
+            None,
+            "a landed-and-deleted dependency must resolve to nothing, so the caller can \
+             fall through to `base`"
+        );
+        assert_eq!(
+            remote_ref(&repo.root, "task/dep"),
+            "task/dep".to_string(),
+            "remote_ref still answers the bare name — that is the behaviour this is not"
+        );
+    }
 
     /// A branch keeps its pull request after it lands, so `gh pr view` still
     /// answers for one that is merged. Reading the state is what separates a

@@ -2,7 +2,7 @@
 # The ways a run ends badly, held against a real dispatcher and real detached
 # lanes — a hard kill with lanes live, the stale lock it leaves, a restart
 # over a still-running lane, a lane that reports with nobody listening, a
-# stop that sweeps and one that does not, and a multiplexer that dies under
+# stop that leaves every lane running, and a multiplexer that dies under
 # worktrees that outlive it.
 #
 # `dispatch.backend = headless` makes every lane a real `setsid` process of
@@ -21,8 +21,6 @@
 # stand-in reads that file before it reads its own task id. The tmux case is
 # the one exception, and says why where it queues its own task.
 #
-# covers: dispatch.tear_lanes_on_stop — a stop with the teardown on ends the lane before it takes the worktree, and keeps the branch
-# covers: dispatch.tear_lanes_on_stop — a stop with the teardown off leaves every worktree and lane exactly where it stood
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=../lib.sh
@@ -132,31 +130,40 @@ one_shot_stop() {
   poll_while 15 kill -0 "$pid"
 }
 
-# Sweep whatever a case left running, with the teardown on, so one case's
-# mess is never what the next one reads. Not a check itself — nothing here
-# calls `ok` or `bad` — so it costs nothing on the tally either way.
+# Any resident supervisor a case left running, ended hard, so a one-shot pass
+# later in the suite never has to race a second dispatcher for the lock. A
+# stop no longer gives back anything on its own — see `forget` below for what
+# actually reclaims a task's checkout — so there is nothing else left for this
+# to do. Not a check itself — nothing here calls `ok` or `bad` — so it costs
+# nothing on the tally either way.
 sweep() {
-  must "the teardown is on, to clear whatever this case left running" \
-    "$SPOOLWAY" config set dispatch.tear_lanes_on_stop true
-  # Any resident supervisor first, hard — a one-shot pass racing a second
-  # dispatcher for the lock would only ever watch it, never sweep anything.
   kill_dispatcher KILL
-  one_shot_stop "$(one_shot_start)"
 }
 
-# A swept task is not a *done* one — the sweep gives back its lane and its
-# worktree and leaves it exactly on the step it stood on, ready for a future
-# pass to pick up right where it stopped, which is the whole point of a stop
-# being resumable. This suite's own `hang`-mode tasks never report, so
-# nothing ever moves them on; left in the queue, every pass from here on
-# would restart one for no reason a later case is asking about — and under
-# the tmux case, on the wrong backend entirely, since a headless task's
-# recorded workspace answers to nothing a tmux `workspace_alive` check would
-# recognise. Deleting the task document is what a person abandoning a task by
-# hand would do too — there is no `queue remove`, because there is ordinarily
-# no reason to want one.
+# What a person abandoning a task by hand would do — there is no `queue
+# remove`, because there is ordinarily no reason to want one, and a stop no
+# longer reclaims a checkout either. So this suite's own housekeeping does
+# what both used to: the lane's process is killed outright, its worktree and
+# branch go back with git directly, and the task file itself leaves the
+# queue. Named for the stage the task is still sitting on — a swept task was
+# never a *done* one, so its lane keeps the name of the step it stood on
+# rather than any step it never reached.
+#
+# This suite's own `hang`-mode tasks never report, so nothing ever moves them
+# on; left in the queue, every pass from here on would restart one for no
+# reason a later case is asking about — and under the tmux case, on the wrong
+# backend entirely, since a headless task's recorded workspace answers to
+# nothing a tmux `workspace_alive` check would recognise.
 forget() {
-  rm -f "$SPOOLWAY_PROJECT_HOME/queue/$1.md"
+  local id=$1 lane pid wt
+  lane="$id · $(stage_of "$id")"
+  pid=$(cat "$SPOOLWAY_PROJECT_HOME/headless/$lane.pid" 2>/dev/null)
+  [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null
+  wt=$(worktree_of "$id")
+  [ -n "$wt" ] && git worktree remove --force "$wt" 2>/dev/null
+  git branch -D "task/$id" 2>/dev/null
+  rm -f "$SPOOLWAY_PROJECT_HOME/queue/$id.md"
+  true
 }
 
 # ------------------------------------------------------- a hard kill, live
@@ -242,8 +249,6 @@ forget hang
 # still be certain the report happened with nobody running.
 SAVED_INTERVAL=$E2E_INTERVAL
 E2E_INTERVAL=60s
-must "the teardown is on, for the ordinary flow" \
-  "$SPOOLWAY" config set dispatch.tear_lanes_on_stop true
 dispatcher_start
 task_doc "$LIVE/orphan.md" orphan "$BODY" "group: disaster" "touches: [notes/orphan.md]"
 must "orphan queues" "$SPOOLWAY" queue add --from "$LIVE/orphan.md"
@@ -264,56 +269,50 @@ else
 fi
 sweep
 
-# ------------------------------------------------------- a stop, teardown on
-must "the teardown is on" "$SPOOLWAY" config set dispatch.tear_lanes_on_stop true
-queue_hang stop-on
+# ------------------------------------------------------------- a stop, live
+# A stop never removes a worktree, workspace, pane or tab any more — every
+# live lane is left exactly where it was.
+queue_hang stop-live
 OS5=$(one_shot_start)
-PID5=$(lane_pid "stop-on · implement" 20)
-WT5=$(worktree_of stop-on)
+PID5=$(lane_pid "stop-live · implement" 20)
+WT5=$(worktree_of stop-live)
 if [ -n "$PID5" ] && [ -n "$WT5" ]; then
   one_shot_stop "$OS5"
-  if ! kill -0 "$PID5" 2>/dev/null && [ ! -e "$WT5" ] \
-     && git rev-parse --verify -q "refs/heads/task/stop-on" >/dev/null 2>&1; then
-    ok "a stop ends the lane before it removes the checkout under it"
+  if kill -0 "$PID5" 2>/dev/null && [ -d "$WT5" ] && [ "$(stage_of stop-live)" = implement ]; then
+    ok "a stop leaves the lane running and its worktree exactly where it stood"
   else
-    bad "a stop ends the lane before it removes the checkout under it"
-    printf '        lane alive: %s, worktree: %s, branch: %s\n' \
+    bad "a stop leaves the lane running and its worktree exactly where it stood"
+    printf '        lane alive: %s, worktree: %s, stage: %s\n' \
       "$(kill -0 "$PID5" 2>/dev/null && echo yes || echo no)" \
-      "$([ -e "$WT5" ] && echo present || echo gone)" \
-      "$(git rev-parse --verify -q refs/heads/task/stop-on >/dev/null 2>&1 && echo present || echo gone)"
+      "$([ -d "$WT5" ] && echo present || echo gone)" "$(stage_of stop-live)"
   fi
+
+  # And the next run picks the queue back up: its own reconciliation matches
+  # the still-running lane against the task's own stage and leaves it alone,
+  # rather than starting a second one over the same worktree — the same
+  # promise the earlier "a restart, over a live lane" case holds for a kill.
+  STARTS_BEFORE=$(grep -c 'started stop-live · implement' "$E2E_DISPATCH_LOG" 2>/dev/null || true)
+  dispatcher_start
+  if poll_until 15 bash -c \
+       '[ "$(cat "$0/headless/stop-live · implement.pid" 2>/dev/null)" = "$1" ]' \
+       "$SPOOLWAY_PROJECT_HOME" "$PID5"; then
+    STARTS_AFTER=$(grep -c 'started stop-live · implement' "$E2E_DISPATCH_LOG" 2>/dev/null || true)
+    if [ "$STARTS_AFTER" = "$STARTS_BEFORE" ] && kill -0 "$PID5" 2>/dev/null; then
+      ok "the next run resumes the same lane rather than starting a second one"
+    else
+      bad "the next run resumes the same lane rather than starting a second one"
+      printf '        starts before/after: %s/%s\n' "$STARTS_BEFORE" "$STARTS_AFTER"
+    fi
+  else
+    bad "the next run resumes the same lane rather than starting a second one (pid file changed)"
+  fi
+  kill_dispatcher KILL
 else
-  bad "a stop ends the lane before it removes the checkout under it (the lane never started)"
+  bad "a stop leaves the lane running and its worktree exactly where it stood (the lane never started)"
   one_shot_stop "$OS5"
 fi
-# Swept already — the assertion above is what the sweep left behind. Only
-# forgotten here, so a later case's dispatcher never restarts it for nothing.
-forget stop-on
-
-# ------------------------------------------------------ a stop, teardown off
-must "the teardown is off" "$SPOOLWAY" config set dispatch.tear_lanes_on_stop false
-queue_hang stop-off
-OS6=$(one_shot_start)
-PID6=$(lane_pid "stop-off · implement" 20)
-WT6=$(worktree_of stop-off)
-if [ -n "$PID6" ] && [ -n "$WT6" ]; then
-  one_shot_stop "$OS6"
-  if kill -0 "$PID6" 2>/dev/null && [ -d "$WT6" ] && [ "$(stage_of stop-off)" = implement ]; then
-    ok "tear_lanes_on_stop = false leaves every worktree exactly where it stood"
-  else
-    bad "tear_lanes_on_stop = false leaves every worktree exactly where it stood"
-    printf '        lane alive: %s, worktree: %s, stage: %s\n' \
-      "$(kill -0 "$PID6" 2>/dev/null && echo yes || echo no)" \
-      "$([ -d "$WT6" ] && echo present || echo gone)" "$(stage_of stop-off)"
-  fi
-else
-  bad "tear_lanes_on_stop = false leaves every worktree exactly where it stood (the lane never started)"
-  one_shot_stop "$OS6"
-fi
-# Left alive on purpose above — the sweep below is what finally takes it, now
-# that the assertion it was kept for has run.
 sweep
-forget stop-off
+forget stop-live
 
 # --------------------------------------------------------- a multiplexer dies
 # `src/tmux.rs` drives the default server unless `SPOOLWAY_TMUX_SOCKET` names

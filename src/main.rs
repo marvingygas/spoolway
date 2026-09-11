@@ -38,7 +38,9 @@ mod release_notes;
 mod repo;
 mod retain;
 mod runfiles;
-#[cfg(test)]
+// Not test-only any more: `doctor`'s live pane check needs a scratch
+// directory to open one in, same as a test fixture does — see
+// `commands::doctor::live_pane`.
 mod scratch;
 mod screen;
 mod skeleton;
@@ -155,7 +157,14 @@ fn run() -> Result<()> {
             // `discover_lenient` reads. `doctor` loads `repo.checkout`'s own
             // copy again for everything it checks, and folds this one in as
             // a finding of its own rather than a gate — see its own doc.
-            commands::doctor(&repo, pipelines, config_error, args.verbose, cli.json)
+            commands::doctor(
+                &repo,
+                pipelines,
+                config_error,
+                args.verbose,
+                cli.json,
+                args.no_live,
+            )
         }
 
         // Before a project is discovered, and deliberately: what spoolway can
