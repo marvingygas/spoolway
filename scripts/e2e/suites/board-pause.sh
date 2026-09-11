@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
-# The board's `p` and `P` keys, driven end to end: real keystrokes read off a
-# real pipe by a real `spoolway dispatch`, over a real headless lane that is
+# The board's confirm-panel keys, driven end to end: real keystrokes read off
+# a real pipe by a real `spoolway dispatch`, over a real headless lane that is
 # genuinely mid-turn.
 #
 # Everything else about the board is rendering, and `run.sh` says why that is
-# not worth a suite. This is the exception: pausing from the board *routes*.
-# A keypress interrupts a live lane and writes a task file, and the panel
-# standing between the two is the only thing that stops it — none of which a
-# frame comparison can see.
+# not worth a suite. This is the exception: answering a panel *routes*. A
+# keypress interrupts a live lane, or writes or moves a task file, and the
+# panel standing between the two is the only thing that stops it — none of
+# which a frame comparison can see. `p` and `P` carry most of the suite,
+# since pausing is the one panel that can also abort a live lane; `U` and a
+# `p` of a task that never started each get one pass through the same
+# `enter`/`esc` answers near the bottom, to cover the other panels and the
+# `parked_from` record a park off `queued` leaves.
 #
 # How a key gets in. The board reads stdin itself, between redraws, only
 # while the dispatcher is waiting out its interval — so this suite runs a
@@ -247,6 +251,48 @@ MARK=$(wc -l < "$BOARD_LOG")
 press p
 sleep 3
 never_draws "\`p\` over an already-paused row opens nothing" "Pausing aborts" "$MARK"
+
+# ------------------------------- pausing a task that never started at all
+# Nothing live, nothing declared for `queued` in any pipeline, so this parks
+# on the spot exactly like the "nothing live" `P` above — the one thing worth
+# checking here is the record it leaves, not the keypress.
+queue_idle never-run late
+sleep 2
+MARK=$(wc -l < "$BOARD_LOG")
+press P
+stage_reaches "pausing a task that never started parks it at once" never-run paused 25
+never_draws "with no panel to answer" "Pausing aborts" "$MARK"
+lacks "and writes no \`parked_from\` for a task that was still \`queued\`" \
+  "parked_from:" "$SPOOLWAY_PROJECT_HOME/queue/never-run.md"
+
+must "resuming it by hand" "$SPOOLWAY" resume never-run
+stage_reaches "it lands on the pipeline's own entry step" never-run implement 25
+lacks "carrying no leftover \`parked_from\`" "parked_from:" \
+  "$SPOOLWAY_PROJECT_HOME/queue/never-run.md"
+lacks "or \`resume:\`" "resume:" "$SPOOLWAY_PROJECT_HOME/queue/never-run.md"
+
+# --------------------------------------- `U` answers only to enter now
+# The other panels this task hands the same two answers `p`/`P`'s own already
+# had: `U` still opens unconditionally, but the letter that opened it no
+# longer closes it — only `enter` does, the same rule proven above for the
+# pause panel.
+queue_idle stalled late
+sleep 2
+press U
+draws "\`U\` opens the unqueue-all panel" "1 task has not started:"
+draws "answered with enter or esc, and nothing else" "[enter] unqueue them   [esc] cancel"
+stage_stays "nothing is written while the panel is open" stalled queued
+
+press U
+sleep 3
+stage_stays "the old confirming letter no longer answers the panel" stalled queued
+draws "and the panel is still up" "1 task has not started:"
+
+_gone() { [ ! -e "$SPOOLWAY_PROJECT_HOME/queue/$1.md" ]; }
+press $'\r'
+if poll_until 25 _gone stalled; then ok "enter carries out the unqueue"
+else bad "enter carries out the unqueue"; tail -30 "$BOARD_LOG" | sed 's/^/        /'; fi
+has "the document lands back in pending" "id: stalled" "$SPOOLWAY_PROJECT_HOME/pending/stalled.md"
 
 board_stop
 finish

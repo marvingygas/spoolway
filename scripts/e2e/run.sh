@@ -69,9 +69,10 @@ REPO=$(cd "$E2E_DIR/../.." && pwd)
 #               a real pass, and an e2e version would re-assert the same
 #               branches through a slower path. The board's keys are a
 #               different question and do have a suite: `board-pause` drives
-#               `p` and `P` as real keystrokes into a real dispatcher, because
-#               those interrupt a live lane and write a task file, which no
-#               frame comparison can see.
+#               `p`, `P` and `U` as real keystrokes into a real dispatcher,
+#               because those interrupt a live lane, write or move a task
+#               file, and answer only to `enter`/`esc` once a panel is open —
+#               none of which a frame comparison can see.
 #
 # And two tiers that are in none of the others, because each needs something a
 # task's own gate cannot assume:

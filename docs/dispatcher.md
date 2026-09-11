@@ -357,7 +357,7 @@ or `esc` is ignored and leaves the panel open.
 `R` resumes every paused task whose own resume key is live, through the same `spoolway resume`
 a single row's `r` runs. If any paused task carries `paused_at` — a
 genuine gate, rather than a plain park `p` or an interrupt left behind — `R` opens a panel first,
-naming those tasks, and only resumes anything once you confirm with `R` again; `esc` leaves every
+naming those tasks, and only resumes anything once you confirm with `enter` again; `esc` leaves every
 paused task exactly where it is.
 
 `u` and `U` take a task off the queue and back to pending — `~/.spoolway/<project>/pending/`, the
@@ -379,7 +379,7 @@ where it came from, so a document unqueued in error has to be sent again by hand
 │                                                  │
 │  `spoolway queue` is what sends it again.        │
 │                                                  │
-│  [u] unqueue it   [esc] cancel                   │
+│  [enter] unqueue it   [esc] cancel               │
 └──────────────────────────────────────────────────┘
 ```
 
@@ -400,7 +400,7 @@ longest id rather than growing with how many there are:
 │  Each goes back to pending. Running, paused and  │
 │  blocked tasks stay where they are.              │
 │                                                  │
-│  [U] unqueue them   [esc] cancel                 │
+│  [enter] unqueue them   [esc] cancel             │
 └──────────────────────────────────────────────────┘
 ```
 
@@ -428,8 +428,9 @@ cut to the pane's width rather than wrapped. A line for a task arriving somewher
 the step that reported, not the one it arrived at: a move that lands on that step's own
 `on_pass` route draws `✓ pass` in green, one landing on its `on_fail` route draws `✗ fail` in
 red, and a task arriving at `paused` or `blocked` draws `● paused` or `● blocked` — the same
-word and colour the table's STATE column uses — naming the step recorded in `paused_at` or
-`blocked_from`. A move that matches none of those routes draws dim, with the step named and no
+word and colour the table's STATE column uses — naming the step recorded in `paused_at`, or
+`parked_from` when no gate was passed, or `blocked_from`. A move that matches none of those
+routes draws dim, with the step named and no
 verdict word. After the verdict comes a position, the named step's own place in its pipeline's
 walk over how many steps that walk still has left, or `—` where the task's pipeline cannot be
 read. Only the verdict token itself carries colour; the rest of the line, including the step
@@ -629,7 +630,10 @@ from `blocked` would have — carrying the task past that step, not back onto it
 The board's own `p` and `P` keys (see [Reading the state](#reading-the-state)) park a task on
 `paused` too, `parked_from` naming the step it was on rather than one it gated on —
 a plain park, with no `paused_at` and no `blocked_from`, telling it apart from both a genuine
-gate and a real block. `R` and a row's own `r` both read that difference: only a task carrying
+gate and a real block. A task that is still on `queued` when it is parked is the one case that
+leaves no `parked_from` at all: `queued` is not a step any pipeline declares, so a breadcrumb
+naming it would never be spent, and `spoolway resume` falls through to the pipeline's entry step
+for it instead. `R` and a row's own `r` both read that difference: only a task carrying
 `paused_at` is confirmed past with a named panel before it resumes. Resuming a park is not a lap
 either — the task never left the step, so putting it back banks nothing and repeats none of a
 block's own bookkeeping; see `parked_from` in [the frontmatter field table](tasks.md).

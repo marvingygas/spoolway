@@ -465,12 +465,11 @@ impl Board {
     /// confirm panel first wherever what it is about to do is not free to
     /// undo — `u` and `U` open one unconditionally, since writing a document
     /// back to pending is exactly that — see [`BoardMode`]. With a panel
-    /// already open every other key is read by that panel instead, and a
-    /// key neither mode recognises is ignored — `enter` and `q` included,
-    /// since resuming and quitting now belong to `r` and `ctrl-c` — the
-    /// board answers a gate and the run around it, and nothing past that;
-    /// see the task's own non-goals for the keys this deliberately does not
-    /// add.
+    /// already open every other key is read by that panel instead: `enter`
+    /// confirms whatever it opened and `esc` cancels it, on every panel the
+    /// board draws, and the letter that opened the panel no longer answers
+    /// it once it is — a `q` typed there, or any other key neither mode
+    /// recognises, is ignored, the same as it is while browsing.
     ///
     /// Reads the queue fresh rather than trusting the last frame drawn: a key
     /// can land in the gap between two redraws, and moving the cursor — or
@@ -735,7 +734,7 @@ impl Board {
     ) -> Result<()> {
         use crate::screen::Key;
         match key {
-            Key::Char('R') => self.resume_all(repo, pipelines)?,
+            Key::Enter => self.resume_all(repo, pipelines)?,
             Key::Esc => {}
             _ => self.mode = BoardMode::ConfirmResume(gated),
         }
@@ -810,7 +809,7 @@ impl Board {
     ) -> Result<()> {
         use crate::screen::Key;
         match key {
-            Key::Char('u') => {
+            Key::Enter => {
                 // The row this task sits on is about to leave the table, so
                 // asking where `↓` would go has to happen against the rows
                 // as they stand right now — the same list the removed row is
@@ -839,7 +838,7 @@ impl Board {
     ) -> Result<()> {
         use crate::screen::Key;
         match key {
-            Key::Char('U') => {
+            Key::Enter => {
                 for id in &ids {
                     unqueue_task(repo, id)?;
                 }
@@ -1064,18 +1063,24 @@ pub(crate) fn resume_task(repo: &Repo, pipelines: &Pipelines, id: &str) -> Resul
     };
     // `paused_at` is a gate passed, waiting to be sent on past it;
     // `parked_from` is a person's own interrupt, and `blocked_from` is a
-    // real block — both waiting to be sent back to where they stopped. Only
-    // ever one of the three, and never none, on a task standing on `paused`.
+    // real block — all three waiting to be sent back to where they stopped.
+    // Never more than one of the three on a task standing on `paused`, but a
+    // park off `queued` carries none of them at all: there was no step to
+    // record, so there is nothing here to name either — see `park`.
     //
-    // Nothing here has to say which: `commands::resume` reads
-    // `paused_at.is_some()` itself to route a gate one way and everything
-    // else the other, so naming a step here would only risk disagreeing
-    // with it — see `back_onto_its_step`, which finds `parked_from` and
-    // `blocked_from` on its own.
-    if task.front.paused_at.is_none()
-        && task.front.parked_from.is_none()
-        && task.front.blocked_from.is_none()
-    {
+    // The guard is on `stage()`, not on the three fields, exactly because of
+    // that case: refusing whenever all three are absent would also refuse
+    // the one task with a genuine, fieldless park to resume. `stage()` is
+    // the one thing every stopped task shares, whichever of the three (or
+    // none) it carries.
+    //
+    // Nothing here has to say which of the three, if any, applies:
+    // `commands::resume` reads `paused_at.is_some()` itself to route a gate
+    // one way and everything else the other, so naming a step here would
+    // only risk disagreeing with it — see `back_onto_its_step`, which finds
+    // `parked_from` and `blocked_from` on its own and falls through to the
+    // pipeline's entry step when neither is set.
+    if task.stage() != crate::pipeline::PAUSED && task.stage() != crate::pipeline::BLOCKED {
         return Ok(());
     }
     crate::commands::resume(
@@ -1188,6 +1193,13 @@ fn unqueue_task(repo: &Repo, id: &str) -> Result<()> {
 /// touches `paused_at` either: this task passed no gate, so there is no step
 /// to release it past, only one to send it back to.
 ///
+/// Sets no `parked_from` at all when the task is still on `queued`: `queued`
+/// is not a step any pipeline declares, so a `parked_from: queued` would
+/// never match the step a launch is starting and would never be spent by
+/// `Dispatcher::start_one` — it would sit in the document for the rest of the
+/// run. `resume_target` already falls through to the pipeline's entry step
+/// when nothing names one, which is where a task that never started belongs.
+///
 /// Goes through [`crate::task::Task::set_stage_unbanked`] rather than
 /// `set_stage`: the task never left `implement` (or wherever it was), so
 /// arriving at `paused` and leaving it again are not laps of anything, and
@@ -1199,7 +1211,9 @@ fn unqueue_task(repo: &Repo, id: &str) -> Result<()> {
 /// with a `## Status Log` line that says why *that* park happened, which is
 /// not "paused from the board".
 pub(crate) fn park(task: &mut crate::task::Task, message: &str) {
-    task.front.parked_from = Some(task.stage().to_string());
+    if task.stage() != crate::pipeline::QUEUED {
+        task.front.parked_from = Some(task.stage().to_string());
+    }
     task.set_stage_unbanked(crate::pipeline::PAUSED, message);
 }
 
@@ -2458,11 +2472,12 @@ fn forget_dead_live_sessions(live: &HashSet<String>) {
 /// `paused` and `blocked` are not steps a pipeline declares — they are
 /// dispatcher states no `on_pass`/`on_fail` ever names, so the step worth
 /// naming and scoring is not `was` but the *real* step behind the wait:
-/// `paused_at`, the gate that passed, or `blocked_from`, the step the task
-/// stopped on and will return to — exactly the two fields `spoolway resume`
-/// reads to tell one stop from the other. Everywhere else, `was` is the step
-/// that reported, and its own [`Step::destination`] against `stage` is what
-/// tells a pass from a fail — see [`Verdict`].
+/// `paused_at`, the gate that passed; `parked_from`, the step a person
+/// interrupted; or `blocked_from`, the step the task stopped on and will
+/// return to — the three fields `spoolway resume` reads to tell one stop
+/// from the other. Everywhere else, `was` is the step that reported, and its
+/// own [`Step::destination`] against `stage` is what tells a pass from a
+/// fail — see [`Verdict`].
 ///
 /// Both the step name and the position are worked out here, once, because
 /// they are facts about the pipeline the task is on at the moment it
@@ -2482,8 +2497,19 @@ fn arrival_event(
     let pipeline = task.and_then(|t| pipelines.for_task(t).ok());
 
     let (named, verdict) = match stage {
+        // `paused_at` names a gate; `parked_from` names a person's own
+        // interrupt (see the two fields' own comments in `src/task.rs`).
+        // Never both set, so falling back to the second whenever the first
+        // is absent picks up the step a `p`-park actually left — the common
+        // case now that `p` works from every state, not the rare one it was
+        // while `paused_at` alone was ever worth reading here.
         crate::pipeline::PAUSED => (
-            task.and_then(|t| t.front.paused_at.clone()),
+            task.and_then(|t| {
+                t.front
+                    .paused_at
+                    .clone()
+                    .or_else(|| t.front.parked_from.clone())
+            }),
             Verdict::Paused,
         ),
         crate::pipeline::BLOCKED => (
@@ -2501,8 +2527,11 @@ fn arrival_event(
     };
 
     // Falls back to the stage itself when there is no step to name — a
-    // paused/blocked task with no `paused_at`/`blocked_from` recorded, which
-    // `spoolway resume` never leaves behind but an edited task file could.
+    // task `p`-parked before it ever started is the real case that reaches
+    // this: it was on `queued`, which `park` never records into
+    // `parked_from` because no pipeline declares it as a step, so there is
+    // no step here to name or score, only the bare word `paused` and a `—`
+    // for its position.
     let step = named.clone().unwrap_or_else(|| stage.to_string());
     // The named step's own position in its pipeline's walk: its index plus
     // one — the steps up to and including it — over that plus the length of
@@ -4078,6 +4107,36 @@ mod tests {
         assert_eq!(task.front.blocked_from, None);
     }
 
+    /// `r` on a task parked before it ever started — no `paused_at`,
+    /// `parked_from` or `blocked_from` at all, exactly what `park` leaves on
+    /// a task still on `queued` — still resumes it, straight to the
+    /// pipeline's own entry step: `resume_task`'s guard reads `stage()`, not
+    /// the three fields, exactly so this case is never mistaken for
+    /// "nothing to resume".
+    #[test]
+    fn r_on_a_task_parked_before_it_started_puts_it_back_on_the_pipeline_entry() {
+        let repo = fixture("resume-key-queued-park");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "never-run", &[], None);
+        let mut task = repo.task("never-run").unwrap();
+        task.set_stage(crate::pipeline::PAUSED, None);
+        task.save().unwrap();
+
+        let mut board = Board::for_test();
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Down)
+            .unwrap();
+        assert_eq!(board.cursor.as_deref(), Some("never-run"));
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Char('r'))
+            .unwrap();
+
+        let task = repo.task("never-run").unwrap();
+        assert_eq!(task.stage(), "implement", "{}", task.stage());
+        assert_eq!(task.front.parked_from, None);
+        assert_eq!(task.front.resume, None);
+    }
+
     /// `r` on a row whose own rule says it is not resumable does
     /// nothing: the task stays exactly where it was.
     #[test]
@@ -4483,7 +4542,9 @@ mod tests {
 
     /// `p` on a row with nothing live parks it straight to `paused` with no
     /// panel at all — from `queued`, from a row parked on a quota clock, and
-    /// from a real step sitting in the gap between two lanes.
+    /// from a real step sitting in the gap between two lanes. `queued` is the
+    /// one case that leaves no `parked_from` at all: it is not a step any
+    /// pipeline declares, so a breadcrumb naming it would never be spent.
     #[test]
     fn pressing_p_with_nothing_live_parks_at_once_from_every_such_state() {
         let repo = fixture("pause-nothing-live");
@@ -4498,9 +4559,9 @@ mod tests {
 
         let mut board = Board::for_test();
         let cases = [
-            ("queued-task", "queued"),
-            ("gap-task", "implement"),
-            ("quota-task", "implement"),
+            ("queued-task", None),
+            ("gap-task", Some("implement")),
+            ("quota-task", Some("implement")),
         ];
         for (id, from) in cases {
             board.cursor = Some(id.to_string());
@@ -4511,11 +4572,7 @@ mod tests {
             assert!(matches!(board.mode, BoardMode::Browsing), "pausing {id}");
             let task = repo.task(id).unwrap();
             assert_eq!(task.stage(), crate::pipeline::PAUSED, "pausing {id}");
-            assert_eq!(
-                task.front.parked_from.as_deref(),
-                Some(from),
-                "pausing {id}"
-            );
+            assert_eq!(task.front.parked_from.as_deref(), from, "pausing {id}");
         }
     }
 
@@ -4631,13 +4688,13 @@ mod tests {
         let frame = strip(&board.frame(&repo, &pipelines, Phase::Waiting).unwrap());
         assert!(frame.contains("unqueue chain-refusals"), "{frame}");
         assert!(frame.contains("chain-refusals.md"), "{frame}");
-        assert!(frame.contains("[u] unqueue it"), "{frame}");
+        assert!(frame.contains("[enter] unqueue it"), "{frame}");
         // Still sitting in the queue — nothing moves until the panel is
         // answered.
         assert!(repo.task("chain-refusals").is_ok());
 
         board
-            .on_key(&repo, &pipelines, crate::screen::Key::Char('u'))
+            .on_key(&repo, &pipelines, crate::screen::Key::Enter)
             .unwrap();
 
         assert!(!repo.queue_dir().join("chain-refusals.md").exists());
@@ -4758,7 +4815,7 @@ mod tests {
             .on_key(&repo, &pipelines, crate::screen::Key::Char('u'))
             .unwrap();
         board
-            .on_key(&repo, &pipelines, crate::screen::Key::Char('u'))
+            .on_key(&repo, &pipelines, crate::screen::Key::Enter)
             .unwrap();
 
         assert_eq!(board.cursor.as_deref(), Some("month-instant"));
@@ -4784,7 +4841,7 @@ mod tests {
             .on_key(&repo, &pipelines, crate::screen::Key::Char('u'))
             .unwrap();
         board
-            .on_key(&repo, &pipelines, crate::screen::Key::Char('u'))
+            .on_key(&repo, &pipelines, crate::screen::Key::Enter)
             .unwrap();
 
         assert_eq!(board.cursor, None);
@@ -4815,10 +4872,10 @@ mod tests {
         // whole frame would prove nothing.
         assert!(frame.contains("chain-refusals"), "{frame}");
         assert!(frame.contains("month-instant"), "{frame}");
-        assert!(frame.contains("[U] unqueue them"), "{frame}");
+        assert!(frame.contains("[enter] unqueue them"), "{frame}");
 
         board
-            .on_key(&repo, &pipelines, crate::screen::Key::Char('U'))
+            .on_key(&repo, &pipelines, crate::screen::Key::Enter)
             .unwrap();
 
         assert!(repo.pending_dir().join("chain-refusals.md").exists());
@@ -4901,7 +4958,7 @@ mod tests {
         // Confirmed: both go, the gate released past `implement` and the
         // park sent back to the step it stopped on.
         board
-            .on_key(&repo, &pipelines, crate::screen::Key::Char('R'))
+            .on_key(&repo, &pipelines, crate::screen::Key::Enter)
             .unwrap();
         assert_eq!(repo.task("gate-board").unwrap().stage(), "review");
         assert_eq!(repo.task("quiet-pane").unwrap().stage(), "review");
@@ -4925,5 +4982,60 @@ mod tests {
             .unwrap();
 
         assert_eq!(repo.task("quiet-pane").unwrap().stage(), "review");
+    }
+
+    /// The letter that opens the resume-all, unqueue and unqueue-all panels
+    /// no longer answers them, the same as any other unrecognised key —
+    /// `enter` is the only key that does now, proven on each panel by the
+    /// tests above this one.
+    #[test]
+    fn the_old_confirming_letter_no_longer_answers_any_panel() {
+        let repo = fixture("panels-ignore-their-own-letter");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "gate-board", &[], None);
+        let mut gated = repo.task("gate-board").unwrap();
+        gated.front.paused_at = Some("implement".into());
+        gated.set_stage(crate::pipeline::PAUSED, None);
+        gated.save().unwrap();
+        add(&repo, "solo", &[], None);
+
+        let mut board = Board::for_test();
+
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Char('R'))
+            .unwrap();
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Char('R'))
+            .unwrap();
+        assert!(!matches!(board.mode, BoardMode::Browsing), "resume-all");
+        assert_eq!(
+            repo.task("gate-board").unwrap().stage(),
+            crate::pipeline::PAUSED
+        );
+
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Esc)
+            .unwrap();
+        board.cursor = Some("solo".to_string());
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Char('u'))
+            .unwrap();
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Char('u'))
+            .unwrap();
+        assert!(!matches!(board.mode, BoardMode::Browsing), "unqueue");
+        assert!(repo.task("solo").is_ok());
+
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Esc)
+            .unwrap();
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Char('U'))
+            .unwrap();
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Char('U'))
+            .unwrap();
+        assert!(!matches!(board.mode, BoardMode::Browsing), "unqueue-all");
+        assert!(repo.task("solo").is_ok());
     }
 }

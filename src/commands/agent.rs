@@ -1698,6 +1698,20 @@ mod tests {
         "secondary":null,"credits":null,"individual_limit":null,
         "spend_control_reached":null,"plan_type":null,"rate_limit_reached_type":null}"#;
 
+    /// The reset time a window is expected to print, spelled the same way
+    /// `quota_clause` spells it: a bare clock for a reset later today, and
+    /// `MM-DD HH:MM` for one on any other day. Written out here rather than
+    /// pinned as a literal so these tests read the same on the day one of
+    /// the captured resets happens to land on today's date.
+    fn expected_reset(resets_at: i64) -> String {
+        let (target, same_day) =
+            crate::task::local_instant(resets_at, chrono::Utc::now().timestamp());
+        match same_day {
+            true => target.format("%H:%M").to_string(),
+            false => target.format("%m-%d %H:%M").to_string(),
+        }
+    }
+
     /// codex's own row, once signed in with ChatGPT: the window labels are
     /// `five_hour`/`seven_day` and the reset is an absolute local time, as
     /// the task's own codex mockup draws it. The `timestamp` itself is
@@ -1714,14 +1728,8 @@ mod tests {
         );
         crate::platform::test_home::with_home(&home, || {
             let adapter = crate::agent::adapter("codex").expect("codex is a real adapter");
-            let five_hour_resets = chrono::DateTime::from_timestamp(1788611977, 0)
-                .unwrap()
-                .with_timezone(&chrono::Local)
-                .format("%m-%d %H:%M");
-            let seven_day_resets = chrono::DateTime::from_timestamp(1789151593, 0)
-                .unwrap()
-                .with_timezone(&chrono::Local)
-                .format("%m-%d %H:%M");
+            let five_hour_resets = expected_reset(1788611977);
+            let seven_day_resets = expected_reset(1789151593);
             match quota_clause(adapter) {
                 Clause::Ok(note) => {
                     assert!(
@@ -1756,14 +1764,8 @@ mod tests {
         );
         crate::platform::test_home::with_home(&home, || {
             let adapter = crate::agent::adapter("codex").expect("codex is a real adapter");
-            let five_hour_resets = chrono::DateTime::from_timestamp(1788611977, 0)
-                .unwrap()
-                .with_timezone(&chrono::Local)
-                .format("%m-%d %H:%M");
-            let seven_day_resets = chrono::DateTime::from_timestamp(1789151593, 0)
-                .unwrap()
-                .with_timezone(&chrono::Local)
-                .format("%m-%d %H:%M");
+            let five_hour_resets = expected_reset(1788611977);
+            let seven_day_resets = expected_reset(1789151593);
             let clause = quota_clause(adapter);
             let rendered = render_quota_row("codex", &clause);
             let mut lines = rendered.lines();

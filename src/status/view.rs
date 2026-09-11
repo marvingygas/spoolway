@@ -181,9 +181,10 @@ pub(crate) enum RecentEvent {
         at: String,
         id: String,
         /// The step that reported: `was`, the step the task moved from, for
-        /// an ordinary route — or `paused_at`/`blocked_from` when the
-        /// arrival itself is `paused`/`blocked`, since neither is a step any
-        /// pipeline declares.
+        /// an ordinary route — or `paused_at`, `parked_from` (whichever is
+        /// set) or `blocked_from` when the arrival itself is
+        /// `paused`/`blocked`, since none of those is a step any pipeline
+        /// declares.
         step: String,
         verdict: Verdict,
         /// The named step's own position in its pipeline's walk: its index
@@ -349,7 +350,7 @@ pub(super) fn resume_confirm_panel(gated: &[String]) -> Vec<String> {
     body.push(String::new());
     body.push("Resuming sends every one of them past its gate,".to_string());
     body.push("with nobody having looked at it first.".to_string());
-    crate::screen::panel("resume all", &body, "[R] resume all   [esc] cancel")
+    crate::screen::panel("resume all", &body, "[enter] resume them   [esc] cancel")
 }
 
 /// [`BoardMode::ConfirmUnqueue`]'s panel.
@@ -365,7 +366,7 @@ pub(super) fn unqueue_confirm_panel(id: &str, dir: &std::path::Path) -> Vec<Stri
     crate::screen::panel(
         &format!("unqueue {id}"),
         &body,
-        "[u] unqueue it   [esc] cancel",
+        "[enter] unqueue it   [esc] cancel",
     )
 }
 
@@ -388,7 +389,7 @@ pub(super) fn unqueue_all_confirm_panel(ids: &[String]) -> Vec<String> {
     body.push(String::new());
     body.push("Each goes back to pending. Running, paused and".to_string());
     body.push("blocked tasks stay where they are.".to_string());
-    crate::screen::panel("unqueue all", &body, "[U] unqueue them   [esc] cancel")
+    crate::screen::panel("unqueue all", &body, "[enter] unqueue them   [esc] cancel")
 }
 
 /// `path` with a leading run matching the home directory rewritten to `~`,
@@ -3156,6 +3157,42 @@ mod tests {
         let block = strip(&raw);
         assert!(
             block.contains("14:22   gate-board   implement   ● paused   1/5"),
+            "{block}"
+        );
+    }
+
+    /// A `p`-park carries no `paused_at` at all, only `parked_from` — the
+    /// line still has to name a step and a position rather than fall back to
+    /// the bare word `paused`, so this reads `parked_from` whenever
+    /// `paused_at` is absent.
+    #[test]
+    fn arriving_at_paused_falls_back_to_parked_from_when_there_is_no_gate() {
+        let repo = fixture("verdict-paused-parked-from");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "billing", &[], None);
+        let mut task = repo.task("billing").unwrap();
+        task.front.parked_from = Some("handover".into());
+        task.set_stage(crate::pipeline::PAUSED, None);
+        task.save().unwrap();
+        let tasks = repo.tasks().unwrap();
+
+        let mut recent = VecDeque::new();
+        push_recent(
+            &mut recent,
+            arrival_event(
+                "09:44",
+                "billing",
+                "handover", // `was` is ignored for paused/blocked
+                crate::pipeline::PAUSED,
+                &tasks,
+                &pipelines,
+            ),
+        );
+        let raw = ticker(&recent, 120, 5);
+        let block = strip(&raw);
+        // handover is index 3, with checks (1) still ahead: 3 + 1 over 4 + 1.
+        assert!(
+            block.contains("09:44   billing   handover   ● paused   4/5"),
             "{block}"
         );
     }
