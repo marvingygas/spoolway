@@ -36,7 +36,9 @@ Both shipped pipelines give every task a `document` step. Its lane runs the arch
 prompt, and the prompt is what resolves the task's `touches` against every document's
 `covers` — by reading `docs/` itself, not from anything spoolway hands it. The repository's own
 front pages, `README.md` and `DOCS.md`, are that prompt's too, and no other step may touch
-them. See `assets/prompts/archivist/PROMPT.md`.
+them. It reads both on every task and checks the diff's user-facing names against their
+examples, captions and screenshots, because neither page has a `covers` header to route a
+change there. See `assets/prompts/archivist/PROMPT.md`.
 
 The scope is one task's diff, not a plan's. That is what puts the documentation in the same
 pull request as the behaviour it describes, rather than in a separate change at the end.

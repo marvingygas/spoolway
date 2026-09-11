@@ -46,6 +46,8 @@ sometimes does. spoolway won't surprise you with a bill or an opinion.
 - **Trials.** Fork one task into an arm per pipeline and queue them together, then read the
   arms side by side in eval.
 - **Routines.** Keep the tasks you run over and over in `.spoolway/routines/`.
+- **Scheduled jobs.** Run a routine on a cron schedule; the dispatcher stays up for the next
+  one even when the queue is empty.
 - **Eval built in.** Every lane's spend and outcome land in a ledger, so you can see what
   your last pipeline edit did to pass rate and price.
 
@@ -122,7 +124,8 @@ spoolway dispatch      # watch the board, and step in only where you are needed
 
 *One row per task, grouped by `group:`. The board says what each lane is spending as it
 spends it, what every queued task is waiting on, and which tasks are paused for you. NEXT
-distinguishes a lane holding a question from a task waiting to be resumed past a gate.*
+distinguishes a lane holding a question from a task waiting to be resumed past a gate. It
+also shows the next scheduled job.*
 
 Every task on the board is in one of a few states:
 
@@ -135,9 +138,10 @@ Every task on the board is in one of a few states:
 | `unreachable` | A task it depends on is blocked, so it cannot start until you clear that one. |
 | `done` | Finished: the branch is handed over, the worktree removed, the task archived. |
 
-For JSON consumers, question-held rows now report `"state": "paused"` instead of
-`"state": "waiting_on_you"`. Use `next` to distinguish ``look at pane `<lane>``` from a
-gate's resume instruction.
+Run `spoolway jobs` to schedule any routine in `.spoolway/routines/`; the dispatcher fires it
+when its five-field cron expression comes round. See **[Jobs](docs/jobs.md)**.
+
+<img src="docs/screenshots/jobs.png" alt="the dispatcher waiting for two scheduled jobs">
 
 ### 5. Calibrate
 
