@@ -447,6 +447,20 @@ this applies to a board that is not drawn to a terminal, which has no bottom to 
 keeps every line. One blank row opens every frame, above the lockup, so its top line has a
 margin to sit in rather than landing flush against the pane's own edge.
 
+A row on a real step with no live lane reading it is `queued` — the word for a task that has
+genuinely not started a lane yet. The one exception is the ordinary gap between a handoff and
+its new lane: the instant a lane's turn ends, `spoolway report` writes the task's next stage,
+and the dispatcher's next pass takes a whole `interval` before it starts a lane there. A task
+caught in that gap still reads `running`, so the board does not flash `queued` on the word
+reserved for a task that has truly not started. The board only knows a handoff just happened by keeping, per row, a memory of its stage across
+the frames it draws — the same kind of per-frame memory it keeps for the RECENT ticker — and it
+stamps an arrival time the moment that stage changes, which is what lets it tell a handoff that
+just landed from a task that has run out of workers to pick it up. It holds that reading for
+two `dispatch.interval`s after the stage last changed, with no lane up for it, before falling
+back to `queued` if no lane has started by then. A task still on the pipeline's own reserved
+`queued` stage, never having started a step, has no such memory to consult and reads `queued`
+at once.
+
 The lockup mark turns while at least one row is running, and holds still the moment none is.
 Which of its two hand-drawn frames a draw picks is a function of the wall clock alone — the
 elapsed seconds taken modulo two — rather than a count of how many times the

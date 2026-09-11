@@ -129,7 +129,7 @@ Every task on the board is in one of a few states:
 | State | Meaning |
 |---|---|
 | `queued` | Waiting for its dependencies and a free slot. |
-| `running` | An agent is working the task's current step right now. |
+| `running` | An agent is working the task's current step, or it has just moved there and a lane is starting. |
 | `paused` | Needs a person: NEXT names either a pane holding a question or the route for resuming a gated task. |
 | `blocked` | Something needs a person. |
 | `unreachable` | A task it depends on is blocked, so it cannot start until you clear that one. |
