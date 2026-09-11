@@ -31,9 +31,9 @@ steps:
   # starts with `implement`'s opening turn rather than after it. Every task
   # passes through it on its way in, which is how one observer comes to be
   # running whatever the task count is: `observe.sh` takes a lock and the second
-  # task's run exits immediately, having found it held. A backgrounded `run:`
-  # step routes nowhere on failure — `background: true` refuses `on_fail` — so a
-  # task never waits for it and never fails because of it.
+  # task's run exits immediately, having found it held. This step declares no
+  # `on_fail`, so a background failure still routes nowhere — a task never
+  # waits for it and never fails because of it.
   #
   # A command step at the entry cuts the task's worktree itself, so there is no
   # lane it has to follow. Which also makes this the one plan-run assertion that

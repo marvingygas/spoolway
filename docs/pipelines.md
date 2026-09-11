@@ -474,15 +474,18 @@ worker slot either — nothing is competing for the model server.
 |---|---|---|
 | The next step | starts when the command exits | starts immediately |
 | Routing | exit 0 → `on_pass`, else `on_fail` | `on_pass`, taken at once |
-| `on_fail` | where a failure goes | **refused at load** |
-| `timeout` | routes to `on_fail` | the run is killed, and nothing routes |
+| `on_fail` | where a failure goes | the task goes there on the pass that finds the exit code, wherever the task has reached |
+| `timeout` | routes to `on_fail` | the run is killed with no exit code left, so nothing routes |
 | The output | `<task> · <step>.log`, under the project's own home | the same |
 
-`on_fail` on a background step is refused rather than ignored, and that is the whole design of
-the key: by the time the command exits the task has been somewhere else for minutes, and a
-route nothing can take reads as a handled failure while handling nothing. What the command
-wrote is in its log either way, and a run still going when the task is cleaned up is stopped
-with it rather than left writing into a worktree that has been removed.
+A background step that declares `on_fail` sends the task there on the pass that finds the run
+exited non-zero — wherever the task has reached by then, even a step further down the pipeline
+than this one. The task left this step on an earlier pass, so the dispatcher's own look after
+straggling runs (`Dispatcher::reap_stale_runs`) is what reads the exit code again and routes on
+it, the same look that stops a run past its timeout. A run that exits zero, or is still going
+when the task is cleaned up, changes nothing about where the task is. What the command wrote is
+in its log either way, and a run still going at cleanup is stopped with it rather than left
+writing into a worktree that has been removed.
 
 ### Watching, or not
 
@@ -582,9 +585,11 @@ nothing else: no worker slot, no model, no other task held up. So the default si
 above what real work takes, and a step that knows better says so — `timeout: 2h` for a
 nightly, `timeout: 60s` for a lint that should never take longer.
 
-A background command is bounded by the same key, even though nothing routes on its outcome.
-There the timeout is not a verdict on the work: it is what stops a process outliving
-everything that knew about it, on a task that blocked on its way to cleanup.
+A background command is bounded by the same key. A run that declares `on_fail` is routed on
+when it exits non-zero, but one stopped at its timeout leaves no exit code behind, so there is
+no verdict for `on_fail` to route on. There the timeout is not a verdict on the work: it is
+what stops a process outliving everything that knew about it, on a task that blocked on its
+way to cleanup.
 
 ### Which shell, and nothing to configure
 

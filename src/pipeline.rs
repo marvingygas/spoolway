@@ -267,7 +267,9 @@ pub enum StepKind {
     ///
     /// Blocking by default: the task sits here until the process ends, and its
     /// exit code picks `on_pass` or `on_fail`. With `background: true` the task
-    /// leaves on the same pass it started, and the process runs on unwatched.
+    /// leaves on the same pass it started, and the process runs on; if it
+    /// declares `on_fail`, a later pass that finds it exited non-zero routes
+    /// the task there, wherever it has reached by then.
     Command,
 }
 
@@ -515,9 +517,11 @@ pub struct Step {
     /// looks exactly like a slow one. What tells them apart is a number
     /// somebody wrote down.
     ///
-    /// It bounds a background run too, which nothing routes on — there the
-    /// alternative is a process outliving the task that started it, on a task
-    /// that never reaches cleanup because it blocked on the way.
+    /// It bounds a background run too, but stopping one at its timeout is not
+    /// a verdict `on_fail` can route on — the process is killed with no exit
+    /// code left behind, the same as one interrupted any other way. What it
+    /// stops is a process outliving the task that started it, on a task that
+    /// never reaches cleanup because it blocked on the way.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -527,11 +531,12 @@ pub struct Step {
 
     /// Let the task move on while the command keeps running.
     ///
-    /// The exit code is nobody's to route on afterwards — the task is already
-    /// somewhere else — so [`Pipeline::validate`] refuses `on_fail` here rather
-    /// than let a file read as though a late failure were handled. What the
-    /// command wrote is in its log, and a run still going at cleanup is stopped
-    /// with the task.
+    /// If the step declares `on_fail`, a later pass that finds the run exited
+    /// non-zero routes the task there — wherever it has reached by then, even
+    /// a step further down the pipeline than this one. A run that exits zero,
+    /// or is still going, changes nothing about where the task is. What the
+    /// command wrote is in its log either way, and a run still going at
+    /// cleanup is stopped with the task.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub background: bool,
 
@@ -1218,10 +1223,6 @@ impl Pipeline {
                             step.id
                         );
                     }
-                    // A background command's exit code arrives after the task
-                    // has gone, so there is nothing left to route. Refused
-                    // rather than ignored: an `on_fail` here reads as a handled
-                    // failure and handles nothing.
                     // `timeout: 0s` reads as "no limit" and means the opposite:
                     // every run of it is over the bound the moment it starts.
                     if step.timeout == Some(Duration::ZERO) {
@@ -1229,14 +1230,6 @@ impl Pipeline {
                             "step `{}` sets `timeout: 0s`, which would kill the command as soon \
                              as it started. There is no way to say `no limit` here — write the \
                              longest this command may reasonably take",
-                            step.id
-                        );
-                    }
-                    if step.background && step.on_fail.is_some() {
-                        bail!(
-                            "step `{}` is `background: true` and declares `on_fail` — the task \
-                             has already moved on by the time it exits, so nothing could route \
-                             there. Drop `background:` to wait for it, or drop `on_fail:`",
                             step.id
                         );
                     }
@@ -2781,22 +2774,6 @@ mod tests {
             message.contains("names both `run:` and `agent:`"),
             "{message}"
         );
-    }
-
-    /// The one that would otherwise read as a handled failure: by the time a
-    /// background command exits, the task has been somewhere else for a while
-    /// and nothing could route on it.
-    #[test]
-    fn rejects_a_background_command_that_declares_on_fail() {
-        let err = parse(
-            "steps:\n  - id: a\n    run: ./bench.sh\n    \
-             background: true\n    on_pass: z\n    on_fail: z\n  - id: z\n    end: true\n",
-        )
-        .unwrap_err();
-        let message = err.to_string();
-        assert!(message.contains("already moved on"), "{message}");
-        // And it says what to do about it, both ways round.
-        assert!(message.contains("Drop `background:`"), "{message}");
     }
 
     /// A command step starts no lane, so every key that configures one is a key

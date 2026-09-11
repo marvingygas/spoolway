@@ -930,6 +930,78 @@ else
   bad "cleanup stops a background command rather than orphaning it (pid $BENCH_PID)"
 fi
 
+# --------------------------------------------------------- background, on_fail
+# The refusal `pipeline check` used to make against `background: true` plus
+# `on_fail:` is gone — a background command that fails now routes the task
+# down its `on_fail`, whichever step the task has since reached. Proven with
+# two file gates rather than a sleep, so the assertion does not race the mock
+# pipeline's own speed (the whole thing above ran in under a second): `scratch`
+# only fails once told to, and `hold`, spliced in right after it, only passes
+# once told to — so the task is provably sitting well past `scratch`, still
+# going, when the failure lands.
+cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
+SCRATCH_FAIL="$LIVE/scratch-fail-now"
+SCRATCH_HOLD="$LIVE/scratch-hold-release"
+rm -f "$SCRATCH_FAIL" "$SCRATCH_HOLD"
+{
+  printf '\n  - id: scratch\n'
+  printf '    description: A background step whose command fails once told to.\n'
+  printf '    run: while [ ! -f %q ]; do sleep 0.2; done; echo scratch-failed >&2; exit 1\n' \
+    "$SCRATCH_FAIL"
+  printf '    background: true\n'
+  printf '    on_pass: hold\n'
+  printf '    on_fail: blocked\n'
+  printf '\n  - id: hold\n'
+  printf '    description: Holds the task here so the test can prove it moved past scratch.\n'
+  printf '    run: while [ ! -f %q ]; do sleep 0.2; done\n' "$SCRATCH_HOLD"
+  printf '    on_pass: review\n'
+} >> .spoolway/pipelines/default.yml
+# The same two rewrites `add_command_step` makes for one splice, done by hand
+# for two: `implement`'s own `on_pass: review` becomes the entry into
+# `scratch`, and `review`'s `loop: implement: 2` is renamed to name `hold` —
+# the step that now actually arrives at `review` on every lap.
+sed -i "0,/^    on_pass: review\$/s//    on_pass: scratch/" .spoolway/pipelines/default.yml
+sed -i "0,/^      implement: /s//      hold: /" .spoolway/pipelines/default.yml
+works "a background step that also declares on_fail checks out" "$SPOOLWAY" pipeline check
+
+dispatcher_restart   # the pipeline it is holding has neither new step in it
+task_doc "$LIVE/scratch-fail.md" scratch-fail "$BODY" "group: live" \
+  "touches: [notes/scratch-fail.md]"
+must "a task behind a background step that will later fail" \
+  "$SPOOLWAY" queue add --from "$LIVE/scratch-fail.md"
+
+if drive scratch-fail hold 60; then
+  ok "the task moved on past the background step while its command was still running"
+else
+  bad "the task moved on past the background step while its command was still running \
+(at \`$(stage_of scratch-fail)\`)"
+fi
+
+touch "$SCRATCH_FAIL"
+if drive scratch-fail blocked 60; then
+  ok "the background command's failure still reached the task, at the step it moved on to"
+else
+  bad "the background command's failure still reached the task, at the step it moved on to \
+(at \`$(stage_of scratch-fail)\`)"
+fi
+# The route is narrated on the dispatcher's own record, same as the mockup —
+# not the task's own Status Log, which `set_stage` writes with no message here,
+# the same as every other route a fall-through or a command step's ordinary
+# `on_fail` takes.
+if wait_for_text 20 "$E2E_DISPATCH_LOG" \
+  '`scratch` (background) exited 1 — moving to `blocked`'; then
+  ok "and the route taken is on the record"
+else
+  bad "and the route taken is on the record"
+fi
+has "blocked_from names the step it was actually pulled out of, not \`scratch\` itself" \
+  "blocked_from: hold" $SPOOLWAY_PROJECT_HOME/queue/scratch-fail.md
+
+# Let the stranded `hold` command finish rather than leave it running for the
+# rest of the suite — its own task has already moved on to `blocked`, so
+# nothing is waiting on it any more.
+touch "$SCRATCH_HOLD"
+
 # ----------------------------------------------------------- headless, no setsid
 # The reason this task exists: detaching a headless command step used to run
 # `setsid sh -c`, and macOS ships no `setsid` binary. It now calls

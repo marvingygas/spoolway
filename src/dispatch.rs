@@ -882,7 +882,17 @@ impl<'a> Dispatcher<'a> {
                 // the only place left that can. Without it, `background: true`
                 // plus a task that blocks on the way is a process nothing ever
                 // stops.
-                self.reap_stale_runs(&tasks[index], &pipeline, report);
+                //
+                // The same look also finds a background run that has since
+                // exited non-zero and declared `on_fail`. Rerouting it here —
+                // before `this_step` is acted on — is what lets the failure
+                // reach the task wherever this pass finds it, even a step it
+                // is only halfway through; the loop re-reads the stage on
+                // `continue`, same as the `FallThrough::To` arm below.
+                if self.reap_stale_runs(&mut tasks[index], &pipeline, report) {
+                    self.persist(&mut tasks[index])?;
+                    continue;
+                }
 
                 match fall_through(
                     &this_step,
@@ -3759,10 +3769,12 @@ impl<'a> Dispatcher<'a> {
                     }
                 }
 
-                // A background step is done with the moment it has started: the
-                // task moves on, and the exit code is nobody's to route on —
-                // which is why `on_fail` is refused on one. What it wrote is in
-                // its log either way.
+                // A background step is done with the moment it has started:
+                // the task moves on now, whatever the command goes on to do.
+                // If it declares `on_fail`, [`Dispatcher::reap_stale_runs`] is
+                // what reads the exit code later and routes on it — not here,
+                // since the task may be anywhere by the time it lands. What
+                // the command wrote is in its log either way.
                 if step.background {
                     report.actions.push(format!(
                         "{id}: started `{}` in the background — {}",
@@ -3870,17 +3882,26 @@ impl<'a> Dispatcher<'a> {
         }
     }
 
-    /// Stop any of this task's command runs that have outstayed their step's
-    /// `timeout:` — except the one on the step it is sitting on, which
-    /// [`Dispatcher::run_command`] bounds itself and can say more about.
+    /// Look after every one of this task's command runs except the one on the
+    /// step it is sitting on, which [`Dispatcher::run_command`] watches itself
+    /// and can say more about.
     ///
-    /// In practice this is the background ones. Nothing routes on those, so
-    /// their timeout is not a verdict on the work: it is the only thing standing
-    /// between `background: true` and a process that outlives everything that
-    /// knew about it.
-    fn reap_stale_runs(&self, task: &Task, pipeline: &Pipeline, report: &mut Report) {
+    /// In practice this is the background ones — the step that started each
+    /// one has already walked away from it, so this is the only place left
+    /// that ever looks again. Two things can be found: a run that has
+    /// outstayed its step's `timeout:`, stopped here because nothing else
+    /// would; and a finished run whose step declared `on_fail`, which is
+    /// routed on here because nowhere else asks. A step with no `on_fail`
+    /// keeps behaving exactly as it always has — its exit code is left
+    /// unread, the same as a run still going or one that passed.
+    ///
+    /// Answers whether it moved the task, which happens for at most one run
+    /// per call: rerouting changes what step counts as "the one it is sitting
+    /// on", so a second failure found in the same call is left for the pass
+    /// that follows to pick up against the new stage.
+    fn reap_stale_runs(&self, task: &mut Task, pipeline: &Pipeline, report: &mut Report) -> bool {
         if self.dry_run {
-            return;
+            return false;
         }
         let runs = crate::command_step::Runs::new(&self.repo.commands_dir());
         // A key is `<task> · <step>` — see `crate::command_step::Runs::key`.
@@ -3895,21 +3916,53 @@ impl<'a> Dispatcher<'a> {
             let Some(step) = pipeline.step(step_id) else {
                 continue;
             };
-            if runs.state(&key) != crate::command_step::RunState::Running {
-                continue;
+            match runs.state(&key) {
+                crate::command_step::RunState::Running => {
+                    let limit = step.command_timeout();
+                    if runs.elapsed(&key).unwrap_or_default() < limit {
+                        continue;
+                    }
+                    runs.stop(&key);
+                    report.actions.push(format!(
+                        "{}: background `{step_id}` ran past its timeout of {} and was stopped \
+                         — see {}",
+                        task.id(),
+                        crate::config::human_duration::format(limit),
+                        runs.log_path(&key).display()
+                    ));
+                }
+                // A zero exit is a pass for a step the task already walked
+                // away from — nothing to route on — so it is left exactly as
+                // unread as a step with no `on_fail` leaves every code.
+                crate::command_step::RunState::Exited(code) if code != 0 => {
+                    let Some(destination) = step.on_fail.clone() else {
+                        continue;
+                    };
+                    // Read once and cleared, the same discipline
+                    // `run_command`'s own `Exited` arm keeps: without it a
+                    // step that comes back round to `step_id` later would
+                    // read this stale code and route on it again with
+                    // nothing new having run.
+                    runs.forget(&key);
+                    report.actions.push(format!(
+                        "{}: `{step_id}` (background) exited {code} — moving to `{destination}`",
+                        task.id()
+                    ));
+                    // The step the task was actually pulled out of, not the
+                    // background one that failed — a resume from `blocked`
+                    // carries on from *there*, same as any other block. Read
+                    // before `set_stage` overwrites it.
+                    if destination == crate::pipeline::BLOCKED {
+                        let stopped_on = task.stage().to_string();
+                        crate::commands::set_blocked_from(task, &stopped_on);
+                    }
+                    task.set_stage(&destination, None);
+                    return true;
+                }
+                _ => {}
             }
-            let limit = step.command_timeout();
-            if runs.elapsed(&key).unwrap_or_default() < limit {
-                continue;
-            }
-            runs.stop(&key);
-            report.actions.push(format!(
-                "{}: background `{step_id}` ran past its timeout of {} and was stopped — see {}",
-                task.id(),
-                crate::config::human_duration::format(limit),
-                runs.log_path(&key).display()
-            ));
         }
+        false
     }
 
     /// Move a task to the blocked step and tell a person about it — or, in an
@@ -13850,8 +13903,10 @@ mod tests {
         // trip back from `review`.
         step.session = false;
         if background {
-            // Refused at load, and the fixture must not build a graph a project
-            // could not actually write.
+            // Cleared rather than left at the shipped `implement.on_fail:
+            // blocked`: most background fixtures are not about routing on a
+            // failure, and a caller that does want it declares it itself,
+            // same as any other project would.
             step.on_fail = None;
         }
         pipelines
@@ -14459,6 +14514,147 @@ mod tests {
             "the task moved on but the command did not survive it"
         );
         runs.stop(&key);
+    }
+
+    /// The whole point of the feature: a background command that fails routes
+    /// its task down that step's `on_fail`, on the pass that finds the exit
+    /// code — wherever the task has reached by then, not only where it stood
+    /// when the command started.
+    ///
+    /// `reap_stale_runs` is called directly rather than through a second
+    /// `pass()`: a second real pass would also re-examine `review`, the agent
+    /// step the task moved on to, and a `review` that has been started once
+    /// with no session ever reported for it is — correctly, and for reasons
+    /// this test has nothing to do with — an agent that died at launch, which
+    /// escalates on its own. Calling the function under test directly is what
+    /// isolates one behaviour from the other.
+    #[cfg(unix)]
+    #[test]
+    fn a_background_commands_failure_routes_the_task_wherever_it_has_moved_on() {
+        let repo = fixture("command-background-fail");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]);
+        let mut pipelines = pipelines_running("exit 1", true);
+        let name = pipelines.default.clone();
+        pipelines
+            .pipelines
+            .get_mut(&name)
+            .unwrap()
+            .steps
+            .iter_mut()
+            .find(|s| s.id == "implement")
+            .unwrap()
+            .on_fail = Some(crate::pipeline::BLOCKED.to_string());
+
+        Dispatcher::new(&repo, &pipelines, &mux, false)
+            .pass()
+            .unwrap();
+        let mut task = reload(&path);
+        assert_eq!(
+            task.stage(),
+            "review",
+            "the task must have moved on before the command's failure is even possible to read"
+        );
+        // Moved on further still, by hand — proving the reroute reaches
+        // wherever the task actually is, not only the step right after the
+        // one that failed.
+        task.set_stage("document", None);
+
+        let key = crate::command_step::Runs::key("implement", "demo");
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        for _ in 0..50 {
+            if runs.state(&key) != crate::command_step::RunState::Running {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Exited(1));
+
+        let pipeline = pipelines.pipelines.get(&name).unwrap();
+        let mut report = Report::default();
+        let rerouted = Dispatcher::new(&repo, &pipelines, &mux, false).reap_stale_runs(
+            &mut task,
+            pipeline,
+            &mut report,
+        );
+
+        assert!(
+            rerouted,
+            "a non-zero exit with on_fail declared must reroute the task"
+        );
+        assert_eq!(task.stage(), "blocked");
+        assert_eq!(
+            task.front.blocked_from.as_deref(),
+            Some("document"),
+            "blocked_from names the step the task was actually pulled out of, not the \
+             background step that failed"
+        );
+        assert!(
+            report
+                .actions
+                .iter()
+                .any(|a| a.contains("`implement` (background) exited 1")
+                    && a.contains("moving to `blocked`")),
+            "{:?}",
+            report.actions
+        );
+    }
+
+    /// The other half: a background command that passes, or one still going,
+    /// changes nothing about where the task is — a zero exit is left exactly
+    /// as unread as a step with no `on_fail` leaves every code.
+    #[cfg(unix)]
+    #[test]
+    fn a_background_commands_success_leaves_the_task_where_it_already_is() {
+        let repo = fixture("command-background-pass");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]);
+        let mut pipelines = pipelines_running("exit 0", true);
+        let name = pipelines.default.clone();
+        pipelines
+            .pipelines
+            .get_mut(&name)
+            .unwrap()
+            .steps
+            .iter_mut()
+            .find(|s| s.id == "implement")
+            .unwrap()
+            .on_fail = Some(crate::pipeline::BLOCKED.to_string());
+
+        Dispatcher::new(&repo, &pipelines, &mux, false)
+            .pass()
+            .unwrap();
+        let mut task = reload(&path);
+        assert_eq!(task.stage(), "review");
+
+        let key = crate::command_step::Runs::key("implement", "demo");
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        for _ in 0..50 {
+            if runs.state(&key) != crate::command_step::RunState::Running {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Exited(0));
+
+        let pipeline = pipelines.pipelines.get(&name).unwrap();
+        let mut report = Report::default();
+        let rerouted = Dispatcher::new(&repo, &pipelines, &mux, false).reap_stale_runs(
+            &mut task,
+            pipeline,
+            &mut report,
+        );
+
+        assert!(
+            !rerouted,
+            "a zero exit must not move a task that already moved on"
+        );
+        assert_eq!(task.stage(), "review");
+        assert_eq!(
+            runs.state(&key),
+            crate::command_step::RunState::Exited(0),
+            "a zero exit is left exactly as unread as a step with no on_fail leaves it"
+        );
     }
 
     /// A task standing on a background step whose run is already going moves

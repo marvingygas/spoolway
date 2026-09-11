@@ -44,7 +44,7 @@
 #                     on_pass <default>  It carries on, findings and all.
 #   timeout           <duration>         How long a command step may run, e.g. `90s`.
 #                                        Absent: 30m.
-#   background        true               The task moves on; `on_fail` is refused.
+#   background        true               The task moves on; `on_fail` routes it later.
 #                     false <default>    The task waits for the command.
 #   headless          true               The command runs detached, with no pane.
 #                     false <default>    It runs in a pane of its own.

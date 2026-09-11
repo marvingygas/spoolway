@@ -102,8 +102,8 @@ impl Runs {
     }
 
     /// Everything the command wrote, both streams, kept after the run is
-    /// forgotten — for a background run it is the *only* account of what
-    /// happened, since nothing routes on its outcome.
+    /// forgotten — for a background run with no `on_fail` it is the *only*
+    /// account of what happened, since nothing routes on its outcome.
     pub fn log_path(&self, key: &str) -> PathBuf {
         self.dir.join(format!("{key}.log"))
     }

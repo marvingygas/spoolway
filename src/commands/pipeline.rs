@@ -460,7 +460,7 @@ fn template() -> String {
          \x20\x20- id: handover\n\
          \x20\x20\x20\x20run: spoolway stack\n\
          \x20\x20\x20\x20# timeout: 45m             30m unless the step says otherwise\n\
-         \x20\x20\x20\x20# background: true         let the task move on; then `on_fail` is refused\n\
+         \x20\x20\x20\x20# background: true         let the task move on; `on_fail` still routes it later\n\
          \x20\x20\x20\x20# headless: true            run detached, with no pane, the way every command did before\n\
          \x20\x20\x20\x20# last: true                only the top task of a chain runs it\n\
          \x20\x20\x20\x20on_pass: done\n\
