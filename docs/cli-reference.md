@@ -354,7 +354,7 @@ fingerprint of the tracked `.spoolway/` configuration, recorded on every lane. O
 pipeline, its versions inside it newest first.
 
 Bare, with no flag at all, no `--json`, and stdout a real terminal, this opens a screen instead:
-four views — `pipelines`, `steps`, `runs`, `skills` — cycled with `tab`, a cursor over the rows
+three views — `pipelines`, `steps`, `runs` — cycled with `tab`, a cursor over the rows
 with `↑↓`, a filter panel (`f`) over every flag below, `e` to export the rows on screen to
 `.spoolway/evals/eval-<view>-YYYY-MM-DD-HHMMSS.csv` — with a `-2`, `-3` and so on appended
 when that name is already taken — `r` to refresh, `q` to quit. Reads keys the same way
@@ -383,18 +383,18 @@ prints a note to stderr saying where the table moved to, and otherwise behaves e
 | `--group <GROUP>` | `--runs` only: only runs whose task carries this `group:` |
 | `--trial <ID>` | `--runs` only: one trial's arms, side by side on pass rate, cost and time, plus a delta line per arm against the first |
 | `--csv` | The same rows this would print, as CSV. Refused together with the global `--json` |
-| `--by [<task\|group\|step\|model\|project\|month\|skill\|lane>]` | Deprecated: see `spoolway spend --help` |
+| `--by [<task\|group\|step\|model\|project\|month\|lane>]` | Deprecated: see `spoolway spend --help` |
 
 See [Comparing versions](eval.md) and [Cost accounting](cost.md).
 
-### `spoolway spend [<task\|group\|step\|model\|project\|month\|skill\|lane>]`
+### `spoolway spend [<task\|group\|step\|model\|project\|month\|lane>]`
 
 Read the lane ledger back out as a spend summary: what the pipeline has spent, grouped by
-task, group, step, model, project, month or skill, or one row per lane with `lane`. Bare,
-with no cut named, this still picks one: `step`, or `project` when more than one project is
-in scope. Prints a skills block below the pipeline's table where the ledger holds skill
-spend, and sweeps this project's interactive sessions onto the ledger before it prints — see
-[Skill sessions](cost.md#skill-sessions).
+task, group, step, model, project, month, or one row per lane with `lane`. Bare, with no cut
+named, this still picks one: `step`, or `project` when more than one project is in scope. It
+reads lanes only — every line that is not a lane is skipped — and sweeps this project's
+interactive sessions onto the ledger before it prints — see [Skill
+sessions](cost.md#skill-sessions).
 
 | Flag | Meaning |
 |---|---|

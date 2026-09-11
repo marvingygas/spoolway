@@ -50,10 +50,9 @@ Two kinds of finding are in scope, and the second matters as much as the first:
    the evidence a finding cites has to be a real line from a real document, not a summary of
    one.
 
-3. **Read the ledger.** `spoolway spend step --since <window>` and
-   `spoolway spend skill --since <window>` price exactly what step 1 counted; call them
-   rather than recomputing anything from the raw usage records. A step or a skill named in
-   more than one pipeline is one row here — that is the ledger's own grouping, and this
+3. **Read the ledger.** `spoolway spend step --since <window>` prices exactly what step 1
+   counted; call it rather than recomputing anything from the raw usage records. A step named
+   in more than one pipeline is one row here — that is the ledger's own grouping, and this
    procedure does not second-guess it. Then `spoolway eval --runs --since <window>` for one row
    per run: its CTX PEAK column is how close a lane came to filling its model's window, and
    BLOCKS is how often one gave up.

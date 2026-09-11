@@ -252,6 +252,17 @@ impl Entry {
     pub fn is_skill(&self) -> bool {
         self.skill_label().is_some()
     }
+
+    /// Whether this line belongs to a lane, and so is worth a row in
+    /// `spoolway eval` or `spoolway spend`: every reader over those two now
+    /// asks this instead of `!is_skill()`, since an interactive line's
+    /// `agent` is the one thing every writer of one already agrees on,
+    /// where `is_skill()` also has to resolve the legacy shapes
+    /// `skill_label` reads back. Historical interactive lines stay on disk;
+    /// this is where a reader skips them.
+    pub fn is_lane(&self) -> bool {
+        self.agent != INTERACTIVE_AGENT
+    }
 }
 
 /// A model's window and its per-1M-token prices, matching one glob over its
@@ -1128,11 +1139,7 @@ fn read_transcript(kind: &str, path: &Path) -> Transcript {
 /// The skill a slash command names: whatever the command is actually called.
 /// `spoolway-plan` is `spoolway-plan`, `my-plan` is `my-plan`, `clear` is
 /// `clear` — nothing is rewritten on the way in, so the name in the ledger is
-/// the name a person types. Which of those get a block of their own under
-/// `spoolway eval` is a later decision, [`crate::config::Config::skills`]'s
-/// to make; this only records what actually ran, so a name left off that list
-/// today is still banked under its real name and can be promoted to a block
-/// just by adding it.
+/// the name a person types; this only records what actually ran.
 ///
 /// A `spoolway-` prefix used to be stripped here, so that `/spoolway-plan`
 /// banked as `plan`. It meant `config.toml` named one skill by a name that
@@ -4513,6 +4520,26 @@ mod tests {
         };
         assert_eq!(lane.skill_label(), None);
         assert!(!lane.is_skill());
+    }
+
+    /// `is_lane` is what `spoolway eval` and `spoolway spend` now filter the
+    /// ledger through, in place of `!is_skill()` — pinned against both an
+    /// interactive line and a lane line so the two never trade places.
+    #[test]
+    fn is_lane_tells_a_lane_from_an_interactive_session() {
+        let lane = Entry {
+            task: "login".into(),
+            step: "review".into(),
+            pipeline: "default".into(),
+            ..plain_entry()
+        };
+        assert!(lane.is_lane());
+
+        let interactive = Entry {
+            agent: INTERACTIVE_AGENT.into(),
+            ..plain_entry()
+        };
+        assert!(!interactive.is_lane());
     }
 
     // ------------------------------------------------ settled lanes, swept

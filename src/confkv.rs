@@ -45,13 +45,6 @@ pub struct Reference {
 /// them.
 pub const REFERENCE: &[Reference] = &[
     Reference {
-        key: "skills",
-        values: "<names>",
-        default: "spoolway-plan",
-        sentence: "Which skills `spoolway eval` gives a block of their own; every other \
-                    name is left off the table.",
-    },
-    Reference {
         key: "dispatch.backend",
         values: "herdr, tmux, headless",
         default: "herdr",
@@ -1215,8 +1208,22 @@ mod tests {
 
         assert_eq!(kind("agents.claude.session_reuse_ctx"), Kind::Number);
         assert_eq!(kind("agents.pi.kind"), Kind::Text);
-        assert_eq!(kind("skills"), Kind::List);
         assert_eq!(kind("update.check"), Kind::Bool);
+    }
+
+    /// A list of scalars is one editable field, whichever key it sits under —
+    /// pinned directly against a synthetic value now that no field in the
+    /// default config is itself a list, the way `skills` used to be.
+    #[test]
+    fn a_list_of_scalars_gets_kind_list() {
+        let mut path = String::new();
+        let mut out = Vec::new();
+        walk(
+            &Value::Array(vec![Value::String("a".into()), Value::String("b".into())]),
+            &mut path,
+            &mut out,
+        );
+        assert_eq!(out[0].kind, Kind::List);
     }
 
     /// A profile that omits `concurrency` can still be given one, the way a
@@ -1263,9 +1270,6 @@ mod tests {
 
         let updated = set(&config, "agents.pi.concurrency", "4").unwrap();
         assert_eq!(updated.agents["pi"].concurrency, 4);
-
-        let updated = set(&config, "skills", "plan, queue").unwrap();
-        assert_eq!(updated.skills, ["plan", "queue"]);
     }
 
     /// `[models]` ships empty, so — like `[pricing]` before it — a glob is

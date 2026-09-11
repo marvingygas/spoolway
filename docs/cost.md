@@ -62,19 +62,13 @@ implement         4      52.2k      15.4k     794.4k          0           0     
 review            4        536     222.1k     27.22M     568.3k       24.85       53m
 pipeline         17     118.4k     339.9k     36.57M     683.2k       31.12     3h29m
 
-SKILL      SESSIONS         IN        OUT    CACHE R    CACHE W    COST USD
-plan              3       9.1k      41.2k     18.44M      92.0k        8.30
-queue             2       1.4k       6.7k      3.12M      11.4k        1.21
-skills            6      12.7k      59.8k     27.64M     128.3k       12.15
-
 total                    131.1k     399.7k     64.21M     811.5k       43.27
 ```
 
-Two tables, two units, one grand total — see [Skill sessions](#skill-sessions). Each table
-closes with its own subtotal, `pipeline` under the lanes and `skills` under the sessions, and
-`total` is the one line that spans both — carrying no count and no `WALL`, since neither column
-means the same thing on both sides of it. A project whose ledger holds no skill line prints the
-first table alone, with `total` on its last row.
+One table and one total. The rows are the ledger grouped by the named cut; the last row, `total`,
+is the sum of every row above it — the same columns, all of them filled, with no second
+population left to hold apart. Every line of spend that is not a lane is skipped wherever this
+table is read, so it shows lanes only.
 
 ### Reading a row
 
@@ -92,17 +86,12 @@ group into a floor on its own.
 ### Grouping
 
 The cut is a plain positional argument: `task`, `group`, `step`, `model`, `project`, `month`,
-`skill`, `lane`. Each answers a different question — `step` says where the pipeline's spend
-goes, `model` what each one costs to run, `task` and `group` what a piece of work came to.
-`skill` cuts the ledger the other way, folding every lane into a single `pipeline` row so the
-skills can be compared against it. `lane` is the one cut that prints a different table
-entirely: one row per lane, newest last, instead of a grouped summary.
+`lane`. Each answers a different question — `step` says where the pipeline's spend goes,
+`model` what each one costs to run, `task` and `group` what a piece of work came to. `lane` is
+the one cut that prints a different table entirely: one row per lane, newest last, instead of a
+grouped summary.
 
 It defaults to `step`, or to `project` when more than one project is in scope.
-
-A skill line carries no task and no group, so it appears in the skills block rather than in a
-`--by task` or `--by group` row: the transcript says which skill ran, never which group it was
-about.
 
 Under the global `--json`, `spoolway spend` does not honour the cut at all: it dumps the
 matching ledger entries themselves, raw and ungrouped, whatever cut was named. A script wanting
@@ -146,14 +135,12 @@ this project's ledger only, never to another project's under `--all`.
 
 A skill line is counted in **distinct sessions**, not rows: one session banks a line every
 time it is swept. It carries no run, no outcome and `wall_s: 0` — a session's open hours
-measure how long you had the window up, not model time — which is why the skills block has no
-WALL column, and why `spoolway eval` keeps skill spend out of the pipeline blocks entirely.
+measure how long you had the window up, not model time. That is why neither `spoolway eval`
+nor `spoolway spend` shows skill spend in its tables: both read lanes only, and a skill session
+is not a lane.
 
-Every command's real name reaches the ledger, but not every name earns a block of its own on
-`spoolway eval` — `skills` in `config.toml` decides that, defaulting to `["spoolway-plan"]`.
-A name left off that list is still counted in full in the ledger; only `spoolway eval` narrows
-to what is registered. See [Naming your own
-skills](configuration.md#skills--which-skills-get-a-block-of-their-own-under-spoolway-eval).
+Every command's real name reaches the ledger, and every name is counted in full — no list
+narrows what is banked.
 
 What it cannot do:
 

@@ -1694,6 +1694,19 @@ mod tests {
         "individual_limit":null,"spend_control_reached":null,"plan_type":"plus",
         "rate_limit_reached_type":null}"#;
 
+    /// How a reset instant reads in the rendered row, by the same rule
+    /// `quota_clause` itself uses: bare `HH:MM` when it falls on today, and
+    /// `MM-DD HH:MM` on any other day. Spelling `%m-%d %H:%M` out in a test
+    /// instead makes it pass every day but the one the fixture's own reset
+    /// lands on.
+    fn reset_display(ts: i64) -> String {
+        let (target, same_day) = crate::task::local_instant(ts, chrono::Utc::now().timestamp());
+        match same_day {
+            true => target.format("%H:%M").to_string(),
+            false => target.format("%m-%d %H:%M").to_string(),
+        }
+    }
+
     const NULL_RATE_LIMITS: &str = r#"{"limit_id":"codex","limit_name":null,"primary":null,
         "secondary":null,"credits":null,"individual_limit":null,
         "spend_control_reached":null,"plan_type":null,"rate_limit_reached_type":null}"#;
@@ -1714,14 +1727,8 @@ mod tests {
         );
         crate::platform::test_home::with_home(&home, || {
             let adapter = crate::agent::adapter("codex").expect("codex is a real adapter");
-            let five_hour_resets = chrono::DateTime::from_timestamp(1788611977, 0)
-                .unwrap()
-                .with_timezone(&chrono::Local)
-                .format("%m-%d %H:%M");
-            let seven_day_resets = chrono::DateTime::from_timestamp(1789151593, 0)
-                .unwrap()
-                .with_timezone(&chrono::Local)
-                .format("%m-%d %H:%M");
+            let five_hour_resets = reset_display(1788611977);
+            let seven_day_resets = reset_display(1789151593);
             match quota_clause(adapter) {
                 Clause::Ok(note) => {
                     assert!(
@@ -1756,14 +1763,8 @@ mod tests {
         );
         crate::platform::test_home::with_home(&home, || {
             let adapter = crate::agent::adapter("codex").expect("codex is a real adapter");
-            let five_hour_resets = chrono::DateTime::from_timestamp(1788611977, 0)
-                .unwrap()
-                .with_timezone(&chrono::Local)
-                .format("%m-%d %H:%M");
-            let seven_day_resets = chrono::DateTime::from_timestamp(1789151593, 0)
-                .unwrap()
-                .with_timezone(&chrono::Local)
-                .format("%m-%d %H:%M");
+            let five_hour_resets = reset_display(1788611977);
+            let seven_day_resets = reset_display(1789151593);
             let clause = quota_clause(adapter);
             let rendered = render_quota_row("codex", &clause);
             let mut lines = rendered.lines();

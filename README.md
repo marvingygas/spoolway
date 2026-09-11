@@ -251,8 +251,6 @@ See **[Issue Tracking](docs/configuration.md#issue_tracking--a-hook-fired-on-fou
 - Set specific models for generating pipelines or pull request summaries.
 
 ```toml
-skills = ["spoolway-plan"]   # which skills `spoolway eval` gives a block of their own
-
 [dispatch]
 backend = "herdr"            # herdr, tmux, or headless
 herdr_mode = "split"         # "split": a workspace per task; "grouped": one shared tab, a pane per task
@@ -318,9 +316,9 @@ spoolway eval
 
 <img src="docs/screenshots/eval.png" alt="the eval screen">
 
-*The eval screen on its runs view, one row per attempt at a task — `tab` cycles the four
-views: the version comparisons per pipeline and per step, this one, and what your skills
-came to. `f` filters, `e` exports CSV.*
+*The eval screen on its runs view, one row per attempt at a task — `tab` cycles the three
+views: the version comparisons per pipeline and per step, and this one. `f` filters, `e`
+exports CSV.*
 
 ## Documentation
 

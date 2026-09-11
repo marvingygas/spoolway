@@ -105,7 +105,7 @@ pub enum Command {
     Eval(EvalArgs),
 
     /// Read the lane ledger back out as a spend summary — by task, group,
-    /// step, model, skill, project, month, or one row per lane.
+    /// step, model, project, month, or one row per lane.
     Spend(SpendArgs),
 
     /// Report the outcome of a step. This is what prompts call when done.
@@ -378,9 +378,6 @@ pub enum SpendBy {
     Group,
     Step,
     Model,
-    /// Which skill a session was running. Every lane folds into one
-    /// `pipeline` row, so the skills can be compared against it.
-    Skill,
     /// Which project the lane ran in. The useful cut once `--all` is on.
     Project,
     /// Calendar month, local time. What a monthly bill is grouped by.
@@ -400,7 +397,7 @@ pub enum SpendBy {
         believing a delta: a version that ran four runs can swing a long way on luck alone, \
         and the column is there to say so.\n\n\
         `spoolway spend` is a different read of the same ledger: a table grouped by task, \
-        group, step, model, project, month or skill, or one row per lane. `eval --by` still \
+        group, step, model, project or month, or one row per lane. `eval --by` still \
         works as a deprecated alias for it.",
     after_long_help = "\x1b[1mExamples:\x1b[0m\n  \
         spoolway eval                       every pipeline, the last ten versions\n  \
@@ -507,7 +504,7 @@ impl EvalArgs {
 #[derive(Debug, Args)]
 #[command(
     long_about = "Read the lane ledger back out as a spend summary, grouped by task, group, \
-        step, model, project, month or skill, or one row per lane.\n\n\
+        step, model, project or month, or one row per lane.\n\n\
         Every figure is collected rather than estimated: token counts come from the \
         transcripts the agents themselves wrote, and a model with no configured price is \
         reported as unpriced rather than counted as free. A ledger lives under its own \
@@ -525,7 +522,6 @@ impl EvalArgs {
         spoolway spend group --project webshop      one named project\n\n  \
         spoolway spend --month 2026-08              one calendar month, local time\n  \
         spoolway spend month --all                  what each month came to\n  \
-        spoolway spend skill                        skills against the pipeline\n  \
         spoolway spend --since 7d                   a duration back from now\n  \
         spoolway spend --since 2026-06-01 --until 4h   dates and durations, either end\n\n  \
         spoolway spend --csv > report.csv           the same rows, flat\n\n  \
@@ -1300,6 +1296,36 @@ mod tests {
     fn spend_reads_its_cut_as_a_positional() {
         assert_eq!(spend_args(&["task"]).by, Some(SpendBy::Task));
         assert_eq!(spend_args(&["lane"]).by, Some(SpendBy::Lane));
+    }
+
+    /// The `skill` cut is gone, and clap is what refuses it: the positional
+    /// is a `SpendBy`, so an unknown value never reaches `spend::print`. The
+    /// rendered error is also what the user reads, so this pins the list of
+    /// cuts it offers instead of only pinning that parsing failed.
+    #[test]
+    fn spend_refuses_the_skill_cut() {
+        let err = Cli::try_parse_from(["spoolway", "spend", "skill"])
+            .expect_err("`spend skill` should be refused");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("invalid value 'skill'"),
+            "expected clap's invalid-value error, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("[possible values: task, group, step, model, project, month, lane]"),
+            "expected the cut list without `skill`, got: {rendered}"
+        );
+    }
+
+    /// `eval --by` takes a plain string and resolves it through the same
+    /// `SpendBy` value list, so the deprecated alias refuses `skill` too.
+    #[test]
+    fn eval_by_skill_is_refused() {
+        assert_eq!(eval_args(&["--by", "skill"]).by.as_deref(), Some("skill"));
+        assert!(
+            <SpendBy as clap::ValueEnum>::from_str("skill", true).is_err(),
+            "`eval --by skill` should not resolve to a cut"
+        );
     }
 
     #[test]
