@@ -8,6 +8,10 @@ description: Build or change a spoolway pipeline — the graph of steps in `.spo
 A step is placement; a prompt is behaviour. Adding a step usually means
 writing the prompt it runs. One skill owns both.
 
+The flow itself is the person's design. This skill sets one up from
+scratch, or edits one they already run, and keeps the contract holding
+while it does — it does not decide the shape for them.
+
 ## Before you write
 
     spoolway pipeline contract    the format: every key, every rule, a blank to copy
@@ -24,8 +28,12 @@ what the loader enforces.
   high effort. These steps decide what every later step does.
 - Implementation and documentation run on the cheapest model that can do
   them — a local one where the contract says local models are in play.
-- Fewer steps is cheaper. Cut a step before you cut a model: a compact
-  pipeline on good models beats a long one on weak ones.
+- Prefer fewer steps, but not because fewer is always cheaper. A step
+  asked to hold too much in one pass pays for it in laps, context
+  pressure and blocked lanes, and splitting it can cost less than keeping
+  it whole. Judge by the prompt: one role, one pass, one thing to
+  produce. Where a prompt wants two of those, put splitting to the person
+  as an option; otherwise leave the step whole.
 
 ## Procedure
 
