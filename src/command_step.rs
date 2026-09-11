@@ -371,8 +371,8 @@ impl Runs {
     /// Wait for the wrapper's pid file to appear — the one thing that says a
     /// run actually got going, whether it was spawned detached by
     /// [`Runs::start`] or handed to a pane by [`crate::mux::Mux::run_in_pane`].
-    /// A wrapper that never wrote one failed before it got that far: a
-    /// missing `setsid`, a backend that dropped the script on the floor.
+    /// A wrapper that never wrote one failed before it got that far: no `sh`
+    /// on PATH, a backend that dropped the script on the floor.
     pub fn await_started(&self, key: &str) -> Result<u32> {
         match crate::headless::await_pid_file(|| self.read_pid(key)) {
             Some(pid) => Ok(pid),
@@ -487,26 +487,37 @@ impl Runs {
 
 /// Spawn a wrapper script detached, so it outlives the pass that started it.
 ///
-/// `setsid sh -c` on Unix, unchanged. On Windows there is no `setsid`: the
-/// process group and the named job [`crate::headless::spawn_detached`] puts
-/// it in are that platform's answer to the same problem, and `is_running`
-/// off `crate::lock` is its answer to `/proc` — both already exist for
-/// [`crate::headless::alive`] to read liveness through.
+/// `libc::setsid()`, called in the child between fork and exec, on Unix —
+/// that is what `setsid(1)` itself does, and calling the syscall directly
+/// means this no longer depends on that binary being on PATH, which macOS
+/// does not ship and Homebrew's keg-only `util-linux` does not fix. On
+/// Windows there is no `setsid`: the process group and the named job
+/// [`crate::headless::spawn_detached`] puts it in are that platform's answer
+/// to the same problem, and `is_running` off `crate::lock` is its answer to
+/// `/proc` — both already exist for [`crate::headless::alive`] to read
+/// liveness through.
 #[cfg(unix)]
 fn spawn_wrapper(script: &str, cwd: &Path) -> Result<std::process::Child> {
-    std::process::Command::new("setsid")
-        .arg("sh")
-        .arg("-c")
-        .arg(script)
+    use std::os::unix::process::CommandExt;
+
+    let mut command = std::process::Command::new("sh");
+    command.arg("-c").arg(script);
+    // SAFETY: `setsid()` only detaches the child into its own session; it
+    // touches nothing this process holds, and runs after `fork` so a failure
+    // in it cannot affect this process either.
+    unsafe {
+        command.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    command
         .current_dir(cwd)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .context(
-            "could not start a command step: `setsid` is needed to detach it from this \
-             dispatch pass",
-        )
+        .context("could not start a command step")
 }
 
 /// See the Unix arm's doc — same contract, this platform's mechanism.
@@ -521,9 +532,10 @@ fn spawn_wrapper(script: &str, cwd: &Path) -> Result<std::process::Child> {
     crate::headless::spawn_detached(command).context("could not start a command step")
 }
 
-// Every test below starts a real run: `setsid sh -c` on Unix, a detached
-// PowerShell wrapper in a named job on Windows — see `spawn_wrapper` and
-// `Runs::wrapper_body`. Both are exercised here, each on its own platform.
+// Every test below starts a real run: `sh -c` under `libc::setsid()` on
+// Unix, a detached PowerShell wrapper in a named job on Windows — see
+// `spawn_wrapper` and `Runs::wrapper_body`. Both are exercised here, each on
+// its own platform.
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -37,7 +37,7 @@ Or by hand: every release attaches one archive per target — `spoolway-<triple>
 
 | Requirement | What it means |
 |---|---|
-| **A multiplexer** | herdr or tmux, unless you run the headless backend, which needs no multiplexer at all. On Linux, headless also wants `setsid` to detach a lane from the dispatcher |
+| **A multiplexer** | herdr or tmux, unless you run the headless backend, which needs no multiplexer at all. It runs on any Unix host and detaches its lanes with the `setsid` syscall, so no `setsid` binary is needed on `PATH` |
 | **Agent binaries** | `pi` for local lanes, `claude` for the review step — or whatever your own configuration points at |
 | **git** | And `gh`, if your pipeline opens pull requests |
 
@@ -305,13 +305,12 @@ below is genuinely everything the platforms differ on.
 
 ### Linux
 
-The reference platform, and the only one the headless backend runs on: it detaches a turn
-with `setsid` and reads a lane's liveness out of `/proc`.
+The reference platform: the headless backend runs on any Unix host, detaching a turn
+with the `setsid` syscall and reading a lane's liveness out of `/proc`.
 
 ### macOS
 
-Everything works except the headless backend, which wants a `setsid` binary and a `/proc` to
-read. Run lanes under herdr there — it refuses at lane start rather than pretending.
+The headless backend runs here too — it detaches a turn with the same `setsid` syscall, and reads a lane's liveness through a lock file rather than `/proc`, which macOS does not have. Everything else is the same.
 
 ### Windows
 
@@ -324,7 +323,7 @@ far less real use than the Linux build.
   symptom is a lane that starts with none of its environment set.
 - **`spoolway init` writes the PowerShell hook pair**, `github.ps1` and `jira.ps1`, in place
   of the `.sh` pair a Unix install gets. See [`[issue_tracking]`](configuration.md#issue_tracking--a-hook-fired-on-four-task-events).
-- **No headless backend**, for the same reason as macOS.
+- **No headless backend.** This platform has no `setsid`-equivalent syscall to detach a turn with, so a lane cannot outlive the dispatcher the way it does on Unix. Run lanes through a multiplexer here, or under WSL for the Linux build.
 - **Command steps run all the same.** A `run:` line is emitted as PowerShell rather than `sh`,
   a step spawns detached through a process group and a job object in place of `setsid`, and its
   liveness is read the same way a lock file's owner is, rather than out of `/proc` — none of

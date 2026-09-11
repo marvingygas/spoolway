@@ -5298,15 +5298,7 @@ mod tests {
             // the same way `command_step::Runs::start` spawns one, so the
             // pid/exit files a test drives the dispatcher against behave
             // exactly as they would under a real backend.
-            let spawned = std::process::Command::new("setsid")
-                .arg("sh")
-                .arg("-c")
-                .arg(script)
-                .current_dir(cwd)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()?;
+            let spawned = crate::headless::spawn_detached_shell(script, cwd)?;
             crate::headless::reap_when_it_ends(spawned);
             Ok(Some(pane))
         }
