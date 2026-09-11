@@ -1521,24 +1521,8 @@ fn session_file_in(home: &Path, kind_name: &str, session: &str) -> Option<PathBu
 /// A walk rather than a glob because the shape of the tree below a session's
 /// own home is the agent's business, not spoolway's — codex shards by date
 /// today, and a version that shards by something else would still land here.
-///
-/// `pub(crate)` rather than private: [`crate::quota::read`]'s codex row has
-/// no session id to look up by — it wants whichever rollout is newest under
-/// a home, the same question this answers for one session's own transcript.
-pub(crate) fn newest_transcript(root: &Path) -> Option<PathBuf> {
+fn newest_transcript(root: &Path) -> Option<PathBuf> {
     newest_matching(root, |_| true)
-}
-
-/// Every `.jsonl` anywhere under `root`, each with its mtime.
-///
-/// The same walk as [`newest_transcript`], without collapsing to the newest
-/// one. [`crate::quota::read`]'s codex row wants all of them: a rollout that
-/// carries no reading has to be passed over for the next-newest that does, so
-/// it cannot ask for just the newest file up front.
-pub(crate) fn transcripts_under(root: &Path) -> Vec<(std::time::SystemTime, PathBuf)> {
-    let mut found = Vec::new();
-    transcripts_matching(root, |_| true, &mut |at, path| found.push((at, path)));
-    found
 }
 
 /// The same walk, over the transcripts whose file stem `keep` accepts.
@@ -1557,7 +1541,7 @@ fn newest_matching(root: &Path, keep: impl Fn(&str) -> bool) -> Option<PathBuf> 
     best.map(|(_, path)| path)
 }
 
-/// The shared walk under `newest_matching` and `transcripts_under`: every
+/// The shared walk under [`newest_matching`]: every
 /// `.jsonl` under `root` whose stem `keep` accepts and whose mtime is
 /// readable is handed to `visit`, in no particular order.
 fn transcripts_matching(

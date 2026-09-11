@@ -298,20 +298,6 @@ pub fn agent_verify(
 
     report("transcript directory", transcript_dir_clause(adapter));
 
-    // Quota is drawn in its own shape rather than through `report` above —
-    // the mockup's own `claude   quota  ...` row, not the generic `ok/warn
-    // quota — ...` line every other clause here uses — so a person reading
-    // several kinds' output in a row sees which kind each quota line is
-    // about without having to scroll back to the command that produced it.
-    let quota = quota_clause(adapter);
-    if matches!(quota, Clause::Fail(_)) {
-        failed += 1;
-    }
-    match json {
-        true => clauses.push(quota.to_json("quota")),
-        false => print_quota_row(&args.kind, &quota),
-    }
-
     if json {
         let payload = serde_json::json!({"kind": args.kind, "failed": failed, "clauses": clauses});
         println!("{}", serde_json::to_string_pretty(&payload)?);
@@ -519,145 +505,6 @@ fn transcript_dir_clause(adapter: &crate::agent::Adapter) -> Clause {
     }
 }
 
-/// Where this kind's own cached usage percentage comes from, and what it
-/// currently reads — see [`crate::agent::Adapter::quota`] and
-/// [`crate::quota`]. Never a [`Clause::Fail`]: every one of the four ways
-/// this can come up short — no probe, an unreadable or unparseable source, a
-/// reading judged stale, or (codex only) a reading with nothing behind it —
-/// is exactly the fail-open case `dispatch.rs`'s own gates already degrade
-/// past, so it is reported here and never blocks the command.
-///
-/// The two established rows read a different shape off a different place, so
-/// the source line branches on [`crate::agent::Accounting::format`] rather
-/// than assuming `claude`'s single-cache-file wording is universal — codex
-/// has no one file to name, and reads its figure from the newest rollout
-/// under either codex home. The window line itself is rendered the same for
-/// both, as the task's codex mockup draws it.
-fn quota_clause(adapter: &crate::agent::Adapter) -> Clause {
-    let Some(rel) = adapter.quota else {
-        // The embedded `\n` is the mockup's own line break, not a wrap this
-        // reader chose — `render_quota_row` indents whatever follows it to
-        // the note's own column, the same as the two-window `Ok` case does.
-        return Clause::Warn(
-            "no probe established — an enabled quota ceiling holds new launches;\nits usage limit is not detected either"
-                .into(),
-            Vec::new(),
-        );
-    };
-    let is_codex = matches!(
-        adapter.accounting.as_ref().map(|a| a.format),
-        Some(crate::usage::Format::Codex)
-    );
-    // The mockup's own two-line source description for codex, split the same
-    // way a two-window `Ok` case splits its lines — `render_quota_row`
-    // indents every one of them to the note's own column.
-    let source = match is_codex {
-        true => "newest rollout under either codex home,\nlast token_count event's rate_limits"
-            .to_string(),
-        false => format!("~/{rel} cachedUsageUtilization"),
-    };
-    match crate::quota::read(adapter.kind) {
-        Err(crate::quota::Miss::NoProbe) => unreachable!("adapter.quota was just Some"),
-        Err(crate::quota::Miss::Unreadable(why)) => {
-            Clause::Warn(format!("{source} could not be read: {why}"), Vec::new())
-        }
-        Err(crate::quota::Miss::Unparseable(why)) => {
-            Clause::Warn(format!("{source} did not parse: {why}"), Vec::new())
-        }
-        // codex's own negative case — a rollout that parsed cleanly and
-        // carries nothing to act on, never a malformed file.
-        Err(crate::quota::Miss::NoReading(why)) => {
-            Clause::Warn(format!("{source}\n{why}"), Vec::new())
-        }
-        Ok(reading) if reading.stale(chrono::Utc::now()) => Clause::Warn(
-            format!(
-                "{source} is stale — fetched too long ago to trust; enabled quota ceilings hold new launches"
-            ),
-            Vec::new(),
-        ),
-        Ok(reading) => {
-            let now = chrono::Utc::now();
-            // Both kinds render a window the same way — the label is the
-            // window's own key (`five_hour`/`seven_day`), and the reset is an
-            // absolute local time, as the task's own mockup draws it for
-            // codex. A reset today reads as a bare clock the same way the
-            // board and the dispatcher's own reports do; a reset on another
-            // day is named `MM-DD HH:MM` rather than either of
-            // `format_instant`'s own shapes — this line already carries
-            // "resets", so a year nobody asked about would only crowd it,
-            // and this display names no park for `parked_window` to pin a
-            // longer one against.
-            let window = |w: &crate::quota::WindowReading| {
-                let (target, same_day) =
-                    crate::task::local_instant(w.resets_at.timestamp(), now.timestamp());
-                let resets = match same_day {
-                    true => target.format("%H:%M").to_string(),
-                    false => target.format("%m-%d %H:%M").to_string(),
-                };
-                format!("{} {}% resets {resets}", w.window.key(), w.utilization)
-            };
-            // No indent baked in here — this note is also `--json`'s own
-            // payload, which has no notion of a printed column to align to.
-            // `print_quota_row` is what indents a continuation line, to
-            // whatever width its own kind-name column comes out to.
-            Clause::Ok(format!(
-                "{source}\n{} · {}",
-                window(&reading.five_hour),
-                window(&reading.seven_day),
-            ))
-        }
-    }
-}
-
-/// Prints the quota clause in its own shape — the mockup's own
-/// `claude   quota  ...` row — rather than through [`Clause::print`]'s
-/// generic `ok`/`warn`/`FAIL` line every other clause in this command uses.
-/// Quota is the only clause the mockup pins to an exact rendering.
-///
-/// Prints [`render_quota_row`] — split out as a pure function, the same way
-/// `agent_list_json` is, so a test can check the actual text without
-/// capturing stdout, which nothing else in this codebase does.
-fn print_quota_row(kind: &str, clause: &Clause) {
-    println!("{}", render_quota_row(kind, clause));
-}
-
-/// The mockup's own `claude   quota  ...` row: a kind name left-aligned and
-/// padded on the right to the width of the longest kind in the whole
-/// adapter table, so every kind's own row lines up the same way whichever
-/// one is checked, then `quota`, then the note — split on its own embedded
-/// `\n` (see [`quota_clause`]'s `Ok` case) with each continuation line
-/// indented to the note's own column rather than the kind's.
-fn render_quota_row(kind: &str, clause: &Clause) -> String {
-    let width = crate::agent::ADAPTERS
-        .iter()
-        .map(|a| a.kind.len())
-        .max()
-        .unwrap_or(0);
-    let prefix = format!("{kind:<width$}   quota  ");
-    let indent = " ".repeat(prefix.chars().count());
-    // quota_clause's own doc: never a Fail. Matched exhaustively rather
-    // than assumed, in case that ever changes.
-    let (note, detail): (&str, &[String]) = match clause {
-        Clause::Ok(note) => (note.as_str(), &[]),
-        Clause::Warn(note, detail) => (note.as_str(), detail.as_slice()),
-        Clause::Fail(why) => (why.as_str(), &[]),
-    };
-    let mut lines = note.split('\n');
-    let mut out = format!("{prefix}{}", lines.next().unwrap_or_default());
-    for line in lines {
-        out.push('\n');
-        out.push_str(&indent);
-        out.push_str(line);
-    }
-    for line in detail {
-        out.push('\n');
-        out.push_str(&indent);
-        out.push_str("· ");
-        out.push_str(line);
-    }
-    out
-}
-
 /// Whether a turn actually wrote into the per-session home spoolway made it,
 /// and which home that was. `None` for a kind that pins by id, which has none.
 ///
@@ -809,9 +656,7 @@ fn run_live_turn(
 /// command: an absent accounting row is a legal state, but a declared one that
 /// does not read back is a wrong row.
 /// A scratch tree — and the per-session agent home the check makes it — torn
-/// down when it falls out of scope, with one carve-out: for a kind that
-/// refreshes its quota reading out of a lane home, the newest such home is
-/// kept, so a person can refresh a stale reading with one `verify --live` run.
+/// down when it falls out of scope.
 ///
 /// A guard rather than a `remove_dir_all` at the end of the check, because the
 /// check has a dozen ways out: every `?` on a spawn that would not start, the
@@ -819,107 +664,19 @@ fn run_live_turn(
 /// function call would clean up after exactly the run that needed it least.
 ///
 /// `home` is the state directory `prepare_session_home` makes for a kind that
-/// mints its own session id — `None` for every other kind. When `keep_home` is
-/// false it is taken back on the way out; leaving it unreclaimed is what had CI
-/// running `verify --live` per push leak one per run (review finding 62). When
-/// `keep_home` is true the home stays and [`prune_verify_homes`] takes back
-/// every older live-check home beside it instead, so the leak stays closed at
-/// one home per kind.
+/// mints its own session id — `None` for every other kind — and is taken back
+/// on the way out the same as `dir`; leaving it unreclaimed is what had CI
+/// running `verify --live` per push leak one per run (review finding 62).
 struct ScratchTree {
     dir: std::path::PathBuf,
     home: Option<std::path::PathBuf>,
-    /// Set when this kind reads its quota out of a lane home — see
-    /// [`crate::quota::refreshes_from_lane_home`]. Keeps `home` on the way out
-    /// rather than deleting it, and prunes older live-check homes in its place.
-    keep_home: bool,
 }
 
 impl Drop for ScratchTree {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);
         if let Some(home) = &self.home {
-            match self.keep_home {
-                true => prune_verify_homes(home),
-                false => drop_dir(home),
-            }
-        }
-    }
-}
-
-/// The file `agent_verify_live` drops into a per-session home it means to keep.
-///
-/// It does two jobs. Its presence tells a live-check home from a codex lane's
-/// live `$CODEX_HOME` — the two sit in the same directory, and only the former
-/// is ever swept; `prepare_session_home` never writes it. Its contents are the
-/// wall-clock nanoseconds at which the home was made, written once and never
-/// rewritten, which is how [`prune_verify_homes`] orders two runs. The
-/// directory's own mtime cannot do that job: codex keeps bumping it as it
-/// creates `sessions/` and writes its config, so a slow older run's home can
-/// end up with a later mtime than a fast newer run's.
-const VERIFY_HOME_MARKER: &str = ".spoolway-verify-live";
-
-/// Write [`VERIFY_HOME_MARKER`] into `home` with this instant's creation stamp.
-fn mark_verify_home(home: &std::path::Path) {
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let _ = std::fs::write(home.join(VERIFY_HOME_MARKER), stamp.to_string());
-}
-
-/// The creation stamp [`mark_verify_home`] wrote, or `None` for a directory
-/// with no marker (a real lane's `$CODEX_HOME`) or an unparseable one (a marker
-/// from before this file carried a stamp).
-fn verify_home_stamp(home: &std::path::Path) -> Option<u128> {
-    std::fs::read_to_string(home.join(VERIFY_HOME_MARKER))
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
-}
-
-/// Take back one per-session home the live check made — today's behaviour, for
-/// a kind whose quota is not read out of that home.
-fn drop_dir(home: &std::path::Path) {
-    let _ = std::fs::remove_dir_all(home);
-}
-
-/// Keep `kept` and take back every *older* live-check home beside it.
-///
-/// The acceptance criterion is that the newest home survives and only older
-/// ones go. Two `verify --live` runs can overlap: if the older run's guard
-/// drops first, an unconditional sweep would delete the newer run's home while
-/// it is still writing its rollout, and the newer guard would then leave no
-/// rollout at all. So a sibling is pruned only when its [`VERIFY_HOME_MARKER`]
-/// creation stamp predates `kept`'s — a value fixed when each home is made,
-/// unlike the directory mtime codex keeps advancing under both.
-///
-/// A directory with no readable stamp is never a candidate: that is a real
-/// codex lane's `$CODEX_HOME`, which lives in this same directory and must
-/// outlive any codex lane in flight. This is what keeps review finding 62's
-/// leak from reopening now that the home is no longer deleted outright: at most
-/// one live-check home per kind is left behind.
-fn prune_verify_homes(kept: &std::path::Path) {
-    let Some(parent) = kept.parent() else {
-        return;
-    };
-    let Some(kept_stamp) = verify_home_stamp(kept) else {
-        return;
-    };
-    let Ok(entries) = std::fs::read_dir(parent) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.file_name() == kept.file_name() || !entry.file_type().is_ok_and(|t| t.is_dir()) {
-            continue;
-        }
-        // Only a home stamped before the one this run kept. No stamp, an
-        // unreadable one, or one at or after `kept`'s is left alone — a
-        // concurrent run's home is newer, and losing it costs that run its
-        // rollout.
-        if verify_home_stamp(&path).is_some_and(|stamp| stamp < kept_stamp) {
-            let _ = std::fs::remove_dir_all(&path);
+            let _ = std::fs::remove_dir_all(home);
         }
     }
 }
@@ -979,12 +736,10 @@ fn agent_verify_live(
     // and a check that is run often enough to be useful is run often enough to
     // matter: one machine held 531 of these trees, the oldest two weeks old.
     // The per-session agent home, if this kind gets one, is added below once
-    // its path is known — and unlike the tree it may be kept, for a kind that
-    // refreshes its quota reading out of that home (see `ScratchTree`).
+    // its path is known.
     let mut scratch = ScratchTree {
         dir: dir.clone(),
         home: None,
-        keep_home: crate::quota::refreshes_from_lane_home(&args.kind),
     };
     // A repo, because a lane's worktree is one and at least one kind checks:
     // codex refuses to start outside a git repo with "Not inside a trusted
@@ -1034,20 +789,9 @@ fn agent_verify_live(
 
     // The same home a lane of this kind would be given, made the same way. For
     // a kind that pins by id this is `None` and nothing below changes. For one
-    // that pins by home the guard owns it from here: it takes the home back on
-    // the way out (review finding 62), unless this kind refreshes a quota
-    // reading out of that home — then the newest home is kept for a manual
-    // `verify --live` refresh and only the older ones are pruned.
+    // that pins by home the guard owns it from here and takes it back on the
+    // way out (review finding 62).
     scratch.home = crate::agent::prepare_session_home(&args.kind, &session, &dir);
-    if scratch.keep_home
-        && let Some(home) = &scratch.home
-    {
-        // Marks this home as one `verify --live` made and means to keep, and
-        // stamps it with its creation instant, so the prune on the way out
-        // sweeps its own older homes and never a newer concurrent run's or a
-        // codex lane's live `$CODEX_HOME` in the same directory.
-        mark_verify_home(home);
-    }
     let env: Vec<(String, String)> = adapter.session_env(&session);
 
     println!(
@@ -1418,9 +1162,6 @@ mod tests {
             let _scratch = ScratchTree {
                 dir: dir.clone(),
                 home: Some(home.clone()),
-                // A kind whose quota is not read out of a lane home keeps
-                // today's behaviour: the home goes on the way out.
-                keep_home: false,
             };
             assert!(dir.exists(), "the guard must not delete it early");
         }
@@ -1448,7 +1189,6 @@ mod tests {
             let _scratch = ScratchTree {
                 dir: dir.to_path_buf(),
                 home: None,
-                keep_home: false,
             };
             bail!("the reading did not match its row")
         }
@@ -1459,420 +1199,5 @@ mod tests {
             "a check that bailed kept its tree: {}",
             dir.display()
         );
-    }
-
-    /// For a kind that refreshes its quota out of a lane home, the guard keeps
-    /// the home this run wrote — with its rollout — and prunes only its own
-    /// *older* live-check homes, so review finding 62's leak stays closed at
-    /// one home per kind. Four siblings pin the edges:
-    ///
-    /// - an older marked home is swept;
-    /// - a newer marked home is left — it belongs to a `verify --live` run
-    ///   still in flight, and deleting it would cost that run its rollout;
-    /// - a real codex lane's `$CODEX_HOME`, marker-less, is never a candidate.
-    ///
-    /// Run age comes from the marker's creation stamp, not the directory
-    /// mtime: the kept home's mtime is set here to the newest of all four and
-    /// the surviving newer home's to the oldest, so a prune that consulted
-    /// mtime would delete exactly the home that must survive.
-    #[test]
-    fn the_guard_keeps_its_home_and_prunes_only_older_verify_homes() {
-        use std::time::{Duration, SystemTime};
-
-        let parent = crate::scratch::root("agent-verify-kept-home");
-        std::fs::create_dir_all(&parent).unwrap();
-        let now = SystemTime::now();
-
-        // The home this run wrote its rollout into — stamped in the middle,
-        // but with the newest mtime of the four.
-        let kept = parent.join("this-verify-session");
-        std::fs::create_dir_all(&kept).unwrap();
-        std::fs::write(kept.join(VERIFY_HOME_MARKER), "2000").unwrap();
-        std::fs::write(kept.join("rollout.jsonl"), "{}").unwrap();
-        crate::scratch::set_mtime(&kept, now);
-
-        // An older live-check home — stamped before `kept`.
-        let older = parent.join("older-verify-session");
-        std::fs::create_dir_all(&older).unwrap();
-        std::fs::write(older.join(VERIFY_HOME_MARKER), "1000").unwrap();
-        crate::scratch::set_mtime(&older, now - Duration::from_secs(60));
-
-        // A newer live-check home — a concurrent run still in flight. Stamped
-        // after `kept`, yet given the oldest mtime of the four: codex bumps a
-        // home's mtime as it writes, so mtime order is not run order.
-        let newer = parent.join("concurrent-verify-session");
-        std::fs::create_dir_all(&newer).unwrap();
-        std::fs::write(newer.join(VERIFY_HOME_MARKER), "3000").unwrap();
-        crate::scratch::set_mtime(&newer, now - Duration::from_secs(120));
-
-        // A real codex lane's home in the same directory — no marker.
-        let lane = parent.join("a-live-lane-session");
-        std::fs::create_dir_all(&lane).unwrap();
-        std::fs::write(lane.join("auth.json"), "{}").unwrap();
-
-        {
-            let scratch_dir = crate::scratch::root("agent-verify-kept-scratch");
-            std::fs::create_dir_all(&scratch_dir).unwrap();
-            let _scratch = ScratchTree {
-                dir: scratch_dir,
-                home: Some(kept.clone()),
-                keep_home: true,
-            };
-        }
-
-        assert!(
-            kept.join("rollout.jsonl").exists(),
-            "the kept home and its rollout must outlive the guard: {}",
-            kept.display()
-        );
-        assert!(
-            !older.exists(),
-            "an older live-check home must be pruned: {}",
-            older.display()
-        );
-        assert!(
-            newer.exists(),
-            "a newer live-check home belongs to a concurrent run and must survive: {}",
-            newer.display()
-        );
-        assert!(
-            lane.join("auth.json").exists(),
-            "a real lane home in the same directory must be left alone: {}",
-            lane.display()
-        );
-    }
-
-    fn write_claude_json(home: &std::path::Path, body: &str) {
-        std::fs::write(home.join(".claude.json"), body).unwrap();
-    }
-
-    /// A kind with no [`crate::agent::Adapter::quota`] row at all — `pi`
-    /// today — is reported rather than skipped, and never fails the command.
-    #[test]
-    fn quota_clause_on_a_kind_with_no_probe_warns_enabled_ceilings_hold() {
-        let adapter = crate::agent::adapter("pi").expect("pi is a real adapter");
-        match quota_clause(adapter) {
-            Clause::Warn(note, _) => assert!(
-                note.contains("no probe established"),
-                "unexpected note: {note}"
-            ),
-            _ => panic!("a kind with no quota row must warn, not ok or fail"),
-        }
-    }
-
-    /// A probe row whose file does not exist yet is `Unreadable`, reported
-    /// the same way — a warning, never a fail.
-    #[test]
-    fn quota_clause_on_an_unreadable_file_warns() {
-        let home = crate::scratch::root("agent-verify-quota-unreadable");
-        std::fs::create_dir_all(&home).unwrap();
-        crate::platform::test_home::with_home(&home, || {
-            let adapter = crate::agent::adapter("claude").expect("claude is a real adapter");
-            match quota_clause(adapter) {
-                Clause::Warn(note, _) => {
-                    assert!(
-                        note.contains("could not be read"),
-                        "unexpected note: {note}"
-                    )
-                }
-                _ => panic!("an unreadable probe must warn, not ok or fail"),
-            }
-        });
-    }
-
-    /// A file that exists but does not parse the cache shape this reader
-    /// expects is `Unparseable`, named as such rather than read as an
-    /// absent window.
-    #[test]
-    fn quota_clause_on_an_unparseable_file_warns_it_did_not_parse() {
-        let home = crate::scratch::root("agent-verify-quota-unparseable");
-        std::fs::create_dir_all(&home).unwrap();
-        write_claude_json(&home, "not json at all");
-        crate::platform::test_home::with_home(&home, || {
-            let adapter = crate::agent::adapter("claude").expect("claude is a real adapter");
-            match quota_clause(adapter) {
-                Clause::Warn(note, _) => {
-                    assert!(note.contains("did not parse"), "unexpected note: {note}")
-                }
-                _ => panic!("an unparseable probe must warn, not ok or fail"),
-            }
-        });
-    }
-
-    /// A reading fetched too long ago to trust is reported as stale, treated
-    /// as absent rather than acted on.
-    #[test]
-    fn quota_clause_on_a_stale_reading_warns_enabled_ceilings_hold() {
-        let home = crate::scratch::root("agent-verify-quota-stale");
-        std::fs::create_dir_all(&home).unwrap();
-        let fetched_at = (chrono::Utc::now() - chrono::Duration::hours(6)).timestamp_millis();
-        write_claude_json(
-            &home,
-            &format!(
-                r#"{{"cachedUsageUtilization": {{
-                    "fetchedAtMs": {fetched_at},
-                    "five_hour": {{"utilization": 90, "resets_at": "2099-01-01T00:00:00Z"}},
-                    "seven_day": {{"utilization": 90, "resets_at": "2099-01-01T00:00:00Z"}}
-                }}}}"#
-            ),
-        );
-        crate::platform::test_home::with_home(&home, || {
-            let adapter = crate::agent::adapter("claude").expect("claude is a real adapter");
-            match quota_clause(adapter) {
-                Clause::Warn(note, _) => assert!(note.contains("stale"), "unexpected note: {note}"),
-                _ => panic!("a stale probe must warn, not ok or fail"),
-            }
-        });
-    }
-
-    /// A fresh, well-formed reading is `Ok`, naming both windows' percentage
-    /// and reset — the mockup's own two-window line. Both resets are years
-    /// out, so both render `MM-DD HH:MM`, no year — this is the mockup's own
-    /// `resets 09-11 04:00` shape, distinct from `format_instant`'s own
-    /// cross-day shape (which does carry a year) since this display names
-    /// no park for `parked_window` to pin a longer one against.
-    ///
-    /// The expected text is derived from the same instant independently
-    /// rather than hand-typed, so the assertion holds whatever local
-    /// timezone the test happens to run under.
-    #[test]
-    fn quota_clause_on_a_fresh_reading_reports_both_windows() {
-        let home = crate::scratch::root("agent-verify-quota-fresh");
-        std::fs::create_dir_all(&home).unwrap();
-        let fetched_at = chrono::Utc::now().timestamp_millis();
-        let five_hour_resets: chrono::DateTime<chrono::Utc> =
-            "2099-01-01T00:00:00Z".parse().unwrap();
-        let seven_day_resets: chrono::DateTime<chrono::Utc> =
-            "2099-02-01T04:00:00Z".parse().unwrap();
-        write_claude_json(
-            &home,
-            &format!(
-                r#"{{"cachedUsageUtilization": {{
-                    "fetchedAtMs": {fetched_at},
-                    "five_hour": {{"utilization": 61, "resets_at": "{}"}},
-                    "seven_day": {{"utilization": 16, "resets_at": "{}"}}
-                }}}}"#,
-                five_hour_resets.to_rfc3339(),
-                seven_day_resets.to_rfc3339(),
-            ),
-        );
-        crate::platform::test_home::with_home(&home, || {
-            let adapter = crate::agent::adapter("claude").expect("claude is a real adapter");
-            let five_hour_display = five_hour_resets
-                .with_timezone(&chrono::Local)
-                .format("%m-%d %H:%M");
-            let seven_day_display = seven_day_resets
-                .with_timezone(&chrono::Local)
-                .format("%m-%d %H:%M");
-            match quota_clause(adapter) {
-                Clause::Ok(note) => {
-                    assert!(
-                        note.contains(&format!("five_hour 61% resets {five_hour_display}")),
-                        "unexpected note: {note}"
-                    );
-                    assert!(
-                        note.contains(&format!("seven_day 16% resets {seven_day_display}")),
-                        "unexpected note: {note}"
-                    );
-                    assert!(!note.contains("2099-"), "must not carry a year: {note}");
-                }
-                _ => panic!("a fresh reading must report ok with both windows"),
-            }
-        });
-    }
-
-    /// A rollout under a managed lane home —
-    /// `<home>/.local/state/spoolway/codex/<session>/sessions/**`, one of the
-    /// places `spoolway agent verify`'s codex quota clause reads (it also
-    /// reads `~/.codex`). See `crate::quota::tests::write_managed_codex_rollout`,
-    /// this command's own copy of the same fixture shape.
-    fn write_codex_rollout(home: &std::path::Path, timestamp: &str, rate_limits: &str) {
-        let dir = home.join(".local/state/spoolway/codex/fixture-session/sessions/2026/09/05");
-        std::fs::create_dir_all(&dir).unwrap();
-        let line = format!(
-            r#"{{"timestamp":"{timestamp}","type":"event_msg","payload":{{"type":"token_count","info":{{}},"rate_limits":{rate_limits}}}}}"#
-        );
-        // One record per physical line, the way a real rollout is — the
-        // multi-line `rate_limits` constants below are kept readable, not
-        // written that way for real, so their embedded newlines are folded
-        // out first.
-        std::fs::write(dir.join("rollout-fixture.jsonl"), line.replace('\n', "")).unwrap();
-    }
-
-    /// codex's own `rate_limits` payload, shaped exactly as a real rollout
-    /// carries it, with both resets moved onto days that are not today.
-    ///
-    /// The two reset instants are computed from `now` rather than captured,
-    /// because the display drops the date half of `MM-DD HH:MM` for a reset
-    /// that falls on today's local date. A captured epoch quietly becomes
-    /// today once the calendar reaches it, which is how the hardcoded pair
-    /// this replaces started failing. Returned alongside the JSON so a test
-    /// can build the exact string it expects.
-    fn real_shaped_rate_limits() -> (String, i64, i64) {
-        let now = chrono::Utc::now().timestamp();
-        let five_hour_resets = now - 6 * 24 * 60 * 60;
-        let seven_day_resets = now + 5 * 24 * 60 * 60;
-        let json = format!(
-            r#"{{"limit_id":"codex","limit_name":null,
-        "primary":{{"used_percent":5.0,"window_minutes":300,"resets_at":{five_hour_resets}}},
-        "secondary":{{"used_percent":2.0,"window_minutes":10080,"resets_at":{seven_day_resets}}},
-        "credits":{{"has_credits":false,"unlimited":false,"balance":"0"}},
-        "individual_limit":null,"spend_control_reached":null,"plan_type":"plus",
-        "rate_limit_reached_type":null}}"#
-        );
-        (json, five_hour_resets, seven_day_resets)
-    }
-
-    const NULL_RATE_LIMITS: &str = r#"{"limit_id":"codex","limit_name":null,"primary":null,
-        "secondary":null,"credits":null,"individual_limit":null,
-        "spend_control_reached":null,"plan_type":null,"rate_limit_reached_type":null}"#;
-
-    /// codex's own row, once signed in with ChatGPT: the window labels are
-    /// `five_hour`/`seven_day` and the reset is an absolute local time, as
-    /// the task's own codex mockup draws it. Both the rollout `timestamp` and
-    /// the two resets are computed from now, so this stays fresh however long
-    /// after that real capture the suite happens to run.
-    #[test]
-    fn quota_clause_on_a_fresh_codex_reading_reports_both_windows_like_the_mockup() {
-        let home = crate::scratch::root("agent-verify-quota-codex-fresh");
-        std::fs::create_dir_all(&home).unwrap();
-        let (rate_limits, five_hour_at, seven_day_at) = real_shaped_rate_limits();
-        write_codex_rollout(&home, &chrono::Utc::now().to_rfc3339(), &rate_limits);
-        crate::platform::test_home::with_home(&home, || {
-            let adapter = crate::agent::adapter("codex").expect("codex is a real adapter");
-            let five_hour_resets = chrono::DateTime::from_timestamp(five_hour_at, 0)
-                .unwrap()
-                .with_timezone(&chrono::Local)
-                .format("%m-%d %H:%M");
-            let seven_day_resets = chrono::DateTime::from_timestamp(seven_day_at, 0)
-                .unwrap()
-                .with_timezone(&chrono::Local)
-                .format("%m-%d %H:%M");
-            match quota_clause(adapter) {
-                Clause::Ok(note) => {
-                    assert!(
-                        note.contains(&format!("five_hour 5% resets {five_hour_resets}")),
-                        "unexpected note: {note}"
-                    );
-                    assert!(
-                        note.contains(&format!("seven_day 2% resets {seven_day_resets}")),
-                        "unexpected note: {note}"
-                    );
-                    assert!(
-                        note.contains("newest rollout under either codex home"),
-                        "unexpected note: {note}"
-                    );
-                }
-                _ => panic!("a fresh codex reading must report ok with both windows"),
-            }
-        });
-    }
-
-    /// The mockup's own codex row, pinned exactly rather than by substring —
-    /// `render_quota_row` is what `spoolway agent verify` actually prints, so
-    /// this is the line a person reading the command's output really sees.
-    #[test]
-    fn agent_verify_prints_codexs_quota_row_exactly_as_the_mockup_draws_it() {
-        let home = crate::scratch::root("agent-verify-quota-codex-exact");
-        std::fs::create_dir_all(&home).unwrap();
-        let (rate_limits, five_hour_at, seven_day_at) = real_shaped_rate_limits();
-        write_codex_rollout(&home, &chrono::Utc::now().to_rfc3339(), &rate_limits);
-        crate::platform::test_home::with_home(&home, || {
-            let adapter = crate::agent::adapter("codex").expect("codex is a real adapter");
-            let five_hour_resets = chrono::DateTime::from_timestamp(five_hour_at, 0)
-                .unwrap()
-                .with_timezone(&chrono::Local)
-                .format("%m-%d %H:%M");
-            let seven_day_resets = chrono::DateTime::from_timestamp(seven_day_at, 0)
-                .unwrap()
-                .with_timezone(&chrono::Local)
-                .format("%m-%d %H:%M");
-            let clause = quota_clause(adapter);
-            let rendered = render_quota_row("codex", &clause);
-            let mut lines = rendered.lines();
-            assert_eq!(
-                lines.next().unwrap(),
-                "codex    quota  newest rollout under either codex home,"
-            );
-            assert_eq!(
-                lines.next().unwrap(),
-                "                last token_count event's rate_limits"
-            );
-            assert_eq!(
-                lines.next().unwrap(),
-                format!(
-                    "                five_hour 5% resets {five_hour_resets} · \
-                     seven_day 2% resets {seven_day_resets}"
-                ),
-            );
-        });
-    }
-
-    /// codex's own negative case — a session settled against a local
-    /// endpoint or a bare API key — is reported rather than misread as a
-    /// parse failure, and never fails the command.
-    #[test]
-    fn quota_clause_on_a_codex_session_with_null_rate_limits_warns_not_signed_in() {
-        let home = crate::scratch::root("agent-verify-quota-codex-null");
-        std::fs::create_dir_all(&home).unwrap();
-        write_codex_rollout(&home, "2026-09-05T07:51:22.019Z", NULL_RATE_LIMITS);
-        crate::platform::test_home::with_home(&home, || {
-            let adapter = crate::agent::adapter("codex").expect("codex is a real adapter");
-            match quota_clause(adapter) {
-                Clause::Warn(note, _) => assert!(
-                    note.contains("not signed in with ChatGPT"),
-                    "unexpected note: {note}"
-                ),
-                _ => panic!("a null codex reading must warn, not ok or fail"),
-            }
-        });
-    }
-
-    /// The mockup's own two rows — `claude` and `pi`, both a multi-line
-    /// `Ok`/`Warn` — line up their `quota` label at the same column however
-    /// differently long the two kind names are, and each continuation line
-    /// lands under the note rather than under the kind name.
-    #[test]
-    fn render_quota_row_lines_up_kind_names_and_indents_continuation() {
-        let ok = Clause::Ok(
-            "~/.claude.json cachedUsageUtilization\nfive_hour 61% resets 14:00 · seven_day \
-             16% resets 09-11 04:00"
-                .to_string(),
-        );
-        let warn = Clause::Warn(
-            "no probe established — an enabled quota ceiling holds new launches;\nits usage limit is not detected either"
-                .to_string(),
-            Vec::new(),
-        );
-        let claude_row = render_quota_row("claude", &ok);
-        let pi_row = render_quota_row("pi", &warn);
-
-        let mut claude_lines = claude_row.lines();
-        let claude_first = claude_lines.next().unwrap();
-        let claude_second = claude_lines.next().expect("a continuation line");
-        let mut pi_lines = pi_row.lines();
-        let pi_first = pi_lines.next().unwrap();
-        let pi_second = pi_lines.next().expect("a continuation line");
-
-        assert_eq!(
-            claude_first,
-            "claude   quota  ~/.claude.json cachedUsageUtilization"
-        );
-        assert_eq!(
-            claude_second,
-            "                five_hour 61% resets 14:00 · seven_day 16% resets 09-11 04:00"
-        );
-        assert_eq!(
-            pi_first,
-            "pi       quota  no probe established — an enabled quota ceiling holds new launches;"
-        );
-        assert_eq!(
-            pi_second,
-            "                its usage limit is not detected either"
-        );
-
-        // Both rows' `quota` label starts at the same column, however
-        // differently long "claude" and "pi" are.
-        assert_eq!(claude_first.find("quota"), pi_first.find("quota"));
     }
 }

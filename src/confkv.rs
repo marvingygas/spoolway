@@ -315,15 +315,6 @@ pub const REFERENCE: &[Reference] = &[
                     at turn boundaries, so the ceiling can be overshot.",
     },
     Reference {
-        key: "agents.<profile>.quota_ceiling",
-        values: "0, 1..=100",
-        default: "0",
-        sentence: "Ceiling on this profile's own kind's cached usage percentage (either \
-                    window); at or above it a pass starts no new lane and parks every \
-                    candidate task instead. 0 is off. An unavailable or stale quota reading \
-                    holds new launches; `spoolway agent verify` diagnoses the reading.",
-    },
-    Reference {
         key: "agents.<profile>.permission_mode",
         values: "<mode>",
         default: "the kind's own first mode (absent on a kind with none)",
@@ -779,13 +770,6 @@ pub fn set(config: &Config, key: &str, input: &str) -> Result<Config> {
                 profile.session_blocked_ctx
             );
         }
-        if profile.quota_ceiling != 0 && !(1..=100).contains(&profile.quota_ceiling) {
-            bail!(
-                "`agents.{name}.quota_ceiling` must be 0 (off) or between 1 and 100 (1..=100), \
-                 got {}",
-                profile.quota_ceiling
-            );
-        }
         // Both directions of the same rule, caught wherever the edit landed:
         // a ceiling set at or under the reuse threshold, or a reuse threshold
         // raised to meet an already-set ceiling. Either way a task blocked on
@@ -1020,6 +1004,7 @@ mod tests {
             "agents.pi.sandbox",
             "agents.pi.env",
             "agents.pi.session_reuse_uncached",
+            "agents.pi.quota_ceiling",
             "paths.prompts",
             "effort.tier_models.high",
             "sandbox.mode",
@@ -1376,24 +1361,14 @@ mod tests {
         assert!(set(&config, "agents.claude.session_blocked_ctx", "0").is_ok());
     }
 
+    /// `quota_ceiling` is retired along with the quota gate it configured —
+    /// gone from the reference table, so neither `get` nor `set` knows it any
+    /// more, the same as every other retired key.
     #[test]
-    // covers: agents.<profile>.quota_ceiling — the ceiling a pass reads before starting a new lane
-    fn a_quota_ceiling_outside_its_range_is_refused() {
+    fn a_retired_quota_ceiling_is_an_unknown_key() {
         let config = Config::default();
-        assert_eq!(config.agents["claude"].quota_ceiling, 0);
-
-        let off = set(&config, "agents.claude.quota_ceiling", "0")
-            .map(|c| c.agents["claude"].quota_ceiling);
-        assert_eq!(off.ok(), Some(0), "0 is off, and always allowed");
-
-        let err = set(&config, "agents.claude.quota_ceiling", "101")
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("must be 0 (off) or between 1 and 100"),
-            "{err}"
-        );
-        assert!(set(&config, "agents.claude.quota_ceiling", "85").is_ok());
+        assert!(get(&config, "agents.claude.quota_ceiling").is_err());
+        assert!(set(&config, "agents.claude.quota_ceiling", "85").is_err());
     }
 
     #[test]

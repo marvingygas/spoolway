@@ -716,14 +716,7 @@ Each `--live` turn is bounded. A turn still running after 180 seconds has hung, 
 kills it and reports the clause as failed rather than waiting forever — `verify --live` is
 often run from CI, where a hang is a stuck job with nobody to interrupt it. The scratch tree
 `--live` works in is removed when the command ends, whichever way it ends. So is the
-per-session agent home it creates for a kind that pins by home — with one carve-out.
-
-The carve-out is a kind whose quota reading is read out of one of those homes, which today
-means `codex`. That home is kept, so the rollout the live turn just wrote stays on disk and a
-stale reading can be refreshed by hand with one `spoolway agent verify codex --live`. Only the
-newest such home survives: on the way out the command takes back every older home its own
-earlier runs left, so what is kept never grows past one per kind. A real lane's home in the
-same directory is never touched.
+per-session agent home it creates for a kind that pins by home.
 
 `agent list` and `agent verify` both run against the whole adapter table rather than the
 profiles this project configures — that is `doctor`'s scope, and the kind you want to ask

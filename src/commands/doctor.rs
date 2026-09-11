@@ -1009,19 +1009,6 @@ fn agent_kind_checks(config: &Config) -> Vec<Finding> {
                 profile.kind, profile.kind
             )));
         }
-
-        // A ceiling with no probe holds every new launch. Name that
-        // configuration explicitly for a profile that enabled protection —
-        // every kind with no probe at all is already covered by `spoolway
-        // agent verify`'s own `quota` line.
-        if profile.quota_ceiling > 0 && adapter.is_some_and(|a| a.quota.is_none()) {
-            findings.push(Finding::Note(format!(
-                "agent `{name}` sets `quota_ceiling` = {}, but kind `{}` carries no quota \
-                 probe — new launches stay held until protection is disabled or a supported kind is used. `spoolway agent verify {}` \
-                 says so on its own line",
-                profile.quota_ceiling, profile.kind, profile.kind
-            )));
-        }
     }
     findings
 }

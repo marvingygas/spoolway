@@ -85,9 +85,8 @@ pub enum State {
     Blocked,
     /// Waiting on a dependency that can never arrive.
     Unreachable,
-    /// Held on a clock, not on a person — a quota probe over its ceiling, or
-    /// a lane whose pane already carries its kind's usage-limit phrase. Read
-    /// off [`crate::task::Frontmatter::parked_at`], the fixed start of a
+    /// Held on a clock, not on a person. Read off
+    /// [`crate::task::Frontmatter::parked_at`], the fixed start of a
     /// continuous hold, falling back to a future
     /// [`crate::task::Frontmatter::parked_until`] for a legacy park that has
     /// no `parked_at`. Next to `Queued` rather than `Paused`: nothing went
@@ -1730,9 +1729,9 @@ fn build_rows(
         let parked_on_blocked = task.stage() == crate::pipeline::BLOCKED
             && !pipeline.blocked_is_staffed(repo.unattended());
 
-        // A quota probe or a usage-limit pane parked this task — see
-        // `Dispatcher::quota_over_ceiling` and `Dispatcher::usage_limit_hold`
-        // in `dispatch.rs`. `park-lifecycle` stamps `parked_at` once when a
+        // A park recorded on the task's own file — nothing in this binary
+        // writes one any more, but a row here still honours one already on
+        // disk. `park-lifecycle` stamps `parked_at` once when a
         // continuous hold begins and clears it only on a true exit — a
         // launch, a stage move, a re-queue — so it stays set across a
         // re-probe whose `parked_until` deadline has already run out. Reading
@@ -1779,13 +1778,10 @@ fn build_rows(
                 // slot, and reads the same line the rest of them do.
                 //
                 // A park outranks that plain queued read, the same way it
-                // does on a real step below. A task on `queued` is parked by
-                // exactly the same quota gate: `route_reserved_stage` turns
-                // it into a candidate, and a candidate over its kind's
-                // ceiling gets `parked_until` written on it. A row that read
-                // `queued · waiting for a worker slot` right through a
-                // four-day park was describing a dispatcher that had
-                // stopped, which is the one thing it was not doing.
+                // does on a real step below. A row that read `queued ·
+                // waiting for a worker slot` right through a park was
+                // describing a dispatcher that had stopped, which is the one
+                // thing it was not doing.
                 //
                 // Only when nothing else holds it. A dependency it is still
                 // waiting on is the harder hold and the more useful thing to
@@ -1840,11 +1836,10 @@ fn build_rows(
                 format!("unknown step `{}` — not in this pipeline", task.stage()),
                 false,
             ),
-            // Parked ahead of the ordinary running/queued read below: a task
-            // held for its quota is still sitting on a real step, which
-            // would otherwise read as `Running` (a live lane) or `Queued` (no
-            // lane yet) with nothing on the row saying why nothing is
-            // happening.
+            // Parked ahead of the ordinary running/queued read below: a
+            // parked task is still sitting on a real step, which would
+            // otherwise read as `Running` (a live lane) or `Queued` (no lane
+            // yet) with nothing on the row saying why nothing is happening.
             Some(step) if parked_hold => {
                 let next = match pipeline.next_running_step(&step.id) {
                     Some(next) => format!("→ {next}"),
@@ -1936,27 +1931,30 @@ fn build_rows(
                 .then(|| parked_at.map(|at| view::park_age((now - at).max(0))))
                 .flatten(),
             // Keep an unavailable reading visible without putting prose in
-            // the additive JSON age field. This also preserves the diagnosis
-            // for a legacy hold whose missing `parked_at` leaves no age to
-            // draw beside it.
+            // the additive JSON age field. `parked_window == "unknown"` was
+            // the spelling the deleted quota gate wrote for a probe it could
+            // not read; nothing writes it any more, but a park already on a
+            // task file from before this shipped still carries it, and this
+            // still preserves its diagnosis for a hold whose missing
+            // `parked_at` leaves no age to draw beside it.
             parked_reason: (state == State::Parked && task.front.parked_window == "unknown")
                 .then(|| "quota unavailable".to_string()),
             // Keep the pre-existing JSON clock independent of the board's
             // age: consumers of `parked_until` must not silently receive a
             // duration with different semantics under the old field name. An
             // `unknown`-window park still names no reset time here either —
-            // `parked_until` is the dispatcher's own retry deadline in that
-            // case, drifting outward every pass, and printing it would put
-            // back the exact clock this task's `parked_display` fix removed
-            // from the board (a board reading 22:05, 22:13 and 22:29 in one
-            // evening while usage never moved), just under the JSON field
-            // instead.
+            // `parked_until` was the deleted quota gate's own retry deadline
+            // in that case, drifting outward every pass it rechecked, and
+            // printing it would put back the exact clock this task's
+            // `parked_display` fix removed from the board (a board reading
+            // 22:05, 22:13 and 22:29 in one evening while usage never
+            // moved), just under the JSON field instead.
             parked_until_display: task.front.parked_until.filter(|&until| until > now).map(
                 |until| {
                     if task.front.parked_window == "unknown" {
                         return "quota unavailable".to_string();
                     }
-                    let dated = task.front.parked_window == crate::quota::Window::SevenDay.key();
+                    let dated = task.front.parked_window == "seven_day";
                     crate::task::format_instant(until, now, dated)
                 },
             ),
@@ -3082,12 +3080,14 @@ mod tests {
     }
 
     /// A park with no real window to name carries its diagnosis on
-    /// `parked_reason`, not on the age itself. When the dispatcher could not
-    /// produce a quota reading at all it sets `parked_window` to `"unknown"`
-    /// and pushes `parked_until` out by its own retry backoff. That instant
-    /// is a retry deadline, not a quota reset, and it drifts outward every
-    /// pass, so the row must not draw it in the position a real window's
-    /// reset time occupies — and this task has no `parked_at` either, so
+    /// `parked_reason`, not on the age itself. `parked_window = "unknown"`
+    /// with `parked_until` pushed out by a retry backoff is the shape the
+    /// deleted quota gate wrote when it could not produce a reading at all —
+    /// nothing writes it now, but a park already on a task file from before
+    /// this shipped may still carry it. That instant was a retry deadline,
+    /// not a quota reset, and drifted outward every pass it rechecked, so
+    /// the row must not draw it in the position a real window's reset time
+    /// occupies — and this task has no `parked_at` either, so
     /// `parked_display` invents no age for it.
     ///
     /// The compatible JSON clock, `parked_until_display`, must not leak that

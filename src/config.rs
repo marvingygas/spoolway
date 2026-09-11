@@ -1171,22 +1171,16 @@ pub struct AgentProfile {
     /// way round.
     pub session_blocked_ctx: u8,
 
-    /// The ceiling on this profile's own kind's cached usage percentage,
-    /// checked before a pass starts a new lane of it — see
-    /// [`crate::agent::Adapter::quota`] and `Dispatcher::quota_over_ceiling`
-    /// in `dispatch.rs`. `0`, the default, is off: nothing is read and no
-    /// candidate is ever parked for it.
-    ///
-    /// At or above this, in either window, a pass starts no new lane of this
-    /// profile and writes `parked_until:` on every candidate task instead,
-    /// set from the probe's own `resets_at` — the task file carries the
-    /// park, not the dispatcher, so it survives a restart.
-    ///
-    /// An enabled ceiling holds new launches when the reading is missing,
-    /// malformed, stale, or expired. Rechecks back off independently of
-    /// launch attempts; `spoolway agent verify` diagnoses the source.
-    /// 1..=100, or `0` for off.
-    pub quota_ceiling: u8,
+    /// Retired: the ceiling on this profile's own kind's cached usage
+    /// percentage, checked before a pass started a new lane of it. The quota
+    /// gate and the usage-limit detector it fed are gone outright rather
+    /// than repaired — a usage limit is now an ordinary quiet pane, handled
+    /// by `Dispatcher::check_unreported` like any other. Kept only so an
+    /// existing config still parses; dropped unconditionally on the next
+    /// save.
+    #[allow(dead_code)]
+    #[serde(default, skip_serializing)]
+    quota_ceiling: u8,
 
     /// Retired: whether a carried session was still worth resuming once its
     /// prompt cache had gone cold. Two settings governed one decision, and
@@ -2059,7 +2053,6 @@ mod tests {
             assert_eq!(parsed.agents[name].concurrency, 0, "{name}");
             assert_eq!(parsed.agents[name].session_reuse_ctx, 0, "{name}");
             assert_eq!(parsed.agents[name].session_blocked_ctx, 0, "{name}");
-            assert_eq!(parsed.agents[name].quota_ceiling, 0, "{name}");
         }
         assert!(
             !text.contains("concurrency ="),
@@ -2781,6 +2774,21 @@ mod tests {
                 .unwrap()
                 .contains("session_reuse_uncached")
         );
+    }
+
+    /// `quota_ceiling` retires the way `session_reuse_uncached` did: the
+    /// quota gate it configured is gone outright, along with the usage-limit
+    /// detector it shared a name with — a usage limit is now an ordinary
+    /// quiet pane, handled like any other. An existing config still parses,
+    /// and the key is gone on the next save because nothing reads it any
+    /// more.
+    #[test]
+    fn a_profiles_retired_quota_ceiling_parses_and_drops() {
+        let raw = "[agents.claude]\n\
+                    kind = \"claude\"\n\
+                    quota_ceiling = 85\n";
+        let config: Config = toml::from_str(raw).expect("a retired quota_ceiling must still parse");
+        assert!(!toml::to_string(&config).unwrap().contains("quota_ceiling"));
     }
 
     /// `models.<glob>.cache_ttl` is the field's old name, kept as a serde

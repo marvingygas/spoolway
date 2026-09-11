@@ -369,42 +369,44 @@ pub struct Frontmatter {
     #[serde(default, skip_serializing_if = "is_zero")]
     pub attempts: u32,
 
-    /// Whether this task is currently held for its agent kind's own
-    /// usage-limit message rather than for a dead launch — set alongside
-    /// [`Self::parked_until`] by `Dispatcher::usage_limit_hold` in
-    /// `src/dispatch.rs`. Marks the first logged hold; the hold itself lives on
-    /// `parked_until` rather than on launch attempts. Repeated observations
-    /// of the same hold update the clock without appending the log again.
+    /// Whether this task was held for its agent kind's own usage-limit
+    /// message rather than for a dead launch.
     ///
-    /// Cleared wherever `attempts` is: by `set_stage`, `set_stage_unbanked`
-    /// and `launch_landed`, because a task that has left the step it was
-    /// held on — or landed a lane on it — has left the hold behind with it;
-    /// and by `parse_submission`'s re-queue normalisation in
-    /// `src/commands/queue.rs`, which clears both by hand for a document
-    /// coming back through the queue rather than through either path.
+    /// Nothing in this binary writes this field any more — the dispatcher
+    /// check that used to, `Dispatcher::usage_limit_hold` in
+    /// `src/dispatch.rs`, is gone along with the quota gate it shared a name
+    /// with; a usage limit now reads as an ordinary quiet pane, handled by
+    /// `Dispatcher::check_unreported` like any other. Left in place, and
+    /// still cleared everywhere it always was — by `set_stage`,
+    /// `set_stage_unbanked`, `launch_landed`, and `parse_submission`'s
+    /// re-queue normalisation in `src/commands/queue.rs` — for a task whose
+    /// file still carries `true` from before this shipped.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub usage_limit_hold: bool,
 
-    /// Consecutive quota rechecks, independent of launch attempts. Persisted
-    /// so restarting the dispatcher does not restart a tight retry loop.
+    /// Consecutive quota rechecks, independent of launch attempts.
+    ///
+    /// Nothing in this binary writes this field any more — see
+    /// [`Self::usage_limit_hold`]'s doc. Left in place and still cleared
+    /// everywhere it always was, for a task whose file still carries a
+    /// nonzero count from before this shipped.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub quota_retries: u32,
 
-    /// A quota probe's or a usage-limit pane's own clock, in epoch seconds:
-    /// no candidate of this task is offered a lane, and no reminder is sent
-    /// to a lane already running one, before this passes.
+    /// A park's own clock, in epoch seconds: no candidate of this task is
+    /// offered a lane, and no reminder is sent to a lane already running
+    /// one, before this passes.
     ///
-    /// Written by two different dispatcher checks, both in `dispatch.rs`:
-    /// `quota_over_ceiling`, ahead of a launch, from the probe's own
-    /// `resets_at` for the window that tripped `agents.<profile>.
-    /// quota_ceiling`; and `usage_limit_hold`, for a lane whose pane already
-    /// carries its kind's usage-limit phrase, from the same probe when it is
-    /// fresh or a doubling backoff when it is not. Either way the park is
-    /// written here rather than held anywhere in the dispatcher's own
-    /// memory, so a dispatcher that is stopped and restarted — or never
-    /// running at all for as long as the wait takes — honours it without
-    /// taking a fresh reading: see the top of a pass's own per-task loop,
-    /// which reads this before it resolves a step or looks at a lane.
+    /// Nothing in this binary writes this field any more — the two
+    /// dispatcher checks that used to, `quota_over_ceiling` and
+    /// `usage_limit_hold`, are both gone along with the quota gate and the
+    /// usage-limit detector they implemented. Left in place, and still
+    /// honoured by `Dispatcher::parked` for a task whose file still carries
+    /// one from before this shipped: the park is read off the task file
+    /// rather than held anywhere in the dispatcher's own memory, so a
+    /// dispatcher that is stopped and restarted — or never running at all
+    /// for as long as the wait takes — honours it without anything to
+    /// re-derive it from.
     ///
     /// Cleared by `set_stage` and `set_stage_unbanked`, the same as
     /// `usage_limit_hold`, `quota_retries` and `attempts` — a task that has
@@ -417,10 +419,10 @@ pub struct Frontmatter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parked_until: Option<i64>,
 
-    /// Which of a kind's two windows `parked_until` came from —
-    /// [`crate::quota::Window::key`]'s own spelling, `"five_hour"` or
-    /// `"seven_day"` — kept only so the clock draws the right way on a pass
-    /// that did not just compute it.
+    /// Which of a kind's two windows `parked_until` came from — `"five_hour"`
+    /// or `"seven_day"`, the spelling the deleted quota reader used — kept
+    /// only so the clock draws the right way on a pass that did not just
+    /// compute it.
     ///
     /// A five-hour park and a seven-day one are different enough in scale
     /// that one display would fail one of them: a bare `HH:MM` loses all
@@ -451,15 +453,15 @@ pub struct Frontmatter {
     /// inside a hold there, since it outlives a `parked_until` deadline that
     /// has run out; a legacy park without it shows a bare `● parked`.
     ///
-    /// Written once, by whichever dispatcher check in `src/dispatch.rs`
-    /// first parks the task — `quota_over_ceiling`, the unavailable-reading
-    /// branch, or `usage_limit_hold` — and left exactly as it was on every
-    /// later pass that finds the same hold still in force. That includes a
-    /// pass whose expired `parked_until` is rechecked and re-parked: a
-    /// re-park is the same uninterrupted hold, so the age goes on counting
-    /// from here rather than restarting. `Dispatcher::parked` deliberately
-    /// does not touch this when a deadline expires — an expiry is a
-    /// recheck, not an exit.
+    /// Nothing in this binary writes a park at all any more — see
+    /// [`Self::usage_limit_hold`]'s doc. Should one still be on disk from
+    /// before this shipped, it is left exactly as it was on every later
+    /// pass that finds the same hold still in force — including a pass
+    /// whose expired `parked_until` is rechecked and re-parked: a re-park is
+    /// the same uninterrupted hold, so the age goes on counting from here
+    /// rather than restarting. `Dispatcher::parked` deliberately does not
+    /// touch this when a deadline expires — an expiry is a recheck, not an
+    /// exit.
     ///
     /// Cleared on a true exit from the hold, wherever `parked_until` and
     /// `parked_window` are also cleared: [`Task::set_stage`] and
@@ -614,12 +616,7 @@ pub fn format_until(until: i64, now: i64, dated: bool) -> String {
 /// `until` and `now`, both in local time, and whether they fall on the same
 /// calendar day — the one question [`format_instant`] and [`format_until`]
 /// both have to ask before they can decide their own shape.
-///
-/// `pub(crate)` rather than private: `spoolway agent verify`'s own quota
-/// clause asks the same same-day question, for a shorter display of its
-/// own (`MM-DD HH:MM`, no year — see `commands::agent::quota_clause`)
-/// rather than either of the two shapes here.
-pub(crate) fn local_instant(until: i64, now: i64) -> (DateTime<chrono::Local>, bool) {
+fn local_instant(until: i64, now: i64) -> (DateTime<chrono::Local>, bool) {
     let target = DateTime::from_timestamp(until, 0)
         .unwrap_or_else(Utc::now)
         .with_timezone(&chrono::Local);
@@ -854,12 +851,12 @@ impl Task {
     /// started, and the board read `None` — a dash — for the rest of the
     /// step.
     ///
-    /// Also forgives the whole quota park — `parked_until`, `parked_window`
-    /// and `parked_at`. A lane of this task is running, so the hold it was
+    /// Also forgives the whole park — `parked_until`, `parked_window` and
+    /// `parked_at`. A lane of this task is running, so the hold it was
     /// parked for is over; the dispatcher's own `parked` gate keeps this off
     /// a task still inside a live park, so the only park this ever sees is a
-    /// spent one — most often a usage-limit lane that has resumed its own
-    /// turn, whose growing "still parked" age would otherwise sit on the
+    /// spent one — a hold already on the task file from before this
+    /// shipped, whose growing "still parked" age would otherwise sit on the
     /// board over a lane hard at work.
     ///
     /// Answers whether anything changed, so a caller reading every task on

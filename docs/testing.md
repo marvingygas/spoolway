@@ -131,7 +131,7 @@ A tier is a named set of suites, so a command step has something short to name.
 | Tier | Suites | Used by |
 |---|---|---|
 | `smoke` | flow | Nothing automatic; the fast signal for a person running it by hand |
-| `pr` | flow, commands, stacking, stack, conflicts, forge, disaster, lock, trials, routines, jobs, jobs-screen, restart, quota | The last task of a chain, through the `suite` step in `.spoolway/pipelines/*.yml` |
+| `pr` | flow, commands, stacking, stack, conflicts, forge, disaster, lock, trials, routines, jobs, jobs-screen, restart | The last task of a chain, through the `suite` step in `.spoolway/pipelines/*.yml` |
 | `nightly` | the same as `pr` | The nightly routine, run by a person |
 | `cloud` | warmth | Nothing automatic. It spends real tokens, and refuses to run without `SPOOLWAY_E2E_CLOUD=1` |
 | `live` | live | Nothing automatic. It runs the real `codex` binary, and skips it unless `SPOOLWAY_E2E_CODEX_MODEL` names it a model |

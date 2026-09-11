@@ -348,7 +348,6 @@ fn shorten_home(path: &std::path::Path) -> String {
 /// total line closing each group.
 struct Spend {
     name: String,
-    quota: String,
     /// One line per pooled model this profile's steps name — a figure and the
     /// model it counts against — or, when it names none, the single line the
     /// profile drew before pooling existed: a figure with no model beside it,
@@ -460,15 +459,6 @@ pub(super) fn footer(
             };
             Some(Spend {
                 name: name.clone(),
-                quota: match profile.quota_ceiling {
-                    0 if crate::agent::adapter(&profile.kind)
-                        .is_some_and(|a| a.quota.is_some()) =>
-                    {
-                        " · quota off".into()
-                    }
-                    0 => String::new(),
-                    ceiling => format!(" · quota ceiling {ceiling}%"),
-                },
                 lines,
             })
         })
@@ -478,26 +468,26 @@ pub(super) fn footer(
     let name_w = width(&|s| s.name.chars().count());
 
     // One rendered line per `(figure, model)` pair a profile carries — the
-    // profile's own name and quota print once, on the first, and every line
-    // after it leaves that column blank, exactly as a group's own rows leave
-    // a repeated value off every line but their first.
-    let mut lines: Vec<String> =
-        spends
-            .iter()
-            .flat_map(|spend| {
-                spend.lines.iter().enumerate().map(move |(i, (slots, model))| {
-                let name = if i == 0 { spend.name.as_str() } else { "" };
-                let quota = if i == 0 { spend.quota.as_str() } else { "" };
-                let pool = match model {
-                    Some(model) => format!("{GUTTER}{model}"),
-                    None => String::new(),
-                };
-                format!(
-                    "{BOLD}{name:<name_w$}{RESET}{GUTTER}{DIM}slots{RESET} {slots}{quota}{pool}"
-                )
-            })
-            })
-            .collect();
+    // profile's own name prints once, on the first, and every line after it
+    // leaves that column blank, exactly as a group's own rows leave a
+    // repeated value off every line but their first.
+    let mut lines: Vec<String> = spends
+        .iter()
+        .flat_map(|spend| {
+            spend
+                .lines
+                .iter()
+                .enumerate()
+                .map(move |(i, (slots, model))| {
+                    let name = if i == 0 { spend.name.as_str() } else { "" };
+                    let pool = match model {
+                        Some(model) => format!("{GUTTER}{model}"),
+                        None => String::new(),
+                    };
+                    format!("{BOLD}{name:<name_w$}{RESET}{GUTTER}{DIM}slots{RESET} {slots}{pool}")
+                })
+        })
+        .collect();
 
     // One line, only when something has actually failed — absent entirely
     // otherwise, the same as every other figure this footer only prints when
@@ -2509,7 +2499,6 @@ mod tests {
         let line = |name: &str| lines.iter().find(|l| l.starts_with(name)).unwrap().clone();
         // Fresh profiles assert no harness cap, including Claude.
         assert!(line("claude").contains("slots 1/∞"), "{lines:#?}");
-        assert!(line("claude").contains("quota off"), "{lines:#?}");
         // No cap either side: the model names no `slots` and the profile no
         // `concurrency`, so the ceiling is what zero has always meant.
         assert!(line("pi").contains("slots 1/\u{221e}"), "{lines:#?}");
@@ -2669,7 +2658,7 @@ mod tests {
 
     /// A profile whose steps name two different pooled models draws two
     /// lines, each with its own live count and cap — the profile's own name
-    /// and quota on the first, and the second left blank under it.
+    /// on the first, and the second left blank under it.
     #[test]
     fn a_profile_naming_two_pooled_models_draws_two_pool_lines() {
         let mut repo = fixture("footer-two-pools");

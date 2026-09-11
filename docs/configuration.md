@@ -354,13 +354,11 @@ instructions could disagree with each other.
 kind = "pi"
 session_reuse_ctx = 0
 session_blocked_ctx = 0
-quota_ceiling = 0
 
 [agents.claude]
 kind = "claude"
 session_reuse_ctx = 0
 session_blocked_ctx = 0
-quota_ceiling = 0
 permission_mode = "auto"
 ```
 
@@ -438,39 +436,6 @@ error: `session_blocked_ctx` (30) must be above `session_reuse_ctx` (40) — a t
 `spoolway doctor` warns separately when a profile sets `session_blocked_ctx` but its pipeline
 steps run against a model that resolves to no `context_window` — the ceiling never fires for
 that profile, and the run still proceeds.
-
-**`quota_ceiling`** is the ceiling on how much of its kind's *account-wide* quota this profile
-may have spent before a pass will start another lane of it. It is a percentage, 1..=100, and
-`0` — the default on every shipped profile — is off: no reading is taken and no task is ever
-parked for it. It is not a size at all, unlike the two settings above; it is read from whatever
-the agent itself writes its usage percentage into, which today means `claude` and `codex` — see
-[Reading a kind's quota before a lane
-starts](agents.md#reading-a-kinds-quota-before-a-lane-starts).
-
-Two windows are checked, `five_hour` first and then `seven_day`, and either one at or above the
-ceiling stops the launch. The pass writes `parked_until:` on every candidate task of that
-profile, taken from the window's own `resets_at`, and stamps `parked_at:` once at the start of
-the continuous hold. Later rechecks may move that deadline or refine its window while preserving
-the fixed `parked_at`; the board reads the latter to show the increasing elapsed age. The park
-lives on the task file rather than in
-the dispatcher, so it survives the dispatcher being closed and the machine being turned off —
-a second dispatcher started from cold honours it without taking any reading of its own. Tasks
-whose step names a different profile are staffed in the same pass.
-
-An enabled ceiling holds new launches when the reading is unavailable, invalid, older than
-five hours, or has an expired window. Rechecks back off from one minute to one hour; the
-task's status log explains the failure and the board labels it `quota unavailable`.
-The agent must refresh its own reading; spoolway does not fetch quota over the network.
-Disable the ceiling explicitly to permit launches without a trustworthy reading. Running
-lanes are left intact. This threshold reserves no capacity for their remaining work.
-
-```
-$ spoolway config set agents.claude.quota_ceiling 101
-error: `agents.claude.quota_ceiling` must be 0 (off) or between 1 and 100 (1..=100), got 101
-```
-
-`spoolway doctor` notes a profile that sets `quota_ceiling` on a kind carrying no quota probe:
-the setting is accepted and can never fire.
 
 The second bound a carried session used to face — whether it was still worth resuming once its
 prompt cache had gone cold — is not here any more. It is `models.<glob>.session_reuse_idle`

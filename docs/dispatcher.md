@@ -470,15 +470,14 @@ floor. `N` is the laps this task has taken from the step it arrived here from, `
 route's own budget, the same pair `apply_loop_budget` compares before it lets another one
 through. A step with no declared budget for that route shows a bare step id.
 
-A task holding a quota park reads its elapsed age from the fixed `parked_at:` timestamp, on
-the board and in `spoolway queue list` alike. The age keeps increasing while rechecks move
-`parked_until:`. A legacy park without `parked_at:` gets no invented age; when the quota
-reading itself is unavailable, its state can still retain that separate diagnosis.
+A task holding a park reads its elapsed age from the fixed `parked_at:` timestamp, on the
+board and in `spoolway queue list` alike. `parked_until:` beside it is the deadline, not a
+moving figure — the age counts from `parked_at` the whole time the park stands, and is only
+reprobed once that deadline has passed. A park without `parked_at:` gets no invented age.
 
 ```
 TASK       PIPELINE  STEP       STATE                                  NEXT
 wire-up    impl      implement  ● parked · 8m                           review
-quota      impl      implement  ● parked · quota unavailable · 42m     review
 legacy     impl      implement  ● parked                                review
 log-view   impl      implement  ● running                               review
 ```
@@ -520,8 +519,7 @@ seconds and only when it has changed, so a figure can be that stale — invisibl
 one-second redraw, and much cheaper than reading a megabyte of conversation per frame.
 
 The footer shows one line per agent profile that carries a cap, its name and `slots <live>/<cap>`.
-Quota-capable profiles also show `quota off`, or `quota ceiling <percent>%` when enabled. A
-cap is either the profile's own `concurrency`, or a model the profile runs that carries
+A cap is either the profile's own `concurrency`, or a model the profile runs that carries
 `slots` of its own — resolved from whichever of the profile's live lanes or a queued task's
 pipeline steps names it. A profile whose model has `slots` of its own shows up the moment a
 task routes onto a pipeline that names it, with nothing running on it at all. Where the model
@@ -532,8 +530,8 @@ touching `[agents.pi]`.
 
 A profile that names more than one pooled model draws one line per model, each reading
 `slots <live>/<cap>` with that model's own name printed after the figures, each figure counted
-against that model's own cap. A profile whose steps name two pooled models prints its name and
-quota on the first line and leaves the name column blank on the rest. Two model names that
+against that model's own cap. A profile whose steps name two pooled models prints its name on
+the first line and leaves the name column blank on the rest. Two model names that
 match the same `[models."<glob>"]` entry collapse to one line, since they are the same pool.
 A profile that names no pooled model keeps the single line it always drew, with no model name
 after the figures. What a run has spent lives on the board itself now, in each group's
@@ -890,65 +888,6 @@ second later would.
 A `lanes.json` that will not parse is not discarded. The pass starts from no lane records, but
 it first copies the bad file aside as `lanes.json.bad` and writes a line to the problem log
 saying so, rather than silently overwriting a hand edit or a disk error with an empty file.
-
-A lane whose pane carries its own kind's usage-limit message takes a different road entirely,
-and it does not go through the backoff above. **The lane is left running.** Its pane, session
-and worktree are untouched and no `stop_lane` is called, because the agent picks its own turn
-back up once the window resets — killing it would throw away work that is going to finish by
-itself. Instead the dispatcher writes `parked_until:` on the task and stops nudging it: no
-reminder is sent while the park stands, the task never reaches `blocked`, and `attempts` is
-left exactly where the launch that hit the limit set it. A `## Status Log` line names the
-limit and the time the park runs to.
-
-This check runs whether the multiplexer reports the lane `Working` or settled. A limit surface
-that keeps redrawing never settles, so a check that only looked at settled lanes would miss the
-common case entirely and leave the reminder loop to escalate it.
-
-The park's clock comes from an observed exhausted window's reset, including a weekly reset.
-Without one, `quota_retries` backs off rechecks from one minute to one hour independently of
-launch attempts. The counter survives restarts and clears when the lane resumes or the task
-moves on. Repeated holds update the clock without appending duplicate status-log entries.
-Whether a tail is a limit is answered by `Adapter::usage_limit` in `src/agent.rs`.
-
-### Parking a task before the limit lands
-
-The check above catches a limit that has already landed. `agents.<profile>.quota_ceiling`
-catches one before it does. Ahead of starting a lane, a pass reads the profile's kind's own
-cached usage percentage — something the agent wrote to disk, never a network call — and at or
-above the ceiling on either window it starts no new lane of that profile at all. Every candidate task of
-that profile gets `parked_until:` written from the tripped window's own `resets_at`, and the
-first park of a continuous hold also stamps `parked_at:` — the fixed start the age counts from —
-while every later re-probe moves only `parked_until`. Tasks
-whose step names a different profile are staffed in the same pass. See [Reading a kind's quota
-before a lane starts](agents.md#reading-a-kinds-quota-before-a-lane-starts) for where the
-reading comes from. An enabled ceiling holds launches when that reading is unavailable,
-stale, malformed or expired, rechecking with the same persistent backoff. The board's profile
-footer names the quota ceiling, or `quota off`; a task awaiting a reading says
-`quota unavailable` beside its recheck time. When the reading itself could not be produced the
-park has no reset to name, so it shows `quota unavailable` with no clock — its `parked_until`
-is the dispatcher's own retry deadline, not a quota reset. `spoolway agent verify <kind>`
-diagnoses the source.
-The ceiling checks admission only: running lanes and external sessions can still exhaust
-the account during processing.
-
-    pass 41
-      wire-up: `implement` parked until 14:00 — claude at 88% of its
-               five-hour window, ceiling is 85
-      log-view: started `implement` on pi
-      lanes still working
-
-**The park lives on the task file, not in the dispatcher.** That is the whole point of writing
-a timestamp rather than holding a timer: a seven-day wait outlives any dispatcher process, and
-often the machine. A dispatcher started from cold reads `parked_until:` at the top of its
-per-task loop, before it resolves a step or looks at a lane, and honours it without taking any
-reading of its own. The first pass after the timestamp has passed rechecks quota without touching the park: an expired
-deadline is a recheck, not an exit, so the same pass resolves the hold in one write — re-parking
-with a fresh deadline against a still-exhausted reading, or admitting another lane once the reading
-has dropped. The hold's age, stamped once when it began (`parked_at`), keeps counting from there
-rather than restarting, and a pass that reaches no decision at all (a dependency still open, say)
-leaves the whole park on disk with its deadline simply in the past — still held, not yet decided. A
-forty-minute five-hour wait and a six-day seven-day wait behave
-identically.
 
 A park never ends the run. The dispatcher keeps passing and reports the park each time; closing
 it is a person's call.
