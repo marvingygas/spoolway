@@ -37,19 +37,26 @@ const OPTIONAL_KEYS: &[&str] = &[
     "ticket",
 ];
 
-/// The keys spoolway's own dispatcher machinery overwrites unconditionally
+/// The keys spoolway's own dispatcher machinery throws away unconditionally
 /// once a document reaches `parse_submission`, whatever value the document
-/// gave them — see the block of `front.<field> = ...` assignments there.
-/// Distinct from [`super::queue::RESERVED_KEYS`]: setting one of *these* is
-/// not refused, it is simply thrown away, because a document cannot know the
-/// run id, the worktree path or the launch counters before any of them
-/// exist.
+/// gave them. Distinct from [`super::queue::RESERVED_KEYS`]: setting one of
+/// *these* is not refused, it is simply thrown away, because a document
+/// cannot know the run id, the worktree path or the launch counters before
+/// any of them exist.
+///
+/// Most of these are overwritten by one of the `front.<field> = ...`
+/// assignments in `parse_submission` — everything but the five quota-park
+/// keys at the end, which have no `Frontmatter` field left to assign: a
+/// document still carrying one of those five is a task file that predates
+/// their retirement, and `RETIRED_PARK_KEYS` (`src/task.rs`) strips it out
+/// of `extra` instead, the same way `Task::parse` drops one already queued.
 const IGNORED_KEYS: &[&str] = &[
     "base",
     "borrowed",
     "last_report",
     "blocked_from",
     "parked_from",
+    "escalated",
     "resume",
     "patch",
     "skip",
@@ -60,14 +67,14 @@ const IGNORED_KEYS: &[&str] = &[
     "tab_id",
     "paused_at",
     "launched_at",
+    "prompts",
+    "rounds",
+    "arrived_from",
     "usage_limit_hold",
     "quota_retries",
     "parked_until",
     "parked_window",
     "parked_at",
-    "prompts",
-    "rounds",
-    "arrived_from",
 ];
 
 /// What a document does with a key none of the four groups above name.

@@ -501,7 +501,7 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
         assets::PULL_REQUEST_TEMPLATE.as_bytes(),
         false,
     )?;
-    // The six typed messages a lane's pane receives. One file, not one per
+    // The seven typed messages a lane's pane receives. One file, not one per
     // pipeline or per state — a project overrides as many `##` sections as
     // it wants and leaves the rest to fall back to spoolway's own words.
     place(

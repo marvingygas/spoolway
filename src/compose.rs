@@ -472,9 +472,9 @@ const ARRIVED_BY_FAIL: &str = "Fix pass. `{from}` failed this task back to you; 
 /// project's own concern and not spoolway's. The project's own words, from
 /// `.spoolway/templates/lane-prompts.md`'s `## arrived-by-fail` section, or
 /// spoolway's own built-in — see [`crate::lane_prompts::render`], the same
-/// per-section resolution the six typed messages already use, reached
+/// per-section resolution the seven typed messages already use, reached
 /// directly here rather than through [`crate::lane_prompts::STATES`]: this
-/// is not one of the six messages typed into a pane, it is a paragraph of
+/// is not one of the seven messages typed into a pane, it is a paragraph of
 /// the system prompt itself.
 ///
 /// [`failed_command`]'s own case, not this one: a command step reports
@@ -536,7 +536,7 @@ pub(crate) fn report_contract(pipeline: &Pipeline, blocked: bool) -> String {
     )
 }
 
-/// The built-in wording for each of the six typed messages a lane's pane
+/// The built-in wording for each of the seven typed messages a lane's pane
 /// receives, in [`crate::lane_prompts::STATES`] order — what
 /// [`crate::lane_prompts::render`] falls back to when a project's own
 /// `.spoolway/templates/lane-prompts.md` is silent about that state. See that
@@ -569,6 +569,12 @@ const PARK: &str = "A person stopped your turn with a keypress — not anything 
      back. Nothing was blocked and nothing changed: no work of yours was undone, nothing was \
      added to the task, nothing new is in your way. Same session, continued: pick up where the \
      interrupt cut you off.";
+
+const PARK_ESCALATED: &str = "You went quiet and never reported, so spoolway reminded you and, when nothing \
+     followed, tore your lane down and put the task back here. Nothing failed a check — this \
+     is not a block — but something was written down while you were gone: the last `## Status \
+     Log` entry in {task_file} says why, and `## Blocker` may carry the last of what your pane \
+     said. Same session, continued: read those, then carry on.";
 
 const REMINDER: &str = "`{step}` ended its turn without reporting. Here is the report contract again:\n\n\
      {report_contract}";
@@ -672,26 +678,40 @@ pub(crate) fn carry_prompt(repo: &Repo, task: &Task, _pipeline: &Pipeline) -> St
 
 /// What a lane resumed after a park is told, instead of the opening
 /// briefing — distinct from both [`resume_prompt`] and [`carry_prompt`],
-/// because it must say the one thing neither of those may: nothing here was
-/// ever a blocker.
+/// because it must say the one thing neither of those may: nothing here
+/// failed a check.
 ///
-/// Two gestures land a task on `paused` with `parked_from` set rather than a
-/// gate or a real block, and this prompt answers for both without knowing
-/// which: the board's `p` key, and a person's own Escape typed straight into
-/// the pane — see [`crate::dispatch::Dispatcher::park_after_interrupt`].
-/// [`resume_prompt`]'s unattended half sends a lane hunting through `##
-/// Blocker` for an obstacle; a park never wrote one, so this says the
-/// opposite, plainly.
-pub(crate) fn park_prompt(repo: &Repo, _task: &Task, _pipeline: &Pipeline) -> String {
-    // `task` and `pipeline` are unused: unlike `resume_prompt` and
-    // `carry_prompt`, nothing here points a lane back at its own task file
-    // or names a report form any more, but they are kept so all three
-    // prompt functions share one shape and a caller never has to remember
-    // which needs which.
-    crate::lane_prompts::render(repo, "park", PARK, &[])
+/// Three gestures land a task on `paused` with `parked_from` set rather than
+/// a gate or a real block, and `escalated` — [`crate::task::Frontmatter::
+/// escalated`] — is what tells the third apart from the first two, which this
+/// answers for without knowing which of them it was: the board's `p` key,
+/// and a person's own Escape typed straight into the pane — see
+/// [`crate::dispatch::Dispatcher::park_after_interrupt`]. Neither of those
+/// changed anything, so the `park` state says so, plainly, the opposite of
+/// what [`resume_prompt`]'s unattended half sends a lane hunting `## Blocker`
+/// for. `escalated` is the third gesture — [`crate::dispatch::Dispatcher::
+/// tear_down_and_escalate`], a lane reminded three times and torn down, or
+/// one stopped past its context ceiling — where something *did* happen, and
+/// `park`'s own wording would be false; `park-escalated` says what.
+pub(crate) fn park_prompt(
+    repo: &Repo,
+    task: &Task,
+    _pipeline: &Pipeline,
+    escalated: bool,
+) -> String {
+    let task_file = task.path.display().to_string();
+    match escalated {
+        false => crate::lane_prompts::render(repo, "park", PARK, &[]),
+        true => crate::lane_prompts::render(
+            repo,
+            "park-escalated",
+            PARK_ESCALATED,
+            &[("task_file", &task_file)],
+        ),
+    }
 }
 
-/// The sixth typed message: what a lane that has gone quiet is nudged with,
+/// The seventh typed message: what a lane that has gone quiet is nudged with,
 /// naming the step it is on and repeating the report contract it was
 /// launched with. Its own function rather than inlined at the one call
 /// site, so `spoolway prompt contract` can render it too, against the same
@@ -706,7 +726,7 @@ pub(crate) fn reminder_prompt(repo: &Repo, pipeline: &Pipeline, step: &Step) -> 
     )
 }
 
-/// Every one of the six typed messages, rendered for `state` against a real
+/// Every one of the seven typed messages, rendered for `state` against a real
 /// or sample task — what `spoolway prompt contract`'s section 3 shows, one
 /// state at a time. `state` outside [`crate::lane_prompts::STATES`] renders
 /// empty rather than panicking: the contract's own loop is the only caller,
@@ -723,7 +743,8 @@ pub(crate) fn lane_prompt_for_state(
         "resume" => resume_prompt(repo, task, pipeline, false),
         "resume-unattended" => resume_prompt(repo, task, pipeline, true),
         "carry" => carry_prompt(repo, task, pipeline),
-        "park" => park_prompt(repo, task, pipeline),
+        "park" => park_prompt(repo, task, pipeline, false),
+        "park-escalated" => park_prompt(repo, task, pipeline, true),
         "reminder" => reminder_prompt(repo, pipeline, step),
         _ => String::new(),
     }

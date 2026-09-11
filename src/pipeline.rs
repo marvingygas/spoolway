@@ -1089,20 +1089,22 @@ impl Pipeline {
             }
 
             // `blocked` routes itself, in one turn: a pass is read from where
-            // the task stopped rather than from this step — one step past
-            // there under `unattended.skip_blocked_lane`, back onto it when
-            // that is off — and anything else (`--fail`, `--block`, or
-            // `--pause`) parks the task on `paused` for a person, never back
-            // onto `blocked` itself. Each of the keys that would otherwise say
-            // one of those things is refused by name, pointing at what
-            // actually decides it instead of leaving a reader to wonder why
-            // the graph disagrees with the file.
+            // the task stopped rather than from this step. For an agent step
+            // that is one step past there under `unattended.skip_blocked_lane`,
+            // back onto it when that is off; a command step is always handed
+            // back to itself, whatever the setting says. Anything else
+            // (`--fail`, `--block`, or `--pause`) parks the task on `paused`
+            // for a person, never back onto `blocked` itself. Each of the keys
+            // that would otherwise say one of those things is refused by
+            // name, pointing at what actually decides it instead of leaving a
+            // reader to wonder why the graph disagrees with the file.
             if step.id == BLOCKED {
                 if step.on_pass.is_some() {
                     bail!(
                         "step `blocked` declares `on_pass:` — where its pass goes is read from \
-                         the step the task blocked on, not from here: past that step, or back \
-                         onto it under `unattended.skip_blocked_lane = false`; delete `on_pass:`"
+                         the step the task blocked on, not from here: past that step for an \
+                         agent step (or back onto it under `unattended.skip_blocked_lane = \
+                         false`), always back onto it for a command step; delete `on_pass:`"
                     );
                 }
                 if step.on_fail.is_some() {

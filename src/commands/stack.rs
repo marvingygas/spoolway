@@ -519,6 +519,10 @@ fn run_summary(repo: &Repo, task: &Task) -> Result<Option<(String, String)>> {
 
     let session = crate::usage::new_session_id();
     let state_dir = repo.root.join(crate::config::STATE_DIR);
+    // This summary turn runs directly in `repo.root`, never a worktree of its
+    // own, so its git directory is the main checkout's — resolved through
+    // git rather than assumed, the same as a dispatched lane's launch.
+    let git_dir = crate::repo::git_dir(&repo.root)?;
     let values = std::collections::BTreeMap::from([
         ("model", summary.model.clone()),
         ("session_id", session.clone()),
@@ -532,6 +536,7 @@ fn run_summary(repo: &Repo, task: &Task) -> Result<Option<(String, String)>> {
         // lane's own `--add-dir` grant needs this too, the same as a
         // dispatched lane's launch in `dispatch.rs`.
         ("project_home", repo.home().display().to_string()),
+        ("git_dir", git_dir.display().to_string()),
     ]);
     let mut rendered = profile.render_args(&values)?;
     let effort = (!summary.effort.trim().is_empty()).then_some(summary.effort.as_str());

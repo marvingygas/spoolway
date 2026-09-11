@@ -167,7 +167,7 @@ reads correctly beside `cleanup: true`, which is a terminal's key anyway.
 | Stage | What it is |
 |---|---|
 | `queued` | Where every task starts. It waits here for its dependencies and a worker slot, and the dispatcher promotes it to the first step when `depends_on` is satisfied |
-| `done` | The task finished. Its worktree is removed and its file is archived. The local branch spoolway cut for it is deleted too, unless something still queued names it in `depends_on`, in which case it is kept until that stops being true. The published branch is left alone — deleting a merged pull request's head branch is a repository setting the forge applies itself |
+| `done` | The task finished. Its worktree is removed and its file is archived. The local branch spoolway cut for it is deleted too, unless something still queued names it in `depends_on` or some remote still lacks a commit of that branch — the branch is asked directly whether every commit has reached a remote, not trusted to `git`'s own "merged" check, which a squash-merge would lie about — in which case it is kept until the reason is gone, freed by the next cleanup. The published branch is left alone — deleting a merged pull request's head branch is a repository setting the forge applies itself |
 | `blocked` | The task needs help: something stopped it. Attended, `spoolway resume <task>` resumes it at the step it stopped on. Unattended, a lane staffs it instead, configured by `[unattended]`'s `blocked_*` keys in config.toml; see [Staffing `blocked`](#staffing-blocked) |
 | `paused` | The task passed a `gate:` step and needs a person to let it past. `spoolway resume <task>` sends it on. Nothing is wrong with it, and its dependents wait quietly — see [Gates](#gates) |
 
@@ -363,15 +363,18 @@ when the thing genuinely cannot be done — pauses it for a person with `spoolwa
 `blocked` itself; a pause parks the task on `paused` with the same destination a pass would
 have reached, `spoolway resume` carries it there, and there is no round trip left to bound.
 
-A pass carries the task **past** the step it blocked on, to that step's own `on_pass`. The
+An agent step's pass carries the task **past** it, to that step's own `on_pass`. The
 unblocker prompt is told to do the blocked step's work, so its pass is read as that step's
 pass, and handing the task back would pay an agent to reach a verdict that already exists.
-
-This applies to command steps as well. A task blocked on `test` resumes at whatever `test`
-passes to, without `test` running again, on the unblocker's word that the build is green.
 Set `unattended.skip_blocked_lane = false` where that claim matters more than the extra lap:
 the task then lands back on the step it blocked on, which is where `spoolway resume` sends
 it by hand, and the lane already there is continued rather than replaced.
+
+A command step is never carried past — it is handed back to itself, whatever the setting
+says. Its output is a `git push` or a pull request opened, and the unblocker's word that it
+happened does not make either one exist — only running the command does. So a task blocked
+on `test` resumes on `test` itself, and the lane already there is continued rather than
+replaced. The setting only ever decided what an agent step's take-over was worth.
 
 `blocked_session = true` resumes the prompt's own earlier session on this task — the same
 conversation that read the first blocker is the one asked to look at the second, if there is

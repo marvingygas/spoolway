@@ -1009,19 +1009,6 @@ fn agent_kind_checks(config: &Config) -> Vec<Finding> {
                 profile.kind, profile.kind
             )));
         }
-
-        // A ceiling with no probe holds every new launch. Name that
-        // configuration explicitly for a profile that enabled protection —
-        // every kind with no probe at all is already covered by `spoolway
-        // agent verify`'s own `quota` line.
-        if profile.quota_ceiling > 0 && adapter.is_some_and(|a| a.quota.is_none()) {
-            findings.push(Finding::Note(format!(
-                "agent `{name}` sets `quota_ceiling` = {}, but kind `{}` carries no quota \
-                 probe — new launches stay held until protection is disabled or a supported kind is used. `spoolway agent verify {}` \
-                 says so on its own line",
-                profile.quota_ceiling, profile.kind, profile.kind
-            )));
-        }
     }
     findings
 }
@@ -1077,7 +1064,7 @@ fn prompt_checks(repo: &Repo, pipelines: &Pipelines) -> Vec<Finding> {
         Err(err) => findings.push(Finding::Note(format!("prompts could not be read: {err:#}"))),
     }
 
-    // Same read, over the six typed messages a lane's pane receives rather
+    // Same read, over the seven typed messages a lane's pane receives rather
     // than a role's own prose — see `crate::lane_prompts`. A section that
     // names none of the placeholders its state needs, or names one this
     // binary does not substitute, is a finding here too.

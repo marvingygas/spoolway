@@ -775,10 +775,12 @@ pub struct DispatchArgs {
     /// its four companion keys (or by the five keys a declared `blocked` step
     /// overrides), `loop` applies to it as usual, and nothing bounds how many
     /// times it round-trips. When that lane passes, `unattended.skip_blocked_lane`
-    /// decides where the task lands: on by default, it carries one step past
-    /// where the block was hit, on the unblocker's word that the work is done;
-    /// set `false`, it hands the task back to the step it blocked on to run
-    /// again. A step's `gate:` is not one of the things this lifts — a gate is a
+    /// decides where an *agent* step lands: on by default, it carries one step
+    /// past where the block was hit, on the unblocker's word that the work is
+    /// done; set `false`, it hands the task back to the step it blocked on to
+    /// run again. A command step ignores this setting — the unblocker's word
+    /// is not a `git push` or a pull request, so it always runs again. A
+    /// step's `gate:` is not one of the things this lifts — a gate is a
     /// person's decision by design, so a gated pass still parks on `paused` and
     /// still waits for `spoolway resume`.
     ///

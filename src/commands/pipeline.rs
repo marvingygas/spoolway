@@ -949,6 +949,10 @@ pub fn pipeline_gen(repo: &Repo, mux: &dyn Mux, args: &PipelineGenArgs) -> Resul
     write_atomic(&prompt_file, &system_prompt)?;
 
     let state_dir = repo.root.join(crate::config::STATE_DIR);
+    // This session opens directly in `repo.root`, never a worktree of its
+    // own, so its git directory is the main checkout's — resolved through
+    // git rather than assumed, the same as a real lane start.
+    let git_dir = crate::repo::git_dir(&repo.root)?;
     let values: std::collections::BTreeMap<&str, String> = std::collections::BTreeMap::from([
         ("model", cfg.pipeline_model.clone()),
         ("session_id", session.clone()),
@@ -961,6 +965,7 @@ pub fn pipeline_gen(repo: &Repo, mux: &dyn Mux, args: &PipelineGenArgs) -> Resul
         // told where this project's runtime state lives — see
         // `crate::repo::Repo::home`.
         ("project_home", repo.home().display().to_string()),
+        ("git_dir", git_dir.display().to_string()),
     ]);
 
     let mut lane_args = profile.render_args(&values)?;

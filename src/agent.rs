@@ -78,8 +78,8 @@ pub struct Adapter {
 
     /// The argv template a lane of this kind is started with. Placeholders —
     /// `{model}`, `{prompt_file}`, `{task_file}`, `{worktree}`, `{repo}`,
-    /// `{state_dir}`, `{project_home}`, `{session_id}` — are substituted by
-    /// [`crate::config::AgentProfile::render_args`] from what a lane start
+    /// `{state_dir}`, `{project_home}`, `{git_dir}`, `{session_id}` — are
+    /// substituted by [`crate::config::AgentProfile::render_args`] from what a lane start
     /// already computes; see that function's doc comment for what each one
     /// carries. Empty on a kind nobody has wired up yet — a profile naming
     /// such a kind is refused rather than launched with no flags at all.
@@ -99,45 +99,6 @@ pub struct Adapter {
     /// line. Nothing anywhere refuses a kind for being here; see
     /// [`Accounting`] for what an unmetered kind actually loses.
     pub accounting: Option<Accounting>,
-
-    /// The phrase this kind's own CLI leaves in a pane when it has hit a
-    /// usage limit and stopped making progress on its own — read verbatim off
-    /// a real transcript, not guessed at. A lane whose tail carries this is
-    /// not stuck on a question and not dead at launch; it is waiting out a
-    /// clock nothing spoolway does will shorten, so the dispatcher leaves the
-    /// pane exactly as it is and parks the task instead of reminding it or
-    /// tearing it down — see `Dispatcher::usage_limit_hold` in `dispatch.rs`,
-    /// checked ahead of the ordinary settled/reminder path rather than inside
-    /// it, since this is true of a working pane as much as a settled one.
-    ///
-    /// `None` for a kind nobody has established this wording for: its lanes
-    /// keep going through the ordinary settled/reminder path, exactly as they
-    /// did before this field existed.
-    pub usage_limit: Option<&'static str>,
-
-    /// Where this kind's own cached usage percentage is read back from.
-    /// `spoolway agent verify` prints it verbatim, and [`crate::quota::read`]
-    /// decides how to use it from [`Accounting::format`], since the two rows
-    /// established so far do not read it the same way.
-    ///
-    /// **`claude`**: a file relative to the home directory, `.claude.json`,
-    /// whose `cachedUsageUtilization.utilization` object carries a `five_hour` and a
-    /// `seven_day` entry — each an integer `utilization` percent and an ISO
-    /// `resets_at` — plus `fetchedAtMs` on `cachedUsageUtilization`. Read verbatim
-    /// off a real file, not guessed at.
-    ///
-    /// **`codex`**: `"sessions"`, a directory joined onto every per-lane home
-    /// spoolway has made for this kind and onto `~/.codex`, then walked for
-    /// the newest rollout across all of them. Its last `token_count` event
-    /// carries a `rate_limits` object with a `primary` and a `secondary`
-    /// window, each a `used_percent` float and an epoch-seconds `resets_at`;
-    /// see the comment on codex's own row for the real reading this was
-    /// established against, and its negative case.
-    ///
-    /// `None` for a kind with no such cache to read — every row but these
-    /// two today. Enabling a quota ceiling on such a profile holds new
-    /// launches; `spoolway agent verify` diagnoses the missing probe.
-    pub quota: Option<&'static str>,
 
     /// How this kind's transcript records a person's interrupt — the record
     /// left behind when Escape lands mid-turn. Read by
@@ -537,10 +498,6 @@ pub const ADAPTERS: &[Adapter] = &[
             // change for planning done in a pi session to start being counted.
             session_env: None,
         }),
-        // A local model has no account-wide usage limit to run out of.
-        usage_limit: None,
-        // Nor a cached percentage against one.
-        quota: None,
         // Captured off a real transcript: the last record after Escape is
         // `{"type":"message","message":{"role":"assistant","content":[],
         // "stopReason":"aborted","errorMessage":"Operation aborted"}}`.
@@ -623,6 +580,16 @@ pub const ADAPTERS: &[Adapter] = &[
             "{state_dir}",
             "--add-dir",
             "{project_home}",
+            // A lane's own worktree is not the whole of what `git add` and
+            // `git commit` there need to write to: a linked worktree's index
+            // lives outside it, and the objects and branch ref a commit
+            // writes live further out still, in the main checkout's shared
+            // `.git` — so without this grant every commit a lane tries fails
+            // with `Read-only file system`. `{git_dir}` names that shared
+            // directory, never the worktree's own — see
+            // `crate::repo::git_dir`.
+            "--add-dir",
+            "{git_dir}",
         ],
         // Takes the id spoolway mints, so it needs no home of its own.
         home: None,
@@ -632,16 +599,6 @@ pub const ADAPTERS: &[Adapter] = &[
             format: Format::AnthropicApi,
             session_env: Some("CLAUDE_CODE_SESSION_ID"),
         }),
-        // Read verbatim off a real transcript — see
-        // `~/.spoolway/spoolway/archive/checkout-line.md`'s own `## Blocker`:
-        // "Usage limit reached · continuing automatically at 9:50am · esc to
-        // cancel", and again as "Usage limit reached again after you
-        // continued · continuing automatically…". The phrase itself, not the
-        // clock or the rest of the line, is what stays the same between them.
-        usage_limit: Some("Usage limit reached"),
-        // Read verbatim off a real `~/.claude.json` — see `quota::read`'s own
-        // doc for the shape.
-        quota: Some(".claude.json"),
         // Captured off a real transcript: the last record after Escape is
         // `{"type":"user","message":{"role":"user","content":
         // [{"type":"text","text":"[Request interrupted by user]"}]}}`.
@@ -746,6 +703,15 @@ pub const ADAPTERS: &[Adapter] = &[
             "{state_dir}",
             "--add-dir",
             "{project_home}",
+            // Same reasoning again, this time for writing rather than
+            // reading: `--sandbox workspace-write` confines codex to
+            // `worktree`, and a linked worktree writes its objects and moves
+            // its branch ref in the main checkout's shared `.git`, further
+            // outside it still than the worktree's own index — so without
+            // this grant `git add`/`git commit` there fail. See
+            // `crate::repo::git_dir`.
+            "--add-dir",
+            "{git_dir}",
             // codex checks for a newer release of itself on startup, and a
             // newer one stops the lane dead: `✨ Update available! 0.153.4 ->
             // 0.153.6`, then `1. Update now (runs npm install -g
@@ -827,42 +793,6 @@ pub const ADAPTERS: &[Adapter] = &[
             // which resolves both.
             session_env: Some("CODEX_THREAD_ID"),
         }),
-        // Not established against a real codex transcript yet.
-        usage_limit: None,
-        // Read verbatim off a real ChatGPT-authed rollout on this machine —
-        // `~/.codex/sessions/2026/09/05/rollout-2026-09-05T09-51-18-
-        // 01a0708c-ec8f-7a01-b4f9-99f6337e1a05.jsonl`'s last `token_count`
-        // event carried:
-        //   "rate_limits":{"limit_id":"codex","limit_name":null,
-        //   "primary":{"used_percent":5.0,"window_minutes":300,
-        //   "resets_at":1788611977},"secondary":{"used_percent":2.0,
-        //   "window_minutes":10080,"resets_at":1789151593},
-        //   "credits":{"has_credits":false,"unlimited":false,"balance":"0"},
-        //   "individual_limit":null,"spend_control_reached":null,
-        //   "plan_type":"plus","rate_limit_reached_type":null}
-        // — a non-null `primary`, only ever seen after a `chatgpt`
-        // `auth_mode` sign-in; a local endpoint or an API key leave
-        // `rate_limits` present but `primary` and `secondary` null, along
-        // with every other field but `limit_id` itself (which stayed
-        // `"codex"`) — see [`crate::quota`]'s own doc — which is the
-        // negative case its reader has to return no reading for.
-        //
-        // `"sessions"` rather than a file: unlike claude's single cache file,
-        // codex writes this per session, so [`crate::quota::read`] walks for
-        // the newest rollout across every per-lane home spoolway has made
-        // under its own state directory *and* `~/.codex`, joining this onto
-        // each one, and reads the last `token_count` event's `rate_limits`
-        // out of whichever file that is.
-        //
-        // `~/.codex` was excluded once, on the grounds that a session
-        // spoolway did not start should not override a lane it did. That
-        // deadlocked the queue: only a codex lane writes a managed rollout,
-        // and the gate reading it holds every codex lane, so a reading that
-        // aged out could never be replaced. The worry it was guarding
-        // against — a run settled against a local endpoint — writes both
-        // windows null, and [`crate::quota`] skips those rather than letting
-        // them win on recency, which is where that guard belongs.
-        quota: Some("sessions"),
         // Captured off a real rollout: the record after Escape is a `user`
         // item whose text opens `<turn_aborted>` —
         // `{"role":"user","content":[{"type":"input_text","text":
@@ -894,19 +824,6 @@ impl Adapter {
     /// established against the real binary.
     pub fn resumes(&self) -> bool {
         self.headless.is_some()
-    }
-
-    /// Whether `tail` — a lane's own pane, its last output — is this kind's
-    /// own usage-limit message.
-    ///
-    /// The dispatcher asks this rather than matching a pattern of its own:
-    /// the exact wording is a fact about one CLI, established by reading a
-    /// real transcript, and belongs on the row for that CLI rather than
-    /// duplicated — or drifting — in `dispatch.rs`. `false` on a kind with no
-    /// [`Adapter::usage_limit`] established, which leaves its lanes on the
-    /// ordinary settled/reminder path.
-    pub fn is_usage_limit(&self, tail: &str) -> bool {
-        self.usage_limit.is_some_and(|phrase| tail.contains(phrase))
     }
 
     /// Whether spoolway knows how to start this kind at all.
@@ -1266,24 +1183,6 @@ mod tests {
                     "`{}` claims a quit gesture nobody has checked against its binary",
                     row.kind
                 );
-            }
-        }
-    }
-
-    /// A kind's own cache format is established the same way its quit gesture
-    /// is — against a real file, not guessed at — so only a kind whose
-    /// reading has actually been read off a real run may claim a probe.
-    #[test]
-    fn only_claude_and_codex_carry_a_quota_probe() {
-        for row in ADAPTERS {
-            match row.kind {
-                "claude" => assert_eq!(row.quota, Some(".claude.json")),
-                "codex" => assert_eq!(row.quota, Some("sessions")),
-                _ => assert!(
-                    row.quota.is_none(),
-                    "`{}` claims a quota probe nobody has read off its real cache",
-                    row.kind
-                ),
             }
         }
     }

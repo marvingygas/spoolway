@@ -213,7 +213,7 @@ dispatcher running · pid 48213 · up 6m 49s
    TASK       PIPELINE   STEP           STATE              CTX   OUT    COST      TIME   NEXT
 
  ▌auth
- ▸ login      default    deploy         ● waiting on you     —   18k   $2.14    4m 00s   answer it in pane `login · deploy`
+ ▸ login      default    deploy         ● paused             —   18k   $2.14    4m 00s   look at pane `login · deploy` — [r] resumes it
    profile    bugfix     queued         ● unreachable        —     —       —         —   unreachable — login is blocked
    signup     default    done           ● done               —     —       —         —
                                                                  49k   $2.14   31m 02s
@@ -470,21 +470,6 @@ floor. `N` is the laps this task has taken from the step it arrived here from, `
 route's own budget, the same pair `apply_loop_budget` compares before it lets another one
 through. A step with no declared budget for that route shows a bare step id.
 
-A task holding a `parked_until:` in the future reads `● parked · 14:00`, on the board and in
-`spoolway queue list` alike — the one state whose word carries a clock, because the only thing
-a reader wants from a parked row is when it stops being parked. A reset within the day shows a
-bare time; a longer wait shows the date and how far off it is.
-
-```
-TASK       PIPELINE  STEP       STATE                NEXT
-wire-up    impl      implement  ● parked · 14:00     review
-log-view   impl      implement  ● running            review
-```
-
-Re-queueing a document clears `parked_until:` along with the `usage_limit_hold` beside it, the
-same way it clears every other field the dispatcher stamped on the earlier run — so a task can
-be taken off a park without waiting the clock out.
-
 `deploy` there is a project's own gated step — no step of any shipped pipeline declares
 `gate:`, because a pull request is already the checkpoint. A task that has passed one reads
 `● paused`, with `→` and the step passing the gate would carry it to in the NEXT column, and
@@ -518,8 +503,7 @@ seconds and only when it has changed, so a figure can be that stale — invisibl
 one-second redraw, and much cheaper than reading a megabyte of conversation per frame.
 
 The footer shows one line per agent profile that carries a cap, its name and `slots <live>/<cap>`.
-Quota-capable profiles also show `quota off`, or `quota ceiling <percent>%` when enabled. A
-cap is either the profile's own `concurrency`, or a model the profile runs that carries
+A cap is either the profile's own `concurrency`, or a model the profile runs that carries
 `slots` of its own — resolved from whichever of the profile's live lanes or a queued task's
 pipeline steps names it. A profile whose model has `slots` of its own shows up the moment a
 task routes onto a pipeline that names it, with nothing running on it at all. Where the model
@@ -530,8 +514,8 @@ touching `[agents.pi]`.
 
 A profile that names more than one pooled model draws one line per model, each reading
 `slots <live>/<cap>` with that model's own name printed after the figures, each figure counted
-against that model's own cap. A profile whose steps name two pooled models prints its name and
-quota on the first line and leaves the name column blank on the rest. Two model names that
+against that model's own cap. A profile whose steps name two pooled models prints its name on
+the first line and leaves the name column blank on the rest. Two model names that
 match the same `[models."<glob>"]` entry collapse to one line, since they are the same pool.
 A profile that names no pooled model keeps the single line it always drew, with no model name
 after the figures. What a run has spent lives on the board itself now, in each group's
@@ -696,7 +680,7 @@ to answer the question keeps today's behaviour exactly, transcript alone.
 One exit bounds the loop besides the count, and it is counted too, not timed. A lane that goes
 fully quiet *after* a reminder — nothing further in its transcript — is the dead session no
 reminder can reach: due for another reminder is one comparison, whether the transcript has
-written since the last one, and a lane that has not is blocked on that very pass rather than
+written since the last one, and a lane that has not is paused on that very pass rather than
 given a clock to wait out. There the task carries the reason and the last of what the pane said,
 its session is closed and its worker slot goes back, and `spoolway resume` resumes it at the
 step it never reported from, as the session it was — see
@@ -732,8 +716,11 @@ nothing. `Mux::prompt` is what stands in its place instead: implemented once, on
 so a headless lane is reminded by reopening its pinned session and a resident one by typing into
 the pane it never left — the same call either way, identical for every agent kind.
 
-Either way you are told once that a pane is worth a look — the board's `waiting on you` — and
-the pane is named in the status output.
+Either way you are told once that a pane is worth a look — the board's `paused` state, the
+same state a gated task on the `paused` stage gets — and NEXT names the pane to look at, in the
+same ``look at pane `<lane>``` — [r] resumes it`` form a gate's resume carries. The task
+remains on its live pipeline step; the two differ only in route, not in key: the pane-held row
+points at the pane, the gate-held row points at the resume route.
 
 Once, and not for the rest of the lane's life: the mark comes off the moment the lane is seen
 working again. Whether you answered the question or the lane was only quiet long enough between
@@ -744,7 +731,7 @@ that is a second question and worth being told about.
 A lane that ended its turn *waiting* on something — a backgrounded watch, a scheduled
 wakeup — is this same case and not a third one. Nothing under spoolway resumes a settled
 session beyond the reminder above, so the pane it left is the pane a lane holding a question
-leaves, and the board says `waiting on you` about a pane with no question in it. That is
+leaves, and the board says `paused` and names a pane with no question in it. That is
 prevention's job too: the framing every lane is sent says in as many words that nothing brings
 it back to a turn, and that nothing watches how long any one call takes any more — long waits
 are polled through, awake, inside the turn, because there is no clock left to sit through them
@@ -885,65 +872,6 @@ second later would.
 A `lanes.json` that will not parse is not discarded. The pass starts from no lane records, but
 it first copies the bad file aside as `lanes.json.bad` and writes a line to the problem log
 saying so, rather than silently overwriting a hand edit or a disk error with an empty file.
-
-A lane whose pane carries its own kind's usage-limit message takes a different road entirely,
-and it does not go through the backoff above. **The lane is left running.** Its pane, session
-and worktree are untouched and no `stop_lane` is called, because the agent picks its own turn
-back up once the window resets — killing it would throw away work that is going to finish by
-itself. Instead the dispatcher writes `parked_until:` on the task and stops nudging it: no
-reminder is sent while the park stands, the task never reaches `blocked`, and `attempts` is
-left exactly where the launch that hit the limit set it. A `## Status Log` line names the
-limit and the time the park runs to.
-
-This check runs whether the multiplexer reports the lane `Working` or settled. A limit surface
-that keeps redrawing never settles, so a check that only looked at settled lanes would miss the
-common case entirely and leave the reminder loop to escalate it.
-
-The park's clock comes from an observed exhausted window's reset, including a weekly reset.
-Without one, `quota_retries` backs off rechecks from one minute to one hour independently of
-launch attempts. The counter survives restarts and clears when the lane resumes or the task
-moves on. Repeated holds update the clock without appending duplicate status-log entries.
-Whether a tail is a limit is answered by `Adapter::usage_limit` in `src/agent.rs`.
-
-### Parking a task before the limit lands
-
-The check above catches a limit that has already landed. `agents.<profile>.quota_ceiling`
-catches one before it does. Ahead of starting a lane, a pass reads the profile's kind's own
-cached usage percentage — something the agent wrote to disk, never a network call — and at or
-above the ceiling on either window it starts no new lane of that profile at all. Every candidate task of
-that profile gets `parked_until:` written from the tripped window's own `resets_at`, and the
-first park of a continuous hold also stamps `parked_at:` — the fixed start the age counts from —
-while every later re-probe moves only `parked_until`. Tasks
-whose step names a different profile are staffed in the same pass. See [Reading a kind's quota
-before a lane starts](agents.md#reading-a-kinds-quota-before-a-lane-starts) for where the
-reading comes from. An enabled ceiling holds launches when that reading is unavailable,
-stale, malformed or expired, rechecking with the same persistent backoff. The board's profile
-footer names the quota ceiling, or `quota off`; a task awaiting a reading says
-`quota unavailable` beside its recheck time. When the reading itself could not be produced the
-park has no reset to name, so it shows `quota unavailable` with no clock — its `parked_until`
-is the dispatcher's own retry deadline, not a quota reset. `spoolway agent verify <kind>`
-diagnoses the source.
-The ceiling checks admission only: running lanes and external sessions can still exhaust
-the account during processing.
-
-    pass 41
-      wire-up: `implement` parked until 14:00 — claude at 88% of its
-               five-hour window, ceiling is 85
-      log-view: started `implement` on pi
-      lanes still working
-
-**The park lives on the task file, not in the dispatcher.** That is the whole point of writing
-a timestamp rather than holding a timer: a seven-day wait outlives any dispatcher process, and
-often the machine. A dispatcher started from cold reads `parked_until:` at the top of its
-per-task loop, before it resolves a step or looks at a lane, and honours it without taking any
-reading of its own. The first pass after the timestamp has passed rechecks quota without touching the park: an expired
-deadline is a recheck, not an exit, so the same pass resolves the hold in one write — re-parking
-with a fresh deadline against a still-exhausted reading, or admitting another lane once the reading
-has dropped. The hold's age, stamped once when it began (`parked_at`), keeps counting from there
-rather than restarting, and a pass that reaches no decision at all (a dependency still open, say)
-leaves the whole park on disk with its deadline simply in the past — still held, not yet decided. A
-forty-minute five-hour wait and a six-day seven-day wait behave
-identically.
 
 A park never ends the run. The dispatcher keeps passing and reports the park each time; closing
 it is a person's call.
@@ -1209,7 +1137,7 @@ spoolway-dispatcher:  2 windows  (created Thu Aug 14 09:12)
 │   ✻ Working… (esc to interrupt)        │   ✻ Working… (esc to interrupt)│
 ├────────────────────────────────────────┼────────────────────────────────┤
 │ ● fix-flaky · review                   │                                │
-│   waiting on you                       │                                │
+│   paused — look at pane                │                                │
 └────────────────────────────────────────┴────────────────────────────────┘
 ```
 
@@ -1408,9 +1336,16 @@ held at `blocked` instead of archived, with a `## Status Log` line saying why, s
 sees the worktree before it is gone. Residue a lane deliberately left is not this: it is
 named in the log, and cleanup proceeds.
 
-A finished task's own branch is kept alive past that cleanup while anything still queued names
-it in `depends_on` — that branch is what the dependent's worktree gets cut from. It is freed by
-the next cleanup to run once nothing queued needs it any more.
+A finished task's own branch is kept alive past that cleanup for a reason that is not that the
+work is done: while anything still queued names it in `depends_on` — that branch is what the
+dependent's worktree gets cut from — and while some remote still lacks a commit of its own, the
+branch being asked directly whether every commit on it has reached a remote rather than trusting
+`git`'s own "merged" check, which a squash-merge would lie about. A branch kept for the second
+reason is named on the run's problem list, `"<id>: kept branch <branch> — it has commits no
+remote has"`, so the last thing that used to happen to a finished task — deleting the only copy
+of its work — no longer does. Either way the next cleanup to run frees it once the reason is
+gone: a depended-on branch once the last dependent has been cut, an unpushed one once it is
+pushed and nothing still needs it.
 
 Archiving a task also reclaims the run files and session state named for it. Its hook run
 files under `tracking/` and its command-step run files under `commands/` are deleted, matched

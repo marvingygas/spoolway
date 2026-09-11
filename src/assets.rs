@@ -218,7 +218,7 @@ pub const HOOK_SCRIPTS: &[(&str, &str)] = &[
 /// .spoolway/templates/pull-request.md`.
 pub const PULL_REQUEST_TEMPLATE: &str = include_str!("../assets/pull-request.md");
 
-/// The six typed messages a lane's pane receives — see
+/// The seven typed messages a lane's pane receives — see
 /// [`crate::lane_prompts`]. Written whole by `init`, left alone by an
 /// ordinary `spoolway update`, and brought back to this text only by
 /// `spoolway update --replace .spoolway/templates/lane-prompts.md`, the same

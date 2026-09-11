@@ -118,14 +118,12 @@ pub(super) const AMBER: &str = "\x1b[33m";
 
 const RED: &str = "\x1b[31m";
 
-const CYAN: &str = "\x1b[36m";
-
 // Blocked's own colour, apart from `RED`: a block is a task waiting on a
 // person, the same *kind* of stop `Paused` is, and red is reserved for a
 // dead end nothing here can move past on its own — the graph's own
 // `Unreachable`, the state a dependency cycle or a missing dependency reads
-// as. Orange rather than amber too, so a block and a genuine `WaitingOnYou`
-// or `Paused` never read as the same colour from across a room.
+// as. Orange rather than amber too, so a block and a `Paused` row never read
+// as the same colour from across a room.
 const ORANGE: &str = "\x1b[38;5;208m";
 
 /// The two halves of an OSC 8 terminal hyperlink: `OSC8 <url> ST <label> OSC8
@@ -140,13 +138,11 @@ impl State {
     /// the same column width as a coloured one.
     pub fn word(self) -> &'static str {
         match self {
-            State::WaitingOnYou => "● waiting on you",
             State::Paused => "● paused",
             State::Running => "● running",
             State::Blocked => "● blocked",
             State::Unreachable => "● unreachable",
             State::Queued => "○ queued",
-            State::Parked => "● parked",
             State::Done => "● done",
         }
     }
@@ -154,17 +150,14 @@ impl State {
     fn dot(self) -> String {
         let word = self.word();
         match self {
-            State::WaitingOnYou => format!("{AMBER}{BOLD}{word}{RESET}"),
-            // Amber like a question and not red like a failure: a paused task
-            // is a step that went *well*, waiting to be let past.
+            // Amber, and bold: a paused task is a step that went *well* and
+            // is now the one thing on the board a person can act on — whether
+            // it is a gate to release or a pane to look at.
             State::Paused => format!("{AMBER}{BOLD}{word}{RESET}"),
             State::Running => format!("{GREEN}{word}{RESET}"),
             State::Blocked => format!("{ORANGE}{word}{RESET}"),
             State::Unreachable => format!("{RED}{word}{RESET}"),
             State::Queued => format!("{DIM}{word}{RESET}"),
-            // Dim like `Queued`, not amber like `Paused`: nothing is waiting
-            // on a person here, only a clock.
-            State::Parked => format!("{DIM}{word}{RESET}"),
             State::Done => format!("{DIM}{word}{RESET}"),
         }
     }
@@ -351,7 +344,6 @@ fn shorten_home(path: &std::path::Path) -> String {
 /// total line closing each group.
 struct Spend {
     name: String,
-    quota: String,
     /// One line per pooled model this profile's steps name — a figure and the
     /// model it counts against — or, when it names none, the single line the
     /// profile drew before pooling existed: a figure with no model beside it,
@@ -463,15 +455,6 @@ pub(super) fn footer(
             };
             Some(Spend {
                 name: name.clone(),
-                quota: match profile.quota_ceiling {
-                    0 if crate::agent::adapter(&profile.kind)
-                        .is_some_and(|a| a.quota.is_some()) =>
-                    {
-                        " · quota off".into()
-                    }
-                    0 => String::new(),
-                    ceiling => format!(" · quota ceiling {ceiling}%"),
-                },
                 lines,
             })
         })
@@ -481,26 +464,26 @@ pub(super) fn footer(
     let name_w = width(&|s| s.name.chars().count());
 
     // One rendered line per `(figure, model)` pair a profile carries — the
-    // profile's own name and quota print once, on the first, and every line
-    // after it leaves that column blank, exactly as a group's own rows leave
-    // a repeated value off every line but their first.
-    let mut lines: Vec<String> =
-        spends
-            .iter()
-            .flat_map(|spend| {
-                spend.lines.iter().enumerate().map(move |(i, (slots, model))| {
-                let name = if i == 0 { spend.name.as_str() } else { "" };
-                let quota = if i == 0 { spend.quota.as_str() } else { "" };
-                let pool = match model {
-                    Some(model) => format!("{GUTTER}{model}"),
-                    None => String::new(),
-                };
-                format!(
-                    "{BOLD}{name:<name_w$}{RESET}{GUTTER}{DIM}slots{RESET} {slots}{quota}{pool}"
-                )
-            })
-            })
-            .collect();
+    // profile's own name prints once, on the first, and every line after it
+    // leaves that column blank, exactly as a group's own rows leave a
+    // repeated value off every line but their first.
+    let mut lines: Vec<String> = spends
+        .iter()
+        .flat_map(|spend| {
+            spend
+                .lines
+                .iter()
+                .enumerate()
+                .map(move |(i, (slots, model))| {
+                    let name = if i == 0 { spend.name.as_str() } else { "" };
+                    let pool = match model {
+                        Some(model) => format!("{GUTTER}{model}"),
+                        None => String::new(),
+                    };
+                    format!("{BOLD}{name:<name_w$}{RESET}{GUTTER}{DIM}slots{RESET} {slots}{pool}")
+                })
+        })
+        .collect();
 
     // One line, only when something has actually failed — absent entirely
     // otherwise, the same as every other figure this footer only prints when
@@ -1166,7 +1149,6 @@ pub(super) fn table(
                 None => row.next.clone(),
             };
             let next = match row.state {
-                State::WaitingOnYou => style.paint(CYAN, &next),
                 State::Done => style.paint(DIM, &next),
                 _ => next,
             };
@@ -1182,27 +1164,21 @@ pub(super) fn table(
     out
 }
 
-/// The full text of a row's STATE cell: the state's own word, plus a
-/// `· <timestamp>` suffix on a `Parked` row — the one state whose meaning
-/// includes a clock nothing else on the board carries. Kept off
-/// [`State::word`] itself, which returns `&'static str` and so cannot carry
-/// per-row text.
+/// The full text of a row's STATE cell: the state's own word, with nothing
+/// after it. Kept as its own function, rather than a direct call to
+/// [`State::word`] at each of its two call sites, for the plain-text and
+/// coloured cells to stay the same shape — no board row draws a `· <clock>`
+/// or a reason after its state word any more; that suffix belonged to
+/// `Parked`, which left with the park fields behind it.
 fn state_cell_text(row: &Row) -> String {
-    match (&row.state, &row.parked_display) {
-        (State::Parked, Some(display)) => format!("{} · {display}", row.state.word()),
-        _ => row.state.word().to_string(),
-    }
+    row.state.word().to_string()
 }
 
 impl Style {
     fn paint_state(&self, row: &Row) -> String {
-        let dot = match self.colour {
+        match self.colour {
             true => row.state.dot(),
             false => row.state.word().to_string(),
-        };
-        match (&row.state, &row.parked_display) {
-            (State::Parked, Some(display)) => format!("{dot} · {display}"),
-            _ => dot,
         }
     }
 
@@ -1579,10 +1555,6 @@ mod tests {
             format!("{RED}● unreachable{RESET}")
         );
         assert_eq!(State::Paused.dot(), format!("{AMBER}{BOLD}● paused{RESET}"));
-        assert_eq!(
-            State::WaitingOnYou.dot(),
-            format!("{AMBER}{BOLD}● waiting on you{RESET}")
-        );
         assert_eq!(State::Running.dot(), format!("{GREEN}● running{RESET}"));
     }
 
@@ -2499,7 +2471,6 @@ mod tests {
         let line = |name: &str| lines.iter().find(|l| l.starts_with(name)).unwrap().clone();
         // Fresh profiles assert no harness cap, including Claude.
         assert!(line("claude").contains("slots 1/∞"), "{lines:#?}");
-        assert!(line("claude").contains("quota off"), "{lines:#?}");
         // No cap either side: the model names no `slots` and the profile no
         // `concurrency`, so the ceiling is what zero has always meant.
         assert!(line("pi").contains("slots 1/\u{221e}"), "{lines:#?}");
@@ -2659,7 +2630,7 @@ mod tests {
 
     /// A profile whose steps name two different pooled models draws two
     /// lines, each with its own live count and cap — the profile's own name
-    /// and quota on the first, and the second left blank under it.
+    /// on the first, and the second left blank under it.
     #[test]
     fn a_profile_naming_two_pooled_models_draws_two_pool_lines() {
         let mut repo = fixture("footer-two-pools");

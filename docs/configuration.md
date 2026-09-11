@@ -214,7 +214,7 @@ every other key there applies whether or not a person is watching.
 | `enabled` | `false` | Whether this run stops for a person, or for nobody — see [Unattended runs](pipelines.md#unattended-runs). `true` sends no task to `blocked` at all: every block resumes the lane that hit it, in the same session, with its round budgets handed back. A step's `loop` stops applying, since it exists to hand a decision to somebody who is not there, and the launch ceiling that parks a task whose lane keeps dying backs off instead — `gate:` still holds, and parks the task on `paused` for a person regardless. What else still holds is every check that catches a lane going wrong rather than a person being needed: the reminder loop, and a command step's own `timeout:`. `spoolway dispatch --unattended` / `--attended` decides it for one run without editing this |
 | `max_output_tokens` | `0` | Output tokens one **unattended** run may spend before the dispatcher stops starting work; `0` is no ceiling. Ignored when `enabled` is off — an attended run has you and `ctrl-c`. Output alone of the four token classes, for the reason the board's footer counts it: it tracks work done rather than context carried. Reaching it starts no further lane and lets whatever is live finish; the queue keeps its place for the next run |
 | `max_cost_usd` | `0.0` | Dollars one **unattended** run may spend before the dispatcher stops starting work; `0.0` is no ceiling. `max_output_tokens`'s own counterpart in money, priced the same way every other cost figure is — see [Cost accounting](cost.md) — a model neither `[models]` nor either price table prices contributes nothing to the sum, never estimated. Set alongside `max_output_tokens` and whichever ceiling is reached first stops the run; either alone is enough |
-| `skip_blocked_lane` | `true` | Whether clearing a block carries the task past the step it blocked on, on the grounds that the unblocker did that step's work, or hands it back to that step instead. See [Staffing `blocked`](pipelines.md#staffing-blocked) |
+| `skip_blocked_lane` | `true` | Whether clearing a block on an *agent* step carries the task past the step it blocked on, on the grounds that the unblocker did that step's work, or hands it back to that step instead — a command step is always handed back to itself, whatever this says. See [Staffing `blocked`](pipelines.md#staffing-blocked) |
 | `blocked_agent` | `claude` | Which `[agents.*]` profile staffs `blocked` in an unattended run. `Pipelines::assemble` builds the `blocked` step from these five keys for every pipeline that does not declare its own; a pipeline may override `agent`, `model`, `effort`, `session` and `prompt` for its own `blocked` step, and nothing else |
 | `blocked_model` | `claude-opus-5` | The model that profile runs, staffing `blocked` — see `blocked_agent`. Starting an unattended run with this blank is refused: with nobody staffing `blocked`, a run has no way to clear one |
 | `blocked_effort` | *(blank)* | How hard that model thinks, staffing `blocked` — see `blocked_agent` |
@@ -354,13 +354,11 @@ instructions could disagree with each other.
 kind = "pi"
 session_reuse_ctx = 0
 session_blocked_ctx = 0
-quota_ceiling = 0
 
 [agents.claude]
 kind = "claude"
 session_reuse_ctx = 0
 session_blocked_ctx = 0
-quota_ceiling = 0
 permission_mode = "auto"
 ```
 
@@ -438,36 +436,6 @@ error: `session_blocked_ctx` (30) must be above `session_reuse_ctx` (40) — a t
 `spoolway doctor` warns separately when a profile sets `session_blocked_ctx` but its pipeline
 steps run against a model that resolves to no `context_window` — the ceiling never fires for
 that profile, and the run still proceeds.
-
-**`quota_ceiling`** is the ceiling on how much of its kind's *account-wide* quota this profile
-may have spent before a pass will start another lane of it. It is a percentage, 1..=100, and
-`0` — the default on every shipped profile — is off: no reading is taken and no task is ever
-parked for it. It is not a size at all, unlike the two settings above; it is read from whatever
-the agent itself writes its usage percentage into, which today means `claude` and `codex` — see
-[Reading a kind's quota before a lane
-starts](agents.md#reading-a-kinds-quota-before-a-lane-starts).
-
-Two windows are checked, `five_hour` first and then `seven_day`, and either one at or above the
-ceiling stops the launch. The pass then writes `parked_until:` on every candidate task of that
-profile, taken from the window's own `resets_at`. The park lives on the task file rather than in
-the dispatcher, so it survives the dispatcher being closed and the machine being turned off —
-a second dispatcher started from cold honours it without taking any reading of its own. Tasks
-whose step names a different profile are staffed in the same pass.
-
-An enabled ceiling holds new launches when the reading is unavailable, invalid, older than
-five hours, or has an expired window. Rechecks back off from one minute to one hour; the
-task's status log explains the failure and the board labels it `quota unavailable`.
-The agent must refresh its own reading; spoolway does not fetch quota over the network.
-Disable the ceiling explicitly to permit launches without a trustworthy reading. Running
-lanes are left intact. This threshold reserves no capacity for their remaining work.
-
-```
-$ spoolway config set agents.claude.quota_ceiling 101
-error: `agents.claude.quota_ceiling` must be 0 (off) or between 1 and 100 (1..=100), got 101
-```
-
-`spoolway doctor` notes a profile that sets `quota_ceiling` on a kind carrying no quota probe:
-the setting is accepted and can never fire.
 
 The second bound a carried session used to face — whether it was still worth resuming once its
 prompt cache had gone cold — is not here any more. It is `models.<glob>.session_reuse_idle`

@@ -60,6 +60,22 @@ pub struct Patch {
     pub deletions: usize,
 }
 
+/// Frontmatter keys of the quota-and-usage-limit park that no `Frontmatter`
+/// field answers to any more — see the comment above where the five used to
+/// live. Stripped out of `extra` in [`Task::parse`] so a task file still
+/// carrying one from before this shipped drops it on its next save rather
+/// than round-tripping it forever, the way an ordinary unrecognised key
+/// would. `pub(crate)` so `commands::queue::parse_submission`, which
+/// deserialises a submitted document's own frontmatter directly rather than
+/// through [`Task::parse`], strips the same keys from its own `extra`.
+pub(crate) const RETIRED_PARK_KEYS: &[&str] = &[
+    "usage_limit_hold",
+    "quota_retries",
+    "parked_until",
+    "parked_window",
+    "parked_at",
+];
+
 /// The typed half of a task file's frontmatter.
 ///
 /// Unrecognised keys are kept in `extra` and written back untouched, so a
@@ -166,18 +182,36 @@ pub struct Frontmatter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked_from: Option<String>,
 
-    /// The step a person interrupted this task from, with the board's `p`.
+    /// The step this task stopped on without failing a check, for `spoolway
+    /// resume` to carry it straight back to.
     ///
-    /// `blocked_from`'s counterpart for a stop nothing reported: a lane never
-    /// said it could not go on, a person's own keypress cut its turn short.
-    /// Nothing else means that — a real block always carries `blocked_from`,
-    /// and this and that are never both set on the same task. Read back by
-    /// [`crate::commands::resume`], which puts the task back on this step
-    /// rather than treating the stop as a block to clear, and cleared once
-    /// the continuing lane has actually launched, in `Dispatcher::start_one`
-    /// in `src/dispatch.rs` — the same moment `resume` is spent.
+    /// `blocked_from`'s counterpart for a stop nothing reported: a real block
+    /// always carries `blocked_from`, and this and that are never both set on
+    /// the same task. Three gestures set it — a person's own keypress (the
+    /// board's `p`), a person's own Escape typed into the pane (see
+    /// `Dispatcher::park_after_interrupt`), and a lane `Dispatcher::
+    /// escalate_clock` gave up on for going quiet — and [`Self::escalated`]
+    /// is what tells the last of those apart from the first two once a lane
+    /// resumes here. Read back by [`crate::commands::resume`], which puts the
+    /// task back on this step rather than treating the stop as a block to
+    /// clear, and cleared once the continuing lane has actually launched, in
+    /// `Dispatcher::start_one` in `src/dispatch.rs` — the same moment
+    /// `resume` is spent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parked_from: Option<String>,
+
+    /// Whether [`Self::parked_from`] names a step `escalate_clock` gave up
+    /// on, rather than a person's own keypress or Escape.
+    ///
+    /// The one fact `start_one` cannot otherwise recover once a lane resumes:
+    /// `parked_from` alone reads the same for all three gestures that set it.
+    /// A person's interrupt genuinely changed nothing, and the resumed lane
+    /// is told so by `park_prompt`; an escalation reminded the lane three
+    /// times, tore its pane down and wrote a `## Status Log` line saying why
+    /// — telling it nothing changed would be false. Spent alongside
+    /// `parked_from`, in the same places and at the same moment.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub escalated: bool,
 
     /// The step whose lane is to be *continued* rather than started fresh, for
     /// exactly one launch.
@@ -369,112 +403,17 @@ pub struct Frontmatter {
     #[serde(default, skip_serializing_if = "is_zero")]
     pub attempts: u32,
 
-    /// Whether this task is currently held for its agent kind's own
-    /// usage-limit message rather than for a dead launch — set alongside
-    /// [`Self::parked_until`] by `Dispatcher::usage_limit_hold` in
-    /// `src/dispatch.rs`. Marks the first logged hold; the hold itself lives on
-    /// `parked_until` rather than on launch attempts. Repeated observations
-    /// of the same hold update the clock without appending the log again.
-    ///
-    /// Cleared wherever `attempts` is: by `set_stage`, `set_stage_unbanked`
-    /// and `launch_landed`, because a task that has left the step it was
-    /// held on — or landed a lane on it — has left the hold behind with it;
-    /// and by `parse_submission`'s re-queue normalisation in
-    /// `src/commands/queue.rs`, which clears both by hand for a document
-    /// coming back through the queue rather than through either path.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub usage_limit_hold: bool,
-
-    /// Consecutive quota rechecks, independent of launch attempts. Persisted
-    /// so restarting the dispatcher does not restart a tight retry loop.
-    #[serde(default, skip_serializing_if = "is_zero")]
-    pub quota_retries: u32,
-
-    /// A quota probe's or a usage-limit pane's own clock, in epoch seconds:
-    /// no candidate of this task is offered a lane, and no reminder is sent
-    /// to a lane already running one, before this passes.
-    ///
-    /// Written by two different dispatcher checks, both in `dispatch.rs`:
-    /// `quota_over_ceiling`, ahead of a launch, from the probe's own
-    /// `resets_at` for the window that tripped `agents.<profile>.
-    /// quota_ceiling`; and `usage_limit_hold`, for a lane whose pane already
-    /// carries its kind's usage-limit phrase, from the same probe when it is
-    /// fresh or a doubling backoff when it is not. Either way the park is
-    /// written here rather than held anywhere in the dispatcher's own
-    /// memory, so a dispatcher that is stopped and restarted — or never
-    /// running at all for as long as the wait takes — honours it without
-    /// taking a fresh reading: see the top of a pass's own per-task loop,
-    /// which reads this before it resolves a step or looks at a lane.
-    ///
-    /// Cleared by `set_stage` and `set_stage_unbanked`, the same as
-    /// `usage_limit_hold`, `quota_retries` and `attempts` — a task that has
-    /// moved on has left whatever parked it behind. When the deadline is
-    /// merely in the past, `Dispatcher::parked` leaves this field alone and
-    /// only stops gating the task; the same pass then rewrites the park as
-    /// one whole — a re-park with a fresh deadline, a launch that drops all
-    /// three park fields in `start_one`, or a stage move — so a reader never
-    /// sees this cleared while `parked_at` or `parked_window` still stands.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parked_until: Option<i64>,
-
-    /// Which of a kind's two windows `parked_until` came from —
-    /// [`crate::quota::Window::key`]'s own spelling, `"five_hour"` or
-    /// `"seven_day"` — kept only so the clock draws the right way on a pass
-    /// that did not just compute it.
-    ///
-    /// A five-hour park and a seven-day one are different enough in scale
-    /// that one display would fail one of them: a bare `HH:MM` loses all
-    /// sense of "how far" once the wait runs past today, and a full date
-    /// with a duration next to it repeats what a same-day clock already
-    /// said. So the shape is decided once, at park time, and remembered
-    /// here rather than re-derived from how much of the wait is left —
-    /// re-deriving it would have a seven-day park's own display quietly
-    /// switch to the five-hour shape on its last day, which is exactly the
-    /// day a reader most wants to see how far it has come.
-    ///
-    /// `unknown` marks an unavailable admission reading. Empty marks a
-    /// mid-turn hold without an observed exhausted window, or an older
-    /// unclassified park; these display a recheck time without a date.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub parked_window: String,
-
-    /// When one continuous quota or usage-limit park began, in epoch
-    /// seconds — fixed for the whole of that hold, unlike
-    /// [`Self::parked_until`] beside it, which is only ever the *next*
-    /// recheck deadline and moves every time the park is re-probed.
-    ///
-    /// The intended reading is the park's age, `now - parked_at`, for a
-    /// display that wants "how long has this been held" rather than "when
-    /// does the next probe fall". Nothing consumes it that way yet — the
-    /// board still draws parks off `parked_until` — so this field is only
-    /// written and round-tripped for now, against the board change that will
-    /// read it (see the `parked-duration-and-paused-state` plan).
-    ///
-    /// Written once, by whichever dispatcher check in `src/dispatch.rs`
-    /// first parks the task — `quota_over_ceiling`, the unavailable-reading
-    /// branch, or `usage_limit_hold` — and left exactly as it was on every
-    /// later pass that finds the same hold still in force. That includes a
-    /// pass whose expired `parked_until` is rechecked and re-parked: a
-    /// re-park is the same uninterrupted hold, so the age goes on counting
-    /// from here rather than restarting. `Dispatcher::parked` deliberately
-    /// does not touch this when a deadline expires — an expiry is a
-    /// recheck, not an exit.
-    ///
-    /// Cleared on a true exit from the hold, wherever `parked_until` and
-    /// `parked_window` are also cleared: [`Task::set_stage`] and
-    /// [`Task::set_stage_unbanked`] when the task leaves the step,
-    /// [`Task::launch_landed`] when a lane of it is seen running,
-    /// `parse_submission`'s re-queue normalisation in
-    /// `src/commands/queue.rs`, and the launch path in `start_one`
-    /// (`src/dispatch.rs`) for a task that starts a lane from the very step
-    /// it was parked on, where no stage move runs.
-    ///
-    /// Absent on a task file written before this field existed, and on any
-    /// park that predates it. A reader that finds it absent is meant to show
-    /// no age rather than invent one from a missing start.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parked_at: Option<i64>,
-
+    // `usage_limit_hold`, `quota_retries`, `parked_until`, `parked_window`
+    // and `parked_at` — the quota-and-usage-limit park's own five fields —
+    // lived here through the gate and the detector that wrote them, and
+    // then a while longer as inert fields kept only for a task file that
+    // still carried one from before either was deleted. Both are long gone,
+    // and so now are they: a task file still setting any of the five parses
+    // (`RETIRED_PARK_KEYS` in [`Task::parse`] strips them from `extra`
+    // rather than let them round-trip forever) and drops them on its next
+    // save. The board's only clock-bearing state was `Parked`, which went
+    // with them; a lane that stops reporting now waits on a person, on
+    // `paused`, like every other stop.
     /// The gated step this task is paused on, waiting for a person to release
     /// it — see [`crate::pipeline::PAUSED`].
     ///
@@ -561,72 +500,6 @@ pub fn route_key(from: &str, to: &str) -> String {
     format!("{from}->{to}")
 }
 
-/// `until` — epoch seconds — in local time: a bare `HH:MM` on the day it
-/// falls on `now`, or `YYYY-MM-DD HH:MM` otherwise. `dated` forces the long
-/// form even on a day that now matches `now`'s own — see [`format_until`]'s
-/// own doc for why a caller ever wants that.
-///
-/// Shared by every reader of [`Frontmatter::parked_until`] — the board, `queue
-/// list` and the dispatcher's own report lines — so a park reads the same
-/// clock everywhere it is printed. `now` is a parameter rather than read
-/// here, so a test can hold it still.
-pub fn format_instant(until: i64, now: i64, dated: bool) -> String {
-    let (target, same_day) = local_instant(until, now);
-    match dated || !same_day {
-        true => target.format("%Y-%m-%d %H:%M").to_string(),
-        false => target.format("%H:%M").to_string(),
-    }
-}
-
-/// [`format_instant`], with the wait remaining appended in parentheses —
-/// but only once the bare clock alone has stopped saying enough on its own:
-/// a same-day reset already reads as "how soon", and a duration next to it
-/// would repeat the answer rather than add one. A reset on a different day
-/// carries no sense of scale by itself, which is exactly what the
-/// parenthesised wait supplies — the mockup's own `14:00` for a five-hour
-/// park against its `2026-09-11 04:00 (6d)` for a seven-day one, and the
-/// same `(2h)` still there once that six-day wait has mostly run out.
-///
-/// `dated` is that last case's whole reason for existing: `now` and `until`
-/// can end up on the same calendar day purely because most of a multi-day
-/// wait has run out, at which point re-deriving the shape from the two
-/// timestamps alone would have the display quietly drop back to the bare
-/// five-hour shape on exactly the day a reader most wants to see how far
-/// the wait has come. Callers who know which of a kind's windows this park
-/// came from — [`Frontmatter::parked_window`] — pass `true` for
-/// `"seven_day"` and `false` otherwise, so the shape decided when the park
-/// was written survives however close `now` gets to it.
-pub fn format_until(until: i64, now: i64, dated: bool) -> String {
-    let (_, same_day) = local_instant(until, now);
-    let bare = format_instant(until, now, dated);
-    if same_day && !dated {
-        return bare;
-    }
-    let remaining = (until - now).max(0) as u64;
-    format!(
-        "{bare} ({})",
-        crate::config::human_duration::format(std::time::Duration::from_secs(remaining)),
-    )
-}
-
-/// `until` and `now`, both in local time, and whether they fall on the same
-/// calendar day — the one question [`format_instant`] and [`format_until`]
-/// both have to ask before they can decide their own shape.
-///
-/// `pub(crate)` rather than private: `spoolway agent verify`'s own quota
-/// clause asks the same same-day question, for a shorter display of its
-/// own (`MM-DD HH:MM`, no year — see `commands::agent::quota_clause`)
-/// rather than either of the two shapes here.
-pub(crate) fn local_instant(until: i64, now: i64) -> (DateTime<chrono::Local>, bool) {
-    let target = DateTime::from_timestamp(until, 0)
-        .unwrap_or_else(Utc::now)
-        .with_timezone(&chrono::Local);
-    let today = DateTime::from_timestamp(now, 0)
-        .unwrap_or_else(Utc::now)
-        .with_timezone(&chrono::Local);
-    (target, target.date_naive() == today.date_naive())
-}
-
 /// A task file as loaded from disk: typed frontmatter plus the untouched body.
 #[derive(Debug, Clone)]
 pub struct Task {
@@ -696,8 +569,18 @@ impl Task {
         let (yaml, body) = split_fence(raw)?;
         let body = body.to_string();
 
-        let front: Frontmatter =
+        let mut front: Frontmatter =
             serde_norway::from_str(yaml).context("frontmatter is not valid task YAML")?;
+
+        // The quota-and-usage-limit park's five fields have no struct home
+        // any more, so a file that still carries one lands here — in
+        // `extra`, the catch-all every other unrecognised key survives a
+        // rewrite through. These do not get that mercy: they are retired,
+        // not merely unread, so a save must drop them rather than round-trip
+        // them forever.
+        for key in RETIRED_PARK_KEYS {
+            front.extra.remove(*key);
+        }
 
         // `queue add` checks this too, and is not the only way a file gets here:
         // a person edits one, a plan writes several. The id names this task's
@@ -760,11 +643,6 @@ impl Task {
             .or_insert(0) += 1;
         self.front.arrived_from = Some(from);
         self.front.attempts = 0;
-        self.front.usage_limit_hold = false;
-        self.front.quota_retries = 0;
-        self.front.parked_until = None;
-        self.front.parked_window = String::new();
-        self.front.parked_at = None;
         self.front.launched_at = None;
 
         let stamp: DateTime<Utc> = Utc::now();
@@ -788,18 +666,12 @@ impl Task {
     /// here would leave a `loop:` budget seeing an arrival no pipeline
     /// routed. See [`Task::set_stage`], which this deliberately does not
     /// call: `rounds` and `arrived_from` are left exactly as they were, and
-    /// `attempts`, `usage_limit_hold`, `parked_until`, `parked_window`,
-    /// `parked_at` and `launched_at` are reset the same way `set_stage`
+    /// `attempts` and `launched_at` are reset the same way `set_stage`
     /// resets them, since neither a parked task nor the lane it is handed
     /// back to has anything of those left to mean.
     pub fn set_stage_unbanked(&mut self, stage: &str, message: &str) {
         self.front.stage = stage.to_string();
         self.front.attempts = 0;
-        self.front.usage_limit_hold = false;
-        self.front.quota_retries = 0;
-        self.front.parked_until = None;
-        self.front.parked_window = String::new();
-        self.front.parked_at = None;
         self.front.launched_at = None;
 
         let stamp: DateTime<Utc> = Utc::now();
@@ -843,37 +715,19 @@ impl Task {
     /// left nothing behind" always meant, decided where the answer is known
     /// rather than assumed at the moment of asking.
     ///
-    /// Forgives `attempts` and `usage_limit_hold` — a launch landing means
-    /// whatever `attempts` was counting is over, hold or dead launch alike —
-    /// but not `launched_at`. That is the board's clock for a live lane and
-    /// outlives the forgiveness — `set_stage` is what clears it, because
-    /// arriving somewhere is what restarts it. Folding it in here, as this
-    /// once did, forgave the clock about two seconds after every lane
+    /// Forgives `attempts` — a launch landing means whatever it was counting
+    /// is over — but not `launched_at`. That is the board's clock for a live
+    /// lane and outlives the forgiveness — `set_stage` is what clears it,
+    /// because arriving somewhere is what restarts it. Folding it in here, as
+    /// this once did, forgave the clock about two seconds after every lane
     /// started, and the board read `None` — a dash — for the rest of the
     /// step.
-    ///
-    /// Also forgives the whole quota park — `parked_until`, `parked_window`
-    /// and `parked_at`. A lane of this task is running, so the hold it was
-    /// parked for is over; the dispatcher's own `parked` gate keeps this off
-    /// a task still inside a live park, so the only park this ever sees is a
-    /// spent one — most often a usage-limit lane that has resumed its own
-    /// turn, whose growing "still parked" age would otherwise sit on the
-    /// board over a lane hard at work.
     ///
     /// Answers whether anything changed, so a caller reading every task on
     /// every pass writes only the file that moved.
     pub fn launch_landed(&mut self) -> bool {
-        let counted = self.front.attempts > 0
-            || self.front.usage_limit_hold
-            || self.front.quota_retries > 0
-            || self.front.parked_until.is_some()
-            || self.front.parked_at.is_some();
+        let counted = self.front.attempts > 0;
         self.front.attempts = 0;
-        self.front.usage_limit_hold = false;
-        self.front.quota_retries = 0;
-        self.front.parked_until = None;
-        self.front.parked_window = String::new();
-        self.front.parked_at = None;
         counted
     }
 
@@ -1177,65 +1031,6 @@ mod tests {
 
     const SAMPLE: &str = "---\nid: demo\nstage: queued\ntouches: [src/**]\n---\n## Goal\nDo a thing.\n\n## Status Log\n- earlier entry\n";
 
-    /// The mockup's own five-hour park: same local day as `now`, so the bare
-    /// clock already says how soon — `format_until` must not repeat that as
-    /// a duration in parentheses. `dated` is `false` throughout, the way a
-    /// five-hour park's own `parked_window` reads.
-    ///
-    /// Built through `chrono::Local` directly rather than parsed off a UTC
-    /// string, so the assertion holds whatever this machine's own timezone
-    /// is — `format_instant`/`format_until` compare local calendar days, and
-    /// a fixed UTC instant lands on a different local day depending on the
-    /// offset the test happens to run under.
-    #[test]
-    fn a_same_day_park_carries_no_duration() {
-        use chrono::TimeZone;
-        let now = chrono::Local
-            .with_ymd_and_hms(2026, 9, 4, 12, 0, 0)
-            .unwrap()
-            .timestamp();
-        let until = chrono::Local
-            .with_ymd_and_hms(2026, 9, 4, 14, 0, 0)
-            .unwrap()
-            .timestamp();
-        assert_eq!(format_instant(until, now, false), "14:00");
-        assert_eq!(format_until(until, now, false), "14:00");
-    }
-
-    /// The mockup's own six-day park, and the same figure days later with
-    /// most of the wait spent: a reset on a different day carries no sense
-    /// of scale on its own, which is exactly what the duration supplies.
-    /// `dated` is `true` throughout, the way a seven-day park's own
-    /// `parked_window` reads — pinned at park time rather than re-derived,
-    /// so the shape survives even once `now` has caught up to `until`'s own
-    /// calendar day.
-    #[test]
-    fn a_cross_day_park_carries_its_duration() {
-        use chrono::TimeZone;
-        let now = chrono::Local
-            .with_ymd_and_hms(2026, 9, 5, 4, 0, 0)
-            .unwrap()
-            .timestamp();
-        let until = chrono::Local
-            .with_ymd_and_hms(2026, 9, 11, 4, 0, 0)
-            .unwrap()
-            .timestamp();
-        assert_eq!(format_instant(until, now, true), "2026-09-11 04:00");
-        assert_eq!(format_until(until, now, true), "2026-09-11 04:00 (6d)");
-
-        // Days later, most of the wait spent — now on the same calendar day
-        // as `until` itself: still the dated shape and a duration, now
-        // shorter, because `dated` still says so.
-        let almost_there = chrono::Local
-            .with_ymd_and_hms(2026, 9, 11, 2, 0, 0)
-            .unwrap()
-            .timestamp();
-        assert_eq!(
-            format_until(until, almost_there, true),
-            "2026-09-11 04:00 (2h)"
-        );
-    }
-
     #[test]
     fn parses_and_round_trips() {
         let task = Task::parse(PathBuf::from("demo.md"), SAMPLE).unwrap();
@@ -1312,27 +1107,28 @@ mod tests {
         assert_eq!(task.front.launched_at, None);
     }
 
-    /// `launch_landed` forgives a quota or usage-limit park the same way it
-    /// forgives `attempts`: a lane of this task is running now, so the hold
-    /// is over and the whole park — its start, its deadline and its window —
-    /// comes off. A park with nothing else set still counts as something to
-    /// forgive.
+    /// The quota-and-usage-limit park's five fields have no struct home any
+    /// more, so a task file still carrying one from before this shipped
+    /// lands in `extra` on parse — and unlike an ordinary unrecognised key,
+    /// which `extra` writes back untouched, these are dropped: the field
+    /// they belonged to is retired, not merely a hand-added key nothing
+    /// reads, so a rewrite must not preserve it.
     #[test]
-    fn launch_landed_forgives_a_quota_park() {
-        let mut task = Task::parse(PathBuf::from("demo.md"), SAMPLE).unwrap();
-        task.front.parked_at = Some(1_000);
-        task.front.parked_until = Some(2_000);
-        task.front.parked_window = "seven_day".into();
-
-        assert!(task.launch_landed(), "a live park is something to forgive");
-        assert_eq!(task.front.parked_at, None);
-        assert_eq!(task.front.parked_until, None);
-        assert_eq!(task.front.parked_window, "");
-
-        assert!(
-            !task.launch_landed(),
-            "nothing left to forgive the second time"
-        );
+    fn a_legacy_park_field_parses_and_is_dropped_on_the_next_save() {
+        let raw = "---\nid: demo\nstage: review\nparked_until: 1788801180\n\
+                    parked_window: five_hour\nparked_at: 1788793980\n\
+                    quota_retries: 2\nusage_limit_hold: true\n---\nbody\n";
+        let task = Task::parse(PathBuf::from("demo.md"), raw).unwrap();
+        let rendered = task.render().unwrap();
+        for key in [
+            "parked_until",
+            "parked_window",
+            "parked_at",
+            "quota_retries",
+            "usage_limit_hold",
+        ] {
+            assert!(!rendered.contains(key), "{key} survived a save: {rendered}");
+        }
     }
 
     /// A stage change is an arrival, and a lap is a transition: `set_stage`
@@ -1484,47 +1280,6 @@ mod tests {
         let reparsed = Task::parse(PathBuf::from("demo.md"), &rendered).unwrap();
         assert_eq!(reparsed.front.base.as_deref(), Some("main"));
         assert_eq!(reparsed.front.cut_from.as_deref(), Some("task/dependency"));
-    }
-
-    /// `parked_at` round-trips like any other optional epoch field, stays
-    /// out of a file that never set it, and a park written by an older
-    /// spoolway — `parked_until` with no `parked_at` beside it — still
-    /// parses, read as `None` rather than refused.
-    #[test]
-    fn parked_at_round_trips_and_a_legacy_park_omits_it() {
-        let mut task = Task::parse(PathBuf::from("demo.md"), SAMPLE).unwrap();
-        assert_eq!(task.front.parked_at, None);
-        assert!(!task.render().unwrap().contains("parked_at:"));
-
-        task.front.parked_at = Some(1_788_793_980);
-        let rendered = task.render().unwrap();
-        assert!(rendered.contains("parked_at: 1788793980"), "{rendered}");
-        let reparsed = Task::parse(PathBuf::from("demo.md"), &rendered).unwrap();
-        assert_eq!(reparsed.front.parked_at, Some(1_788_793_980));
-
-        let legacy = "---\nid: demo\nstage: review\nparked_until: 1788801180\n\
-                      parked_window: five_hour\n---\nbody\n";
-        let task = Task::parse(PathBuf::from("demo.md"), legacy).unwrap();
-        assert_eq!(task.front.parked_at, None);
-        assert_eq!(task.front.parked_until, Some(1_788_801_180));
-    }
-
-    /// Both stage moves drop `parked_at` the same way they already drop
-    /// `parked_until` and `parked_window`: a task that has left the step it
-    /// was parked on has left the hold, so its age has nothing left to
-    /// count.
-    #[test]
-    fn a_stage_move_clears_parked_at() {
-        let mut task = Task::parse(PathBuf::from("demo.md"), SAMPLE).unwrap();
-        task.front.parked_at = Some(1_000);
-        task.front.parked_until = Some(2_000);
-        task.set_stage("review", Some("moved on"));
-        assert_eq!(task.front.parked_at, None);
-
-        let mut task = Task::parse(PathBuf::from("demo.md"), SAMPLE).unwrap();
-        task.front.parked_at = Some(1_000);
-        task.set_stage_unbanked("paused", "parked from the board");
-        assert_eq!(task.front.parked_at, None);
     }
 
     /// `at` round-trips like any other field, and a task file written before

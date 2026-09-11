@@ -224,7 +224,7 @@ pub fn contract(repo: &Repo, pipelines: &Pipelines, args: &PromptContractArgs) -
     println!();
     println!("3  THE MESSAGE TYPED INTO ITS PANE, ONCE IT IS UP");
     println!(
-        "   Six of these, one per state, each read from {} when the project has",
+        "   Seven of these, one per state, each read from {} when the project has",
         crate::lane_prompts::path(repo).display()
     );
     println!("   written that section and spoolway's own words otherwise.");

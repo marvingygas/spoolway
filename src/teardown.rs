@@ -3,13 +3,16 @@
 //!
 //! Two moments call this, and they disagree on one thing: a task that
 //! reached `done` has finished, so its branch is spent litter the moment
-//! nothing else still needs it ([`Branch::Delete`], from
-//! [`Dispatcher::clean_up`]); a task swept because the run itself is
-//! stopping has not finished, so its file stays queued and the branch that
-//! holds its commits must stay too ([`Branch::Keep`], from
-//! [`Dispatcher::sweep_on_stop`]). Everything below either function calls
-//! is shared between the two: which parts of a checkout exist to give back,
-//! and in what order.
+//! nothing else still needs it and every commit on it has reached a remote
+//! ([`Branch::Delete`], from [`Dispatcher::clean_up`]); a task swept because
+//! the run itself is stopping has not finished, so its file stays queued and
+//! the branch that holds its commits must stay too, unconditionally
+//! ([`Branch::Keep`], from [`Dispatcher::sweep_on_stop`]). A branch
+//! `Branch::Delete` would otherwise take is spared the same way `Branch::Keep`
+//! always is when no remote yet has its commits — see the push check in
+//! [`Dispatcher::tear_down_checkout`] below. Everything below either function
+//! calls is shared between the two: which parts of a checkout exist to give
+//! back, and in what order.
 //!
 //! Kept apart from the rest of [`crate::dispatch`] because this is the one
 //! cluster of it that ends a task's residence in the queue (or the run's
@@ -180,7 +183,7 @@ impl<'a> Dispatcher<'a> {
             task.save()?;
         }
 
-        self.tear_down_checkout(task, Branch::Delete);
+        self.tear_down_checkout(task, Branch::Delete, report);
 
         let destination = self.repo.archive_dir().join(format!("{}.md", task.id()));
         std::fs::create_dir_all(self.repo.archive_dir())?;
@@ -258,14 +261,22 @@ impl<'a> Dispatcher<'a> {
     }
 
     /// Give back everything a task's checkout is holding: its workspace, the
-    /// worktree under it, and — if [`Branch::Delete`] says so — the local
-    /// branch it was cut on.
+    /// worktree under it, and — if [`Branch::Delete`] says so and every
+    /// commit on it has reached a remote — the local branch it was cut on.
     ///
     /// Split out of [`Dispatcher::clean_up`] because the stop sweep needs
     /// exactly this and none of the rest of it: a task swept because the run
     /// was interrupted has not *finished*, so its file stays in the queue to be
     /// picked up again rather than being archived as though it had.
-    pub(crate) fn tear_down_checkout(&mut self, task: &mut Task, branch: Branch) {
+    ///
+    /// `report` is where a branch kept because it is not fully pushed gets
+    /// named — see the comment on the delete itself, below.
+    pub(crate) fn tear_down_checkout(
+        &mut self,
+        task: &mut Task,
+        branch: Branch,
+        report: &mut Report,
+    ) {
         // Whether the workspace recorded on this task is the task's own or the
         // one the whole run shares — see [`Mux::task_owns_workspace`]. Under
         // `grouped` every task is a pane in the tab its project shares, so
@@ -366,8 +377,38 @@ impl<'a> Dispatcher<'a> {
             // `-D` rather than `-d`: the branch may have been squash-merged, so
             // git considers it "not fully merged" even though its content is in
             // — and under `person` it may not be merged at all yet, which is
-            // the deal that mode signs.
-            let _ = self.repo.git(&["branch", "-D", &branch]);
+            // the deal that mode signs. That same squash-merge is why git's own
+            // "is this merged" check cannot stand in for the question asked
+            // here either: the branch is asked directly whether every commit
+            // on it is reachable from some remote-tracking ref. A `handover`
+            // that never ran, or a push that failed silently, is otherwise the
+            // last thing that happens to a finished task being the deletion of
+            // the only copy of its work — which is exactly how one task lost
+            // twelve commits to this path.
+            if self.branch_fully_pushed(&branch) {
+                let _ = self.repo.git(&["branch", "-D", &branch]);
+            } else {
+                report.problems.push(format!(
+                    "{}: kept branch `{branch}` — it has commits no remote has",
+                    task.id()
+                ));
+            }
+        }
+    }
+
+    /// Whether every commit reachable from `branch` is also reachable from
+    /// some remote-tracking ref — not necessarily the same-named upstream,
+    /// just some `refs/remotes/*` ref, the way `sweep_orphaned_branches`
+    /// below reads the same question for a branch this check already kept.
+    ///
+    /// A git failure here — no such branch, a corrupt ref, a repository with
+    /// no remote at all — reads as "not pushed" rather than propagating: this
+    /// gates whether the only copy of a task's work gets deleted, so the safe
+    /// side of any doubt is to keep it.
+    fn branch_fully_pushed(&self, branch: &str) -> bool {
+        match self.repo.git(&["rev-list", branch, "--not", "--remotes"]) {
+            Ok(unpushed) => unpushed.trim().is_empty(),
+            Err(_) => false,
         }
     }
 
@@ -396,6 +437,12 @@ impl<'a> Dispatcher<'a> {
     /// cleanup finding it now unneeded. Cheap enough to run on every cleanup
     /// rather than tracked separately: one `for-each-ref` and a scan of the
     /// tasks already in hand.
+    ///
+    /// The same push check `tear_down_checkout` used to spare this branch in
+    /// the first place is asked again here, for the same reason: nothing
+    /// about becoming orphaned makes an unpushed commit any less the only
+    /// copy of the work it holds. Once it is pushed, this is what frees it —
+    /// nothing re-visits an archived task's own cleanup to do it there.
     fn sweep_orphaned_branches(&mut self, tasks: &[Task]) {
         if self.dry_run {
             return;
@@ -432,6 +479,9 @@ impl<'a> Dispatcher<'a> {
             // only place `borrowed` is still readable once the task's file
             // has moved, and `task_for_branch` found `owner` there.
             if owner.front.borrowed {
+                continue;
+            }
+            if !self.branch_fully_pushed(branch) {
                 continue;
             }
             let _ = self.repo.git(&["branch", "-D", branch]);
@@ -639,7 +689,7 @@ impl<'a> Dispatcher<'a> {
                 runs.stop(&key);
             }
 
-            self.tear_down_checkout(task, Branch::Keep);
+            self.tear_down_checkout(task, Branch::Keep, report);
             if let Some(tab_id) = task.front.tab_id.clone() {
                 project_tab_id = Some(tab_id);
             }

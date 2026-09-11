@@ -100,9 +100,6 @@ struct QueueRowJson {
     out_tokens: Option<u64>,
     cost_usd: Option<f64>,
     lane_time_s: Option<i64>,
-    /// The clock a `state: "parked"` row is waiting out, already formatted —
-    /// `None` on every other state. Mirrors `Row::parked_display`.
-    parked_until: Option<String>,
 }
 
 impl From<&crate::status::Row> for QueueRowJson {
@@ -122,7 +119,6 @@ impl From<&crate::status::Row> for QueueRowJson {
             out_tokens: row.out,
             cost_usd: row.cost,
             lane_time_s: row.lane_time,
-            parked_until: row.parked_display.clone(),
         }
     }
 }
@@ -132,13 +128,11 @@ impl From<&crate::status::Row> for QueueRowJson {
 fn state_label(state: crate::status::State) -> &'static str {
     use crate::status::State::*;
     match state {
-        WaitingOnYou => "waiting_on_you",
         Paused => "paused",
         Running => "running",
         Blocked => "blocked",
         Unreachable => "unreachable",
         Queued => "queued",
-        Parked => "parked",
         Done => "done",
     }
 }
@@ -385,6 +379,13 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: &str) -> Result<Task
         serde_norway::from_value(serde_norway::Value::Mapping(mapping))
             .with_context(|| format!("{name}: frontmatter is not valid task YAML"))?;
 
+    // The retired quota-and-usage-limit park fields, same as `Task::parse`
+    // strips them for a file already on disk — a submitted document copied
+    // from an older task carries them just as easily.
+    for key in crate::task::RETIRED_PARK_KEYS {
+        front.extra.remove(*key);
+    }
+
     if front.id.trim().is_empty() {
         bail!("{name}: a document must set `id:`");
     }
@@ -417,6 +418,7 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: &str) -> Result<Task
     front.last_report = None;
     front.blocked_from = None;
     front.parked_from = None;
+    front.escalated = false;
     front.resume = None;
     front.branch = Some(format!("task/{}", front.id));
     front.base = Some(base.to_string());
@@ -431,11 +433,6 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: &str) -> Result<Task
     front.pane_id = None;
     front.tab_id = None;
     front.attempts = 0;
-    front.usage_limit_hold = false;
-    front.quota_retries = 0;
-    front.parked_until = None;
-    front.parked_window = String::new();
-    front.parked_at = None;
     front.paused_at = None;
     front.launched_at = None;
     front.prompts = Default::default();
@@ -1382,7 +1379,7 @@ pub fn queue_pause(repo: &Repo, pipelines: &Pipelines, id: &str, force: bool) ->
         }
     }
 
-    crate::status::park(&mut tasks[idx], "paused via `spoolway queue pause`");
+    crate::status::park(&mut tasks[idx], "paused via `spoolway queue pause`", false);
     tasks[idx].save()?;
     println!("paused `{id}`");
     Ok(())
@@ -4170,6 +4167,48 @@ mod tests {
     /// to exist, not to say anything in particular.
     const BODY: &str = "## Goal\n\nDo the thing.\n";
 
+    /// `queue list --json` reports one `paused` for both a gate-held row and
+    /// a question-held one — `State::WaitingOnYou` is gone — while `next`
+    /// still carries the wording that tells the two apart and `resumable` is
+    /// `true` on both: a question-held row offers the same `[r]` a gate does,
+    /// alongside the pane it names. Nothing emits the old `waiting_on_you`
+    /// state label, and nothing emits `parked` either — that state left with
+    /// the fields behind it, and a lane that stops reporting now reads as an
+    /// ordinary `paused` row like these two.
+    #[test]
+    fn queue_json_reports_paused_for_both_a_gate_and_a_question() {
+        use crate::status::State;
+        use crate::status::testutil::row;
+
+        let mut gate = row("release-me");
+        gate.state = State::Paused;
+        gate.resumable = true;
+        gate.next = "→ handover — [r] resumes it".into();
+
+        let mut question = row("question");
+        question.state = State::Paused;
+        question.resumable = true;
+        question.next = "look at pane `question · implement` — [r] resumes it".into();
+
+        let json: Vec<QueueRowJson> = [&gate, &question]
+            .iter()
+            .map(|r| QueueRowJson::from(*r))
+            .collect();
+
+        assert_eq!(json[0].state, "paused");
+        assert!(json[0].resumable);
+        assert_eq!(json[1].state, "paused");
+        assert!(json[1].resumable);
+        assert_eq!(
+            json[1].next,
+            "look at pane `question · implement` — [r] resumes it"
+        );
+
+        let rendered = serde_json::to_string(&json[1]).unwrap();
+        assert!(!rendered.contains("waiting_on_you"), "{rendered}");
+        assert!(!rendered.contains("parked"), "{rendered}");
+    }
+
     #[test]
     fn strip_slug_prefix_removes_only_a_recognised_prefix() {
         assert_eq!(
@@ -4814,6 +4853,46 @@ mod tests {
         assert_eq!(task.stage(), "implement");
     }
 
+    /// A question-held row is never on `paused`, `parked` or `blocked` —
+    /// none of `paused_at`, `parked_from` or `blocked_from` is ever set for
+    /// it — so `resume_task`'s guard against a task with nothing to resume
+    /// must not treat that absence as a reason to do nothing, the way it
+    /// does for a genuine race on the persisted `paused` stage. `r` on that
+    /// row instead falls through to `back_onto_its_step`, which resumes at
+    /// `resume_target`'s `last_report.step`: the step the row was already
+    /// on. That restarts it — banking a round on the step's own route to
+    /// itself and logging the same "unblocked by hand" message a block's
+    /// `r` would — rather than leaving `r` a silent no-op the rest of the
+    /// suite could not tell apart from the guard doing its job.
+    #[test]
+    fn a_question_held_task_is_restarted_on_the_step_its_pane_never_answered() {
+        let repo = fixture("queue-resume-question-pane");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "solo", &[]);
+        let mut task = queued(&repo, "solo");
+        task.set_stage_unbanked("implement", "test setup");
+        task.front.last_report = Some(crate::task::LastReport {
+            step: "implement".into(),
+            outcome: "pass".into(),
+            at: 0,
+        });
+        task.save().unwrap();
+        let before = queued(&repo, "solo");
+        assert_eq!(before.front.paused_at, None);
+        assert_eq!(before.front.parked_from, None);
+        assert_eq!(before.front.blocked_from, None);
+
+        queue_resume(&repo, &pipelines, "solo").unwrap();
+
+        let task = queued(&repo, "solo");
+        assert_eq!(task.stage(), "implement");
+        assert!(
+            task.body.contains("unblocked by hand"),
+            "the step was restarted rather than left alone: {}",
+            task.body
+        );
+    }
+
     #[test]
     fn queue_resume_refuses_an_unknown_task() {
         let repo = fixture("queue-resume-unknown");
@@ -4914,20 +4993,22 @@ mod tests {
         assert_eq!(task.front.base.as_deref(), Some("plan/live"));
     }
 
-    /// The park fields are the dispatcher's, not a document's — a submission
-    /// that carries `parked_at:` (or the deadline beside it) from an earlier
-    /// run has them wiped, the same as `attempts:` or `launched_at:`.
+    /// The retired quota-and-usage-limit park fields have no struct home any
+    /// more — a submission that still carries one from an earlier run has it
+    /// dropped on parse, the same as any other document `Task::parse` refuses
+    /// to round-trip.
     #[test]
-    fn a_document_carrying_park_fields_has_them_reset() {
+    fn a_document_carrying_park_fields_has_them_dropped() {
         let text = document(
             "demo",
             "group: demo\nparked_at: 1788793980\nparked_until: 1788801180\nparked_window: five_hour\n",
             BODY,
         );
         let task = parse_submission("mine.md", &text, "plan/demo").unwrap();
-        assert_eq!(task.front.parked_at, None);
-        assert_eq!(task.front.parked_until, None);
-        assert_eq!(task.front.parked_window, "");
+        let rendered = task.render().unwrap();
+        assert!(!rendered.contains("parked_at"), "{rendered}");
+        assert!(!rendered.contains("parked_until"), "{rendered}");
+        assert!(!rendered.contains("parked_window"), "{rendered}");
     }
 
     /// A repeat submission is refused whether the id is still in the queue —

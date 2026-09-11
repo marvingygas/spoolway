@@ -869,19 +869,16 @@ pub struct UnattendedConfig {
     /// The unblocker is told to *do the blocked step's work* — write the code,
     /// fix the check, make the call. If it did, then handing the task back to
     /// that step re-runs work that is already finished, and re-running an agent
-    /// step means paying for it a second time. So a pass here takes the task to
-    /// wherever the blocked step's `on_pass` pointed, one step past where it
-    /// stopped.
+    /// step means paying for it a second time. So a pass here takes an *agent*
+    /// step's task to wherever the blocked step's `on_pass` pointed, one step
+    /// past where it stopped. Set `false` to hand it back to the step it
+    /// blocked on instead, which is what spoolway did before this key existed.
     ///
-    /// **This includes command steps, deliberately.** A task blocked on `test`
-    /// resumes at whatever `test` passes to, without `test` running again — so
-    /// the unblocker's word that the build is green is taken on trust and
-    /// nothing re-checks it. That is the trade this key names: skipping the
-    /// re-run is the saving, and an unverified claim reaching the next step is
-    /// what it costs. Set it `false` where the claim matters more than the lap.
-    ///
-    /// Set `false` to hand the task back to the step it blocked on instead,
-    /// which is what spoolway did before this key existed.
+    /// **A command step ignores this key.** Its output is a `git push` or a
+    /// pull request opened, and the unblocker's word that it happened does
+    /// not make either one exist — only running the command does. So a task
+    /// blocked on a command step is always handed back to that step to run
+    /// again, whatever this says.
     ///
     /// Two things are unaffected either way. A task with no recorded origin
     /// still has nowhere forward to go, so it is not carried anywhere — see
@@ -1049,6 +1046,11 @@ impl Priority {
 /// - `{project_home}` absolute path to the project's own home (see
 ///   [`crate::repo::Repo::home`]) — the task file a lane reads from outside
 ///   its worktree
+/// - `{git_dir}`      absolute path to the git directory a lane needs write
+///   access to for `git add`/`git commit` to work (see
+///   [`crate::repo::git_dir`]) — a linked worktree's objects and branch ref
+///   live in the main checkout's shared `.git`, outside `{worktree}` and
+///   otherwise read-only to a lane confined to it
 /// - `{session_id}`   session id spoolway minted for this lane, so that the
 ///   transcript the agent writes can be found again and its token usage
 ///   recorded. Drop it and the lane still runs — it just spends unaccounted.
@@ -1169,22 +1171,16 @@ pub struct AgentProfile {
     /// way round.
     pub session_blocked_ctx: u8,
 
-    /// The ceiling on this profile's own kind's cached usage percentage,
-    /// checked before a pass starts a new lane of it — see
-    /// [`crate::agent::Adapter::quota`] and `Dispatcher::quota_over_ceiling`
-    /// in `dispatch.rs`. `0`, the default, is off: nothing is read and no
-    /// candidate is ever parked for it.
-    ///
-    /// At or above this, in either window, a pass starts no new lane of this
-    /// profile and writes `parked_until:` on every candidate task instead,
-    /// set from the probe's own `resets_at` — the task file carries the
-    /// park, not the dispatcher, so it survives a restart.
-    ///
-    /// An enabled ceiling holds new launches when the reading is missing,
-    /// malformed, stale, or expired. Rechecks back off independently of
-    /// launch attempts; `spoolway agent verify` diagnoses the source.
-    /// 1..=100, or `0` for off.
-    pub quota_ceiling: u8,
+    /// Retired: the ceiling on this profile's own kind's cached usage
+    /// percentage, checked before a pass started a new lane of it. The quota
+    /// gate and the usage-limit detector it fed are gone outright rather
+    /// than repaired — a usage limit is now an ordinary quiet pane, handled
+    /// by `Dispatcher::check_unreported` like any other. Kept only so an
+    /// existing config still parses; dropped unconditionally on the next
+    /// save.
+    #[allow(dead_code)]
+    #[serde(default, skip_serializing)]
+    quota_ceiling: u8,
 
     /// Retired: whether a carried session was still worth resuming once its
     /// prompt cache had gone cold. Two settings governed one decision, and
@@ -2057,7 +2053,6 @@ mod tests {
             assert_eq!(parsed.agents[name].concurrency, 0, "{name}");
             assert_eq!(parsed.agents[name].session_reuse_ctx, 0, "{name}");
             assert_eq!(parsed.agents[name].session_blocked_ctx, 0, "{name}");
-            assert_eq!(parsed.agents[name].quota_ceiling, 0, "{name}");
         }
         assert!(
             !text.contains("concurrency ="),
@@ -2160,6 +2155,7 @@ mod tests {
             "repo",
             "state_dir",
             "project_home",
+            "git_dir",
         ]
         .iter()
         .map(|key| (*key, format!("<{key}>")))
@@ -2396,6 +2392,29 @@ mod tests {
         incomplete.remove("state_dir");
         let err = cloud.render_args(&incomplete).unwrap_err();
         assert!(err.to_string().contains("{state_dir}"));
+    }
+
+    /// Both agent kinds a lane can be dispatched with are launched with a
+    /// third `--add-dir`, naming the git directory the lane's worktree
+    /// actually uses — the grant that lets `git add`/`git commit` create
+    /// `index.lock` there instead of failing on a read-only filesystem.
+    #[test]
+    fn both_kinds_carry_the_git_dir_as_a_third_add_dir() {
+        for kind in ["claude", "codex"] {
+            let profile = AgentProfile::defaults()[kind].clone();
+            let args = profile.render_args(&values()).unwrap();
+            let add_dirs: Vec<&str> = args
+                .windows(2)
+                .filter(|pair| pair[0] == "--add-dir")
+                .map(|pair| pair[1].as_str())
+                .collect();
+            assert_eq!(
+                add_dirs,
+                ["<state_dir>", "<project_home>", "<git_dir>"],
+                "`{kind}` must carry `{{state_dir}}`, `{{project_home}}` and \
+                 `{{git_dir}}` as its three `--add-dir` grants, in that order"
+            );
+        }
     }
 
     /// spoolway is not in the business of choosing anyone's models, and
@@ -2755,6 +2774,21 @@ mod tests {
                 .unwrap()
                 .contains("session_reuse_uncached")
         );
+    }
+
+    /// `quota_ceiling` retires the way `session_reuse_uncached` did: the
+    /// quota gate it configured is gone outright, along with the usage-limit
+    /// detector it shared a name with — a usage limit is now an ordinary
+    /// quiet pane, handled like any other. An existing config still parses,
+    /// and the key is gone on the next save because nothing reads it any
+    /// more.
+    #[test]
+    fn a_profiles_retired_quota_ceiling_parses_and_drops() {
+        let raw = "[agents.claude]\n\
+                    kind = \"claude\"\n\
+                    quota_ceiling = 85\n";
+        let config: Config = toml::from_str(raw).expect("a retired quota_ceiling must still parse");
+        assert!(!toml::to_string(&config).unwrap().contains("quota_ceiling"));
     }
 
     /// `models.<glob>.cache_ttl` is the field's old name, kept as a serde

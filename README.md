@@ -121,8 +121,8 @@ spoolway dispatch      # watch the board, and step in only where you are needed
 <img src="docs/screenshots/dispatch.png" alt="the dispatcher board">
 
 *One row per task, grouped by `group:`. The board says what each lane is spending as it
-spends it, what every queued task is waiting on, and which tasks are waiting on you — the
-paused one above passed a gated step. Tasks can be paused and resumed from the board.*
+spends it, what every queued task is waiting on, and which tasks are paused for you. NEXT
+distinguishes a lane holding a question from a task waiting to be resumed past a gate.*
 
 Every task on the board is in one of a few states:
 
@@ -130,11 +130,14 @@ Every task on the board is in one of a few states:
 |---|---|
 | `queued` | Waiting for its dependencies and a free slot. |
 | `running` | An agent is working the task's current step right now. |
-| `waiting on you` | A lane ended its turn on a question; answering it is what moves the task. |
-| `paused` | Passed a gated step; you decide whether it goes on. |
+| `paused` | Needs a person: NEXT names either a pane holding a question or the route for resuming a gated task. |
 | `blocked` | Something needs a person. |
 | `unreachable` | A task it depends on is blocked, so it cannot start until you clear that one. |
 | `done` | Finished: the branch is handed over, the worktree removed, the task archived. |
+
+For JSON consumers, question-held rows now report `"state": "paused"` instead of
+`"state": "waiting_on_you"`. Use `next` to distinguish ``look at pane `<lane>``` from a
+gate's resume instruction.
 
 ### 5. Calibrate
 
@@ -236,7 +239,7 @@ Use event hooks to sync with project management tools. GitHub and Jira sample sc
 | `open` | `spoolway queue add` opens a ticket per document |
 | `queued` | A task arrives in the queue |
 | `blocked` | A task comes to rest on `blocked` |
-| `paused` | A task is held on `paused` |
+| `paused` | A task arrives on the persisted `paused` stage; a live-step row whose public state is `paused` does not fire it |
 | `done` | A task finishes |
 
 **The two shipped scripts are samples.** `spoolway init` writes `github.sh` and `jira.sh` into
@@ -264,7 +267,7 @@ auto_commit = true
 [unattended]
 enabled = true               # the overnight switch
 max_output_tokens = 0        # spend ceiling for a run with nobody watching; 0 is none
-skip_blocked_lane = true     # a cleared block carries the task past the step it blocked on
+skip_blocked_lane = true     # an agent step's cleared block carries the task past the step it blocked on
 blocked_agent = "claude"     # who staffs `blocked` when nobody is at the keyboard
 blocked_model = "claude-opus-5"
 blocked_effort = "medium"

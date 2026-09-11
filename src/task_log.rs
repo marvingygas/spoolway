@@ -12,7 +12,7 @@
 //! see [`HEADINGS`] — only the prose under each is the project's.
 //!
 //! Resolution is deliberately not the per-section fallback
-//! [`crate::lane_prompts::render`] gives the six typed messages: there, a
+//! [`crate::lane_prompts::render`] gives the seven typed messages: there, a
 //! project silent about one state still gets spoolway's built-in wording for
 //! it, because a lane launched with nothing to say would be a bug. Here, a
 //! project that has written the file but left a heading out of it is telling

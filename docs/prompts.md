@@ -153,7 +153,8 @@ for something slow, it backgrounds the wait and ends the turn, because in the ha
 trained in a finished background job wakes it up again; here nothing does, and what it leaves
 is the settled pane a lane holding a question leaves. The board cannot tell those apart —
 [it deliberately does not read the pane to guess](dispatcher.md#a-lane-that-settles-without-reporting)
-— so it reports `waiting on you` and names a pane with no question in it.
+— so it reports `paused`, with NEXT saying ``look at pane `<lane>``` even though that pane
+contains no question.
 
 **A report can leave a note for whichever step runs next.** `--handoff` rides on any outcome:
 one per thing the next step should know, written into the task file's `## Handoff` as

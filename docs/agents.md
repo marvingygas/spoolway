@@ -1,6 +1,6 @@
 ---
 domain: agents
-covers: ["src/agent.rs", "src/quota.rs"]
+covers: ["src/agent.rs"]
 ---
 
 # Agents and models
@@ -53,11 +53,10 @@ Which steps run on which profile is the pipeline's business now — see
 | `concurrency` | **absent** on every shipped profile | Most lanes of this profile running at once. `0` is unlimited. A cap on the harness — for a local model the count belongs to the model, as `models."<glob>".slots` |
 | `session_reuse_ctx` | `0` — off | How large an earlier session may be, as a percentage of the model's context window, before a `session: true` step opens fresh instead of carrying it over. `0` — the default — never refuses reuse on size; a nonzero value is `1..=100`, judged on the last turn alone |
 | `session_blocked_ctx` | `0` — off | How large a *running* lane's last completed turn may get, as a percentage of that window, before the dispatcher stops the lane and blocks its task. Must be above `session_reuse_ctx` when both are set — see [`[agents.*]`](configuration.md#agents--who-runs-a-step) |
-| `quota_ceiling` | `0` — off | How much of its kind's own account-wide quota may be spent, as a percentage of either window, before a pass starts no new lane of this profile and parks every candidate task instead. 1..=100, or `0` for off. Holds new launches when the reading is unavailable, invalid, stale or expired — see [Reading a kind's quota before a lane starts](#reading-a-kinds-quota-before-a-lane-starts) |
 | `permission_mode` | kind's own first, strongest-unattended mode; **absent** on a kind with none | Whether this kind's lanes stop and ask about a tool call. Holds the mode a lane is actually started with — `claude` ships `"auto"`, `codex` ships `"never"` — never a placeholder for one; a blank is refused by `spoolway config set` and never reaches `Config::load` |
 
 A profile no longer carries `model`, `context_window`, `args`, `sandbox`, `sandbox_extension`,
-`env` or `session_reuse_uncached`. A profile running several steps could only ever name one
+`env`, `session_reuse_uncached` or `quota_ceiling`. A profile running several steps could only ever name one
 model for all of them, which is exactly the problem naming it per step fixes; every flag `args`
 ever held was spoolway addressing its own CLI with paths and ids only spoolway computes, not a
 project's to hand-tune — see [The argument template](#the-argument-template); the two sandbox
@@ -106,108 +105,6 @@ column, and `headless.rs`'s argv, resolve the program to start through this rath
 Accounting is still an optional half of a row — see [Accounting is
 optional](#accounting-is-optional-and-its-absence-is-a-cost-not-a-refusal) — but no shipped
 kind occupies that state today.
-
-### Telling a spent quota from a dead lane
-
-A row can also carry `usage_limit`: the exact phrase this kind's own CLI leaves in a pane when
-it has hit an account-wide usage limit and stopped making progress on its own. Only `claude`
-declares one today, `"Usage limit reached"`, read verbatim off a real transcript rather than
-guessed at. A kind with no `usage_limit` established, `codex` among them, leaves its lanes on
-the ordinary settled/reminder path; `Adapter::is_usage_limit` answers `false` for every tail on
-such a kind.
-
-**The pane is left alone when this phrase shows up.** The agent resumes its own turn once the
-window resets, so tearing the lane down would throw away work that is going to continue by
-itself. The dispatcher parks the task instead: it writes `parked_until:` on the task file, the
-lane keeps its pane, session and worktree, and the reminder loop stops nudging it. The park
-runs to an observed exhausted window's reset, or uses a separate quota-recheck backoff
-from one minute to one hour. Repeated holds do not append duplicate log entries. See [Restarts, laps and
-escalation](dispatcher.md#restarts-laps-and-escalation).
-
-### Reading a kind's quota before a lane starts
-
-A row can also carry `quota`: where this kind's own CLI leaves its account-wide usage
-percentage. `claude` and `codex` both declare one today. Nothing here goes over the network;
-the figure is something the agent already wrote to disk.
-
-The two kinds write it in different places, so the string on the row means a different thing on
-each. `claude` names a **file** relative to the home directory, `.claude.json`, whose
-`cachedUsageUtilization.utilization` object holds a `five_hour` and a `seven_day` entry.
-Each is an integer `utilization` percent and an ISO `resets_at`; `fetchedAtMs` on
-`cachedUsageUtilization` dates the pair. The reader also accepts the flat layout with both
-windows directly under `cachedUsageUtilization`. A malformed nested layout is rejected,
-even if a flat pair is also present.
-
-`codex` names a **directory** instead, `sessions`, because codex writes its figure per session
-rather than to one cache. Every `token_count` event in a rollout carries a `rate_limits` object,
-with a `primary` window and a `secondary` one. `crate::quota::read` walks the rollouts under
-both homes newest-first and takes the newest one that carries a reading; a rollout with both
-windows null is passed over for the next-newest. The last `token_count` event's `rate_limits` is
-what is read out of whichever file wins, and the event's own `timestamp` is what dates the
-reading, standing in for claude's `fetchedAtMs`.
-
-**Codex is read from two places, and the newest rollout across both wins.** The managed homes
-are the `<state_root>/codex/<session>/sessions/` directories a dispatched lane writes into. Each
-of those directories is itself the `$CODEX_HOME` spoolway handed that lane, so the probe does read
-per-lane `CODEX_HOME` values. The other home is `~/.codex`, where an interactive session or a run
-against a local endpoint writes. Both are walked: every `.jsonl` under a session's `sessions/`
-tree is a candidate, not just the newest file in it, so a real reading under an older null one is
-still found.
-
-The ambient `$CODEX_HOME` this process would otherwise resolve is not a third home. A dispatcher
-started inside a codex session inherits it pointing at a managed home the scan already covers, so
-honouring it would make the reading depend on the shell the dispatcher launched from rather than
-on the account.
-
-A rollout in `~/.codex` comes from a run spoolway did not start, and the case that guards
-against it — a session settled against a local endpoint — writes `rate_limits` with both windows
-null, which is never a reading here. That null is skipped rather than allowed to win on recency,
-so it cannot blank out the account's real figure from the other home; when no rollout anywhere
-carries both windows the result is `Miss::NoReading`. Reading only the managed homes deadlocks
-the queue: only a codex lane writes a managed rollout, and the gate reading it holds every codex
-lane, so a reading that aged out could never be replaced.
-
-The reading gates a launch through [`quota_ceiling`](#every-profile-key). At or above the
-ceiling on either window, a pass starts no new lane of that profile and writes `parked_until:`
-on every candidate task, taken from the window's own `resets_at`. The five-hour window is
-checked first, because it is the one that resets soonest. Codex's `primary` and `secondary`
-windows are carried in those same two slots. Tasks whose step names a different profile are
-staffed in the same pass, untouched.
-
-**An enabled ceiling requires a trustworthy reading.** Missing probes, unreadable or
-malformed files, readings older than five hours, and expired windows hold new launches.
-Codex's all-null windows also hold: they carry no account quota reading. A half-null pair
-is malformed. The task says `quota unavailable`, and its status log points to
-`spoolway agent verify <kind>` for diagnosis. Rechecks start after one minute, double to
-an hour, and survive dispatcher restarts; a fresh reading permits admission at the next recheck.
-Spoolway only reads these files: the agent must refresh them. With no writer, the hold
-continues until the reading is refreshed or the ceiling is disabled. Existing lanes retain
-their sessions, and profiles with `quota_ceiling = 0` take no reading.
-
-The ceiling is an admission threshold, not a completion guarantee. Concurrent lanes and
-sessions outside spoolway share account quota; no quota is reserved for their remaining work.
-
-`spoolway agent verify` prints each kind's quota clause, so a person can see which of those
-cases they are in:
-
-```
-claude   quota  ~/.claude.json cachedUsageUtilization
-                five_hour 61% resets 14:00 · seven_day 16% resets 09-11 04:00
-codex    quota  newest rollout under either codex home,
-                last token_count event's rate_limits
-                five_hour 2% resets 14:00 · seven_day 6% resets 09-11 20:33
-pi       quota  no probe established — an enabled quota ceiling holds new launches;
-                its usage limit is not detected either
-```
-
-Both kinds render their windows the same way: the window's own key (`five_hour`/`seven_day`)
-and an absolute local reset time. A reset within the day shows a bare clock; a reset on another
-day shows `MM-DD HH:MM`, because the line already carries "resets" and a year nobody asked about
-would only crowd it. The account behind codex's reading is not necessarily on this machine's own
-timezone, so the reset is an absolute local time rather than a countdown.
-
-The clause never fails the command. `spoolway doctor` says the same thing from the other side:
-it names a profile that sets `quota_ceiling` on a kind with no probe, where new launches stay held until the ceiling is disabled or a supported kind is used.
 
 ### Telling an interrupted turn from a finished one
 
@@ -511,29 +408,6 @@ Run end to end afterwards, in a scratch project: a first `codex exec` turn enrol
 session, `codex exec resume --last` banked 2 turns of it against the model `turn_context`
 names, and a `spoolway spend` run from outside the session swept the rest.
 
-A third pass settled codex's quota row the same way, and it needed something the other two did
-not: a real ChatGPT sign-in. Every earlier reading on this machine came from a local
-OpenAI-compatible endpoint, and that account has no plan window at all — `rate_limits` is
-present on the event, but `primary` and `secondary` are both null. A bare API key gives the
-same nulls. The row could only be written once a turn ran under an actual subscription.
-
-| Clause | What the binary did |
-|---|---|
-| Where the figure is | An `event_msg` of type `token_count` carries a `rate_limits` object beside its `info`, in the same rollout the token usage is already read from. There is no cache file anywhere — the figure only exists per session |
-| The authenticated reading | `~/.codex/sessions/2026/09/05/rollout-2026-09-05T09-51-18-01a0708c-ec8f-7a01-b4f9-99f6337e1a05.jsonl`, `auth_mode: chatgpt`, last `token_count` event: `"rate_limits":{"limit_id":"codex","limit_name":null,"primary":{"used_percent":5.0,"window_minutes":300,"resets_at":1788611977},"secondary":{"used_percent":2.0,"window_minutes":10080,"resets_at":1789151593},"credits":{"has_credits":false,"unlimited":false,"balance":"0"},"individual_limit":null,"spend_control_reached":null,"plan_type":"plus","rate_limit_reached_type":null}` |
-| Shapes | `used_percent` is a float, not claude's integer. `resets_at` is a Unix timestamp in seconds, not claude's RFC3339 string. `window_minutes` is 300 and 10080 — five hours and seven days, the same two windows claude declares |
-| The unauthenticated reading | The same object with both windows null and the account fields beside them null: `"primary":null,"secondary":null,"credits":null,"plan_type":null`. `limit_id` stays `"codex"`. Seen on `~/.codex/sessions/2026/08/13/rollout-2026-08-13T12-06-16-019ffa96-38fe-7ec1-b8d2-d9b8c4698e45.jsonl`, a turn against the local endpoint |
-| Freshness | Nothing in the object says when it was fetched. The `token_count` event's own `timestamp` dates the reading instead, which is what the five-hour staleness rule is applied to |
-
-The null case is why the probe has a fifth outcome the claude reader never needed. A rollout
-whose `rate_limits` has both windows null parsed correctly and is not a broken file, so calling
-it unparseable would be wrong. It reports no reading, which the dispatcher treats the same as
-every other miss: it blocks nothing. A rollout with only one window null is a shape nobody has
-seen, and that one is reported as malformed.
-
-`usage_limit` stayed `None` on this row. No real run has left a limit phrase in a codex pane to
-quote, and this pass did not invent one.
-
 **codex declares no cache lifetime, and cannot.** Its `token_count` reports how many input
 tokens were served from cache, so cached input is priced correctly, but it carries no
 lifetime anywhere — re-checked against a real rollout by scanning every record for one under
@@ -623,6 +497,7 @@ it, not hand-spelled flags. Each row's template substitutes:
 | `{repo}` | Absolute path to the project root |
 | `{state_dir}` | Absolute path to the project's `.spoolway/` — the prompts a lane reads from outside its worktree |
 | `{project_home}` | Absolute path to the project's own home — the task file a lane reads from outside its worktree |
+| `{git_dir}` | Absolute path to the repo's shared `.git` — the one write grant of the three `--add-dir` paths; the objects and branch ref a lane's `git add`/`git commit` write from inside its worktree live there, outside `{worktree}` and otherwise read-only to it |
 | `{session_id}` | The session id spoolway minted for this lane |
 
 Drop `{session_id}` and the lane still runs. For a kind that takes an id, it then spends

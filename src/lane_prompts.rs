@@ -1,4 +1,4 @@
-//! The six typed messages a lane's pane receives across its life, and the
+//! The seven typed messages a lane's pane receives across its life, and the
 //! project's own say over them.
 //!
 //! A lane is sent two things: the composed system prompt — spoolway's
@@ -7,24 +7,25 @@
 //! the other half, and it is the project's to rewrite, one state at a time,
 //! in `.spoolway/templates/lane-prompts.md`.
 //!
-//! Six states, six `##` sections: `opening`, `resume`, `resume-unattended`,
-//! `carry`, `park`, `reminder` — see [`STATES`]. [`render`] resolves one
-//! section at a time, the same fallback chain [`crate::task_template::
-//! resolve`] uses for a task skeleton: the project's own section wins when
-//! the file has it and it is not blank, spoolway's built-in wording
-//! otherwise. A file missing entirely, a section the file does not name, and
-//! a section left blank are the same answer — the built-in — so a project
-//! can override one state and say nothing about the other five.
+//! Seven states, seven `##` sections: `opening`, `resume`, `resume-unattended`,
+//! `carry`, `park`, `park-escalated`, `reminder` — see [`STATES`]. [`render`]
+//! resolves one section at a time, the same fallback chain
+//! [`crate::task_template::resolve`] uses for a task skeleton: the project's
+//! own section wins when the file has it and it is not blank, spoolway's
+//! built-in wording otherwise. A file missing entirely, a section the file
+//! does not name, and a section left blank are the same answer — the
+//! built-in — so a project can override one state and say nothing about the
+//! other six.
 //!
-//! Four names are substituted for the six states: `{task_file}`, `{step}`,
+//! Four names are substituted for the seven states: `{task_file}`, `{step}`,
 //! `{skills}`, `{report_contract}` — see [`PLACEHOLDERS`], what [`lint`]
 //! checks a state's own section against. A `{...}` naming anything else is
 //! left exactly as written rather than rendered empty — a project's own
 //! placeholder-shaped prose is not this module's to eat, and blanking it
 //! silently is how a typo in a project's own template would go unnoticed.
 //!
-//! [`render`] itself answers for more than the six states: `## arrived-by-
-//! fail`, a seventh section composed straight into the system prompt by
+//! [`render`] itself answers for more than the seven states: `## arrived-by-
+//! fail`, an eighth section composed straight into the system prompt by
 //! [`crate::compose::policy`] rather than typed into a pane, goes through it
 //! too, substituting a fifth name — `{from}` — that [`lint`] never checks
 //! because the section names no state in [`STATES`].
@@ -39,14 +40,15 @@ use crate::repo::Repo;
 /// Every state a lane's pane is prompted in, in the order a lane can reach
 /// them. `reminder` is the odd one out — not a launch at all, but the nudge
 /// sent to a lane that has gone quiet — kept in this same set because it is
-/// the sixth typed message spoolway ever sends, and a project rewriting the
-/// other five has just as much reason to rewrite this one.
+/// the seventh typed message spoolway ever sends, and a project rewriting
+/// the other six has just as much reason to rewrite this one.
 pub const STATES: &[&str] = &[
     "opening",
     "resume",
     "resume-unattended",
     "carry",
     "park",
+    "park-escalated",
     "reminder",
 ];
 
@@ -55,7 +57,7 @@ pub const STATES: &[&str] = &[
 /// is asking for nothing this module can answer, and [`lint`] says so.
 const PLACEHOLDERS: &[&str] = &["task_file", "step", "skills", "report_contract"];
 
-/// Where a project overrides these six messages, relative to its checkout.
+/// Where a project overrides these seven messages, relative to its checkout.
 pub fn path(repo: &Repo) -> std::path::PathBuf {
     repo.lane_prompts_path()
 }
@@ -160,7 +162,7 @@ fn placeholder_names(body: &str) -> Vec<String> {
 /// wrong for a lane when a project's own section leaves one out.
 fn needed(state: &str) -> &'static [(&'static str, &'static str)] {
     match state {
-        "opening" | "resume" | "resume-unattended" | "carry" => {
+        "opening" | "resume" | "resume-unattended" | "carry" | "park-escalated" => {
             &[("task_file", "so a lane is never told which file to read")]
         }
         "reminder" => &[

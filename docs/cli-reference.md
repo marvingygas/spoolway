@@ -176,7 +176,12 @@ board draws, once and as plain text, without the board's own spend columns or it
 total lines — for another terminal while a run is going, or for no run at all.
 
 `--json` prints the dispatcher's pid, if one holds the lock, and one object per task instead —
-the fields a script would actually want, rather than the board's own row shape.
+the fields a script would actually want, rather than the board's own row shape. A question-held
+row and a gate-held paused row both emit `"state": "paused"` and both carry the `[r]` resume
+key — the difference is the route, not the key: the question-held row's `next` names the pane
+to look at (``look at pane `<lane>``` — [r] resumes it), the gate-held row's names the resume
+route (`→ handover — [r] resumes it`). No row emits a `parked` state: a lane that stopped
+reporting lands on `paused` too, so `paused` covers a gate, a question, and a quiet lane alike.
 
 ### `spoolway queue show <task>`
 
@@ -255,7 +260,7 @@ of them has not started either. `ctrl-c` stops the run and leaves the last frame
 | `--interval <DURATION>` | Override the configured interval between passes, e.g. `5m` |
 | `--dry-run` | Report what one pass would do without spawning anything or writing to task files, then exit. One pass, because a dry run archives nothing: a second would report the same untouched queue |
 | `--plain` | Print a line per pass instead of drawing the board — for a pipe, a CI log, or a terminal that mangles the redraw. `--dry-run` prints lines regardless |
-| `--unattended` | Stop for nobody: every block starts a lane on `blocked` instead of parking the task for a person. Every pipeline stages `blocked` — `Pipelines::assemble` materialises one from `[unattended]`'s `blocked_*` keys onto any pipeline that does not declare its own — so there is always a step to route to, staffed by whatever prompt `blocked` names, with `loop` applying as usual and nothing bounding how many times it round-trips. When that lane passes, `unattended.skip_blocked_lane` decides where the task lands: on by default, one step past where the block was hit; `false`, back on the step it blocked on. The launch ceiling that parks a task whose lane keeps dying backs off instead. `gate:` holds either way, and still parks a task on `paused` for a person. Overrides `unattended.enabled` for this run — see [Unattended runs](pipelines.md#unattended-runs). With neither `unattended.max_output_tokens` nor `unattended.max_cost_usd` set, this run has no ceiling at all |
+| `--unattended` | Stop for nobody: every block starts a lane on `blocked` instead of parking the task for a person. Every pipeline stages `blocked` — `Pipelines::assemble` materialises one from `[unattended]`'s `blocked_*` keys onto any pipeline that does not declare its own — so there is always a step to route to, staffed by whatever prompt `blocked` names, with `loop` applying as usual and nothing bounding how many times it round-trips. When that lane passes, `unattended.skip_blocked_lane` decides where an *agent* step's task lands: on by default, one step past where the block was hit; `false`, back on the step it blocked on. A command step ignores this setting and is always handed back to itself. The launch ceiling that parks a task whose lane keeps dying backs off instead. `gate:` holds either way, and still parks a task on `paused` for a person. Overrides `unattended.enabled` for this run — see [Unattended runs](pipelines.md#unattended-runs). With neither `unattended.max_output_tokens` nor `unattended.max_cost_usd` set, this run has no ceiling at all |
 | `--attended` | Park blocked tasks in front of a person for this run, whatever `unattended.enabled` says |
 | `--force` | Start anyway, past the restart guard — see below |
 
@@ -710,14 +715,7 @@ Each `--live` turn is bounded. A turn still running after 180 seconds has hung, 
 kills it and reports the clause as failed rather than waiting forever — `verify --live` is
 often run from CI, where a hang is a stuck job with nobody to interrupt it. The scratch tree
 `--live` works in is removed when the command ends, whichever way it ends. So is the
-per-session agent home it creates for a kind that pins by home — with one carve-out.
-
-The carve-out is a kind whose quota reading is read out of one of those homes, which today
-means `codex`. That home is kept, so the rollout the live turn just wrote stays on disk and a
-stale reading can be refreshed by hand with one `spoolway agent verify codex --live`. Only the
-newest such home survives: on the way out the command takes back every older home its own
-earlier runs left, so what is kept never grows past one per kind. A real lane's home in the
-same directory is never touched.
+per-session agent home it creates for a kind that pins by home.
 
 `agent list` and `agent verify` both run against the whole adapter table rather than the
 profiles this project configures — that is `doctor`'s scope, and the kind you want to ask
