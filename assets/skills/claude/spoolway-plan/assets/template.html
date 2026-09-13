@@ -187,6 +187,25 @@ figcaption { font-size: 0.875rem; color: var(--ink-faint); max-width: var(--meas
 .frame.lit svg .sub { fill: #877c70; }
 .frame.lit svg .lead { stroke: #b0a79b; }
 
+/* A figure that IS a product screen — SLDS, a brand UI, somebody else's
+   chrome. The stylesheet stops recolouring it, so the drawing paints itself:
+   group with fill="", or use the names below. Note there is no font-size
+   here on purpose — CSS would beat the attribute and every size would have
+   to come back inline. Never combine with .lit. */
+.frame.raw { background: var(--ui-ground, #f3f3f3); }
+.frame.raw svg { fill: #181818; }
+.frame.raw svg text { fill: inherit; }
+.frame.raw svg .card  { fill: #ffffff; stroke: #e5e5e5; }
+.frame.raw svg .rule  { fill: none; stroke: #e5e5e5; }
+.frame.raw svg .lbl   { fill: #5c5c5c; font-size: 9.5px; letter-spacing: 0.08em; }
+.frame.raw svg .val   { fill: #181818; font-size: 13.5px; }
+.frame.raw svg .mut   { fill: #5c5c5c; }
+.frame.raw svg .on    { fill: #ffffff; }
+.frame.raw svg .brand { fill: var(--ui-brand, #0176d3); }
+.frame.raw svg .ok    { fill: #2e844a; }
+.frame.raw svg .warn  { fill: #8c4b02; }
+.frame.raw svg .bad   { fill: #ba0517; }
+
 .mocks { display: flex; flex-direction: column; gap: 1rem; margin: 0; }
 .mock {
   background: var(--surface); border: 1px solid var(--rule); border-radius: 5px;
@@ -284,11 +303,13 @@ td code { font-family: var(--mono); font-size: 0.85em; color: var(--accent); }
         <li><a href="#context">Context</a></li>
         <li><a href="#decisions">Decisions</a>
           <ul>
+            <!-- rail-dec: one line per record -->
             <li><a href="#d-[[decision-slug]]">[[Decision, in three or four words]]</a></li>
           </ul>
         </li>
         <li><a href="#mockup">Mockup</a>
           <ul>
+            <!-- rail-step: one line per mockup step -->
             <li><a href="#m-[[step-slug]]">[[What this step is, in two or three words]]</a></li>
           </ul>
         </li>
@@ -331,6 +352,7 @@ td code { font-family: var(--mono); font-size: 0.85em; color: var(--accent); }
     <h2 id="decisions">Decisions</h2>
     <p>[[One sentence naming what these records add up to.]]</p>
 
+    <!-- dec -->
     <section class="dec" id="d-[[decision-slug]]">
       <h3>[[The decision, stated as the decision — what is chosen, not what is discussed]]</h3>
       <p class="forces">[[What pushes each way, in one or two sentences.]]</p>
@@ -353,7 +375,9 @@ td code { font-family: var(--mono); font-size: 0.85em; color: var(--accent); }
 
       <p class="cost">[[What this decision costs, in one sentence.]]</p>
     </section>
+    <!-- /dec -->
 
+    <!-- dec -->
     <section class="dec" id="d-[[decision-slug]]">
       <h3>[[The decision]]</h3>
       <p class="forces">[[What pushes each way.]]</p>
@@ -375,20 +399,12 @@ td code { font-family: var(--mono); font-size: 0.85em; color: var(--accent); }
 
       <p class="cost">[[What this decision costs, in one sentence.]]</p>
     </section>
-
-    <figure>
-      <div class="mocks">
-        <div class="mock">
-          <div class="bar"><span class="dots"><i></i><i></i><i></i></span><span>$ [[the command]]</span></div>
-<pre>[[what it prints — the real columns, the real widths, the real wording]]</pre>
-        </div>
-      </div>
-      <figcaption>[[What the reader should take from it.]]</figcaption>
-    </figure>
+    <!-- /dec -->
 
     <h2 id="mockup">Mockup</h2>
     <div class="mockup">
 
+      <!-- step -->
       <section class="mock-step" id="m-[[step-slug]]">
         <h3>[[What this step is, in two or three words]]</h3>
         <figure>
@@ -400,7 +416,9 @@ td code { font-family: var(--mono); font-size: 0.85em; color: var(--accent); }
           </div>
         </figure>
       </section>
+      <!-- /step -->
 
+      <!-- step -->
       <section class="mock-step" id="m-[[step-slug]]">
         <h3>[[What this step is, in two or three words]]</h3>
         <figure>
@@ -412,7 +430,9 @@ td code { font-family: var(--mono); font-size: 0.85em; color: var(--accent); }
           </div>
         </figure>
       </section>
+      <!-- /step -->
 
+      <!-- step -->
       <section class="mock-step" id="m-[[step-slug]]">
         <h3>[[What this step is, in two or three words]]</h3>
         <figure>
@@ -424,6 +444,7 @@ td code { font-family: var(--mono); font-size: 0.85em; color: var(--accent); }
           </div>
         </figure>
       </section>
+      <!-- /step -->
 
     </div>
 

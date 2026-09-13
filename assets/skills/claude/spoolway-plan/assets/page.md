@@ -44,6 +44,12 @@ missing setting: a plan is read once and archived, and a page arguing in a house
 own is a page a reader has to re-learn. The two lockups are inlined as data URIs and are not
 slots either — leave the `<img>` tags exactly as they are.
 
+**Optional: `--ui-brand` and `--ui-ground`**, when the page carries a `.frame.raw` screen —
+the other product's own brand colour and page ground, declared in the same `:root` block. They
+default to a Salesforce blue on a light grey and are the only two colours a raw figure needs
+named; everything else it paints inline. They are deliberately outside the theme, because a
+screenshot of somebody else's UI does not have a dark mode.
+
 **Optional: one hue per part**, `--l-<part>: #......;`, when a plan has a natural set of parts
 and the colour should mean the same thing in every drawing it appears in. Declare each one in the
 same `:root` block as the ten, named for the part. If a token needs lifting on the dark ground
@@ -61,6 +67,22 @@ grep -n '\[\[' <path>
 
 Edit each line the grep names, in place, with **Edit**. The stylesheet and the two lockups carry
 no marker and are never touched.
+
+**A page needing more records than the skeleton has copies a block, never improvises one.** Four
+HTML comments mark what repeats — `<!-- dec -->…<!-- /dec -->` around a decision, `<!-- step
+-->…<!-- /step -->` around a mockup step, and `<!-- rail-dec -->` / `<!-- rail-step -->` over
+the rail line each one needs. Find them the same way, and copy or delete whole marked blocks:
+
+```
+grep -n '<!-- /\?\(dec\|step\|rail-\)' <path>
+```
+
+The skeleton ships two decisions and three steps. Three decisions and two steps is a copy and a
+delete between markers — not a reason to open the file and read it.
+
+**The markers stay on the finished page.** They are HTML comments, they reach no reader, and a
+revision at step 5 adds a record the same way the first fill did. Stripping them is a pass over
+the page that buys nothing.
 
 ## What each slot takes
 
@@ -91,6 +113,36 @@ no marker and are never touched.
 - Each mockup step's `<h3>` — two or three words naming the moment — and its figure. Nothing
   else: no caption, no note under a panel.
 
+## The drawing vocabulary
+
+Every class an inline `<svg>` may use, so that a figure is written without opening the skeleton.
+Nothing outside this list is themed, and a hex typed into a themed drawing is a colour the toggle
+throws away.
+
+| Class | On | Paints |
+|---|---|---|
+| `.node` | `rect`, `circle` | a box: surface fill, rule stroke |
+| `.edge` | `path`, `line` | a connector: faint stroke, no fill |
+| `.mark` | any | the chosen one: accent stroke, no fill |
+| `.tip` | `polygon` | an arrowhead: faint fill, no stroke |
+| `.sub` | `text` | a sub-label under a node: mono, 10.5px, faint, letterspaced — set it in caps |
+| `.lead` | `path` | a thin leader from a label to the thing it names |
+| `.grid` | `path`, `line` | a separator or axis: rule stroke |
+| `.wait` | `path` | a gap, a delay, a route being dropped: dashed and faint |
+| `.tick`, `.dur` | `text` | mono 10px tabular figures for a timeline; `.dur.end` right-anchors |
+| `.who` | `text` | a lane or actor label: mono 11px |
+
+`text` with no class takes the sans face and the ink colour, and `font-size` is yours as a plain
+attribute. Three grounds hold these: **`.frame`** follows the theme and is the default;
+**`.frame.lit`** pins a light ground for a drawing whose own colours carry meaning; and
+**`.frame.raw`** is for a figure that *is* somebody else's product screen.
+
+**A raw figure paints itself.** The stylesheet's `fill` stops applying, so group with
+`<g fill="#FFFFFF">` rather than styling each `text`, and reach for these where they fit:
+`.card` (white panel, hairline border), `.rule` (a divider), `.lbl` (small caps field label),
+`.val` (a field value), `.mut`, `.on` (white, for text on a filled bar), `.brand`, `.ok`,
+`.warn`, `.bad`. Never put `.raw` and `.lit` on the same frame.
+
 ## The record's figure
 
 A figure argues the decision; the prose around it only says what to look at.
@@ -107,12 +159,12 @@ A figure argues the decision; the prose around it only says what to look at.
 - **Never two figures, and never two panels of one figure, side by side.** Every panel and every
   drawing takes the column's full width, one per row; half a column clips the line that carries
   the change. `.mocks` already stacks its panels — do not fight it with a grid.
-- A mockup starts from the thing's own captured output — a real screenshot, a real command's real
-  output, a rendered page — never redrawn from memory. Something that does not run yet has no
-  output to capture; its bar names the bound the panel was drawn to hold instead, in a `<span
-  class="tag">`, and the task that builds it carries proving that bound as a criterion. Writing or
-  running anything, scratch scripts included, to manufacture a panel's contents is not this
-  skill's to do — see `SKILL.md`'s own rule on this before you reach for a terminal.
+- **Where a panel's contents come from is `SKILL.md`'s rule, not this file's** — read it there.
+  The markup half is only this: a thing that does not run yet names the bound it was drawn to
+  hold in a `<span class="tag">` in the panel's bar, where a real artifact would have carried
+  its path.
+- **A table inside a screen shows two rows and a count**, never the whole set. Six columns of
+  four rows is a page of markup an architect approves no better than two rows and `5 more`.
 - Source is welcome as supporting material under a figure that has already said what the code is
   for — a `<pre>` inside the same `.mock`, or beside it — never as the first thing in a record.
 

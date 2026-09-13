@@ -76,6 +76,9 @@ in prose about functions and line edits.
 - **Every record has a figure, explained only after it**: forces, figure, what it doesn't show,
   the cost — nothing after re-explains it in words. Show code freely as supporting material
   under it, never first, never alone.
+- **A figure is drawn from the vocabulary in `assets/page.md`**, which names every class and the
+  three grounds — themed, lit, and `.raw` for a figure that is somebody else's product screen.
+  A screen goes in `.raw` and paints its own colours; a diagram never does.
 - **Four sentences per record before the cost line**, and the cost line is never skipped — a
   record with nothing to say it costs was not a decision.
 - **The mockup section carries headings and figures, nothing else** — a two-or-three-word `h3`
@@ -117,8 +120,11 @@ day it changes; a path stays true. Name the file that already holds the ground n
    reference: the default path, what every `[[slot]]` takes, how a record's and mockup's markup
    is built, and the proof block to run before you say a word. Open it now.**
 
-   Fill every slot from a line-numbered grep for its marker, plus your own edits — never from a
-   whole read of the page:
+   **Neither file is read whole, and the skeleton is never opened at all.** `page.md` carries
+   the slot list, the drawing vocabulary and the markers, which is everything the markup needs;
+   opening `template.html` to find out what a class paints spends thousands of tokens relearning
+   what is already written down. Fill every slot from a line-numbered grep for its marker, plus
+   your own edits:
 
    ```
    grep -n '\[\[' <path>
