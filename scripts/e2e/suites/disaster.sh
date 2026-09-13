@@ -481,79 +481,76 @@ else
 fi
 must "retention back to the default" "$SPOOLWAY" config set retention.days 30
 
-# ------------- the board names a local model a queued task is about to run
-# The footer's slot counts only ever see the lanes spoolway started, so a
-# model flagged `local = true` earns a standing line saying that manually
-# started sessions are not considered by the slots pool — drawn only when a
-# queued task actually routes onto such a model, and on the board alone.
+# ------------- the retired local-model warning never draws
+# The footer's slot counts only ever see the lanes spoolway started, but that
+# gap is exactly as true of a manually started cloud session as a local
+# one — see docs/dispatcher.md's own accounting for what "slots" counts. The
+# board used to single out a `local = true` model with a standing line saying
+# manually started sessions are not considered by the slots pool; it draws no
+# such line any more, flagged or not — the pooled-slots line for the model
+# itself is a separate thing and is unaffected.
 #
-# covers: models.<glob>.local — the board names a local model a queued task routes onto, and stays silent for a model that has not set it
+# covers: models.<glob>.local — the board never renders the retired manual-session warning, whether or not a queued task's model is flagged local
 sweep
 LOCAL_MODEL=$(local_model)   # `fake-local`, the model the mock's local steps name
 queue_hang localnote          # a task whose default pipeline routes through that step
 
-# Nothing has flagged the model yet: the board treats it like any other and
-# draws no such line.
+# Unflagged: no reason to expect the warning, and none appears.
 BEFORE=$(wc -l < "$E2E_DISPATCH_LOG" 2>/dev/null || echo 0)
 BOARD_PID=$(one_shot_start_board)
 poll_until 15 bash -c \
   'tail -n +'"$((BEFORE + 1))"' "'"$E2E_DISPATCH_LOG"'" | grep -q "slots"'
 if tail -n +"$((BEFORE + 1))" "$E2E_DISPATCH_LOG" | grep -qF "not considered by the slots pool"; then
-  bad "a model that has not set \`local\` draws no board line"
+  bad "no board frame carries the retired warning (model unflagged)"
   tail -n +"$((BEFORE + 1))" "$E2E_DISPATCH_LOG" | sed 's/^/        /'
 else
-  ok "a model that has not set \`local\` draws no board line"
+  ok "no board frame carries the retired warning (model unflagged)"
 fi
 one_shot_stop "$BOARD_PID"
 
-# Flagged, the same queued task's route now draws one line naming the model.
+# Flagged local, and given a pool of its own, `pi` — the profile
+# `localnote`'s `implement` step names — still earns a slots line on the
+# frame, with no lane of its own ever started: `slots_used` widens
+# `agent_model` over every queued task's whole pipeline, not only its live
+# lanes. That accounting is untouched by this task; only the warning beside
+# it is gone.
 must "flag the model local" "$SPOOLWAY" config set "models.$LOCAL_MODEL.local" true
-# Given a pool of its own, `pi` — the profile `localnote`'s `implement` step
-# names — earns a slots line on the very same frame, with no lane of its own
-# ever started: `slots_used` now widens `agent_model` over every queued
-# task's whole pipeline, not only its live lanes.
 must "give the model a pool" "$SPOOLWAY" config set "models.$LOCAL_MODEL.slots" 3
 BEFORE=$(wc -l < "$E2E_DISPATCH_LOG" 2>/dev/null || echo 0)
 BOARD_PID=$(one_shot_start_board)
-if wait_for_text 20 "$E2E_DISPATCH_LOG" \
-     "$LOCAL_MODEL — manually started sessions are not considered by the slots pool"; then
-  ok "the board names a local model a queued task routes onto"
+if wait_for_text 20 "$E2E_DISPATCH_LOG" "$LOCAL_MODEL"; then
+  ok "the board still names the pooled model's own slots line"
 else
-  bad "the board names a local model a queued task routes onto"
+  bad "the board still names the pooled model's own slots line"
   tail -n +"$((BEFORE + 1))" "$E2E_DISPATCH_LOG" | sed 's/^/        /'
 fi
 tail -n +"$((BEFORE + 1))" "$E2E_DISPATCH_LOG" > "$LIVE/local-pool.out"
-# Split back into frames — see the `h`-cycle case in commands.sh for why a
-# single grep over the whole file cannot tell "the same frame" from "some
-# frame, eventually": both lines must land on the frame that carries the
-# notice.
 # The live count in `pi`'s own line is not asserted — `localnote`'s hung
-# `implement` lane may or may not have been dispatched yet by this point,
-# and either way is beside what this case is about: the `/3` cap is there
-# at all, off the queued pipeline's own step, whether or not a lane is live.
-# The model itself is asserted, though — `pool-line-per-model` puts one line
-# per pooled model on the footer, the model's own name printed after its
-# figures, and the local notice below it is the standing reminder that this
-# same model's line is undercounting whoever else is running it by hand.
+# `implement` lane may or may not have been dispatched yet by this point, and
+# either way is beside what this case is about: the `/3` cap is there at all,
+# off the queued pipeline's own step, whether or not a lane is live.
 if python3 - "$LIVE/local-pool.out" "$LOCAL_MODEL" <<'PY'
 import re
 import sys
 
 data = open(sys.argv[1], "rb").read()
 model = sys.argv[2].encode()
-frames = data.split(b"\x1b[2J\x1b[H")[1:]
-notice = b"not considered by the slots pool"
 pool_line = re.compile(
     rb"\x1b\[1mpi\s*\x1b\[0m {3}\x1b\[2mslots\x1b\[0m \d+/3 {3}" + re.escape(model)
 )
-ok = any(notice in f and pool_line.search(f) for f in frames)
-sys.exit(0 if ok else 1)
+sys.exit(0 if pool_line.search(data) else 1)
 PY
 then
-  ok "the same frame also carries the pool line naming that model"
+  ok "the pooled slots line names the flagged model"
 else
-  bad "the same frame also carries the pool line naming that model"
+  bad "the pooled slots line names the flagged model"
   sed 's/^/        /' "$LIVE/local-pool.out"
+fi
+if grep -qF "not considered by the slots pool" "$LIVE/local-pool.out"; then
+  bad "flagging a model local does not bring the retired warning back"
+  sed 's/^/        /' "$LIVE/local-pool.out"
+else
+  ok "flagging a model local does not bring the retired warning back"
 fi
 one_shot_stop "$BOARD_PID"
 forget localnote

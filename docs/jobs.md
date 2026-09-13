@@ -71,9 +71,11 @@ next: nightly-audit, Mon 8 Sep 03:00  (in 5h 48m)
 ctrl-c stops.
 ```
 
-The board shows the same three facts in its own dim style, in place of `nothing queued`. If
-no enabled job will ever fire, the `next:` line reads `no job will fire — run spoolway
-doctor` instead.
+The board shows two of the three in its own dim style, in place of `nothing queued`: the
+opening line and `ctrl-c stops.`, but not the `next:` line, which the board's own job ledger
+below already carries for every enabled job — see [The dispatcher](dispatcher.md). The plain
+run still prints all three; if no enabled job will ever fire, its `next:` line reads `no job
+will fire — run spoolway doctor`.
 
 With no job enabled, nothing changes. An empty queue still stops the run, a cold start with
 nothing queued still exits 3, `ctrl-c` still stops a resident run, and a stop still banks
