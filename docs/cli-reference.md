@@ -74,8 +74,9 @@ Once every one of a group's tasks has run to the end and moved into the archive 
 row is marked `done` instead, still with no checkbox — a finished group stays on screen behind
 the third `h` press rather than disappearing, so `s` and `p` can still reach it. A group with
 some tasks archived and others still queued shows its whole chain in the tasks pane, and each
-task's own row there carries its own `queued` or `done` tail next to its id, since a group's own
-row can only speak for the group as a whole.
+task's own row there carries its own `queued` or `done` tail next to its id — except once the
+whole group has finished, when the group's row already reads `done` and no task under it draws a
+tail, since a group's own row can only speak for the group as a whole.
 
 `f` opens a filter over the left pane: the query is drawn on the pane's own first row, reading
 `find: <query>`, with a
@@ -89,7 +90,7 @@ it — a queued group it matches is listed with its `queued` tail and no checkbo
 would show it. While the filter has focus, `q` is an ordinary character rather than the key that
 quits the screen — which it otherwise does from browsing, the gate picker and a report on
 screen — and the footer reads
-`type to narrow   ↑↓ move   enter keep filter   esc clear   q is a letter here` in its place.
+`↑↓ move   f find   p trial   s save routine   esc back` in its place.
 
 The two panes are sized to the terminal on every frame, and a pane with more rows than fit
 scrolls to whatever is highlighted. `↑`/`↓` (or `j`/`k`) move the cursor by one group or task.
@@ -120,12 +121,16 @@ globs itself: an overlap across two groups merges on two separate branches and i
 `depends_on` here could fix, so it is left for `spoolway queue conflicts` to report on demand,
 ordered by nothing.
 
-`p`, live only while the tasks pane has focus and a task is highlighted under it, opens a picker
-for running that one task on several pipelines at once — the project's pipelines first, `space`
-ticking one, and, once at least one is ticked, the union of their own steps below it, each with
-its own `space` to tick as a step to skip. `enter` queues one arm per ticked pipeline, each under
-a minted id — the task's own id with the lowest free number appended — with the ticked steps in
-its own `skip:`; `esc` closes the picker with the selection exactly as it was. See
+`p` forks a whole group — whichever one the cursor sits on in either pane, or the containing
+group of a selected task, in any view `h` is showing — into one arm per task across two screens.
+The first assigns a pipeline to every task: each row already carries its own document's pipeline,
+or this project's default, and `←`/`→` cycle the highlighted task's through the project's
+pipelines. `enter` advances to the second screen, which lists each task's own steps under the
+pipeline it was assigned, a `space` per step to tick as a step to skip, a separate skip set per
+task, and `esc` returns to the assignment screen without dropping either pick. `enter` on the
+second screen mints and writes one arm per task under one freshly minted trial id, remapping every
+`depends_on` that names a sibling in the batch to that sibling's own minted id; `esc` off the
+first screen closes the picker with the selection exactly as it was. See
 [Trials](planning.md#trials) for the full flow.
 
 `r` swaps the left pane for the folder tree under `.spoolway/routines/` — the repeatable task
@@ -384,7 +389,7 @@ prints a note to stderr saying where the table moved to, and otherwise behaves e
 | `--all` | Every project spoolway knows about, not just this one. Refused together with `--project` |
 | `--project <NAME>` | One named project — its directory name, or its path |
 | `--runs` | One row per run instead of a grouped summary: task, when, version, pipeline, lanes, pass, blocks, ctx peak, out, cost, time |
-| `--task <ID>` | `--runs` only: one task's runs. A trial's arms are separate tasks (`solo-1`, `solo-2`, …), so this is not how to see a trial side by side — that is `--runs --trial <id>` |
+| `--task <ID>` | `--runs` only: one task's runs. A trial forks a whole group, one arm per source task (`alpha-1`, `beta-1`, …), so this is not how to see a trial side by side — that is `--runs --trial <id>` |
 | `--group <GROUP>` | `--runs` only: only runs whose task carries this `group:` |
 | `--trial <ID>` | `--runs` only: one trial's arms, side by side on pass rate, cost and time, plus a delta line per arm against the first |
 | `--csv` | The same rows this would print, as CSV. Refused together with the global `--json` |

@@ -341,9 +341,10 @@ pub struct Frontmatter {
     /// on every arm the queue screen's `p` picker forks — see
     /// `commands::queue::begin_trial`. Absent on a task queued the ordinary
     /// way. What lets `spoolway eval --runs --trial <id>` find a trial's arms
-    /// together in the ledger, since their ids otherwise share nothing but a
-    /// minted-together prefix (`solo-1`, `solo-2`, …) that is not itself
-    /// recorded anywhere.
+    /// together in the ledger: a trial forks a whole group, one arm per
+    /// source task (`alpha-1`, `beta-1`, …), so those arms come from
+    /// different source documents and share nothing else — not even an id
+    /// prefix — to group them by.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trial: Option<String>,
 

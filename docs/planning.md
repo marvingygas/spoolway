@@ -261,29 +261,31 @@ deletes nothing.
 
 ### Trials
 
-`p` on a highlighted task opens a picker, over the same screen, for running that one task on
-several pipelines at once — to see which does the work better. The picker lists the project's
-pipelines first; `space` ticks one, and once at least one is ticked, the union of the ticked
-pipelines' own steps is listed below it, each with its own `space` to tick as a step to skip.
-`enter` queues one arm per ticked pipeline; `esc` leaves the ticks exactly as they were and
+`p` on a highlighted group opens a picker, over the same screen, for running the whole group —
+to see which pipeline does each task's work. The first screen assigns a pipeline to every task
+in the group: each already carries its own document's pipeline, or this project's default, and
+`←`/`→` cycle the highlighted task's through the project's pipelines. `enter` advances to the
+second screen, which lists each task's own steps under the pipeline it was assigned, a `space`
+per step to tick as a step to skip, a separate skip set per task; `esc` returns to the first
+screen without dropping either pick. `enter` on the second screen runs it; `esc` off the first
 closes the picker without queueing anything.
 
-Each arm is a copy of the highlighted task's document, queued under its own `pipeline:`, the
-ticked steps in its own `skip:`, and the same `group:` the source document names. If that document
-has already been through a run, it gets the same reset a save does before an arm is built from it
-— see [Routines](#routines). Its id is minted, not typed: the source document's own id with the
-lowest number free in both the queue and the archive appended — `<id>-1`, `<id>-2`, and so on —
-and that minted id is measured against the arm's own pipeline the same way `spoolway task
-contract` measures an ordinary one; an id too long for its pipeline's budget is refused, naming
-the budget and by how much it is over, and nothing in the trial is written. The source document
-itself is a template for the arms, not one of them — it is left in the pending directory exactly
-as it was, and no bare-id copy of it ever reaches the queue.
+Each task becomes one arm, queued under the pipeline its screen assigned it, the ticked steps in
+its own `skip:`, and the same `group:` the source document names. If a document has already been
+through a run, it gets the same reset a save does before an arm is built from it — see
+[Routines](#routines). Its id is minted, not typed: the task's own id with the lowest number free
+in both the queue and the archive appended — `<id>-1`, `<id>-2`, and so on — and that minted id is
+measured against the arm's own pipeline the same way `spoolway task contract` measures an ordinary
+one; an id too long for its pipeline's budget is refused, naming the budget and by how much it is
+over, and nothing in the trial is written. The source documents themselves are templates for the
+arms, not arms of their own — they are left in the pending directory exactly where `p` found them,
+and no bare-id copy of any of them ever reaches the queue.
 
 The ticked steps land in `skip:` so that a trial arm never pushes a branch or opens a pull
-request on its own — see [`skip`](tasks.md#the-task-file). Every arm banks the source
-document's own id as its trial id, so `spoolway eval --runs --trial <id>` finds them together
-and puts them side by side on pass rate, cost and time — the comparison a trial exists to
-answer. See [Comparing versions](eval.md#spend-by-spoolway-spend).
+request on its own — see [`skip`](tasks.md#the-task-file). Every arm shares one freshly minted
+trial id — a `t` plus sixteen hex digits, new on every launch — so `spoolway eval --runs
+--trial <id>` finds them together and puts them side by side on pass rate, cost and time — the
+comparison a trial exists to answer. See [Comparing versions](eval.md#spend-by-spoolway-spend).
 
 ### Routines
 

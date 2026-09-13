@@ -468,9 +468,9 @@ pub struct EvalArgs {
     #[arg(long)]
     pub runs: bool,
 
-    /// `--runs` only: one task's runs. A trial's arms are separate tasks
-    /// (`solo-1`, `solo-2`, …), so this is not how to see a trial side by
-    /// side — that is `--runs --trial <id>`.
+    /// `--runs` only: one task's runs. A trial forks a whole group, one arm
+    /// per source task (`alpha-1`, `beta-1`, …), so this is not how to see a
+    /// trial side by side — that is `--runs --trial <id>`.
     #[arg(long, value_name = "ID", requires = "runs")]
     pub task: Option<String>,
 

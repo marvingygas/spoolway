@@ -1551,6 +1551,22 @@ pub fn new_run_id() -> String {
     format!("r{value:016x}")
 }
 
+/// A fresh trial id: `t` plus sixteen hex digits, minted once per trial
+/// launch so every arm the batch mints shares one and two trials of the same
+/// group are never indistinguishable in the ledger. Same shape and the same
+/// reason as [`new_run_id`]: `spoolway eval --runs --trial <id>` groups by
+/// this value exactly the way `group_by_run` groups a run, so a collision
+/// would silently fold two unrelated trials into one comparison table — the
+/// one question a trial exists to let a person answer.
+pub fn new_trial_id() -> String {
+    let mut bytes = [0u8; 8];
+    if !os_random(&mut bytes) {
+        distinct_fallback(&mut bytes);
+    }
+    let value = u64::from_le_bytes(bytes);
+    format!("t{value:016x}")
+}
+
 pub fn ledger_path(repo: &Repo) -> PathBuf {
     repo.usage_file()
 }
@@ -3290,6 +3306,18 @@ mod tests {
         assert_eq!(a.len(), 17, "{a}");
         // Not a strict guarantee — it is 64 bits of entropy — but a pair of
         // freshly minted ids colliding would be worth knowing about.
+        assert_ne!(a, b);
+    }
+
+    /// The same shape and the same distinctness as [`new_run_id`], under its
+    /// own `t` prefix — two trials of the same group must read apart in the
+    /// ledger, which a reused value could never promise.
+    #[test]
+    fn trial_ids_are_wide_and_distinct() {
+        let a = new_trial_id();
+        let b = new_trial_id();
+        assert!(a.starts_with('t'));
+        assert_eq!(a.len(), 17, "{a}");
         assert_ne!(a, b);
     }
 

@@ -246,9 +246,10 @@ A ledger line written before `run` existed carries none, so it is named instead:
 `<task>@<date of its earliest round>`, qualified with the project where two projects would
 otherwise mint the same name on the same day.
 
-This is also the table a trial is read in. The queue screen's `p` forks one task into an arm
-per pipeline, each queued under its own minted id and the same trial id, so the arms arrive
-here as one row each — same work, different pipeline, side by side.
+This is also the table a trial is read in. The queue screen's `p` forks a whole group, one arm
+per source task, each under the pipeline its own screen assigned it and under a shared,
+freshly minted trial id, so the arms arrive here as one row each — different work, different
+pipeline, side by side.
 
 `--runs --trial <id>` narrows the table to one trial's own arms and adds a delta line under it
 per arm, against the first: how far its pass rate, cost and time moved from the trial's
