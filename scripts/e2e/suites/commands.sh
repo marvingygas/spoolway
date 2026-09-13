@@ -32,16 +32,12 @@
 # covers: step.background — the task moves on the same pass, and cleanup stops the command
 # covers: step.timeout — a hung command is stopped at the step`s own bound, not the dispatcher`s
 # covers: step.loop — a command step's own failure feeds the loop bound on the agent step behind it, the shape a mechanical CI gate is built on
-# covers: stack.summary.agent — a config predating the table gets it back from `update`, blank
-# covers: stack.summary.model — same run: blank, and unchanged by a second `update`
-# covers: stack.summary.effort — same run: blank, and unchanged by a second `update`
-# covers: stack.summary.prompt — same run: defaulted to `summariser`, and unchanged by a second `update`
 # covers: issue_tracking.hook — a bare filename, resolved inside .spoolway/hooks/, fires once per task per event with the full environment set
 # covers: issue_tracking.project_key — opaque, handed to the hook verbatim as SPOOLWAY_PROJECT_KEY
 # covers: issue_tracking.on_fail — a non-zero exit under "pause" holds the task on `queued` and `done`, and only records the failure on `blocked` and `paused`
 # covers: issue_tracking.key_in_names — with it on and the hook answering slug=, `queue add` writes `group: <slug>-<group>` and `branch: task/<slug>-<id>` and stores the hook's url=
-# covers: retention.days — an entry past the age is swept from a byproduct directory, and never from queue/, however old
-# covers: prices.max_age_days — doctor notes only a table older than the configured limit; 0 is covered by the unit boundary test
+# covers: housekeeping.retention_days — an entry past the age is swept from a byproduct directory, and never from queue/, however old
+# covers: housekeeping.price_max_age_days — doctor notes only a table older than the configured limit; 0 is covered by the unit boundary test
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=../lib.sh
@@ -129,14 +125,14 @@ PRICE_TABLE="$HOME/.spoolway/model-prices.json"
 jq '.generated = "2000-01-01"' "$PRICE_TABLE" >"$PRICE_TABLE.tmp"
 mv "$PRICE_TABLE.tmp" "$PRICE_TABLE"
 must "price age limit is set for the doctor boundary" \
-  "$SPOOLWAY" config set prices.max_age_days 30
+  "$SPOOLWAY" config set housekeeping.price_max_age_days 30
 says "doctor notes a refreshed table past the age limit" \
-  'past the 30 in `prices.max_age_days`' "$SPOOLWAY" doctor
+  'past the 30 in `housekeeping.price_max_age_days`' "$SPOOLWAY" doctor
 
 jq --arg today "$(date -u +%F)" '.generated = $today' "$PRICE_TABLE" >"$PRICE_TABLE.tmp"
 mv "$PRICE_TABLE.tmp" "$PRICE_TABLE"
 silent_about "doctor stays quiet for a refreshed table inside the age limit" \
-  'past the 30 in `prices.max_age_days`' "$SPOOLWAY" doctor
+  'past the 30 in `housekeeping.price_max_age_days`' "$SPOOLWAY" doctor
 
 BODY="$LIVE/body.md"
 task_body "$BODY"
@@ -195,34 +191,6 @@ works "and spoolway-calibrate lands too" \
 
 refuses "the retired agent answer is no longer accepted" \
   "unexpected argument '--agent'" env -C "$INITDIR/unasked" "$SPOOLWAY" init --agent gemini
-
-# `[stack.summary]` is a table every config now carries, blank `agent` and
-# `model` included — a project whose config predates it never wrote the
-# section at all, so `update` is what has to pick it up, the same way it picks
-# up any other setting a config has yet to see.
-STACK_CONFIG="$INITDIR/unasked/.spoolway/config.toml"
-sed -i '/^\[stack\.summary\]$/,/^prompt = "summariser"$/d' "$STACK_CONFIG"
-# `task contract` is what `queue check` became — it is the command in this
-# suite that loads the project's config and its pipelines and exits without
-# writing anything, which is all "does this config still parse" needs.
-works "a config predating [stack.summary] still parses" \
-  env -C "$INITDIR/unasked" "$SPOOLWAY" task contract
-says "update reports the config as changed" "config.toml" \
-  env -C "$INITDIR/unasked" "$SPOOLWAY" update
-
-# Anchored to the table itself — `pipeline_model = ""`, `pipeline_effort = ""`
-# and `blocked_effort = ""` already sit elsewhere in this file with the same
-# text a bare substring search for `model = ""` or `effort = ""` would catch,
-# which would pass even with the whole `[stack.summary]` table missing.
-WANT_STACK_TABLE=$(printf '[stack.summary]\nagent = ""\nmodel = ""\neffort = ""\nprompt = "summariser"\n')
-GOT_STACK_TABLE=$(sed -n '/^\[stack\.summary\]$/,+4p' "$STACK_CONFIG")
-works "and writes the table back with every value blank but prompt" \
-  test "$GOT_STACK_TABLE" = "$WANT_STACK_TABLE"
-
-silent_about "a second run finds nothing left to add" "config.toml" \
-  env -C "$INITDIR/unasked" "$SPOOLWAY" update
-works "so the table's blank values are exactly what they were" \
-  test "$(sed -n '/^\[stack\.summary\]$/,+4p' "$STACK_CONFIG")" = "$WANT_STACK_TABLE"
 
 # Run again for a second provider: the skills land, and the config the project
 # has been running on is not rewritten around it.
@@ -1926,7 +1894,7 @@ works "and github-open-check's own ticket, queued with no source: at all, never 
 # `system-prompts/` and `queue/` are dated the same way here, so what makes
 # the difference is only which directory holds the entry.
 must "retention is set to an age touch can force in a moment" \
-  "$SPOOLWAY" config set retention.days 1
+  "$SPOOLWAY" config set housekeeping.retention_days 1
 
 # `system-prompts/` is the composed-prompt directory, one file per lane.
 # Not `.spoolway/prompts/` in the checkout, which holds the project's tracked
@@ -1955,7 +1923,7 @@ works "the aged prompt went" test ! -e "$OLD_PROMPT"
 works "the aged queue entry did not — queue/ is never swept, whatever its age" \
   test -f "$OLD_QUEUED"
 
-must "retention restored to its default" "$SPOOLWAY" config set retention.days 30
+must "retention restored to its default" "$SPOOLWAY" config set housekeeping.retention_days 30
 rm -f "$OLD_QUEUED"
 
 finish

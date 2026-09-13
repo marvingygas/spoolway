@@ -514,9 +514,9 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
             true,
         )?;
     }
-    // The shape `spoolway stack`'s summary prompt fills in. One file, not one
-    // per pipeline — there is one shape of pull request whichever pipeline
-    // opened it.
+    // A pull request template, unread by anything in this binary — see
+    // `crate::config::PULL_REQUEST_TEMPLATE` — but installed and managed
+    // like any other file in this module.
     place(
         root.join(crate::config::PULL_REQUEST_TEMPLATE),
         assets::PULL_REQUEST_TEMPLATE.as_bytes(),

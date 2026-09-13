@@ -498,12 +498,12 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: &str) -> Result<Task
     if front.id.trim().is_empty() {
         bail!("{name}: a document must set `id:`");
     }
-    // The squashed commit's subject, always — and the pull request's title
-    // whenever no summary model is configured to write its own. No heading in
-    // the body can carry it: the body's shape is the project's, and this
-    // needs to survive any template. Written `feat(queue): add a --dry-run
-    // flag`, and only its presence is checked: a document predating that
-    // convention still queues, rather than being refused over its wording.
+    // The squashed commit's subject, always — and the pull request's title,
+    // always. No heading in the body can carry it: the body's shape is the
+    // project's, and this needs to survive any template. Written
+    // `feat(queue): add a --dry-run flag`, and only its presence is checked:
+    // a document predating that convention still queues, rather than being
+    // refused over its wording.
     if front.title.trim().is_empty() {
         bail!("{name}: a document must set `title:`");
     }
@@ -1289,7 +1289,7 @@ fn check_dependencies_set(repo: &Repo, pipelines: &Pipelines, batch: &mut [Task]
 
         for dep in &task.front.depends_on {
             if graph.state(dep) == DepState::Unknown {
-                let days = repo.config.retention.days;
+                let days = repo.config.housekeeping.retention_days;
                 if days > 0 {
                     // `retain` deletes an `archive/` entry once it is this
                     // old, and a dependency this refused could just as
@@ -1298,8 +1298,8 @@ fn check_dependencies_set(repo: &Repo, pipelines: &Pipelines, batch: &mut [Task]
                     bail!(
                         "`{id}` depends on `{dep}`, which is in neither the queue nor the \
                          archive — if `{dep}` finished more than {days} day(s) ago, \
-                         `retention.days` has already swept it out of the archive; \
-                         otherwise check the id, or queue that task first"
+                         `housekeeping.retention_days` has already swept it out of the \
+                         archive; otherwise check the id, or queue that task first"
                     );
                 }
                 bail!(
@@ -4700,14 +4700,14 @@ mod tests {
         let err = check_dependencies_set(&repo, &Pipelines::builtin(), &mut [sessions.clone()])
             .unwrap_err();
         assert!(
-            err.to_string().contains("retention.days"),
+            err.to_string().contains("housekeeping.retention_days"),
             "the age was not named: {err:#}"
         );
 
-        // `retention.days = 0` never sweeps, so the same missing dependency
-        // is reported the plain way instead.
+        // `housekeeping.retention_days = 0` never sweeps, so the same
+        // missing dependency is reported the plain way instead.
         let mut off = crate::config::Config::default();
-        off.retention.days = 0;
+        off.housekeeping.retention_days = 0;
         let repo_off = Repo {
             config: off,
             ..repo.clone()
@@ -4716,7 +4716,7 @@ mod tests {
         let err =
             check_dependencies_set(&repo_off, &Pipelines::builtin(), &mut [sessions]).unwrap_err();
         assert!(
-            !err.to_string().contains("retention.days"),
+            !err.to_string().contains("housekeeping.retention_days"),
             "retention off must not be blamed: {err:#}"
         );
     }
@@ -5250,10 +5250,10 @@ mod tests {
         assert!(err.to_string().contains("empty"), "{err:#}");
     }
 
-    /// `title:` is the squashed commit's subject and, absent a summary
-    /// model, the pull request's title — no heading in the body can supply
-    /// one, so a document leaving it blank is refused before anything is
-    /// queued, naming the document and the field.
+    /// `title:` is the squashed commit's subject and the pull request's
+    /// title — no heading in the body can supply one, so a document leaving
+    /// it blank is refused before anything is queued, naming the document
+    /// and the field.
     #[test]
     fn a_document_with_no_title_is_refused() {
         let text = "---\nid: demo\ngroup: demo\n---\n## Goal\n\nDo the thing.\n";

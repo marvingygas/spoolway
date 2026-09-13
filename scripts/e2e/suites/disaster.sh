@@ -440,13 +440,14 @@ forget survivor
 
 # --------- the retention sweep spares a queued task's scratch and headless state
 # `retain::sweep_now` runs on every command's startup and deletes byproduct
-# entries older than `retention.days`. `scratch/<id>` is what a lane is handed
-# as `$SPOOLWAY_SCRATCH` — planner output and all — and `headless/` holds the
-# record a running lane is read back through. An entry in either must survive
-# for as long as its task is still in the queue, whatever stage it sits on, or
-# `spoolway resume` comes back to a lane with nothing under it.
+# entries older than `housekeeping.retention_days`. `scratch/<id>` is what a
+# lane is handed as `$SPOOLWAY_SCRATCH` — planner output and all — and
+# `headless/` holds the record a running lane is read back through. An entry
+# in either must survive for as long as its task is still in the queue,
+# whatever stage it sits on, or `spoolway resume` comes back to a lane with
+# nothing under it.
 sweep
-must "a short retention window" "$SPOOLWAY" config set retention.days 1
+must "a short retention window" "$SPOOLWAY" config set housekeeping.retention_days 1
 HOME_DIR=$SPOOLWAY_PROJECT_HOME
 queue_hang retained
 mkdir -p "$HOME_DIR/scratch/retained" "$HOME_DIR/headless"
@@ -479,7 +480,7 @@ else
     "$([ -e "$HOME_DIR/scratch/retained" ] && echo present || echo gone)" \
     "$([ -e "$HOME_DIR/headless/retained · implement.json" ] && echo present || echo gone)"
 fi
-must "retention back to the default" "$SPOOLWAY" config set retention.days 30
+must "retention back to the default" "$SPOOLWAY" config set housekeeping.retention_days 30
 
 # ------------- the board names a local model a queued task is about to run
 # The footer's slot counts only ever see the lanes spoolway started, so a

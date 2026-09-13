@@ -136,8 +136,8 @@ against before ever handing a document over.
 A `depends_on` is checked against the whole submission, not one document at a time: it must
 name a task already in the queue or the archive, or a document queued in this same batch, must
 not name the document's own `id`, and must not close a cycle. A task that finished long enough
-ago to have aged out of the archive under `retention.days` (see
-[`[retention]`](configuration.md#retention--how-long-a-byproduct-directory-keeps-what-it-holds))
+ago to have aged out of the archive under `retention_days` (see
+[`[housekeeping]`](configuration.md#housekeeping--everything-spoolway-does-for-its-own-upkeep))
 can no longer be named this way; the refusal says the age is why. A dependency and its dependent
 must also share the same `base` and the same `group` — see [Expressing order](#expressing-order)
 below for why. Every task in one `depends_on` chain therefore has to agree on a base: either

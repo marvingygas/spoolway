@@ -251,7 +251,7 @@ See **[Issue Tracking](docs/configuration.md#issue_tracking--a-hook-fired-on-fou
 
 - Unattended mode delegates **`blocked`** tasks to a prompt you define. It clears
   obstacles on its own and keeps your pipeline running while nobody is watching.
-- Set specific models for generating pipelines or pull request summaries.
+- Set a specific model for generating pipelines.
 
 ```toml
 [dispatch]
@@ -275,19 +275,10 @@ blocked_prompt = "unblocker"
 pipeline_agent = "claude"    # who `spoolway pipeline gen` opens its session as
 pipeline_model = "claude-opus-5"
 pipeline_effort = "medium"
-pipeline_auto = false        # false asks before writing the pipeline
-pipeline_local_models = false
 
-[update]
-check = true                 # tell a person at a keyboard that a newer release is out
-
-[calibrate]
-window = "14d"               # how far back `/spoolway-calibrate` reads
-
-[stack.summary]
-agent = "claude"             # writes each PR's title and summary
-model = "claude-haiku-4-5"   # blank: the task file itself is the PR body
-prompt = "summariser"
+[housekeeping]
+update_check = true          # tell a person at a keyboard that a newer release is out
+calibrate_window = "14d"     # how far back `/spoolway-calibrate` reads
 
 [agents.pi]
 kind = "pi"

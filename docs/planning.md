@@ -112,23 +112,12 @@ yet while the page's Intend, Context, Decisions and Mockup are still being argue
 **Plan against the system as it is.** A person describing a detailed solution is telling you
 about a problem; the solution is evidence, not specification.
 
-**Size each task for the lane, not for a person.** A lane is an agent in a fresh worktree with
-a context window, not a developer with an afternoon, so "a session" and "a day's work" are the
-wrong units. A task's size is estimated from judgement on the split ballot,
-never from a token count of the task itself.
-
-**Which way to lean is the routed pipeline's window to decide.** Each subject is routed to a
-pipeline first, and that pipeline is what supplies the one number the sizing turns on: its
-window. A pipeline's window is the smallest window among the models on its own agent steps,
-each of those models looked up in `spoolway models`. Two subjects in the same breakdown may
-therefore be sized against two different numbers, because they were routed to two different
-pipelines. A hosted frontier model carries a window in the millions, and there the bias is to
-**lean bigger** — every extra task pays for another lane to read the codebase, the prompt and the
-task from scratch before it writes a line, and runs `review`, `e2e` and `document` again on top,
-while the implement lane a split relieves almost always had room to spare. A model served from
-your own machine carries a hundred thousand or so, and there the bias inverts: **cut smaller**,
-because a task that overflows a local window does not slow down, it forgets the contract it was
-given and fails the step. A model with no resolvable window is treated as the small case.
+**Size each task for the lane, not for a person.** A lane is an agent in a fresh worktree, not
+a developer with an afternoon, so "a session" and "a day's work" are the wrong units. There is
+no arithmetic to it: `spoolway task contract` carries the project's own `sizing` guidance, and
+against that, a task's size is judged by subject — the files a lane reads to understand the
+change, the files it changes, and whether the whole thing is one thing — with each task's
+criteria kept under five bullets or split again.
 
 The ballot is the recommended count and the four below it, floored at 1 — a recommendation of 6
 offers 2, 3, 4, 5 and 6, and one of 3 offers 1, 2 and 3. Only the four largest fit as options,

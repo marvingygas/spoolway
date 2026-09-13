@@ -2,7 +2,7 @@
 #
 # Key                                   Values                 Default                                                 Meaning
 # dispatch.backend                      herdr, tmux, headless  herdr                                                   Where lanes run: a real pane you can watch, or no multiplexer at all.
-# dispatch.herdr_mode                   grouped, split         grouped                                                 How a herdr run is laid out: a pane per task in its project's shared tab, or a row of its own per task.
+# dispatch.herdr_mode                   grouped, split         split                                                   How a herdr run is laid out: a pane per task in its project's shared tab, or a row of its own per task.
 # dispatch.tmux_mode                    grouped, split         grouped                                                 How a tmux run is laid out: one session for the whole run, or a session per task.
 # dispatch.worktree_root                <path>                 (blank)                                                 Where a dispatched task's worktree is cut, whatever the backend; blank means `~/.spoolway/<project>/worktrees`.
 # dispatch.interval                     <duration>             10s                                                     How long the dispatcher waits between passes.
@@ -23,17 +23,10 @@
 # pipeline_gen.pipeline_agent           <profile>              claude                                                  Which `[agents.*]` profile `spoolway pipeline gen` opens its session as.
 # pipeline_gen.pipeline_model           <model>                (blank)                                                 The model that session runs; blank refuses the command.
 # pipeline_gen.pipeline_effort          <level>                (blank)                                                 How hard that model thinks; blank means the kind's own default.
-# pipeline_gen.pipeline_auto            true, false            false                                                   Whether the generation procedure asks before writing, or takes its own recommendation.
-# pipeline_gen.pipeline_loop_default    <n>                    1                                                       The budget every loop a generated pipeline writes starts at.
-# pipeline_gen.pipeline_local_models    true, false            false                                                   Whether local models are involved in what gets generated — pre-answers the procedure's first question.
-# update.check                          true, false            true                                                    Whether spoolway tells a person at a keyboard that a newer release is out.
-# calibrate.window                      <duration>             14d                                                     How far back `spoolway-calibrate` reads: archived tasks finished inside the window, and the ledger entries beside them.
-# retention.days                        <days>                 30                                                      How long system-prompts/, commands/, tracking/, headless/, scratch/ and archive/ keep an entry before it is deleted; 0 keeps everything forever. queue/, pending/, worktrees/ and plans/ are never swept.
-# prices.max_age_days                   <days>                 30                                                      How old the active shared price table may be before `spoolway doctor` says so; 0 disables the note.
-# stack.summary.agent                   <profile>              (blank)                                                 Agent profile from `[agents.*]` that writes the pull request's title and summary before `spoolway stack` opens it. Blank alongside `model`, the whole task file is the pull request body instead.
-# stack.summary.model                   <name>                 (blank)                                                 The model that profile's kind is started with, for the summary turn. Blank alongside `agent`, the whole task file is the pull request body instead.
-# stack.summary.effort                  <string>               (blank)                                                 Passed to the agent kind's effort flag, same as a pipeline step's `effort:`. Blank means no flag is sent.
-# stack.summary.prompt                  <name>                 summariser                                              Prompt under `.spoolway/prompts/` the summary turn runs.
+# housekeeping.update_check             true, false            true                                                    Whether spoolway tells a person at a keyboard that a newer release is out.
+# housekeeping.calibrate_window         <duration>             14d                                                     How far back `spoolway-calibrate` reads: archived tasks finished inside the window, and the ledger entries beside them.
+# housekeeping.retention_days           <days>                 30                                                      How long system-prompts/, commands/, tracking/, headless/, scratch/ and archive/ keep an entry before it is deleted; 0 keeps everything forever. queue/, pending/, worktrees/ and plans/ are never swept.
+# housekeeping.price_max_age_days       <days>                 30                                                      How old the active shared price table may be before `spoolway doctor` says so; 0 disables the note.
 # agents.<profile>.kind                 <agent kind>           one per shipped profile                                 Which agent binary this profile launches.
 # agents.<profile>.concurrency          <n>                    unset — omitted means no cap                            Most lanes of this profile running at once; 0 is unlimited. A cap on the harness — a local model's own count is `models.<glob>.slots`.
 # agents.<profile>.session_reuse_ctx    0, 1..=100             0                                                       How large a carried session may be, as a percentage of the model's context window, before a fresh one opens instead; 0 is off.
@@ -79,27 +72,12 @@ blocked_prompt = "unblocker"
 pipeline_agent = "claude"
 pipeline_model = "claude-opus-5"
 pipeline_effort = "medium"
-pipeline_auto = false
-pipeline_loop_default = 1
-pipeline_local_models = false
 
-[update]
-check = true
-
-[calibrate]
-window = "14d"
-
-[retention]
-days = 30
-
-[prices]
-max_age_days = 30
-
-[stack.summary]
-agent = ""
-model = ""
-effort = ""
-prompt = "summariser"
+[housekeeping]
+update_check = true
+calibrate_window = "14d"
+retention_days = 30
+price_max_age_days = 30
 
 [agents.claude]
 kind = "claude"
@@ -120,16 +98,11 @@ kind = "pi"
 session_reuse_ctx = 50
 session_blocked_ctx = 0
 
-[models."*Ornith-1.5-35B-A3B"]
+[models."Ornith-1.5-35B-A3B"]
 context_window = 100096
 slots = 2
 exclusive = true
 local = true
-
-[models."*Qwen3.6-35B-A3B"]
-context_window = 100096
-slots = 2
-exclusive = true
 
 [issue_tracking]
 hook = ""

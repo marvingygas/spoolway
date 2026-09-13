@@ -54,8 +54,8 @@
 # <<< spoolway <<<
 
 description: >-
-  Feature work that changes something a person looks at. Adds a step that
-  drives the built binary and checks the screen against the task's mockup.
+  Feature work that changes something a person looks at, with a step that
+  drives the built binary against the mockup.
 
 # The pipeline's own name has no task skeleton, so this names the one it uses.
 task_template: default
@@ -114,13 +114,7 @@ steps:
 
   - id: test
     description: The mechanical verdict on this change, as an exit code.
-    run: >-
-      cargo fmt --check
-      && cargo deny check advisories
-      && cargo clippy --all-targets --locked -- -D warnings
-      && cargo test --all-targets --locked
-      && cargo check --target x86_64-pc-windows-gnu --all-targets --locked
-      && cargo build --release && ./target/release/spoolway pipeline check
+    run: scripts/gate.sh
     timeout: 45m
     on_pass: suite
     on_fail: e2e
@@ -128,7 +122,7 @@ steps:
   - id: suite
     description: The end-to-end suites, on the last task of the chain.
     last: true
-    run: SPOOLWAY="$PWD/target/release/spoolway" scripts/e2e/run.sh --tier pr
+    run: scripts/e2e-pr.sh
     timeout: 45m
     on_pass: document
     on_fail: e2e

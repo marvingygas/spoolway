@@ -83,15 +83,6 @@ pub const PROMPTS: &[Prompt] = &[
             ),
         ],
     },
-    // `spoolway stack`'s optional summary model. Named by `[stack.summary]`
-    // rather than by a pipeline step — there is no worker slot and no lane
-    // here, just one turn read back for its title line and the text below
-    // it. It does nothing else: no git, no `gh`, not even the task's diff.
-    Prompt {
-        name: "summariser",
-        body: include_str!("../assets/prompts/summariser/PROMPT.md"),
-        assets: &[],
-    },
     // A sample, not a mechanism: the binary knows the step id `blocked`, not
     // this prompt's name — nothing in `src/` outside this file spells
     // `unblocker`. Staffed only in an unattended run, on a pipeline that
@@ -204,18 +195,16 @@ pub const HOOK_SCRIPTS: &[(&str, &str)] = &[
     ("jira.ps1", include_str!("../assets/hooks/jira.ps1")),
 ];
 
-/// The shape `spoolway stack`'s summary prompt fills in — see
-/// [`crate::config::PULL_REQUEST_TEMPLATE`] for where it installs.
+/// A pull request template — see [`crate::config::PULL_REQUEST_TEMPLATE`]
+/// for where it installs, and why nothing reads it any more.
 ///
 /// A top-level asset rather than a prompt's own: the versioner used to keep
 /// a private copy at `assets/prompts/versioner/assets/pull-request.md`, and
 /// this is that file moved up a level and shared, before the versioner
-/// prompt it was shared with was deleted outright — git up to the pull
-/// request is `spoolway stack`'s job now, and this is the one piece of that
-/// prompt still worth keeping. Restorable the way a prompt or a task skeleton is: written once
-/// by `init`, left alone by an ordinary `spoolway update`, and brought back
-/// to this text only by `spoolway update --replace
-/// .spoolway/templates/pull-request.md`.
+/// prompt it was shared with was deleted outright. Restorable the way a
+/// prompt or a task skeleton is: written once by `init`, left alone by an
+/// ordinary `spoolway update`, and brought back to this text only by
+/// `spoolway update --replace .spoolway/templates/pull-request.md`.
 pub const PULL_REQUEST_TEMPLATE: &str = include_str!("../assets/pull-request.md");
 
 /// The seven typed messages a lane's pane receives — see

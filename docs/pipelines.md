@@ -77,7 +77,7 @@ task still open — see [Closing a plan out](planning.md#closing-a-plan-out).
 
 | Key | Default | Meaning |
 |---|---|---|
-| `description` | — | What this pipeline is for, in a few sentences — read to choose between pipelines |
+| `description` | — | What this pipeline is for, in one sentence — read to choose between pipelines |
 | `task_template` | the pipeline's own name, falling back to `default` | Which task skeleton a task queued here is written from |
 | `steps` | — | The flow, in order. The first one is where a task starts |
 
@@ -658,9 +658,8 @@ Handing a change over — commit what is uncommitted, squash to one commit, push
 reuse the one already there), register the GitHub stack — is mechanical, and `spoolway stack`
 is the command that does it with git and `gh` alone. No rebase: the dependent's worktree already
 sits on its dependency's branch by the time a task reaches `handover` (see
-[Dispatching](dispatcher.md)), so there is nothing left to rebase there. The one model turn it
-can run is the pull request body itself, when `[stack.summary]` names one — see the body
-paragraph above.
+[Dispatching](dispatcher.md)), so there is nothing left to rebase there. No model turn either:
+the title and body come straight from the task file — see the paragraph below.
 
 ```yaml
   - id: handover
@@ -675,39 +674,13 @@ its outcome. It refuses to open a pull request when the branch's three-dot diff 
 point is empty, and reports a lease refused by a moved remote distinctly from every other git or
 `gh` failure.
 
-**In task-file mode — blank `agent` and `model` — the pull request's title is the task's own
-`title:` and its body is the task file, both verbatim.** The body is everything after the
-frontmatter fence, with a trailer under it. The trailer names no address — not the git
-`user.email` that opened it, and none for the model either. It closes with
-`Co-Authored-By: Claude Code`, and above that tag, informationally, any file the branch
-touched that the task's own `touches` does not cover, and any open `parallel: true` task `git
-merge-tree --write-tree` predicts a conflict with. Neither of those refuses the pull request;
-both are for whoever reads it next.
-
-**Every project's `config.toml` carries a `[stack.summary]` table**, naming an `agent`, `model`,
-`effort` and `prompt` — the same four a pipeline step's agent half carries. Blank `agent` and
-`model` are task-file mode, above; exactly one of the two set refuses the command outright,
-naming whichever is blank, rather than guessing at a mode from half a configuration. Fill both
-in — `agent = "claude"`, `model = "claude-sonnet-5"` — and `spoolway stack` reads
-`.spoolway/templates/pull-request.md` (from `assets/pull-request.md`, written once by `init` and
-restorable with `spoolway update --replace`, the way a prompt or a task skeleton is) and passes
-its text to the prompt inside the prompt — the prompt never opens it itself. It runs that
-prompt on the task file for one turn before anything else: its first printed line becomes the
-pull request's title — a Conventional Commits line, which is what the template's opening
-comment asks for — and everything it prints is the pull request's whole body — the task
-file's own text does not also appear below it. A missing or empty template refuses the command
-the same way a blank half does, naming the path and the `spoolway update --replace` that restores
-it, and both refusals land before the branch is pushed or a pull request opened, so a broken
-setup never reaches the remote. The shipped `summariser` prompt does nothing else — no git, no
-`gh`, not even the diff.
-
-```toml
-[stack.summary]
-agent = ""
-model = ""
-effort = ""
-prompt = "summariser"
-```
+**The pull request's title is the task's own `title:` and its body is the task file, both
+verbatim.** The body is everything after the frontmatter fence, with a trailer under it. The
+trailer names no address — not the git `user.email` that opened it, and none for a model
+either, since none runs. It closes with `Co-Authored-By: Claude Code`, and above that tag,
+informationally, any file the branch touched that the task's own `touches` does not cover, and
+any open `parallel: true` task `git merge-tree --write-tree` predicts a conflict with. Neither
+of those refuses the pull request; both are for whoever reads it next.
 
 ## When `spoolway stack` cannot
 

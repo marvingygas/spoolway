@@ -53,7 +53,7 @@ pub const REFERENCE: &[Reference] = &[
     Reference {
         key: "dispatch.herdr_mode",
         values: "grouped, split",
-        default: "grouped",
+        default: "split",
         sentence: "How a herdr run is laid out: a pane per task in its project's shared \
                     tab, or a row of its own per task.",
     },
@@ -193,40 +193,20 @@ pub const REFERENCE: &[Reference] = &[
         sentence: "How hard that model thinks; blank means the kind's own default.",
     },
     Reference {
-        key: "pipeline_gen.pipeline_auto",
-        values: "true, false",
-        default: "false",
-        sentence: "Whether the generation procedure asks before writing, or takes its own \
-                    recommendation.",
-    },
-    Reference {
-        key: "pipeline_gen.pipeline_loop_default",
-        values: "<n>",
-        default: "1",
-        sentence: "The budget every loop a generated pipeline writes starts at.",
-    },
-    Reference {
-        key: "pipeline_gen.pipeline_local_models",
-        values: "true, false",
-        default: "false",
-        sentence: "Whether local models are involved in what gets generated — pre-answers \
-                    the procedure's first question.",
-    },
-    Reference {
-        key: "update.check",
+        key: "housekeeping.update_check",
         values: "true, false",
         default: "true",
         sentence: "Whether spoolway tells a person at a keyboard that a newer release is out.",
     },
     Reference {
-        key: "calibrate.window",
+        key: "housekeeping.calibrate_window",
         values: "<duration>",
         default: "14d",
         sentence: "How far back `spoolway-calibrate` reads: archived tasks finished inside \
                     the window, and the ledger entries beside them.",
     },
     Reference {
-        key: "retention.days",
+        key: "housekeeping.retention_days",
         values: "<days>",
         default: "30",
         sentence: "How long system-prompts/, commands/, tracking/, headless/, scratch/ \
@@ -235,40 +215,11 @@ pub const REFERENCE: &[Reference] = &[
                     never swept.",
     },
     Reference {
-        key: "prices.max_age_days",
+        key: "housekeeping.price_max_age_days",
         values: "<days>",
         default: "30",
         sentence: "How old the active shared price table may be before `spoolway doctor` says so; \
                     0 disables the note.",
-    },
-    Reference {
-        key: "stack.summary.agent",
-        values: "<profile>",
-        default: "(blank)",
-        sentence: "Agent profile from `[agents.*]` that writes the pull request's title \
-                    and summary before `spoolway stack` opens it. Blank alongside `model`, \
-                    the whole task file is the pull request body instead.",
-    },
-    Reference {
-        key: "stack.summary.model",
-        values: "<name>",
-        default: "(blank)",
-        sentence: "The model that profile's kind is started with, for the summary turn. \
-                    Blank alongside `agent`, the whole task file is the pull request body \
-                    instead.",
-    },
-    Reference {
-        key: "stack.summary.effort",
-        values: "<string>",
-        default: "(blank)",
-        sentence: "Passed to the agent kind's effort flag, same as a pipeline step's \
-                    `effort:`. Blank means no flag is sent.",
-    },
-    Reference {
-        key: "stack.summary.prompt",
-        values: "<name>",
-        default: "summariser",
-        sentence: "Prompt under `.spoolway/prompts/` the summary turn runs.",
     },
     Reference {
         key: "agents.<profile>.kind",
@@ -1167,7 +1118,7 @@ mod tests {
 
         assert_eq!(kind("agents.claude.session_reuse_ctx"), Kind::Number);
         assert_eq!(kind("agents.pi.kind"), Kind::Text);
-        assert_eq!(kind("update.check"), Kind::Bool);
+        assert_eq!(kind("housekeeping.update_check"), Kind::Bool);
     }
 
     /// A list of scalars is one editable field, whichever key it sits under —
@@ -1391,23 +1342,69 @@ mod tests {
     #[test]
     fn retention_days_round_trips_and_zero_means_off() {
         let config = Config::default();
-        assert_eq!(get(&config, "retention.days").unwrap(), "30");
+        assert_eq!(get(&config, "housekeeping.retention_days").unwrap(), "30");
 
-        let off = set(&config, "retention.days", "0").unwrap();
-        assert_eq!(off.retention.days, 0);
-        assert_eq!(get(&off, "retention.days").unwrap(), "0");
+        let off = set(&config, "housekeeping.retention_days", "0").unwrap();
+        assert_eq!(off.housekeeping.retention_days, 0);
+        assert_eq!(get(&off, "housekeeping.retention_days").unwrap(), "0");
 
-        let ninety = set(&off, "retention.days", "90").unwrap();
-        assert_eq!(ninety.retention.days, 90);
+        let ninety = set(&off, "housekeeping.retention_days", "90").unwrap();
+        assert_eq!(ninety.housekeeping.retention_days, 90);
     }
 
     #[test]
     fn price_table_age_round_trips_and_zero_means_quiet() {
         let config = Config::default();
-        assert_eq!(get(&config, "prices.max_age_days").unwrap(), "30");
+        assert_eq!(
+            get(&config, "housekeeping.price_max_age_days").unwrap(),
+            "30"
+        );
 
-        let off = set(&config, "prices.max_age_days", "0").unwrap();
-        assert_eq!(off.prices.max_age_days, 0);
-        assert_eq!(get(&off, "prices.max_age_days").unwrap(), "0");
+        let off = set(&config, "housekeeping.price_max_age_days", "0").unwrap();
+        assert_eq!(off.housekeeping.price_max_age_days, 0);
+        assert_eq!(get(&off, "housekeeping.price_max_age_days").unwrap(), "0");
+    }
+
+    /// The four one-key tables the mockup folds into `[housekeeping]` are
+    /// gone by their old names — `config list` (via [`entries`]) must name
+    /// none of them, only the housekeeping keys they became.
+    #[test]
+    fn the_old_one_key_tables_are_gone_and_housekeeping_names_all_four() {
+        let config = Config::default();
+        let keys: Vec<String> = entries(&config)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.key)
+            .collect();
+
+        for gone in [
+            "update.check",
+            "calibrate.window",
+            "retention.days",
+            "prices.max_age_days",
+            "stack.summary.agent",
+            "stack.summary.model",
+            "stack.summary.effort",
+            "stack.summary.prompt",
+            "pipeline_gen.pipeline_auto",
+            "pipeline_gen.pipeline_loop_default",
+            "pipeline_gen.pipeline_local_models",
+        ] {
+            assert!(
+                !keys.contains(&gone.to_string()),
+                "`{gone}` is retired and must not be listed"
+            );
+        }
+        for present in [
+            "housekeeping.update_check",
+            "housekeeping.calibrate_window",
+            "housekeeping.retention_days",
+            "housekeeping.price_max_age_days",
+        ] {
+            assert!(
+                keys.contains(&present.to_string()),
+                "`{present}` must be listed"
+            );
+        }
     }
 }

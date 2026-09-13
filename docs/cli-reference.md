@@ -529,13 +529,13 @@ pipeline `impl`  (default)  entry: implement
              Write the code to satisfy the task's acceptance criteria.
              pass -> review   fail -> blocked
 
-  review     agent     agent=claude prompt=reviewer model=claude-opus-5 session loop=implement:2 exit=blocked
+  review     agent     agent=codex prompt=reviewer model=gpt-5.6-sol session loop=implement:2 exit=blocked
              Check the diff against the acceptance criteria and project standards.
              pass -> e2e   fail -> implement
 
   suite      command   waits timeout=45m last-of-chain
              The end-to-end suites, on the last task of the chain.
-             run: SPOOLWAY="$PWD/target/release/spoolway" scripts/e2e/run.sh --tier pr
+             run: scripts/e2e-pr.sh
              pass -> document   fail -> e2e
 ```
 
@@ -759,13 +759,16 @@ Print or validate the task-document contract — the same rules `parse_submissio
 itself runs, so neither mode can say something the enforcement does not.
 
 Bare, prints the whole contract as JSON on stdout and nothing else: this project's default
-pipeline; where a finished document is written, what to name it there, and the commands that
-check it and send it, under `output`; the document's required, optional, refused and ignored
-keys, plus what happens to a key named in none of them; one sentence per settable key on how
-to fill it; one entry per pipeline giving its longest agent step, its id budget, the step ids
-`gate_at` accepts and the body skeleton a task on it is written from; and the rules that only
-hold across a set. A producer with no access to `docs/tasks.md` can write a queueable document
-from this alone.
+pipeline; a `sizing` sentence on how to judge the size of a breakdown, with no per-pipeline
+figure to do arithmetic on; where a finished document is written, what to name it there, and
+the commands that check it and send it, under `output`; the document's required, optional,
+refused and ignored keys, plus what happens to a key named in none of them; one sentence per
+settable key on how to fill it, `title`'s naming the Conventional Commits shape and all nine
+commit types; one entry per pipeline giving its longest agent step, its id budget, the step
+ids `gate_at` accepts, its own `description` and which step is `last_of_chain` (`null` for a
+pipeline that marks none), and the body skeleton a task on it is written from; and the rules
+that only hold across a set. A producer with no access to `docs/tasks.md` can write a
+queueable document from this alone.
 
 `output.dir` is this machine's own pending directory, already resolved rather than given as a
 pattern to expand, so a producer handed nothing but this JSON still writes where `spoolway
@@ -981,16 +984,14 @@ own task.
 
 ### `spoolway stack [<task>]`
 
-Hand a task's change over with git and `gh` — no rebase, and a model only when
-`[stack.summary]` names one. Run in a task's worktree, usually as a pipeline's `handover` step's
-`run:` line — see [`spoolway stack` hands the change over](pipelines.md#spoolway-stack-hands-the-change-over).
-The task defaults to the one in the environment, exactly as `report` does. In order: with
-`[stack.summary]`'s `agent` and `model` both set, runs that prompt on the task file for one
-turn and takes its printed output as the whole pull request body — a blank half of the pair, or
-a missing or empty `.spoolway/templates/pull-request.md`, refuses the command here, before
-anything below runs; commits what is uncommitted, squashes the branch to one commit named after
-the task's `title:` verbatim — written `feat(queue): add a --dry-run flag`, and no task id is
-prefixed onto it. The squash is built with `git commit-tree`, so no `commit-msg` or
+Hand a task's change over with git and `gh` — no rebase, and no model. Run in a task's
+worktree, usually as a pipeline's `handover` step's `run:` line — see [`spoolway stack` hands
+the change over](pipelines.md#spoolway-stack-hands-the-change-over).
+The task defaults to the one in the environment, exactly as `report` does. In order: commits
+what is uncommitted, squashes the branch to one commit named after the task's `title:`
+verbatim — written `feat(queue): add a --dry-run flag`, and no task id is prefixed onto it —
+using the task file's own body as the pull request body. A blank `title:` refuses the command
+here, before anything below runs. The squash is built with `git commit-tree`, so no `commit-msg` or
 `pre-commit` hook can reject it and leave the branch half-collapsed; for the same reason a
 project that signs its commits gets an unsigned squash here. Then it pushes with
 `--force-with-lease`, opens the pull request against the branch

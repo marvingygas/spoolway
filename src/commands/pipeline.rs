@@ -148,9 +148,9 @@ const FIELD_SENTENCES: &[(&str, &str)] = &[
     ),
     (
         "description",
-        "At the top level, what this pipeline is for, in a few sentences — read \
-         to choose between pipelines. On a step, a human-facing one-liner, shown \
-         by `spoolway pipeline show`.",
+        "At the top level, one sentence on what this pipeline is for — read to \
+         choose between pipelines. On a step, a human-facing one-liner, shown by \
+         `spoolway pipeline show`.",
     ),
     (
         "agent",
@@ -209,7 +209,9 @@ const FIELD_SENTENCES: &[(&str, &str)] = &[
     (
         "loop",
         "Laps allowed per route in — arrivals, not conversations. A bare number \
-         bounds every route; the map form bounds one at a time.",
+         bounds every route; the map form bounds one at a time. Three is the \
+         ceiling worth reaching for; a flow that needs more is welcome to say so, \
+         and nothing refuses it.",
     ),
     (
         "on_loop_max",
@@ -256,6 +258,9 @@ fn rules() -> Vec<&'static str> {
         "every cycle carries a `loop`, and the exit it names must leave the cycle",
         "`blocked` may be declared to staff it; `queued`, `done`, `paused` never",
         "a step is what it carries — `agent:`, `run:` or `end: true`",
+        "prefer a script the repo already holds over a multi-command `run:` — a chain more \
+         than one pipeline runs belongs in a file, named by relative path from the worktree \
+         root",
     ]
 }
 
@@ -287,13 +292,6 @@ struct AgentContractEntry {
     concurrency: usize,
 }
 
-#[derive(Debug, serde::Serialize)]
-struct PreferencesContract {
-    local_models: bool,
-    loop_default: u32,
-    auto: bool,
-}
-
 /// The whole pipeline-file contract, printed as JSON by bare `spoolway
 /// pipeline contract`.
 #[derive(Debug, serde::Serialize)]
@@ -306,7 +304,6 @@ struct Contract {
     prompts: Vec<String>,
     task_skeletons: Vec<String>,
     existing: Vec<String>,
-    preferences: PreferencesContract,
     template: String,
 }
 
@@ -362,8 +359,6 @@ fn build_contract(repo: &Repo, pipelines: &Pipelines) -> Contract {
         .map(|entries| entries.into_iter().map(|e| e.name).collect())
         .unwrap_or_default();
 
-    let cfg = &repo.config.pipeline_gen;
-
     Contract {
         path: ".spoolway/pipelines/<name>.yml",
         keys: ContractKeys {
@@ -382,11 +377,6 @@ fn build_contract(repo: &Repo, pipelines: &Pipelines) -> Contract {
         prompts,
         task_skeletons: task_skeletons(repo),
         existing: pipelines.names().into_iter().map(str::to_string).collect(),
-        preferences: PreferencesContract {
-            local_models: cfg.pipeline_local_models,
-            loop_default: cfg.pipeline_loop_default,
-            auto: cfg.pipeline_auto,
-        },
         template: template(),
     }
 }
@@ -411,11 +401,11 @@ fn template() -> String {
          # paused — the dispatcher's own states, never declared. `blocked` is the one\n\
          # exception: a pipeline may declare it to staff the step.\n\
          \n\
-         # What this pipeline is for, in a few sentences — read to choose between\n\
+         # What this pipeline is for, in one sentence — read to choose between\n\
          # pipelines.\n\
          description: >-\n\
-         \x20\x20A few sentences on what this pipeline is for, and which tasks belong\n\
-         \x20\x20on it rather than another one.\n\
+         \x20\x20One sentence on what this pipeline is for, and which tasks belong on\n\
+         \x20\x20it rather than another one.\n\
          \n\
          # Which task skeleton a task queued here is written from. Defaults to this\n\
          # pipeline's own name under `.spoolway/templates/tasks/`, falling back to\n\
@@ -1000,10 +990,6 @@ pub fn pipeline_gen(repo: &Repo, mux: &dyn Mux, args: &PipelineGenArgs) -> Resul
     if let Some(plan) = plan {
         println!("plan          {plan}");
     }
-    println!(
-        "preferences   auto = {} · loop_default = {} · local_models = {}",
-        cfg.pipeline_auto, cfg.pipeline_loop_default, cfg.pipeline_local_models
-    );
     println!();
     println!("opened a pane on this checkout");
     println!("prompted `spoolway-pipeline`");
@@ -1723,6 +1709,62 @@ mod tests {
         }
     }
 
+    /// `rules` is the one place a format rule is stated to every caller at
+    /// once — a script preference belongs there, not only in a reviewer's
+    /// head.
+    #[test]
+    fn rules_prefer_a_script_over_a_multi_command_run() {
+        assert!(
+            rules().iter().any(|rule| rule.contains("script")),
+            "`rules` should tell a caller to prefer a script over a multi-command `run:`: \
+             {:?}",
+            rules()
+        );
+    }
+
+    /// `loop`'s own sentence in `fields` states a recommended ceiling —
+    /// stated, not enforced: `pipeline check` still refuses nothing over it,
+    /// per this task's own non-goals.
+    #[test]
+    fn loop_field_states_a_recommended_ceiling() {
+        let fields: std::collections::BTreeMap<&str, &str> =
+            FIELD_SENTENCES.iter().copied().collect();
+        assert!(
+            fields["loop"].contains("Three"),
+            "`loop`'s sentence should recommend a ceiling: {}",
+            fields["loop"]
+        );
+    }
+
+    /// The top-level `description` sentence asks for one sentence, not the
+    /// multi-sentence prose a pipeline file may still get away with.
+    #[test]
+    fn description_field_asks_for_one_sentence() {
+        let fields: std::collections::BTreeMap<&str, &str> =
+            FIELD_SENTENCES.iter().copied().collect();
+        assert!(
+            fields["description"].contains("one sentence"),
+            "`description`'s sentence should ask for one sentence: {}",
+            fields["description"]
+        );
+    }
+
+    /// The template and the `description` field sentence ship inside one
+    /// `pipeline contract` payload, so they cannot ask for different sizes —
+    /// the template's own prose has to want the one sentence too.
+    #[test]
+    fn the_template_asks_for_the_same_one_sentence_description() {
+        let template = template();
+        assert!(
+            !template.to_lowercase().contains("a few sentences"),
+            "the template should not still ask for a few sentences: {template}"
+        );
+        assert!(
+            template.contains("One sentence on what this pipeline is for"),
+            "the template's `description:` placeholder should ask for one sentence: {template}"
+        );
+    }
+
     /// The `template` field is not decoration: written to a real project's
     /// `.spoolway/pipelines/<name>.yml`, it has to load and pass the exact
     /// validation `pipeline check` runs, and every key `pipeline contract`
@@ -1784,7 +1826,6 @@ mod tests {
             "prompts",
             "task_skeletons",
             "existing",
-            "preferences",
             "template",
         ] {
             assert!(value.get(key).is_some(), "missing `{key}`: {value}");

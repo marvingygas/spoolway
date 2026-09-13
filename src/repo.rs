@@ -441,7 +441,7 @@ impl Repo {
     /// task whose file happens not to load: [`crate::retain`]'s sweep, so it
     /// never ages out the scratch directory or headless record of a task
     /// still in flight — `paused` and `blocked` are stages a task can sit on
-    /// for longer than `retention.days` — and [`crate::tracking::failure_count`],
+    /// for longer than `housekeeping.retention_days` — and [`crate::tracking::failure_count`],
     /// so the board stops counting a hook failure once its task is archived.
     pub fn queued_ids(&self) -> std::collections::BTreeSet<String> {
         let mut ids = std::collections::BTreeSet::new();

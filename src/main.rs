@@ -228,7 +228,7 @@ fn run() -> Result<()> {
         command => {
             let repo = Repo::discover(&cwd)?;
 
-            // Byproducts older than `retention.days` go, once per process —
+            // Byproducts older than `housekeeping.retention_days` go, once per process —
             // see `retain` for the fixed split between those and the
             // directories a task's own work lives in, which this never
             // touches. Here rather than behind `init`, `doctor` or the
@@ -465,7 +465,7 @@ fn notify(cli: &Cli, cwd: &std::path::Path) {
     }
 
     let enabled = Repo::discover_lenient(cwd)
-        .map(|(repo, _)| repo.config.update.check)
+        .map(|(repo, _)| repo.config.housekeeping.update_check)
         .unwrap_or(true);
 
     release::notify(release::Audience {

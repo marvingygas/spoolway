@@ -50,9 +50,9 @@ pub fn stack(repo: &Repo, args: &StackArgs) -> Result<()> {
     let task = repo.task(&id)?;
     // `title:` is required at queue time (`queue_add::parse_submission`), but
     // an older task file can still carry a blank one — checked here rather
-    // than trusted, since this is the one place that value becomes a commit
-    // subject and, absent a summary, a pull request's title. It is written in
-    // the Conventional Commits shape — `feat(queue): add a --dry-run flag` —
+    // than trusted, since this is the one place that value becomes the
+    // commit subject and the pull request's title. It is written in the
+    // Conventional Commits shape — `feat(queue): add a --dry-run flag` —
     // and used verbatim, so nothing here prefixes the task's id onto it.
     if task.front.title.trim().is_empty() {
         bail!("task `{id}` has no `title:` to make the squashed commit's subject from");
@@ -168,15 +168,6 @@ pub fn stack(repo: &Repo, args: &StackArgs) -> Result<()> {
         );
     }
 
-    // Everything `[stack.summary]` could refuse over — a blank half, a
-    // missing or empty template — is settled before a single bit of git
-    // state changes: not just before the push, but before the squash below
-    // too. Nothing in `run_summary` depends on the squash having happened
-    // (the summary turn is given only the task file), so a broken setup
-    // refuses a branch that still looks exactly as it did when this command
-    // was invoked — nothing squashed, nothing pushed, nothing opened.
-    let summary = run_summary(repo, &task)?;
-
     // Squash to one commit before anything downstream reasons about this
     // branch's shape: `git merge-tree` is only sound against a single commit,
     // and a two-commit branch can read clean at the tips while a real replay
@@ -261,16 +252,8 @@ pub fn stack(repo: &Repo, args: &StackArgs) -> Result<()> {
         },
     );
 
-    let title = summary
-        .as_ref()
-        .map(|(title, _)| title.clone())
-        .unwrap_or_else(|| subject.clone());
-    let body = compose_body(
-        &task.body,
-        summary.as_ref().map(|(_, rest)| rest.as_str()),
-        &gaps,
-        &conflicts,
-    );
+    let title = subject.clone();
+    let body = compose_body(&task.body, &gaps, &conflicts);
 
     let (own_number, url) = open_or_reuse_pr(&worktree, &branch, &cut_from, &title, &body)?;
     report_line("pull req", format!("#{own_number} — {url}"));
@@ -401,29 +384,13 @@ fn parallel_conflicts(repo: &Repo, worktree: &Path, id: &str) -> Vec<String> {
 /// The pull request's body, with the trailer below it, cut to fit GitHub's
 /// body limit.
 ///
-/// `summary_text` is `Some` exactly when `[stack.summary]` ran a model turn —
-/// see [`run_summary`] — and when it is, it *is* the body: the task file's
-/// own text does not also appear, so one change is not described twice on
-/// one page. `None` is task-file mode, unchanged from before this turn
-/// existed: the body is everything after the task file's frontmatter fence,
-/// verbatim.
-fn compose_body(
-    task_body: &str,
-    summary_text: Option<&str>,
-    gaps: &[String],
-    conflicts: &[String],
-) -> String {
+/// The body is everything after the task file's frontmatter fence, verbatim
+/// — the only mode `spoolway stack` has now that its optional model summary
+/// turn is gone.
+fn compose_body(task_body: &str, gaps: &[String], conflicts: &[String]) -> String {
     let mut body = String::new();
-    match summary_text {
-        Some(summary) => {
-            body.push_str(summary.trim());
-            body.push('\n');
-        }
-        None => {
-            body.push_str(task_body.trim_end());
-            body.push('\n');
-        }
-    }
+    body.push_str(task_body.trim_end());
+    body.push('\n');
 
     // The trailer's gap and conflict lists are unbounded — a branch touching
     // a few dozen undeclared files makes a trailer no fixed guess would
@@ -512,123 +479,6 @@ fn trailer(gaps: &[String], conflicts: &[String], truncated: bool) -> String {
     out.push_str(CO_AUTHOR);
     out.push('\n');
     out
-}
-
-/// Run the configured `[stack.summary]` prompt on the task file for one
-/// turn, and read back its title line and the text below it. `Ok(None)` when
-/// `agent` and `model` are both blank — the ordinary, unconfigured case, and
-/// not a failure. Those two blanks are the only thing that decides it, the
-/// same shape `pipeline_gen.pipeline_model` already uses for its own
-/// refusal — and exactly one of them set is refused outright, naming
-/// whichever is blank, rather than silently falling back to task-file mode
-/// or guessing at the other half.
-fn run_summary(repo: &Repo, task: &Task) -> Result<Option<(String, String)>> {
-    let summary = &repo.config.stack.summary;
-    let agent_blank = summary.agent.trim().is_empty();
-    let model_blank = summary.model.trim().is_empty();
-    if agent_blank && model_blank {
-        return Ok(None);
-    }
-    if agent_blank {
-        bail!(
-            "`stack.summary.agent` is blank while `stack.summary.model` is set — set both or \
-             neither"
-        );
-    }
-    if model_blank {
-        bail!(
-            "`stack.summary.model` is blank while `stack.summary.agent` is set — set both or \
-             neither"
-        );
-    }
-
-    // The template is this turn's whole shape, read here and handed to the
-    // model as text rather than as a path — a missing template used to
-    // produce an improvised body and no error, because nothing in the
-    // binary ever opened it; the model's own file access was the only thing
-    // standing between a broken setup and silence.
-    let template_path = repo.pull_request_template_path();
-    let template = std::fs::read_to_string(&template_path)
-        .ok()
-        .filter(|text| !text.trim().is_empty());
-    let Some(template) = template else {
-        bail!(
-            "`[stack.summary]` names a summary model, and there is no {} to fill in.\n\n       \
-             spoolway update --replace {}",
-            crate::config::PULL_REQUEST_TEMPLATE,
-            crate::config::PULL_REQUEST_TEMPLATE,
-        );
-    };
-
-    let profile = repo.config.agent(&summary.agent)?;
-    let adapter = crate::agent::adapter(&profile.kind)
-        .ok_or_else(|| anyhow::anyhow!("spoolway does not know agent kind `{}`", profile.kind))?;
-    let prompt_path = crate::prompt::path_for(repo, &summary.prompt);
-    if !prompt_path.is_file() {
-        bail!(
-            "`stack.summary.prompt` names `{}`, and there is no {} — run `spoolway init` or \
-             `spoolway update --replace` to restore it",
-            summary.prompt,
-            prompt_path.display()
-        );
-    }
-
-    let session = crate::usage::new_session_id();
-    let state_dir = repo.root.join(crate::config::STATE_DIR);
-    // This summary turn runs directly in `repo.root`, never a worktree of its
-    // own, so its git directory is the main checkout's — resolved through
-    // git rather than assumed, the same as a dispatched lane's launch.
-    let git_dir = crate::repo::git_dir(&repo.root)?;
-    let values = std::collections::BTreeMap::from([
-        ("model", summary.model.clone()),
-        ("session_id", session.clone()),
-        ("prompt_file", prompt_path.display().to_string()),
-        ("task_file", task.path.display().to_string()),
-        ("worktree", repo.root.display().to_string()),
-        ("repo", repo.root.display().to_string()),
-        ("state_dir", state_dir.display().to_string()),
-        // The task file moved out of `state_dir` along with the rest of a
-        // project's runtime state — see `crate::repo::Repo::home` — so a
-        // lane's own `--add-dir` grant needs this too, the same as a
-        // dispatched lane's launch in `dispatch.rs`.
-        ("project_home", repo.home().display().to_string()),
-        ("git_dir", git_dir.display().to_string()),
-    ]);
-    let mut rendered = profile.render_args(&values)?;
-    let effort = (!summary.effort.trim().is_empty()).then_some(summary.effort.as_str());
-    rendered.extend(profile.effort_args(effort));
-    let argv = adapter
-        .headless_args(&rendered, false)
-        .context("this agent kind has no headless row to run one turn with")?;
-    crate::agent::prepare_session_home(&profile.kind, &session, &repo.root);
-    let env = adapter.session_env(&session);
-
-    let message = format!(
-        "Read the task file and write the pull request's whole body, exactly as your \
-         instructions say. Here is the template to fill in, comment included:\n\n{template}"
-    );
-    let output = Command::new(adapter.program())
-        .args(&argv)
-        .arg(&message)
-        .current_dir(&repo.root)
-        .envs(env)
-        .output()
-        .with_context(|| format!("running the summary turn (`{}`)", profile.kind))?;
-    if !output.status.success() {
-        bail!(
-            "the summary turn failed: {}",
-            first_line(&String::from_utf8_lossy(&output.stderr))
-        );
-    }
-
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let mut lines = text.splitn(2, '\n');
-    let title = lines.next().unwrap_or_default().trim().to_string();
-    let rest = lines.next().unwrap_or_default().trim().to_string();
-    if title.is_empty() {
-        bail!("the summary turn printed nothing to use as a title");
-    }
-    Ok(Some((title, rest)))
 }
 
 /// The pull request already open on `branch`, or a freshly opened one.
@@ -1089,8 +939,8 @@ mod tests {
     /// Nothing to report leaves the tag standing on its own, and no trace of
     /// who ran the task: an address in a trailer is what this shape dropped.
     #[test]
-    fn compose_body_is_verbatim_below_the_summary_with_a_trailer() {
-        let body = compose_body("## Goal\n\nDo the thing.\n", None, &[], &[]);
+    fn compose_body_is_verbatim_with_a_trailer() {
+        let body = compose_body("## Goal\n\nDo the thing.\n", &[], &[]);
         assert!(body.starts_with("## Goal\n\nDo the thing.\n"));
         assert!(body.trim_end().ends_with("Co-Authored-By: Claude Code"));
         assert!(!body.contains("did not declare"));
@@ -1098,32 +948,11 @@ mod tests {
         assert!(!body.contains('@'), "a trailer names no address");
     }
 
-    /// With a model turn's output to work from, that output *is* the body —
-    /// the task file's own text does not also appear below it, so one
-    /// change is not described twice on one page.
-    #[test]
-    fn compose_body_is_the_model_output_alone_in_model_mode() {
-        let body = compose_body(
-            "## Goal\n\nDo the thing.\n",
-            Some("## Why\n\nA one-line reason."),
-            &["untouched.rs".to_string()],
-            &["other-task".to_string()],
-        );
-        assert!(body.starts_with("## Why\n\nA one-line reason.\n"));
-        assert!(!body.contains("## Goal\n\nDo the thing."));
-        assert!(body.contains("Changed 1 file it did not declare in `touches`:\n  untouched.rs"));
-        assert!(
-            body.contains(
-                "Will conflict with `other-task`, which is not ordered against this task."
-            )
-        );
-    }
-
     /// The order the trailer reads in: what the branch did that the task file
     /// did not say it would, and the tag last.
     #[test]
     fn the_touches_gap_comes_before_the_co_author_tag() {
-        let body = compose_body("## Goal\n", None, &["untouched.rs".to_string()], &[]);
+        let body = compose_body("## Goal\n", &["untouched.rs".to_string()], &[]);
         let gap = body.find("did not declare").expect("the gap is reported");
         let tag = body.find(CO_AUTHOR).expect("the tag is there");
         assert!(gap < tag, "the gap belongs above the tag:\n{body}");
@@ -1140,7 +969,7 @@ mod tests {
                 "## Section {i}\n\nSome text about section {i}.\n\n"
             ));
         }
-        let body = compose_body(&long_body, None, &[], &[]);
+        let body = compose_body(&long_body, &[], &[]);
         assert!(body.len() <= MAX_BODY);
         assert!(body.contains("cut short to fit GitHub's 65,536-character limit"));
         // The cut happened right at a section boundary: what is left ends on
@@ -1167,7 +996,7 @@ mod tests {
                 "## Section {i}\n\nSome text about section {i}.\n\n"
             ));
         }
-        let body = compose_body(&long_body, None, &gaps, &conflicts);
+        let body = compose_body(&long_body, &gaps, &conflicts);
         assert!(body.len() <= MAX_BODY, "{} bytes", body.len());
         // The whole trailer survived intact — cutting the body is what paid
         // for it, not dropping any of the trailer's own lines.
