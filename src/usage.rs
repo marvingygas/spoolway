@@ -407,19 +407,19 @@ pub fn price(prices: &BTreeMap<String, ModelPrice>, model: &str, tokens: &Tokens
 }
 
 /// The most specific pattern matching `model`, where specificity is how much of
-/// the pattern is literal. `claude-opus-5` beats `claude-*` for an exact model.
-///
-/// Crate-visible so `crate::models::resolve` can check this project's own
-/// `[models]` table before falling back to the exact-name price files.
-pub(crate) fn best_match<'a>(
+/// the pattern is literal. `claude-opus-5` beats `claude-*` for an exact model —
+/// the key rather than the price it holds, since `crate::models::resolved_row`
+/// (which every price and pool lookup now goes through) needs to say *which*
+/// row a name reaches, not only what that row is worth.
+pub(crate) fn best_match_key<'a>(
     prices: &'a BTreeMap<String, ModelPrice>,
     model: &str,
-) -> Option<&'a ModelPrice> {
+) -> Option<&'a str> {
     prices
         .iter()
         .filter(|(pattern, _)| glob_match(pattern, model))
         .max_by_key(|(pattern, _)| pattern.chars().filter(|c| *c != '*').count())
-        .map(|(_, entry)| entry)
+        .map(|(key, _)| key.as_str())
 }
 
 /// `*` matches any run of characters; everything else is literal. Enough for

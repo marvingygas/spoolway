@@ -1027,6 +1027,18 @@ fn model_health_checks(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
         )));
     }
 
+    // A row nothing routes to is exactly what a rename leaves behind — the
+    // task that added this check found `[models."*Qwen3.6-35B-A3B"]` sitting
+    // unreached after a step's model was renamed in the same pass its own row
+    // was not. Silent otherwise: an unrouted row costs nothing to leave, but
+    // it is dead config a person should be told about rather than stumble on.
+    for glob in crate::models::unrouted(pipelines, &config.models) {
+        findings.push(Finding::Note(format!(
+            "model `{glob}` is configured but no step in this project's pipelines routes to \
+             it — remove the row, or point a step at it"
+        )));
+    }
+
     // `agents.<profile>.session_blocked_ctx` only ever fires against the
     // model that actually answered — resolved the same way
     // `dispatch::ctx_ceiling_hold` reads it, through `models::resolve`. A
@@ -1649,6 +1661,39 @@ mod tests {
             "{}",
             note("*Muse-*")
         );
+    }
+
+    /// `spoolway doctor` names a `[models]` row nothing routes to, and stays
+    /// silent for one a step does reach — the check that would have caught
+    /// `[models."*Qwen3.6-35B-A3B"]` sitting dead after `49a4221` renamed the
+    /// step that used to reach it.
+    #[test]
+    fn an_unrouted_model_row_is_noted_and_a_routed_one_is_silent() {
+        let pipelines = single_step_pipelines(
+            "  - id: build\n    agent: pi\n    model: ornith/Ornith-1.5-35B-A3B\n    \
+             on_pass: finish\n  - id: finish\n    end: true\n",
+        );
+        let mut config = Config::default();
+        config.models.insert(
+            "Ornith-1.5-35B-A3B".into(),
+            crate::usage::ModelPrice::default(),
+        );
+        config.models.insert(
+            "Qwen3.6-35B-A3B".into(),
+            crate::usage::ModelPrice::default(),
+        );
+
+        let notes: Vec<String> = model_health_checks(&pipelines, &config)
+            .iter()
+            .filter_map(|f| match f {
+                Finding::Note(text) if text.contains("routes to it") => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(notes.len(), 1, "{notes:#?}");
+        assert!(notes[0].contains("model `Qwen3.6-35B-A3B`"), "{}", notes[0]);
+        assert!(!notes[0].contains("Ornith"), "{}", notes[0]);
     }
 
     #[test]

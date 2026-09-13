@@ -578,14 +578,17 @@ session_reuse_idle = "5m"
 
 Per million tokens, plus the window one session gets — both keyed by a glob over the model
 name, matched by the same most-literal-wins rule as everywhere else spoolway matches a glob:
-`claude-opus-5` beats `claude-*` for that one model.
+`claude-opus-5` beats `claude-*` for that one model. That full-name pass runs across the whole
+table first; only once it fails everywhere is the part of the name after its last `/` tried the
+same way, so a row can be spelled the way a person names the model — `[models."Name"]` — and
+still answer both a step's `vendor/Name` and pi's own bare `Name`, with no leading `*` needed.
 
 **A zero is written by leaving the key out.** Only the fields you have actually set appear, so
 a local model reads as the few lines that say something rather than as nine, five of
 which would be rates saying a free model is free:
 
 ```toml
-[models."*Qwen3.6-35B-A3B"]
+[models."Qwen3.6-35B-A3B"]
 context_window = 100096
 slots = 3
 exclusive = true
@@ -649,6 +652,9 @@ spoolway never infers `local`. A model that sets `slots` or `exclusive` describe
 kind of hardware, but so does a local model nobody has sized. So `spoolway doctor` only notes
 a `slots` or `exclusive` model that has not set `local`, rather than assuming either way. The
 board line is drawn nowhere else — not under `--plain`, and not into a pipe.
+
+`spoolway doctor` also notes a `[models]` row that no agent step in this project's pipelines
+routes to — config left behind by a rename, naming a model nothing ever runs.
 
 `spoolway config set models.'<glob>'.slots 3` writes any of these fields the same way any
 other `[models]` key is set.

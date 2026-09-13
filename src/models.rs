@@ -404,18 +404,18 @@ pub struct Resolved {
     pub source: Source,
 }
 
-/// Resolve `model`: this project's own `[models]` table first, by glob —
-/// [`crate::usage::best_match`], the same rule `spoolway eval --by` always used —
-/// then the refreshed and vendored tables by exact name, then nothing.
+/// Resolve `model`: this project's own `[models]` table first — see
+/// [`resolved_row`] for the full-name-then-suffix order that table is tried
+/// in — then the refreshed and vendored tables by exact name, then nothing.
 ///
 /// Exact names in the price files because they hold real model names, not
 /// patterns someone wrote to match a family; a project that wants a glob to
 /// win writes one in `[models]`, which is checked first for exactly that
 /// reason.
 pub fn resolve(config_models: &BTreeMap<String, ModelPrice>, model: &str) -> Resolved {
-    if let Some(entry) = crate::usage::best_match(config_models, model) {
+    if let Some(key) = resolved_row(config_models, model) {
         return Resolved {
-            price: Some(*entry),
+            price: Some(config_models[key]),
             source: Source::Config,
         };
     }
@@ -435,6 +435,30 @@ pub fn resolve(config_models: &BTreeMap<String, ModelPrice>, model: &str) -> Res
         price: None,
         source: Source::Unknown,
     }
+}
+
+/// Which `[models]` row, if any, answers `model` — the full name checked
+/// against the *whole* table before anything falls back to a suffix, so a
+/// hosted model whose full name (`vendor/name`) matches nothing never lands
+/// on a same-suffixed local row by way of the fallback below; only once the
+/// full-name pass has failed everywhere does the part after the last `/` get
+/// tried the same way. That second pass is what lets a row be spelled the way
+/// a person names the model — `[models."Ornith-1.5-35B-A3B"]` — and still
+/// answer both a step's `ornith/Ornith-1.5-35B-A3B` and pi's own bare
+/// `Ornith-1.5-35B-A3B`, with no leading `*` required for either.
+///
+/// Crate-visible so `crate::status::view` can tell whether two model names
+/// land on the same pool — the same reason [`resolve`] itself needs the key
+/// and not only the price it holds.
+pub(crate) fn resolved_row<'a>(
+    config_models: &'a BTreeMap<String, ModelPrice>,
+    model: &str,
+) -> Option<&'a str> {
+    if let Some(key) = crate::usage::best_match_key(config_models, model) {
+        return Some(key);
+    }
+    let suffix = model.rsplit('/').next().filter(|suffix| *suffix != model)?;
+    crate::usage::best_match_key(config_models, suffix)
 }
 
 /// Every model an agent step of this project's pipelines names, and which
@@ -457,6 +481,27 @@ pub fn named(pipelines: &Pipelines) -> BTreeMap<&str, Vec<&str>> {
         }
     }
     map
+}
+
+/// Every `[models]` row that no agent step in `pipelines` reaches, in the
+/// table's own order — a row a rename left behind, the way commit `49a4221`
+/// left `[models."*Qwen3.6-35B-A3B"]` pointing at nothing, and that
+/// [`named`] alone would never surface since it only walks pipelines
+/// outward, never `config_models` back.
+pub fn unrouted<'a>(
+    pipelines: &Pipelines,
+    config_models: &'a BTreeMap<String, ModelPrice>,
+) -> Vec<&'a str> {
+    let named = named(pipelines);
+    config_models
+        .keys()
+        .filter(|key| {
+            !named
+                .keys()
+                .any(|model| resolved_row(config_models, model) == Some(key.as_str()))
+        })
+        .map(|key| key.as_str())
+        .collect()
 }
 
 #[derive(Serialize)]
@@ -950,6 +995,82 @@ mod tests {
                 Source::Builtin
             );
         });
+    }
+
+    /// A `[models]` row spelled the way a person names the model — no
+    /// leading `*` — answers both spellings a real run ever hands `resolve`:
+    /// a step's own `vendor/Name`, and pi's transcript reporting the bare
+    /// `Name` with the vendor in its own field.
+    #[test]
+    fn a_plain_named_row_resolves_both_the_qualified_and_bare_spelling() {
+        let mut config = BTreeMap::new();
+        config.insert(
+            "Ornith-1.5-35B-A3B".to_string(),
+            ModelPrice {
+                context_window: 100_096,
+                slots: 3,
+                exclusive: true,
+                local: true,
+                ..Default::default()
+            },
+        );
+
+        let qualified = resolve(&config, "ornith/Ornith-1.5-35B-A3B");
+        assert_eq!(qualified.source, Source::Config);
+        assert_eq!(qualified.price.unwrap().context_window, 100_096);
+
+        let bare = resolve(&config, "Ornith-1.5-35B-A3B");
+        assert_eq!(bare.source, Source::Config);
+        assert_eq!(bare.price.unwrap().context_window, 100_096);
+    }
+
+    /// The full name is tried across the whole table before any suffix
+    /// fallback: a hosted model whose qualified name a project has priced
+    /// directly must resolve to that row, not to an unrelated local row that
+    /// merely shares its suffix.
+    #[test]
+    fn a_full_name_match_wins_over_a_same_suffixed_row() {
+        let mut config = BTreeMap::new();
+        config.insert(
+            "hosted/Name".to_string(),
+            ModelPrice {
+                input: 5.0,
+                ..Default::default()
+            },
+        );
+        config.insert(
+            "Name".to_string(),
+            ModelPrice {
+                local: true,
+                ..Default::default()
+            },
+        );
+
+        let resolved = resolve(&config, "hosted/Name");
+        let price = resolved.price.expect("the full-name row answers");
+        assert_eq!(price.input, 5.0, "not the same-suffixed local row");
+        assert!(!price.local);
+    }
+
+    /// `unrouted` names a configured row nothing reaches, and stays silent
+    /// once a step is pointed at it — the note `spoolway doctor` prints for
+    /// the row `49a4221` left behind.
+    #[test]
+    fn unrouted_names_a_row_no_step_reaches() {
+        let mut config = BTreeMap::new();
+        config.insert("Ornith-1.5-35B-A3B".to_string(), ModelPrice::default());
+        config.insert("Qwen3.6-35B-A3B".to_string(), ModelPrice::default());
+
+        let raw = "steps:\n  - id: build\n    agent: pi\n    model: ornith/Ornith-1.5-35B-A3B\n";
+        let pipeline: crate::pipeline::Pipeline = serde_norway::from_str(raw).unwrap();
+        let mut pipelines = BTreeMap::new();
+        pipelines.insert("default".to_string(), pipeline);
+        let pipelines = Pipelines {
+            default: "default".to_string(),
+            pipelines,
+        };
+
+        assert_eq!(unrouted(&pipelines, &config), vec!["Qwen3.6-35B-A3B"]);
     }
 
     /// Shipped pipeline text makes no model choice. Its explicit blanks stay

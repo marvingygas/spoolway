@@ -455,14 +455,18 @@ pub(super) fn footer(
         .filter_map(|(name, profile)| {
             // Every model this profile's steps name that carries its own
             // `slots`, one entry per pool — but two names that match the same
-            // `[models."<glob>"]` entry collapse to the one entry, since they
+            // `[models."<row>"]` entry collapse to the one entry, since they
             // are the same pool being rationed and must draw only one line.
-            // `best_match` is what `resolve` itself matches a glob through,
-            // so comparing the pointer it returns is comparing pool identity
-            // exactly as `resolve` sees it, not merely equal numbers two
-            // unrelated entries could share by coincidence.
+            // `models::resolved_row` is the same lookup `resolve` itself
+            // answers through — full name first, a bare model's suffix only
+            // once that whole pass fails — so comparing the row *key* it
+            // returns is comparing pool identity exactly as `resolve` sees
+            // it: `ornith/Ornith-1.5-35B-A3B` and pi's own bare
+            // `Ornith-1.5-35B-A3B` both key on `Ornith-1.5-35B-A3B` and
+            // collapse to one line, which a raw `best_match` pointer would
+            // miss since it never takes the suffix fallback.
             let mut pools: Vec<(&str, u32)> = Vec::new();
-            let mut seen_entries: Vec<*const crate::usage::ModelPrice> = Vec::new();
+            let mut seen_rows: Vec<&str> = Vec::new();
             for model in agent_model.get(name.as_str()).into_iter().flatten() {
                 let Some(slots) = crate::models::resolve(&repo.config.models, model)
                     .price
@@ -471,12 +475,11 @@ pub(super) fn footer(
                 else {
                     continue;
                 };
-                if let Some(entry) = crate::usage::best_match(&repo.config.models, model) {
-                    let ptr = entry as *const _;
-                    if seen_entries.contains(&ptr) {
+                if let Some(row) = crate::models::resolved_row(&repo.config.models, model) {
+                    if seen_rows.contains(&row) {
                         continue;
                     }
-                    seen_entries.push(ptr);
+                    seen_rows.push(row);
                 }
                 pools.push((model, slots));
             }
@@ -2778,6 +2781,49 @@ mod tests {
                 "ornith/Ornith-1.5-35B-A3B",
                 "ornith/Ornith-1.5-35B-A3B-alias",
             ],
+        );
+
+        let pipelines = Pipelines::builtin();
+        let lines: Vec<String> = footer(
+            &repo,
+            &pipelines,
+            &BTreeMap::new(),
+            &model_used,
+            &agent_model,
+            &[],
+        )
+        .iter()
+        .map(|l| strip(l))
+        .collect();
+
+        let pi_lines: Vec<&String> = lines.iter().skip_while(|l| !l.starts_with("pi")).collect();
+        assert_eq!(pi_lines.len(), 1, "{lines:#?}");
+        assert!(pi_lines[0].contains("slots 2/3"), "{lines:#?}");
+    }
+
+    /// Two spellings of one model reached only through the suffix fallback —
+    /// a step's own `vendor/Name` and pi's bare `Name` — draw one line too:
+    /// the dedupe has to key on the row `models::resolved_row` answers, not
+    /// on a `best_match` pointer that never takes that second pass.
+    #[test]
+    fn a_qualified_and_a_bare_name_sharing_a_plain_row_draw_one_line() {
+        let mut repo = fixture("footer-shared-suffix-row");
+        repo.config.models.insert(
+            "Ornith-1.5-35B-A3B".to_string(),
+            crate::usage::ModelPrice {
+                slots: 3,
+                ..Default::default()
+            },
+        );
+
+        let mut model_used: BTreeMap<&str, usize> = BTreeMap::new();
+        model_used.insert("ornith/Ornith-1.5-35B-A3B", 2);
+        let mut agent_model: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        // A step's own qualified name and pi's bare one, both landing on the
+        // one plain row only by way of the suffix fallback.
+        agent_model.insert(
+            "pi",
+            vec!["ornith/Ornith-1.5-35B-A3B", "Ornith-1.5-35B-A3B"],
         );
 
         let pipelines = Pipelines::builtin();
