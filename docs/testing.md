@@ -341,19 +341,41 @@ A hollow suite is worse than none, so two domains are covered elsewhere:
   in, and herdr cannot be nested inside the one this project itself runs under — so that case
   stays a plan a person queues under `scripts/e2e/plans/`, never a suite.
 
-## There is no CI
+## Local gates and daily CI
 
-`.github/workflows/ci.yml` is switched off on GitHub. It ran three jobs on every push and every
-pull request, one of them on a Windows runner billed at ten times the Linux rate, and this
-account was running out of Actions minutes. That last part no longer holds — the repository is
-public, and public repositories get Actions free — so what keeps it off is now only that the
-laptop already covers everything it did. The file is left on disk unchanged so that
-`gh workflow enable ci` is the whole of turning it back on.
+`.github/workflows/ci.yml` runs daily on the default branch (`main`) at 03:17 UTC —
+05:17 in Berlin during summer, 04:17 in winter. Pushes, pull requests and stacks do not
+trigger it. GitHub may delay scheduled runs; this is a daily integration check, not a
+per-merge gate.
 
-Everything it did now happens on a laptop, and none of it is optional there. **The `test` and
-`suite` steps in each of `.spoolway/pipelines/*.yml` are the whole mechanical verdict on a
-change.** Both are command steps, so each is an exit code rather than a lane's own report, and
-both run before the `handover` step opens a pull request.
+The Linux job runs formatting, Clippy, the full Cargo tests, a release build, the `nightly`
+end-to-end tier and the pipeline contract. A Windows job runs the full Cargo tests on a real
+Windows runner. Both jobs skip a commit that already has a successful scheduled run of this
+workflow. Failed runs are retried at the next daily opportunity; a successful manual run with
+a narrower tier does not qualify a commit for skipping. Dependency advisories refresh daily
+even when source is unchanged.
+
+Manual runs always execute all checks, with `nightly` as the default end-to-end tier:
+
+    gh workflow run ci --ref main -f tier=nightly
+    gh run list --workflow ci --limit 5
+    gh run view <run-id> --json headSha,conclusion,jobs
+
+Use a manual run before a release or to verify a fix immediately. Inspect the actual job
+conclusions and record `headSha`: the result covers that commit, not newer work on the branch.
+The release workflow remains separate, with its existing rehearsal and tag publication flow.
+
+Standard hosted runners are free for this public repository; artifact and cache storage have
+separate allowances. See [GitHub Actions billing](https://docs.github.com/en/billing/concepts/product-billing/github-actions).
+CI caches Rust builds, replaces older runs on the same ref, bounds Linux testing to 45 minutes,
+Windows testing to 30 and the audit to 10, and retains failure artifacts for three days.
+
+**The local `test` and `suite` command steps remain the mechanical verdict before handover.**
+Implementation lanes add coverage, run focused tests for changed behaviour and affected callers,
+confirm those tests ran, and format before handoff. They broaden checks when the impact demands
+it and report exactly what was checked. The downstream gate owns routine full tests and Clippy;
+TDD still requires observed red and green results. Work committed directly on `main` bypasses
+these lanes and needs its own local validation before the daily integration check.
 
 `test` runs for every task:
 
@@ -377,17 +399,17 @@ plan is rebased onto the one below, so the task at the top carries every change 
 one run there covers all of them.
 
 Cheapest first, so the commonest failure costs the least to find. A failure in either routes
-the task back to the step before them — `e2e` in every `impl*.yml`, `reproduce-again` in
-`bugfix.yml` — bounded to two laps from each of `test` and `suite`, and then `on_loop_max`
-parks it for a person.
+the task back to the step before them — `e2e` in `impl`, `impl_tdd` and `impl_ui`,
+`reproduce-again` in `bugfix` — bounded to two laps from each of `test` and `suite`, and then
+`on_loop_max` parks it for a person. `impl_fast` runs the full `test` gate, routes failures
+back to `implement`, and has no `suite` step.
 
 `pipeline check` is in the list because this project is developed with the spoolway it builds, so
 `.spoolway/` here is a live control plane rather than a fixture. A retired pipeline key reaching
 main once stopped the dispatcher from loading at all. It runs against the task's own worktree,
 using the binary the line above it just built.
 
-One check does not belong in a per-task verdict and moved to the nightly
-routine instead, where a person runs it by hand:
+Real Windows tests run in hosted CI. They can also be run locally in the nightly routine:
 
 - `cargo test --target x86_64-pc-windows-gnu --all-targets --locked`, the Windows tests actually
   run rather than only compiled. WSL interop executes Windows binaries on the machine this
@@ -397,15 +419,13 @@ routine instead, where a person runs it by hand:
 moves without this repository moving, so a nightly-only run would leave a task landing on a
 green check that had already gone stale.
 
-**Nothing runs on a pull request any more.** A pull request opens with an empty check list and
-stays that way; that is the finished state, not something still in flight. It is also why this
-project's own pipelines carry no `checks` step: `gh pr checks` on a pull request with no checks
-fails rather than passing, so the step would park every task — see [The shipped `default`
-pipeline](pipelines.md#the-shipped-default-pipeline).
+**No hosted check starts automatically for a pull request.** This project's pipelines carry
+no `checks` step: daily CI is not a promised per-PR check, and waiting for one would park
+ordinary tasks — see [The shipped `default` pipeline](pipelines.md#the-shipped-default-pipeline).
 
-What is now checked nowhere: a pull request as a whole, against a tree nobody has a local copy of
-— every check above runs in the task's own worktree, so a change that is fine alone and broken
-beside another task's change is only found when a person lands the stack.
+Local gates cover each task worktree and the chain's top. Independently landed changes can
+still break each other on `main`; daily CI checks that integrated tree. Newer commits have only
+their local validation until a scheduled or manual run verifies them.
 
 Nothing is installed and nothing needs to be, except `cargo-deny` and the
 `x86_64-pc-windows-gnu` target. The four checked-in fixture projects that used to drag `python3`

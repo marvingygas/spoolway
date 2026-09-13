@@ -870,17 +870,18 @@ clippy`, `cargo test`, a Windows cross-compile check, a release build and `pipel
 against this repository's own control plane — as an exit code rather than a lane's own report.
 `suite` runs the end-to-end suite's `pr` tier, and carries [`last:`](#last--a-step-the-chain-runs-once),
 so a stack runs it once at the top rather than once per task over work the task above will
-cover again. The full list is in [There is no CI](testing.md#there-is-no-ci).
+cover again. The full list is in [Local gates and daily CI](testing.md#local-gates-and-daily-ci).
 `assets/pipelines/default.yml`, above, carries none of that on purpose: what to build and what
 to test is the installing project's own answer, not something a file shipped to every project
 can guess.
 
 The second difference runs the other way. **The installed pipelines have no `checks` step**,
-because GitHub Actions is switched off on this repository — see [There is no
-CI](testing.md#there-is-no-ci). With nothing running on the forge there is nothing for a
-`checks` step to wait for, and `gh pr checks` on a pull request with no checks fails rather than
-passing, so the step would park every task. The shipped files keep it, because a project that
-installs spoolway probably does have CI and `gh pr checks` means the same thing there.
+because hosted CI runs daily on `main` and on manual dispatch, with no push or pull-request
+trigger — see [Local gates and daily CI](testing.md#local-gates-and-daily-ci). There is no
+guaranteed per-PR run for a `checks` step to wait for, and `gh pr checks` on a pull request with
+no checks fails rather than passing, so the step would park every task. The shipped files keep
+it, because a project that installs spoolway probably does have CI and `gh pr checks` means the
+same thing there.
 
 A third difference sits in `handover` itself: the shipped files run `run: spoolway stack`,
 resolved through `PATH`, while `.spoolway/pipelines/impl.yml` runs

@@ -1,60 +1,15 @@
 name: ci
 
-# DISABLED ON GITHUB. The triggers below are intact but no event reaches them:
-# the workflow is switched off at the repository.
-#
-#   gh workflow enable ci      turn it back on, unchanged
-#   gh workflow disable ci     turn it back off
-#
-# A disabled workflow refuses `workflow_dispatch` too, so a run by hand means
-# enabling it first.
-#
-# It was switched off to stop three jobs per push — one of them on a Windows
-# runner, billed at ten times the Linux rate — eating this account's Actions
-# minutes. **That reason has expired**: this repository is public now, and
-# public repositories get Actions free and unlimited. What keeps it off is only
-# that the laptop already covers it, and enabling it would make three sections
-# of docs/testing.md and docs/pipelines.md wrong. The argument for turning it
-# back on is a pull request from somebody who never ran the laptop gate.
-#
-# Everything below now runs on a laptop instead, and it is not optional there:
-# the `gate` step in `.spoolway/pipelines/*.yml` runs `cargo fmt --check`, the
-# advisory database, clippy, `cargo test`, the Windows target, a release build,
-# `pipeline check` and the `pr` end-to-end tier as one command, per task, before
-# a pull request exists. Only the real Windows test run — as opposed to the
-# Windows target merely compiling — still waits on the nightly routine a person
-# runs by hand. See docs/testing.md for what is checked where, and what is now
-# checked nowhere.
-#
-# Two layers, neither of which spends a model, a multiplexer or a forge:
-#
-#   cargo test                  the units, including the dispatcher's decisions
-#                               against a fake multiplexer
-#   scripts/e2e/run.sh --tier   the CLI end to end on real git repos, with the
-#                               agents replaced by stand-ins: `pr` on every
-#                               push and every pull request, `nightly` on
-#                               a schedule
-#
-# The half that cannot run here is the one that starts real agents against real
-# models and watches a multiplexer do something: the plans under
-# scripts/e2e/plans/, queued by hand into a project scripts/e2e/scaffold.sh
-# builds, on a machine with a model server and a screen. `scripts/e2e/run.sh
-# --list` names the settings that are covered there rather than here, and the
-# ones covered nowhere.
-#
-# Nothing below installs a dependency, and nothing below needs one: the suites
-# reach for `git`, `bash`, `curl` and `setsid`, all of which are on the runner
-# image. The four checked-in fixture projects that used to drag `python3` and
-# `node` in here are gone — a suite builds its own subject from a seed written
-# inline.
+# Daily integration checks on main; pushes, pull requests and stacks start no run.
+# Local pipeline gates still validate each task and the top of each chain.
+# Successful scheduled checks are reused only for the same commit. Advisories
+# refresh every day even when source is unchanged; manual runs always run all jobs.
+# Standard hosted runners are free for this public repository. Keep artifacts
+# short-lived because storage has its own allowance.
 
 on:
-  push:
-    branches: [main]
-  pull_request:
   schedule:
-    # Nightly, off the hour: the tier that adds the six-task plan and the
-    # closeout, which are too slow to sit in front of a review.
+    # 03:17 UTC: 05:17 Berlin in summer, 04:17 in winter.
     - cron: "17 3 * * *"
   workflow_dispatch:
     inputs:
@@ -64,6 +19,10 @@ on:
         options: [smoke, pr, nightly]
         default: nightly
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -71,7 +30,38 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    outputs:
+      test: ${{ steps.check.outputs.test }}
+    steps:
+      - name: check whether this commit already passed a daily run
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != schedule ]; then
+            echo "test=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          passed=$(gh api --method GET "repos/$GH_REPO/actions/workflows/ci.yml/runs" \
+            -f event=schedule -f status=success -f head_sha="$GITHUB_SHA" \
+            -f per_page=1 --jq '.total_count')
+          if [ "$passed" -gt 0 ]; then
+            echo "test=false" >> "$GITHUB_OUTPUT"
+            echo "This commit already passed daily CI; only advisories need refreshing." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "test=true" >> "$GITHUB_OUTPUT"
+          fi
+
   test:
+    timeout-minutes: 45
+    needs: changes
+    if: needs.changes.outputs.test == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -95,27 +85,17 @@ jobs:
 
       - run: cargo test --all-targets --locked
 
-      - name: pick the e2e tier
-        id: tier
-        run: |
-          case "${{ github.event_name }}" in
-            push | pull_request) tier=pr ;;
-            schedule)          tier=nightly ;;
-            workflow_dispatch) tier="${{ inputs.tier }}" ;;
-            *)                 tier=pr ;;
-          esac
-          echo "tier=$tier" >> "$GITHUB_OUTPUT"
-
       # KEEP leaves each suite's scratch tree behind. It costs nothing on a
       # green run — the runner is thrown away either way — and on a red one it
       # is the difference between debugging a failure and guessing at it.
       - name: end to end
         env:
           KEEP: 1
+          E2E_TIER: ${{ inputs.tier || 'nightly' }}
         run: |
-          cargo build --release
+          cargo build --release --locked
           SPOOLWAY="$PWD/target/release/spoolway" \
-            scripts/e2e/run.sh --tier "${{ steps.tier.outputs.tier }}"
+            scripts/e2e/run.sh --tier "$E2E_TIER"
 
       # This repo is developed with the spoolway it builds, so its own
       # `.spoolway/` is a live control plane, not a fixture — the same tree a
@@ -136,16 +116,15 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-scratch-${{ steps.tier.outputs.tier }}
+          name: e2e-scratch-${{ inputs.tier || 'nightly' }}
           path: /tmp/tmp.*
-          retention-days: 7
+          retention-days: 3
           if-no-files-found: ignore
 
-  # The advisory database moves without this repo moving, so the nightly
-  # schedule matters as much here as the push: a dependency can become a
-  # vulnerability report overnight. Advisories only — licenses and duplicate
-  # versions are decisions for a person reading Cargo.lock, not a gate.
+  # Advisories change without source changes, so never skip this daily check.
+  # Licenses and duplicate versions remain decisions for a person.
   audit:
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -162,6 +141,9 @@ jobs:
   # No e2e here: the suites are bash, and what they cover is platform-neutral.
   # What is platform-specific is in the unit tests.
   test-windows:
+    needs: changes
+    if: needs.changes.outputs.test == 'true'
+    timeout-minutes: 30
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4

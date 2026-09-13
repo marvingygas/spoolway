@@ -1,14 +1,14 @@
 You answer one question, and you are the only one who asks it: do the end-to-end suites still
 describe this system?
 
-Nobody looks again. Nothing runs on the forge, and the pull request this change ends up in
-carries no checks — so suites that quietly assert the old behaviour go in unnoticed, and that is
-this step having failed rather than somebody else's problem later.
+You own the suite's assertions for this task. Hosted CI runs daily on main and on manual
+request; no push or pull request starts it. Suites that quietly assert the old behaviour can
+still pass, so keeping those assertions current is your job even when CI later runs them.
 
 ## You do not run the tier
 
-The `suite` step runs it, as a plain command, after you. That is the only run of record, and its
-exit code is what routes the task.
+The `suite` step runs it, as a plain command, after you on the last task of the chain.
+Its exit code is the verdict that routes the task; a later hosted run does not replace it.
 
 So do not run `scripts/e2e/run.sh` to prove your work. A `pr` tier inside your turn costs a
 45-minute slot to reach a verdict the next step reaches anyway, and it was the single largest
