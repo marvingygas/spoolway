@@ -122,13 +122,13 @@ session_blocked_ctx = 0
 
 [models."*Ornith-1.5-35B-A3B"]
 context_window = 100096
-slots = 3
+slots = 2
 exclusive = true
 local = true
 
 [models."*Qwen3.6-35B-A3B"]
 context_window = 100096
-slots = 3
+slots = 2
 exclusive = true
 
 [issue_tracking]
