@@ -18,8 +18,9 @@ touches:
 - `CHANGELOG.md` is the single release record. One approved section per version is committed beside
   the version bump, compiled into every binary built from the tag by `include_str!`, and used by the
   workflow as the GitHub release body; the contract it must follow is written at the top of the file.
-- Nothing runs on the forge before release, so local checks and a non-publishing workflow rehearsal
-  are the complete gate before tagging.
+- Daily CI verifies main, but release rehearsal and publication each require the shared full
+  verification gate on the exact release commit. An older green run is not release approval.
+- `docs/releasing.md` is the repository-local runbook used by every release role.
 - The tag is irreversible in ordinary operation and therefore follows human approval of the exact
   candidate version and release notes.
 
@@ -49,7 +50,11 @@ commands, provenance, and contributing pull requests clear.
 - the approved section is committed to `CHANGELOG.md` in the release commit, satisfies the contract at
   the top of that file, adds nothing to older sections, and is confirmed by the locked tests and by
   `spoolway whats-new` before the rehearsal
-- the rehearsal assembles six platforms, dry-runs seven packages, and reports correct provenance
+- the rehearsal's head SHA equals the release commit; Linux checks, nightly end-to-end tests,
+  advisories and real Windows tests all pass without the daily skip policy
+- the rehearsal validates the approved changelog section, assembles six platforms, dry-runs seven
+  packages, and reports correct provenance without publishing to npm or GitHub
+- the tag names the exact rehearsed release commit, and publication requires the full gate again
 - the approved tag publishes seven packages and six archives plus `SHA256SUMS`
 - the GitHub release body is created by the workflow from the tagged changelog section and reads back
   byte-for-byte identical to the approved notes
@@ -58,7 +63,8 @@ commands, provenance, and contributing pull requests clear.
 
 ## References
 
-- `/home/marvin/.claude/skills/release-spoolway/SKILL.md` — the source release routine
+- `docs/releasing.md` — the self-contained release runbook
+- `.github/workflows/verify.yml` — shared Linux, Windows, end-to-end and advisory verification
 - `.github/workflows/release.yml` — the build, pack, publish, and release mechanism
 - `CHANGELOG.md` — the release-record contract the committed section must satisfy
 - `src/release_notes.rs` — the parser that enforces that contract at test time

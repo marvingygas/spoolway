@@ -363,7 +363,10 @@ Manual runs always execute all checks, with `nightly` as the default end-to-end 
 
 Use a manual run before a release or to verify a fix immediately. Inspect the actual job
 conclusions and record `headSha`: the result covers that commit, not newer work on the branch.
-The release workflow remains separate, with its existing rehearsal and tag publication flow.
+Daily CI and releases share `.github/workflows/verify.yml`. The release workflow always runs
+its full nightly verification, including real Windows tests, in both rehearsal and tag runs.
+It never uses daily CI's unchanged-commit shortcut. Platform builds and publication depend on
+that verification passing at the run's exact commit. See [Releasing spoolway](releasing.md).
 
 Standard hosted runners are free for this public repository; artifact and cache storage have
 separate allowances. See [GitHub Actions billing](https://docs.github.com/en/billing/concepts/product-billing/github-actions).

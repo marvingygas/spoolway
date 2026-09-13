@@ -3,9 +3,9 @@
 ## What you are looking at
 
 Publish the human-approved candidate and prove the registry, downloadable assets, release notes, and
-real installation agree. Read the release routine named in the task's References in full, then read
-the preflight and release-note handoffs. The approval before this lane is authority for exactly the
-recorded commit, version, and notes—nothing newer.
+real installation agree. Read `docs/releasing.md` in full, then the preflight and release-note
+handoffs. The approval before this lane is authority for exactly the recorded commit, version, and
+notes—nothing newer.
 
 The approved section is one record with three homes: you commit it to `CHANGELOG.md`, the tag build
 compiles it into every binary, and the tagged workflow creates the GitHub release body from it. You
@@ -22,24 +22,38 @@ are the tagged bytes.
 2. Insert the approved scratch `release-notes.md` into `CHANGELOG.md` as a new section, byte-for-byte
    as approved, separated from its neighbours by one blank line. Leave the file's contract preamble
    and every older section exactly as they are; `git diff` on `CHANGELOG.md` must show additions and
-   nothing else. Follow the source routine to write the approved version only in `Cargo.toml` and
+   nothing else. Follow the runbook to write the approved version only in `Cargo.toml` and
    refresh the package's entry in `Cargo.lock`. Never edit an npm package version by hand.
-3. Prove the record before anything irreversible. Run the repository's locked test suite, which parses
-   `CHANGELOG.md` through the compiled binary and rejects a section that breaks the contract. Then
-   build and run the binary's own `whats-new` with no `--since`, and confirm it prints the new version
-   and the approved section rather than an older release or an empty result. That agreement between
-   `Cargo.toml` and the changelog is what the tag build and the release page both rely on, so a
-   failure here is a block, not a warning. Only once it passes, commit the version bump, the lock
-   refresh, and the changelog section together with the repository's release subject, and push main.
-4. Run the non-publishing workflow rehearsal and watch it to completion. Inspect conclusions rather
-   than trusting the watcher's exit code. Prove all six platforms were assembled, all seven dry-run
-   packages were packed, hashes and sizes were printed, and the provenance repository is correct.
-5. Only after the rehearsal is green, create and push the approved `v<version>` tag. This is the
-   irreversible boundary already approved by the human gate.
-6. Watch the tag workflow and inspect every job's actual conclusion. Recover a partial publish using
-   the source routine: read the real registry error, preserve already-published packages, and rerun.
-   If a workflow fix is required, commit it and move the tag to that commit before rerunning; a rerun
-   alone uses the old tagged workflow.
+3. Prove the record before committing it. Run `cargo test --locked release_notes::tests`, confirm the
+   parser tests actually ran, and resolve any changelog contract failure. Full verification belongs
+   to the mandatory rehearsal gate. Then build and run the binary's own `whats-new` with no
+   `--since`, and confirm it prints the new version and the approved section rather than an older
+   release or an empty result. That agreement between `Cargo.toml` and the changelog is what the
+   tag build and the release page both rely on, so a failure here is a block, not a warning. Only
+   once it passes, commit the version bump, the lock refresh, and the changelog section together
+   with the repository's release subject, and push main.
+   Record the full release commit SHA separately from the approved source SHA. Prove its parent
+   is the approved source commit and its diff contains only the three approved release files.
+4. Dispatch `release.yml` on main with `publish=false`, as described in the runbook. Record the run id
+   and require its `headSha` to equal the release commit SHA. Watch it to completion, then inspect
+   actual job conclusions: shared Linux checks, nightly end-to-end tests, advisories, real Windows
+   tests, notes extraction, all six platform builds and package assembly must succeed. Skipped,
+   cancelled or missing required jobs are not green. Only GitHub release creation is intentionally
+   skipped. Confirm the extracted section matches the approved notes, all seven packages were packed,
+   hashes and sizes were printed, and the provenance repository is correct. A daily CI run, including
+   one on the approved source commit, never substitutes for this release-commit rehearsal.
+5. Fetch again and require clean local main, origin/main and the rehearsal's head SHA to equal the
+   recorded release SHA. Main moving takes the cleanup path below. Only after the full rehearsal is
+   green, create `v<version>` with that exact SHA as the tag command's target and push only that tag.
+   This is the irreversible boundary already approved by the human gate.
+6. Require the tag and tag workflow's head SHA to equal the recorded release SHA. Watch the workflow
+   and inspect every job's actual conclusion, including the full verification gate, which runs again
+   before publication. Recover a partial publish using the runbook: read the real registry error,
+   preserve already-published packages, and rerun.
+   If a workflow fix is required after a failed partial release, record the old and new SHAs and
+   reason, rehearse the corrected commit with publication disabled, and require all checks to pass
+   before moving the tag to it. A rerun alone uses the old tagged workflow. Product changes require
+   fresh preflight and approval; never move a successful release tag.
 7. Verify the registry directly: all seven package names must report the approved version. Verify the
    GitHub release directly: six platform archives plus `SHA256SUMS` must exist.
 8. Read the published release body back with `gh release view` and prove it is the approved section.
@@ -51,7 +65,8 @@ are the tagged bytes.
 9. Install the public wrapper into a fresh fixed-purpose directory under `/tmp`, run that installed
    executable's version command, and verify npm installed the wrapper plus exactly one platform
    package. Remove only that fixed-purpose temporary directory after the check.
-10. Report the version and tag, rehearsal and publish run ids, all seven registry versions, all seven
+10. Report the approved source SHA, release SHA, version and tag, rehearsal and publish run ids with
+    their head SHAs and required job conclusions, all seven registry versions, all seven
     release assets, the release-body diff result, the real-install result, and every failure plus
     recovery.
 
@@ -62,11 +77,11 @@ new tip. What differs is the wreckage you have to clear first, and leaving any o
 the next attempt ends up publishing notes nobody approved.
 
 - **Before the release commit is pushed** — the push is rejected, or step 1 finds main already
-  advanced. Reset the checkout so the unpushed release commit is gone and `Cargo.toml`,
-  `Cargo.lock`, and `CHANGELOG.md` match the new `origin/main` again. Delete the approved
-  `release-notes.md` from scratch so no later lane can mistake it for a current record. Confirm the
-  tree is clean and matches `origin/main` before you report. Then fail to preflight, naming the new
-  tip commit and what changed.
+  advanced. Remove only this attempt's unpushed release commit and restore `Cargo.toml`,
+  `Cargo.lock`, and `CHANGELOG.md` to the new `origin/main`. Preserve unrelated work and block if
+  cleanup would overwrite it. Delete the approved `release-notes.md` from scratch so no later lane
+  can mistake it for a current record. Confirm the tree is clean and matches `origin/main` before
+  you report. Then fail to preflight, naming the new tip commit and what changed.
 - **After the release commit is pushed but before the tag exists** — main now carries a version bump
   and a changelog section for a version that will never be tagged as approved. Do not force-push and
   do not rewrite anyone else's commits. Add a revert of your release commit on top of the current
@@ -82,7 +97,8 @@ the next attempt ends up publishing notes nobody approved.
 
 ## Never
 
-- Never tag before a fully green rehearsal or publish a commit different from the approved candidate.
+- Never tag without a fully green rehearsal on the exact release SHA, or publish unrelated changes
+  beyond the approved source, version and notes. Neither daily CI nor a skipped release check suffices.
 - Never trust a workflow watch exit code in place of job conclusions or the registry's own state.
 - Never hand-edit versions under `npm/`, publish the wrapper before platform packages, or republish a
   package version already present.

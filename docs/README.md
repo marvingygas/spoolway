@@ -46,6 +46,7 @@ be read on its own, but the order below is the order most people meet them in.
 | [Configuration](configuration.md) | Every setting in the config file, what it means, and how to edit it |
 | [CLI reference](cli-reference.md) | Every command, subcommand and flag |
 | [Testing](testing.md) | How spoolway is tested: the suites, the fixtures, and running them with or without models |
+| [Releasing spoolway](releasing.md) | The maintainer runbook: approval, verification, rehearsal, tagging and publication |
 
 ## The shape of the thing, in one paragraph
 

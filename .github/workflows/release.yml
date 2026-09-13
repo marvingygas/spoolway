@@ -1,19 +1,22 @@
 name: release
 
-# Tag a version to publish it:
-#   cargo set-version 0.2.0  (or edit Cargo.toml) && git tag v0.2.0 && git push --tags
-#
-# Run it from the Actions tab first with publish=false to build every target and
-# pack every tarball without touching the registry.
+# Follow docs/releasing.md: rehearse the release commit with publish=false,
+# verify the run's SHA and every required job, then tag that exact commit.
+# Both rehearsal and publication require the full shared verification gate.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
     inputs:
       publish:
-        description: "Publish to npm (unchecked = build and pack only)"
+        description: "Publish to npm and GitHub (unchecked = verify, build and pack only)"
         type: boolean
         default: false
+
+# Never interrupt publication halfway through the seven registry writes.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -27,23 +30,21 @@ jobs:
       targets: ${{ steps.read.outputs.targets }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
       - id: read
         run: echo "targets=$(jq -c .targets npm/targets.json)" >> "$GITHUB_OUTPUT"
 
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test --locked
+  # Release checks never consult the daily workflow's skip decision.
+  verify:
+    uses: ./.github/workflows/verify.yml
+    with:
+      tier: nightly
+      run-tests: true
 
-  # Each target names its own runner in npm/targets.json. `ubuntu-24.04-arm`,
-  # which linux-arm64 builds on, is free only on public repositories — fine
-  # here, but if this repository is ever made private again that row has to be
-  # pointed at `ubuntu-latest` and built through `cross` instead.
+  # Build platform packages only after the shared verification gate passes.
   build:
-    needs: matrix
+    needs: [matrix, verify, notes]
     strategy:
       fail-fast: true
       matrix:
@@ -51,6 +52,8 @@ jobs:
     runs-on: ${{ matrix.target.runner }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -88,14 +91,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
 
-      # Skipping the job outright would skip everything that needs it, so the
-      # job always runs and only its tag-only steps are conditional. A
-      # `workflow_dispatch` rehearsal therefore passes straight through.
-      - name: Extract the tagged release section
-        if: startsWith(github.ref, 'refs/tags/v')
+      # Rehearsal validates the same changelog section publication will use.
+      - name: Extract the release section
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')"
+          if [[ "$GITHUB_REF" == refs/tags/v* && "${GITHUB_REF_NAME#v}" != "$version" ]]; then
+            echo "Tag $GITHUB_REF_NAME does not match Cargo.toml version $version" >&2
+            exit 1
+          fi
           heading="## $version — "
 
           # Counted by literal prefix rather than a regex, so a version whose
@@ -105,7 +111,7 @@ jobs:
             END { print total + 0 }
           ' CHANGELOG.md)"
           if [ "$found" != "1" ]; then
-            echo "CHANGELOG.md at tag $GITHUB_REF_NAME holds $found sections headed \"$heading\", but the release body is built from exactly one; add the missing $version section or merge the duplicates on main, move tag $GITHUB_REF_NAME to that commit, and rerun this workflow." >&2
+            echo "CHANGELOG.md at commit $GITHUB_SHA holds $found sections headed \"$heading\", but the release body requires exactly one; correct the candidate and follow docs/releasing.md before retrying." >&2
             exit 1
           fi
 
@@ -122,7 +128,6 @@ jobs:
           cat release-body.md
 
       - uses: actions/upload-artifact@v4
-        if: startsWith(github.ref, 'refs/tags/v')
         with:
           name: release-body
           path: release-body.md
@@ -130,13 +135,15 @@ jobs:
           retention-days: 7
 
   publish:
-    needs: [matrix, notes, test, build]
+    needs: [matrix, notes, verify, build]
     runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write # npm provenance
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
 
       - uses: actions/setup-node@v4
         with:
@@ -229,12 +236,14 @@ jobs:
   # version npm refused.
   assets:
     needs: publish
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') && (github.event_name != 'workflow_dispatch' || inputs.publish)
     runs-on: ubuntu-latest
     permissions:
       contents: write # creating the release
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
 
       - uses: actions/download-artifact@v4
         with:

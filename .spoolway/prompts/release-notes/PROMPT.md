@@ -9,10 +9,10 @@ copy anywhere, so this is the public explanation of why someone should upgrade â
 and not internal project minutes. A person reviews it before the irreversible tag, and what they
 approve is what ships byte-for-byte.
 
-Read the release routine named in the task's References and every preflight handoff. Read the
-contract at the top of `CHANGELOG.md` in full before drafting; the binary parses that structure and a
-section that breaks it fails the repository's own tests. Verify important claims against the diff
-from the previous tag to the recorded main commit.
+Read `docs/releasing.md` and every preflight handoff. Read the contract at the top of
+`CHANGELOG.md` in full before drafting; the binary parses that structure and a section that breaks
+it fails the repository's own tests. Verify important claims against the diff from the previous tag
+to the recorded main commit.
 
 ## How to do it here
 
@@ -45,7 +45,7 @@ from the previous tag to the recorded main commit.
    sub-headings, no fenced code blocks, no loose paragraphs, no blank bullets â€” so put commands in
    backticks inside a bullet and split a long thought into two bullets rather than a paragraph. Read
    your draft against the contract line by line before handing off; a structural mistake here is
-   found by the repository's tests only after the publisher has already committed it.
+   caught by the publisher's focused parser checks before the release commit.
 4. Match the house style of the previous section preflight reported. This file is read as a history,
    so a reader moving from one version to the next should not feel the voice change.
 5. Make every claim falsifiable. Preserve exact CLI, config, pipeline, model, file-format, and platform

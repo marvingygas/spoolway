@@ -1,0 +1,133 @@
+name: verify
+
+# One definition for daily CI, release rehearsal and tag publication.
+# The caller's immutable SHA is used by every job. No publish credentials are needed.
+on:
+  workflow_call:
+    inputs:
+      tier:
+        description: end-to-end tier (smoke, pr or nightly)
+        type: string
+        default: nightly
+      run-tests:
+        description: daily CI may skip tests for a commit already verified
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    timeout-minutes: 45
+    if: inputs.run-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      # First, because it is the cheapest thing that can fail and the only one
+      # whose fix is a single command. There is no rustfmt.toml: the default
+      # style is the one nobody had a reason to disagree with.
+      - name: formatting
+        run: cargo fmt --check
+
+      # The tree is kept clippy-clean, so any warning here is new — and a
+      # warning nobody is made to look at is one that gets shipped.
+      - name: clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - run: cargo test --all-targets --locked
+
+      - name: validate the end-to-end tier
+        env:
+          E2E_TIER: ${{ inputs.tier }}
+        run: |
+          case "$E2E_TIER" in
+            smoke|pr|nightly) ;;
+            *) echo "Unsupported verification tier: $E2E_TIER" >&2; exit 1 ;;
+          esac
+
+      # KEEP leaves each suite's scratch tree behind. It costs nothing on a
+      # green run — the runner is thrown away either way — and on a red one it
+      # is the difference between debugging a failure and guessing at it.
+      - name: end to end
+        env:
+          KEEP: 1
+          E2E_TIER: ${{ inputs.tier }}
+        run: |
+          cargo build --release --locked
+          SPOOLWAY="$PWD/target/release/spoolway" \
+            scripts/e2e/run.sh --tier "$E2E_TIER"
+
+      # This repo is developed with the spoolway it builds, so its own
+      # `.spoolway/` is a live control plane, not a fixture — the same tree a
+      # retired pipeline key once reached main through and stopped the
+      # dispatcher loading at all. `pipeline check` is the command for that:
+      # it reads the pipeline, its prompts and the config it names, and
+      # fails on exactly a control plane that does not load — unlike
+      # `doctor`, which also fails a runner that never had herdr or an agent
+      # binary on PATH in the first place, for reasons this workflow does
+      # not claim to cover. The build above already produced the release
+      # binary, so this costs seconds rather than a build of its own.
+      - name: check this repo's own control plane still loads
+        run: ./target/release/spoolway pipeline check
+
+      # The suites keep their trees under a mktemp root and print it; collecting
+      # the lot is simpler than parsing for it, and only happens on a failure.
+      - name: keep the wreckage
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-scratch-${{ inputs.tier }}
+          path: /tmp/tmp.*
+          retention-days: 3
+          if-no-files-found: ignore
+
+  # Advisories change without source changes, so never skip this daily check.
+  # Licenses and duplicate versions remain decisions for a person.
+  audit:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories
+
+  # Windows is a supported target, and the parts of spoolway that differ there
+  # are exactly the parts a Linux run cannot exercise: the PowerShell dialect
+  # typed at a pane, the PATHEXT lookup, the `.cmd` shim, and the process check
+  # standing in for /proc. Building it is not enough — those have to run.
+  #
+  # No e2e here: the suites are bash, and what they cover is platform-neutral.
+  # What is platform-specific is in the unit tests.
+  test-windows:
+    if: inputs.run-tests
+    timeout-minutes: 30
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Every unit test whose behaviour forks on the platform — the PowerShell
+      # dialect, the PATHEXT lookup, the `.cmd` shim, the process check.
+      - run: cargo test --all-targets --locked

@@ -42,6 +42,7 @@ pages themselves live in [`docs/`](docs/README.md) and each one can be read on i
 | [Configuration](docs/configuration.md) | Every setting in the config file, what it means, and how to edit it |
 | [CLI reference](docs/cli-reference.md) | Every command, subcommand and flag |
 | [Testing](docs/testing.md) | The suites, the fixtures, and running them with or without models |
+| [Releasing spoolway](docs/releasing.md) | The maintainer runbook: approval, verification, rehearsal, tagging and publication |
 
 ## The shape of the thing, in one paragraph
 
