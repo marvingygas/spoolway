@@ -740,13 +740,16 @@ Print or validate the task-document contract — the same rules `parse_submissio
 itself runs, so neither mode can say something the enforcement does not.
 
 Bare, prints the whole contract as JSON on stdout and nothing else: this project's default
-pipeline; where a finished document is written, what to name it there, and the commands that
-check it and send it, under `output`; the document's required, optional, refused and ignored
-keys, plus what happens to a key named in none of them; one sentence per settable key on how
-to fill it; one entry per pipeline giving its longest agent step, its id budget, the step ids
-`gate_at` accepts and the body skeleton a task on it is written from; and the rules that only
-hold across a set. A producer with no access to `docs/tasks.md` can write a queueable document
-from this alone.
+pipeline; a `sizing` sentence on how to judge the size of a breakdown, with no per-pipeline
+figure to do arithmetic on; where a finished document is written, what to name it there, and
+the commands that check it and send it, under `output`; the document's required, optional,
+refused and ignored keys, plus what happens to a key named in none of them; one sentence per
+settable key on how to fill it, `title`'s naming the Conventional Commits shape and all nine
+commit types; one entry per pipeline giving its longest agent step, its id budget, the step
+ids `gate_at` accepts, its own `description` and which step is `last_of_chain` (`null` for a
+pipeline that marks none), and the body skeleton a task on it is written from; and the rules
+that only hold across a set. A producer with no access to `docs/tasks.md` can write a
+queueable document from this alone.
 
 `output.dir` is this machine's own pending directory, already resolved rather than given as a
 pattern to expand, so a producer handed nothing but this JSON still writes where `spoolway

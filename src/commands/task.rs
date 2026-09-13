@@ -3,14 +3,16 @@
 //!
 //! `spoolway task contract` is the whole interface a producer needs. Printed
 //! bare, it is every key a document may set, every key it may not, which
-//! pipeline is this project's default, each pipeline's id budget, the steps
-//! `gate_at` accepts, the body skeleton itself, and — under `output` — the
-//! directory a finished document is written to, what to name it there, and
-//! the two commands that check it and send it. One call, so a producer never
-//! has to be told anything a person read somewhere else: a model handed this
-//! JSON and a goal has everything it needs to leave a queueable task on
-//! disk. Run with `--from`, it is the exact validation `queue add --from`
-//! runs, with nothing written at the end of it.
+//! pipeline is this project's default, a sentence on how to size a
+//! breakdown, and — per pipeline — its id budget, the steps `gate_at`
+//! accepts, its own `description:`, which step is `last-of-chain`, and the
+//! body skeleton itself; under `output` it is the directory a finished
+//! document is written to, what to name it there, and the two commands that
+//! check it and send it. One call, so a producer never has to be told
+//! anything a person read somewhere else: a model handed this JSON and a
+//! goal has everything it needs to leave a queueable task on disk. Run with
+//! `--from`, it is the exact validation `queue add --from` runs, with
+//! nothing written at the end of it.
 //!
 //! Both modes are read straight off [`super::queue::RESERVED_KEYS`],
 //! [`super::queue::longest_agent_step`], [`super::queue::gather_documents`]
@@ -94,8 +96,12 @@ const FIELD_SENTENCES: &[(&str, &str)] = &[
     ),
     (
         "title",
-        "A short, present-tense sentence naming what this task does — the subject \
-         of the eventual commit and pull request.",
+        "A Conventional Commits line: a type, the area of code in parentheses, a \
+         colon, and one short present-tense sentence — `feat(queue): add a \
+         --dry-run flag`. The type is one of `feat`, `fix`, `docs`, `refactor`, \
+         `perf`, `test`, `build`, `ci` or `chore`; the parentheses come off when \
+         no single area fits. Used verbatim — as the squashed commit's subject \
+         and the pull request's title where nothing else sets one.",
     ),
     (
         "group",
@@ -201,13 +207,19 @@ struct ContractOutput {
 }
 
 /// One pipeline's own slice of the contract: the constraint an id has to fit
-/// under, the steps a `gate_at` may name, and the body a task on it is
-/// written from.
+/// under, the steps a `gate_at` may name, which of them is `last-of-chain`,
+/// this pipeline's own `description:`, and the body a task on it is written
+/// from.
 #[derive(Debug, serde::Serialize)]
 struct PipelineContract {
     longest_agent_step: String,
     id_budget: usize,
     gate_at: Vec<String>,
+    /// The step a `run:` chain treats as the top of the chain — `None` when
+    /// this pipeline marks no step `last: true`, the same case `pipeline
+    /// show` renders by saying nothing rather than printing a placeholder.
+    last_of_chain: Option<String>,
+    description: Option<String>,
     body: String,
 }
 
@@ -220,11 +232,20 @@ struct ContractKeys {
     passthrough: &'static str,
 }
 
+/// One sentence on how to size a breakdown — what `spoolway-tasks` used to
+/// work out itself from a pipeline's model windows, before there was
+/// anywhere to print it instead. Judgment, not arithmetic: see this task's
+/// own non-goals for why no per-pipeline figure replaces it.
+const SIZING: &str = "Cut a reasonable number of tasks for the shape at hand, each routed to \
+                      one of the pipelines below. No arithmetic: judge the split by subject, \
+                      and keep each task's criteria under five bullets.";
+
 /// The whole task-document contract, printed as JSON by bare `spoolway task
 /// contract`.
 #[derive(Debug, serde::Serialize)]
 struct Contract {
     default: String,
+    sizing: &'static str,
     output: ContractOutput,
     keys: ContractKeys,
     set_rules: Vec<String>,
@@ -239,12 +260,19 @@ fn build_contract(repo: &Repo, pipelines: &Pipelines) -> Contract {
         .map(|(name, pipeline)| {
             let longest = super::queue::longest_agent_step(pipeline);
             let body = crate::task_template::resolve(repo, pipeline.task_template_name());
+            let last_of_chain = pipeline
+                .steps
+                .iter()
+                .find(|step| step.last)
+                .map(|step| step.id.clone());
             (
                 name.clone(),
                 PipelineContract {
                     longest_agent_step: longest.to_string(),
                     id_budget: id_budget(longest),
                     gate_at: pipeline.steps.iter().map(|s| s.id.clone()).collect(),
+                    last_of_chain,
+                    description: pipeline.description.clone(),
                     body,
                 },
             )
@@ -256,6 +284,7 @@ fn build_contract(repo: &Repo, pipelines: &Pipelines) -> Contract {
 
     Contract {
         default: pipelines.default.clone(),
+        sizing: SIZING,
         output: ContractOutput {
             verify: format!("spoolway task contract --from {pending}"),
             dir: pending,
@@ -506,6 +535,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(value["default"], Pipelines::builtin().default);
+        assert!(value["sizing"].is_string(), "{value}");
         assert!(value.get("keys").is_some());
         assert!(value.get("fields").is_some());
         assert!(value.get("pipelines").is_some());
@@ -524,6 +554,60 @@ mod tests {
             "{value}"
         );
         assert!(value["pipelines"]["default"]["body"].is_string(), "{value}");
+        assert!(
+            !value["pipelines"]["default"]
+                .as_object()
+                .unwrap()
+                .contains_key("window"),
+            "no per-pipeline `window` — a caller judges sizing by subject, not arithmetic: {value}"
+        );
+    }
+
+    /// The `title` field names every Conventional Commits type this project
+    /// actually uses — `assets/skills/*/spoolway-tasks/SKILL.md` hardcodes
+    /// the same nine today, and this is the one place a caller should be
+    /// able to read them from instead.
+    #[test]
+    fn title_field_names_all_nine_commit_types() {
+        let repo = fixture("contract-title-types");
+        let contract = build_contract(&repo, &Pipelines::builtin());
+        let title = contract.fields["title"];
+        for kind in [
+            "feat", "fix", "docs", "refactor", "perf", "test", "build", "ci", "chore",
+        ] {
+            assert!(
+                title.contains(kind),
+                "`title` should name the `{kind}` commit type: {title}"
+            );
+        }
+    }
+
+    /// Every pipeline carries its own `description:` and `last_of_chain` —
+    /// the two facts a caller otherwise has to open `pipeline show` for.
+    /// `last_of_chain` is `None` for a pipeline that marks no step
+    /// `last: true`, and the step's own id for one that does.
+    #[test]
+    fn pipeline_contract_carries_description_and_last_of_chain() {
+        let mut pipelines = Pipelines::builtin();
+        let with_last = pipelines.pipelines.get_mut("default").unwrap();
+        with_last.description = Some("a test pipeline".to_string());
+        let last_step_id = with_last.steps.first().unwrap().id.clone();
+        with_last.steps.first_mut().unwrap().last = true;
+
+        let repo = fixture("contract-last-of-chain");
+        let contract = build_contract(&repo, &pipelines);
+
+        let default_out = &contract.pipelines["default"];
+        assert_eq!(default_out.description.as_deref(), Some("a test pipeline"));
+        assert_eq!(
+            default_out.last_of_chain.as_deref(),
+            Some(last_step_id.as_str())
+        );
+
+        // `bugfix` marks no step `last: true` in this fixture — `None`
+        // rather than a made-up placeholder.
+        let bugfix_out = &contract.pipelines["bugfix"];
+        assert_eq!(bugfix_out.last_of_chain, None);
     }
 
     /// The contract names the directory a document is written to, and names

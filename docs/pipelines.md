@@ -77,7 +77,7 @@ task still open — see [Closing a plan out](planning.md#closing-a-plan-out).
 
 | Key | Default | Meaning |
 |---|---|---|
-| `description` | — | What this pipeline is for, in a few sentences — read to choose between pipelines |
+| `description` | — | What this pipeline is for, in one sentence — read to choose between pipelines |
 | `task_template` | the pipeline's own name, falling back to `default` | Which task skeleton a task queued here is written from |
 | `steps` | — | The flow, in order. The first one is where a task starts |
 
