@@ -32,11 +32,11 @@
 //! now, so the skill fetches them at runtime instead of carrying a copy that
 //! can drift from the binary that actually enforces the format.
 //!
-//! The plan skeleton is not installed by this module at all: `spoolway-plan`'s
-//! `assets: &[]` here names nothing, so a fresh project running `spoolway
-//! install` gets the skill's `SKILL.md` and no `assets/template.html` beside
-//! it. That skeleton lives at `assets/skills/claude/spoolway-plan/assets/` in
-//! this repository, and is not yet part of what this file ships.
+//! `spoolway-plan` is the exception that does carry assets: its skeleton and
+//! the markup reference beside it, both from
+//! `assets/skills/claude/spoolway-plan/assets/`. They ship rather than being
+//! fetched because there is no command that prints them — a plan page is not
+//! a format the binary enforces, so nothing can regenerate one at runtime.
 
 use std::path::{Path, PathBuf};
 
@@ -82,9 +82,19 @@ const SKILLS: &[Skill] = &[
         skill_md: include_str!("../assets/skills/claude/spoolway-plan/SKILL.md"),
         codex_skill_md: include_str!("../assets/skills/codex/spoolway-plan/SKILL.md"),
         pi_skill_md: include_str!("../assets/skills/pi/spoolway-plan/SKILL.md"),
-        // Names nothing: the skill's own skeleton is not yet part of what
-        // this file ships — see this module's header.
-        assets: &[],
+        // The skeleton the procedure's step 4 copies, and the markup
+        // reference it opens instead of reading the skeleton. Both are the
+        // Claude copy: neither names a provider's tools.
+        assets: &[
+            (
+                "template.html",
+                include_str!("../assets/skills/claude/spoolway-plan/assets/template.html"),
+            ),
+            (
+                "page.md",
+                include_str!("../assets/skills/claude/spoolway-plan/assets/page.md"),
+            ),
+        ],
     },
     // The task-cutting procedure `spoolway-plan`'s step 7 invokes, and any
     // second caller doing the same breakdown later. It has to be reachable
@@ -302,6 +312,8 @@ mod tests {
             let skills = root.join(parent).join(dir);
             let expected = vec![
                 skills.join("spoolway-plan").join("SKILL.md"),
+                skills.join("spoolway-plan").join("assets").join("template.html"),
+                skills.join("spoolway-plan").join("assets").join("page.md"),
                 skills.join("spoolway-tasks").join("SKILL.md"),
                 skills.join("spoolway-pipeline").join("SKILL.md"),
                 skills.join("spoolway-doctor").join("SKILL.md"),
@@ -432,6 +444,20 @@ mod tests {
                 assert!(
                     skill.assets.iter().any(|(file, _)| *file == "template.yml"),
                     "{} tells the agent to copy assets/template.yml but ships no such file",
+                    skill.name
+                );
+            }
+            if skill.skill_md.contains("assets/template.html") {
+                assert!(
+                    skill.assets.iter().any(|(file, _)| *file == "template.html"),
+                    "{} tells the agent to copy assets/template.html but ships no such file",
+                    skill.name
+                );
+            }
+            if skill.skill_md.contains("assets/page.md") {
+                assert!(
+                    skill.assets.iter().any(|(file, _)| *file == "page.md"),
+                    "{} tells the agent to open assets/page.md but ships no such file",
                     skill.name
                 );
             }
