@@ -431,7 +431,14 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
                 // promptly; without this guard the loop would keep taking
                 // that as a key, get `None` back from `read_key` every time,
                 // and spin the wait down to nothing for the rest of the run.
-                let mut listening = true;
+                //
+                // Never on where there is no raw mode to listen through: a
+                // cooked stdin answers `byte_pending` with `false` at once
+                // (see `RawStdin`), and starting out listening there would
+                // spin on that answer with no sleep in it. Off from the start,
+                // the wait is the plain sleep below and `read_key` is never
+                // reached (jobs review finding 8).
+                let mut listening = cfg!(unix);
                 let until = std::time::Instant::now() + interval;
                 while let Some(left) = until.checked_duration_since(std::time::Instant::now()) {
                     if crate::platform::stop::asked() {
@@ -570,6 +577,18 @@ pub(crate) fn check_git_identity(
         return Ok(None);
     };
 
+    // Asked the way a commit asks it. `git var` builds the identity from
+    // the environment first — `GIT_AUTHOR_NAME`, `GIT_COMMITTER_EMAIL`,
+    // `EMAIL` — then config, honouring `user.useConfigOnly`, and fails
+    // exactly when a commit would. A CI runner or container that supplies
+    // its identity that way has no `user.name` to read and every commit
+    // succeeds; `git config` alone refused it.
+    if repo.git(&["var", "GIT_AUTHOR_IDENT"]).is_ok()
+        && repo.git(&["var", "GIT_COMMITTER_IDENT"]).is_ok()
+    {
+        return Ok(None);
+    }
+
     let missing: Vec<&str> = ["user.name", "user.email"]
         .into_iter()
         .filter(|key| {
@@ -580,7 +599,15 @@ pub(crate) fn check_git_identity(
         })
         .collect();
     if missing.is_empty() {
-        return Ok(None);
+        // Both keys read back, and git still cannot build an identity from
+        // them — `user.useConfigOnly` with a value git rejects, say. Git's
+        // own words are the ones to act on.
+        return Err(anyhow::Error::new(Refusal {
+            reason: format!("git cannot build a commit identity, and {reason}"),
+            fix: "the first commit would fail. Run `git var GIT_COMMITTER_IDENT` in the \
+                  checkout to see what git objects to, and fix that"
+                .to_string(),
+        }));
     }
 
     let (verb, pronoun) = match missing.len() {

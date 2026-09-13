@@ -233,6 +233,11 @@ fn relaunch(repo: &Repo) -> Vec<String> {
 /// Split out from [`run`] so that `spoolway doctor` can ask the same question
 /// without printing anything — which is where a [`Outcome::Blocked`] surfaces,
 /// now that the report itself is only paths.
+/// The `detail` a [`Outcome::Wrote`] carries for a file that was not there
+/// at all — named so `doctor` can tell one apart from a file that was there
+/// and out of date, which is a different thing to advise about.
+pub const MISSING: &str = "was missing";
+
 pub fn scan(repo: &Repo, args: &UpdateArgs) -> Result<Vec<Outcome>> {
     let mut outcomes = Vec::new();
     ignores(repo, args, &mut outcomes)?;
@@ -298,7 +303,7 @@ fn config(repo: &Repo, args: &UpdateArgs, outcomes: &mut Vec<Outcome>) -> Result
             if !args.dry_run {
                 repo.config.save(&repo.root)?;
             }
-            outcomes.push(Outcome::wrote(&shown, "was missing"));
+            outcomes.push(Outcome::wrote(&shown, MISSING));
             return Ok(());
         }
         Err(err) => {
@@ -411,7 +416,7 @@ fn templates(repo: &Repo, args: &UpdateArgs, outcomes: &mut Vec<Outcome>) -> Res
                 if !args.dry_run {
                     write_atomic(&path, skeleton.shipped)?;
                 }
-                outcomes.push(Outcome::wrote(&shown, "was missing"));
+                outcomes.push(Outcome::wrote(&shown, MISSING));
                 continue;
             }
             Err(err) => {

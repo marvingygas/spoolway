@@ -341,6 +341,9 @@ fn run() -> Result<()> {
                 Command::Queue {
                     command: Some(QueueCommand::Resume { task }),
                 } => commands::queue_resume(&repo, routing(&graph)?, task),
+                Command::Queue {
+                    command: Some(QueueCommand::Remove { task }),
+                } => commands::queue_remove(&repo, routing(&graph)?, task),
 
                 // `cwd`, for the same reason `queue add` reads it: `--from`
                 // resolves `base` the same way, and the cross-base rule it

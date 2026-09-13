@@ -766,20 +766,30 @@ mod tests {
     fn table_age_uses_the_refreshed_date_and_falls_back_as_a_whole_file() {
         let home = fixture_home("models-table-age");
         crate::platform::test_home::with_home(&home, || {
-            let today = NaiveDate::from_ymd_opt(2026, 9, 10).unwrap();
+            // Read off the vendored table rather than written in: that file
+            // is refreshed on release days, and a date spelled out here
+            // would fail every time it was — the behaviour under test is the
+            // fallback, not which day the fallback happens to name.
+            let vendored = builtin_file().generated;
+            let today = vendored + chrono::Duration::days(32);
             assert_eq!(
                 price_table_age_at(today),
                 PriceTableAge {
-                    generated: NaiveDate::from_ymd_opt(2026, 8, 9).unwrap(),
+                    generated: vendored,
                     days: 32,
                 }
             );
 
-            write_refreshed_generated(&home, "2026-09-01", serde_json::json!({}));
+            let refreshed = today - chrono::Duration::days(9);
+            write_refreshed_generated(
+                &home,
+                &refreshed.format("%Y-%m-%d").to_string(),
+                serde_json::json!({}),
+            );
             assert_eq!(
                 price_table_age_at(today),
                 PriceTableAge {
-                    generated: NaiveDate::from_ymd_opt(2026, 9, 1).unwrap(),
+                    generated: refreshed,
                     days: 9,
                 }
             );

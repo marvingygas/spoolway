@@ -33,6 +33,7 @@ pub fn add(repo: &Repo, id: &str, depends_on: &[&str]) {
 
     let args = QueueAddArgs {
         from: vec![path.display().to_string()],
+        dry_run: false,
     };
     queue_add(repo, &Pipelines::builtin(), &args, &repo.root, false)
         .unwrap_or_else(|e| panic!("queueing {id}: {e:#}"));

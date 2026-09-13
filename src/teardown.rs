@@ -376,11 +376,23 @@ impl<'a> Dispatcher<'a> {
     /// just some `refs/remotes/*` ref, the way `sweep_orphaned_branches`
     /// below reads the same question for a branch this check already kept.
     ///
-    /// A git failure here — no such branch, a corrupt ref, a repository with
-    /// no remote at all — reads as "not pushed" rather than propagating: this
-    /// gates whether the only copy of a task's work gets deleted, so the safe
-    /// side of any doubt is to keep it.
+    /// A repository with no remote at all is the one case the question does
+    /// not apply to: `--remotes` matches nothing there, so every commit would
+    /// read as unpushed, a local-only project would keep one `task/…` branch
+    /// per finished task forever, and the advice on the problem line — push
+    /// it — is one nobody can follow. With nowhere to push to, "pushed" is
+    /// not a state the branch can ever reach; 0.1.0 deleted it after
+    /// archiving, and so does this, without a problem line, since there is
+    /// nothing for anyone to do about it (lifecycle review finding 7).
+    ///
+    /// A git failure otherwise — no such branch, a corrupt ref — reads as
+    /// "not pushed" rather than propagating: this gates whether the only
+    /// copy of a task's work gets deleted, so the safe side of any doubt is
+    /// to keep it.
     fn branch_fully_pushed(&self, branch: &str) -> bool {
+        if !self.repo.has_remote() {
+            return true;
+        }
         match self.repo.git(&["rev-list", branch, "--not", "--remotes"]) {
             Ok(unpushed) => unpushed.trim().is_empty(),
             Err(_) => false,
@@ -610,8 +622,25 @@ impl<'a> Dispatcher<'a> {
                 .unwrap_or_default();
             self.record_usage(&record, task.id(), &step_id, Some(task), &pipeline);
 
-            task.launch_landed();
-            task.save()?;
+            // Under the task's own lock, and against a fresh read rather
+            // than the copy taken at the top: the lane this forgives is
+            // still running, and a stop is exactly the moment its own
+            // `spoolway report` can land — `record_usage` above harvests a
+            // whole transcript first, which is long enough for one to. The
+            // same reload `persist_task` does in `src/dispatch.rs`, so a
+            // report that landed in between is what gets written back, with
+            // the forgiveness applied on top of it rather than instead.
+            let lock = crate::lock::TaskLock::acquire(&self.repo.task_lock_file(task.id()));
+            if lock.is_err() {
+                crate::problem_log::append(
+                    self.repo,
+                    &format!("{}: task lock still held, saving without it", task.id()),
+                );
+            }
+            let mut fresh = Task::load(&task.path).unwrap_or_else(|_| task.clone());
+            fresh.launch_landed();
+            fresh.save()?;
+            drop(lock);
             left_standing += 1;
         }
 

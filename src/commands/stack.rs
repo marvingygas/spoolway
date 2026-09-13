@@ -1058,6 +1058,7 @@ mod tests {
             &Pipelines::builtin(),
             &QueueAddArgs {
                 from: vec![path.display().to_string()],
+                dry_run: false,
             },
             &repo.root,
             false,

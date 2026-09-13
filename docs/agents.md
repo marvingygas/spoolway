@@ -56,7 +56,7 @@ Which steps run on which profile is the pipeline's business now — see
 | `permission_mode` | kind's own first, strongest-unattended mode; **absent** on a kind with none | Whether this kind's lanes stop and ask about a tool call. Holds the mode a lane is actually started with — `claude` ships `"auto"`, `codex` ships `"never"` — never a placeholder for one; a blank is refused by `spoolway config set` and never reaches `Config::load` |
 
 A profile no longer carries `model`, `context_window`, `args`, `sandbox`, `sandbox_extension`,
-`env`, `session_reuse_uncached` or `quota_ceiling`. A profile running several steps could only ever name one
+`env` or `session_reuse_uncached`. A profile running several steps could only ever name one
 model for all of them, which is exactly the problem naming it per step fixes; every flag `args`
 ever held was spoolway addressing its own CLI with paths and ids only spoolway computes, not a
 project's to hand-tune — see [The argument template](#the-argument-template); the two sandbox

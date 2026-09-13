@@ -605,7 +605,11 @@ impl<'a> Dispatcher<'a> {
     /// The lock is held only around the reload check and the write — never
     /// across a multiplexer call, which every caller already sequences
     /// before or after its own `persist`.
-    fn persist(&self, task: &mut Task) -> Result<()> {
+    ///
+    /// Answers whether the write happened: `false` when a report landing
+    /// mid-pass had it dropped, for the one caller that has already changed
+    /// something else on the strength of it — see [`Self::reap_stale_runs`].
+    fn persist(&self, task: &mut Task) -> Result<bool> {
         persist_task(self.repo, task, &self.report_seen)
     }
 
@@ -886,8 +890,14 @@ impl<'a> Dispatcher<'a> {
                 // reach the task wherever this pass finds it, even a step it
                 // is only halfway through; the loop re-reads the stage on
                 // `continue`, same as the `FallThrough::To` arm below.
-                if self.reap_stale_runs(&mut tasks[index], &pipeline, report) {
-                    self.persist(&mut tasks[index])?;
+                if let Some(key) = self.reap_stale_runs(&mut tasks[index], &pipeline, report) {
+                    // The exit code goes only once the move is written: a
+                    // write `persist` dropped leaves the task where the lane's
+                    // own report put it, and the next pass reads the code
+                    // again against that.
+                    if self.persist(&mut tasks[index])? {
+                        crate::command_step::Runs::new(&self.repo.commands_dir()).forget(&key);
+                    }
                     continue;
                 }
 
@@ -2702,7 +2712,8 @@ impl<'a> Dispatcher<'a> {
         // here is told what actually happened rather than `park_prompt`'s
         // "nothing changed".
         crate::status::park(task, reason, true);
-        self.persist(task)
+        self.persist(task)?;
+        Ok(())
     }
 
     /// Count one launch of `step` that could not even start, and say whether
@@ -3603,13 +3614,22 @@ impl<'a> Dispatcher<'a> {
     /// keeps behaving exactly as it always has — its exit code is left
     /// unread, the same as a run still going or one that passed.
     ///
-    /// Answers whether it moved the task, which happens for at most one run
-    /// per call: rerouting changes what step counts as "the one it is sitting
-    /// on", so a second failure found in the same call is left for the pass
-    /// that follows to pick up against the new stage.
-    fn reap_stale_runs(&self, task: &mut Task, pipeline: &Pipeline, report: &mut Report) -> bool {
+    /// Answers the run key it moved the task on, which happens for at most
+    /// one run per call: rerouting changes what step counts as "the one it
+    /// is sitting on", so a second failure found in the same call is left
+    /// for the pass that follows to pick up against the new stage. The exit
+    /// code behind that key is left on disk for the caller to forget once
+    /// the move has actually been written — `persist` drops its write when
+    /// a report landed mid-pass, and an exit code forgotten before that is a
+    /// failure nothing will ever route on again.
+    fn reap_stale_runs(
+        &self,
+        task: &mut Task,
+        pipeline: &Pipeline,
+        report: &mut Report,
+    ) -> Option<String> {
         if self.dry_run {
-            return false;
+            return None;
         }
         let runs = crate::command_step::Runs::new(&self.repo.commands_dir());
         // A key is `<task> · <step>` — see `crate::command_step::Runs::key`.
@@ -3646,12 +3666,11 @@ impl<'a> Dispatcher<'a> {
                     let Some(destination) = step.on_fail.clone() else {
                         continue;
                     };
-                    // Read once and cleared, the same discipline
-                    // `run_command`'s own `Exited` arm keeps: without it a
-                    // step that comes back round to `step_id` later would
-                    // read this stale code and route on it again with
-                    // nothing new having run.
-                    runs.forget(&key);
+                    // Read once and cleared — by the caller, once the move
+                    // is on disk — the same discipline `run_command`'s own
+                    // `Exited` arm keeps: without it a step that comes back
+                    // round to `step_id` later would read this stale code
+                    // and route on it again with nothing new having run.
                     report.actions.push(format!(
                         "{}: `{step_id}` (background) exited {code} — moving to `{destination}`",
                         task.id()
@@ -3665,12 +3684,12 @@ impl<'a> Dispatcher<'a> {
                         crate::commands::set_blocked_from(task, &stopped_on);
                     }
                     task.set_stage(&destination, None);
-                    return true;
+                    return Some(key);
                 }
                 _ => {}
             }
         }
-        false
+        None
     }
 
     /// Move a task to the blocked step and tell a person about it — or, in an
@@ -3958,8 +3977,9 @@ pub const ENV_SESSION: &str = "SPOOLWAY_SESSION";
 /// have no `self` to reach the pass's `report_seen` through. Same rule: take
 /// the task's per-task lock, and skip the write when a lane's `spoolway
 /// report` has advanced `last_report` past what this pass first read — the
-/// lost-update review finding 2 guards against.
-fn persist_task(repo: &Repo, task: &mut Task, report_seen: &HashMap<String, i64>) -> Result<()> {
+/// lost-update review finding 2 guards against. `Ok(false)` is that dropped
+/// write; `Ok(true)` is a save that reached the disk.
+fn persist_task(repo: &Repo, task: &mut Task, report_seen: &HashMap<String, i64>) -> Result<bool> {
     // Bound to a name, not discarded: an `Ok` holds the lock in it until
     // this function returns, which is what keeps the reload check and the
     // write below atomic against a lane's `spoolway report`.
@@ -3978,9 +3998,10 @@ fn persist_task(repo: &Repo, task: &mut Task, report_seen: &HashMap<String, i64>
         .and_then(|disk| disk.front.last_report.map(|report| report.at))
         .unwrap_or(0);
     if disk_at > report_seen.get(task.id()).copied().unwrap_or(0) {
-        return Ok(());
+        return Ok(false);
     }
-    task.save()
+    task.save()?;
+    Ok(true)
 }
 
 /// Create the task's worktree if it has none, start its agent in that pane,
@@ -6370,6 +6391,12 @@ mod tests {
     #[test]
     fn a_branch_with_unpushed_commits_survives_its_own_tasks_archiving() {
         let repo = fixture("cleanup-branch-unpushed");
+        // A remote to have pushed to. The fixture has none, and with none
+        // "unpushed" is not a state at all — see the two tests below — so
+        // one is named here, never fetched from: nothing under `task/demo`
+        // is on it.
+        let origin = repo.root.display().to_string();
+        crate::repo::run(&repo.root, "git", &["remote", "add", "origin", &origin]).unwrap();
         crate::repo::run(&repo.root, "git", &["branch", "task/demo"]).unwrap();
         let path = add_task(&repo, "demo", "implement");
         let mut task = reload(&path);
@@ -6396,6 +6423,97 @@ mod tests {
                 .any(|p| p.contains("demo") && p.contains("task/demo")),
             "and the reason is recorded on the run's problem list, naming the \
              task and the branch: {:?}",
+            report.problems
+        );
+    }
+
+    /// The one repository the check above does not apply to: with no remote
+    /// at all, `--remotes` matches nothing, so every commit would read as
+    /// unpushed and a local-only project would keep one `task/…` branch per
+    /// finished task forever, each with a problem line advising a push there
+    /// is nowhere to make. 0.1.0 deleted the branch after archiving; so does
+    /// this, and nothing lands on the problem list (lifecycle review
+    /// finding 7).
+    #[test]
+    fn with_no_remote_a_finished_tasks_branch_goes_with_its_archive() {
+        let repo = fixture("cleanup-branch-no-remote");
+        assert!(!repo.has_remote(), "the fixture is local-only");
+        repo.git(&["checkout", "-q", "-b", "task/demo"]).unwrap();
+        repo.git(&["commit", "-q", "--allow-empty", "-m", "demo"])
+            .unwrap();
+        repo.git(&["checkout", "-q", "work"]).unwrap();
+        let path = add_task(&repo, "demo", "implement");
+        let mut task = reload(&path);
+        task.front.workspace_id = Some("w1".into());
+        task.front.branch = Some("task/demo".into());
+        task.save().unwrap();
+
+        let mux = FakeMux::new(vec![]);
+        let mut report = Report::default();
+        Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
+            .clean_up(&mut task, &[], &mut report)
+            .unwrap();
+
+        assert!(
+            !has_branch(&repo, "task/demo"),
+            "nowhere to push to, so nothing to keep the branch for"
+        );
+        assert!(
+            !report
+                .problems
+                .iter()
+                .any(|p| p.contains("branch") || p.contains("remote")),
+            "nothing for anyone to do, so nothing to say: {:?}",
+            report.problems
+        );
+    }
+
+    /// The orphan sweep asks the same question and gets the same answer: a
+    /// branch retained for a queued dependent is freed by the next cleanup
+    /// once nothing names it, without a push ever having been possible.
+    #[test]
+    fn with_no_remote_the_orphan_sweep_frees_a_retained_branch() {
+        let repo = fixture("branch-freed-no-remote");
+        assert!(!repo.has_remote(), "the fixture is local-only");
+        repo.git(&["checkout", "-q", "-b", "task/first"]).unwrap();
+        repo.git(&["commit", "-q", "--allow-empty", "-m", "first"])
+            .unwrap();
+        repo.git(&["checkout", "-q", "work"]).unwrap();
+
+        let first = add_task_with(&repo, "first", "done", |f| {
+            f.branch = Some("task/first".into());
+        });
+        let second = add_task_with(&repo, "second", "done", |f| {
+            f.branch = Some("task/second".into());
+            f.depends_on = vec!["first".into()];
+        });
+
+        let mux = FakeMux::new(vec![]);
+        let pipelines = Pipelines::builtin();
+        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux, false);
+        let mut report = Report::default();
+
+        dispatcher
+            .clean_up(&mut reload(&first), &[], &mut report)
+            .unwrap();
+        assert!(
+            has_branch(&repo, "task/first"),
+            "`second` is still queued and has not been cut from it yet"
+        );
+
+        dispatcher
+            .clean_up(&mut reload(&second), &[], &mut report)
+            .unwrap();
+        assert!(
+            !has_branch(&repo, "task/first"),
+            "nothing queued needs it, and there is no remote to have pushed it to"
+        );
+        assert!(
+            !report
+                .problems
+                .iter()
+                .any(|p| p.contains("branch") || p.contains("remote")),
+            "{:?}",
             report.problems
         );
     }
@@ -6437,6 +6555,10 @@ mod tests {
     #[test]
     fn an_unpushed_branch_is_freed_once_pushed_by_the_next_cleanups_sweep() {
         let repo = fixture("cleanup-branch-unpushed-then-pushed");
+        // A remote to have pushed to, never fetched from — as in
+        // `a_branch_with_unpushed_commits_survives_its_own_tasks_archiving`.
+        let origin = repo.root.display().to_string();
+        crate::repo::run(&repo.root, "git", &["remote", "add", "origin", &origin]).unwrap();
         crate::repo::run(&repo.root, "git", &["branch", "task/first"]).unwrap();
         let first = add_task(&repo, "first", "implement");
         let mut first_task = reload(&first);
@@ -12342,9 +12464,17 @@ mod tests {
             worktree.to_str().unwrap(),
         ])
         .unwrap();
-        // Uncommitted work in the tree — with `auto_commit` off this is
-        // `AutoCommit::Unrecorded`, which holds the cleanup at `blocked`.
-        std::fs::write(worktree.join("scratch.txt"), "unsaved\n").unwrap();
+        // Uncommitted work in the tree — a tracked file changed, which with
+        // `auto_commit` off is `AutoCommit::Unrecorded` and holds the
+        // cleanup at `blocked`. (An untracked leftover alone is residue.)
+        std::fs::write(worktree.join("tracked.txt"), "as committed\n").unwrap();
+        for args in [
+            vec!["add", "tracked.txt"],
+            vec!["commit", "-q", "-m", "tracked"],
+        ] {
+            crate::repo::run(&worktree, "git", &args).unwrap();
+        }
+        std::fs::write(worktree.join("tracked.txt"), "unsaved\n").unwrap();
 
         let path = add_task_with(&repo, "demo", "done", |f| {
             f.workspace_id = Some("w1".into());
@@ -13230,9 +13360,17 @@ mod tests {
             &mut report,
         );
 
-        assert!(
-            rerouted,
-            "a non-zero exit with on_fail declared must reroute the task"
+        assert_eq!(
+            rerouted.as_deref(),
+            Some(key.as_str()),
+            "a non-zero exit with on_fail declared must reroute the task, naming the run \
+             whose exit code the caller forgets once the move is written"
+        );
+        assert_eq!(
+            runs.state(&key),
+            crate::command_step::RunState::Exited(1),
+            "the exit code outlives the reroute until the move is on disk — see lifecycle \
+             review finding 3"
         );
         assert_eq!(task.stage(), "blocked");
         assert_eq!(
@@ -13298,7 +13436,7 @@ mod tests {
         );
 
         assert!(
-            !rerouted,
+            rerouted.is_none(),
             "a zero exit must not move a task that already moved on"
         );
         assert_eq!(task.stage(), "review");

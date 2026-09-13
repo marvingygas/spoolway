@@ -861,12 +861,24 @@ fn last_record(kind_name: &str, path: &Path) -> Option<serde_json::Value> {
     let end = file.seek(SeekFrom::End(0)).ok()?;
     let start = end.saturating_sub(64 * 1024);
     file.seek(SeekFrom::Start(start)).ok()?;
-    let mut raw = String::new();
-    file.read_to_string(&mut raw).ok()?;
-    // A tail that began mid-line has an unparseable first line, which
-    // `find_map` skips the same as any other; the last parseable line is the
-    // record wanted.
-    raw.lines()
+    let mut raw = Vec::new();
+    file.read_to_end(&mut raw).ok()?;
+    // A tail that began mid-line is discarded up to and including its first
+    // newline: that line is unparseable anyway, and a tail that begins
+    // mid-*character* — an em dash straddling the boundary — would have had
+    // `read_to_string` refuse the whole buffer over its first byte, reading
+    // as "no record" and so "not aborted" for a lane a person interrupted.
+    // A tail that is the whole file starts on a line and keeps it all. The
+    // last parseable line of what is left is the record wanted.
+    let skip = match start {
+        0 => 0,
+        _ => raw
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(raw.len(), |at| at + 1),
+    };
+    String::from_utf8_lossy(&raw[skip..])
+        .lines()
         .rev()
         .find_map(|line| serde_json::from_str(line).ok())
 }
@@ -1714,10 +1726,18 @@ pub fn read_cached(repo: &Repo) -> std::sync::Arc<Vec<Entry>> {
         }
     }
 
-    let entries = std::sync::Arc::new(read_at(&path).unwrap_or_default());
+    // The length is what the read actually consumed, not the `stat` taken
+    // before it: a line the dispatcher appends while a multi-megabyte ledger
+    // is being parsed is in `entries` already, and a shorter recorded
+    // length would have the next call re-read it as new tail and carry the
+    // duplicate for the life of the process (release review finding 4).
+    // The mtime stays the pre-read one — a write that lands between the two
+    // costs one full re-read, never a duplicate.
+    let (entries, len) = read_tail(&path, 0).unwrap_or_default();
+    let entries = std::sync::Arc::new(entries);
     *guard = Some(LedgerCache {
         path,
-        len: len_now,
+        len,
         mtime: mtime_now,
         ino: ino_now,
         entries: std::sync::Arc::clone(&entries),
@@ -2702,6 +2722,44 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// The 64 KiB tail `last_record` reads can begin one byte into a
+    /// multi-byte character — em dashes and curly quotes are routine in a
+    /// transcript — and a `read_to_string` of that buffer fails whole,
+    /// answering "no record" for a transcript that ends in one (release
+    /// review finding 3). The partial first line is dropped as bytes before
+    /// anything is read as text.
+    #[test]
+    fn last_record_survives_a_tail_that_starts_inside_a_multi_byte_character() {
+        let dir = crate::scratch::root("usage-last-record-mid-char");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("transcript.jsonl");
+        let last = r#"{"type":"marker","text":"the last record"}"#;
+        let dashes = "—".repeat(30_000);
+        // A filler line after the dashes, sized so the tail's first byte
+        // lands inside one of them rather than on a dash boundary.
+        let mut fill = 0;
+        let end = loop {
+            let end = dashes.len() + 1 + fill + 1 + last.len() + 1;
+            if !(end - 64 * 1024).is_multiple_of(3) {
+                break end;
+            }
+            fill += 1;
+        };
+        std::fs::write(&path, format!("{dashes}\n{}\n{last}\n", "x".repeat(fill))).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(bytes.len(), end);
+        assert!(
+            std::str::from_utf8(&bytes[end - 64 * 1024..]).is_err(),
+            "the fixture's tail must start mid-character for this to prove anything"
+        );
+
+        assert_eq!(
+            last_record("claude", &path),
+            Some(serde_json::from_str(last).unwrap())
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A kind spoolway does not even know carries no marker at all — see

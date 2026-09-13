@@ -156,10 +156,15 @@ task](tasks.md#queueing-a-task) for the document's shape and the fields it may s
 | Flag | Meaning |
 |---|---|
 | `--from <PATH>` | A task document to queue: a file, a directory of `*.md` files (read in filename order — pointing it at `~/.spoolway/<project>/pending/` queues every document waiting there), or `-` for a `---`-separated stream on standard input. Repeatable — every document named across every `--from` is validated together and written all or none. Unlike the screen, this deletes nothing |
+| `--dry-run` | Validate the batch and say what would happen, writing nothing: the project root and home directory it resolved, the base branch, and every task that would be queued with the path it would land at. No task file is written and no ticket is opened. Requires `--from` |
 
 With no `--from` at all, this prints the project's default pipeline's skeleton document —
 frontmatter plus the pipeline's own body skeleton — for a person to save, fill in, and hand
 back through `--from`.
+
+`--dry-run` is the way to check where a batch would actually land before it lands there. It
+prints the project root and home directory it resolved to, which is what tells a checkout whose
+project was found correctly from one where it was not.
 
 With `[issue_tracking]` configured, this opens a ticket for every document in the batch before
 any of them is written — see [`open` — a fifth event, run by `queue
@@ -209,6 +214,20 @@ nothing live to interrupt. A running command step is refused rather than acted o
 What the board's `r` key does to one row, from a script: send it past a gate it finished, or
 back onto the step a park or a block pulled it off of. Exactly `spoolway resume <task>` with
 no other flags.
+
+### `spoolway queue remove <task>`
+
+Take a task out of the queue, carrying its document back to the pending directory the way the
+board's `u` key does. The document is kept, not deleted, so `queue add --from` can take it
+again once it has been fixed.
+
+Only a task on `queued`, `paused` or `blocked` with nothing in flight can be removed. A task
+with a live agent lane, a running command step, or a worktree cut for it is refused, and the
+error names the command that stops that thing first. Nothing is killed and no worktree is
+removed on a script's say-so.
+
+A draft already sitting in the pending directory under the same name is not overwritten: the
+removal is refused instead, naming the file to move aside.
 
 ### `spoolway group list`
 

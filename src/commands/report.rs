@@ -595,9 +595,27 @@ pub fn auto_commit(
     }
 
     if !repo.config.dispatch.auto_commit {
+        // Residue or lost work is still a real question with the backstop
+        // off — the one place this answer is read is a cleanup about to
+        // remove the worktree. A tracked file modified or deleted is work
+        // a person would have to redo; a tree whose only leftovers are
+        // untracked — a lockfile, a `target/`, a generated file — is
+        // residue, and holding every such task at `blocked` (as 0.2.0's
+        // first cut did) sent each one back round its last agent step and
+        // `handover` for nothing. 0.1.0 archived these; so does this.
+        let tracked = dirty
+            .lines()
+            .filter(|l| !l.trim().is_empty() && !l.starts_with("??"))
+            .count();
+        if tracked == 0 {
+            return AutoCommit::Residue(format!(
+                "left {files} untracked file(s) behind — not committed, because \
+                 `dispatch.auto_commit` is off, and nothing tracked was changed"
+            ));
+        }
         return AutoCommit::Unrecorded(format!(
-            "left {files} uncommitted file(s) behind — not committed, because \
-             `dispatch.auto_commit` is off"
+            "left {files} uncommitted file(s) behind, {tracked} of them tracked — not \
+             committed, because `dispatch.auto_commit` is off"
         ));
     }
 
@@ -693,6 +711,21 @@ fn lane_committed(started_at: &str, head_now: &str) -> bool {
 /// nothing in exactly the case it exists for, so it skips `blocked` and lets the
 /// entry have it.
 pub fn resume_target(task: &Task, pipeline: &Pipeline) -> String {
+    // A task that never started — parked off `queued` by the board's `p`
+    // or `spoolway queue pause`, or held on `paused` by the tracking hook —
+    // has no step to go back to, and the entry is the wrong answer: it
+    // skips the dependency and hook gates only the `queued` arm applies, so
+    // a resumed task would be launched off a dependency still mid-work.
+    // Back onto `queued`, where it is gated like any other (jobs review
+    // finding 1). Nothing else leaves all four unset: a launch that failed
+    // records `blocked_from`, a lane that ran records a checkout.
+    if task.front.blocked_from.is_none()
+        && task.front.last_report.is_none()
+        && task.front.worktree_path.is_none()
+        && task.front.workspace_id.is_none()
+    {
+        return crate::pipeline::QUEUED.to_string();
+    }
     let known = |step: Option<&str>| {
         step.filter(|id| *id != crate::pipeline::BLOCKED)
             .filter(|id| pipeline.step(id).is_some())
@@ -1234,13 +1267,28 @@ mod tests {
         git(&["commit", "-qm", "seed"]);
         let head = crate::repo::run(&repo.root, "git", &["rev-parse", "HEAD"]).unwrap();
 
-        std::fs::write(repo.root.join("work"), "what the lane did").unwrap();
+        // A tracked file changed is work: held, not swept.
+        std::fs::write(repo.root.join("seed"), "what the lane did").unwrap();
         let outcome = auto_commit(&repo, &repo.root, head.trim(), "task-1", "implement");
         assert!(outcome.is_unrecorded(), "{outcome:?}");
         let note = outcome
             .note()
             .expect("the leftovers are still worth naming");
         assert!(note.contains("auto_commit` is off"), "{note}");
+
+        // Untracked leftovers alone are residue — lifecycle review finding
+        // 4: a lockfile or a build artefact must not hold a finished task at
+        // `blocked` with the backstop off, any more than it does with it on.
+        std::fs::write(repo.root.join("seed"), "seed").unwrap();
+        std::fs::write(repo.root.join("work.lock"), "generated").unwrap();
+        let outcome = auto_commit(&repo, &repo.root, head.trim(), "task-1", "implement");
+        assert!(!outcome.is_unrecorded(), "{outcome:?}");
+        assert!(
+            outcome
+                .note()
+                .is_some_and(|n| n.contains("untracked") && n.contains("auto_commit` is off")),
+            "{outcome:?}"
+        );
         assert_eq!(
             crate::repo::run(&repo.root, "git", &["rev-parse", "HEAD"])
                 .unwrap()
@@ -1547,7 +1595,9 @@ mod tests {
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "t"]);
-        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+        std::fs::write(repo.root.join("tracked"), "as committed").unwrap();
+        git(&["add", "tracked"]);
+        git(&["commit", "-q", "-m", "root"]);
         add(&repo, "dirtywork", &[]);
         let pipelines = work_pipelines();
 
@@ -1555,7 +1605,9 @@ mod tests {
         task.set_stage("work", None);
         task.save().unwrap();
 
-        std::fs::write(repo.root.join("left-behind"), "uncommitted").unwrap();
+        // A tracked file changed: work, not residue — an untracked leftover
+        // alone would be swept as residue, `auto_commit` off or on.
+        std::fs::write(repo.root.join("tracked"), "uncommitted").unwrap();
         let worktree = repo.root.to_str().unwrap().to_string();
 
         crate::platform::test_env::with_env("SPOOLWAY_WORKTREE", &worktree, || {
@@ -1753,11 +1805,21 @@ mod tests {
             "the last step that reported beats the entry"
         );
 
+        // A task that ran but never reported has nothing better than the
+        // entry; one that never ran at all goes back to `queued`, where the
+        // dependency and hook gates apply again (jobs review finding 1).
         task.front.last_report = None;
+        task.front.worktree_path = Some("/tmp/spoolway-fake-worktree".into());
         assert_eq!(
             resume_target(&task, pipeline),
             pipeline.entry(),
             "a task that never reported has nothing better than the entry"
+        );
+        task.front.worktree_path = None;
+        assert_eq!(
+            resume_target(&task, pipeline),
+            crate::pipeline::QUEUED,
+            "a task that never started is gated again, not launched off the entry"
         );
     }
 
@@ -2653,6 +2715,42 @@ mod tests {
             queued(&repo, "stuck").front.resume.as_deref(),
             Some("review")
         );
+    }
+
+    /// A task parked before it ever started — `p` on a `queued` row, which
+    /// records no `parked_from` — goes back onto `queued`, not the entry
+    /// step: it is the `queued` arm that applies the dependency and hook
+    /// gates, and a resume that lands past it launches the task off a
+    /// dependency still mid-work (jobs review finding 1).
+    #[test]
+    fn resuming_a_task_parked_off_queued_lands_it_back_on_queued() {
+        let repo = fixture("unpark-from-queued");
+        add(&repo, "stuck", &[]);
+
+        let mut task = queued(&repo, "stuck");
+        crate::status::park(&mut task, "paused from the board", false);
+        task.save().unwrap();
+        assert_eq!(
+            task.front.parked_from, None,
+            "what `park` leaves on `queued`"
+        );
+
+        resume(
+            &repo,
+            &Pipelines::builtin(),
+            &crate::cli::ResumeArgs {
+                task: "stuck".into(),
+                stage: None,
+                reject: false,
+                message: None,
+            },
+            false,
+        )
+        .unwrap();
+
+        let task = queued(&repo, "stuck");
+        assert_eq!(task.stage(), crate::pipeline::QUEUED);
+        assert_eq!(task.front.paused_at, None);
     }
 
     /// A bare `spoolway resume` on a `p`-parked task reaches `unpark`, not

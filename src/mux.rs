@@ -1052,7 +1052,8 @@ fn confirm_split(
         ),
         (Some(_), Some(_)) => bail!(
             "herdr pane split left more than one new pane behind — refusing to guess \
-             which one is `{reported}`"
+             which one is `{reported}`, so none of them was closed: close the one this \
+             split made by hand"
         ),
     };
     if confirmed != reported {
@@ -1541,7 +1542,25 @@ impl Mux for Herdr {
         // function of its own rather than living inline here.
         let list: PaneList = self.call(&["pane", "list"])?;
         let after = pane_ids_in_tab(&list, tab_id);
-        confirm_split(&before, &after, &reported)
+        match confirm_split(&before, &after, &reported) {
+            Ok(pane) => Ok(pane),
+            Err(err) => {
+                // The split itself already happened by the time a refusal
+                // is reached, and nothing upstream gets a pane id to close.
+                // Exactly one new pane is provably this split's own, so it
+                // is closed here rather than left as a bare shell in the
+                // project tab on every pass — three such passes park the
+                // task, each with an orphan behind it. With more than one,
+                // ownership is ambiguous and `confirm_split`'s own message
+                // says none was touched.
+                let mut appeared = after.difference(&before);
+                if let (Some(only), None) = (appeared.next(), appeared.next()) {
+                    let _ = self.close_pane(only);
+                    bail!("{err} — closed `{only}`, the pane this split left behind");
+                }
+                Err(err)
+            }
+        }
     }
 
     fn run_in_pane(
@@ -1836,7 +1855,15 @@ pub const DISPATCH_HOME_NAME: &str = ".dispatcher";
 /// beside it under `~/.spoolway/` — see [`project_home`] — and so that a name
 /// a checkout could plausibly have can never collide with it.
 pub fn dispatch_home() -> PathBuf {
-    home().join(".spoolway").join(DISPATCH_HOME_NAME)
+    state_root().join(DISPATCH_HOME_NAME)
+}
+
+/// `~/.spoolway/` itself: the one directory every project's home and the
+/// shared dispatch workspace sit under. Named once so that
+/// [`crate::repo::Repo::discover`]'s ancestor walk can refuse it by identity
+/// — it is a `.spoolway` directory, but never a project's.
+pub fn state_root() -> PathBuf {
+    home().join(".spoolway")
 }
 
 /// A project's own directory name, which is what its tab in the shared
@@ -1857,7 +1884,7 @@ pub fn project_label(root: &Path) -> String {
 /// this directory, which is exactly the clash `spoolway init` refuses —
 /// nothing here resolves that; it only names where the pointer file lives.
 pub fn project_home(root: &Path) -> PathBuf {
-    home().join(".spoolway").join(project_label(root))
+    state_root().join(project_label(root))
 }
 
 /// Where dispatched checkouts are cut, for both backends and every layout.

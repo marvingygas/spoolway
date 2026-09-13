@@ -217,7 +217,17 @@ mod tests {
         )
         .unwrap();
 
-        let repo = crate::repo::Repo::discover(&wt).unwrap();
+        // Discovery insists on the registration `spoolway init` writes, so
+        // the project is claimed under a scratch home of its own first —
+        // never under the real `~/.spoolway/`.
+        let home = base.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let home = home.canonicalize().unwrap();
+        let repo = crate::platform::test_home::with_home(&home, || {
+            super::init::claim(&root, false).unwrap();
+            crate::repo::Repo::discover(&wt)
+        })
+        .unwrap();
         assert_ne!(
             repo.checkout, repo.root,
             "the fixture is only useful if it actually lands in a linked worktree"

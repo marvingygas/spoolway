@@ -801,6 +801,11 @@ fn draw_jobs(
 /// Wait for the next key, redrawing on every idle poll slice so a resize or an
 /// edit from elsewhere lands without a keystroke. The list is re-read only
 /// while browsing — a half-typed draft must survive an idle tick.
+///
+/// A cooked stdin — no raw mode, no `poll` — reports nothing pending without
+/// waiting (see `RawStdin`), and is read straight away instead: blocking on
+/// the line the terminal will deliver is what this loop is for, where
+/// spinning on that answer would never read a key at all.
 fn jobs_wait_for_key(
     ctx: &Ctx,
     jobs: &mut Vec<Job>,
@@ -810,7 +815,7 @@ fn jobs_wait_for_key(
     out: &mut impl std::io::Write,
 ) -> Option<Key> {
     loop {
-        if input.byte_pending(crate::status::POLL) {
+        if !cfg!(unix) || input.byte_pending(crate::status::POLL) {
             return read_key(input);
         }
         if matches!(state.mode, JobMode::List) {
