@@ -418,6 +418,7 @@ mod tests {
     fn from_args(paths: &[&str]) -> QueueAddArgs {
         QueueAddArgs {
             from: paths.iter().map(|p| p.to_string()).collect(),
+            dry_run: false,
         }
     }
 

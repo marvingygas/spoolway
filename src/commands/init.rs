@@ -163,7 +163,7 @@ impl Answers {
 }
 
 /// The file naming which checkout a project's home directory belongs to.
-const PROJECT_FILE: &str = "project.toml";
+pub(crate) const PROJECT_FILE: &str = "project.toml";
 
 /// What a project's own home directory (`~/.spoolway/<name>/`) is pointed
 /// back at — see [`crate::mux::project_home`].
@@ -173,6 +173,27 @@ const PROJECT_FILE: &str = "project.toml";
 #[derive(Debug, Serialize, Deserialize)]
 struct ProjectPointer {
     root: PathBuf,
+}
+
+/// Whether `home` — a `~/.spoolway/<name>/` directory — has been claimed by
+/// an `init` at all. [`crate::repo::Repo::discover`] refuses to go on
+/// without this: every accessor under `Repo` creates its directory on
+/// demand, so a home nobody claimed is one a misread project root would
+/// otherwise conjure up, queue and all, without a word.
+pub(crate) fn registered(home: &Path) -> bool {
+    home.join(PROJECT_FILE).is_file()
+}
+
+/// The checkout `home`'s pointer names, if there is a readable one.
+///
+/// Read by discovery to tell a checkout that *is* a registered project on a
+/// branch without `.spoolway/` from a directory that was never one; a
+/// pointer that cannot be read is treated as no pointer here, because the
+/// only thing it decides is which error a person gets.
+pub(crate) fn pointer_root(home: &Path) -> Option<PathBuf> {
+    let raw = std::fs::read_to_string(home.join(PROJECT_FILE)).ok()?;
+    let pointer: ProjectPointer = toml::from_str(&raw).ok()?;
+    Some(pointer.root)
 }
 
 /// Claim this checkout's name under `~/.spoolway/`, or refuse it.
@@ -187,7 +208,7 @@ struct ProjectPointer {
 /// `.dispatcher` is refused outright, with no pointer file to disagree with —
 /// that name belongs to the shared dispatch workspace (see
 /// [`crate::mux::dispatch_home`]), not to any project.
-fn claim(root: &Path, take_over: bool) -> Result<Option<String>> {
+pub(crate) fn claim(root: &Path, take_over: bool) -> Result<Option<String>> {
     let name = crate::mux::project_label(root);
     if name == crate::mux::DISPATCH_HOME_NAME {
         bail!(

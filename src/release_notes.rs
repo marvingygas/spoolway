@@ -451,9 +451,22 @@ mod tests {
     fn digest_is_terminal_gated_and_keeps_migrations() {
         assert_eq!(update_digest("0.0.0", false).unwrap(), None);
         let digest = update_digest("0.0.0", true).unwrap().unwrap();
-        assert!(digest.contains("Updated spoolway 0.0.0 → 0.1.0"));
-        assert!(digest.contains("What's new — Deterministic agent pipelines arrive"));
-        assert!(digest.contains("Full notes: https://github.com/"));
+        // Against the installed version and its own section, rather than a
+        // version written in here: both move on release day, and a digest
+        // that upgrades to whatever this binary is is the thing under test.
+        let installed = Version::parse(crate::release::current()).unwrap();
+        let newest = parse(CHANGELOG)
+            .unwrap()
+            .into_iter()
+            .find(|release| release.version == installed)
+            .expect("the installed version has a changelog section");
+        assert!(digest.contains(&format!("Updated spoolway 0.0.0 → {installed}")));
+        // The theme, in whichever shape the range takes: one release names
+        // it after `What's new —`, several list it beside their version.
+        assert!(digest.contains(&newest.theme), "{digest}");
+        // The release URL is carried either way; only the line above it
+        // differs between the one-release and the several-release shape.
+        assert!(digest.contains(&newest.url), "{digest}");
 
         let releases = parse(TWO).unwrap();
         let one = digest_for(

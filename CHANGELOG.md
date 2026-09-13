@@ -17,6 +17,30 @@ the following contract so the binary can parse and replay them:
 The overview, theme, highlights, migrations, and release URL are public copy.
 Keep internal task bookkeeping out of them and describe user-visible outcomes.
 
+## 0.2.0 — A run you can leave alone
+
+Spoolway's second release is about what happens when nobody is watching: work arrives on a schedule, a stop leaves every lane standing, and one honest `paused` state replaces the several ways a task used to go quiet.
+
+### Highlights
+- Cron jobs run a routine on a schedule, with a screen to write one from and a catch-up pass so a window between two dispatcher passes is not missed.
+- Stopping a run no longer takes anything down: lanes, worktrees and branches stay exactly where they are, so a stop is a pause rather than a teardown.
+- Everything that holds a task for a person — a gate, a question, a park, a lane that went quiet — now reads as `paused` and resumes with one key.
+- `spoolway doctor` checks the project over and refuses to start a run that cannot succeed, naming the missing piece and the command that supplies it, alongside new `config`, `prompt`, `agent`, `group` and `whats-new` commands.
+- Model prices come from a layered table refreshed straight from litellm, so spend is priced against current rates rather than whatever shipped.
+
+### Breaking changes and migration
+- A project must be claimed by `spoolway init` before any other command will run in it. Earlier versions created the project's state directory silently on first use, which let a checkout on the wrong branch quietly adopt a directory belonging to something else. Run `spoolway init` once in each checkout you use; projects already initialised need nothing.
+- `spoolway handover` and `spoolway adopt` are gone. The work they did is carried by `spoolway stack` and the ordinary pipeline steps; remove any script that calls them.
+- `spoolway queue list --json` reports `"state": "paused"` where 0.1.0 reported `waiting_on_you`. Scripts matching on the old value need updating; the `next` field still says which kind of hold it is.
+- Retired settings are now dropped rather than refused: a config carrying `tear_lanes_on_stop` or `cleanup_on_stop`, or a pipeline step carrying `cleanup:`, loads with a note and is cleaned up on the next save.
+
+### Queueing
+- A task document may name its own `base:`, so one checkout can queue work against several long-lived branches. A document that leaves it out is still based on the branch the checkout has out.
+- `spoolway queue remove <task>` takes a task out of the queue and carries its document back to pending, refusing anything with a lane, a command step or a worktree still in flight.
+- `spoolway queue add --dry-run` validates a batch and prints the project, home directory and base it resolved without writing anything.
+
+Release: https://github.com/marvingygas/spoolway/releases/tag/v0.2.0
+
 ## 0.1.0 — Deterministic agent pipelines arrive
 
 Spoolway's first release turns multi-agent work into a local-first pipeline whose scheduling, isolation, and handoff rules remain explicit and inspectable.

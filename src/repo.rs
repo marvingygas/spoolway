@@ -52,6 +52,23 @@ impl Repo {
         let checkout = checkout_of(&start, &root, main.as_deref());
         let config = Config::load(&root)?;
         let home = crate::mux::project_home(&root);
+        // Refused here, once, rather than in every accessor that creates a
+        // directory under `home` on demand: a project nobody has run `init`
+        // in has no claim on `~/.spoolway/<name>/`, and a command that went
+        // on regardless would create that directory — queue, archive and
+        // all — for a checkout the name may not even belong to. `doctor`
+        // takes the same fact as a finding through `discover_lenient`, and a
+        // test fixture that sets `home` by hand never comes through here.
+        if !crate::commands::registered(&home) {
+            bail!(
+                "{} is not registered as a spoolway project: {} does not exist. Run \
+                 `spoolway init` in {} first, so that this checkout claims its state \
+                 directory before anything is written there.",
+                root.display(),
+                home.join(crate::commands::PROJECT_FILE).display(),
+                root.display(),
+            );
+        }
         Ok(Repo {
             root,
             checkout,
@@ -106,21 +123,52 @@ impl Repo {
     /// [`checkout_of`], so this makes no `git rev-parse` call that a caller
     /// has not already paid for.
     fn root(start: &Path, main: Option<&Path>) -> Result<PathBuf> {
-        main.filter(|dir| dir.join(crate::config::STATE_DIR).is_dir())
-            .map(Path::to_path_buf)
-            .or_else(|| {
-                start
-                    .ancestors()
-                    .find(|dir| dir.join(crate::config::STATE_DIR).is_dir())
-                    .map(Path::to_path_buf)
-            })
-            .or_else(|| git_toplevel(start).ok())
-            .with_context(|| {
-                format!(
-                    "no spoolway project found at or above {} (run `spoolway init` there first)",
-                    start.display()
-                )
-            })
+        if let Some(main) = main.filter(|dir| dir.join(crate::config::STATE_DIR).is_dir()) {
+            return Ok(main.to_path_buf());
+        }
+
+        // The walk stops at the checkout's own top. Left unbounded, it
+        // climbed out of the repository and on up to `$HOME`, where the
+        // global `~/.spoolway/` — every project's state, not a project's
+        // control plane — read as a `.spoolway` directory of its own, and a
+        // `queue add` run on a branch without `.spoolway/` silently queued
+        // into `~/.spoolway/<user>/`. Outside any repository there is no top
+        // to stop at, and the two identity checks below are what stand
+        // between the walk and that same directory.
+        let top = git_toplevel(start).ok();
+        let state_root = global_state_root();
+        let found = start
+            .ancestors()
+            .take_while(|dir| top.as_deref().is_none_or(|top| dir.starts_with(top)))
+            .filter(|dir| *dir != state_root && dir.join(crate::config::STATE_DIR) != state_root)
+            .find(|dir| dir.join(crate::config::STATE_DIR).is_dir());
+        if let Some(dir) = found {
+            return Ok(dir.to_path_buf());
+        }
+
+        // No `.spoolway/` anywhere in the checkout. That used to fall back to
+        // the toplevel with a default config, which is how a checkout on the
+        // wrong branch became a project with no files in it. Two answers now,
+        // both errors: a checkout that *is* a registered project has its
+        // `.spoolway/` on some other branch, and is told so by name; anything
+        // else was never initialised.
+        if let Some(top) = top.as_deref() {
+            let project = main.unwrap_or(top);
+            if let Some(pointer) = crate::commands::pointer_root(&crate::mux::project_home(project))
+                && (pointer == project || pointer == top)
+            {
+                bail!(
+                    "{} is a spoolway project, but `.spoolway/` is not on branch `{}` — check \
+                     out a branch that carries it, or run `spoolway init` here",
+                    top.display(),
+                    branch_or_detached(top),
+                );
+            }
+        }
+        bail!(
+            "no spoolway project found at or above {} (run `spoolway init` there first)",
+            start.display()
+        )
     }
 
     /// Whether work here stops for a person: what the run in progress was
@@ -425,18 +473,46 @@ impl Repo {
     /// failure that surfaces at the dependent's worktree cut rather than here,
     /// where the name was chosen.
     ///
-    /// A dependency whose task cannot be loaded is an error that names the
-    /// dependency, not a `task/<dep_id>` guess handed on to a cut that then
-    /// fails over a ref nobody can place.
+    /// A dependency whose task file is there but cannot be loaded is an
+    /// error that names the dependency, not a `task/<dep_id>` guess handed
+    /// on to a cut that then fails over a ref nobody can place. A file that
+    /// is *gone* is different: the branch may well still be there, and it is
+    /// asked for by its default name before this gives up — see the body.
     pub fn dependency_branch(&self, dep_id: &str) -> Result<String> {
-        // The wrapped error from [`Repo::task`] already says whether the file
-        // is missing or fails to parse; this only adds why it matters and
-        // what to do, without asserting which of the two it was.
+        let file = format!("{dep_id}.md");
+        let on_disk = [self.queue_dir(), self.archive_dir()]
+            .iter()
+            .any(|dir| dir.join(&file).exists());
+        if !on_disk {
+            // `retain` sweeps the archive purely by age, with no regard for a
+            // queued dependent still naming the swept task — so a dependent
+            // parked for longer than `retention.days` comes back to find its
+            // dependency's file gone while the branch it has to be cut from
+            // is still there. The file only said which branch that was. A
+            // prefixed `task/<slug>-<id>` cannot be rebuilt without it, but
+            // the default can, so that one is asked for, and this refuses
+            // only when it does not exist either (lifecycle review finding 5).
+            let branch = task::default_branch(dep_id);
+            let full = format!("refs/heads/{branch}");
+            if self
+                .git(&["rev-parse", "--verify", "--quiet", &full])
+                .is_ok()
+            {
+                return Ok(branch);
+            }
+            bail!(
+                "The branch of dependency `{dep_id}` could not be resolved: its task file is \
+                 in neither this project's queue nor its archive, and no `{branch}` branch \
+                 exists. Add its task file back to the queue or archive before running a \
+                 task that depends on it."
+            );
+        }
+        // The wrapped error from [`Repo::task`] already says how the file
+        // fails to parse; this only adds why it matters and what to do.
         let dep = self.task(dep_id).with_context(|| {
             format!(
-                "The branch of dependency `{dep_id}` could not be resolved. Add its task file \
-                 to this project's queue or archive, or repair it if it is already there, \
-                 before running a task that depends on it."
+                "The branch of dependency `{dep_id}` could not be resolved. Repair its task \
+                 file before running a task that depends on it."
             )
         })?;
         Ok(dep
@@ -636,6 +712,24 @@ pub fn branch_at(dir: &Path) -> Result<String> {
     Ok(branch)
 }
 
+/// `~/.spoolway/` in the spelling `Repo::root`'s canonicalized `start`
+/// compares against — resolved when it exists, as given when it does not,
+/// since then no ancestor can equal it either way.
+fn global_state_root() -> PathBuf {
+    let dir = crate::mux::state_root();
+    dir.canonicalize().unwrap_or(dir)
+}
+
+/// The branch `dir` has out, for an error message only: `branch_at` refuses
+/// a detached HEAD with advice of its own, and the message this feeds wants
+/// to name what is checked out rather than stop on it.
+fn branch_or_detached(dir: &Path) -> String {
+    match run(dir, "git", &["branch", "--show-current"]) {
+        Ok(branch) if !branch.trim().is_empty() => branch.trim().to_string(),
+        _ => "(detached HEAD)".to_string(),
+    }
+}
+
 fn git_toplevel(dir: &Path) -> Result<PathBuf> {
     let out = run(dir, "git", &["rev-parse", "--show-toplevel"])?;
     // The same spelling rule as `main_checkout`: git's answer, in the form
@@ -670,6 +764,34 @@ mod tests {
 
     fn git(dir: &Path, args: &[&str]) -> String {
         run(dir, "git", args).unwrap_or_else(|e| panic!("git {args:?} in {dir:?}: {e:#}"))
+    }
+
+    /// A scratch `$HOME`, canonicalized the way `Repo::root` canonicalizes
+    /// the path it walks up from, so a `.spoolway` planted under it compares
+    /// equal to what discovery sees.
+    fn scratch_home(name: &str) -> PathBuf {
+        let home = crate::scratch::root(&format!("repo-test-home-{name}"));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        home.canonicalize().unwrap()
+    }
+
+    /// `Repo::discover`, on a checkout `spoolway init` has claimed under a
+    /// scratch home of its own — the one registration discovery insists on,
+    /// written the way `init` writes it, and never into the real
+    /// `~/.spoolway/`.
+    fn discover_registered(work: &Path) -> Result<Repo> {
+        discover_registered_as(work, work)
+    }
+
+    /// The same, started from `start` — a linked worktree of `project`, in
+    /// the tests that need one — with `project` being what `init` claimed.
+    fn discover_registered_as(project: &Path, start: &Path) -> Result<Repo> {
+        let home = scratch_home("registered");
+        crate::platform::test_home::with_home(&home, || {
+            crate::commands::claim(project, false).unwrap();
+            Repo::discover(start)
+        })
     }
 
     /// A bare "origin", a checkout wired to it, and spoolway state in the
@@ -713,7 +835,7 @@ mod tests {
     #[test]
     fn the_tracked_prompt_templates_are_not_a_byproduct_directory() {
         let (_origin, work) = fixture("byproducts");
-        let repo = Repo::discover(&work).unwrap();
+        let repo = discover_registered(&work).unwrap();
         let dirs = repo.byproduct_dirs();
 
         assert!(
@@ -752,7 +874,7 @@ mod tests {
         // walking up for it would stop here and find an empty queue.
         assert!(wt.join(crate::config::STATE_DIR).is_dir());
 
-        let repo = Repo::discover(&wt).unwrap();
+        let repo = discover_registered_as(&work, &wt).unwrap();
         assert_eq!(
             repo.root.canonicalize().unwrap(),
             work.canonicalize().unwrap(),
@@ -850,7 +972,7 @@ mod tests {
             ],
         );
 
-        let repo = Repo::discover(&wt).unwrap();
+        let repo = discover_registered_as(&work, &wt).unwrap();
         let note = repo
             .checkout_note()
             .unwrap()
@@ -872,14 +994,14 @@ mod tests {
     #[test]
     fn checkout_note_is_none_in_the_main_checkout() {
         let (_origin, work) = fixture("checkout-note-main");
-        let repo = Repo::discover(&work).unwrap();
+        let repo = discover_registered(&work).unwrap();
         assert!(repo.checkout_note().unwrap().is_none());
     }
 
     #[test]
     fn discover_from_the_project_itself_is_unchanged() {
         let (_origin, work) = fixture("plain");
-        let repo = Repo::discover(&work).unwrap();
+        let repo = discover_registered(&work).unwrap();
         assert_eq!(
             repo.checkout.canonicalize().unwrap(),
             repo.root.canonicalize().unwrap(),
@@ -901,9 +1023,14 @@ mod tests {
         )
         .unwrap();
 
-        assert!(Repo::discover(&work).is_err(), "every other command dies");
+        let home = scratch_home("unparsable");
+        let (strict, lenient) = crate::platform::test_home::with_home(&home, || {
+            crate::commands::claim(&work, false).unwrap();
+            (Repo::discover(&work), Repo::discover_lenient(&work))
+        });
+        assert!(strict.is_err(), "every other command dies");
 
-        let (repo, err) = Repo::discover_lenient(&work).unwrap();
+        let (repo, err) = lenient.unwrap();
         assert_eq!(
             repo.root.canonicalize().unwrap(),
             work.canonicalize().unwrap()
@@ -921,7 +1048,7 @@ mod tests {
     #[test]
     fn a_branch_checked_out_in_another_worktree_is_found_there() {
         let (_origin, work) = fixture("worktree-lookup");
-        let repo = Repo::discover(&work).unwrap();
+        let repo = discover_registered(&work).unwrap();
 
         let plan_y = work.parent().unwrap().join("plan-y");
         git(
@@ -954,6 +1081,37 @@ mod tests {
         );
     }
 
+    /// `retain` sweeps the archive by age with no regard for a queued
+    /// dependent still naming the swept task, so a dependent parked for
+    /// longer than `retention.days` comes back to find its dependency's file
+    /// gone while the branch it has to be cut from is still there. The
+    /// branch is what the cut needs; the file only said which one — and with
+    /// neither there, the error names both (lifecycle review finding 5).
+    #[test]
+    fn a_dependency_whose_file_aged_out_of_the_archive_still_resolves_to_its_branch() {
+        let (_origin, work) = fixture("dependency-branch-fallback");
+        git(&work, &["branch", "task/aged"]);
+        let repo = discover_registered(&work).unwrap();
+        assert!(
+            !repo.queue_dir().join("aged.md").exists()
+                && !repo.archive_dir().join("aged.md").exists(),
+            "the task file is what this test does without"
+        );
+
+        assert_eq!(
+            repo.dependency_branch("aged").unwrap(),
+            "task/aged",
+            "the branch is there, so it is what the cut gets"
+        );
+
+        let err = repo.dependency_branch("gone").unwrap_err().to_string();
+        assert!(
+            err.contains("`gone`") && err.contains("`task/gone`"),
+            "neither the file nor the branch exists, and the error says which \
+             of each it looked for: {err}"
+        );
+    }
+
     #[test]
     fn a_repo_with_no_remote_reports_so() {
         let base = crate::scratch::root("repo-test-noremote");
@@ -961,7 +1119,7 @@ mod tests {
         std::fs::create_dir_all(base.join(crate::config::STATE_DIR)).unwrap();
         git(&base, &["init", "-q", "-b", "work"]);
 
-        let repo = Repo::discover(&base).unwrap();
+        let repo = discover_registered(&base).unwrap();
         assert!(
             !repo.has_remote(),
             "local-only repos must not attempt a push"
@@ -982,7 +1140,7 @@ mod tests {
         std::fs::create_dir_all(sub.join(crate::config::STATE_DIR)).unwrap();
         git(&base, &["init", "-q", "-b", "work"]);
 
-        let repo = Repo::discover(&sub).unwrap();
+        let repo = discover_registered(&sub).unwrap();
         assert_eq!(
             repo.root.canonicalize().unwrap(),
             sub.canonicalize().unwrap(),
@@ -1041,5 +1199,124 @@ mod tests {
             "the sweep must never reach the checkout's own tracked prompt templates"
         );
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// The bug as reported: on a branch without `.spoolway/`, the ancestor
+    /// walk climbed out of the checkout, found the global `~/.spoolway/`
+    /// under `$HOME`, and called `$HOME` the project — so `queue add` wrote
+    /// into `~/.spoolway/<user>/`. The global state root is never a
+    /// project's `.spoolway`, and `~/.spoolway` itself is never a project.
+    #[test]
+    fn the_global_state_root_is_never_taken_for_a_project() {
+        let home = scratch_home("global-state-root");
+        let state_root = home.join(crate::config::STATE_DIR);
+        // `~/.spoolway/.spoolway/` too, so the walk is tested against both
+        // readings: `$HOME` as a root, and `~/.spoolway` as one.
+        let inside = state_root.join(crate::config::STATE_DIR).join("deep");
+        std::fs::create_dir_all(&inside).unwrap();
+
+        let err = crate::platform::test_home::with_home(&home, || Repo::discover(&inside))
+            .expect_err("no directory under ~/.spoolway is a project");
+        let said = format!("{err:#}");
+        assert!(
+            said.contains("no spoolway project found"),
+            "the walk must fall through to the not-found error: {said}"
+        );
+        assert!(
+            !state_root.join(home.file_name().unwrap()).exists(),
+            "nothing may be created under the state root for a misread project"
+        );
+    }
+
+    /// A checkout on a branch without `.spoolway/` must not find one above
+    /// the repository — the walk is bounded at git's toplevel — and must not
+    /// quietly fall back to the toplevel with a default config either, which
+    /// is the other half of how a stray project came to exist.
+    #[test]
+    fn the_ancestor_walk_stops_at_the_git_toplevel() {
+        let base = crate::scratch::root("repo-test-walk-bound");
+        let _ = std::fs::remove_dir_all(&base);
+        // A `.spoolway/` above the repository, where the old walk found it.
+        std::fs::create_dir_all(base.join(crate::config::STATE_DIR)).unwrap();
+        let work = base.join("work");
+        let sub = work.join("src");
+        std::fs::create_dir_all(&sub).unwrap();
+        git(&work, &["init", "-q", "-b", "bare"]);
+
+        let home = scratch_home("walk-bound");
+        let err = crate::platform::test_home::with_home(&home, || Repo::discover(&sub))
+            .expect_err("a repository with no .spoolway/ is not a project");
+        let said = format!("{err:#}");
+        assert!(
+            said.contains("no spoolway project found") && said.contains("spoolway init"),
+            "{said}"
+        );
+        assert!(
+            !home.join(crate::config::STATE_DIR).exists(),
+            "no state directory may be created for a repository that is not a project"
+        );
+    }
+
+    /// The registration `init` writes is what every other command insists
+    /// on: a `.spoolway/` in the checkout is not enough, because every
+    /// accessor under `Repo` creates its home on demand, and a home nobody
+    /// claimed is how `~/.spoolway/<name>/` was conjured up for the wrong
+    /// checkout. `doctor` still gets a `Repo` to report the fact with.
+    #[test]
+    fn discovery_refuses_a_project_init_never_registered() {
+        let (_origin, work) = fixture("unregistered");
+        let home = scratch_home("unregistered");
+
+        let (strict, lenient) = crate::platform::test_home::with_home(&home, || {
+            (Repo::discover(&work), Repo::discover_lenient(&work))
+        });
+        let err = strict.expect_err("a project nobody ran `init` in is refused");
+        let said = format!("{err:#}");
+        assert!(
+            said.contains("not registered") && said.contains("`spoolway init` in"),
+            "the error says what to do: {said}"
+        );
+        assert!(
+            !home.join(crate::config::STATE_DIR).exists(),
+            "refusing must not create the very directory it refuses to claim"
+        );
+
+        let (repo, config_error) = lenient.unwrap();
+        assert!(config_error.is_none());
+        assert_eq!(
+            repo.root.canonicalize().unwrap(),
+            work.canonicalize().unwrap()
+        );
+        assert!(
+            !crate::commands::registered(&repo.home),
+            "doctor's own Repo carries the unregistered home, to report on"
+        );
+    }
+
+    /// `.spoolway/` is tracked, so a checkout is a project on one branch
+    /// and not on another. A registered project on a branch that lacks it
+    /// is told exactly that, by branch name, rather than the generic
+    /// not-found error a never-initialised directory gets.
+    #[test]
+    fn a_registered_project_on_a_branch_without_its_state_dir_is_told_so() {
+        let (_origin, work) = fixture("branch-without-state");
+        let home = scratch_home("branch-without-state");
+        let err = crate::platform::test_home::with_home(&home, || {
+            crate::commands::claim(&work, false).unwrap();
+            git(&work, &["checkout", "-q", "-b", "bare"]);
+            git(&work, &["rm", "-q", "-r", crate::config::STATE_DIR]);
+            git(&work, &["commit", "-q", "-m", "drop the control plane"]);
+            Repo::discover(&work)
+        })
+        .expect_err("no .spoolway/ on this branch");
+        let said = format!("{err:#}");
+        assert!(
+            said.contains("is a spoolway project, but `.spoolway/` is not on branch `bare`"),
+            "{said}"
+        );
+        assert!(
+            said.contains("check out a branch that carries it"),
+            "the error says what to do: {said}"
+        );
     }
 }

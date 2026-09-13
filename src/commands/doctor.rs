@@ -334,6 +334,7 @@ fn doctor_unconfigured(
 ) -> Result<()> {
     let mut report = Report::default();
 
+    report.record(registration_check(repo));
     report.check("config parses", Err(err));
     report.check(
         "pipelines are valid",
@@ -361,6 +362,26 @@ fn doctor_unconfigured(
     finish(&report, verbose, json)
 }
 
+/// Whether `init` ever claimed this project's `~/.spoolway/<name>/`. Every
+/// other command refuses to run without it — see `Repo::discover` — and
+/// `doctor` is the one that comes through `discover_lenient` instead, so it
+/// is the one place the fact is reported rather than fatal.
+fn registration_check(repo: &Repo) -> Finding {
+    Finding::Check(
+        "registered under ~/.spoolway".into(),
+        if crate::commands::registered(&repo.home) {
+            Ok(Some(repo.home.display().to_string()))
+        } else {
+            Err(anyhow::anyhow!(
+                "{} does not exist, so every command but `doctor` refuses this project — run \
+                 `spoolway init` in {} first",
+                repo.home.join(crate::commands::PROJECT_FILE).display(),
+                repo.root.display()
+            ))
+        },
+    )
+}
+
 /// The checks that only need the checkout's own loaded `config` and whether
 /// the project's own copy (`repo.root`'s) parsed — see the module doc for why
 /// those are two different questions. Order matches `doctor`'s own: the
@@ -371,13 +392,14 @@ fn config_checks(
     config_error: Option<anyhow::Error>,
     config: &Config,
 ) -> Vec<Finding> {
-    let mut findings = vec![Finding::Check(
+    let mut findings = vec![registration_check(repo)];
+    findings.push(Finding::Check(
         "config parses".into(),
         Ok(Some(format!(
             "{} — this checkout's own copy",
             Config::path_in(&repo.checkout).display()
         ))),
-    )];
+    ));
     // The checkout's file parsing says nothing about the project's own copy —
     // the one the real dispatcher runs on — when the two differ. In the main
     // checkout they are the same file, so `config_error` and the check above
@@ -1306,10 +1328,36 @@ fn doctor_update(repo: &Repo, report: &mut Report) {
     let Ok(outcomes) = crate::update::scan(repo, &dry) else {
         return;
     };
+    // The scan reads `repo.root`'s copy, so that is the file whose absence
+    // says `init` never ran here.
+    let initialised = Config::path_in(&repo.root).is_file();
+    for note in update_notes(&outcomes, initialised) {
+        report.note(note);
+    }
+}
 
+/// The notes [`doctor_update`] records for a dry `update` scan.
+///
+/// A file that is missing altogether from a project that was never
+/// initialised — no `config.toml` at all — is not *behind*: nothing was ever
+/// written for `update` to bring forward, and pointing at `update` there
+/// sends a person to the wrong command. Those files get a note of their own
+/// naming `spoolway init`; the "behind" note keeps only what `update` is
+/// actually for. In an initialised project a missing file is an ordinary
+/// thing for `update` to restore, and stays where it was.
+fn update_notes(outcomes: &[crate::update::Outcome], initialised: bool) -> Vec<String> {
+    let mut notes = Vec::new();
     let mut behind: Vec<(&str, &str)> = Vec::new();
-    for outcome in &outcomes {
+    let mut never_written: Vec<&str> = Vec::new();
+    for outcome in outcomes {
         match outcome {
+            crate::update::Outcome::Wrote { path, detail }
+                if !initialised && detail == crate::update::MISSING =>
+            {
+                if !never_written.contains(&path.as_str()) {
+                    never_written.push(path);
+                }
+            }
             // One file can be behind for several reasons at once — a config
             // gains a setting and has a note rewritten in the same pass — and
             // this is a count of files, not of reasons.
@@ -1319,10 +1367,22 @@ fn doctor_update(repo: &Repo, report: &mut Report) {
                 }
             }
             crate::update::Outcome::Blocked { path, why } => {
-                report.note(format!("{path}: {why}"));
+                notes.push(format!("{path}: {why}"));
             }
             crate::update::Outcome::Kept => {}
         }
+    }
+
+    if !never_written.is_empty() {
+        let mut note = format!(
+            "{} file(s) here have never been written — this project was not initialised; \
+             `spoolway init` writes them",
+            never_written.len()
+        );
+        for path in &never_written {
+            note += &format!("\n          {path}");
+        }
+        notes.push(note);
     }
 
     if !behind.is_empty() {
@@ -1338,8 +1398,9 @@ fn doctor_update(repo: &Repo, report: &mut Report) {
             // a screen is a note nobody reads to the end of.
             note += &format!("\n          {path} ({})", ellipsis(detail, 72));
         }
-        report.note(note);
+        notes.push(note);
     }
+    notes
 }
 
 /// `text`, cut to `width` on a word boundary, with an ellipsis where it was
@@ -2004,5 +2065,78 @@ mod tests {
             live_check(&mux, false),
             Finding::NoteVerbose(text) if text.contains("no real pane")
         ));
+    }
+
+    /// A file missing from a project `init` never wrote is not *behind* —
+    /// `update` has nothing to bring forward there — so the note names
+    /// `init` for it and keeps the "behind" note for files `update` is for.
+    #[test]
+    fn a_never_initialised_project_is_sent_to_init_not_update() {
+        use crate::update::Outcome;
+        let outcomes = vec![
+            Outcome::Wrote {
+                path: ".spoolway/config.toml".into(),
+                detail: crate::update::MISSING.into(),
+            },
+            Outcome::Wrote {
+                path: ".spoolway/prompts/a.md".into(),
+                detail: "rewritten".into(),
+            },
+        ];
+
+        let notes = update_notes(&outcomes, false);
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        assert!(
+            notes[0].contains("`spoolway init` writes them")
+                && notes[0].contains(".spoolway/config.toml")
+                && !notes[0].contains("prompts/a.md"),
+            "{notes:?}"
+        );
+        assert!(
+            notes[1].starts_with("1 file(s) here are behind this spoolway")
+                && notes[1].contains("prompts/a.md")
+                && !notes[1].contains("config.toml"),
+            "{notes:?}"
+        );
+
+        // In an initialised project a missing file is `update`'s to restore.
+        let notes = update_notes(&outcomes, true);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].starts_with("2 file(s) here are behind this spoolway"));
+    }
+
+    /// The registration every other command dies without is a finding here.
+    #[test]
+    fn an_unregistered_project_is_a_failed_check_naming_init() {
+        let root = crate::scratch::root("doctor-unregistered");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let repo = Repo {
+            checkout: root.clone(),
+            root: root.clone(),
+            config: Config::default(),
+            home: root.join(".home"),
+        };
+
+        let Finding::Check(label, outcome) = registration_check(&repo) else {
+            panic!("registration is a check, not a note");
+        };
+        assert_eq!(label, "registered under ~/.spoolway");
+        let err = outcome.expect_err("nothing claimed this home");
+        assert!(
+            format!("{err:#}").contains("run `spoolway init`"),
+            "{err:#}"
+        );
+
+        std::fs::create_dir_all(&repo.home).unwrap();
+        std::fs::write(
+            repo.home.join(crate::commands::PROJECT_FILE),
+            "root = \"/x\"\n",
+        )
+        .unwrap();
+        let Finding::Check(_, outcome) = registration_check(&repo) else {
+            panic!("registration is a check, not a note");
+        };
+        assert!(outcome.is_ok());
     }
 }

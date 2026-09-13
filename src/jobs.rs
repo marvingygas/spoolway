@@ -292,6 +292,44 @@ pub struct FireRecord {
     /// pass that crosses the minute.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skipped_minute: Option<String>,
+    /// The local minute [`fire_due`] last looked at for this job,
+    /// `MINUTE_FMT`. The next pass walks every minute after it up to its
+    /// own — an hour back at most — so a window that fell between two passes
+    /// still fires; see [`due_minute`]. Absent in a state file written
+    /// before the field existed, which reads as "the current minute only",
+    /// exactly what every pass did until then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checked_minute: Option<String>,
+}
+
+/// How far back a pass looks for a window it was not awake for.
+const CATCH_UP_LIMIT: Duration = Duration::hours(1);
+
+/// The latest minute `cron` fires on, out of the current one and every
+/// minute since `checked` — the minute the previous pass looked at — back at
+/// most [`CATCH_UP_LIMIT`]. `None` when none of them matches.
+///
+/// A pass samples the clock once at its top, and passes are as far apart as
+/// `dispatch.interval` plus however long a pass runs: `0 3 * * *` under a
+/// two-minute interval fell between two passes about every other night, and
+/// nothing said so (jobs review finding 2). The latest match rather than
+/// all of them: one run per pass is what a job gets, and the previous run
+/// still being queued would skip the rest anyway.
+fn due_minute(cron: &Cron, checked: Option<&str>, now: NaiveDateTime) -> Option<NaiveDateTime> {
+    let start = checked
+        .and_then(|minute| NaiveDateTime::parse_from_str(minute, MINUTE_FMT).ok())
+        .map(|minute| minute + Duration::minutes(1))
+        .unwrap_or(now)
+        .max(now - CATCH_UP_LIMIT)
+        .min(now);
+    let mut at = now;
+    while at >= start {
+        if cron.matches(&at) {
+            return Some(at);
+        }
+        at -= Duration::minutes(1);
+    }
+    None
 }
 
 /// The whole state file: one [`FireRecord`] per job name.
@@ -350,11 +388,19 @@ pub fn fire_due(
             // An expression that will not parse never fires; `doctor` names it.
             continue;
         };
-        if !cron.matches(&now) {
-            continue;
-        }
 
         let record = state.entry(job.name.clone()).or_default();
+        let due = due_minute(&cron, record.checked_minute.as_deref(), now);
+        if record.checked_minute.as_deref() != Some(minute.as_str()) {
+            record.checked_minute = Some(minute.clone());
+            dirty = true;
+        }
+        let Some(due) = due else {
+            continue;
+        };
+        // The window's own minute, not the pass's: a job that fired late is
+        // recorded — and deduplicated — against the minute it was due.
+        let minute = due.format(MINUTE_FMT).to_string();
         if record.fired_minute.as_deref() == Some(minute.as_str())
             || record.skipped_minute.as_deref() == Some(minute.as_str())
         {
@@ -1081,6 +1127,11 @@ mod tests {
     /// A routine folder with one queueable document, and a job pointing at it
     /// on `pipeline` with an expression that matches every minute.
     fn every_minute_job(repo: &Repo, routine: &str, pipeline: &str) {
+        scheduled_job(repo, routine, pipeline, "* * * * *");
+    }
+
+    /// [`every_minute_job`] on any expression.
+    fn scheduled_job(repo: &Repo, routine: &str, pipeline: &str, schedule: &str) {
         let dir = repo.routines_dir().join(routine);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
@@ -1091,7 +1142,7 @@ mod tests {
         write_user_store(
             repo,
             &format!(
-                "[jobs.nightly]\nschedule = \"* * * * *\"\npipeline = \"{pipeline}\"\nroutine = \"{routine}\"\n"
+                "[jobs.nightly]\nschedule = \"{schedule}\"\npipeline = \"{pipeline}\"\nroutine = \"{routine}\"\n"
             ),
         );
     }
@@ -1133,6 +1184,66 @@ mod tests {
             Some("bugfix")
         );
         assert!(read_state(&repo)["nightly"].fired_minute.is_some());
+    }
+
+    /// A window that fell between two passes — the previous one looked 45
+    /// minutes ago, the job was due 30 minutes ago — fires on this pass and
+    /// is recorded against the minute it was due (jobs review finding 2).
+    /// With no record of a previous look, a state file from before the
+    /// field existed included, only the current minute is asked about.
+    #[test]
+    fn a_window_that_fell_between_two_passes_still_fires() {
+        use chrono::Timelike;
+        let repo = fixture("jobs-missed-window");
+        let now = Local::now().naive_local();
+        let due = now - Duration::minutes(30);
+        scheduled_job(
+            &repo,
+            "nightly",
+            "default",
+            &format!("{} {} * * *", due.minute(), due.hour()),
+        );
+
+        let old: FireRecord = serde_json::from_str(r#"{"fired_minute":"2000-01-01T00:00"}"#)
+            .expect("a record written before checked_minute existed still parses");
+        assert_eq!(old.checked_minute, None);
+
+        let (actions, problems) = fire(&repo);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert!(
+            actions.is_empty(),
+            "nothing was due this minute: {actions:?}"
+        );
+        assert_eq!(
+            read_state(&repo)["nightly"].checked_minute.as_deref(),
+            Some(now.format(MINUTE_FMT).to_string().as_str())
+        );
+
+        let mut state = read_state(&repo);
+        state
+            .entry("nightly".to_string())
+            .or_default()
+            .checked_minute = Some((now - Duration::minutes(45)).format(MINUTE_FMT).to_string());
+        write_state(&repo, &state).unwrap();
+
+        let (actions, problems) = fire(&repo);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert!(
+            actions
+                .iter()
+                .any(|line| line.contains("job nightly") && line.contains("fired")),
+            "{actions:?}"
+        );
+        assert_eq!(
+            read_state(&repo)["nightly"].fired_minute.as_deref(),
+            Some(due.format(MINUTE_FMT).to_string().as_str()),
+            "recorded against the minute it was due"
+        );
+
+        // And not again: the next pass starts after the minute this one
+        // looked at.
+        let (actions, _) = fire(&repo);
+        assert!(actions.is_empty(), "{actions:?}");
     }
 
     #[test]

@@ -35,7 +35,7 @@ can change with a spoolway release without a single file in your repository havi
 | `parallel` | you | Marks the *absent* `depends_on` between this task and another `parallel: true` task of the same group as deliberate rather than forgotten. It does not excuse a `touches` overlap: an overlap between two declared-parallel tasks is read as a mistake in the group — see [Declaring a fan on purpose](#declaring-a-fan-on-purpose). Read only by `queue conflicts`, `queue list`, and the two planning skills — nothing that schedules or bases a task looks at it |
 | `gate_at` | you, optionally | Pauses the task on `paused` once this step passes, on the same terms a step's own `gate: true` does — see [Paused is the other one, and it is not a block](#paused-is-the-other-one-and-it-is-not-a-block). Lets a document hold work for a person without giving the task a pipeline of its own |
 | `borrowed` | the dispatcher | Whether the task's checkout was already there rather than cut for it. Cleanup reads it to know the checkout and branch are not its to remove |
-| `base` | the dispatcher | The branch the group lands in, recorded at queue time from the checkout `queue add` ran in — the base of the *foot* of the stack's pull request. `spoolway stack` opens every other task's pull request against `cut_from` instead |
+| `base` | you, optionally | The branch the group lands in — the base of the *foot* of the stack's pull request. `spoolway stack` opens every other task's pull request against `cut_from` instead. A document that names one keeps it, and `queue add` refuses a branch this repository does not have; a document that leaves it out is based on the branch the checkout `queue add` ran in has out, recorded at that moment |
 | `branch` | the dispatcher | The branch for this task: `task/<id>`, or `task/<slug>-<id>` when `issue_tracking.key_in_names` had `queue add` prefix it with a tracker slug. spoolway derives it and a document may not set it to either shape by hand — see [What a document may set](#what-a-document-may-set) |
 | `run` | the dispatcher | Minted once, when the task's worktree is cut, and copied onto every ledger line banked for it from then on — the id `spoolway eval --runs` gathers a run's lanes under |
 | `cut_from` | the dispatcher | What the worktree was actually cut from, and what `spoolway stack` opens its pull request against: the first dependency's own `branch:` field when `depends_on` names one, `base` otherwise. That field is read straight off the dependency, whichever shape `queue add` stamped it — `task/<dep>` or a slug-prefixed `task/<slug>-<dep>`. A dependent's worktree is cut from its dependency's branch rather than `base`, so the two can disagree — `spoolway queue show` prints this on a line of its own, distinct from `base` |
@@ -93,10 +93,11 @@ mine.md sets `run:`, which spoolway sets on every task itself — remove it from
 ```
 
 `stage`, `run`, `attempts`, `base_commit`, `cut_from` and `branch` are those six. `base` is not
-in that list because it is not a document key at all: the checkout `queue add` runs in answers
-for it, whatever a document happens to say there. Every other field of `Frontmatter` the table
-above lists as "Set by the dispatcher" — `borrowed`, `patch` and the rest — is not refused
-either: a document may write one, and it is simply thrown away, the same as `base` is.
+in that list because it is a document's to set: one that names a branch keeps it, checked
+against the repository's own branches first, and one that leaves it out is based on the branch
+the checkout `queue add` runs in has out. Every other field of `Frontmatter` the table above
+lists as "Set by the dispatcher" — `borrowed`, `patch` and the rest — is not refused either: a
+document may write one, and it is simply thrown away.
 
 `branch` is refused, not thrown away, because a task body is content an agent wrote and
 `spoolway stack` force-pushes a squashed commit onto whatever `branch:` names. A document may
@@ -139,10 +140,10 @@ ago to have aged out of the archive under `retention.days` (see
 [`[retention]`](configuration.md#retention--how-long-a-byproduct-directory-keeps-what-it-holds))
 can no longer be named this way; the refusal says the age is why. A dependency and its dependent
 must also share the same `base` and the same `group` — see [Expressing order](#expressing-order)
-below for why. And because `base` is read from the checkout at queue time, every task in one
-`depends_on` chain has to be queued from that one checkout: a document naming a dependency
-queued from somewhere else can still be accepted, but the base rule above then refuses the pair
-the moment both are known.
+below for why. Every task in one `depends_on` chain therefore has to agree on a base: either
+they all name the same one, or they are all queued from the one checkout that answers for it. A
+document naming a dependency based on some other branch can still be accepted on its own, but
+the base rule above refuses the pair the moment both are known.
 
 A `depends_on` naming more than one id is also reordered here, not just checked: the id whose
 own history already reaches every other one named beside it is moved to the front, because that
@@ -314,9 +315,11 @@ documents apart everywhere else. That means a task's body may not contain a line
 `---` on its own; put a longer rule (`----`) or fence the line in code if the project's own
 markdown needs one.
 
-The task starts on its pipeline's entry step, and its `base` is recorded from the branch the
-checkout you ran `queue add` from has out — at that moment, from that checkout. That is what
-makes groups independent of one another, and why `base` is never a document's to set.
+The task starts on its pipeline's entry step. Its `base` is the branch the document named, or —
+where the document named none — the branch the checkout you ran `queue add` from has out, at
+that moment, from that checkout. That is what makes groups independent of one another: a
+repository with several long-lived bases can queue against each of them, either from a checkout
+per base or by naming the base in the document.
 
 ### Read the queue
 

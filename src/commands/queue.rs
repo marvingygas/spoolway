@@ -202,7 +202,115 @@ pub fn queue_add(
     let base = crate::repo::branch_at(cwd)?;
 
     let documents = gather_documents(&args.from)?;
+    if args.dry_run {
+        return queue_add_dry_run(repo, pipelines, &base, &documents);
+    }
     queue_add_documents(repo, pipelines, &base, &documents)
+}
+
+/// `--dry-run`: everything `queue add` decides, said out loud, and nothing
+/// written — no task file, no ticket opened, no name prefixed. The project
+/// root and home are printed first because the bug this exists for was a
+/// `queue add` that quietly resolved to the wrong project: a person who can
+/// see where the files *would* go can stop before they go there.
+fn queue_add_dry_run(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    base: &str,
+    documents: &[(String, String)],
+) -> Result<()> {
+    let tasks = validate_batch(repo, pipelines, base, documents)?;
+    println!("dry run — nothing written");
+    println!("  project: {}", repo.root.display());
+    println!("  home:    {}", repo.home.display());
+    println!(
+        "  base:    `{base}` (the branch {} has out)",
+        repo.checkout.display()
+    );
+    for task in &tasks {
+        println!(
+            "would queue {} at `{}`\n  {}",
+            task.id(),
+            crate::pipeline::QUEUED,
+            task.path.display()
+        );
+    }
+    println!("{}", based_on_note(&tasks, base));
+    Ok(())
+}
+
+/// `spoolway queue remove <id>`: take a task that has not started — or was
+/// parked before it ever got a worktree — out of the queue, carrying its
+/// document back to the pending directory the same way the board's `u` does,
+/// so `queue add --from` can take it again once it is fixed.
+///
+/// Refused outright for anything with work in flight: a live lane, a running
+/// command step, or a worktree — that last one being the fact that survives
+/// a lane going quiet, so a task on `paused` or `blocked` with a checkout
+/// cut for it is refused too. Nothing here stops a lane or removes a
+/// worktree on a script's say-so; the error names the commands that do.
+pub fn queue_remove(repo: &Repo, pipelines: &Pipelines, id: &str) -> Result<()> {
+    // The same per-task lock the dispatcher and the board's `u` take, so the
+    // rename cannot land in the middle of one of their read-modify-writes.
+    let _task_lock = crate::lock::TaskLock::acquire(&repo.task_lock_file(id));
+
+    let tasks = repo.tasks()?;
+    let idx = tasks.iter().position(|t| t.id() == id).with_context(|| {
+        format!("no queued task `{id}` — `spoolway queue list` names the ones there are")
+    })?;
+    let task = &tasks[idx];
+    let stage = task.stage();
+
+    let mux = crate::mux::backend(repo);
+    let lanes = mux.list_lanes().unwrap_or_default();
+    if crate::status::live_agent_lane_tasks(repo, &tasks, pipelines, &lanes).contains(&idx) {
+        bail!(
+            "`{id}` has a lane running at `{stage}` — stop it with `spoolway queue pause {id}` \
+             first, then run this again."
+        );
+    }
+    if let Some(run) = crate::status::running_command_steps(repo, &tasks, pipelines)
+        .into_iter()
+        .find(|run| run.task == id)
+    {
+        bail!(
+            "`{id}` is running a command step (`{}`) — stop it with `spoolway queue pause {id} \
+             --force` first, then run this again.",
+            run.step
+        );
+    }
+    if let Some(path) = &task.front.worktree_path {
+        bail!(
+            "`{id}` has a worktree at {} — its work is in flight there. Stop any lane with \
+             `spoolway queue pause {id}`, remove the worktree with `git worktree remove {}`, \
+             then run this again.",
+            path.display(),
+            path.display()
+        );
+    }
+    if !matches!(
+        stage,
+        crate::pipeline::QUEUED | crate::pipeline::PAUSED | crate::pipeline::BLOCKED
+    ) {
+        bail!(
+            "`{id}` is at `{stage}`, which is a step in progress — only a task on `queued`, \
+             `paused` or `blocked` can be removed. Pause it with `spoolway queue pause {id}` \
+             first, then run this again."
+        );
+    }
+
+    match crate::status::carry_to_pending(repo, task)? {
+        Some(dest) => {
+            println!("removed `{id}` from the queue");
+            println!("  {}", dest.display());
+            Ok(())
+        }
+        None => bail!(
+            "did not remove `{id}`: a newer draft is already at {} — move that draft aside, \
+             then run this again.",
+            repo.pending_dir().join(format!("{id}.md")).display()
+        ),
+    }
 }
 
 /// The pipeline skeleton, printed rather than written: there is no id yet to
@@ -228,6 +336,7 @@ fn skeleton_document(repo: &Repo, pipelines: &Pipelines) -> Result<String> {
          # source: where this came from — an issue URL, a plan page path, never parsed\n\
          touches: []                  # globs this task expects to modify\n\
          depends_on: []               # sibling task ids that must finish first\n\
+         # base: branch-name          # the branch to cut from and merge into — defaults to the branch this checkout has out\n\
          # pipeline: {}               # which pipeline to run on — defaults to this project's default\n\
          # gate_at: step-id           # pause after that step passes, for a person to `spoolway resume`\n\
          ---\n{}",
@@ -421,7 +530,16 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: &str) -> Result<Task
     front.escalated = false;
     front.resume = None;
     front.branch = Some(format!("task/{}", front.id));
-    front.base = Some(base.to_string());
+    // A document that names its own `base:` keeps it — a task cut for a
+    // branch other than the one the checkout happens to have out — and
+    // `validate_batch` checks that branch is real before anything is
+    // written. Everything else is based on the checkout's branch, as before.
+    front.base = Some(
+        match front.base.take().filter(|own| !own.trim().is_empty()) {
+            Some(own) => own,
+            None => base.to_string(),
+        },
+    );
     front.run = None;
     front.cut_from = None;
     front.base_commit = None;
@@ -468,6 +586,9 @@ pub(crate) fn validate_batch(
     let mut tasks = Vec::new();
     for (name, raw) in documents {
         let mut task = parse_submission(name, raw, base)?;
+        if let Some(own) = task.front.base.as_deref().filter(|own| *own != base) {
+            check_document_base(repo, name, own)?;
+        }
 
         let pipeline = match &task.front.pipeline {
             Some(name) => pipelines.get(name)?,
@@ -537,6 +658,61 @@ fn mint_id(repo: &Repo, base_id: &str, taken: &std::collections::BTreeSet<String
     }
 }
 
+/// A `base:` a document set for itself, checked before anything is written:
+/// it has to be a branch this repository actually has, since the worktree
+/// is cut from it and the pull request merges into it, and neither of those
+/// can wait until dispatch to find out it is not there.
+///
+/// The leading `-` is refused before git sees the value at all: what
+/// reaches `rev-parse` and `check-ref-format` here would otherwise be read
+/// as a flag, the same reason `branch:` is refused outright.
+fn check_document_base(repo: &Repo, name: &str, base: &str) -> Result<()> {
+    if base.starts_with('-') {
+        bail!(
+            "{name}: `base: {base}` starts with `-`, which git would read as a flag — name a \
+             branch instead"
+        );
+    }
+    if repo.git(&["check-ref-format", "--branch", base]).is_err() {
+        bail!("{name}: `base: {base}` is not a valid branch name — name a branch instead");
+    }
+    if repo
+        .git(&[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{base}"),
+        ])
+        .is_err()
+    {
+        bail!(
+            "{name}: `base: {base}` names a branch this repository does not have locally — \
+             create or fetch it first, or leave `base:` out to use the checkout's branch"
+        );
+    }
+    Ok(())
+}
+
+/// The `based on` line every path that queues a batch prints: one line when
+/// the whole batch shares a base — the ordinary case, the checkout's own
+/// branch — and one line per task when documents named bases of their own,
+/// so what is printed is always the base each task was actually given.
+pub(crate) fn based_on_note(tasks: &[Task], base: &str) -> String {
+    let bases: Vec<&str> = tasks
+        .iter()
+        .map(|t| t.front.base.as_deref().unwrap_or(base))
+        .collect();
+    match bases.first() {
+        Some(first) if bases.iter().all(|b| b == first) => format!("  based on `{first}`"),
+        _ => tasks
+            .iter()
+            .zip(&bases)
+            .map(|(task, base)| format!("  {} based on `{base}`", task.id()))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
+}
+
 /// Validate every document as one set, then write all or none — the shape
 /// `queue add --from` needs, and the same all-or-nothing pass
 /// [`validate_batch`] runs, right before this saves what it validated.
@@ -547,16 +723,7 @@ fn queue_add_documents(
     documents: &[(String, String)],
 ) -> Result<()> {
     let mut tasks = validate_batch(repo, pipelines, base, documents)?;
-    // Before anything is queued: a ticket opened for a task that never made
-    // it into the queue — because a sibling document further down the batch
-    // turned out to be broken — would be a ticket nothing ever points back
-    // at.
-    let group_slug = open_tickets(repo, documents, &mut tasks)?;
-
-    // The prefix goes on in a pass of its own, after the hook has answered:
-    // the slug does not exist until `open_tickets` has run, and `branch:` was
-    // already stamped and the lane name already checked by `validate_batch`.
-    prefix_generated_names(&mut tasks, &group_slug);
+    open_and_prefix(repo, documents, &mut tasks)?;
 
     // All or none: every document above already parsed and validated, so
     // nothing left here can fail — the writes are the commit.
@@ -569,14 +736,44 @@ fn queue_add_documents(
         println!("  {}", task.path.display());
     }
     // Where this batch's worktrees will be cut from and where their pull
-    // requests will merge back to — worth saying once, because it comes from
-    // the checkout this was run in rather than from anything in a document.
-    println!("  based on `{base}`");
+    // requests will merge back to — worth saying, because it usually comes
+    // from the checkout this was run in rather than from anything in a
+    // document, and a document that set its own is the exception worth
+    // seeing.
+    println!("{}", based_on_note(&tasks, base));
 
     // Nothing is banked here any more. Queueing used to be the one path a
     // planning session's spend had onto the ledger; an interactive session's
     // spend is not banked from any command any more, and this one was never
     // special.
+    Ok(())
+}
+
+/// What every path that saves a validated batch runs between
+/// [`validate_batch`] and its writes: open the batch's tickets, then apply
+/// the prefix `issue_tracking.key_in_names` asks for. One place for the
+/// pair, so a batch is named the same way however it arrived — `queue add
+/// --from`, the queue screen's `enter`, or a routine fired from the `r` pane
+/// or by a job. Only `--from` ran it once, and with the flag on one queue
+/// mixed prefixed and bare names by the route each batch had taken (jobs
+/// review finding 6).
+///
+/// `documents` are the files a failed hook call writes the ids it already
+/// opened back into, so a re-run resumes rather than opening a second set —
+/// see [`write_back_ids`]. A routine hands an empty list: its minted
+/// document has no file of its own, and the source under
+/// `.spoolway/routines/` is never written to.
+fn open_and_prefix(repo: &Repo, documents: &[(String, String)], tasks: &mut [Task]) -> Result<()> {
+    // Before anything is queued: a ticket opened for a task that never made
+    // it into the queue — because a sibling document further down the batch
+    // turned out to be broken — would be a ticket nothing ever points back
+    // at.
+    let group_slug = open_tickets(repo, documents, tasks)?;
+
+    // The prefix goes on in a pass of its own, after the hook has answered:
+    // the slug does not exist until `open_tickets` has run, and `branch:` was
+    // already stamped and the lane name already checked by `validate_batch`.
+    prefix_generated_names(tasks, &group_slug);
     Ok(())
 }
 
@@ -805,19 +1002,28 @@ fn open_tickets(
                 // a later task's own raw answer, which document order would
                 // otherwise let win the re-run.
                 stamp_group_slugs(tasks, &group_slug);
-                write_back_ids(documents, tasks)?;
+                let written_back = write_back_ids(documents, tasks)?;
                 let code = exit_code
                     .map(|c| c.to_string())
                     .unwrap_or_else(|| "no code".to_string());
-                // Two different sentences, not one with a blank filled in:
+                // Three different sentences, not one with a blank filled in:
                 // "every one of those ids" has nothing to point at when this
                 // is the very first call in the batch to run at all, and a
                 // person reading that would go looking in `pending/` for
-                // ids that were never written.
+                // ids that were never written — as they would when there was
+                // no document on disk to write them into, a routine's or one
+                // read from standard input.
                 let resume = if opened.is_empty() {
                     "nothing had been opened yet, so there is nothing to resume from — \
                      running this command again starts the batch fresh."
                         .to_string()
+                } else if !written_back {
+                    format!(
+                        "{} had already been opened, and there is no document on disk to \
+                         record those ids in, so running this again opens a second set — \
+                         close those by hand first.",
+                        opened.join(" and "),
+                    )
                 } else {
                     format!(
                         "{} had already been opened, and every one of those ids is \
@@ -1019,8 +1225,11 @@ fn dependency_ticket(repo: &Repo, tasks: &[Task], dep: &str) -> Result<String> {
 /// reorders that top-level list — only a task's own `depends_on` is ever
 /// reordered. A document read from `-` (standard input) has no file to write
 /// back to and is silently skipped; there is nowhere on disk for its answer
-/// to resume from anyway.
-fn write_back_ids(documents: &[(String, String)], tasks: &[Task]) -> Result<()> {
+/// to resume from anyway. Returns whether any document was written at all,
+/// so the failure message can say where the ids went — or that they went
+/// nowhere.
+fn write_back_ids(documents: &[(String, String)], tasks: &[Task]) -> Result<bool> {
+    let mut written = false;
     for (task, (name, raw)) in tasks.iter().zip(documents.iter()) {
         let path = std::path::Path::new(name);
         if !path.is_file() {
@@ -1037,9 +1246,10 @@ fn write_back_ids(documents: &[(String, String)], tasks: &[Task]) -> Result<()> 
         if updated != *raw {
             crate::task::write_atomic(path, &updated)
                 .with_context(|| format!("writing the opened ids back into {name}"))?;
+            written = true;
         }
     }
-    Ok(())
+    Ok(written)
 }
 
 /// Sections are appended to a body later, and `append_to_section` reasons in
@@ -1103,15 +1313,29 @@ fn check_dependencies_set(repo: &Repo, pipelines: &Pipelines, batch: &mut [Task]
             // left comes from a plan page, and a plan cuts one group at a
             // time. A dependency naming another group is always a mistake,
             // and queue time is the cheapest place to say so.
+            //
+            // Compared bare: a queued sibling's `group:` already carries the
+            // `<slug>-` prefix its own `queue add` applied when
+            // `issue_tracking.key_in_names` is on, while this document still
+            // reads what the person wrote — `open_tickets` runs after this
+            // check. The same strip `open_tickets` uses for its epic lookup,
+            // so a group that spans two `queue add` calls chains the way it
+            // was meant to.
+            let sibling = tasks.iter().find(|t| t.id() == dep);
             let (mine, theirs) = (
                 task.front.group.as_deref(),
-                tasks
-                    .iter()
-                    .find(|t| t.id() == dep)
-                    .and_then(|t| t.front.group.as_deref()),
+                sibling.and_then(|t| t.front.group.as_deref()),
             );
             if let (Some(mine), Some(theirs)) = (mine, theirs)
                 && mine != theirs
+                && (!repo.config.issue_tracking.key_in_names
+                    || strip_slug_prefix(
+                        theirs,
+                        sibling
+                            .map(|t| t.extra_str("slug"))
+                            .filter(|slug| accept_slug(slug))
+                            .unwrap_or(""),
+                    ) != mine)
             {
                 bail!(
                     "`{id}` is in group `{mine}` but depends on `{dep}`, which is in group \
@@ -2025,7 +2249,11 @@ fn clamp_cursors(groups: &[Group], state: &mut ScreenState) {
 /// `thread::sleep(POLL)` would have. Every in-memory reader used in tests
 /// reports a byte pending unconditionally (see [`PollableRead`]), so this
 /// falls straight through to `read_key` there — the reload below only ever
-/// runs against a real, currently idle terminal.
+/// runs against a real, currently idle terminal. A cooked stdin — no raw
+/// mode, no `poll` — reports the opposite without waiting, and is read
+/// straight away instead: blocking on the line the terminal will deliver is
+/// the whole of what this loop is for, where spinning on "nothing pending"
+/// would never read a key at all.
 fn wait_for_key(
     repo: &Repo,
     groups: &mut Vec<Group>,
@@ -2036,7 +2264,7 @@ fn wait_for_key(
     out: &mut impl std::io::Write,
 ) -> Option<Key> {
     loop {
-        if input.byte_pending(crate::status::POLL) {
+        if !cfg!(unix) || input.byte_pending(crate::status::POLL) {
             return read_key(input);
         }
         reload(repo, groups, state);
@@ -2436,7 +2664,12 @@ fn handle_gate_key(
 }
 
 /// Insert or replace a `<key>: <value>` line right after a document's
-/// opening `---` fence, dropping any line already there for that same key.
+/// opening `---` fence, dropping any line already there for that same key —
+/// and, with it, the indented or `- ` lines that continued it, so a
+/// block-list `depends_on:` is replaced whole rather than leaving its items
+/// orphaned under the new key (jobs review finding 4). Only the frontmatter
+/// is looked at: a `<key>:` in the body, a code sample say, is copied
+/// through untouched.
 ///
 /// Shared by [`with_gate`], which never writes this back to disk, and
 /// [`write_back_ids`], which does — this only ever touches the text in
@@ -2456,9 +2689,22 @@ fn with_frontmatter_field(doc: &str, key: &str, value: &str) -> String {
     out.push(' ');
     out.push_str(value);
     out.push('\n');
+    let mut in_frontmatter = true;
+    let mut dropping = false;
     for line in doc[nl + 1..].lines() {
-        if line.trim_start().starts_with(&prefix) {
-            continue;
+        if in_frontmatter {
+            if line.trim() == "---" {
+                in_frontmatter = false;
+            } else if line.starts_with(&prefix) {
+                dropping = true;
+                continue;
+            } else if dropping
+                && (line.starts_with(' ') || line.starts_with('\t') || line.starts_with("- "))
+            {
+                continue;
+            } else {
+                dropping = false;
+            }
         }
         out.push_str(line);
         out.push('\n');
@@ -3545,7 +3791,9 @@ fn begin_submission(
         Err(err) => return Mode::Outcome(format!("submission refused: {err:#}")),
     };
     let selected = state.selected.clone();
-    match finish_submit(repo, pipelines, groups, pending, base, &selected) {
+    match finish_submit(
+        repo, pipelines, groups, pending, &documents, base, &selected,
+    ) {
         Ok(msg) => {
             state.selected.clear();
             state.gates.clear();
@@ -3577,14 +3825,17 @@ fn after_write(repo: &Repo, msg: String) -> Mode {
     }
 }
 
-/// Save the validated batch, clear the documents it came from out of the
-/// pending directory, and build the message [`Mode::Dispatch`] shows.
+/// Open the batch's tickets and name it, save it, clear the documents it
+/// came from out of the pending directory, and build the message
+/// [`Mode::Dispatch`] shows.
 ///
 /// The order is the whole guarantee behind "a submission that fails
 /// validation removes nothing". Nothing is deleted until every task file has
 /// been written, so a batch refused for any reason — a reserved key, an
-/// unknown `depends_on`, a cycle among the selection — leaves the pending
-/// directory exactly as it found it.
+/// unknown `depends_on`, a cycle among the selection, a hook that failed —
+/// leaves the pending directory exactly as it found it, save for the ids a
+/// failed hook call had already secured, written back so the next `enter`
+/// resumes (see [`open_and_prefix`]).
 ///
 /// Only the selected groups' own documents go. Another group's documents sit
 /// in the same flat directory and are not this submission's to touch, so the
@@ -3594,6 +3845,7 @@ fn finish_submit(
     pipelines: &Pipelines,
     groups: &mut Vec<Group>,
     mut pending: Vec<Task>,
+    documents: &[(String, String)],
     base: &str,
     selected: &std::collections::BTreeSet<GroupKey>,
 ) -> Result<String> {
@@ -3604,6 +3856,7 @@ fn finish_submit(
     // next, with whatever batch, saves nothing without this check standing
     // between it and disk.
     check_dependencies_set(repo, pipelines, &mut pending)?;
+    open_and_prefix(repo, documents, &mut pending)?;
 
     for task in &pending {
         task.save()?;
@@ -3634,7 +3887,7 @@ fn finish_submit(
             task.path.display()
         ));
     }
-    msg.push_str(&format!("  based on `{base}`"));
+    msg.push_str(&based_on_note(&pending, base));
     Ok(msg)
 }
 
@@ -3888,7 +4141,7 @@ fn finish_trial(
             arm.path.display()
         ));
     }
-    msg.push_str(&format!("  based on `{base}`"));
+    msg.push_str(&based_on_note(&arms, base));
     Ok(msg)
 }
 
@@ -4068,7 +4321,9 @@ pub(crate) fn queue_routine_target(
         *doc = with_frontmatter_field(doc, "pipeline", pipeline);
     }
 
-    let tasks = validate_batch(repo, pipelines, base, &documents)?;
+    let mut tasks = validate_batch(repo, pipelines, base, &documents)?;
+    // No document to write ids back into — see `open_and_prefix`.
+    open_and_prefix(repo, &[], &mut tasks)?;
     // All or none: everything above parsed and validated, so these writes
     // are the commit — the same discipline `queue_add_documents` follows.
     for task in &tasks {
@@ -4077,17 +4332,20 @@ pub(crate) fn queue_routine_target(
     Ok(tasks)
 }
 
-/// Save every task `validate_batch` handed back, and the same report
-/// [`finish_submit`] and [`finish_trial`] build for their own batches. The
-/// source documents under `.spoolway/routines/` are never touched — a
-/// routine is meant to be queued again, not consumed by being queued once.
-fn finish_routine(tasks: &[Task], base: &str) -> Result<String> {
-    for task in tasks {
+/// Open the batch's tickets and name it, save every task `validate_batch`
+/// handed back, and build the same report [`finish_submit`] and
+/// [`finish_trial`] build for their own batches. The source documents under
+/// `.spoolway/routines/` are never touched — a routine is meant to be queued
+/// again, not consumed by being queued once — which is why nothing is handed
+/// to [`open_and_prefix`] to write ids back into.
+fn finish_routine(repo: &Repo, tasks: &mut [Task], base: &str) -> Result<String> {
+    open_and_prefix(repo, &[], tasks)?;
+    for task in tasks.iter() {
         task.save()?;
     }
 
     let mut msg = String::new();
-    for task in tasks {
+    for task in tasks.iter() {
         msg.push_str(&format!(
             "queued {} at `{}`\n  {}\n",
             task.id(),
@@ -4095,7 +4353,7 @@ fn finish_routine(tasks: &[Task], base: &str) -> Result<String> {
             task.path.display()
         ));
     }
-    msg.push_str(&format!("  based on `{base}`"));
+    msg.push_str(&based_on_note(tasks, base));
     Ok(msg)
 }
 
@@ -4115,7 +4373,7 @@ fn begin_routine_queue(
         return Mode::Browsing;
     }
     match validate_batch(repo, pipelines, base, &documents) {
-        Ok(tasks) => match finish_routine(&tasks, base) {
+        Ok(mut tasks) => match finish_routine(repo, &mut tasks, base) {
             Ok(msg) => after_write(repo, msg),
             Err(err) => Mode::Outcome(format!("queue refused: {err:#}")),
         },
@@ -4150,7 +4408,7 @@ fn begin_routine_solo(
     let documents = vec![(task.path.display().to_string(), doc)];
 
     match validate_batch(repo, pipelines, base, &documents) {
-        Ok(tasks) => match finish_routine(&tasks, base) {
+        Ok(mut tasks) => match finish_routine(repo, &mut tasks, base) {
             Ok(msg) => after_write(repo, msg),
             Err(err) => Mode::Outcome(format!("queue refused: {err:#}")),
         },
@@ -4282,6 +4540,7 @@ mod tests {
     fn from_args(paths: &[&str]) -> QueueAddArgs {
         QueueAddArgs {
             from: paths.iter().map(|p| p.to_string()).collect(),
+            dry_run: false,
         }
     }
 
@@ -4519,6 +4778,44 @@ mod tests {
         );
         assert!(msg.contains("`other`") && msg.contains("`demo`"), "{msg}");
         assert!(msg.contains("a chain does not cross a group"), "{msg}");
+    }
+
+    /// With `issue_tracking.key_in_names` on, a sibling queued by an
+    /// earlier `queue add` carries `group: <slug>-<group>`, and a later
+    /// document still writes the bare group — the check has to see them as
+    /// one group, or a chain can never span two `queue add` calls (jobs
+    /// review finding 3). Only a recognised prefix, and only with the flag
+    /// on: with it off the same two groups are still two groups.
+    #[test]
+    fn a_dependency_on_a_sibling_whose_group_carries_the_slug_prefix_is_accepted() {
+        let mut repo = fixture("cross-batch-slug-prefix");
+        add(&repo, "auth-01", &[]);
+        // What the first `queue add` left behind with the flag on.
+        let mut parent = queued(&repo, "auth-01");
+        parent.front.group = Some("proj-12-demo".into());
+        parent
+            .front
+            .extra
+            .insert("slug".into(), serde_norway::Value::String("proj-12".into()));
+        parent.save().unwrap();
+
+        let text = document("auth-02", "group: demo\ndepends_on: [auth-01]\n", BODY);
+        let path = write_doc(&repo, "auth-02.md", &text);
+        let args = from_args(&[&path]);
+
+        let err = queue_add(&repo, &Pipelines::builtin(), &args, &repo.root, false).unwrap_err();
+        assert!(
+            err.to_string().contains("a chain does not cross a group"),
+            "with the flag off the prefix means nothing: {err:#}"
+        );
+
+        repo.config.issue_tracking.key_in_names = true;
+        queue_add(&repo, &Pipelines::builtin(), &args, &repo.root, false)
+            .expect("the bare group and its prefixed sibling are one group");
+        assert_eq!(
+            queued(&repo, "auth-02").front.depends_on,
+            vec!["auth-01".to_string()]
+        );
     }
 
     /// A dependent is cut from `depends_on.first()`'s branch, so a list
@@ -4917,7 +5214,10 @@ mod tests {
             "the note to whoever maintains the skeleton is not task content:\n{doc}"
         );
 
-        let args = QueueAddArgs { from: vec![] };
+        let args = QueueAddArgs {
+            from: vec![],
+            dry_run: false,
+        };
         assert!(
             queue_add(&repo, &pipelines, &args, &repo.root, false).is_ok(),
             "bare queue add prints rather than errors"
@@ -4984,12 +5284,22 @@ mod tests {
         }
     }
 
-    /// `base:` is not refused — it is simply not a document's to set. The
-    /// checkout `queue add` runs in answers for it, whatever a document says.
+    /// `base:` is a document's to set, and what it sets is kept — a branch
+    /// this repository really has is checked for by `validate_batch`, not
+    /// here. A document that leaves it out, or writes it blank, is based on
+    /// the branch the checkout answered with.
     #[test]
-    fn a_document_setting_base_is_silently_overridden() {
+    fn a_document_setting_base_keeps_it_and_one_without_takes_the_checkouts() {
         let text = document("demo", "group: demo\nbase: some/other/branch\n", BODY);
         let task = parse_submission("mine.md", &text, "plan/live").unwrap();
+        assert_eq!(task.front.base.as_deref(), Some("some/other/branch"));
+
+        let blank = document("demo", "group: demo\nbase: \"  \"\n", BODY);
+        let task = parse_submission("mine.md", &blank, "plan/live").unwrap();
+        assert_eq!(task.front.base.as_deref(), Some("plan/live"));
+
+        let plain = document("demo", "group: demo\n", BODY);
+        let task = parse_submission("mine.md", &plain, "plan/live").unwrap();
         assert_eq!(task.front.base.as_deref(), Some("plan/live"));
     }
 
@@ -5328,6 +5638,30 @@ mod tests {
     #[test]
     fn with_gate_leaves_a_document_with_no_fence_untouched() {
         assert_eq!(with_gate("not a document", "handover"), "not a document");
+    }
+
+    /// A block-list `depends_on:` — the form `pending::depends_on` reads
+    /// fine — is replaced whole, items included, and a `<key>:` in the body
+    /// is not the frontmatter's to touch (jobs review finding 4).
+    #[test]
+    fn with_frontmatter_field_replaces_a_block_list_and_leaves_the_body_alone() {
+        let doc = "---\nid: wire\ndepends_on:\n  - login\n  - sessions\ngroup: demo\n---\n\
+                   ## Goal\n\n```\nid: in-a-sample\ndepends_on:\n  - also-a-sample\n```\n";
+
+        let out = with_frontmatter_field(doc, "depends_on", "[login]");
+        assert_eq!(
+            out,
+            "---\ndepends_on: [login]\nid: wire\ngroup: demo\n---\n\
+             ## Goal\n\n```\nid: in-a-sample\ndepends_on:\n  - also-a-sample\n```\n"
+        );
+        assert_eq!(super::pending::depends_on(&out), vec!["login"]);
+
+        let out = with_frontmatter_field(doc, "id", "wire-2");
+        assert!(
+            out.starts_with("---\nid: wire-2\ndepends_on:\n  - login\n"),
+            "{out}"
+        );
+        assert!(out.contains("id: in-a-sample"), "{out}");
     }
 
     /// The task pane's `Depends on:` row reads `depends_on` straight off a
@@ -8112,6 +8446,121 @@ mod tests {
             );
         }
 
+        /// A routine fired by a job goes through the same ticket opening and
+        /// prefixing `queue add --from` does, so one queue does not end up
+        /// mixing `task/<slug>-<id>` and bare names by how each batch
+        /// arrived (jobs review finding 6). The routine's own source is not
+        /// written to — a `ticket:` landing there would make every later
+        /// fire report it `kept` and reuse the first fire's ticket.
+        #[test]
+        fn a_fired_routine_opens_tickets_and_takes_the_prefix_like_queue_add() {
+            let mut repo = fixture("open-routine-prefix");
+            repo.config.issue_tracking.key_in_names = true;
+            with_hook(
+                &mut repo,
+                r#"{ echo "ticket=PROJ-13"; echo "slug=proj-12"; } >"$SPOOLWAY_OUT""#,
+            );
+            let source = "---\nid: audit\ntitle: audit\ngroup: demo\n---\n## Goal\n\nDo it.\n";
+            let path = write_routine(&repo, "nightly", "audit", source);
+
+            let tasks = queue_routine_target(
+                &repo,
+                &Pipelines::builtin(),
+                "plan/demo",
+                &repo.routines_dir().join("nightly"),
+                "bugfix",
+            )
+            .unwrap();
+            assert_eq!(tasks.len(), 1);
+            let id = tasks[0].id().to_string();
+            assert!(
+                id.starts_with("audit-"),
+                "minted from the routine's id: {id}"
+            );
+
+            let task = queued(&repo, &id);
+            assert_eq!(task.front.group.as_deref(), Some("proj-12-demo"));
+            assert_eq!(
+                task.front.branch.as_deref(),
+                Some(format!("task/proj-12-{id}").as_str())
+            );
+            assert_eq!(task.extra_str("ticket"), "PROJ-13");
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                source,
+                "the routine's source is never written to"
+            );
+        }
+
+        /// A routine has no document on disk for a failed batch's ids to be
+        /// written back into, so the failure must not send a person to
+        /// `pending/` to look for them: it says the ids went nowhere, and
+        /// that running it again opens a second set.
+        #[test]
+        fn a_hook_failing_on_a_routine_says_the_ids_were_not_written_anywhere() {
+            let mut repo = fixture("open-routine-fails");
+            with_hook(
+                &mut repo,
+                r#"if [ "$SPOOLWAY_TASK" != "${SPOOLWAY_TASK#second}" ]; then exit 1; fi
+                   echo "ticket=PROJ-13" >"$SPOOLWAY_OUT""#,
+            );
+            let first = "---\nid: first\ntitle: first\ngroup: demo\n---\n## Goal\n\nDo it.\n";
+            let second = "---\nid: second\ntitle: second\ngroup: demo\ndepends_on: [first]\n---\n## Goal\n\nDo it.\n";
+            let first_path = write_routine(&repo, "nightly", "first", first);
+            let second_path = write_routine(&repo, "nightly", "second", second);
+
+            let err = queue_routine_target(
+                &repo,
+                &Pipelines::builtin(),
+                "plan/demo",
+                &repo.routines_dir().join("nightly"),
+                "bugfix",
+            )
+            .unwrap_err()
+            .to_string();
+
+            assert!(err.contains("opens a second set"), "{err}");
+            assert!(!err.contains("pending"), "{err}");
+            assert_eq!(std::fs::read_to_string(&first_path).unwrap(), first);
+            assert_eq!(std::fs::read_to_string(&second_path).unwrap(), second);
+            assert!(
+                repo.queued_ids().is_empty(),
+                "nothing was queued: {:?}",
+                repo.queued_ids()
+            );
+        }
+
+        /// The queue screen's `enter` is the third way a batch arrives, and
+        /// it takes the same prefix: driven through `begin_submission` the
+        /// way the screen's own tests do.
+        #[test]
+        fn a_screen_submission_takes_the_prefix_like_queue_add() {
+            let mut repo = fixture("open-screen-prefix");
+            repo.config.issue_tracking.key_in_names = true;
+            with_hook(
+                &mut repo,
+                r#"{ echo "ticket=PROJ-13"; echo "slug=proj-12"; } >"$SPOOLWAY_OUT""#,
+            );
+            write_pending(&repo, "wire", &document("wire", "group: one\n", BODY));
+            let mut groups = listed(&repo);
+            let mut state = ScreenState::new();
+            handle_browse_key(&groups, &mut state, Key::Char(' '));
+
+            let mode = begin_submission(
+                &repo,
+                &Pipelines::builtin(),
+                "plan/demo",
+                &mut groups,
+                &mut state,
+            );
+            assert!(matches!(mode, Mode::Dispatch(_)), "{mode:?}");
+
+            let task = queued(&repo, "wire");
+            assert_eq!(task.front.group.as_deref(), Some("proj-12-one"));
+            assert_eq!(task.front.branch.as_deref(), Some("task/proj-12-wire"));
+            assert_eq!(task.extra_str("ticket"), "PROJ-13");
+        }
+
         /// With the flag off, a `slug=` the hook answers is ignored and every
         /// generated name is byte-for-byte what it is today — but a valid
         /// `url=` is still stored on the task, since the goal is to have it
@@ -8447,6 +8896,263 @@ body\n";
             let task = parse_submission("board-key-map.md", &reset, "master").unwrap();
             assert_eq!(task.id(), "board-key-map");
             assert_eq!(task.stage(), crate::pipeline::QUEUED);
+        }
+    }
+
+    /// `queue remove` on a task that has not started: the document goes
+    /// back to pending with the stamped keys dropped — the board's own
+    /// unqueue, from a script — and the queue file is gone.
+    #[test]
+    fn queue_remove_carries_a_queued_task_back_to_pending() {
+        let repo = fixture("queue-remove");
+        add(&repo, "login", &[]);
+        assert!(repo.queue_dir().join("login.md").exists());
+
+        queue_remove(&repo, &Pipelines::builtin(), "login").unwrap();
+
+        assert!(
+            !repo.queue_dir().join("login.md").exists(),
+            "the queue file must be gone"
+        );
+        let pending = repo.pending_dir().join("login.md");
+        let text = std::fs::read_to_string(&pending).unwrap();
+        for key in RESERVED_KEYS {
+            assert!(
+                !text.contains(&format!("\n{key}:")),
+                "`{key}:` must be stripped so `queue add --from` takes it again: {text}"
+            );
+        }
+        assert!(text.contains("id: login"), "{text}");
+
+        // And it is a document again: the same path in queues it back.
+        queue_add(
+            &repo,
+            &Pipelines::builtin(),
+            &from_args(&[pending.to_str().unwrap()]),
+            &repo.root,
+            false,
+        )
+        .unwrap();
+        assert!(repo.queue_dir().join("login.md").exists());
+    }
+
+    /// A task on `paused` with no worktree — parked before anything was
+    /// cut for it — is removable; the same task with a worktree is work in
+    /// flight, and the refusal names what to do about it.
+    #[test]
+    fn queue_remove_refuses_a_task_with_a_worktree_or_a_running_step() {
+        let repo = fixture("queue-remove-refusal");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "solo", &[]);
+
+        // A worktree: refused, naming the pause and the worktree removal.
+        let mut task = queued(&repo, "solo");
+        task.front.stage = crate::pipeline::PAUSED.to_string();
+        task.front.worktree_path = Some(repo.root.join("wt-solo"));
+        task.save().unwrap();
+        let err = queue_remove(&repo, &pipelines, "solo").unwrap_err();
+        let said = format!("{err:#}");
+        assert!(
+            said.contains("has a worktree")
+                && said.contains("spoolway queue pause solo")
+                && said.contains("git worktree remove"),
+            "{said}"
+        );
+        assert!(
+            repo.queue_dir().join("solo.md").exists(),
+            "a refused remove must leave the queue file where it is"
+        );
+
+        // A running command step, no worktree: refused, naming `--force`.
+        let mut task = queued(&repo, "solo");
+        task.front.worktree_path = None;
+        task.set_stage_unbanked("checks", "test setup");
+        task.save().unwrap();
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("checks", "solo");
+        let sleep = if cfg!(windows) {
+            "Start-Sleep -Seconds 20"
+        } else {
+            "sleep 20"
+        };
+        runs.start(&key, sleep, &repo.checkout, &BTreeMap::new())
+            .unwrap();
+        let err = queue_remove(&repo, &pipelines, "solo").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("spoolway queue pause solo --force"),
+            "{err:#}"
+        );
+        runs.stop(&key);
+
+        // A step in progress with nothing running: still not one of the
+        // three removable states.
+        let err = queue_remove(&repo, &pipelines, "solo").unwrap_err();
+        assert!(format!("{err:#}").contains("is at `checks`"), "{err:#}");
+
+        // Paused with no worktree and nothing running: removable.
+        let mut task = queued(&repo, "solo");
+        task.front.stage = crate::pipeline::PAUSED.to_string();
+        task.save().unwrap();
+        queue_remove(&repo, &pipelines, "solo").unwrap();
+        assert!(!repo.queue_dir().join("solo.md").exists());
+        assert!(repo.pending_dir().join("solo.md").exists());
+
+        let err = queue_remove(&repo, &pipelines, "solo").unwrap_err();
+        assert!(format!("{err:#}").contains("no queued task"), "{err:#}");
+    }
+
+    /// `--dry-run` validates the batch and says where everything would go,
+    /// and writes nothing: no task file, and no file of any kind under the
+    /// project's home.
+    #[test]
+    fn queue_add_dry_run_writes_nothing() {
+        let repo = fixture("queue-add-dry-run");
+        let text = document("login", "group: demo\n", BODY);
+        let path = write_doc(&repo, "login.md", &text);
+        let mut args = from_args(&[&path]);
+        args.dry_run = true;
+
+        queue_add(&repo, &Pipelines::builtin(), &args, &repo.root, false).unwrap();
+
+        assert!(
+            !repo.queue_dir().join("login.md").exists(),
+            "a dry run must not queue"
+        );
+        let mut files = Vec::new();
+        collect_files(&repo.home, &mut files);
+        assert!(files.is_empty(), "a dry run wrote under home: {files:?}");
+        assert!(
+            std::path::Path::new(&path).exists(),
+            "the document itself is left where it was"
+        );
+
+        // A broken document still fails the dry run, the way the real thing
+        // would — that is what it is for.
+        let broken = write_doc(&repo, "broken.md", &document("nogroup", "", BODY));
+        let mut args = from_args(&[&broken]);
+        args.dry_run = true;
+        let err = queue_add(&repo, &Pipelines::builtin(), &args, &repo.root, false).unwrap_err();
+        assert!(format!("{err:#}").contains("`group:`"), "{err:#}");
+    }
+
+    fn collect_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_files(&path, out);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+
+    /// A document may name the branch it is cut from and merges into. One
+    /// that does keeps it — verified against the repository's own branches
+    /// first — and one that does not is based on the checkout's branch, as
+    /// every document always was.
+    #[test]
+    fn a_document_naming_its_own_base_is_cut_from_that_branch() {
+        let repo = fixture("document-base");
+        let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+        git(&["branch", "release/1.x"]);
+
+        let own = write_doc(
+            &repo,
+            "own.md",
+            &document("own", "group: demo\nbase: release/1.x\n", BODY),
+        );
+        let plain = write_doc(&repo, "plain.md", &document("plain", "group: demo\n", BODY));
+        queue_add(
+            &repo,
+            &Pipelines::builtin(),
+            &from_args(&[&own, &plain]),
+            &repo.root,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            queued(&repo, "own").front.base.as_deref(),
+            Some("release/1.x"),
+            "the document's own base is what its worktree is cut from"
+        );
+        assert_eq!(
+            queued(&repo, "plain").front.base.as_deref(),
+            Some("plan/demo"),
+            "a document without `base:` is based on the checkout's branch"
+        );
+        assert_eq!(
+            based_on_note(&[queued(&repo, "own"), queued(&repo, "plain")], "plan/demo"),
+            "  own based on `release/1.x`\n  plain based on `plan/demo`",
+            "the printed line names the base each task actually got"
+        );
+        assert_eq!(
+            based_on_note(&[queued(&repo, "plain")], "plan/demo"),
+            "  based on `plan/demo`"
+        );
+
+        // A dependent has to share its dependency's base, whichever way
+        // either of them came by it.
+        let dep = write_doc(
+            &repo,
+            "dep.md",
+            &document("dep", "group: demo\ndepends_on: [own]\n", BODY),
+        );
+        let err = queue_add(
+            &repo,
+            &Pipelines::builtin(),
+            &from_args(&[&dep]),
+            &repo.root,
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("would never put it in reach"),
+            "{err:#}"
+        );
+    }
+
+    /// The three values `base:` is refused for, each named back at the
+    /// document: a branch the repository does not have, a name git will not
+    /// accept, and anything that would reach git as a flag.
+    #[test]
+    fn a_document_base_that_is_not_a_local_branch_is_refused() {
+        let repo = fixture("document-base-refused");
+        let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+
+        for (base, expected) in [
+            ("release/2.x", "does not have locally"),
+            ("bad..name", "not a valid branch name"),
+            ("-x", "starts with `-`"),
+        ] {
+            let path = write_doc(
+                &repo,
+                "t.md",
+                &document("t", &format!("group: demo\nbase: {base}\n"), BODY),
+            );
+            let err = queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&[&path]),
+                &repo.root,
+                false,
+            )
+            .unwrap_err();
+            let said = format!("{err:#}");
+            assert!(said.contains(expected), "base `{base}`: {said}");
+            assert!(
+                !repo.queue_dir().join("t.md").exists(),
+                "base `{base}` must not have been queued"
+            );
         }
     }
 }

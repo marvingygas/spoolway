@@ -583,7 +583,7 @@ impl Board {
         let lanes = mux.list_lanes().unwrap_or_default();
         let aborts = live_aborts(repo, &tasks, pipelines, &lanes);
         if aborts.is_empty() {
-            park_every_pausable(tasks)?;
+            park_every_pausable(repo, tasks)?;
             return Ok(());
         }
         // How many more tasks this keypress would park without cutting
@@ -610,7 +610,7 @@ impl Board {
         let Some(id) = self.cursor.clone() else {
             return Ok(());
         };
-        let mut tasks = repo.tasks()?;
+        let tasks = repo.tasks()?;
         let Some(i) = tasks.iter().position(|t| t.id() == id) else {
             return Ok(());
         };
@@ -626,8 +626,7 @@ impl Board {
             .filter(|a| a.task == id)
             .collect();
         if aborts.is_empty() {
-            park(&mut tasks[i], "paused from the board", false);
-            tasks[i].save()?;
+            park_under_lock(repo, &id)?;
             return Ok(());
         }
         self.mode = BoardMode::ConfirmPause {
@@ -669,9 +668,7 @@ impl Board {
                             runs.stop(&crate::command_step::Runs::key(&abort.step, &abort.task));
                         }
                     }
-                    let mut task = repo.task(&abort.task)?;
-                    park(&mut task, "paused from the board", false);
-                    task.save()?;
+                    park_under_lock(repo, &abort.task)?;
                 }
                 if matches!(scope, PauseScope::All(_)) {
                     // Read fresh rather than trusting the queue as it stood
@@ -684,7 +681,7 @@ impl Board {
                         .into_iter()
                         .filter(|t| !aborts.iter().any(|a| a.task == t.id()))
                         .collect();
-                    park_every_pausable(rest)?;
+                    park_every_pausable(repo, rest)?;
                 }
             }
             // Backing out with `esc` leaves the task, every lane and every
@@ -1031,15 +1028,34 @@ fn pausable_tasks(tasks: &[crate::task::Task]) -> impl Iterator<Item = &crate::t
 /// panel — what `P` does outright when nothing in the run is live, and what
 /// it does to the rest of the run once its own panel, if one opened, is
 /// answered.
-fn park_every_pausable(tasks: Vec<crate::task::Task>) -> Result<()> {
-    for mut task in tasks {
+fn park_every_pausable(repo: &Repo, tasks: Vec<crate::task::Task>) -> Result<()> {
+    for task in tasks {
         if !is_pausable(&task) {
             continue;
         }
-        park(&mut task, "paused from the board", false);
-        task.save()?;
+        park_under_lock(repo, task.id())?;
     }
     Ok(())
+}
+
+/// Park one task by id: read, [`park`] and save under the same per-task
+/// lock a lane's `spoolway report` and the dispatcher's own `persist` take,
+/// so the park cannot land in the middle of either one's read-modify-write
+/// and lose it — or be lost to it. Read fresh under the lock rather than
+/// from the queue as the board last saw it, and silent about a task the
+/// queue no longer has, or one already stopped: `P` walks the whole run,
+/// and one row archived since the panel opened must not leave the rest of
+/// it unparked (jobs review finding 5).
+fn park_under_lock(repo: &Repo, id: &str) -> Result<()> {
+    let _task_lock = crate::lock::TaskLock::acquire(&repo.task_lock_file(id));
+    let Ok(mut task) = repo.task(id) else {
+        return Ok(());
+    };
+    if !is_pausable(&task) {
+        return Ok(());
+    }
+    park(&mut task, "paused from the board", false);
+    task.save()
 }
 
 /// Send one task through `spoolway resume`, exactly as a person typing the
@@ -1159,18 +1175,32 @@ fn unqueue_task(repo: &Repo, id: &str) -> Result<()> {
     if !not_started(&task) {
         return Ok(());
     }
-    let dest = repo.pending_dir().join(format!("{id}.md"));
-    // A document already sitting in `pending/` is a newer draft — a producer
-    // re-ran over work already submitted — and putting the queued copy back
-    // on top of it would silently lose that draft. Leave everything where it
-    // is: the row stays queued, and the reason goes to the problem log
-    // rather than breaking the board loop this runs inside.
-    if dest.exists() {
+    // The reason goes to the problem log rather than breaking the board
+    // loop this runs inside: the row simply stays queued.
+    if carry_to_pending(repo, &task)?.is_none() {
         crate::problem_log::append(
             repo,
             &format!("did not unqueue `{id}`: a newer draft is already in the pending directory"),
         );
-        return Ok(());
+    }
+    Ok(())
+}
+
+/// The move itself, shared with `spoolway queue remove`: `task`'s document
+/// written to pending with every reserved key dropped, then its queue file
+/// removed. The caller decides whether `task` may go — the board's `u` only
+/// carries a task that has not started, `queue remove` also one parked
+/// before it got a worktree — and holds the task's lock while it does.
+///
+/// `None` when a document already sits in `pending/` under this id: that is
+/// a newer draft — a producer re-ran over work already submitted — and
+/// putting the queued copy back on top of it would silently lose that
+/// draft. Nothing is touched in that case.
+pub(crate) fn carry_to_pending(repo: &Repo, task: &crate::task::Task) -> Result<Option<PathBuf>> {
+    let id = task.id();
+    let dest = repo.pending_dir().join(format!("{id}.md"));
+    if dest.exists() {
+        return Ok(None);
     }
     let mut front = serde_norway::to_value(&task.front)
         .with_context(|| format!("serialising {id}'s frontmatter"))?;
@@ -1189,7 +1219,7 @@ fn unqueue_task(repo: &Repo, id: &str) -> Result<()> {
     // than lost between the two directories.
     std::fs::remove_file(&task.path)
         .with_context(|| format!("removing {}", task.path.display()))?;
-    Ok(())
+    Ok(Some(dest))
 }
 
 /// Park one task on `paused` with `parked_from` naming the step it was on —
@@ -4100,12 +4130,12 @@ mod tests {
 
     /// `r` on a task parked before it ever started — no `paused_at`,
     /// `parked_from` or `blocked_from` at all, exactly what `park` leaves on
-    /// a task still on `queued` — still resumes it, straight to the
-    /// pipeline's own entry step: `resume_task`'s guard reads `stage()`, not
-    /// the three fields, exactly so this case is never mistaken for
-    /// "nothing to resume".
+    /// a task still on `queued` — still resumes it, back onto `queued` where
+    /// the dependency and hook gates apply again (jobs review finding 1):
+    /// `resume_task`'s guard reads `stage()`, not the three fields, exactly
+    /// so this case is never mistaken for "nothing to resume".
     #[test]
-    fn r_on_a_task_parked_before_it_started_puts_it_back_on_the_pipeline_entry() {
+    fn r_on_a_task_parked_before_it_started_puts_it_back_on_queued() {
         let repo = fixture("resume-key-queued-park");
         let pipelines = Pipelines::builtin();
         add(&repo, "never-run", &[], None);
@@ -4123,7 +4153,7 @@ mod tests {
             .unwrap();
 
         let task = repo.task("never-run").unwrap();
-        assert_eq!(task.stage(), "implement", "{}", task.stage());
+        assert_eq!(task.stage(), crate::pipeline::QUEUED, "{}", task.stage());
         assert_eq!(task.front.parked_from, None);
         assert_eq!(task.front.resume, None);
     }
@@ -4708,6 +4738,7 @@ mod tests {
         // without editing it by hand.
         let queue_args = crate::cli::QueueAddArgs {
             from: vec![pending_doc.display().to_string()],
+            dry_run: false,
         };
         crate::commands::queue_add(&repo, &pipelines, &queue_args, &repo.root, false).unwrap();
         assert_eq!(repo.task("chain-refusals").unwrap().stage(), "queued");

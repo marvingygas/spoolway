@@ -950,6 +950,13 @@ pub enum QueueCommand {
     /// a gate it finished, or back onto the step a park or a block pulled it
     /// off of — exactly `spoolway resume <id>` with no other flags.
     Resume { task: String },
+
+    /// Take a task out of the queue, carrying its document back to the
+    /// pending directory the way the board's `u` does — for a task on
+    /// `queued`, `paused` or `blocked` with no lane running and no worktree
+    /// cut. Anything with work in flight is refused, naming what to stop
+    /// first; nothing is killed or removed on a script's say-so.
+    Remove { task: String },
 }
 
 #[derive(Debug, Args)]
@@ -975,17 +982,25 @@ pub struct QueueAddArgs {
     ///
     /// Each document is `---\n<frontmatter>\n---\n<body>`, the same shape a
     /// queued task is kept in. `id`, `touches`, `depends_on`, `parallel`,
-    /// `group`, `source`, `plan`, `pipeline` and `gate_at` are a document's to set;
-    /// `stage`, `run`, `attempts`, `base_commit` and `cut_from` are
-    /// spoolway's alone, and a document setting one is refused by name. `base` is not a document key
-    /// at all — the checkout this command runs in answers for it. Any other
-    /// key survives untouched, for a project's own metadata.
+    /// `group`, `source`, `plan`, `pipeline`, `gate_at` and `base` are a
+    /// document's to set; `stage`, `run`, `attempts`, `base_commit` and
+    /// `cut_from` are spoolway's alone, and a document setting one is
+    /// refused by name. A document that leaves `base` out is based on the
+    /// branch the checkout this command runs in has out; one that sets it
+    /// must name a branch this repository has locally. Any other key
+    /// survives untouched, for a project's own metadata.
     ///
     /// Omitted entirely, nothing is queued: the pipeline's skeleton document
     /// is printed instead, for a person to save, fill in, and hand back
     /// through this same flag.
     #[arg(long = "from", value_name = "PATH")]
     pub from: Vec<String>,
+
+    /// Validate and say what would happen, writing nothing: the project root
+    /// and home directory resolved, the base branch, and every task that
+    /// would be queued. No task file is written, no ticket is opened.
+    #[arg(long, requires = "from")]
+    pub dry_run: bool,
 }
 
 /// Print or validate the task-document contract — the same shape

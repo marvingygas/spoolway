@@ -105,12 +105,18 @@ impl PollableRead for RawStdin {
     }
 
     // No Windows termios means no Windows raw mode either (see
-    // `platform::TermGuard`), so nothing on that platform ever blocks stdin
-    // waiting on a key in the first place — the old always-ready behaviour
-    // is exactly right here too.
+    // `platform::TermGuard`): stdin is cooked there, and a cooked stdin
+    // cannot be asked whether a byte is waiting without blocking on it until
+    // a whole line has been typed. Answering `true` was what made the
+    // board's wait do exactly that — the frame stopped redrawing and the
+    // next pass waited on Enter (jobs review finding 8). `false` is the
+    // answer that never blocks: a caller with a sleep to fall back on takes
+    // it, and a screen that means to block for a key reads without asking
+    // first — see `commands::queue::wait_for_key` and
+    // `commands::jobs::jobs_wait_for_key`.
     #[cfg(not(unix))]
     fn byte_pending(&self, _timeout: std::time::Duration) -> bool {
-        true
+        false
     }
 }
 

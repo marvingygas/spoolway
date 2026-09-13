@@ -592,15 +592,13 @@ pub struct Step {
     /// its file, on arrival at a declared terminal step — reaching the
     /// reserved `done` stage does this unconditionally now, at
     /// [`crate::dispatch::Dispatcher::clean_up`], so there was no second value
-    /// this key ever chose between. Kept only so a file still naming it is
-    /// refused by name, the way [`Step::max_new_sessions`] and
-    /// [`Step::max_rounds`] are.
-    #[serde(
-        default,
-        skip_serializing,
-        deserialize_with = "deserialize_retired_cleanup"
-    )]
+    /// this key ever chose between. Kept only so a file still naming it
+    /// parses, the way `blocked_on_write:` below does: 0.1.0's shipped
+    /// pipelines documented `cleanup: true` beside `end: true`, and refusing
+    /// it stopped every routing command on a project that wrote what the
+    /// docs told it to. Dropped unconditionally on the next save.
     #[allow(dead_code)]
+    #[serde(default, skip_serializing)]
     pub cleanup: Option<serde_norway::Value>,
 
     /// Where an old `blocked_on_write:` on this step lands so an existing
@@ -714,21 +712,6 @@ fn deserialize_max_rounds<'de, D: serde::Deserializer<'de>>(
         "`max_rounds:` is now `loop:` — it bounds how many times a task may arrive at this \
          step from a given one. Rename the key, and consider raising the number: what it \
          counts has changed twice since",
-    ))
-}
-
-/// The retired `cleanup:` key, kept only so that a file still naming it is
-/// refused by name rather than serde's own list of every other key a step
-/// may carry.
-fn deserialize_retired_cleanup<'de, D: serde::Deserializer<'de>>(
-    d: D,
-) -> std::result::Result<Option<serde_norway::Value>, D::Error> {
-    let _ = serde_norway::Value::deserialize(d)?;
-    Err(serde::de::Error::custom(
-        "`cleanup:` is retired — reaching the reserved `done` stage already tears a task's \
-         worktree and branch down and archives its file, which was the only value this key \
-         ever carried on a shipped or project pipeline. Delete it; a step that wants the \
-         task to end names `end: true` and nothing else",
     ))
 }
 
@@ -2397,19 +2380,21 @@ mod tests {
         }
     }
 
-    /// A file still naming the retired `cleanup:` is refused by name, the same
-    /// way `max_rounds:` and `max_new_sessions:` are — reaching `done` already
-    /// does what this key used to opt a declared terminal into.
+    /// A file still naming the retired `cleanup:` parses, the same way
+    /// `blocked_on_write:` does — 0.1.0's shipped pipelines told projects to
+    /// write it beside `end: true`, and reaching `done` already does what it
+    /// used to opt a declared terminal into. It is ignored, and gone on the
+    /// next save.
     #[test]
-    fn the_retired_cleanup_key_is_refused_by_name() {
-        let err = parse(
+    fn the_retired_cleanup_key_parses_and_drops() {
+        let pipeline = parse(
             "steps:\n  - id: a\n    agent: pi\n    on_pass: z\n  \
              - id: z\n    end: true\n    cleanup: true\n",
         )
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("`cleanup:` is retired"), "{err}");
-        assert!(err.contains("`done`"), "{err}");
+        .expect("a pipeline naming the retired cleanup key must still parse");
+        assert!(pipeline.step("z").unwrap().end);
+        let rendered = serde_norway::to_string(&pipeline).unwrap();
+        assert!(!rendered.contains("cleanup"), "{rendered}");
     }
 
     /// What the board's NEXT column asks. One hop along `on_pass` — nothing in

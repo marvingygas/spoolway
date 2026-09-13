@@ -50,6 +50,7 @@ pub fn add_to(
 
     let args = crate::cli::QueueAddArgs {
         from: vec![path.display().to_string()],
+        dry_run: false,
     };
     crate::commands::queue_add(repo, &Pipelines::builtin(), &args, &repo.root, false).unwrap();
     // `group` is set above so the document always validates; a task

@@ -681,35 +681,14 @@ pub struct DispatchConfig {
     /// longer a second value for this key to choose between: every
     /// interrupted lane is left exactly where it stood, with its spend
     /// banked and its launch counter forgiven, whichever way the run stopped.
-    /// A config still naming it, under this spelling or its own predecessor
-    /// `cleanup_on_stop`, is refused by name rather than silently dropped —
-    /// silence would read as a promise this binary no longer keeps.
-    #[serde(
-        alias = "cleanup_on_stop",
-        default,
-        skip_serializing,
-        deserialize_with = "deserialize_retired_tear_lanes_on_stop"
-    )]
-    #[allow(dead_code)]
-    pub tear_lanes_on_stop: Option<toml::Value>,
-}
-
-/// The retired `tear_lanes_on_stop` (and its own predecessor
-/// `cleanup_on_stop`), kept on [`DispatchConfig`] only so a config still
-/// naming either spelling is refused by name rather than by
-/// `deny_unknown_fields`'s own "unknown key" — which would say the key is
-/// wrong without saying that stopping the dispatcher no longer has a second
-/// behavior for it to choose.
-fn deserialize_retired_tear_lanes_on_stop<'de, D: Deserializer<'de>>(
-    d: D,
-) -> std::result::Result<Option<toml::Value>, D::Error> {
-    let _ = toml::Value::deserialize(d)?;
-    Err(serde::de::Error::custom(
-        "`tear_lanes_on_stop` is retired — stopping the dispatcher no longer removes a \
-         worktree, workspace, pane or tab, so there is no second value left for this key to \
-         pick between. Delete it: every interrupted lane is left standing, its spend banked \
-         and its launch counter forgiven, so the next run resumes it where it stood",
-    ))
+    /// Kept, under this spelling or its own predecessor `cleanup_on_stop`,
+    /// only so an existing config still parses — 0.1.0 printed the key in
+    /// every scaffolded config's reference header, and refusing it took every
+    /// command down with the file, `config set` included, leaving a hand edit
+    /// as the only way out. [`Config::load`] says once that it is no longer
+    /// read; dropped unconditionally on the next save.
+    #[serde(alias = "cleanup_on_stop", default, skip_serializing)]
+    pub(crate) tear_lanes_on_stop: Option<toml::Value>,
 }
 
 /// Skips an hour on the way out — see [`DispatchConfig::lane_child_ceiling`]
@@ -1611,6 +1590,19 @@ impl Config {
                          edited as prose. Move them across and delete the table.",
                         path.display(),
                         crate::assets::PROMPT_FILE,
+                    );
+                }
+                // Said here for the same reason: a person who set it wanted
+                // their worktrees kept across a stop, and that is now what
+                // every stop does.
+                if config.dispatch.tear_lanes_on_stop.is_some() {
+                    eprintln!(
+                        "note: dispatch.tear_lanes_on_stop in {} is no longer read — stopping \
+                         the dispatcher never removes a worktree, workspace, pane or tab any \
+                         more: every interrupted lane is left standing, its spend banked and \
+                         its launch counter forgiven, so the next run resumes it where it \
+                         stood. The key is dropped on the next save.",
+                        path.display(),
                     );
                 }
                 // Only where a value was somebody's decision: an untouched
@@ -2533,27 +2525,24 @@ mod tests {
     }
 
     /// A config naming `tear_lanes_on_stop`, or its own predecessor
-    /// `cleanup_on_stop`, is refused by name rather than by
-    /// `deny_unknown_fields`'s own "unknown key" — the rename is the message,
-    /// so both spellings are refused the same way.
+    /// `cleanup_on_stop`, still parses — it was a documented 0.1.0 key, and
+    /// refusing it took every command down with the file — and neither
+    /// spelling comes back out on the next save, the same shape every other
+    /// retired key takes.
     #[test]
-    fn the_retired_tear_lanes_on_stop_key_is_refused_by_either_spelling() {
-        let err = toml::from_str::<Config>("[dispatch]\ntear_lanes_on_stop = false\n")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("`tear_lanes_on_stop` is retired"), "{err}");
-
-        let old_err = toml::from_str::<Config>("[dispatch]\ncleanup_on_stop = false\n")
-            .unwrap_err()
-            .to_string();
-        assert!(
-            old_err.contains("`tear_lanes_on_stop` is retired"),
-            "{old_err}"
-        );
-
-        let rendered = toml::to_string(&Config::default()).unwrap();
-        assert!(!rendered.contains("tear_lanes_on_stop"), "{rendered}");
-        assert!(!rendered.contains("cleanup_on_stop"), "{rendered}");
+    fn the_retired_tear_lanes_on_stop_key_parses_and_drops_by_either_spelling() {
+        for raw in [
+            "[dispatch]\ntear_lanes_on_stop = false\n",
+            "[dispatch]\ncleanup_on_stop = false\n",
+        ] {
+            let config: Config =
+                toml::from_str(raw).expect("a retired tear_lanes_on_stop must still parse");
+            assert!(config.dispatch.tear_lanes_on_stop.is_some(), "{raw}");
+            let rendered = toml::to_string(&config).unwrap();
+            assert!(!rendered.contains("tear_lanes_on_stop"), "{rendered}");
+            assert!(!rendered.contains("cleanup_on_stop"), "{rendered}");
+        }
+        assert!(Config::default().dispatch.tear_lanes_on_stop.is_none());
     }
 
     /// `lane_child_ceiling` stays out of a defaulted config so a lane running
