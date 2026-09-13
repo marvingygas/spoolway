@@ -449,8 +449,11 @@ the step that reported, not the one it arrived at: a move that lands on that ste
 `on_pass` route draws `✓ pass` in green, one landing on its `on_fail` route draws `✗ fail` in
 red, and a task arriving at `paused` or `blocked` draws `● paused` or `● blocked` — the same
 word and colour the table's STATE column uses — naming the step recorded in `paused_at`, or
-`parked_from` when no gate was passed, or `blocked_from`. A move that matches none of those
-routes draws dim, with the step named and no
+`parked_from` when no gate was passed, or `blocked_from`. Those two words are the *stage* a
+task arrived at; a running task whose lane the multiplexer reports `blocked` draws `● paused`
+in the table's STATE column without arriving anywhere, so it never earns a ticker line — the
+ticker is a log of moves, and a lane going to a permission prompt is not one. A move that
+matches none of those routes draws dim, with the step named and no
 verdict word. After the verdict comes a position, the named step's own place in its pipeline's
 walk over how many steps that walk still has left, or `—` where the task's pipeline cannot be
 read. Only the verdict token itself carries colour; the rest of the line, including the step
@@ -520,6 +523,15 @@ through. A step with no declared budget for that route shows a bare step id.
 `● paused`, with `→` and the step passing the gate would carry it to in the NEXT column, and
 — on a driving board where every dependency is satisfied and no lane of the task's own is
 mid-turn — ` — [r] resumes it` after it, naming the key rather than the command.
+
+A task still on a live step reads `● paused` too, for the other reason a pane is worth a
+look: its lane is sitting on a permission prompt. The multiplexer reports that state itself —
+herdr calls it `blocked`, off a named rule such as `bash_permission_prompt`, and it means a
+modal is on screen waiting for a keystroke — so the dispatcher marks the lane on the very pass
+that sees it, with none of the quiet wait a merely-settled lane sits through below. NEXT names
+the pane in the same ``look at pane `<lane>``` — [r] resumes it`` form the gated row uses;
+answer the prompt and the next pass sees the lane `working` and takes the mark off, and the row
+goes back to reading as the running step it is.
 
 CTX is how full the conversation a live lane is holding has got, as a percentage of that
 step's model context window — the same reading `session_reuse_ctx` forks a fresh session
@@ -770,6 +782,23 @@ same state a gated task on the `paused` stage gets — and NEXT names the pane t
 same ``look at pane `<lane>``` — [r] resumes it`` form a gate's resume carries. The task
 remains on its live pipeline step; the two differ only in route, not in key: the pane-held row
 points at the pane, the gate-held row points at the resume route.
+
+The same mark, and the same row, is what a `blocked` lane earns — but it earns it without any
+of the ladder above. Everything on this page so far is about a lane that *settled*: the
+dispatcher cannot see why, so it waits out `dispatch.lane_quiet`, reminds, and escalates,
+because silence is only ever an inference. A lane the multiplexer calls `blocked` is not an
+inference at all — it is an observation of a modal on screen — so the pass marks it on the
+spot, with no quiet wait and no reminder, and then leaves it alone. It is still alive: it
+holds its pane, its session and its worker slot, it still forgives the launch counter the way
+a working lane does, and nothing is sent to it, because typing the report contract on top of a
+prompt a person is about to answer is the one thing a live lane must never get.
+
+So the dispatcher's per-lane branch reads four ways, not two. `working`: withdraw the mark, if
+there is one, and carry on. `blocked`: mark it immediately and name the pane — the case this
+section just described. `done` or `idle`: settled, and the reminder and escalation ladder above
+is what happens next. Anything the backend declines to label — `unknown` — is left entirely
+alone and asked again on the next pass, since a multiplexer that will not answer is not the
+same as one answering no.
 
 Once, and not for the rest of the lane's life: the mark comes off the moment the lane is seen
 working again. Whether you answered the question or the lane was only quiet long enough between

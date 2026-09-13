@@ -45,9 +45,18 @@ impl LaneStatus {
         matches!(self, LaneStatus::Done | LaneStatus::Idle)
     }
 
-    /// Is the lane still in flight and not to be disturbed?
+    /// Is the lane mid-turn, with nobody but the agent itself to answer for it?
+    ///
+    /// `Blocked` deliberately does not count. It used to, on the theory that a
+    /// lane holding a modal is not to be disturbed either — true, but it
+    /// buried the one distinction the dispatcher now has to make: `Blocked`
+    /// is a lane waiting on a *person*, which needs marking the moment it is
+    /// seen, not the busy-lane handling below. A call site that still wants
+    /// the old "still in flight, whichever way" reading spells it out as
+    /// `Working | Blocked` itself, so that choice shows in its own diff
+    /// rather than hiding in this predicate.
     pub fn is_busy(self) -> bool {
-        matches!(self, LaneStatus::Working | LaneStatus::Blocked)
+        matches!(self, LaneStatus::Working)
     }
 
     pub fn as_str(self) -> &'static str {
@@ -2480,7 +2489,16 @@ mod tests {
         assert!(LaneStatus::Idle.is_settled());
         assert!(!LaneStatus::Done.is_busy());
         assert!(LaneStatus::Working.is_busy());
-        assert!(LaneStatus::Blocked.is_busy());
+    }
+
+    /// `Blocked` is busy in the everyday sense — a modal is up, the lane is
+    /// not to be started over — but it is not what `is_busy()` answers any
+    /// more: the dispatcher's own arm for it needs to see it apart from
+    /// `Working`, not folded into the same predicate.
+    #[test]
+    fn blocked_is_not_busy_it_gets_its_own_arm() {
+        assert!(!LaneStatus::Blocked.is_busy());
+        assert!(!LaneStatus::Blocked.is_settled());
     }
 
     #[test]

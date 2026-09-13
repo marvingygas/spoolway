@@ -210,7 +210,14 @@ pub fn answer(repo: &Repo, pipelines: &Pipelines, mux: &dyn Mux, args: &AnswerAr
         );
     }
 
-    if lane.status.is_busy() {
+    // Spelled out rather than `is_busy()`: a lane parked on a permission
+    // prompt has not finished its turn either, and sending it `prompt` would
+    // land behind whatever the modal is waiting on rather than reach the
+    // agent at all.
+    if matches!(
+        lane.status,
+        crate::mux::LaneStatus::Working | crate::mux::LaneStatus::Blocked
+    ) {
         bail!(
             "lane `{lane_name}` is `{}` — it has not finished its turn, so there is nothing \
              to answer yet. `spoolway lane {lane_name}` shows where it is.",

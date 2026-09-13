@@ -1076,7 +1076,13 @@ impl<'a> Dispatcher<'a> {
                     // which is what the settled arm twenty lines below now
                     // reads `last_report` for instead of inferring from stage
                     // movement.
-                    let running = lane.is_some_and(|lane| lane.status.is_busy());
+                    //
+                    // Spelled out rather than `is_busy()`: a lane sitting on a
+                    // permission prompt is still proof the launch survived, so
+                    // `Blocked` forgives the counter exactly as `Working` does.
+                    let running = lane.is_some_and(|lane| {
+                        matches!(lane.status, LaneStatus::Working | LaneStatus::Blocked)
+                    });
                     if running && !self.dry_run && tasks[index].launch_landed() {
                         self.persist(&mut tasks[index])?;
                     }
@@ -1091,13 +1097,9 @@ impl<'a> Dispatcher<'a> {
                         //
                         // What is left is bookkeeping, not a clock: a lane
                         // mid-turn is not holding a question, so the mark that
-                        // says it is comes off. Only `Working` clears it —
-                        // `Blocked` is busy too, and means the very thing the
-                        // mark is for.
+                        // says it is comes off.
                         Some(lane) if lane.status.is_busy() => {
-                            if lane.status == LaneStatus::Working {
-                                self.withdraw_waiting(&lane.name);
-                            }
+                            self.withdraw_waiting(&lane.name);
                             // A parked task whose lane is busy again is not
                             // waiting on a launch — a person typed straight
                             // into the pane `spoolway resume` just put back on
@@ -1109,6 +1111,40 @@ impl<'a> Dispatcher<'a> {
                             // report contract on top of what the person just
                             // asked for is exactly what `park_prompt`'s own
                             // doc warns a busy lane must never get.
+                            self.unpark_quietly(&mut tasks[index], &step, report)?;
+                        }
+
+                        // The new arm the four-way branch adds. `Blocked`
+                        // means one thing: a modal is on screen waiting for a
+                        // keystroke, read off herdr's own rule manifest, not
+                        // inferred from silence — so it earns the mark on the
+                        // very pass that sees it, bypassing the `lane_quiet`
+                        // wait `announce_waiting` makes a merely-settled lane
+                        // sit through.
+                        //
+                        // The mark is the only thing this arm adds. A blocked
+                        // lane is alive and holding its pane, so everything
+                        // the busy arm does for a live lane still has to
+                        // happen: the launch counter twenty-five lines above
+                        // already forgives `attempts` for it (`running` spells
+                        // out `Working | Blocked` for exactly this case), and
+                        // `unpark_quietly` is called here for exactly the
+                        // reason it is called there — a parked task whose lane
+                        // is alive is not waiting on a launch, and leaving
+                        // `parked_from` and the one-shot `resume` unspent
+                        // would strand them on a lane that goes `Blocked`
+                        // straight to settled without ever being seen
+                        // `Working`, where the next launch reads `parked_from`
+                        // to tell a person's own interrupt from a real block
+                        // and would call that launch a park.
+                        //
+                        // What the arm deliberately does not do is anything
+                        // about the turn itself: the pass leaves the lane
+                        // alone until it is next seen `Working` (which
+                        // withdraws the mark) or gone (settles or vanishes
+                        // like any other lane).
+                        Some(lane) if lane.status == LaneStatus::Blocked => {
+                            self.mark_blocked(&lane.name);
                             self.unpark_quietly(&mut tasks[index], &step, report)?;
                         }
 
@@ -1593,7 +1629,12 @@ impl<'a> Dispatcher<'a> {
                 continue;
             }
 
-            if lane.status.is_busy() {
+            // Spelled out rather than `is_busy()`: a lane on a permission
+            // prompt has not finished anything, so its pane is exactly as
+            // unfree as a working one's — reclaiming it here would pull the
+            // pane out from under the very prompt a person is about to
+            // answer.
+            if matches!(lane.status, LaneStatus::Working | LaneStatus::Blocked) {
                 continue;
             }
 
@@ -1885,7 +1926,12 @@ impl<'a> Dispatcher<'a> {
         tasks: &mut [Task],
         report: &mut Report,
     ) -> Result<()> {
-        let busy = lane.status.is_busy();
+        // Spelled out rather than `is_busy()`: a person's round that lands on
+        // a permission prompt has not gone idle, it is mid-round waiting on
+        // the very keystroke that continues it — treating that as the idle
+        // half of "idle right after busy" would commit a round that has not
+        // finished yet.
+        let busy = matches!(lane.status, LaneStatus::Working | LaneStatus::Blocked);
 
         // Ahead of both mutations below, not after them: `pass()` saves
         // `self.lanes` unconditionally, so a dry run that flipped
@@ -2620,7 +2666,11 @@ impl<'a> Dispatcher<'a> {
             // `Mux::interrupt_lane` does for a person's own keypress, so the
             // pane a person reads next still holds the conversation, just
             // not one still spending.
-            if lane.status.is_busy() {
+            // Spelled out rather than `is_busy()`: a lane parked on a
+            // permission prompt is still spending against the ceiling that
+            // just fired, exactly as a working one is, and Escape clears a
+            // prompt the same way it ends a turn.
+            if matches!(lane.status, LaneStatus::Working | LaneStatus::Blocked) {
                 let _ = self.mux.interrupt_lane(&lane.name);
             }
         } else {
@@ -2828,8 +2878,9 @@ impl<'a> Dispatcher<'a> {
                 continue;
             }
             // Every surviving lane counts, whatever the multiplexer says it is
-            // doing this second. It used to be `is_busy()` only — `working` or
-            // `blocked` — and that is the bug that put five lanes on a
+            // doing this second. It used to count only the lanes the
+            // multiplexer called `working` or `blocked`, and that is the bug
+            // that put five lanes on a
             // three-slot model: a lane spends its first seconds `idle`
             // ("started but never prompted", and `unknown` while the backend
             // is still labelling its pane), so the pass ten seconds after the
@@ -3876,6 +3927,31 @@ impl<'a> Dispatcher<'a> {
         if silent_for >= quiet {
             record.notified = true;
         }
+    }
+
+    /// Mark, immediately, that a `Blocked` lane's pane is holding a question —
+    /// read back by [`lanes_awaiting_a_person`] the same as [`Self::announce_waiting`]'s
+    /// mark.
+    ///
+    /// No `lane_quiet` wait, unlike `announce_waiting`: that gate exists
+    /// because a *settled* lane might have just ended its turn on a
+    /// background job rather than a question, and only silence tells the two
+    /// apart. `Blocked` carries no such ambiguity — it is herdr reading a
+    /// named rule off the pane (`bash_permission_prompt` and the rest of its
+    /// manifest), not this dispatcher inferring one from quiet — so the first
+    /// pass that sees it is the only wait a person should have to sit
+    /// through.
+    fn mark_blocked(&mut self, lane_name: &str) {
+        if self.dry_run {
+            return;
+        }
+        let now = now_secs();
+        let ledger = self.ledger();
+        let record = self
+            .lanes
+            .entry(lane_name.to_string())
+            .or_insert_with(|| LaneRecord::readopted(lane_name, now, &ledger));
+        record.notified = true;
     }
 
     /// Take the mark back off a lane that has gone back to work.
@@ -8250,6 +8326,75 @@ mod tests {
             lanes_awaiting_a_person(&repo).is_empty(),
             "a lane that only just stopped working is not asking anything yet"
         );
+    }
+
+    /// `LaneStatus::Blocked` earns the mark on the very pass that sees it —
+    /// no `lane_quiet` wait, unlike a merely-settled lane in
+    /// `a_waiting_lane_is_announced_once_and_unmarked_when_it_works_again`
+    /// above — and loses it the moment the lane is `Working` again.
+    #[test]
+    fn a_blocked_lane_is_marked_immediately_and_unmarked_when_it_works_again() {
+        let repo = fixture("blocked-marked-immediately");
+        add_task_with(&repo, "demo", "implement", |f| {
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+        });
+
+        // First pass, no aging at all: a settled lane would need
+        // `lane_quiet` of silence first, but `Blocked` is an observation, not
+        // an inference from quiet.
+        run_pass(
+            &repo,
+            &FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Blocked)]),
+        );
+        assert!(lanes_awaiting_a_person(&repo).contains("demo · implement"));
+
+        // Answered: the lane is working again, and the mark comes off.
+        run_pass(
+            &repo,
+            &FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Working)]),
+        );
+        assert!(lanes_awaiting_a_person(&repo).is_empty());
+    }
+
+    /// The `Blocked` arm's other half. A lane sitting on a permission prompt
+    /// is as alive as a working one, so a park resumed straight into its pane
+    /// is spent here exactly as the busy arm spends it — otherwise
+    /// `parked_from` outlives the lane on a task that goes `Blocked` to
+    /// settled without ever being seen `Working`, and the next launch reads
+    /// it as a person's own interrupt.
+    #[test]
+    fn a_blocked_lane_is_marked_and_un_parked_in_the_same_pass() {
+        let repo = fixture("blocked-unparks");
+        let path = add_task_with(&repo, "demo", "implement", |f| {
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+            f.parked_from = Some("implement".into());
+            f.resume = Some("implement".into());
+        });
+        record_lane(
+            &repo,
+            "demo · implement",
+            "parked-session",
+            &implement_kind(&repo),
+        );
+
+        let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Blocked)]);
+        run_pass(&repo, &mux);
+
+        assert!(
+            mux.did("start").is_empty(),
+            "a live lane must not be relaunched"
+        );
+        assert!(
+            mux.did("prompt").is_empty(),
+            "and never sent a prompt on top of the modal it is holding"
+        );
+        assert!(lanes_awaiting_a_person(&repo).contains("demo · implement"));
+        let task = reload(&path);
+        assert_eq!(task.front.parked_from, None, "un-parked all the same");
+        assert_eq!(task.front.resume, None);
+        assert!(!task.front.escalated, "spent alongside `parked_from`");
     }
 
     #[test]
