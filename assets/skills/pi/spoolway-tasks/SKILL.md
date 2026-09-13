@@ -1,6 +1,6 @@
 ---
 name: spoolway-tasks
-description: Cut an already-approved shape into task documents in the pending directory — gather every pipeline's own window, route each subject to one before sizing it, offer the shape, write the documents, verify the chain and its `last:` step, and prove the set with `spoolway task contract`. Invoked from another skill's own step, such as spoolway-plan's step 7 once a plan is approved, or run directly once a shape is already agreed.
+description: Cut an already-approved shape into task documents in the pending directory — gather each pipeline's own contract, route each subject to one before sizing it, offer the shape, write the documents, verify the chain and its `last:` step, and prove the set with `spoolway task contract`. Invoked from another skill's own step, such as spoolway-plan's step 7 once a plan is approved, or run directly once a shape is already agreed.
 ---
 
 # spoolway-tasks
@@ -28,22 +28,14 @@ read one at its own step 1 — run `spoolway issue show <ref>` first, and decomp
 title, body, labels and comments together: a correction or a scope cut often lives in a
 comment, not the body.
 
-1. **Gather, before anything is sized.** Three commands, and nothing is opened past them:
+1. **Gather, before anything is sized.** One command, and nothing is opened past it:
+   `spoolway task contract` — the project's default pipeline, its own `sizing` guidance, and
+   per pipeline its `description:`, `id_budget`, `gate_at` steps, `last_of_chain`, and
+   skeleton `body`.
 
-   - `spoolway task contract` — the project's default pipeline, and per pipeline its
-     `id_budget`, its `gate_at` steps, and its skeleton `body`.
-   - `spoolway pipeline show` — every pipeline's own `description:`, the model on every agent
-     step, and which steps are `last-of-chain`.
-   - `spoolway models` — the `WINDOW` per model.
-
-   Cross the last two yourself: a pipeline's own window is the smallest window among the
-   models on its own agent steps, and a model `spoolway models` cannot resolve a window for
-   is still the small case — cut for the window you can prove, not the one you hope for. No
-   file is opened here.
-
-2. **Route each subject to a pipeline, then decompose against that pipeline's own window.**
-   Read the pipelines before choosing task boundaries. Let their purpose, steps, and context
-   windows shape the split instead of fitting pipelines onto an already-cut list.
+2. **Route each subject to a pipeline, then decompose against that pipeline's own shape.**
+   Read the pipelines before choosing task boundaries. Let their purpose and steps shape the
+   split instead of fitting pipelines onto an already-cut list.
 
    Each task: **independently completable**, one model, one worktree, no
    coordination; **whole enough that one lane holds the change at once**, split by *subject*
@@ -55,33 +47,18 @@ comment, not the body.
    when they do — still a mistake to share a `touches` glob.
 
    **Route each subject before sizing it, yourself.** Match each subject against step 1's
-   `pipeline show` output — a bug found mid-plan wants `bugfix`, feature work beside it wants
-   `default`, and so on by what each pipeline's own `description:` says it is for. Nobody signs
-   off on this pick in isolation: it is not asked as its own question, because it reaches the
-   person only once, on the split ballot below, where every candidate already shows it.
+   contract — a bug found mid-plan wants `bugfix`, feature work beside it wants `default`,
+   and so on by what each pipeline's own `description:` says it is for. Nobody signs off on
+   this pick in isolation: it is not asked as its own question, because it reaches the person
+   only once, on the split ballot below, where every candidate already shows it.
 
    **Size for the lane that implements it, never for a person.** A lane is an agent in a
-   fresh worktree with a context window, not a developer with an afternoon — so "a session"
-   and "a day's work" are the wrong units and do not belong in this judgement at all. Judge
-   instead by what one lane must hold: the files it reads to understand the change, the
-   files it changes, and whether the whole thing is one subject.
-
-   **Which way to lean is the routed pipeline's own window to decide, not yours** — the
-   number step 1 crossed for it, not one figure for the whole batch, so two subjects on two
-   pipelines may lean two different ways in the same breakdown.
-
-   - **A window in the millions leans bigger.** Every extra task pays for another lane to
-     read the codebase, the prompt and the task from scratch before it writes a line, and
-     runs the pipeline's `review`, `e2e` and `document` steps again on top. The implementing
-     lane that a split relieves almost always had room to spare. Torn between two splits,
-     take the larger tasks and the smaller count — cutting too small is the mistake that
-     actually happens at this scale.
-   - **A window in the hundreds of thousands cuts smaller.** A local model has to hold the
-     files it reads, the diff it writes and its own reasoning in a window an order of
-     magnitude tighter, and it has no compaction worth the name — a task that overflows does
-     not slow down, it forgets the contract it was given and fails the step. Torn between two
-     splits, take the smaller tasks and the larger count, and let the criteria fall well
-     under the five bullets rather than up against them.
+   fresh worktree, not a developer with an afternoon — so "a session" and "a day's work" are
+   the wrong units and do not belong in this judgement at all. Judge instead by what one lane
+   must hold: the files it reads to understand the change, the files it changes, and whether
+   the whole thing is one subject. No arithmetic: step 1's own `sizing` field says it plainly
+   — cut a reasonable number of tasks for the shape at hand, judged by subject, with each
+   task's criteria kept under five bullets or split again.
 
    **Offer the shape, as one printed ballot.** Settle on a recommended count first, then put
    **that count and the four below it** on the ballot, floored at 1 — a recommendation of 6
@@ -146,7 +123,7 @@ comment, not the body.
    **Then check the top of the chain carries its own `last:` step.** The task with no
    dependent — the one nothing else in this breakdown depends on, or the only task where
    there is no chain at all — is the only one whose run of the pipeline ever reaches a step
-   marked `last-of-chain` in step 1's `pipeline show`. When that task's own routed pipeline
+   marked `last-of-chain` in step 1's contract. When that task's own routed pipeline
    carries none, the whole group loses that step silently: nobody after it ever runs it, since
    every other task in the chain walks straight past. Re-route that one task — to the
    project's default pipeline when it carries a `last-of-chain` step, otherwise to the first

@@ -1,6 +1,6 @@
 ---
 domain: testing
-covers: ["scripts/e2e/**", "scripts/e2e-*.sh", ".github/workflows/**", "src/scratch.rs"]
+covers: ["scripts/e2e/**", "scripts/e2e-*.sh", "scripts/gate.sh", ".github/workflows/**", "src/scratch.rs"]
 ---
 
 # Testing
@@ -356,7 +356,7 @@ Everything it did now happens on a laptop, and none of it is optional there. **T
 change.** Both are command steps, so each is an exit code rather than a lane's own report, and
 both run before the `handover` step opens a pull request.
 
-`test` runs for every task:
+`test` runs `scripts/gate.sh` for every task:
 
     cargo fmt --check
     cargo deny check advisories
@@ -366,10 +366,10 @@ both run before the `handover` step opens a pull request.
     cargo build --release
     ./target/release/spoolway pipeline check
 
-`suite` runs the `pr` tier, and carries `last:` — see [`last:` — a step the chain runs
+`suite` runs `scripts/e2e-pr.sh`, and carries `last:` — see [`last:` — a step the chain runs
 once](pipelines.md#last--a-step-the-chain-runs-once):
 
-    scripts/e2e/run.sh --tier pr
+    SPOOLWAY="$PWD/target/release/spoolway" scripts/e2e/run.sh --tier pr
 
 They are two steps rather than one because `last:` applies to a whole step. Folded together,
 every task but the top of a stack would lose fmt, clippy and the compiler along with the

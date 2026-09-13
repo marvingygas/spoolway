@@ -510,13 +510,13 @@ pipeline `impl`  (default)  entry: implement
              Write the code to satisfy the task's acceptance criteria.
              pass -> review   fail -> blocked
 
-  review     agent     agent=claude prompt=reviewer model=claude-opus-5 session loop=implement:2 exit=blocked
+  review     agent     agent=codex prompt=reviewer model=gpt-5.6-sol session loop=implement:2 exit=blocked
              Check the diff against the acceptance criteria and project standards.
              pass -> e2e   fail -> implement
 
   suite      command   waits timeout=45m last-of-chain
              The end-to-end suites, on the last task of the chain.
-             run: SPOOLWAY="$PWD/target/release/spoolway" scripts/e2e/run.sh --tier pr
+             run: scripts/e2e-pr.sh
              pass -> document   fail -> e2e
 ```
 

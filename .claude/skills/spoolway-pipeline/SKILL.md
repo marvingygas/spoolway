@@ -42,23 +42,27 @@ what the loader enforces.
   each. Always worth asking what one pass has to produce.
 - Write the pipeline from the contract's own template, and a prompt for
   every step the project does not already have one for.
-- Every pipeline gets a `description:` — the sentences a reader chooses
+- Every pipeline gets a `description:` — the sentence a reader chooses
   between pipelines by. Take it from the human's own words, or from the plan
-  `pipeline gen` handed you, verbatim: never write one yourself.
+  `pipeline gen` handed you, verbatim except for the one narrow rewrite this
+  skill ever makes to a human's prose: compressing it to a single sentence
+  when it runs longer, per the exception below.
 - Check both halves until clean: `spoolway pipeline check`, then
   `spoolway prompt check <name>`.
 - Say what changed: the paths, and `spoolway pipeline show`.
 
 ## Started by `spoolway pipeline gen`
 
-Same procedure. The command hands you a plan path to read and prints this
-project's preferences — take those as answered rather than asking again,
-and set every loop the file ends up with to the `loop_default` it names.
+Same procedure. The command hands you a plan path to read; nothing else is
+answered for you.
 
 ## Never
 
 - Never rewrite prose the human brought. Transcribe it, and flag what would
-  stop the pipeline running instead of fixing it yourself.
+  stop the pipeline running instead of fixing it yourself — with one
+  exception: a `description:` longer than one sentence is compressed to
+  one, since that field is what `spoolway pipeline show` renders and a
+  reader chooses a pipeline by.
 - Never edit a shipped prompt to make a new role — a role is a file of its
   own, written from the contract's shape.
 - Never queue tasks or start a dispatcher. That is the queue screen's job,
