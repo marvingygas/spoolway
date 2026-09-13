@@ -1879,9 +1879,9 @@ impl Pipelines {
     }
 
     /// [`Pipelines::load`], with no patch layer applied — for a caller that
-    /// must see only the tracked file: `override promote` (a later task)
-    /// and nothing in this one.
-    #[allow(dead_code)]
+    /// must see only the tracked file: `commands::pipeline_override`, to
+    /// check a step id and a key against what the tracked file actually
+    /// has, and `commands::override_promote`'s own read of it.
     pub fn load_tracked(root: &Path, config: &crate::config::Config) -> Result<Pipelines> {
         Pipelines::load_impl(root, config, None)
     }

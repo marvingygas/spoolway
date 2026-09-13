@@ -33,10 +33,11 @@ It is suppressed whenever the checkout **is** the project, which is where almost
 runs — including when `-C` names the project explicitly. In the main checkout these commands
 print exactly what they always did.
 
-The commands that print it are `pipeline show`, `pipeline check`, `pipeline list`, `prompt
-list`, `prompt check`, `config show`, `config list`, `config get` and `config path`. `doctor` reports on both
-sides at once and prints the line once. Commands reading only the queue, the lane state, the
-archive or the usage ledger never print it: they answer for the project and always did.
+The commands that print it are `pipeline show`, `pipeline check`, `pipeline list`, `pipeline
+override`, `prompt list`, `prompt check`, `prompt override`, `config show`, `config list`,
+`config get`, `config path` and `config override`. `doctor` reports on both sides at once and
+prints the line once. Commands reading only the queue, the lane state, the archive or the usage
+ledger never print it: they answer for the project and always did.
 
 Under `--json` the same two facts arrive as one line of JSON instead of prose, so a script reads
 them without parsing English:
@@ -661,6 +662,28 @@ pane to open a session in.
 See [`[pipeline_gen]`](configuration.md#pipeline_gen--generating-a-pipeline) for the block this
 reads.
 
+### `spoolway pipeline override <name> --set <step>.<key>=<value>`
+
+Fork one step's key into the [overrides layer](configuration.md#the-overrides-layer), without
+touching the tracked pipeline file or committing anything:
+
+```
+$ spoolway pipeline override impl --set implement.model=claude-opus-5
+
+  wrote ~/.spoolway/spoolway/overrides/pipelines/impl.yml
+    implement.model   claude-sonnet-5 -> claude-opus-5
+
+  active on the next dispatcher pass. `spoolway override drop impl` to clear it.
+```
+
+`--set <step>.<key>=<value>` is required. The step must already exist on the tracked pipeline,
+and the key must be one the merge would accept — a step id this pipeline does not have, or a
+key the merge would refuse, is refused by name and nothing is written; `id:` in particular can
+never be set this way, since a patch overlays a value on a step rather than renaming or
+repositioning one. Writes to the project-wide layer, so a lane in any worktree sees the fork on
+its next pass; see [`spoolway override`](#spoolway-override-list--promote--drop) to list, promote or
+drop it.
+
 ### `spoolway prompt contract`
 
 Print the contract a prompt is written against, rendered from this project's own pipeline.
@@ -684,6 +707,12 @@ Print one prompt file.
 
 Read prompts against the steps that run them. Also part of `pipeline check`. In a linked
 worktree the [`checkout:` line](#the-checkout-line) comes first; in the main checkout it is suppressed.
+
+### `spoolway prompt override <name>`
+
+Copy the tracked prompt into `overrides/prompts/<name>/PROMPT.md`, so editing starts from it
+instead of from a blank file — the whole file is what an override replaces, there being no key
+in prose for a patch to aim at. See the [overrides layer](configuration.md#the-overrides-layer).
 
 ### `spoolway agent list`
 
@@ -778,6 +807,63 @@ line. `set` writes only the
 project's copy, and refuses inside a linked worktree rather than writing somewhere the dispatcher
 never reads — it prints the `-C <project>` invocation that would land in the right file. See
 [Configuration](configuration.md).
+
+### `spoolway config override`
+
+Open `overrides/config.toml` in `$EDITOR`, creating it first if it does not exist yet — the
+[overrides layer](configuration.md#the-overrides-layer)'s own copy, never the tracked file
+`config edit` opens. Re-checks both files after the save and says which of the two stopped
+parsing, if either did.
+
+### `spoolway override list` / `promote` / `drop`
+
+Inspect and manage whatever is currently forked into the
+[overrides layer](configuration.md#the-overrides-layer) — created by `pipeline override`,
+`prompt override` and `config override`, one entry per pipeline, prompt or config patched.
+
+```
+$ spoolway override list
+
+TARGET                     KIND        OVERRIDES
+pipelines/impl.yml         patch       implement.model, test.timeout
+prompts/reviewer           whole file  —
+config.toml                patch       agents.claude.concurrency
+
+3 artifacts    `override promote <target>` to keep one
+```
+
+A target is named either the short way — a bare pipeline name, since only a pipeline's own
+target is ever bare — or the way `list` prints it: `pipelines/<name>.yml`, `prompts/<name>` or
+`config.toml`. `list` says so plainly when the layer is empty or absent; `--json` prints the
+same rows as a JSON array, `[]` for an empty layer.
+
+`override promote <target>` writes the patched values into the tracked file and clears that
+entry from the layer, leaving an ordinary diff ready to review and commit:
+
+```
+$ spoolway override promote impl && git diff --stat
+
+  wrote .spoolway/pipelines/impl.yml
+    implement.model   claude-opus-5
+    test.timeout      90m
+  cleared pipelines/impl.yml from the layer
+
+ .spoolway/pipelines/impl.yml | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+```
+
+A pipeline patch is promoted as a targeted line edit — find `- id: <step>`, find `<key>:`
+inside that block, replace the value — never a rewrite of the file, so `pipeline::KEY_BLOCK`
+and every `description:` come through untouched; a patch cannot promote a key a step never
+wrote out explicitly, or the pipeline's own top-level `description`/`task_template`, since the
+line editor has no block to point at for either. A config patch is promoted through
+`toml_edit`, keeping the tracked file's comments; a prompt patch overwrites the tracked prompt
+whole. `promote` refuses inside a linked worktree, for the same reason `config set` does — the
+dispatcher reads the project's own files, never a worktree's copy — and prints the `-C
+<project>` invocation that would land in the right file.
+
+`override drop [<target>]` removes one entry, or the whole layer when given none, and leaves no
+empty directories behind.
 
 ### `spoolway models`
 

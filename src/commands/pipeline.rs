@@ -1039,6 +1039,82 @@ fn pipeline_gen_opening_prompt(plan: Option<&str>) -> String {
     }
 }
 
+/// `spoolway pipeline override <name> --set <step>.<key>=<value>`.
+///
+/// Reads the tracked pipeline from `repo.checkout` — the branch actually
+/// running, same as [`pipeline_show`] and every other reader here — so a
+/// step id or a key the merge would refuse is caught before anything is
+/// written, by probing the exact rule [`crate::overrides::apply_step_patch`]
+/// applies at load rather than a second copy of it. The layer itself is
+/// project-wide (`repo.overrides_dir()`), so a lane in any worktree sees the
+/// same fork on its next pass.
+pub fn pipeline_override(repo: &Repo, name: &str, set: &str) -> Result<()> {
+    if let Some(note) = repo.checkout_note()? {
+        note.print(false)?;
+    }
+    let (step_key, raw_value) = set
+        .split_once('=')
+        .with_context(|| format!("`--set {set}` — expected `<step>.<key>=<value>`"))?;
+    let (step_id, key) = step_key
+        .split_once('.')
+        .with_context(|| format!("`--set {set}` — expected `<step>.<key>=<value>`"))?;
+
+    let tracked = Pipelines::load_tracked(&repo.checkout, &repo.config)
+        .with_context(|| format!("reading the tracked pipeline `{name}`"))?;
+    let pipeline = tracked
+        .pipelines
+        .get(name)
+        .with_context(|| format!("no pipeline named `{name}`"))?;
+    let step = pipeline.steps.iter().find(|s| s.id == step_id).with_context(|| {
+        format!(
+            "pipeline `{name}` has no step `{step_id}` — a patch may only set a value on a step \
+             that already exists"
+        )
+    })?;
+
+    let value: serde_norway::Value = serde_norway::from_str(raw_value)
+        .with_context(|| format!("`{raw_value}` is not a value `{key}` can take"))?;
+
+    // Refused by the exact rule the merge itself applies at load — see
+    // `apply_step_patch` — so nothing accepted here can be rejected later,
+    // silently, on the very next dispatcher pass.
+    let mut fields = serde_norway::Mapping::new();
+    fields.insert(serde_norway::Value::String(key.to_string()), value.clone());
+    let mut probe = step.clone();
+    crate::overrides::apply_step_patch(&mut probe, &fields)
+        .with_context(|| format!("`{key}` on step `{step_id}` of pipeline `{name}`"))?;
+
+    // The value currently active, override already layered on included, so a
+    // second `--set` on the same key shows what it is actually replacing.
+    let active = Pipelines::load(&repo.checkout, &repo.config)?;
+    let old = match active
+        .pipelines
+        .get(name)
+        .and_then(|p| p.steps.iter().find(|s| s.id == step_id))
+    {
+        Some(step) => crate::overrides::field_display(step, key)?,
+        None => String::new(),
+    };
+    let new = crate::overrides::field_display(&probe, key)?;
+
+    let overrides_dir = repo.overrides_dir();
+    let mut patch =
+        crate::overrides::read_pipeline_patch(&overrides_dir, name)?.unwrap_or_default();
+    patch
+        .steps
+        .entry(step_id.to_string())
+        .or_default()
+        .insert(serde_norway::Value::String(key.to_string()), value);
+    crate::overrides::write_pipeline_patch(&overrides_dir, name, &patch)?;
+
+    let path = crate::overrides::pipeline_patch_path(&overrides_dir, name);
+    println!("  wrote {}", path.display());
+    println!("    {step_id}.{key}   {old} -> {new}");
+    println!();
+    println!("  active on the next dispatcher pass. `spoolway override drop {name}` to clear it.");
+    Ok(())
+}
+
 fn report_prompt_findings(findings: &[crate::prompt::Finding]) {
     if findings.is_empty() {
         return;
@@ -1794,5 +1870,112 @@ mod tests {
             value["agents"]["pi"]["kind"] == "pi",
             "this project's own agent profiles should be named directly: {value}"
         );
+    }
+
+    /// A repo with a tracked `.spoolway/pipelines/<name>.yml` on disk, and a
+    /// scratch machine home behind it — for `pipeline_override`, which
+    /// reads the tracked file rather than the built-in fixture
+    /// [`Pipelines::builtin`] stands in for elsewhere.
+    ///
+    /// Faking `$HOME` matters here for the same reason it does in
+    /// `commands::override::tests::with_repo`: `repo.overrides_dir()` and
+    /// `overrides::dir_for` both resolve through
+    /// [`crate::mux::project_home`], so a test that leaves the real home in
+    /// place has `pipeline_override`'s own `Pipelines::load` reading a
+    /// layer under the developer's real `~/.spoolway/…` while the write
+    /// lands in the scratch one — two different directories agreeing by
+    /// accident, or not agreeing at all, rather than by construction.
+    fn with_repo_and_pipeline<T>(
+        name: &str,
+        pipeline: &str,
+        body: &str,
+        f: impl FnOnce(&Repo) -> T,
+    ) -> T {
+        let root = crate::scratch::root(&format!("pipeline-override-{name}"));
+        let fake_home = crate::scratch::root(&format!("pipeline-override-{name}-home"));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&fake_home);
+        std::fs::create_dir_all(root.join(".spoolway/pipelines")).unwrap();
+        std::fs::write(
+            root.join(format!(".spoolway/pipelines/{pipeline}.yml")),
+            body,
+        )
+        .unwrap();
+
+        let result = crate::platform::test_home::with_home(&fake_home, || {
+            let home = crate::mux::project_home(&root);
+            let mut config = Config::default();
+            config.dispatch.default_pipeline = pipeline.to_string();
+            let repo = Repo {
+                checkout: root.clone(),
+                root: root.clone(),
+                config,
+                home,
+            };
+            f(&repo)
+        });
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&fake_home).ok();
+        result
+    }
+
+    const DEMO_PIPELINE: &str =
+        "steps:\n  - id: implement\n    agent: pi\n    model: claude-sonnet-5\n    on_pass: done\n";
+
+    #[test]
+    fn pipeline_override_writes_the_layer_and_leaves_the_tracked_file_alone() {
+        with_repo_and_pipeline("happy", "demo", DEMO_PIPELINE, |repo| {
+            let tracked_before =
+                std::fs::read_to_string(Pipelines::file_in(&repo.checkout, "demo")).unwrap();
+
+            pipeline_override(repo, "demo", "implement.model=claude-opus-5").unwrap();
+
+            assert_eq!(
+                std::fs::read_to_string(Pipelines::file_in(&repo.checkout, "demo")).unwrap(),
+                tracked_before,
+            );
+            let patch = crate::overrides::read_pipeline_patch(&repo.overrides_dir(), "demo")
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                patch.steps["implement"]["model"].as_str(),
+                Some("claude-opus-5")
+            );
+        });
+    }
+
+    #[test]
+    fn pipeline_override_refuses_a_step_the_pipeline_does_not_have() {
+        with_repo_and_pipeline("bad-step", "demo", DEMO_PIPELINE, |repo| {
+            let err =
+                pipeline_override(repo, "demo", "nosuchstep.model=claude-opus-5").unwrap_err();
+            assert!(
+                err.to_string().contains("has no step `nosuchstep`"),
+                "{err}"
+            );
+            assert!(
+                crate::overrides::read_pipeline_patch(&repo.overrides_dir(), "demo")
+                    .unwrap()
+                    .is_none(),
+                "nothing should be written on a refusal"
+            );
+        });
+    }
+
+    #[test]
+    fn pipeline_override_refuses_the_id_key() {
+        with_repo_and_pipeline("id-key", "demo", DEMO_PIPELINE, |repo| {
+            let err = pipeline_override(repo, "demo", "implement.id=other").unwrap_err();
+            assert!(format!("{err:#}").contains("rename"), "{err:#}");
+        });
+    }
+
+    #[test]
+    fn pipeline_override_refuses_an_unknown_pipeline() {
+        with_repo_and_pipeline("unknown-pipeline", "demo", DEMO_PIPELINE, |repo| {
+            let err = pipeline_override(repo, "nosuchpipeline", "implement.model=x").unwrap_err();
+            assert!(err.to_string().contains("no pipeline named"), "{err}");
+        });
     }
 }

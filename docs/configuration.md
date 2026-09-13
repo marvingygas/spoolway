@@ -97,9 +97,10 @@ deleted.
 merged onto the tracked control plane at load time — inside `Pipelines::load`, `Config::load`
 and `prompt::path_for`, and nowhere else. Every command, the dispatcher and the status screen
 keep receiving one assembled set exactly as if the patch layer did not exist; nothing
-downstream of those three learns that a second source was consulted. There is no command yet
-to create, list, promote or drop an entry — the directory is written by hand, and read back the
-next time something loads.
+downstream of those three learns that a second source was consulted. `spoolway pipeline
+override`, `prompt override` and `config override` write into it, and `spoolway override
+list | promote | drop` inspect and clear it — see [`spoolway override`](cli-reference.md#spoolway-override-list--promote--drop)
+in the CLI reference.
 
 It holds up to three things:
 

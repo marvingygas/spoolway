@@ -440,9 +440,8 @@ pub fn path_for(repo: &Repo, name: &str) -> PathBuf {
 }
 
 /// [`path_for`], with no patch layer applied — for a caller that must see
-/// only the tracked file: `override promote` (a later task) and nothing in
-/// this one.
-#[allow(dead_code)]
+/// only the tracked file: `commands::prompt_override` reads the source to
+/// fork, and `commands::override_promote` the destination to write.
 pub fn path_for_tracked(repo: &Repo, name: &str) -> PathBuf {
     let nested = directory_form(repo, name);
     if nested.is_file() {

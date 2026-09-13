@@ -108,16 +108,7 @@ pub fn config_set(repo: &Repo, key: &str, value: &str) -> Result<()> {
 /// able to validate its own copy without reaching for `-C`.
 pub fn config_edit(checkout: &Path) -> Result<()> {
     let path = Config::path_in(checkout);
-    let editor = std::env::var("VISUAL")
-        .or_else(|_| std::env::var("EDITOR"))
-        .unwrap_or_else(|_| if cfg!(windows) { "notepad" } else { "vi" }.to_string());
-
-    let status = crate::platform::shell_command(&editor_command(&editor, &path))
-        .status()
-        .with_context(|| format!("could not start `{editor}`"))?;
-    if !status.success() {
-        bail!("`{editor}` exited with {status}");
-    }
+    open_in_editor(&path)?;
 
     match Config::load(checkout) {
         Ok(_) => {
@@ -129,6 +120,29 @@ pub fn config_edit(checkout: &Path) -> Result<()> {
             path.display()
         ))),
     }
+}
+
+/// Resolve the user's editor the way every `spoolway *edit`-shaped command
+/// does: `$VISUAL`, then `$EDITOR`, then a platform default.
+pub(super) fn editor_from_env() -> String {
+    std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| if cfg!(windows) { "notepad" } else { "vi" }.to_string())
+}
+
+/// Open `path` in the resolved editor and wait for it, refusing on a
+/// nonzero exit. Shared by [`config_edit`] and `commands::config_override`,
+/// so the quoting fix in [`editor_command`] (finding 71) only has to be
+/// right once.
+pub(super) fn open_in_editor(path: &Path) -> Result<()> {
+    let editor = editor_from_env();
+    let status = crate::platform::shell_command(&editor_command(&editor, path))
+        .status()
+        .with_context(|| format!("could not start `{editor}`"))?;
+    if !status.success() {
+        bail!("`{editor}` exited with {status}");
+    }
+    Ok(())
 }
 
 /// The shell line that opens `path` in `editor`.
