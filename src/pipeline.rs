@@ -1867,13 +1867,40 @@ impl Pipelines {
         Pipelines::dir_in(root).join(format!("{name}.yml"))
     }
 
-    /// Load and validate from a repo root.
-    ///
+    /// Load and validate from a repo root, with any patch under
+    /// `~/.spoolway/<project>/overrides/pipelines/` merged onto each
+    /// pipeline first — see [`crate::overrides`]. This is what every
+    /// ordinary caller wants: the dispatcher, `pipeline show`, `pipeline
+    /// check`, the status screen, none of which is the one place that
+    /// should have to know a second source exists.
+    pub fn load(root: &Path, config: &crate::config::Config) -> Result<Pipelines> {
+        let overrides = crate::overrides::dir_for(root);
+        Pipelines::load_impl(root, config, Some(&overrides))
+    }
+
+    /// [`Pipelines::load`], with no patch layer applied — for a caller that
+    /// must see only the tracked file: `override promote` (a later task)
+    /// and nothing in this one.
+    #[allow(dead_code)]
+    pub fn load_tracked(root: &Path, config: &crate::config::Config) -> Result<Pipelines> {
+        Pipelines::load_impl(root, config, None)
+    }
+
     /// Two sources, in order: the directory, and the built-in definitions. The
     /// old single `pipeline.yml` is no longer read — a project still carrying
     /// one is told what to do with it rather than silently served the
     /// built-ins beside it.
-    pub fn load(root: &Path, config: &crate::config::Config) -> Result<Pipelines> {
+    ///
+    /// `overrides` is applied to each pipeline right after it is parsed and
+    /// before [`Pipelines::assemble`] runs — assembling first would
+    /// materialise a `blocked` step that a pipeline declaring none of its
+    /// own never had in the file, letting a patch reach a step that, from
+    /// the file's own perspective, does not exist.
+    fn load_impl(
+        root: &Path,
+        config: &crate::config::Config,
+        overrides: Option<&Path>,
+    ) -> Result<Pipelines> {
         let dir = Pipelines::dir_in(root);
         if let Some(files) = read_pipeline_dir(&dir)? {
             let mut pipelines = BTreeMap::new();
@@ -1882,8 +1909,11 @@ impl Pipelines {
                 // some of its five keys on purpose, leaning on
                 // `Pipelines::assemble` to fill the rest in from config
                 // before anything checks that the step is a runnable one.
-                let pipeline = parse_unchecked(&name, &raw)
+                let mut pipeline = parse_unchecked(&name, &raw)
                     .with_context(|| format!("in {}", Pipelines::file_in(root, &name).display()))?;
+                if let Some(overrides) = overrides {
+                    crate::overrides::apply_pipeline_patch(&mut pipeline, overrides)?;
+                }
                 pipelines.insert(name, pipeline);
             }
             return Pipelines::assemble(pipelines, config)
@@ -1903,7 +1933,13 @@ impl Pipelines {
             );
         }
 
-        Pipelines::assemble(builtin_pipelines()?, config)
+        let mut pipelines = builtin_pipelines()?;
+        if let Some(overrides) = overrides {
+            for pipeline in pipelines.values_mut() {
+                crate::overrides::apply_pipeline_patch(pipeline, overrides)?;
+            }
+        }
+        Pipelines::assemble(pipelines, config)
     }
 
     /// Put a parsed set together with the one setting that is not
@@ -3275,5 +3311,197 @@ mod tests {
             Some(2),
             "`implement` always returns through `review`, so that is where the budget lives"
         );
+    }
+
+    /// A two-step tracked pipeline on disk, named `impl` — the fixture every
+    /// `overrides/pipelines/` test below patches.
+    fn write_tracked_impl(root: &Path) {
+        std::fs::create_dir_all(Pipelines::dir_in(root)).unwrap();
+        std::fs::write(
+            Pipelines::file_in(root, "impl"),
+            "steps:\n  \
+             - id: implement\n    agent: pi\n    model: base-model\n    effort: low\n    on_pass: review\n  \
+             - id: review\n    agent: pi\n    model: base-model\n    on_pass: done\n",
+        )
+        .unwrap();
+    }
+
+    /// A scratch root and a scratch `$HOME` swapped in for `f`, so
+    /// `crate::overrides::dir_for` — which every test below reaches for
+    /// directly, to know where to write its own fixture rather than
+    /// hard-coding a second copy of that path — resolves under a directory
+    /// this test owns rather than the real one.
+    fn with_override_fixture<T>(name: &str, f: impl FnOnce(&Path) -> T) -> T {
+        let root = crate::scratch::root(&format!("pipeline-override-{name}"));
+        let home = crate::scratch::root(&format!("pipeline-override-{name}-home"));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&home);
+        write_tracked_impl(&root);
+
+        let result = crate::platform::test_home::with_home(&home, || f(&root));
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&home).ok();
+        result
+    }
+
+    /// `overrides/pipelines/impl.yml` setting one key on one step is read on
+    /// top of the tracked file: the key it names changes, every other key on
+    /// that step and every key on every other step still comes from disk.
+    #[test]
+    fn an_override_sets_one_key_and_leaves_the_rest_tracked() {
+        with_override_fixture("set-one-key", |root| {
+            let overrides = crate::overrides::dir_for(root);
+            std::fs::create_dir_all(overrides.join("pipelines")).unwrap();
+            std::fs::write(
+                overrides.join("pipelines").join("impl.yml"),
+                "steps:\n  implement:\n    model: claude-opus-5\n",
+            )
+            .unwrap();
+
+            let pipelines = Pipelines::load(root, &config_for("impl")).unwrap();
+            let pipeline = pipelines.get("impl").unwrap();
+            let implement = pipeline.step("implement").unwrap();
+            assert_eq!(implement.model.as_deref(), Some("claude-opus-5"));
+            assert_eq!(
+                implement.effort.as_deref(),
+                Some("low"),
+                "a key the patch never named still comes from the tracked file"
+            );
+            let review = pipeline.step("review").unwrap();
+            assert_eq!(
+                review.model.as_deref(),
+                Some("base-model"),
+                "a step the patch never named is untouched"
+            );
+        });
+    }
+
+    /// An override naming a step id the tracked pipeline does not have is
+    /// refused at load, and the error names both the id and the pipeline —
+    /// list order decides slot priority, so a patch may set a value on a
+    /// step that already exists and nothing more.
+    #[test]
+    fn an_override_naming_an_unknown_step_is_refused_by_name() {
+        with_override_fixture("unknown-step", |root| {
+            let overrides = crate::overrides::dir_for(root);
+            std::fs::create_dir_all(overrides.join("pipelines")).unwrap();
+            std::fs::write(
+                overrides.join("pipelines").join("impl.yml"),
+                "steps:\n  nonesuch:\n    model: claude-opus-5\n",
+            )
+            .unwrap();
+
+            let err = Pipelines::load(root, &config_for("impl")).unwrap_err();
+            let message = format!("{err:#}");
+            assert!(message.contains("nonesuch"), "{message}");
+            assert!(message.contains("impl"), "{message}");
+        });
+    }
+
+    /// A patch setting `id:` on a step it names is refused, and the error
+    /// says so: renaming a step in place is the one way a patch could
+    /// otherwise add or drop one from the graph, and the guard in
+    /// `crate::overrides::apply_step_patch` is the only thing stopping it.
+    #[test]
+    fn an_override_setting_a_step_id_is_refused() {
+        with_override_fixture("sets-id", |root| {
+            let overrides = crate::overrides::dir_for(root);
+            std::fs::create_dir_all(overrides.join("pipelines")).unwrap();
+            std::fs::write(
+                overrides.join("pipelines").join("impl.yml"),
+                "steps:\n  implement:\n    id: other\n",
+            )
+            .unwrap();
+
+            let err = Pipelines::load(root, &config_for("impl")).unwrap_err();
+            let message = format!("{err:#}");
+            assert!(message.contains("`id:`"), "{message}");
+            assert!(
+                message.contains("implement"),
+                "the error names the step patched: {message}"
+            );
+        });
+    }
+
+    /// A patch that leaves the graph unreachable is refused exactly as a
+    /// tracked file that shipped the same steps would be — the merged set
+    /// still goes through `Pipelines::validate()`, unchanged.
+    #[test]
+    fn a_patch_that_breaks_the_graph_is_refused_at_load() {
+        with_override_fixture("breaks-graph", |root| {
+            let overrides = crate::overrides::dir_for(root);
+            std::fs::create_dir_all(overrides.join("pipelines")).unwrap();
+            std::fs::write(
+                overrides.join("pipelines").join("impl.yml"),
+                "steps:\n  implement:\n    on_pass: nowhere\n",
+            )
+            .unwrap();
+
+            let err = Pipelines::load(root, &config_for("impl")).unwrap_err();
+            assert!(format!("{err:#}").contains("unknown step"), "{err:#}");
+        });
+    }
+
+    /// With no `overrides/` directory on disk at all, `Pipelines::load`
+    /// answers exactly what it did before this layer existed.
+    #[test]
+    fn with_no_overrides_directory_load_is_unchanged() {
+        with_override_fixture("absent", |root| {
+            let config = config_for("impl");
+            let loaded = Pipelines::load(root, &config).unwrap();
+            let tracked = Pipelines::load_tracked(root, &config).unwrap();
+            assert_eq!(
+                loaded.get("impl").unwrap().step("implement").unwrap().model,
+                tracked
+                    .get("impl")
+                    .unwrap()
+                    .step("implement")
+                    .unwrap()
+                    .model,
+            );
+        });
+    }
+
+    /// `Pipelines::load_tracked` is the second entry point the plan calls
+    /// for: it answers the tracked set even where a patch is sitting right
+    /// there on disk, for a caller that must not see the merge.
+    #[test]
+    fn load_tracked_ignores_a_patch_on_disk() {
+        with_override_fixture("load-tracked", |root| {
+            let overrides = crate::overrides::dir_for(root);
+            std::fs::create_dir_all(overrides.join("pipelines")).unwrap();
+            std::fs::write(
+                overrides.join("pipelines").join("impl.yml"),
+                "steps:\n  implement:\n    model: claude-opus-5\n",
+            )
+            .unwrap();
+
+            let config = config_for("impl");
+            let tracked = Pipelines::load_tracked(root, &config).unwrap();
+            assert_eq!(
+                tracked
+                    .get("impl")
+                    .unwrap()
+                    .step("implement")
+                    .unwrap()
+                    .model
+                    .as_deref(),
+                Some("base-model"),
+                "load_tracked must not see the patch"
+            );
+            let merged = Pipelines::load(root, &config).unwrap();
+            assert_eq!(
+                merged
+                    .get("impl")
+                    .unwrap()
+                    .step("implement")
+                    .unwrap()
+                    .model
+                    .as_deref(),
+                Some("claude-opus-5"),
+                "load, the ordinary entry point, still sees it"
+            );
+        });
     }
 }

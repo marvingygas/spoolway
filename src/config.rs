@@ -72,6 +72,14 @@ pub const PENDING_DIR: &str = "pending";
 /// path like its siblings above, because every caller joins it onto a task id.
 pub const SCRATCH_DIR: &str = "scratch";
 
+/// Directory under the project's home holding the optional patch layer —
+/// see [`crate::overrides`]. A segment, like [`SCRATCH_DIR`], never a path:
+/// [`crate::repo::Repo::overrides_dir`] is the one accessor that joins it
+/// onto a project's home, and [`crate::overrides::dir_for`] the one that
+/// does the same from a bare checkout path for the three load functions that
+/// cannot reach a whole `Repo`.
+pub const OVERRIDES_DIR: &str = "overrides";
+
 /// Is `id` usable as the name of a file under the project's home directory —
 /// see [`crate::repo::Repo::home`]?
 ///
@@ -1593,61 +1601,104 @@ impl Config {
     }
 
     /// Load config from a directory holding `.spoolway/`, falling back to
-    /// defaults if absent. See [`Self::path_in`] for which directory a caller
-    /// should hand it.
+    /// defaults if absent, with `overrides/config.toml` merged onto it by
+    /// dotted key — see [`crate::overrides`]. See [`Self::path_in`] for
+    /// which directory a caller should hand it.
     pub fn load(root: &Path) -> Result<Config> {
+        Config::load_impl(root, Some(&crate::overrides::dir_for(root)))
+    }
+
+    /// [`Config::load`], with no patch layer applied — for a caller that
+    /// must see only the tracked file: `override promote` (a later task) and
+    /// nothing in this one.
+    #[allow(dead_code)]
+    pub fn load_tracked(root: &Path) -> Result<Config> {
+        Config::load_impl(root, None)
+    }
+
+    fn load_impl(root: &Path, overrides: Option<&Path>) -> Result<Config> {
+        let (config, notices) = Config::load_with_notices(root, overrides)?;
+        for notice in notices {
+            eprintln!("{notice}");
+        }
+        Ok(config)
+    }
+
+    /// [`Config::load_impl`] with its retired-table notices handed back
+    /// rather than printed, so a test can see which ones a given file on disk
+    /// earns. `load_impl` is the only caller outside tests; it prints them.
+    fn load_with_notices(root: &Path, overrides: Option<&Path>) -> Result<(Config, Vec<String>)> {
         let path = Config::path_in(root);
         match std::fs::read_to_string(&path) {
             Ok(raw) => {
                 let mut config: Config =
                     toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
+                let mut notices = Vec::new();
                 // Said here rather than in `doctor`, because the standards stop
                 // reaching the reviewer the moment this file is the only place
                 // they are written down, and nothing else would ever mention it.
                 if !config.criteria.is_empty() {
-                    eprintln!(
+                    notices.push(format!(
                         "note: [criteria] in {} is no longer read — a project's review standards \
                          live at the bottom of {PROMPTS_DIR}/reviewer/{}, where they can be \
                          edited as prose. Move them across and delete the table.",
                         path.display(),
                         crate::assets::PROMPT_FILE,
-                    );
+                    ));
                 }
                 // Only where a value was somebody's decision: an untouched
                 // `[docs]` table — every config written before this carries
                 // one — says nothing worth a note.
                 if config.docs != LegacyDocs::default() {
-                    eprintln!(
+                    notices.push(format!(
                         "note: [docs] in {} is no longer read — spoolway keeps no notion of \
                          documentation. Where documents live, and what each covers, is the \
                          archivist's: {PROMPTS_DIR}/archivist/PROMPT.md. The table is dropped \
                          on the next save.",
                         path.display(),
-                    );
+                    ));
                 }
                 for (name, profile) in &config.agents {
                     if !profile.env.is_empty() {
-                        eprintln!(
+                        notices.push(format!(
                             "note: [agents.{name}.env] in {} is no longer read — a lane \
                              inherits the dispatcher's environment, and anything one agent \
                              needs belongs in that agent's own config. Dropped on the next \
                              save.",
                             path.display(),
-                        );
+                        ));
                     }
                     if crate::agent::adapter(&profile.kind).is_none() {
-                        eprintln!(
+                        notices.push(format!(
                             "note: [agents.{name}] in {} names kind `{}`, which spoolway no \
                              longer knows how to launch. Dropped on the next save.",
                             path.display(),
                             profile.kind,
-                        );
+                        ));
                     }
                 }
                 config.migrate();
-                Ok(config)
+                // Last, so the notices above read the config as the tracked
+                // file actually spells it. `apply_config_patch` routes every
+                // leaf through `confkv::set`, which round-trips the whole
+                // config through `Value::try_from` -> `try_into` and re-runs
+                // `migrate()`. Every table those notices point at is
+                // `skip_serializing`, so the round-trip clears it and
+                // `migrate()` drops any profile on a retired kind — a patch
+                // applied any earlier silences the notices for a file that
+                // still spells those tables out.
+                if let Some(overrides) = overrides {
+                    config = crate::overrides::apply_config_patch(config, overrides)?;
+                }
+                Ok((config, notices))
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let mut config = Config::default();
+                if let Some(overrides) = overrides {
+                    config = crate::overrides::apply_config_patch(config, overrides)?;
+                }
+                Ok((config, Vec::new()))
+            }
             Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
         }
     }
@@ -2851,5 +2902,130 @@ mod tests {
         // And a file that never wrote `[docs]` at all — `Config::default()`'s
         // own starting point — is the same as the default table written out.
         assert_eq!(Config::default().docs, LegacyDocs::default());
+    }
+
+    /// A scratch project with a tracked `config.toml`, and a scratch `$HOME`
+    /// swapped in for `f` so `crate::overrides::dir_for` resolves under a
+    /// directory this test owns.
+    fn with_override_fixture<T>(name: &str, tracked: &str, f: impl FnOnce(&Path) -> T) -> T {
+        let root = crate::scratch::root(&format!("config-override-{name}"));
+        let home = crate::scratch::root(&format!("config-override-{name}-home"));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(root.join(STATE_DIR)).unwrap();
+        std::fs::write(Config::path_in(&root), tracked).unwrap();
+
+        let result = crate::platform::test_home::with_home(&home, || f(&root));
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&home).ok();
+        result
+    }
+
+    /// `overrides/config.toml` merges onto the tracked file by dotted key —
+    /// a key the patch names changes, a key it does not name still comes
+    /// from the tracked file.
+    #[test]
+    fn an_override_merges_by_dotted_key_onto_the_tracked_config() {
+        with_override_fixture(
+            "dotted-key",
+            "[unattended]\nenabled = false\n[dispatch]\ndefault_pipeline = \"impl\"\n",
+            |root| {
+                let overrides = crate::overrides::dir_for(root);
+                std::fs::create_dir_all(&overrides).unwrap();
+                std::fs::write(
+                    overrides.join(CONFIG_FILE),
+                    "[unattended]\nenabled = true\n",
+                )
+                .unwrap();
+
+                let config = Config::load(root).unwrap();
+                assert!(config.unattended.enabled, "the patched key must win");
+                assert_eq!(
+                    config.dispatch.default_pipeline, "impl",
+                    "a key the patch never named must still come from the tracked file"
+                );
+            },
+        );
+    }
+
+    /// `Config::load_tracked` is the second entry point the plan calls for:
+    /// it answers the tracked config even where a patch is sitting right
+    /// there on disk, for a caller that must not see the merge.
+    #[test]
+    fn load_tracked_ignores_a_patch_on_disk() {
+        with_override_fixture("load-tracked", "[unattended]\nenabled = false\n", |root| {
+            let overrides = crate::overrides::dir_for(root);
+            std::fs::create_dir_all(&overrides).unwrap();
+            std::fs::write(
+                overrides.join(CONFIG_FILE),
+                "[unattended]\nenabled = true\n",
+            )
+            .unwrap();
+
+            assert!(!Config::load_tracked(root).unwrap().unattended.enabled);
+            assert!(Config::load(root).unwrap().unattended.enabled);
+        });
+    }
+
+    /// A patch on disk does not silence the retired-table notices: they are
+    /// about what the *tracked* file still spells out, and the patch merge
+    /// round-trips the config through `confkv::set`, clearing every
+    /// `skip_serializing` table those notices point at. So the merge runs
+    /// last, after the notices and after `migrate()`.
+    #[test]
+    fn a_patch_on_disk_does_not_silence_the_retired_table_notices() {
+        let tracked = "[docs]\npath = \"handbook\"\n\
+                       [criteria]\ncorrectness = [\"holds\"]\n\
+                       [agents.leftover]\nkind = \"nosuchkind\"\n\
+                       [agents.pi]\nkind = \"pi\"\n\
+                       [agents.pi.env]\nFOO = \"bar\"\n\
+                       [unattended]\nenabled = false\n";
+        with_override_fixture("keeps-notices", tracked, |root| {
+            let bare = Config::load_with_notices(root, None).unwrap().1;
+            assert_eq!(
+                bare.len(),
+                4,
+                "the tracked file alone earns all four notices: {bare:?}"
+            );
+
+            let overrides = crate::overrides::dir_for(root);
+            std::fs::create_dir_all(&overrides).unwrap();
+            std::fs::write(
+                overrides.join(CONFIG_FILE),
+                "[unattended]\nenabled = true\n",
+            )
+            .unwrap();
+
+            let (config, patched) = Config::load_with_notices(root, Some(&overrides)).unwrap();
+            assert!(config.unattended.enabled, "the patch still applies");
+            assert_eq!(
+                patched, bare,
+                "a patch on an unrelated key must not change which notices print"
+            );
+            for table in [
+                "[docs]",
+                "[criteria]",
+                "[agents.pi.env]",
+                "[agents.leftover]",
+            ] {
+                assert!(
+                    patched.iter().any(|n| n.contains(table)),
+                    "{table} notice missing with a patch on disk: {patched:?}"
+                );
+            }
+        });
+    }
+
+    /// With no `overrides/` directory on disk at all, `Config::load` answers
+    /// exactly what it did before this layer existed.
+    #[test]
+    fn with_no_overrides_directory_load_is_unchanged() {
+        with_override_fixture("absent", "[unattended]\nenabled = true\n", |root| {
+            assert_eq!(
+                Config::load(root).unwrap().unattended.enabled,
+                Config::load_tracked(root).unwrap().unattended.enabled,
+            );
+        });
     }
 }

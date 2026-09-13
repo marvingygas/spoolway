@@ -80,12 +80,67 @@ Neither is a config key — see [Jobs](jobs.md).
 Every directory under it is created silently the first time anything resolves it, so a fresh
 clone or a home directory deleted by hand gets one back without a command failing or a note
 being printed — an empty queue is the honest answer for a machine that has run nothing yet.
+`overrides/` is the one exception: it is never created on spoolway's behalf, because its
+absence is how "off" is spelled for the patch layer described below — see [The overrides
+layer](#the-overrides-layer).
 `system-prompts/`, `commands/`, `tracking/`, `headless/`, `scratch/` and `archive/` hold what
 a pass left behind rather than work still in flight, so `[retention]` below ages their contents
 out;
-`queue/`, `pending/`, `worktrees/` and `plans/` hold work itself and are never swept. Delete the
-whole `~/.spoolway/<project>/` directory to forget every task, plan and lane a project has ever
-run; the checkout is untouched, and nothing in it points back at what was deleted.
+`queue/`, `pending/`, `worktrees/`, `plans/` and `overrides/` hold work itself and are never
+swept. Delete the whole `~/.spoolway/<project>/` directory to forget every task, plan and lane a
+project has ever run; the checkout is untouched, and nothing in it points back at what was
+deleted.
+
+## The overrides layer
+
+`~/.spoolway/<project>/overrides/` is an optional patch layer, outside the checkout entirely,
+merged onto the tracked control plane at load time — inside `Pipelines::load`, `Config::load`
+and `prompt::path_for`, and nowhere else. Every command, the dispatcher and the status screen
+keep receiving one assembled set exactly as if the patch layer did not exist; nothing
+downstream of those three learns that a second source was consulted. There is no command yet
+to create, list, promote or drop an entry — the directory is written by hand, and read back the
+next time something loads.
+
+It holds up to three things:
+
+```
+~/.spoolway/<project>/overrides/
+  pipelines/<name>.yml     # patches one pipeline, by the same file name
+  config.toml              # patches the tracked config, by dotted key
+  prompts/<name>/PROMPT.md # replaces one prompt whole
+```
+
+`overrides/pipelines/<name>.yml` carries the pipeline's own top-level keys — `description`,
+`task_template` — plus `steps:`, keyed by step id rather than the tracked file's ordered list:
+
+```yaml
+steps:
+  implement:
+    model: claude-opus-5
+```
+
+Merging overlays only the keys a patch names onto the step that already exists; every other
+key on that step, and every other step, still comes from the tracked file. A patch may not set
+`id:` — that would rename or reposition a step, which is a change to the graph rather than a
+value on one — and naming a step id the tracked pipeline does not have is refused at load,
+naming the id and the pipeline. The merge lands before `Pipelines::assemble` materialises the
+`blocked` step, so a patch can reach only a step the tracked file actually declares, and the
+merged set still goes through `Pipelines::validate()` exactly as the tracked set does — an
+unreachable step, a route to nowhere or a missing agent profile is refused the same way
+regardless of which side named it.
+
+`overrides/config.toml` merges onto the tracked config by dotted key, one leaf at a time,
+through the same validated path `spoolway config set` writes through — so a patch cannot
+produce a config that command would have refused. It is applied last, after the config's own
+retired-table notices and its `migrate()`, so a patch on disk never silences a notice the
+tracked file itself earns.
+
+`overrides/prompts/<name>/PROMPT.md` replaces the tracked prompt whole, rather than being
+appended to it — prose has no key for a patch to aim at.
+
+A second entry point on each of the three — `Pipelines::load_tracked`, `Config::load_tracked`
+and `prompt::path_for_tracked` — returns the tracked set with no layer applied, for a caller
+that must not see the merge.
 
 ## `[dispatch]` — the run loop
 
@@ -263,7 +318,7 @@ days = 30
 The split between what this ages out and what it never touches is fixed in code, not
 configurable per directory: `system-prompts/`, `commands/`, `tracking/`, `headless/`,
 `scratch/` and `archive/` are swept once an entry passes `days`; `queue/`, `pending/`,
-`worktrees/` and `plans/` hold work in flight and are never swept, at any age.
+`worktrees/`, `plans/` and `overrides/` hold work in flight and are never swept, at any age.
 
 `scratch/` and `headless/` are the exception inside that first group. An entry there is
 named for a task, and the sweep loads the queue once and spares any entry whose leading

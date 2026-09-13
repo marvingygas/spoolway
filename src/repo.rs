@@ -273,6 +273,19 @@ impl Repo {
         self.checkout.join(crate::config::PROMPTS_DIR)
     }
 
+    /// The optional patch layer's own directory — see [`crate::overrides`].
+    ///
+    /// Under [`Repo::home`], never `checkout`: the merge it feeds has to
+    /// answer the same way whichever worktree it runs from, and `home` is
+    /// already keyed on the main checkout's basename regardless. Not a
+    /// `home_subdir` — it is never auto-created the way `queue_dir` and
+    /// `pending_dir` are, since a project that has overridden nothing has no
+    /// `overrides/` at all, which is how "off" is spelled; only a promote or
+    /// create command (not this task's) ever writes into it.
+    pub fn overrides_dir(&self) -> PathBuf {
+        self.home.join(crate::config::OVERRIDES_DIR)
+    }
+
     /// Where a project keeps task documents it wants to re-run — see
     /// [`crate::config::ROUTINES_DIR`] for why nothing auto-creates this the
     /// way [`Repo::pending_dir`] creates itself: an ordinary project that has
@@ -721,6 +734,11 @@ mod tests {
             "the checkout's tracked .spoolway/prompts/ is swept: {dirs:?}"
         );
         assert!(
+            !dirs.contains(&repo.overrides_dir()),
+            "the patch layer is swept, and a patch older than retention.days \
+             would silently change how work runs: {dirs:?}"
+        );
+        assert!(
             dirs.contains(&repo.system_prompts_dir()),
             "the composed system prompts are never swept: {dirs:?}"
         );
@@ -1039,6 +1057,10 @@ mod tests {
         assert!(
             !dirs.contains(&repo.prompts_dir()),
             "the sweep must never reach the checkout's own tracked prompt templates"
+        );
+        assert!(
+            !dirs.contains(&repo.overrides_dir()),
+            "the sweep must never reach the patch layer"
         );
         std::fs::remove_dir_all(&base).ok();
     }

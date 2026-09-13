@@ -416,7 +416,11 @@ fn prompt_flag(profile: &crate::config::AgentProfile) -> Option<String> {
     Some(format!("{flag} <prompt file>"))
 }
 
-/// Where a prompt's prose lives, whichever shape this project keeps it in.
+/// Where a prompt's prose lives, whichever shape this project keeps it in,
+/// with `overrides/prompts/<name>/PROMPT.md` — see [`crate::overrides`] —
+/// preferred whole over the tracked file when it exists: a prompt is prose,
+/// with no key in it for a patch to merge onto, so an override of one
+/// replaces it rather than being folded in.
 ///
 /// A prompt is a directory holding a `PROMPT.md`, so that a role with
 /// belongings has somewhere to keep them. Before that it was a flat
@@ -429,6 +433,17 @@ fn prompt_flag(profile: &crate::config::AgentProfile) -> Option<String> {
 /// When neither exists this names the directory shape, so an error points at
 /// where a prompt belongs rather than where it used to.
 pub fn path_for(repo: &Repo, name: &str) -> PathBuf {
+    if let Some(overridden) = crate::overrides::prompt_override(&repo.overrides_dir(), name) {
+        return overridden;
+    }
+    path_for_tracked(repo, name)
+}
+
+/// [`path_for`], with no patch layer applied — for a caller that must see
+/// only the tracked file: `override promote` (a later task) and nothing in
+/// this one.
+#[allow(dead_code)]
+pub fn path_for_tracked(repo: &Repo, name: &str) -> PathBuf {
     let nested = directory_form(repo, name);
     if nested.is_file() {
         return nested;
@@ -1263,5 +1278,89 @@ mod tests {
                 messages(&findings)
             );
         }
+    }
+
+    /// A repo whose `home` is a scratch directory of its own — `overrides_dir`
+    /// reads straight off that field, so no real `$HOME` or git repository is
+    /// needed to test the patch layer here, unlike `Pipelines::load` and
+    /// `Config::load`.
+    fn fixture(name: &str) -> Repo {
+        let base = crate::scratch::root(&format!("prompt-override-{name}"));
+        let _ = std::fs::remove_dir_all(&base);
+        Repo {
+            checkout: base.clone(),
+            root: base.clone(),
+            config: crate::config::Config::default(),
+            home: base.join(".home"),
+        }
+    }
+
+    /// `overrides/prompts/<name>/PROMPT.md` replaces the tracked prompt
+    /// whole, rather than being merged into it — a prompt is prose, with no
+    /// key in it for a patch to aim at.
+    #[test]
+    fn an_override_replaces_the_tracked_prompt_whole() {
+        let repo = fixture("replaces-whole");
+        let tracked = directory_form(&repo, "implementer");
+        std::fs::create_dir_all(tracked.parent().unwrap()).unwrap();
+        std::fs::write(&tracked, "the tracked prompt").unwrap();
+
+        let overridden = repo
+            .overrides_dir()
+            .join("prompts")
+            .join("implementer")
+            .join(crate::assets::PROMPT_FILE);
+        std::fs::create_dir_all(overridden.parent().unwrap()).unwrap();
+        std::fs::write(&overridden, "the overriding prompt").unwrap();
+
+        let path = path_for(&repo, "implementer");
+        assert_eq!(path, overridden);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "the overriding prompt"
+        );
+
+        std::fs::remove_dir_all(&repo.checkout).ok();
+    }
+
+    /// `path_for_tracked` is the second entry point the plan calls for: it
+    /// answers the tracked file even where a patch is sitting right there on
+    /// disk, for a caller that must not see the merge.
+    #[test]
+    fn path_for_tracked_ignores_a_patch_on_disk() {
+        let repo = fixture("tracked-ignores-patch");
+        let tracked = directory_form(&repo, "implementer");
+        std::fs::create_dir_all(tracked.parent().unwrap()).unwrap();
+        std::fs::write(&tracked, "the tracked prompt").unwrap();
+
+        let overridden = repo
+            .overrides_dir()
+            .join("prompts")
+            .join("implementer")
+            .join(crate::assets::PROMPT_FILE);
+        std::fs::create_dir_all(overridden.parent().unwrap()).unwrap();
+        std::fs::write(&overridden, "the overriding prompt").unwrap();
+
+        assert_eq!(path_for_tracked(&repo, "implementer"), tracked);
+        assert_eq!(path_for(&repo, "implementer"), overridden);
+
+        std::fs::remove_dir_all(&repo.checkout).ok();
+    }
+
+    /// With no `overrides/` directory on disk at all, `path_for` answers
+    /// exactly what it did before this layer existed.
+    #[test]
+    fn with_no_overrides_directory_path_for_is_unchanged() {
+        let repo = fixture("absent");
+        let tracked = directory_form(&repo, "implementer");
+        std::fs::create_dir_all(tracked.parent().unwrap()).unwrap();
+        std::fs::write(&tracked, "the tracked prompt").unwrap();
+
+        assert_eq!(
+            path_for(&repo, "implementer"),
+            path_for_tracked(&repo, "implementer")
+        );
+
+        std::fs::remove_dir_all(&repo.checkout).ok();
     }
 }

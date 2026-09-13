@@ -1442,6 +1442,68 @@ else bad "and the worktree's own config is left untouched too"; fi
 must "removing the worktree" git worktree remove --force "$WT"
 must "removing its branch" git branch -D task/config-diff
 
+# --------------------------------------------------------- overrides layer
+# `~/.spoolway/<project>/overrides/` is read by `Pipelines::load`,
+# `Config::load` and `prompt::path_for` through the shared
+# `overrides::dir_for`, which resolves whatever checkout it is handed back
+# to the *main* checkout with a real `git` subprocess before keying it off
+# `crate::mux::project_home` (see `src/overrides.rs`'s own doc). Every unit
+# test below that call runs against a bare fixture directory with no git
+# repository behind it, so all of them exercise only `dir_for`'s fallback
+# branch ("no repo here, treat root as the main checkout already"). Nothing
+# anywhere proves the git-subprocess branch itself resolves a *linked
+# worktree* back to the same directory a command run from the main checkout
+# reads — which is exactly what a lane merging overrides from inside its own
+# worktree depends on. That takes a real worktree, so it is this suite's
+# job and no unit test's; everything else about the merge (an unknown step
+# id refused by name, `id:` refused, a broken graph still caught by
+# `validate()`, the directory absent leaving load unchanged) is already
+# proved in `src/pipeline.rs`'s own `with_override_fixture` tests.
+BEFORE_OUT=$("$SPOOLWAY" pipeline show)
+REVIEW_LINE_BEFORE=$(grep -E '^  review ' <<<"$BEFORE_OUT")
+
+OVERRIDE_MODEL="overridden-by-the-layer"
+mkdir -p "$SPOOLWAY_PROJECT_HOME/overrides/pipelines"
+cat > "$SPOOLWAY_PROJECT_HOME/overrides/pipelines/default.yml" <<YML
+steps:
+  implement:
+    model: $OVERRIDE_MODEL
+YML
+
+OUT=$("$SPOOLWAY" pipeline show)
+IMPLEMENT_LINE=$(grep -E '^  implement ' <<<"$OUT")
+REVIEW_LINE=$(grep -E '^  review ' <<<"$OUT")
+if grep -qF "model=$OVERRIDE_MODEL" <<<"$IMPLEMENT_LINE" && grep -qF "prompt=implementer" <<<"$IMPLEMENT_LINE"; then
+  ok "pipeline show applies a patch from the overrides layer, from the main checkout"
+else
+  bad "pipeline show applies a patch from the overrides layer, from the main checkout"
+  sed 's/^/        /' <<<"$IMPLEMENT_LINE"
+fi
+if [ "$REVIEW_LINE" = "$REVIEW_LINE_BEFORE" ]; then
+  ok "and every other step still comes from the tracked file"
+else
+  bad "and every other step still comes from the tracked file"
+  diff <(echo "$REVIEW_LINE_BEFORE") <(echo "$REVIEW_LINE") | sed 's/^/        /'
+fi
+
+# The same lane, seen from inside a linked worktree it never copied anything
+# into: `pipeline show` there calls `Pipelines::load(&repo.checkout, ...)`
+# with the worktree's own checkout, so this is the git-subprocess branch of
+# `dir_for`, not the fallback every unit test above takes.
+WT2="$LIVE/worktrees/overrides-wt"
+must "cutting a worktree to read the layer from" \
+  git worktree add -q -b task/overrides-wt "$WT2" plan/live
+WT_IMPLEMENT_LINE=$(grep -E '^  implement ' <<<"$("$SPOOLWAY" -C "$WT2" pipeline show)")
+if grep -qF "model=$OVERRIDE_MODEL" <<<"$WT_IMPLEMENT_LINE"; then
+  ok "and the same patch is found from inside a linked worktree, with nothing copied into it"
+else
+  bad "and the same patch is found from inside a linked worktree, with nothing copied into it"
+  sed 's/^/        /' <<<"$WT_IMPLEMENT_LINE"
+fi
+must "removing the overrides worktree" git worktree remove --force "$WT2"
+must "removing its branch" git branch -D task/overrides-wt
+must "the overrides layer" rm -rf "$SPOOLWAY_PROJECT_HOME/overrides"
+
 # ------------------------------------------------------- issue_tracking hook
 # `[issue_tracking]` fires a project's own script once per task on each of the
 # four states nothing inside a pipeline file can already put a `run:` step on

@@ -29,6 +29,7 @@ mod lane_prompts;
 mod lock;
 mod models;
 mod mux;
+mod overrides;
 mod pipeline;
 mod platform;
 mod problem_log;

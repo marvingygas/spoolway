@@ -46,6 +46,10 @@ checkout it is actually running in — a task's own worktree, when it is one —
 from the project's main checkout, so a lane sees its own branch's pipelines even before
 they are merged anywhere. See [Project](concepts.md#project).
 
+An optional patch layer outside the checkout can also set keys on a step that already
+exists, without touching this file — see [The overrides
+layer](configuration.md#the-overrides-layer).
+
 A task picks its pipeline with its own `pipeline:` field. Which one it gets when it names
 none is `dispatch.default_pipeline` in the config, because naming the default is a statement
 about the *set* and no single file can make it. (The old single `pipeline.yml` is no longer
