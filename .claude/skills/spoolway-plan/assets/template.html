@@ -166,7 +166,7 @@ figcaption { font-size: 0.875rem; color: var(--ink-faint); max-width: var(--meas
 
 .frame { background: var(--surface); border: 1px solid var(--rule); border-radius: 5px; padding: 1rem 0.5rem; overflow-x: auto; }
 .frame svg { display: block; width: 100%; height: auto; }
-.frame svg text { font-family: var(--sans); fill: var(--ink); }
+.frame:not(.raw) svg text { font-family: var(--sans); fill: var(--ink); }
 .frame svg .sub { font-family: var(--mono); font-size: 10.5px; fill: var(--ink-faint); letter-spacing: 0.05em; }
 .frame svg .lead { stroke: var(--ink-faint); stroke-width: 1; fill: none; opacity: 0.7; }
 .frame svg .node { fill: var(--surface); stroke: var(--rule); }
@@ -188,24 +188,12 @@ figcaption { font-size: 0.875rem; color: var(--ink-faint); max-width: var(--meas
 .frame.lit svg .lead { stroke: #b0a79b; }
 
 /* A figure that IS a product screen — SLDS, a brand UI, somebody else's
-   chrome. The stylesheet stops recolouring it, so the drawing paints itself:
-   group with fill="", or use the names below. Note there is no font-size
-   here on purpose — CSS would beat the attribute and every size would have
-   to come back inline. Never combine with .lit. */
+   chrome. Nothing in this stylesheet reaches inside it: no fill, no size, no
+   class names to learn. Plain SVG with plain attributes, and what is written
+   is what paints. font-family is set on the root so it inherits, which an
+   attribute on an element still overrides. Never combine with .lit. */
 .frame.raw { background: var(--ui-ground, #f3f3f3); }
-.frame.raw svg { fill: #181818; }
-.frame.raw svg text { fill: inherit; }
-.frame.raw svg .card  { fill: #ffffff; stroke: #e5e5e5; }
-.frame.raw svg .rule  { fill: none; stroke: #e5e5e5; }
-.frame.raw svg .lbl   { fill: #5c5c5c; font-size: 9.5px; letter-spacing: 0.08em; }
-.frame.raw svg .val   { fill: #181818; font-size: 13.5px; }
-.frame.raw svg .mut   { fill: #5c5c5c; }
-.frame.raw svg .on    { fill: #ffffff; }
-.frame.raw svg .brand { fill: var(--ui-brand, #0176d3); }
-.frame.raw svg .ok    { fill: #2e844a; }
-.frame.raw svg .warn  { fill: #8c4b02; }
-.frame.raw svg .bad   { fill: #ba0517; }
-
+.frame.raw svg { font-family: var(--sans); }
 .mocks { display: flex; flex-direction: column; gap: 1rem; margin: 0; }
 .mock {
   background: var(--surface); border: 1px solid var(--rule); border-radius: 5px;

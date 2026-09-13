@@ -137,11 +137,10 @@ attribute. Three grounds hold these: **`.frame`** follows the theme and is the d
 **`.frame.lit`** pins a light ground for a drawing whose own colours carry meaning; and
 **`.frame.raw`** is for a figure that *is* somebody else's product screen.
 
-**A raw figure paints itself.** The stylesheet's `fill` stops applying, so group with
-`<g fill="#FFFFFF">` rather than styling each `text`, and reach for these where they fit:
-`.card` (white panel, hairline border), `.rule` (a divider), `.lbl` (small caps field label),
-`.val` (a field value), `.mut`, `.on` (white, for text on a filled bar), `.brand`, `.ok`,
-`.warn`, `.bad`. Never put `.raw` and `.lit` on the same frame.
+**Inside `.frame.raw` there is no vocabulary at all** — the stylesheet does not reach in, so it
+is plain SVG with plain attributes and what you write is what paints. Draw it the way you would
+draw a screen asked for on its own, with no page around it. `--ui-ground` sets the frame behind
+it; never put `.raw` and `.lit` on the same frame.
 
 ## The record's figure
 
@@ -163,8 +162,6 @@ A figure argues the decision; the prose around it only says what to look at.
   The markup half is only this: a thing that does not run yet names the bound it was drawn to
   hold in a `<span class="tag">` in the panel's bar, where a real artifact would have carried
   its path.
-- **A table inside a screen shows two rows and a count**, never the whole set. Six columns of
-  four rows is a page of markup an architect approves no better than two rows and `5 more`.
 - Source is welcome as supporting material under a figure that has already said what the code is
   for — a `<pre>` inside the same `.mock`, or beside it — never as the first thing in a record.
 
