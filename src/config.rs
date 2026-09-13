@@ -43,9 +43,11 @@ pub const JOBS_FILE: &str = ".spoolway/jobs.toml";
 /// The bare name of a cron-job store, for the user-scoped copy that lives
 /// directly under the project's machine home beside `lanes.json`.
 pub const JOBS_STORE: &str = "jobs.toml";
-/// The pull request template `spoolway stack`'s summary prompt fills in,
-/// beside the task templates but a single file rather than one per pipeline —
-/// there is one shape of pull request, whatever the pipeline that opened it.
+/// A pull request template, beside the task templates but a single file
+/// rather than one per pipeline. Nothing in this binary reads it any more —
+/// `spoolway stack` writes the task file's own body verbatim now — but
+/// `init` and `update` still install and manage it, the same as any other
+/// file in this module.
 pub const PULL_REQUEST_TEMPLATE: &str = ".spoolway/templates/pull-request.md";
 /// Every typed message a lane's pane receives, one `##` section per state —
 /// beside the task templates, a single file rather than one per pipeline,
@@ -131,16 +133,36 @@ pub struct Config {
     /// What `spoolway pipeline gen` opens, and what it tells the generation
     /// procedure. See [`PipelineGenConfig`].
     pub pipeline_gen: PipelineGenConfig,
-    /// Whether spoolway says a newer release is out. See [`UpdateConfig`].
-    pub update: UpdateConfig,
-    /// What window `spoolway-calibrate` reads. See [`CalibrateConfig`].
-    pub calibrate: CalibrateConfig,
-    /// How long a byproduct directory keeps what it holds before
-    /// [`crate::retain`] deletes it. See [`RetentionConfig`].
-    pub retention: RetentionConfig,
-    /// When the shared model-price table is old enough to mention. See
-    /// [`PricesConfig`].
-    pub prices: PricesConfig,
+    /// Everything spoolway does for its own upkeep, with no bearing on how a
+    /// task runs. See [`HousekeepingConfig`].
+    pub housekeeping: HousekeepingConfig,
+    /// Where an old `[update]` table lands so an existing config still
+    /// parses. See [`LegacyUpdate`]; the one key it held moved to
+    /// `housekeeping.update_check`. Dropped unconditionally on the next save.
+    #[allow(dead_code)]
+    #[serde(default, skip_serializing)]
+    update: LegacyUpdate,
+    /// Where an old `[calibrate]` table lands so an existing config still
+    /// parses. See [`LegacyCalibrate`]; the one key it held moved to
+    /// `housekeeping.calibrate_window`. Dropped unconditionally on the next
+    /// save.
+    #[allow(dead_code)]
+    #[serde(default, skip_serializing)]
+    calibrate: LegacyCalibrate,
+    /// Where an old `[retention]` table lands so an existing config still
+    /// parses. See [`LegacyRetention`]; the one key it held moved to
+    /// `housekeeping.retention_days`. Dropped unconditionally on the next
+    /// save.
+    #[allow(dead_code)]
+    #[serde(default, skip_serializing)]
+    retention: LegacyRetention,
+    /// Where an old `[prices]` table lands so an existing config still
+    /// parses. See [`LegacyPrices`]; the one key it held moved to
+    /// `housekeeping.price_max_age_days`. Dropped unconditionally on the next
+    /// save.
+    #[allow(dead_code)]
+    #[serde(default, skip_serializing)]
+    prices: LegacyPrices,
     /// Where an old `[plans]` table lands so an existing config still
     /// parses. See [`LegacyPlans`]; the binary keeps no notion of a plan
     /// store any more — spoolway-plan writes its page wherever it is told
@@ -156,8 +178,6 @@ pub struct Config {
     #[allow(dead_code)]
     #[serde(default, skip_serializing)]
     docs: LegacyDocs,
-    /// `spoolway stack`'s own settings — see [`StackConfig`].
-    pub stack: StackConfig,
     /// Agent profiles, referenced by name from a pipeline step's `agent:`.
     pub agents: BTreeMap<String, AgentProfile>,
     /// Where an old `[effort]` table lands so an existing config still
@@ -219,13 +239,13 @@ impl Default for Config {
             unattended: UnattendedConfig::default(),
             paths: LegacyPaths::default(),
             pipeline_gen: PipelineGenConfig::default(),
-            update: UpdateConfig::default(),
-            calibrate: CalibrateConfig::default(),
-            retention: RetentionConfig::default(),
-            prices: PricesConfig::default(),
+            housekeeping: HousekeepingConfig::default(),
+            update: LegacyUpdate::default(),
+            calibrate: LegacyCalibrate::default(),
+            retention: LegacyRetention::default(),
+            prices: LegacyPrices::default(),
             plans: LegacyPlans::default(),
             docs: LegacyDocs::default(),
-            stack: StackConfig::default(),
             agents: AgentProfile::defaults(),
             effort: LegacyEffort::default(),
             sandbox: LegacySandbox::default(),
@@ -314,20 +334,31 @@ pub struct PipelineGenConfig {
     /// step's `effort:` is. Blank means the kind's own default.
     pub pipeline_effort: String,
 
-    /// `true` skips asking and takes the procedure's own recommendation —
-    /// see the `spoolway-pipeline` skill's generation procedure.
-    pub pipeline_auto: bool,
+    /// Retired: whether the generation procedure asked before writing, or
+    /// took its own recommendation outright. Nothing in spoolway ever
+    /// branched on it — `spoolway-pipeline`'s own procedure decided, having
+    /// only been told the answer in advance. Kept only so an existing config
+    /// still parses; dropped unconditionally on the next save.
+    #[allow(dead_code)]
+    #[serde(default, skip_serializing)]
+    pipeline_auto: bool,
 
-    /// The loop budget every loop a generated pipeline writes starts at.
-    /// Binds generation only: it is typed into the file the procedure
-    /// writes, and never reaches back to change a shipped pipeline's own
-    /// numbers.
-    pub pipeline_loop_default: u32,
+    /// Retired: the loop budget every loop a generated pipeline wrote
+    /// started at. Kept only so an existing config still parses; dropped
+    /// unconditionally on the next save. Its default stays `1` — what the
+    /// live key meant before it retired — rather than `0`, even though
+    /// nothing reads it either way; a changed number with no reader is still
+    /// worth explaining rather than leaving to look like an accident.
+    #[allow(dead_code)]
+    #[serde(default, skip_serializing)]
+    pipeline_loop_default: u32,
 
-    /// Whether local models are involved in what gets generated. Pre-answers
-    /// the procedure's first question rather than skipping it — the
-    /// procedure still says so out loud, it just does not have to ask.
-    pub pipeline_local_models: bool,
+    /// Retired: whether local models were involved in what got generated.
+    /// Kept only so an existing config still parses; dropped unconditionally
+    /// on the next save.
+    #[allow(dead_code)]
+    #[serde(default, skip_serializing)]
+    pipeline_local_models: bool,
 }
 
 impl Default for PipelineGenConfig {
@@ -343,151 +374,132 @@ impl Default for PipelineGenConfig {
     }
 }
 
-/// Whether this project's checkouts are told about a newer release.
+/// `[housekeeping]`: everything spoolway does for its own upkeep, with no
+/// bearing on how any task runs.
 ///
-/// One setting, and it is the project's rather than the machine's because a
-/// team that does not want its pipeline output disturbed decides that once,
-/// in a file everybody has. The other direction — one person, one laptop —
-/// is [`crate::release::ENV_SKIP`], which needs no file to be committed.
+/// Folded from four one-key tables — `[update]`, `[calibrate]`,
+/// `[retention]` and `[prices]` — that each existed only to carry the single
+/// setting below it. Their old spellings still parse, and a value one of them
+/// held is carried across in [`Config::migrate`] — see [`LegacyUpdate`] and
+/// its three siblings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct UpdateConfig {
-    pub check: bool,
-}
+pub struct HousekeepingConfig {
+    /// Whether this project's checkouts are told about a newer release.
+    ///
+    /// The project's rather than the machine's because a team that does not
+    /// want its pipeline output disturbed decides that once, in a file
+    /// everybody has. The other direction — one person, one laptop — is
+    /// [`crate::release::ENV_SKIP`], which needs no file to be committed.
+    pub update_check: bool,
 
-impl Default for UpdateConfig {
-    fn default() -> Self {
-        // On: a check nobody switched on is a check nobody has, and this one
-        // costs a file read on the command path and nothing else.
-        Self { check: true }
-    }
-}
-
-/// `spoolway-calibrate`'s own table: how far back it looks.
-///
-/// One key, the same shape as [`UpdateConfig`], because the skill needs
-/// nothing else from config — its scope (which control-plane paths a finding
-/// may touch) is fixed in the skill's own procedure, not a per-project
-/// setting, the same way a pipeline step's prompt is named in the pipeline
-/// rather than here.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct CalibrateConfig {
     /// How far back a calibration session reads: archived task documents
     /// finished inside the window, and the ledger entries beside them.
     ///
     /// Same spelling `--since` already takes, and the same parser —
     /// [`human_duration`] — so `30d` here and `--since 30d` on `spoolway
-    /// eval` mean the same thing.
+    /// eval` mean the same thing. Read by the `spoolway-calibrate` skill,
+    /// not by this binary.
     #[serde(with = "human_duration")]
-    pub window: Duration,
+    pub calibrate_window: Duration,
+
+    /// How many days an entry sits in a byproduct directory before
+    /// [`crate::retain`] deletes it, read off the entry's own modification
+    /// time. `0` keeps everything forever — what every install does before
+    /// this key existed, and still does until somebody lowers it.
+    pub retention_days: u64,
+
+    /// How old the shared model-price table may be before `spoolway doctor`
+    /// notes it. `0` turns the note off without changing which table answers
+    /// model lookups. Refreshing remains the explicit `spoolway models
+    /// refresh` command however old the active table becomes.
+    pub price_max_age_days: u64,
 }
 
-impl Default for CalibrateConfig {
+impl Default for HousekeepingConfig {
     fn default() -> Self {
         Self {
+            // On: a check nobody switched on is a check nobody has, and this
+            // one costs a file read on the command path and nothing else.
+            update_check: true,
             // Two to three weeks of dispatching is enough archive to see a
             // pattern repeat without also asking a person to read a
             // half-year of history the first time they run this.
+            calibrate_window: Duration::from_secs(14 * 86_400),
+            // Thirty days is enough to look back at last week's run without
+            // ever having to, while still bounding a home that otherwise
+            // grows without end — see the plan's own cost line on the
+            // archive.
+            retention_days: 30,
+            price_max_age_days: 30,
+        }
+    }
+}
+
+/// An old `[update]` table: whether spoolway said a newer release was out.
+///
+/// The one key it held moved to `housekeeping.update_check` — see
+/// [`Config::migrate`], which carries a value across only when this differs
+/// from its own default, the same default `update_check` itself now carries.
+/// Kept only so an existing config still parses; never read directly, and
+/// dropped on the next save.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default)]
+struct LegacyUpdate {
+    check: bool,
+}
+
+impl Default for LegacyUpdate {
+    fn default() -> Self {
+        Self { check: true }
+    }
+}
+
+/// An old `[calibrate]` table: how far back `spoolway-calibrate` read. See
+/// [`LegacyUpdate`] for the pattern; the one key here moved to
+/// `housekeeping.calibrate_window`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default)]
+struct LegacyCalibrate {
+    #[serde(with = "human_duration")]
+    window: Duration,
+}
+
+impl Default for LegacyCalibrate {
+    fn default() -> Self {
+        Self {
             window: Duration::from_secs(14 * 86_400),
         }
     }
 }
 
-/// [`crate::retain`]'s own table: how long a byproduct directory keeps what
-/// it holds.
-///
-/// One key, on purpose. Which directories are byproducts and which are live
-/// state is a fact about spoolway's own layout, not a project's to redraw —
-/// see [`crate::retain`]'s own doc for the fixed split. All this table gives
-/// a project is the one knob that actually varies by install: how long
-/// somebody wants the logs kept around before they go.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct RetentionConfig {
-    /// How many days an entry sits in a byproduct directory before
-    /// [`crate::retain`] deletes it, read off the entry's own modification
-    /// time. `0` keeps everything forever — what every install does before
-    /// this key existed, and still does until somebody lowers it.
-    pub days: u64,
+/// An old `[retention]` table: how long a byproduct directory kept what it
+/// held. See [`LegacyUpdate`] for the pattern; the one key here moved to
+/// `housekeeping.retention_days`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default)]
+struct LegacyRetention {
+    days: u64,
 }
 
-impl Default for RetentionConfig {
+impl Default for LegacyRetention {
     fn default() -> Self {
-        // Thirty days is enough to look back at last week's run without
-        // ever having to, while still bounding a home that otherwise grows
-        // without end — see the plan's own cost line on the archive.
         Self { days: 30 }
     }
 }
 
-/// The shared model-price tables' own freshness setting.
-///
-/// One key, on purpose: age is only reported, never a trigger for a fetch or
-/// a reason for a command to fail. Refreshing remains the explicit
-/// `spoolway models refresh` command however old the active table becomes.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct PricesConfig {
-    /// How old the table may be before `spoolway doctor` notes it. `0` turns
-    /// the note off without changing which table answers model lookups.
-    pub max_age_days: u64,
+/// An old `[prices]` table: how stale the shared price table could get before
+/// it was mentioned. See [`LegacyUpdate`] for the pattern; the one key here
+/// moved to `housekeeping.price_max_age_days`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default)]
+struct LegacyPrices {
+    max_age_days: u64,
 }
 
-impl Default for PricesConfig {
+impl Default for LegacyPrices {
     fn default() -> Self {
         Self { max_age_days: 30 }
-    }
-}
-
-/// `spoolway stack`'s own table. There is deliberately no switch here that
-/// turns stacking itself on or off — a pipeline's step is what does that, by
-/// naming `run: spoolway stack` or not — so this holds only the one thing a
-/// project may want to add on top of the git-and-`gh` mechanics: a model that
-/// writes the pull request's title and a short summary.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct StackConfig {
-    /// Always written, blank `agent` and `model` and all — see
-    /// [`StackSummary`] for what blank means.
-    pub summary: StackSummary,
-}
-
-/// The model `spoolway stack` runs on the task file before opening a pull
-/// request, named the same way a pipeline step names one — `agent`, `model`
-/// and `effort` mean exactly what they mean on a `Step`, because this is the
-/// same call with no worker slot and no prompt held by a pipeline.
-///
-/// Blank `agent` and `model` are what put `spoolway stack` in task-file
-/// mode — the same shape `pipeline_gen.pipeline_model` already uses, where a
-/// blank model refuses the command. There is deliberately no separate switch
-/// naming the mode: two blank strings already say it, and a second key could
-/// only ever disagree with them.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct StackSummary {
-    /// Agent profile from `[agents.*]` the summary runs on. Blank alongside
-    /// `model` means no summary turn runs at all.
-    pub agent: String,
-    /// Model that profile's kind is started with. Blank alongside `agent`
-    /// means no summary turn runs at all.
-    pub model: String,
-    /// Passed to the agent kind's effort flag, same as a step's `effort:`.
-    /// Blank means no flag is sent.
-    pub effort: String,
-    /// Prompt (without extension) under the prompts directory. This
-    /// is the only place a prompt is named outside a pipeline step.
-    pub prompt: String,
-}
-
-impl Default for StackSummary {
-    fn default() -> Self {
-        Self {
-            agent: String::new(),
-            model: String::new(),
-            effort: String::new(),
-            prompt: "summariser".to_string(),
-        }
     }
 }
 
@@ -722,7 +734,11 @@ impl Default for DispatchConfig {
     fn default() -> Self {
         Self {
             backend: Backend::default(),
-            herdr_mode: MuxMode::default(),
+            // A row per task is the layout a fresh project starts on; `grouped`
+            // stays `MuxMode`'s own `#[default]` for a config that omits the
+            // key entirely, which is not this. See `tmux_mode` below for why
+            // the two may still diverge on one project.
+            herdr_mode: MuxMode::Split,
             tmux_mode: MuxMode::default(),
             interval: Duration::from_secs(10),
             // Four of these (`MAX_REMINDERS` + 1) comfortably outlast the 45
@@ -1688,6 +1704,28 @@ impl Config {
                 Some(_) => {}
             }
         }
+
+        // Four retired one-key tables, each folded into `[housekeeping]`. A
+        // legacy table absent from the file parses to the same default its
+        // own struct carries, and that default already equals
+        // `HousekeepingConfig`'s own default for the field it fed — so
+        // comparing against the legacy default is what tells apart a value
+        // somebody actually set under the old name from one that was never
+        // there, and this never clobbers a `[housekeeping]` value the file
+        // set directly with no `[update]`/`[calibrate]`/`[retention]`/
+        // `[prices]` table anywhere in it.
+        if self.update != LegacyUpdate::default() {
+            self.housekeeping.update_check = self.update.check;
+        }
+        if self.calibrate != LegacyCalibrate::default() {
+            self.housekeeping.calibrate_window = self.calibrate.window;
+        }
+        if self.retention != LegacyRetention::default() {
+            self.housekeeping.retention_days = self.retention.days;
+        }
+        if self.prices != LegacyPrices::default() {
+            self.housekeeping.price_max_age_days = self.prices.max_age_days;
+        }
     }
 
     /// The config as it would be written from nothing: one reference table on
@@ -2036,20 +2074,40 @@ mod tests {
         // Every model your pipelines name is already covered by the built-in
         // table once it exists; nothing here is a guess spoolway made for you.
         assert!(parsed.models.is_empty());
-        assert_eq!(parsed.prices.max_age_days, 30);
+        assert_eq!(parsed.housekeeping.price_max_age_days, 30);
     }
 
     #[test]
     fn written_config_explains_the_price_age_key_and_round_trips_it() {
         let mut config = Config::default();
-        config.prices.max_age_days = 7;
+        config.housekeeping.price_max_age_days = 7;
         let rendered = config.render().unwrap();
-        assert!(rendered.contains("prices.max_age_days"));
+        assert!(rendered.contains("housekeeping.price_max_age_days"));
         assert!(rendered.contains("before `spoolway doctor` says so"));
-        assert!(rendered.contains("[prices]\nmax_age_days = 7"));
+        assert!(rendered.contains("price_max_age_days = 7"));
 
         let parsed: Config = toml::from_str(&rendered).unwrap();
-        assert_eq!(parsed.prices.max_age_days, 7);
+        assert_eq!(parsed.housekeeping.price_max_age_days, 7);
+    }
+
+    /// The acceptance test: a config file written before this change, naming
+    /// the old `[update]` table, still reports the value it held after a
+    /// load-and-save round trip — `Config::migrate` carries it into
+    /// `housekeeping.update_check` rather than losing it the way an uncaught
+    /// table would (see [`Config::extra`]).
+    #[test]
+    fn an_old_update_table_survives_a_load_and_save_round_trip() {
+        let mut config: Config = toml::from_str("[update]\ncheck = false\n").unwrap();
+        config.migrate();
+        assert!(!config.housekeeping.update_check);
+
+        let saved = config.render().unwrap();
+        let mut reloaded: Config = toml::from_str(&saved).unwrap();
+        reloaded.migrate();
+        assert!(!reloaded.housekeeping.update_check);
+        // The old table itself is gone from the rewritten file — it is not
+        // simply carried forward alongside the new key.
+        assert!(!saved.contains("[update]"));
     }
 
     /// A setting that changes nothing at runtime is exactly the one people

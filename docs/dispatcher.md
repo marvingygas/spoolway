@@ -1032,7 +1032,7 @@ the singular `worktree`.)
 
 ```toml
 [dispatch]
-herdr_mode = "grouped"    # the default
+herdr_mode = "grouped"
 ```
 
 The shared workspace holds one tab per project, labelled with the project's directory name,

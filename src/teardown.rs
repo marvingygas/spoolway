@@ -432,7 +432,7 @@ impl<'a> Dispatcher<'a> {
         for branch in listing.lines() {
             // The task that recorded this exact branch, if any is still on
             // disk. A branch no queue or archive task claims — its task swept
-            // from the archive by `retention.days`, say — is left alone.
+            // from the archive by `housekeeping.retention_days`, say — is left alone.
             let Some(owner) = task_for_branch(self.repo, branch) else {
                 continue;
             };
@@ -647,7 +647,7 @@ impl<'a> Dispatcher<'a> {
 /// hand-dropped one that never passed `queue add` — matches only the bare
 /// `task/<id>` its id implies, never a prefixed branch. `None` when no task
 /// on disk claims the branch — its task swept from the archive by
-/// `retention.days`, say — which the sweep then leaves alone.
+/// `housekeeping.retention_days`, say — which the sweep then leaves alone.
 fn task_for_branch(repo: &crate::repo::Repo, branch: &str) -> Option<Task> {
     let mut candidate = branch.strip_prefix("task/")?;
     loop {

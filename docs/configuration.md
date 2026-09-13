@@ -81,8 +81,8 @@ Every directory under it is created silently the first time anything resolves it
 clone or a home directory deleted by hand gets one back without a command failing or a note
 being printed — an empty queue is the honest answer for a machine that has run nothing yet.
 `system-prompts/`, `commands/`, `tracking/`, `headless/`, `scratch/` and `archive/` hold what
-a pass left behind rather than work still in flight, so `[retention]` below ages their contents
-out;
+a pass left behind rather than work still in flight, so `[housekeeping]` below ages their
+contents out;
 `queue/`, `pending/`, `worktrees/` and `plans/` hold work itself and are never swept. Delete the
 whole `~/.spoolway/<project>/` directory to forget every task, plan and lane a project has ever
 run; the checkout is untouched, and nothing in it points back at what was deleted.
@@ -92,7 +92,7 @@ run; the checkout is untouched, and nothing in it points back at what was delete
 ```toml
 [dispatch]
 backend = "herdr"
-herdr_mode = "grouped"
+herdr_mode = "split"
 tmux_mode = "grouped"
 worktree_root = ""
 interval = "10s"
@@ -104,7 +104,7 @@ auto_commit = true
 | Key | Default | Meaning |
 |---|---|---|
 | `backend` | `herdr` | Where lanes run. `herdr` and `tmux` put every agent in a real pane you can watch, attach to and take over; `headless` needs no multiplexer at all |
-| `herdr_mode` | `grouped` | How a herdr run is laid out in the multiplexer, and read only under `backend = "herdr"`. `grouped` shares the one `spoolway-dispatcher` workspace with every project, a tab of its own per project and a pane per running task — see [One home for every run, in every project](dispatcher.md#one-home-for-every-run-in-every-project). `split` gives each task a herdr workspace of its own, cut with git and labelled `spoolway/<task>`, and leaves the dispatcher where it was started. The old spellings `workspace` and `worktrees` still parse, and so does the singular `worktree` |
+| `herdr_mode` | `split` | How a herdr run is laid out in the multiplexer, and read only under `backend = "herdr"`. `split` gives each task a herdr workspace of its own, cut with git and labelled `spoolway/<task>`, and leaves the dispatcher where it was started. `grouped` shares the one `spoolway-dispatcher` workspace with every project instead, a tab of its own per project and a pane per running task — see [One home for every run, in every project](dispatcher.md#one-home-for-every-run-in-every-project). The old spellings `workspace` and `worktrees` still parse, and so does the singular `worktree` |
 | `tmux_mode` | `grouped` | How a tmux run is laid out, read only under `backend = "tmux"`, with the same two answers: `grouped` shares the one `spoolway-dispatcher` session with every project, a window per project and a pane per running task, and `split` is a session per task, named `spoolway/<task>`, the dispatcher left where it was started. See [tmux](dispatcher.md#tmux) |
 | `worktree_root` | *(blank)* | Where a dispatched task's worktree is cut, for every backend and every layout. Blank means `~/.spoolway/<project>/worktrees`. The directory under it is the branch flattened to one component, `task-<id>`, for every backend — or `task-<slug>-<id>` when a tracker slug prefixed the branch |
 | `interval` | `10s` | How long to wait between passes when looping. About the floor worth having: below it a pass's polling overhead buys no reaction time, since a lane takes wall-clock minutes regardless |
@@ -159,36 +159,10 @@ What a hand-off *does* with the branch is not configured anywhere: it is `spoolw
 mechanically — commit, squash, push, open the pull request — and when that fails it routes to
 `blocked`, where a person takes over. There is no merge mode to pick.
 
-### `[stack.summary]` — a model for the pull request's title and text
-
-```toml
-[stack.summary]
-agent = ""
-model = ""
-effort = ""
-prompt = "summariser"
-```
-
-Every project's `config.toml` carries this table, and blank `agent` and `model` are what say
-"no model": `spoolway stack` opens the pull request with the task's `title:` and its own body
-verbatim, the whole task file as the body. Fill both in and it runs one turn of the named
-prompt on the task file first, using its first printed line as the title and everything below
-it as the body. Either way the title is a Conventional Commits line — `feat(queue): add a
---dry-run flag` — because that is what a `title:` is written as, and what
-`.spoolway/templates/pull-request.md` asks the prompt for.
-
-| Key | Default | Meaning |
-|---|---|---|
-| `agent` | (blank) | An agent profile from `[agents.*]` — the same table a pipeline step's `agent:` names one from. Blank alongside `model`, the whole task file is the pull request body instead. |
-| `model` | (blank) | The model that profile's kind is started with. Blank alongside `agent`, the whole task file is the pull request body instead. |
-| `effort` | (blank) | Passed to the agent kind's effort flag, same as a step's `effort:`. Blank means no flag is sent. |
-| `prompt` | `summariser` | Prompt under `.spoolway/prompts/` — the shipped one does nothing but fill in `.spoolway/templates/pull-request.md` |
-
-There is deliberately no separate key here that turns the summary model on or off — blank
-`agent` and blank `model` already say it, the same shape `pipeline_gen.pipeline_model` uses for
-its own refusal. Nor is there a key that turns stacking itself on or off: the pipeline's
-`handover` step, naming `run: spoolway stack`, is what does that. This table only ever adds a
-model on top of mechanics that already run without one.
+`spoolway stack` opens the pull request with the task's `title:` as the title and the task
+file's own body verbatim as the pull request body — a Conventional Commits line, `feat(queue):
+add a --dry-run flag`, because that is what a `title:` is written as. There is no model in the
+loop and no config key that puts one there.
 
 ## `[unattended]` — the overnight run
 
@@ -220,68 +194,59 @@ every other key there applies whether or not a person is watching.
 | `blocked_session` | `true` | Whether the lane staffing `blocked` carries its own earlier session forward, the same as a step's `session:` — see `blocked_agent` |
 | `blocked_prompt` | `unblocker` | Prompt the lane staffing `blocked` runs — see `blocked_agent` |
 
-## `[update]` — the release notice
+## `[housekeeping]` — everything spoolway does for its own upkeep
 
 ```toml
-[update]
-check = true
-```
-
-Whether spoolway tells a person at a keyboard that a newer release is out. The check reads a
-cached answer and never waits on the network: a lookup older than a day refreshes it in the
-background, for the next command rather than this one. Nothing is printed inside a lane, under
-`--json`, or when output is not a terminal, so only a person at a keyboard ever sees the
-line — and a binary npm did not install is told to upgrade the way it was installed, never to
-run a command that would refuse. `SPOOLWAY_SKIP_VERSION_CHECK=1` is the same switch for one
-machine, without editing this file.
-
-## `[calibrate]` — how far back `spoolway-calibrate` reads
-
-```toml
-[calibrate]
-window = "14d"
-```
-
-How far back `spoolway-calibrate` reads: archived tasks finished inside the window, and the
-ledger entries beside them. Takes the same duration forms `spoolway eval --since` does — `30d`,
-`36h`, `90m` — and round-trips through `spoolway config set calibrate.window 30d`.
-
-A project that raises this past `retention.days` silently loses the archived tasks
-`spoolway-calibrate` reads, once `retain` sweeps them out of `archive/` — neither side warns.
-
-## `[retention]` — how long a byproduct directory keeps what it holds
-
-```toml
-[retention]
-days = 30
+[housekeeping]
+update_check = true
+calibrate_window = "14d"
+retention_days = 30
+price_max_age_days = 30
 ```
 
 | Key | Default | Meaning |
 |---|---|---|
-| `days` | `30` | How many days an entry sits in a byproduct directory before it is deleted, read off the entry's own modification time. `0` keeps everything forever — every install's behaviour before this key existed |
+| `update_check` | `true` | Whether spoolway tells a person at a keyboard that a newer release is out. |
+| `calibrate_window` | `14d` | How far back `spoolway-calibrate` reads: archived tasks finished inside the window, and the ledger entries beside them. |
+| `retention_days` | `30` | How many days an entry sits in a byproduct directory before it is deleted. |
+| `price_max_age_days` | `30` | How many days the active shared price table may be before `spoolway doctor` notes it. |
 
-The split between what this ages out and what it never touches is fixed in code, not
-configurable per directory: `system-prompts/`, `commands/`, `tracking/`, `headless/`,
-`scratch/` and `archive/` are swept once an entry passes `days`; `queue/`, `pending/`,
-`worktrees/` and `plans/` hold work in flight and are never swept, at any age.
+**`update_check`.** The check reads a cached answer and never waits on the network: a lookup
+older than a day refreshes it in the background, for the next command rather than this one.
+Nothing is printed inside a lane, under `--json`, or when output is not a terminal, so only a
+person at a keyboard ever sees the line — and a binary npm did not install is told to upgrade
+the way it was installed, never to run a command that would refuse.
+`SPOOLWAY_SKIP_VERSION_CHECK=1` is the same switch for one machine, without editing this file.
+
+**`calibrate_window`.** Takes the same duration forms `spoolway eval --since` does — `30d`,
+`36h`, `90m` — and round-trips through `spoolway config set housekeeping.calibrate_window 30d`.
+A project that raises this past `retention_days` silently loses the archived tasks
+`spoolway-calibrate` reads, once `retain` sweeps them out of `archive/` — neither side warns.
+
+**`retention_days`.** Read off an entry's own modification time. `0` keeps everything
+forever — every install's behaviour before this key existed. The split between what this ages
+out and what it never touches is fixed in code, not configurable per directory:
+`system-prompts/`, `commands/`, `tracking/`, `headless/`, `scratch/` and `archive/` are swept
+once an entry passes `retention_days`; `queue/`, `pending/`, `worktrees/` and `plans/` hold work
+in flight and are never swept, at any age.
 
 `scratch/` and `headless/` are the exception inside that first group. An entry there is
 named for a task, and the sweep loads the queue once and spares any entry whose leading
 task id still names a file in `queue/`. This holds whatever stage the task sits on,
 `paused` and `blocked` included, since those are the stages a task can rest on for longer
-than `days`. So `spoolway resume` always finds a paused or blocked lane's scratch tree and
-headless record intact. Only once the task is archived do its scratch directory and its
-headless record age out like anything else.
+than `retention_days`. So `spoolway resume` always finds a paused or blocked lane's scratch
+tree and headless record intact. Only once the task is archived do its scratch directory and
+its headless record age out like anything else.
 
-Archiving a task also reclaims its leftovers straight away, without waiting for `days`.
-Its hook run files under `tracking/`, its command-step run files under `commands/`, and the
-per-session home an agent that mints its own session id was given are all removed when the
-task moves to `archive/`. One consequence is on the board: `failure_count` only counts a
-`<task> · <event>` key whose task is still in the queue, so a failed hook from an archived
-task stops showing as "N hook failures" even on a home where an older build archived that
-task without reclaiming its files. A `fetch` run file is keyed on an issue reference rather
-than a task id, so nothing reclaims it and it only ages out; a failed `spoolway issue show`
-still counts on the board.
+Archiving a task also reclaims its leftovers straight away, without waiting for
+`retention_days`. Its hook run files under `tracking/`, its command-step run files under
+`commands/`, and the per-session home an agent that mints its own session id was given are all
+removed when the task moves to `archive/`. One consequence is on the board: `failure_count`
+only counts a `<task> · <event>` key whose task is still in the queue, so a failed hook from an
+archived task stops showing as "N hook failures" even on a home where an older build archived
+that task without reclaiming its files. A `fetch` run file is keyed on an issue reference
+rather than a task id, so nothing reclaims it and it only ages out; a failed `spoolway issue
+show` still counts on the board.
 
 Only directories under `~/.spoolway/<project>/` are ever swept. `.spoolway/prompts/` in the
 checkout holds the project's tracked prompt templates, and nothing here touches it, however
@@ -293,37 +258,25 @@ long-neglected home drains its backlog over several runs rather than stalling th
 that trips it.
 
 Sweeping `archive/` has one consequence worth knowing: `queue add` resolves a `depends_on`
-against the queue and the archive, so a dependency that finished more than `days` days ago can
-no longer be named. The refusal says so, naming the age, whenever `retention.days` is above
-zero; with it at `0` the same missing dependency is reported the plain way, since sweeping
-cannot be why.
+against the queue and the archive, so a dependency that finished more than `retention_days`
+days ago can no longer be named. The refusal says so, naming the age, whenever
+`retention_days` is above zero; with it at `0` the same missing dependency is reported the
+plain way, since sweeping cannot be why.
 
-## `[prices]` — how stale the shared price table may be before it is mentioned
-
-```toml
-[prices]
-max_age_days = 30
-```
-
-| Key | Default | Meaning |
-|---|---|---|
-| `max_age_days` | `30` | How many days the active shared price table may be before `spoolway doctor` notes it. `0` turns the note off entirely — the table is never mentioned, however old it gets |
-
-The age is taken from whichever table actually answered model lookups: the machine-wide
-`~/.spoolway/model-prices.json` when it parses, the built-in table otherwise. It is reported,
-never acted on — a `note` in `spoolway doctor`, never a fetch and never a failed check. The note
-fires only once the table is past the limit, so a table inside it is never mentioned, and `0`
-means the note never fires at all. Making the table current stays the explicit
-`spoolway models refresh`, however old it has become. See [Pricing](cost.md#pricing).
+**`price_max_age_days`.** `0` turns the note off entirely — the table is never mentioned,
+however old it gets. The age is taken from whichever table actually answered model lookups:
+the machine-wide `~/.spoolway/model-prices.json` when it parses, the built-in table otherwise.
+It is reported, never acted on — a `note` in `spoolway doctor`, never a fetch and never a
+failed check. The note fires only once the table is past the limit, so a table inside it is
+never mentioned, and `0` means the note never fires at all. Making the table current stays the
+explicit `spoolway models refresh`, however old it has become. See
+[Pricing](cost.md#pricing).
 
 ```toml
 [pipeline_gen]
 pipeline_agent = "claude"
 pipeline_model = ""
 pipeline_effort = ""
-pipeline_auto = false
-pipeline_loop_default = 1
-pipeline_local_models = false
 ```
 
 What `spoolway pipeline gen` opens, and what it hands the `spoolway-pipeline` skill's
@@ -335,12 +288,6 @@ as and which model it runs. `pipeline_model` ships blank, and blank refuses the 
 generation session with nothing to say about what it runs is not one worth opening.
 **`pipeline_effort`** is handed straight to that profile's effort flag, the same way a step's
 own `effort:` is; blank means the kind's own default.
-
-**`pipeline_auto`**, **`pipeline_loop_default`** and **`pipeline_local_models`** are printed
-to the session as one line of preferences, which the skill takes as already answered rather
-than asking about them again. **`pipeline_loop_default`** is also the budget every loop a
-generated pipeline writes starts at; it binds generation only — `assets/pipelines/*.yml` keep
-whatever numbers they already have, and this key never reaches back to change them.
 
 There is no `prompt` key here. The `spoolway-pipeline` skill is the whole brief for this
 session, deliberately — a second file layered on top would only be one more place the
@@ -444,6 +391,36 @@ and `session_reuse_idle`'s own entry under `[models]`.
 
 An old `agents.*.model`, `agents.*.context_window`, or `agents.*.args` still parses, and is
 dropped on the next save.
+
+## Retired: `[update]`, `[calibrate]`, `[retention]`, `[prices]`
+
+Four tables that each held exactly one key are folded into [`[housekeeping]`](#housekeeping--everything-spoolway-does-for-its-own-upkeep)
+above: `update.check` is `housekeeping.update_check`, `calibrate.window` is
+`housekeeping.calibrate_window`, `retention.days` is `housekeeping.retention_days`, and
+`prices.max_age_days` is `housekeeping.price_max_age_days`. A value any of the four old tables
+held is carried across the first time a config saved before this loads; all four old tables
+still parse, and are dropped on the next save.
+
+## Retired: `[stack.summary]`
+
+`spoolway stack` used to run a model on the task file first, when `agent` and `model` were both
+set, and take that model's first printed line as the pull request's title and everything below
+it as the body. `title:` is unconditionally both the squashed commit's subject and the pull
+request's title now, and the task file's own body is unconditionally the pull request body —
+see [What hands a change over, and what asks first](#what-hands-a-change-over-and-what-asks-first)
+above. `.spoolway/templates/pull-request.md`, the shape that model turn used to fill in, is
+still installed and managed by `init` and `update`, but nothing reads it any more.
+
+An old `[stack.summary]` table still parses, and is dropped on the next save.
+
+## Retired: `pipeline_gen.pipeline_auto`, `pipeline_loop_default`, `pipeline_local_models`
+
+Three keys printed to a `spoolway pipeline gen` session as one line of preferences, which the
+`spoolway-pipeline` skill took as already answered rather than asking about them again.
+Nothing in spoolway ever branched on any of the three — `pipeline_agent`, `pipeline_model` and
+`pipeline_effort` are `PipelineGenConfig`'s only fields now.
+
+All three still parse in a config saved before this, and are dropped on the next save.
 
 ## Retired: `agents.<profile>.env`
 

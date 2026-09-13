@@ -19,7 +19,7 @@
 //! back through. An entry in either is spared for as long as its leading
 //! task id names a file still in `queue/`, whatever stage that file sits on:
 //! `paused` and `blocked` are stages a task rests on for longer than
-//! `retention.days`, and a directory's own modification time does not move
+//! `housekeeping.retention_days`, and a directory's own modification time does not move
 //! while it only has files written *into* it. Only once the task is archived
 //! do its scratch directory and its headless record age out like anything
 //! else. See [`sweep_now`], which loads the queue once for this.
@@ -29,7 +29,7 @@
 //! project's tracked prompt templates, it is version-controlled, and
 //! [`crate::version`] fingerprints it as part of how work is done. It was
 //! in the swept list once, and that deleted checked-in files off any
-//! working tree git had not rewritten inside `retention.days`.
+//! working tree git had not rewritten inside `housekeeping.retention_days`.
 //!
 //! The shape is copied from [`crate::scratch`]'s own sweep of finished test
 //! fixtures: a [`std::sync::Once`] so a pass runs at most once per process,
@@ -62,7 +62,7 @@ use crate::repo::Repo;
 /// working.
 const SWEEP_LIMIT: usize = 2_000;
 
-/// One second's worth of a day, for turning `retention.days` into a
+/// One second's worth of a day, for turning `housekeeping.retention_days` into a
 /// [`Duration`].
 const SECS_PER_DAY: u64 = 86_400;
 
@@ -79,20 +79,25 @@ pub fn sweep_once(repo: &Repo) {
 }
 
 fn sweep_now(repo: &Repo) {
-    if repo.config.retention.days == 0 {
+    if repo.config.housekeeping.retention_days == 0 {
         // 0 means "keep everything forever" — every install's behaviour
         // before this key existed, and still the default of neither doing
         // nothing nor guessing an age nobody asked for.
         return;
     }
-    // Saturating rather than a plain `*`: `retention.days` is a config value
+    // Saturating rather than a plain `*`: `housekeeping.retention_days` is a config value
     // with no upper bound, and an overflow here has to fail toward keeping
     // everything rather than toward deleting it. A `days` this large
     // saturates to `u64::MAX` seconds — hundreds of billions of years — which
     // reads as "never sweep", not as the wrapped-around tiny age a plain
     // multiply would panic on in a debug build or silently produce in a
     // release one.
-    let max_age = Duration::from_secs(repo.config.retention.days.saturating_mul(SECS_PER_DAY));
+    let max_age = Duration::from_secs(
+        repo.config
+            .housekeeping
+            .retention_days
+            .saturating_mul(SECS_PER_DAY),
+    );
 
     // `scratch/` and `headless/` hold a queued task's live state — see this
     // module's own doc. Read the queue once, here, and pass it only to those
@@ -231,7 +236,7 @@ mod tests {
         let base = crate::scratch::root("retain-zero");
         let _ = std::fs::remove_dir_all(&base);
         let mut config = crate::config::Config::default();
-        config.retention.days = 0;
+        config.housekeeping.retention_days = 0;
         let repo = Repo {
             checkout: base.clone(),
             root: base.clone(),
@@ -240,7 +245,7 @@ mod tests {
         };
 
         // A real byproduct directory, not a directory of the test's own
-        // invention: `sweep_now` is what reads `retention.days`, and it
+        // invention: `sweep_now` is what reads `housekeeping.retention_days`, and it
         // only ever looks inside `repo.byproduct_dirs()`.
         let old = repo.archive_dir().join("ancient.md");
         std::fs::write(&old, "done").unwrap();
@@ -287,7 +292,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// A task paused or blocked for longer than `retention.days` keeps its
+    /// A task paused or blocked for longer than `housekeeping.retention_days` keeps its
     /// scratch directory and its headless record, so `spoolway resume`
     /// continues a lane whose planner output and bookkeeping are intact. An
     /// entry whose task has left the queue ages out exactly as before.
@@ -296,7 +301,7 @@ mod tests {
         let base = crate::scratch::root("retain-live-task");
         let _ = std::fs::remove_dir_all(&base);
         let mut config = crate::config::Config::default();
-        config.retention.days = 30;
+        config.housekeeping.retention_days = 30;
         let repo = Repo {
             checkout: base.clone(),
             root: base.clone(),
@@ -360,7 +365,7 @@ mod tests {
         let base = crate::scratch::root("retain-prompt-source");
         let _ = std::fs::remove_dir_all(&base);
         let mut config = crate::config::Config::default();
-        config.retention.days = 1;
+        config.housekeeping.retention_days = 1;
         let repo = Repo {
             checkout: base.clone(),
             root: base.clone(),

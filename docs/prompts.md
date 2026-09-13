@@ -10,9 +10,9 @@ spoolway has no built-in roles, no reviewer it knows about, no implementer it tr
 specially. A step names a file, the file is prose, and that is the whole of it — adding a role
 to the pipeline is two files, the prompt and the step that runs it.
 
-Six prompts ship, and they are there because the [sample workflow](#the-sample-workflows-cast)
+Five prompts ship, and they are there because the [sample workflow](#the-sample-workflows-cast)
 has to be staffed by somebody. Read them as a worked example of the shape, not as the set to
-work from: a project that deletes all six and writes its own is not working around anything,
+work from: a project that deletes all five and writes its own is not working around anything,
 and nothing in the binary will notice.
 
 ## Where a prompt lives
@@ -218,9 +218,8 @@ guardrails refused before a command ran. It went with them.
 
 ## The sample workflow's cast
 
-The `default` and `bugfix` pipelines need somebody standing on each of their steps, and five
-of these six are who; the sixth, `summariser`, is run by `spoolway stack` rather than by a
-step. They are a demonstration of the division the contract describes — one role, one
+The `default` and `bugfix` pipelines need somebody standing on each of their steps, and these
+five are who. They are a demonstration of the division the contract describes — one role, one
 step's worth of the job, no routing, no powers — rather than the roles spoolway is built
 around. Not one of them is named anywhere in the binary.
 
@@ -231,7 +230,6 @@ around. Not one of them is named anywhere in the binary.
 | `reproducer` | Captures a bug as a failing repro and runs it. Run twice by the bugfix pipeline — before the fix, where the repro failing is the point, and after it, where the same repro passing is. Fixes nothing |
 | `archivist` | Maintains the domain documents. One document per domain, describing the system as it is now — never a changelog. Scoped to its own task's diff, so what it writes lands in the pull request that changed the behaviour |
 | `unblocker` | Staffs the `blocked` step, only in an unattended run. Reads why a task stopped and either clears it — a broken mainline, a stale branch, a missing tool — or, only when the thing genuinely cannot be done, pauses the task for a person. Never merges, never touches another lane's pane, never marks a task done — see [Staffing `blocked`](pipelines.md#staffing-blocked) |
-| `summariser` | Writes one pull request's title and body from the task file, for `spoolway stack` when `[stack.summary]` names an agent and a model. The title is a Conventional Commits line — `feat(queue): add a --dry-run flag`. No git, no `gh`, no diff, no file of its own — the command around it does all of that and reads only what the prompt prints. Named by no pipeline step — see [`spoolway stack` hands the change over](pipelines.md#spoolway-stack-hands-the-change-over) |
 
 ## Writing your own
 

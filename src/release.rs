@@ -45,7 +45,7 @@ pub const MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Turns the check off for one machine, whatever a project's config says.
 ///
-/// The per-machine half of `update.check`, and the same escape hatch pi spells
+/// The per-machine half of `housekeeping.update_check`, and the same escape hatch pi spells
 /// `PI_SKIP_VERSION_CHECK`. A project setting cannot serve here: the config
 /// belongs to the repository and is committed, and "I do not want to hear
 /// about releases on this laptop" is not a fact about the repository.
@@ -406,7 +406,7 @@ pub struct Audience {
     pub machine_readable: bool,
     /// stderr is a terminal.
     pub tty: bool,
-    /// `update.check`, from the project's config.
+    /// `housekeeping.update_check`, from the project's config.
     pub enabled: bool,
     /// `SPOOLWAY_SKIP_VERSION_CHECK` is set.
     pub skipped: bool,

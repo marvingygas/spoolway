@@ -402,7 +402,7 @@ fn config_checks(
             false => Ok(None),
         },
     ));
-    if let Some(note) = current_price_table_age_note(config.prices.max_age_days) {
+    if let Some(note) = current_price_table_age_note(config.housekeeping.price_max_age_days) {
         findings.push(Finding::Note(note));
     }
     findings
@@ -421,7 +421,7 @@ fn price_table_age_note(max_age_days: u64, age_days: u64) -> Option<String> {
     (max_age_days > 0 && age_days > max_age_days).then(|| {
         format!(
             "the price table was generated {} days ago, past the {max_age_days} in \
-             `prices.max_age_days` — `spoolway models refresh` takes litellm's current prices",
+             `housekeeping.price_max_age_days` — `spoolway models refresh` takes litellm's current prices",
             age_days
         )
     })
@@ -1467,7 +1467,7 @@ mod tests {
             price_table_age_note(30, 31).as_deref(),
             Some(
                 "the price table was generated 31 days ago, past the 30 in \
-                 `prices.max_age_days` — `spoolway models refresh` takes litellm's current prices"
+                 `housekeeping.price_max_age_days` — `spoolway models refresh` takes litellm's current prices"
             )
         );
     }

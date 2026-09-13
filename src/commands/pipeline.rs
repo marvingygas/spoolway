@@ -287,13 +287,6 @@ struct AgentContractEntry {
     concurrency: usize,
 }
 
-#[derive(Debug, serde::Serialize)]
-struct PreferencesContract {
-    local_models: bool,
-    loop_default: u32,
-    auto: bool,
-}
-
 /// The whole pipeline-file contract, printed as JSON by bare `spoolway
 /// pipeline contract`.
 #[derive(Debug, serde::Serialize)]
@@ -306,7 +299,6 @@ struct Contract {
     prompts: Vec<String>,
     task_skeletons: Vec<String>,
     existing: Vec<String>,
-    preferences: PreferencesContract,
     template: String,
 }
 
@@ -362,8 +354,6 @@ fn build_contract(repo: &Repo, pipelines: &Pipelines) -> Contract {
         .map(|entries| entries.into_iter().map(|e| e.name).collect())
         .unwrap_or_default();
 
-    let cfg = &repo.config.pipeline_gen;
-
     Contract {
         path: ".spoolway/pipelines/<name>.yml",
         keys: ContractKeys {
@@ -382,11 +372,6 @@ fn build_contract(repo: &Repo, pipelines: &Pipelines) -> Contract {
         prompts,
         task_skeletons: task_skeletons(repo),
         existing: pipelines.names().into_iter().map(str::to_string).collect(),
-        preferences: PreferencesContract {
-            local_models: cfg.pipeline_local_models,
-            loop_default: cfg.pipeline_loop_default,
-            auto: cfg.pipeline_auto,
-        },
         template: template(),
     }
 }
@@ -1000,10 +985,6 @@ pub fn pipeline_gen(repo: &Repo, mux: &dyn Mux, args: &PipelineGenArgs) -> Resul
     if let Some(plan) = plan {
         println!("plan          {plan}");
     }
-    println!(
-        "preferences   auto = {} · loop_default = {} · local_models = {}",
-        cfg.pipeline_auto, cfg.pipeline_loop_default, cfg.pipeline_local_models
-    );
     println!();
     println!("opened a pane on this checkout");
     println!("prompted `spoolway-pipeline`");
@@ -1784,7 +1765,6 @@ mod tests {
             "prompts",
             "task_skeletons",
             "existing",
-            "preferences",
             "template",
         ] {
             assert!(value.get(key).is_some(), "missing `{key}`: {value}");

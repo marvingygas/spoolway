@@ -92,11 +92,11 @@ pub struct Frontmatter {
     /// belongs to the project and a field there is never safe from a
     /// project's own template — the frontmatter is spoolway's, so this is.
     /// It is the subject of the squashed commit `spoolway stack` pushes,
-    /// verbatim, and the pull request's title whenever no summary model is
-    /// configured to write its own. Required: `queue_add::parse_submission`
-    /// refuses a document that leaves it blank, naming the document and the
-    /// field. The shape itself is not enforced anywhere — a task file older
-    /// than this convention still lands, with its own line as the subject.
+    /// verbatim, and the pull request's title. Required:
+    /// `queue_add::parse_submission` refuses a document that leaves it
+    /// blank, naming the document and the field. The shape itself is not
+    /// enforced anywhere — a task file older than this convention still
+    /// lands, with its own line as the subject.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub title: String,
 

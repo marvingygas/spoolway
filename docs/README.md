@@ -59,8 +59,8 @@ lanes.
 
 ## What ships is a sample, not the product
 
-Two pipelines and six prompts come in the box — implement, review, document, summarise a pull
-request, unblock, plus a reproduce-first variant for bugs. They are there so that a project
+Two pipelines and five prompts come in the box — implement, review, document, unblock, plus a
+reproduce-first variant for bugs. They are there so that a project
 scaffolded a minute ago runs on its first pass, and so that there is something concrete to read
 while working out what you want. **They are a template.** Extend them, cut the steps you have no use for, or delete
 both files and describe the workflow your team already follows; nothing in the binary knows

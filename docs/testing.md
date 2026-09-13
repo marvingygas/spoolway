@@ -110,10 +110,11 @@ Four readings, and they mean different things:
 - **`no case — plans/x`** — nothing headless can see it; the named plan is where a person does.
 - **`no case — unit <path>`** — no end-to-end instrument can reach it at all, and a unit test in
   that file is what holds it instead.
-- **`no case`** — a real gap. `scripts/e2e/run.sh --list` names 18 today: `calibrate.window`,
-  `dispatch.default_pipeline`, `dispatch.tmux_mode`, the six `pipeline_gen.pipeline_*` keys,
-  the six `unattended.blocked_*` keys plus `unattended.skip_blocked_lane`, `update.check`,
-  `step.description`, and `step.headless`.
+- **`no case`** — a real gap. `scripts/e2e/run.sh --list` names 17 today:
+  `housekeeping.calibrate_window`, `housekeeping.update_check`, `dispatch.default_pipeline`,
+  `dispatch.tmux_mode`, the three `pipeline_gen.pipeline_*` keys, the five
+  `unattended.blocked_*` keys plus `unattended.skip_blocked_lane` and
+  `unattended.max_cost_usd`, `pipeline.description`, `step.description`, and `step.headless`.
 
 The last three all count toward the tally, because none of them is an end-to-end case. What the
 line after the tally buys is knowing which are gaps and which are simply covered elsewhere.
@@ -144,7 +145,7 @@ spends nothing when its models resolve to a local endpoint — see
 | `flow` | A task's whole life: queued → implement → review → handover → archived, including its command run files under `commands/` being reclaimed once it archives | Real detached processes, a real worktree, a real pull request |
 | `commands` | Command steps: a `run:` line in the graph, its exit code routing, `background:`, `timeout:`, and that nothing confines it; the queue screen submitting a group and clearing its documents from the pending directory; `issue_tracking.key_in_names` prefixing the group and branch and storing the `slug:`/`url:`, through the real binary and a real `open` hook | A real spawned process with a pid, a log and an exit file; real keystrokes piped into the real binary; and, for its pane cases, a real tmux server of its own and a herdr double whose panes are real shells |
 | `stacking` | Three chained tasks: each pull request targets the branch it is cut from, and really sits on it — the third names both earlier ones and is cut from, and stacks on, the deeper of the two | A real rebase, in a real git repository |
-| `stack` | `spoolway stack` itself: the squash to one commit and that a rejecting `commit-msg` hook cannot strand it, a refused lease, the empty-diff refusal, a `branch:` that is neither `task/<id>` nor a slug-prefixed `task/<slug>-<id>` refused when the task loads, and `[stack.summary]`'s modes — the body taken verbatim from the task file, a model turn's printed output as the whole body, and the refusals for a half-set table or a missing template | Real git, and a forge double the command really shells out to |
+| `stack` | `spoolway stack` itself: the squash to one commit and that a rejecting `commit-msg` hook cannot strand it, a refused lease, the empty-diff refusal, a `branch:` that is neither `task/<id>` nor a slug-prefixed `task/<slug>-<id>` refused when the task loads, and the body taken verbatim from the task file | Real git, and a forge double the command really shells out to |
 | `conflicts` | A base that moves under a waiting branch, and the rebase that rescues it | The same, with the base actually moving |
 | `forge` | The `gh` test double, and a hand-off that hands nothing over | A real forge interaction |
 | `disaster` | The ways a run ends badly: a hard kill with lanes live, the stale lock it leaves, a restart over a still-running lane, a lane that reports with nobody listening, a stop with live lanes that leaves every worktree and lane standing and the next run resuming the same lane, a retention sweep that spares a still-queued task's scratch tree and headless record, an `eval` read that banks no catch-up line for a lane still in flight, and a multiplexer that dies under worktrees that outlive it | Real detached processes, a real lock file, and — for the last case — a real tmux server on a scratch socket of its own |
