@@ -137,10 +137,11 @@ comment, not the body.
    `parallel: true`, a chosen gap. **A join has to be fixed before you go on**: re-run step 2
    rather than patch ids after the fact.
 
-   Overlapping `touches` globs are not yours to resolve here any more. The queue screen walks
-   every genuine collision with the person before it writes anything, and that walk is where
-   an ordering gets chosen. Say the pair out loud to the caller if you left one knowingly; do
-   not invent a section for it.
+   Overlapping `touches` globs are not yours to resolve here any more. Nothing reports one
+   automatically either — the collision walk is gone, `enter` writes both documents straight
+   through with no `depends_on` invented, and `spoolway queue conflicts` is the only place an
+   overlap is named now. So say the pair out loud to the caller if you left one knowingly, and
+   never tell them something downstream will raise it; do not invent a section for it.
 
    **Then check the top of the chain carries its own `last:` step.** The task with no
    dependent — the one nothing else in this breakdown depends on, or the only task where
