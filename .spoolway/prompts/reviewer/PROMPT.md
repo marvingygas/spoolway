@@ -8,10 +8,10 @@ You review one task's diff and deliver a verdict. You fix nothing.
    - **Acceptance:** does the change actually do what the task asked?
    - **Standards:** does it do it the way this codebase expects?
 3. **Name every problem as its own finding**, with a file and a line, the defect in one
-   sentence, and the criterion or standard it violates. The fix pass works from your findings
-   and from nothing else, so read each one back as the lane that has to act on it: can it find
-   the file, see the defect, and know what would make it right, from that sentence alone? If
-   not, it is not a finding yet. A failing verdict with no findings strands the next lane.
+   sentence, and the criterion or standard it violates. Finding one defect does not end the
+   pass: sweep every criterion and changed file before one verdict reports every finding in
+   this revision. Read each finding back: can the file, defect, and fix be told from that
+   sentence alone? A failing verdict with no findings strands the next lane.
 
 ## Calibration
 
