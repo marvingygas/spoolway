@@ -35,16 +35,20 @@ rule out stays unbuilt however good an idea it is.
    comment that now describes the old thing. This is the single most common reason a review
    here sends a task back, and item 4 does not excuse it: a comment your own diff falsified
    is your change, not a refactor you were not asked for.
-8. **Run all three checks, in this order, before you report anything.** A later step runs the
-   same three as one command and stops the task if any of them is red, so a failure you leave
-   here comes back. They are ordered cheapest first:
+8. **Test the behaviour you changed and the callers it affects.** Add or update coverage at
+   the level this project already uses, then run the relevant tests by name, module or test
+   target with `cargo test --locked <filter>` or `cargo test --locked --test <target>`.
+   Read the output: the intended tests must actually run; zero matching tests proves nothing.
+   After a failure, diagnose it, fix it, and rerun the affected tests. Check the traps below
+   before concluding the failure is yours.
 
-       cargo fmt
-       cargo clippy --all-targets --locked -- -D warnings
-       cargo test --all-targets --locked
-
-   Red is a loop and not a verdict: read the failure, fix it, run all three again from the top.
-   Check it against the traps below before you conclude the failure is yours.
+   Run `cargo fmt` before handoff. The downstream `test` step owns full tests, Clippy and the
+   other mechanical checks; do not repeat that gate routinely. Broaden your checks when a
+   shared interface, dependency, build change or unexplained failure makes the impact wider
+   than the focused tests can establish. For changes with no executable behaviour, run the
+   relevant format or contract check and explain why no behaviour test applies.
+   Record the exact commands, results and coverage limits in the handoff; distinguish your
+   focused checks from the full gate that has yet to run.
 9. **Know what "done" means before you report it.** Re-read the acceptance criteria against what
    you built, one at a time. A criterion you cannot point at a line for is not met.
 

@@ -48,15 +48,19 @@ The rest of the job is the same as any implementation turn here.
 - **Commit at green.** A commit at the end of each green phase gives the review a diff it can
   read one behaviour at a time. Do not commit a red test on its own.
 
-**Run all three checks, in this order, before you report anything.** A later step runs the same
-three as one command and stops the task if any is red, so a failure you leave here comes back:
+**Keep each red, green and refactor check focused.** Run the criterion's test by name, then
+the tests covering the changed module and affected callers as the change grows. Use
+`cargo test --locked <filter>` or `cargo test --locked --test <target>` and read the output:
+the intended tests must actually run; zero matching tests proves nothing. After a failure,
+diagnose it, fix it, and rerun the affected tests. Check the traps below before concluding the
+failure is yours.
 
-    cargo fmt
-    cargo clippy --all-targets --locked -- -D warnings
-    cargo test --all-targets --locked
-
-Red there is a loop and not a verdict: read the failure, fix it, run all three again from the
-top. Check it against the traps below before you conclude the failure is yours.
+Run `cargo fmt` before handoff. The downstream `test` step owns full tests, Clippy and the other
+mechanical checks; do not repeat that gate routinely. Broaden your checks when a shared
+interface, dependency, build change or unexplained failure makes the impact wider than the
+focused tests can establish. Record the exact commands, results and coverage limits in the
+handoff, including the observed red and green results; distinguish your focused checks from
+the full gate that has yet to run.
 
 **Know what "done" means before you report it.** Re-read the acceptance criteria one at a time,
 and for each one name the test that would fail if the behaviour were removed. A criterion with

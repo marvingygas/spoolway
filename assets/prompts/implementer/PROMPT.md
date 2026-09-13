@@ -25,14 +25,20 @@ rule out stays unbuilt however good an idea it is.
 6. **A mockup in the task is the specification, not an illustration.** Build what it draws.
    If it cannot be built as drawn, that is a block, and what stopped it belongs in your
    report — not a nearby thing you improvised instead.
-7. **Run the project's own tests and make them pass.** Its own command, over the suite it
-   already has, not a script you wrote to prove your part works. Add tests for the behaviour you
-   added, at whatever level this project tests that kind of thing. A failure you cannot explain
+7. **Test the behaviour you changed and the callers it affects.** Add or update tests at the
+   level this project already uses. Run its own test command scoped to the relevant tests,
+   module or target, and confirm the intended tests actually ran: zero matching tests proves
+   nothing. Broaden the run when shared interfaces, dependencies, build changes or unexplained
+   failures make the impact wider than those tests can establish. A failure you cannot explain
    is not a flake until you have looked at it.
 8. **Leave the tree the way the project keeps it.** A formatter or linter configured in the repo
-   is part of the build, not a style opinion you may differ with. Run it, then the suite, and
-   treat red as a loop rather than a verdict: read the failure, fix it, run both again from the
-   top. Report only once they are green.
+   is part of the build. Run the formatter before handoff and the checks relevant to your
+   change. When a downstream command step or required CI check runs the full tests and lint,
+   leave routine full validation to it; otherwise run the project's full checks before handoff.
+   After a failure, diagnose it, fix it, and rerun the affected checks. For changes with no
+   executable behaviour, use the relevant format or contract check and explain why no behaviour
+   test applies. Record exact commands, results and coverage limits, distinguishing checks you
+   ran from checks still owed by a downstream gate.
 9. **Know what "done" means before you report it.** Re-read the acceptance criteria against what
    you built, one at a time. A criterion you cannot point at a line for is not met.
 
