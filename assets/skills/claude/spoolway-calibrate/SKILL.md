@@ -9,7 +9,7 @@ disable-model-invocation: true
 Find out what the control plane actually costs, from the record of running it — not from
 reading the prompts and pipelines and guessing. Every command here reads. **This skill writes
 nothing itself** — a finding the person sends on is written by the skill it goes to,
-`spoolway-tasks`, `spoolway-plan` or `spoolway-pipeline`.
+`spoolway-tasks`, `spoolway-plan` or `spoolway-config`.
 
 **A finding with no number behind it is not a finding.** "This prompt seems long" is an
 opinion. "3 lines become 1, saving about 40 tokens on every one of the 25 lanes that read it
@@ -22,7 +22,7 @@ Two kinds of finding are in scope, and the second matters as much as the first:
 - **A cost finding** tightens a line: what changes, and what keeping the old line cost.
 - **A shape finding** changes the flow: a step carrying more than one pass can hold and
   wanting a split, or a lap that keeps recurring because no step owns the work it redoes.
-  Its fix is a pipeline change, and it goes to `spoolway-pipeline`.
+  Its fix is a pipeline change, and it goes to `spoolway-config`.
 
 ## Procedure
 
@@ -106,7 +106,7 @@ Two kinds of finding are in scope, and the second matters as much as the first:
    **AskUserQuestion**, the one you recommend first:
 
    - **Cut it as a task** — the lines and the arithmetic are both settled. Goes to step 8.
-   - **Reshape the pipeline** — invoke **spoolway-pipeline** with this finding as its goal: it
+   - **Reshape the pipeline** — invoke **spoolway-config** with this finding as its goal: it
      owns the graph and the prompts the steps run, and it decides the split or the new step.
      Recommend this for every shape finding.
    - **Plan it first** — invoke **spoolway-plan** with this finding as its goal, and let that
@@ -123,13 +123,13 @@ Two kinds of finding are in scope, and the second matters as much as the first:
    and where the documents land.
 
 9. **Say one line**, once: what went to `spoolway-tasks`, `spoolway-plan` and
-   `spoolway-pipeline`, what was dropped, and what stayed on the out-of-scope list. Never
+   `spoolway-config`, what was dropped, and what stayed on the out-of-scope list. Never
    repeat the findings themselves — the walk in step 7 already said them once.
 
 ## Never
 
 - Never edit anything under `.spoolway/` from this skill. Writing is `spoolway-tasks`',
-  `spoolway-plan`'s and `spoolway-pipeline`'s job — never `Write` or `Edit` called directly on
+  `spoolway-plan`'s and `spoolway-config`'s job — never `Write` or `Edit` called directly on
   a pipeline, a prompt, a task skeleton, or `config.toml`.
 - Never invent a spoolway command to read or summarise the archive. Read the documents with
   the file tools directly; `spoolway eval` and `spoolway spend` are the only commands this

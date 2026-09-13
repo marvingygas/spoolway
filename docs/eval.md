@@ -14,6 +14,11 @@ which setup a lane ran under: a fingerprint of the tracked configuration, the co
 touched it, and what the lane reported. `spoolway eval` is a **view over the ledger you already
 have** — no second store, no new file, nothing to keep in step.
 
+Where a project's [overrides layer](configuration.md#the-overrides-layer) is active, the
+layer's own files fold into that fingerprint too, so a run under a layer is never mistaken for
+one over the tracked files alone — it banks under a version of its own, marked `ovr` (see
+[Reading a row](#reading-a-row)).
+
 ```
 spoolway eval
 ```
@@ -121,6 +126,11 @@ A version is a fingerprint over the parts of `.spoolway/` that decide how work i
 new version — which is the point, because that word is exactly the kind of change worth
 measuring.
 
+Where an [overrides layer](configuration.md#the-overrides-layer) is active, its own files fold
+into the same fingerprint — a patched pipeline or a replaced prompt changes what ran just as
+much as an edit to the tracked file would, so it has to change the version too, or two runs
+under different layers over identical tracked files would wrongly share one row.
+
 `queue/` and `archive/` are deliberately not in it. They are the work, not the setup, and
 folding them in would mint a new version on every task.
 
@@ -184,6 +194,12 @@ that banked the peak has no `context_window` configured, `CTX PEAK` prints the r
 instead of guessing at a percentage — `1.23M` rather than a blank that would read as "nothing
 happened" when something did. A row with no `ctx_peak` on any of its lanes — every line banked
 before that field existed — prints `—`.
+
+A row trails ` ovr` when the lanes banked under it ran under an [overrides
+layer](configuration.md#the-overrides-layer) — read off the ledger commit's own `+ovr` suffix,
+never a column of its own, since every other version's row has nothing to say here at all.
+`--csv` and `--json` carry no flag of their own for it; it is a table-reading aid, not a new
+field.
 
 ### Tasks that straddle a version
 

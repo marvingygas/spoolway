@@ -95,6 +95,53 @@ pub fn config_set(repo: &Repo, key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+/// `spoolway config contract`: every setting `config.toml` may carry, its
+/// values, its default and one sentence about it — rendered from
+/// [`crate::confkv::reference_table`], the same register the file's own
+/// header table is written from, so a setting is documented once rather than
+/// copied a second time into this command's own prose.
+pub fn config_contract(repo: &Repo, json: bool) -> Result<()> {
+    if let Some(note) = repo.checkout_note()? {
+        note.print(json)?;
+    }
+    print!("{}", render_config_contract());
+    Ok(())
+}
+
+/// [`config_contract`]'s body, built as a string so a test can assert it
+/// against [`crate::confkv::reference_table`] directly rather than capturing
+/// stdout.
+fn render_config_contract() -> String {
+    let commands: &[(&str, &str)] = &[
+        ("spoolway config get <key>", "read one value"),
+        (
+            "spoolway config set <key> <value>",
+            "write one, validated the same way loading the file does",
+        ),
+        ("spoolway config list", "every settable key, one per line"),
+        ("spoolway config show", "the whole file"),
+        ("spoolway config path", "the path to it"),
+        (
+            "spoolway config edit",
+            "open it in $EDITOR, re-validated on save",
+        ),
+        (
+            "spoolway config override",
+            "patch it without touching the tracked file — see `spoolway override contract`",
+        ),
+    ];
+    let width = commands.iter().map(|(cmd, _)| cmd.len()).max().unwrap_or(0);
+
+    let mut out = String::new();
+    out.push_str("THE CONFIG CONTRACT\n");
+    out.push_str("====================\n\n");
+    out.push_str(&crate::confkv::reference_table());
+    for (cmd, note) in commands {
+        out.push_str(&format!("{cmd:width$}  {note}\n"));
+    }
+    out
+}
+
 /// Open the config file in the user's editor, then re-validate it.
 ///
 /// Runs on a lenient discovery, because a config that no longer parses is
@@ -108,16 +155,7 @@ pub fn config_set(repo: &Repo, key: &str, value: &str) -> Result<()> {
 /// able to validate its own copy without reaching for `-C`.
 pub fn config_edit(checkout: &Path) -> Result<()> {
     let path = Config::path_in(checkout);
-    let editor = std::env::var("VISUAL")
-        .or_else(|_| std::env::var("EDITOR"))
-        .unwrap_or_else(|_| if cfg!(windows) { "notepad" } else { "vi" }.to_string());
-
-    let status = crate::platform::shell_command(&editor_command(&editor, &path))
-        .status()
-        .with_context(|| format!("could not start `{editor}`"))?;
-    if !status.success() {
-        bail!("`{editor}` exited with {status}");
-    }
+    open_in_editor(&path)?;
 
     match Config::load(checkout) {
         Ok(_) => {
@@ -129,6 +167,29 @@ pub fn config_edit(checkout: &Path) -> Result<()> {
             path.display()
         ))),
     }
+}
+
+/// Resolve the user's editor the way every `spoolway *edit`-shaped command
+/// does: `$VISUAL`, then `$EDITOR`, then a platform default.
+pub(super) fn editor_from_env() -> String {
+    std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| if cfg!(windows) { "notepad" } else { "vi" }.to_string())
+}
+
+/// Open `path` in the resolved editor and wait for it, refusing on a
+/// nonzero exit. Shared by [`config_edit`] and `commands::config_override`,
+/// so the quoting fix in [`editor_command`] (finding 71) only has to be
+/// right once.
+pub(super) fn open_in_editor(path: &Path) -> Result<()> {
+    let editor = editor_from_env();
+    let status = crate::platform::shell_command(&editor_command(&editor, path))
+        .status()
+        .with_context(|| format!("could not start `{editor}`"))?;
+    if !status.success() {
+        bail!("`{editor}` exited with {status}");
+    }
+    Ok(())
 }
 
 /// The shell line that opens `path` in `editor`.
@@ -150,6 +211,23 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+
+    /// `config contract` renders from [`crate::confkv::reference_table`]
+    /// verbatim rather than a second copy of it — the criterion is that the
+    /// two texts agree, and rendering one straight into the other is what
+    /// makes that hold by construction rather than by two authors staying in
+    /// sync.
+    #[test]
+    fn config_contract_renders_the_same_reference_table_config_toml_writes() {
+        let text = render_config_contract();
+        assert!(
+            text.contains(&crate::confkv::reference_table()),
+            "config contract does not carry config.toml's own header table verbatim"
+        );
+        assert!(text.contains("dispatch.backend"));
+        assert!(text.contains("spoolway config set"));
+        assert!(text.contains("spoolway config override"));
+    }
 
     #[test]
     fn editor_command_quotes_a_path_with_a_single_quote() {

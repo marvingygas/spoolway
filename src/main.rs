@@ -29,6 +29,7 @@ mod lane_prompts;
 mod lock;
 mod models;
 mod mux;
+mod overrides;
 mod pipeline;
 mod platform;
 mod problem_log;
@@ -61,8 +62,9 @@ use std::path::PathBuf;
 use anyhow::Result;
 
 use cli::{
-    AgentCommand, Cli, Command, ConfigCommand, GroupCommand, IssueCommand, JobsCommand,
-    ModelsCommand, PipelineCommand, PromptCommand, QueueCommand, TaskCommand,
+    AgentCommand, Cli, Command, ConfigCommand, GroupCommand, HookCommand, IssueCommand,
+    JobsCommand, ModelsCommand, OverrideCommand, PipelineCommand, PromptCommand, QueueCommand,
+    TaskCommand, TemplateCommand,
 };
 use pipeline::Pipelines;
 use repo::Repo;
@@ -199,6 +201,9 @@ fn run() -> Result<()> {
         // command answers about the file actually in front of it. `set` is
         // the one exception — it writes `repo.root`, and refuses first if a
         // linked worktree's `checkout` differs from it.
+        Command::Config(ConfigCommand::Contract) => {
+            commands::config_contract(&Repo::discover(&cwd)?, cli.json)
+        }
         Command::Config(ConfigCommand::Show) => {
             commands::config_show(&Repo::discover(&cwd)?, cli.json)
         }
@@ -224,6 +229,13 @@ fn run() -> Result<()> {
         Command::Config(ConfigCommand::Edit) => {
             let (repo, _) = Repo::discover_lenient(&cwd)?;
             commands::config_edit(&repo.checkout)
+        }
+        // Lenient for the same reason `config edit` is: an overrides/
+        // config.toml that no longer parses is exactly when you want it
+        // open.
+        Command::Config(ConfigCommand::Override) => {
+            let (repo, _) = Repo::discover_lenient(&cwd)?;
+            commands::config_override(&repo)
         }
         command => {
             let repo = Repo::discover(&cwd)?;
@@ -379,6 +391,9 @@ fn run() -> Result<()> {
                     let mux = mux::backend(&repo);
                     commands::pipeline_gen(&repo, mux.as_ref(), args)
                 }
+                Command::Pipeline(PipelineCommand::Override(args)) => {
+                    commands::pipeline_override(&repo, &args.name, &args.set)
+                }
 
                 Command::Prompt(PromptCommand::Contract(args)) => {
                     prompt::contract(&repo, routing(&graph)?, args)
@@ -392,6 +407,23 @@ fn run() -> Result<()> {
                     let read = Pipelines::load(&repo.checkout, &repo.config)?;
                     prompt::check(&repo, &read, name.as_ref(), cli.json)
                 }
+                Command::Prompt(PromptCommand::Override { name }) => {
+                    commands::prompt_override(&repo, name)
+                }
+
+                Command::Override(OverrideCommand::Contract) => commands::override_contract(),
+                Command::Override(OverrideCommand::List) => {
+                    commands::override_list(&repo, cli.json)
+                }
+                Command::Override(OverrideCommand::Promote(args)) => {
+                    commands::override_promote(&repo, &args.target)
+                }
+                Command::Override(OverrideCommand::Drop(args)) => {
+                    commands::override_drop(&repo, args.target.as_deref())
+                }
+
+                Command::Template(TemplateCommand::Contract) => commands::template_contract(&repo),
+                Command::Hook(HookCommand::Contract) => commands::hook_contract(),
 
                 Command::Group(GroupCommand::List) => commands::group_list(&repo),
 

@@ -33,10 +33,11 @@ It is suppressed whenever the checkout **is** the project, which is where almost
 runs — including when `-C` names the project explicitly. In the main checkout these commands
 print exactly what they always did.
 
-The commands that print it are `pipeline show`, `pipeline check`, `pipeline list`, `prompt
-list`, `prompt check`, `config show`, `config list`, `config get` and `config path`. `doctor` reports on both
-sides at once and prints the line once. Commands reading only the queue, the lane state, the
-archive or the usage ledger never print it: they answer for the project and always did.
+The commands that print it are `pipeline show`, `pipeline check`, `pipeline list`, `pipeline
+override`, `prompt list`, `prompt check`, `prompt override`, `config show`, `config list`,
+`config get`, `config path` and `config override`. `doctor` reports on both sides at once and
+prints the line once. Commands reading only the queue, the lane state, the archive or the usage
+ledger never print it: they answer for the project and always did.
 
 Under `--json` the same two facts arrive as one line of JSON instead of prose, so a script reads
 them without parsing English:
@@ -304,6 +305,29 @@ Only a start that could not run at all counts — today, the lock already held b
 dispatcher. An empty queue is never counted: a repo with nothing to do is not a storm. A start
 that actually runs, or one made with `--force`, clears the count. See [Restarting into a repo
 that cannot run](dispatcher.md#restarting-into-a-repo-that-cannot-run).
+
+With an [overrides layer](configuration.md#the-overrides-layer) active, a run started with a
+terminal on both ends is stopped one more time before the lock is taken — nothing about a
+layer shows in `git status`, so this is the one place a person sees what is patched before it
+runs:
+
+```
+$ spoolway dispatch
+
+  overrides are active for this project
+
+    pipelines/impl.yml        2 keys      implement.model, test.timeout
+    prompts/reviewer          whole file
+    config.toml               1 key       agents.claude.concurrency
+
+  [enter] start the run   [esc] back   [x] don't ask again until this changes
+```
+
+`enter` starts an otherwise ordinary run; `esc` exits without dispatching and without taking
+the repo lock; `x` starts the run and remembers the layer's own fingerprint, so an unchanged layer never asks
+again — editing so much as one byte of it brings the notice back. With stdin or stdout not a
+terminal — every unattended run, and every script piping this command — the notice is printed
+and the run proceeds without waiting on an answer nobody can give.
 
 `spoolway dispatch` exits 0 on a run that dispatched and stopped on its own, 3 on an empty
 queue with no job enabled, 4 when another dispatcher already holds the lock, 5 when the
@@ -587,6 +611,10 @@ from what the loader actually enforces.
 Copy the blank to `.spoolway/pipelines/<name>.yml`, delete what the flow has no use for, and
 run `spoolway pipeline check`.
 
+It also says that a second file, `overrides/pipelines/<name>.yml`, can patch what a tracked
+pipeline says without touching it — see `spoolway override contract` for the merge rule and
+what such a patch may carry.
+
 Moving a pipeline between projects needs no command: copy its file from
 `.spoolway/pipelines/` together with the prompts its steps name, and `spoolway pipeline
 check` on the other side says what is still missing.
@@ -655,7 +683,7 @@ object.
 
 Open a fresh agent session, in a pane of the current checkout, to write a new pipeline. Nothing
 is written by this command itself — it starts the `[pipeline_gen]` profile and prompts the
-`spoolway-pipeline` skill, which carries the whole generation procedure from there:
+`spoolway-config` skill, which carries the whole generation procedure from there:
 
 ```
 $ spoolway pipeline gen --plan ~/.spoolway/myproject/plans/my-plan.html
@@ -665,7 +693,7 @@ plan          ~/.spoolway/myproject/plans/my-plan.html
 preferences   auto = false · loop_default = 1 · local_models = true
 
 opened a pane on this checkout
-prompted `spoolway-pipeline`
+prompted `spoolway-config`
 
 Nothing is written yet. Answer it in that pane.
 ```
@@ -679,6 +707,28 @@ pane to open a session in.
 
 See [`[pipeline_gen]`](configuration.md#pipeline_gen--generating-a-pipeline) for the block this
 reads.
+
+### `spoolway pipeline override <name> --set <step>.<key>=<value>`
+
+Fork one step's key into the [overrides layer](configuration.md#the-overrides-layer), without
+touching the tracked pipeline file or committing anything:
+
+```
+$ spoolway pipeline override impl --set implement.model=claude-opus-5
+
+  wrote ~/.spoolway/spoolway/overrides/pipelines/impl.yml
+    implement.model   claude-sonnet-5 -> claude-opus-5
+
+  active on the next dispatcher pass. `spoolway override drop impl` to clear it.
+```
+
+`--set <step>.<key>=<value>` is required. The step must already exist on the tracked pipeline,
+and the key must be one the merge would accept — a step id this pipeline does not have, or a
+key the merge would refuse, is refused by name and nothing is written; `id:` in particular can
+never be set this way, since a patch overlays a value on a step rather than renaming or
+repositioning one. Writes to the project-wide layer, so a lane in any worktree sees the fork on
+its next pass; see [`spoolway override`](#spoolway-override-list--promote--drop) to list, promote or
+drop it.
 
 ### `spoolway prompt contract`
 
@@ -703,6 +753,12 @@ Print one prompt file.
 
 Read prompts against the steps that run them. Also part of `pipeline check`. In a linked
 worktree the [`checkout:` line](#the-checkout-line) comes first; in the main checkout it is suppressed.
+
+### `spoolway prompt override <name>`
+
+Copy the tracked prompt into `overrides/prompts/<name>/PROMPT.md`, so editing starts from it
+instead of from a blank file — the whole file is what an override replaces, there being no key
+in prose for a patch to aim at. See the [overrides layer](configuration.md#the-overrides-layer).
 
 ### `spoolway agent list`
 
@@ -783,6 +839,34 @@ neither a passing check nor a failing one touches anything under `.spoolway/`. A
 the same message `queue add --from` gives for the same document, and exits non-zero; nothing is
 printed for one that passes beyond a short report of what was checked.
 
+### `spoolway template contract`
+
+Print the four prose shapes a project owns outright — none of them parsed the way a pipeline
+file is, each read back whole or substituted by name: a task's own body
+(`.spoolway/templates/tasks/<pipeline>.md`, falling back by pipeline name), a lane's typed
+messages (`.spoolway/templates/lane-prompts.md`, one `## <state>` section per state, every
+`{placeholder}` it substitutes named), the three headings — Status Log, Handoff, Blocker —
+`spoolway report` appends to a running task's body (`.spoolway/templates/task-log.md`), and the
+pull request title and body `spoolway stack`'s summary turn fills in
+(`.spoolway/templates/pull-request.md`). Ends with this project's own paths for all four.
+
+### `spoolway hook contract`
+
+Print every event an issue-tracking hook script runs on and the environment each one carries —
+`open` (synchronous, before a task is queued), `queued`/`blocked`/`paused`/`done`
+(fire-and-forget, once a task settles there), and `fetch` (synchronous, from `spoolway issue
+show`) — rendered from the same tables `crate::tracking` builds to launch the script, so the
+variable list cannot drift from what a hook is actually handed. See
+[`[issue_tracking]`](configuration.md#issue_tracking--a-hook-fired-on-four-task-events).
+
+### `spoolway config contract`
+
+Print the config format: every setting `config.toml` may carry, its values, its default and
+one sentence about it, rendered from `confkv::reference_table` — the same register the file's
+own [reference table](configuration.md#editing-it) is written from, so a setting is documented
+once rather than copied a second time into this command's own prose. Ends with the other seven
+`config` commands, one line each.
+
 ### `spoolway config show` / `list` / `path` / `get <key>` / `set <key> <value>` / `edit`
 
 Read or write single values non-interactively, e.g. `spoolway config set
@@ -800,6 +884,78 @@ line. `set` writes only the
 project's copy, and refuses inside a linked worktree rather than writing somewhere the dispatcher
 never reads — it prints the `-C <project>` invocation that would land in the right file. See
 [Configuration](configuration.md).
+
+### `spoolway config override`
+
+Open `overrides/config.toml` in `$EDITOR`, creating it first if it does not exist yet — the
+[overrides layer](configuration.md#the-overrides-layer)'s own copy, never the tracked file
+`config edit` opens. Re-checks both files after the save and says which of the two stopped
+parsing, if either did.
+
+### `spoolway override contract`
+
+Print the merge rule for all three kinds of patch, exactly what a pipeline, config or prompt
+patch may carry — including that `override promote` refuses to write a layered pipeline-level
+`description` or `task_template` into the tracked file, since the line editor it promotes
+through has no block to point at for either — and the four `override` commands themselves.
+Nothing here is copied prose: the shape a patch may take is
+[`overrides::PipelinePatch`](configuration.md#the-overrides-layer) and
+`overrides::apply_config_patch`'s own rules, printed rather than restated.
+
+### `spoolway override list` / `promote` / `drop`
+
+Inspect and manage whatever is currently forked into the
+[overrides layer](configuration.md#the-overrides-layer) — created by `pipeline override`,
+`prompt override` and `config override`, one entry per pipeline, prompt or config patched.
+
+```
+$ spoolway override list
+
+TARGET                     KIND        OVERRIDES
+pipelines/impl.yml         patch       implement.model, test.timeout
+prompts/reviewer           whole file  —
+config.toml                patch       agents.claude.concurrency
+
+layer version  a91c4f02    3 artifacts    `override promote <target>` to keep one
+```
+
+A target is named either the short way — a bare pipeline name, since only a pipeline's own
+target is ever bare — or the way `list` prints it: `pipelines/<name>.yml`, `prompts/<name>` or
+`config.toml`. `list` says so plainly when the layer is empty or absent; `--json` prints the
+same rows as a JSON array, `[]` for an empty layer.
+
+The `layer version` footer line is the layer's own fingerprint — the same value `spoolway
+dispatch`'s standing consent gate keys its acknowledgement on, never `version::stamp`'s
+combined one over the tracked files too — so it says exactly what pressing `x` at the gate is
+agreeing to.
+
+`override promote <target>` writes the patched values into the tracked file and clears that
+entry from the layer, leaving an ordinary diff ready to review and commit:
+
+```
+$ spoolway override promote impl && git diff --stat
+
+  wrote .spoolway/pipelines/impl.yml
+    implement.model   claude-opus-5
+    test.timeout      90m
+  cleared pipelines/impl.yml from the layer
+
+ .spoolway/pipelines/impl.yml | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+```
+
+A pipeline patch is promoted as a targeted line edit — find `- id: <step>`, find `<key>:`
+inside that block, replace the value — never a rewrite of the file, so `pipeline::KEY_BLOCK`
+and every `description:` come through untouched; a patch cannot promote a key a step never
+wrote out explicitly, or the pipeline's own top-level `description`/`task_template`, since the
+line editor has no block to point at for either. A config patch is promoted through
+`toml_edit`, keeping the tracked file's comments; a prompt patch overwrites the tracked prompt
+whole. `promote` refuses inside a linked worktree, for the same reason `config set` does — the
+dispatcher reads the project's own files, never a worktree's copy — and prints the `-C
+<project>` invocation that would land in the right file.
+
+`override drop [<target>]` removes one entry, or the whole layer when given none, and leaves no
+empty directories behind.
 
 ### `spoolway models`
 
@@ -948,6 +1104,11 @@ By default it reports only what needs your attention: any failing check, any not
 a file that has fallen behind `spoolway update`, and a closing line such as `28 checks
 passed. Everything checks out.` A failing run instead prints each `FAIL` line, then `N of M
 checks passed.`, and exits non-zero.
+
+An active [overrides layer](configuration.md#the-overrides-layer) is one such note, naming
+every overridden artifact — printed whether or not `spoolway dispatch`'s own gate has been
+acknowledged, since agreeing to run under the layer once does not stop it being worth
+mentioning to somebody reading `doctor` cold.
 
 | Flag | Meaning |
 |---|---|

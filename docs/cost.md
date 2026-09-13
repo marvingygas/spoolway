@@ -243,9 +243,12 @@ session](dispatcher.md#a-step-that-carries-its-own-session).
 
 ## The version a lane ran under
 
-Each line also records a fingerprint of the tracked `.spoolway/` configuration, the commit
-that last touched it, and what the lane reported — which is what makes it possible to ask
-whether an edit to a prompt made the work cheaper. See [Comparing versions](eval.md).
+Each line also records a fingerprint of the tracked `.spoolway/` configuration — folding in the
+[overrides layer](configuration.md#the-overrides-layer)'s own files where one is active — the
+commit that last touched the tracked half, suffixed `+dirty` where the working tree has since
+diverged and `+ovr` where a layer is active, and what the lane reported. That is what makes it
+possible to ask whether an edit to a prompt made the work cheaper, and what lets a layered run
+be told apart from an unpatched one afterwards. See [Comparing versions](eval.md).
 
 ## One ledger per project
 

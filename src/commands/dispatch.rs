@@ -165,6 +165,14 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     refuse(check_index_lock(repo)).context("refusing to start")?;
     refuse(check_backend_checkout(repo, mux.as_ref())).context("refusing to start")?;
 
+    // A layer changes what runs without `git status` ever hinting that it
+    // is on, so this is the one place a person sees it before the run using
+    // it starts — before the lock is taken and the mode is written into it,
+    // so `esc` can back out having done nothing at all.
+    if !overrides_gate(repo)? {
+        return Ok(0);
+    }
+
     // Taken for the whole run. Two dispatchers would both see the same task at
     // the same step and both spawn a lane into its worktree.
     let _lock = crate::lock::Lock::acquire(&repo.lock_file(), unattended)?;
@@ -513,6 +521,134 @@ fn commit_reason(pipelines: &Pipelines, config: &Config) -> Option<String> {
         .dispatch
         .auto_commit
         .then(|| "`dispatch.auto_commit` is on".to_string())
+}
+
+/// The standing consent gate for a patch layer (see [`crate::overrides`]):
+/// `Ok(true)` to go on and start the run, `Ok(false)` only for `esc`, the one
+/// path that must reach the caller before `Lock::acquire` runs at all.
+///
+/// A thin wrapper over [`overrides_gate_with`], which does the real work
+/// against an injected reader, writer and terminal guard — this is the only
+/// thing that touches the process's real stdio, the same split
+/// `commands::queue::queue_screen` draws around `run_screen`. `TermGuard::new`
+/// is handed over as a factory rather than constructed here: raw mode is a
+/// presentation detail for the one branch that actually blocks on a
+/// keypress, and building it eagerly printed `hide_cursor`'s escape into
+/// every single dispatch, layered or not, tty or not (finding: `hide_cursor`
+/// has no `is_terminal` guard of its own, unlike `raw_mode` and
+/// `drain_stdin`). A test hands over `TermGuard::inert` instead, so it never
+/// fights another test over the real terminal (see `TermGuard`'s own `inert`
+/// field) even while driving the branch that would otherwise construct one.
+fn overrides_gate(repo: &Repo) -> Result<bool> {
+    overrides_gate_with(
+        repo,
+        crate::ask::interactive(),
+        &mut crate::screen::RawStdin,
+        &mut std::io::stdout(),
+        crate::platform::TermGuard::new,
+    )
+}
+
+/// [`overrides_gate`]'s own logic, taking whether anyone is there to answer,
+/// where the notice and the prompt go, and how to take the terminal for the
+/// one branch that reads a key — so a test can drive every branch, the
+/// no-tty print-and-proceed path included, without a real terminal at all.
+///
+/// Nothing here may print the interactive prompt and then block: with a
+/// layer present but no terminal on both ends — every unattended run, and
+/// the e2e suites that never allocate one — the notice still goes to the
+/// log, because the layer is otherwise invisible in a `git status` and a run
+/// nobody is watching is exactly the one that most needs it on record, but
+/// the run proceeds without waiting on an answer nobody can give. With a
+/// layer already acknowledged and unmoved since, this says nothing at all —
+/// "don't ask again until this changes" means exactly that.
+fn overrides_gate_with(
+    repo: &Repo,
+    interactive: bool,
+    input: &mut impl PollableRead,
+    out: &mut impl std::io::Write,
+    term: impl FnOnce() -> crate::platform::TermGuard,
+) -> Result<bool> {
+    let rows = collect_override_rows(&repo.overrides_dir())?;
+    if rows.is_empty() {
+        return Ok(true);
+    }
+
+    if !interactive {
+        print_overrides_notice(out, &rows)?;
+        return Ok(true);
+    }
+
+    // The layer's own fingerprint, never `version::stamp`'s combined one — a
+    // tracked-file edit alone must not reopen a gate the layer itself has
+    // not moved. `unwrap_or_default` only stands in for the moment between
+    // `rows` being non-empty and the same directory being read a second
+    // time; an empty string never equals a real fingerprint, so this still
+    // asks rather than silently trusting a layer it could not re-read.
+    let fingerprint = crate::version::layer_fingerprint(repo).unwrap_or_default();
+    if !crate::overrides::ack_needed(&repo.home, &fingerprint) {
+        return Ok(true);
+    }
+
+    print_overrides_notice(out, &rows)?;
+    writeln!(
+        out,
+        "  [enter] start the run   [esc] back   [x] don't ask again until this changes"
+    )?;
+
+    // Taken only now, right before the first read that can actually block —
+    // every early return above constructs no guard at all, so a dispatch
+    // with no layer, or one already acknowledged, hides and shows nothing.
+    let _term = term();
+    loop {
+        match crate::screen::read_key(input) {
+            Some(crate::screen::Key::Enter) => return Ok(true),
+            Some(crate::screen::Key::Esc) => return Ok(false),
+            Some(crate::screen::Key::Char('x' | 'X')) => {
+                crate::overrides::ack_write(&repo.home, &fingerprint)?;
+                return Ok(true);
+            }
+            // The tty went away mid-question — a closed pane, say. Nothing
+            // here may hang waiting for an answer that can no longer come.
+            None => return Ok(true),
+            _ => {}
+        }
+    }
+}
+
+/// The layer's own summary, one line per overridden artifact — the mockup's
+/// "N keys" / "whole file" column, derived from [`OverrideRow`] rather than
+/// `override list`'s own `patch` / `whole file` kind, since a person reading
+/// this notice wants to know how much changed, not what shape the file is.
+fn print_overrides_notice(out: &mut impl std::io::Write, rows: &[OverrideRow]) -> Result<()> {
+    writeln!(out)?;
+    writeln!(out, "  overrides are active for this project")?;
+    writeln!(out)?;
+    let target_w = rows.iter().map(|r| r.target.len()).max().unwrap_or(0);
+    let labels: Vec<String> = rows.iter().map(overrides_gate_kind).collect();
+    let kind_w = labels.iter().map(String::len).max().unwrap_or(0);
+    for (row, kind) in rows.iter().zip(&labels) {
+        if row.overrides == "—" {
+            writeln!(out, "    {:<target_w$}  {kind}", row.target)?;
+        } else {
+            writeln!(
+                out,
+                "    {:<target_w$}  {kind:<kind_w$}  {}",
+                row.target, row.overrides
+            )?;
+        }
+    }
+    writeln!(out)?;
+    Ok(())
+}
+
+/// "N keys" for a pipeline or config patch, "whole file" for a prompt.
+fn overrides_gate_kind(row: &OverrideRow) -> String {
+    if row.kind != "patch" {
+        return row.kind.to_string();
+    }
+    let n = row.overrides.split(", ").filter(|k| !k.is_empty()).count();
+    format!("{n} key{}", if n == 1 { "" } else { "s" })
 }
 
 /// One of the three things [`check_git_identity`], [`check_index_lock`] and
@@ -1254,5 +1390,174 @@ mod tests {
             refuse(check_backend_checkout(&repo, &mux)).unwrap_err()
         );
         assert!(refused.contains("dispatch.backend"), "{refused}");
+    }
+
+    /// A project with no layer at all is nothing to ask about — the gate
+    /// must return straight through to an ordinary run without ever
+    /// consulting `ask::interactive()`, so this passes deterministically
+    /// whether or not the test process happens to have a real terminal.
+    #[test]
+    fn overrides_gate_with_no_layer_proceeds_without_asking() {
+        let repo = fixture("overrides-gate-no-layer");
+        assert!(overrides_gate(&repo).unwrap());
+    }
+
+    /// A fixture with a real layer on it, forked the same way `spoolway
+    /// pipeline override` writes one — for every `overrides_gate_with` case
+    /// below, which needs an actual `OverrideRow` to ask about.
+    fn fixture_with_layer(name: &str) -> Repo {
+        let repo = fixture(name);
+        std::fs::create_dir_all(repo.overrides_dir().join("pipelines")).unwrap();
+        std::fs::write(
+            repo.overrides_dir().join("pipelines/default.yml"),
+            "steps:\n  implement:\n    model: fake-opus\n",
+        )
+        .unwrap();
+        repo
+    }
+
+    fn keys(s: &str) -> std::io::Cursor<Vec<u8>> {
+        std::io::Cursor::new(s.as_bytes().to_vec())
+    }
+
+    /// Acceptance criterion 5, exercised as a real unit test rather than only
+    /// through the e2e suite: with a layer present and nobody there to
+    /// answer, the notice is printed and the run proceeds without ever
+    /// reading a key — `input` is left empty on purpose, so a `read_key` call
+    /// here would hang the test rather than fail it.
+    #[test]
+    fn overrides_gate_with_a_layer_and_no_tty_proceeds_having_printed() {
+        let repo = fixture_with_layer("overrides-gate-no-tty");
+        let mut input = keys("");
+        let mut out = Vec::new();
+        let proceed = overrides_gate_with(
+            &repo,
+            false,
+            &mut input,
+            &mut out,
+            crate::platform::TermGuard::inert,
+        )
+        .unwrap();
+        assert!(proceed);
+        let printed = String::from_utf8(out).unwrap();
+        assert!(printed.contains("overrides are active"), "{printed}");
+        assert!(printed.contains("pipelines/default.yml"), "{printed}");
+    }
+
+    /// `enter` starts an otherwise ordinary run — no acknowledgement is
+    /// written, since the mockup reserves that for `x` alone.
+    #[test]
+    fn overrides_gate_enter_proceeds_without_acknowledging() {
+        let repo = fixture_with_layer("overrides-gate-enter");
+        let mut input = keys("\r");
+        let mut out = Vec::new();
+        assert!(
+            overrides_gate_with(
+                &repo,
+                true,
+                &mut input,
+                &mut out,
+                crate::platform::TermGuard::inert,
+            )
+            .unwrap()
+        );
+        assert!(
+            crate::overrides::ack_needed(
+                &repo.home,
+                &crate::version::layer_fingerprint(&repo).unwrap()
+            ),
+            "enter must not count as an acknowledgement"
+        );
+    }
+
+    /// `esc` is the one path that must reach the caller as `false`, before
+    /// `dispatch` ever takes the lock — and it writes no acknowledgement
+    /// either.
+    #[test]
+    fn overrides_gate_esc_declines() {
+        let repo = fixture_with_layer("overrides-gate-esc");
+        let mut input = keys("\x1b");
+        let mut out = Vec::new();
+        assert!(
+            !overrides_gate_with(
+                &repo,
+                true,
+                &mut input,
+                &mut out,
+                crate::platform::TermGuard::inert,
+            )
+            .unwrap()
+        );
+        assert!(crate::overrides::ack_needed(
+            &repo.home,
+            &crate::version::layer_fingerprint(&repo).unwrap()
+        ));
+    }
+
+    /// `x` starts the run and records the layer's own fingerprint — and once
+    /// recorded, an unchanged layer never asks again, exactly as "don't ask
+    /// again until this changes" promises: the second call needs no input at
+    /// all, or it would hang rather than pass.
+    #[test]
+    fn overrides_gate_x_acknowledges_and_is_not_asked_again() {
+        let repo = fixture_with_layer("overrides-gate-x");
+        let fingerprint = crate::version::layer_fingerprint(&repo).unwrap();
+
+        let mut input = keys("x");
+        let mut out = Vec::new();
+        assert!(
+            overrides_gate_with(
+                &repo,
+                true,
+                &mut input,
+                &mut out,
+                crate::platform::TermGuard::inert,
+            )
+            .unwrap()
+        );
+        assert!(!crate::overrides::ack_needed(&repo.home, &fingerprint));
+
+        let mut no_input = keys("");
+        let mut out = Vec::new();
+        assert!(
+            overrides_gate_with(
+                &repo,
+                true,
+                &mut no_input,
+                &mut out,
+                crate::platform::TermGuard::inert,
+            )
+            .unwrap()
+        );
+        assert!(
+            out.is_empty(),
+            "an unchanged, acknowledged layer must say nothing at all: {out:?}"
+        );
+    }
+
+    /// The mockup's own column: a pipeline or config patch counts its keys,
+    /// singular or plural, and a whole-file prompt override just says so.
+    #[test]
+    fn overrides_gate_kind_counts_keys_and_names_a_whole_file() {
+        let two_keys = OverrideRow {
+            target: "pipelines/impl.yml".into(),
+            kind: "patch",
+            overrides: "implement.model, test.timeout".into(),
+        };
+        assert_eq!(overrides_gate_kind(&two_keys), "2 keys");
+
+        let one_key = OverrideRow {
+            target: "config.toml".into(),
+            kind: "patch",
+            overrides: "agents.claude.concurrency".into(),
+        };
+        assert_eq!(overrides_gate_kind(&one_key), "1 key");
+
+        let prompt = OverrideRow {
+            target: "prompts/reviewer".into(),
+            kind: "whole file",
+            overrides: "—".into(),
+        };
+        assert_eq!(overrides_gate_kind(&prompt), "whole file");
     }
 }

@@ -256,6 +256,7 @@ pub fn doctor(
             report.record_all(config_checks(repo, config_error, &config));
             report.record_all(issue_tracking_checks(repo, &config.issue_tracking));
             report.record_all(retired_key_notes(&repo.checkout));
+            report.record_all(override_layer_note(repo));
             report.record(mux_check(mux.as_ref()));
             doctor_update(repo, &mut report);
             report.record(match crate::lock::Lock::holder(&repo.lock_file())? {
@@ -275,6 +276,7 @@ pub fn doctor(
     report.record_all(config_checks(repo, config_error, &config));
     report.record_all(issue_tracking_checks(repo, &config.issue_tracking));
     report.record_all(retired_key_notes(&repo.checkout));
+    report.record_all(override_layer_note(repo));
     warmth_notes(repo, pipelines, &config, &mut report);
     report.record_all(pipeline_graph_checks(pipelines, &config, &graph));
     report.record_all(branch_and_forge_checks(
@@ -573,6 +575,31 @@ fn issue_tracking_checks(
         }
     }
     findings
+}
+
+/// A patch layer changes what runs without `git status` ever showing it —
+/// reported here as a standing note naming every overridden artifact,
+/// whichever way `dispatch`'s own gate turned out: acknowledging the gate
+/// only means a person has agreed to run under the layer, not that the
+/// layer stops being worth mentioning to somebody reading `doctor` cold.
+fn override_layer_note(repo: &Repo) -> Vec<Finding> {
+    let rows = match collect_override_rows(&repo.overrides_dir()) {
+        Ok(rows) => rows,
+        Err(err) => {
+            return vec![Finding::Note(format!(
+                "the override layer could not be read: {err:#}"
+            ))];
+        }
+    };
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    let names: Vec<&str> = rows.iter().map(|row| row.target.as_str()).collect();
+    vec![Finding::Note(format!(
+        "overrides are active for this project: {} — `spoolway override list` to read them, \
+         `override promote` to keep them, `override drop` to clear them",
+        names.join(", ")
+    ))]
 }
 
 /// Retired: the guard this used to size — how many times a lane may be
@@ -1381,6 +1408,11 @@ fn update_notes(outcomes: &[crate::update::Outcome], initialised: bool) -> Vec<S
             crate::update::Outcome::Blocked { path, why } => {
                 notes.push(format!("{path}: {why}"));
             }
+            crate::update::Outcome::Removed { path, why } => {
+                if !behind.iter().any(|(known, _)| *known == path.as_str()) {
+                    behind.push((path, why));
+                }
+            }
             crate::update::Outcome::Kept => {}
         }
     }
@@ -1586,6 +1618,39 @@ mod tests {
 
         assert_eq!(short["checks"], 2);
         assert_eq!(short["problems"], 1);
+    }
+
+    /// No layer at all is nothing to say: `override_layer_note` must not add
+    /// a row to a project that has never touched `spoolway pipeline
+    /// override` or its siblings.
+    #[test]
+    fn override_layer_note_is_silent_with_no_layer() {
+        let repo = crate::commands::testutil::fixture("doctor-override-note-empty");
+        assert!(override_layer_note(&repo).is_empty());
+    }
+
+    /// A layer present is a standing note naming the overridden artifact —
+    /// present whether or not `dispatch`'s own gate has ever been
+    /// acknowledged, since this function never reads the acknowledgement at
+    /// all.
+    #[test]
+    fn override_layer_note_names_an_active_layer() {
+        let repo = crate::commands::testutil::fixture("doctor-override-note-active");
+        let overrides = repo.overrides_dir();
+        std::fs::create_dir_all(overrides.join("pipelines")).unwrap();
+        std::fs::write(
+            overrides.join("pipelines/default.yml"),
+            "steps:\n  implement:\n    model: fake-opus\n",
+        )
+        .unwrap();
+
+        let findings = override_layer_note(&repo);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        let Finding::Note(text) = &findings[0] else {
+            panic!("expected a note: {findings:?}");
+        };
+        assert!(text.contains("overrides are active"), "{text}");
+        assert!(text.contains("pipelines/default.yml"), "{text}");
     }
 
     /// `doctor`'s model messages name `.spoolway/pipelines/<name>.yml`, where a

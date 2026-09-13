@@ -198,6 +198,19 @@ pub enum Command {
     #[command(subcommand)]
     Config(ConfigCommand),
 
+    /// Manage the patch layer `pipeline override`, `prompt override` and
+    /// `config override` write into.
+    #[command(subcommand)]
+    Override(OverrideCommand),
+
+    /// Print or validate the task, lane-prompt, task-log and PR shapes.
+    #[command(subcommand)]
+    Template(TemplateCommand),
+
+    /// Print the environment an issue-tracking hook is handed.
+    #[command(subcommand)]
+    Hook(HookCommand),
+
     /// Check that everything the configured pipeline needs is actually present.
     Doctor(DoctorArgs),
 }
@@ -250,7 +263,10 @@ pub const HELP_GROUPS: &[(&str, &[&str])] = &[
     ("When something needs you:", &["lane", "resume"]),
     (
         "Shaping the project:",
-        &["pipeline", "prompt", "agent", "task", "config", "models"],
+        &[
+            "pipeline", "prompt", "agent", "task", "config", "models", "override", "template",
+            "hook",
+        ],
     ),
     (
         "Setting up:",
@@ -1121,9 +1137,28 @@ pub enum PipelineCommand {
     /// pipeline.
     ///
     /// Nothing is written by this command itself: it opens the pane, starts
-    /// the `[pipeline_gen]` profile, and prompts the `spoolway-pipeline`
+    /// the `[pipeline_gen]` profile, and prompts the `spoolway-config`
     /// skill to carry the procedure from there.
     Gen(PipelineGenArgs),
+
+    /// Fork one step's key into the patch layer, without touching the
+    /// tracked file or committing anything.
+    ///
+    /// Refused by name, and nothing written, when the step does not exist on
+    /// this pipeline or the merge would refuse the key — `spoolway override
+    /// list` to see what is layered, `override promote` to keep it, `override
+    /// drop` to clear it.
+    Override(PipelineOverrideArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct PipelineOverrideArgs {
+    /// The pipeline to patch.
+    pub name: String,
+
+    /// `<step>.<key>=<value>`, e.g. `implement.model=claude-opus-5`.
+    #[arg(long = "set", value_name = "STEP.KEY=VALUE")]
+    pub set: String,
 }
 
 #[derive(Debug, Args)]
@@ -1214,6 +1249,34 @@ pub enum PromptCommand {
         /// Only this prompt. Default: every one.
         name: Option<String>,
     },
+
+    /// Copy the tracked prompt into the patch layer, so editing starts from
+    /// it instead of from a blank file — the whole file is what an override
+    /// replaces, there being no key in prose for a patch to aim at.
+    Override {
+        /// The prompt to fork.
+        name: String,
+    },
+}
+
+/// Printing the shapes that are prose, not a pipeline: a task's own body, a
+/// lane's seven typed messages, the task-log headings, and the pull request
+/// body.
+#[derive(Debug, Subcommand)]
+pub enum TemplateCommand {
+    /// Print the task, lane-prompt, task-log and PR shapes: where each
+    /// project file lives, what a project may leave out, and every
+    /// placeholder substituted into it.
+    Contract,
+}
+
+/// Printing the environment an issue-tracking hook is handed.
+#[derive(Debug, Subcommand)]
+pub enum HookCommand {
+    /// Print every event a hook script runs on and the environment each one
+    /// carries, rendered from the same tables `crate::tracking` builds to
+    /// launch it.
+    Contract,
 }
 
 #[derive(Debug, Args)]
@@ -1263,6 +1326,11 @@ pub struct PromptContractArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum ConfigCommand {
+    /// Print the config format: every setting, its values, its default and
+    /// one sentence — rendered from the same register `config.toml`'s own
+    /// header table writes, so a setting is documented once.
+    Contract,
+
     /// Print the whole config.
     Show,
 
@@ -1287,6 +1355,46 @@ pub enum ConfigCommand {
     /// once. This merely saves finding the path and tells you immediately if
     /// what you wrote no longer parses.
     Edit,
+
+    /// Open or create `overrides/config.toml`, the patch layer's own copy —
+    /// never the tracked file `config edit` opens.
+    Override,
+}
+
+/// Manage the patch layer under `~/.spoolway/<project>/overrides/` — created
+/// by `pipeline override`, `prompt override` and `config override`, one
+/// entry per pipeline, prompt or config patched, and read live at every
+/// dispatcher pass, `pipeline show` and lane start alongside the tracked
+/// files. Nothing here touches the checkout, so `git status` never moves.
+#[derive(Debug, Subcommand)]
+pub enum OverrideCommand {
+    /// Print the merge rule, what a patch may carry, and the four `override`
+    /// commands.
+    Contract,
+
+    /// One line per overridden artifact: its kind and the keys it carries.
+    List,
+
+    /// Write a patched artifact's values into the tracked file, then clear
+    /// it from the layer — an ordinary diff, ready to review and commit.
+    Promote(OverrideTargetArgs),
+
+    /// Remove one entry from the layer, or the whole layer when none is
+    /// named.
+    Drop(OverrideDropArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct OverrideTargetArgs {
+    /// A pipeline name, or the target as `override list` prints it:
+    /// `pipelines/<name>.yml`, `prompts/<name>`, or `config.toml`.
+    pub target: String,
+}
+
+#[derive(Debug, Args)]
+pub struct OverrideDropArgs {
+    /// Same forms as `override promote`'s target. Omit to clear everything.
+    pub target: Option<String>,
 }
 
 #[cfg(test)]
@@ -1610,6 +1718,90 @@ mod tests {
                 .try_get_matches_from(["spoolway", verb])
                 .expect_err("a removed command must not parse");
             assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand);
+        }
+    }
+
+    #[test]
+    fn pipeline_override_reads_the_name_and_the_set_flag() {
+        match Cli::try_parse_from([
+            "spoolway",
+            "pipeline",
+            "override",
+            "impl",
+            "--set",
+            "implement.model=claude-opus-5",
+        ])
+        .unwrap()
+        .command
+        {
+            Command::Pipeline(PipelineCommand::Override(args)) => {
+                assert_eq!(args.name, "impl");
+                assert_eq!(args.set, "implement.model=claude-opus-5");
+            }
+            other => panic!("expected Command::Pipeline(Override), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pipeline_override_requires_the_set_flag() {
+        assert!(Cli::try_parse_from(["spoolway", "pipeline", "override", "impl"]).is_err());
+    }
+
+    #[test]
+    fn prompt_override_reads_the_name() {
+        match Cli::try_parse_from(["spoolway", "prompt", "override", "reviewer"])
+            .unwrap()
+            .command
+        {
+            Command::Prompt(PromptCommand::Override { name }) => assert_eq!(name, "reviewer"),
+            other => panic!("expected Command::Prompt(Override), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn config_override_takes_no_arguments() {
+        assert!(matches!(
+            Cli::try_parse_from(["spoolway", "config", "override"])
+                .unwrap()
+                .command,
+            Command::Config(ConfigCommand::Override)
+        ));
+    }
+
+    #[test]
+    fn override_list_promote_and_drop_parse() {
+        assert!(matches!(
+            Cli::try_parse_from(["spoolway", "override", "list"])
+                .unwrap()
+                .command,
+            Command::Override(OverrideCommand::List)
+        ));
+
+        match Cli::try_parse_from(["spoolway", "override", "promote", "impl"])
+            .unwrap()
+            .command
+        {
+            Command::Override(OverrideCommand::Promote(args)) => {
+                assert_eq!(args.target, "impl");
+            }
+            other => panic!("expected Command::Override(Promote), got {other:?}"),
+        }
+
+        match Cli::try_parse_from(["spoolway", "override", "drop"])
+            .unwrap()
+            .command
+        {
+            Command::Override(OverrideCommand::Drop(args)) => assert_eq!(args.target, None),
+            other => panic!("expected Command::Override(Drop), got {other:?}"),
+        }
+        match Cli::try_parse_from(["spoolway", "override", "drop", "config.toml"])
+            .unwrap()
+            .command
+        {
+            Command::Override(OverrideCommand::Drop(args)) => {
+                assert_eq!(args.target.as_deref(), Some("config.toml"));
+            }
+            other => panic!("expected Command::Override(Drop), got {other:?}"),
         }
     }
 

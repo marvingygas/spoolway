@@ -60,10 +60,12 @@ mod config;
 mod dispatch;
 mod doctor;
 mod group;
+mod hook;
 mod init;
 mod issue;
 mod jobs;
 mod lanes;
+mod r#override;
 mod pending;
 mod pipeline;
 mod queue;
@@ -71,21 +73,25 @@ mod report;
 mod routines;
 mod stack;
 mod task;
+mod template;
 
 pub use agent::*;
 pub use config::*;
 pub use dispatch::*;
 pub use doctor::*;
 pub use group::*;
+pub use hook::*;
 pub use init::*;
 pub use issue::*;
 pub use jobs::*;
 pub use lanes::*;
+pub use r#override::*;
 pub use pipeline::*;
 pub use queue::*;
 pub use report::*;
 pub use stack::*;
 pub use task::*;
+pub use template::*;
 
 /// Where a program resolves on PATH, if at all.
 ///

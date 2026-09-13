@@ -2,13 +2,16 @@
 //! nobody reads.
 //!
 //! A spoolway home mixes two kinds of directory. `queue/`, `pending/`,
-//! `worktrees/` and `plans/` hold work in flight — losing an entry there
-//! loses work. `system-prompts/`, `commands/`, `tracking/`, `headless/`,
-//! `scratch/` and `archive/` hold what a pass left behind — a composed prompt, a
-//! command step's log, a hook run, a headless lane's record, a rebase's
-//! scratch worktree, a task that has already reached `done`. Nobody reads
-//! any of those once the task they belong to has left the queue, and nothing
-//! this binary does depends on them still being there. This module ages the
+//! `worktrees/`, `plans/` and `overrides/` hold work in flight — losing an
+//! entry there loses work, and a patch under `overrides/` swept after
+//! `retention.days` would silently change how a project runs rather than
+//! merely lose a record of one. `system-prompts/`, `commands/`, `tracking/`,
+//! `headless/`, `scratch/` and `archive/` hold what a pass left behind — a
+//! composed prompt, a command step's log, a hook run, a headless lane's
+//! record, a rebase's scratch worktree, a task that has already reached
+//! `done`. Nobody reads any of those once the task they belong to has left
+//! the queue, and nothing this binary does depends on them still being
+//! there. This module ages the
 //! second kind out; the first kind this never touches, whatever its age —
 //! see [`crate::repo::Repo::byproduct_dirs`] for the one place that split is
 //! written down.

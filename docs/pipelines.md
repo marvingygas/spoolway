@@ -46,6 +46,10 @@ checkout it is actually running in — a task's own worktree, when it is one —
 from the project's main checkout, so a lane sees its own branch's pipelines even before
 they are merged anywhere. See [Project](concepts.md#project).
 
+An optional patch layer outside the checkout can also set keys on a step that already
+exists, without touching this file — see [The overrides
+layer](configuration.md#the-overrides-layer).
+
 A task picks its pipeline with its own `pipeline:` field. Which one it gets when it names
 none is `dispatch.default_pipeline` in the config, because naming the default is a statement
 about the *set* and no single file can make it. (The old single `pipeline.yml` is no longer
@@ -988,7 +992,7 @@ validation `pipeline check` runs, so it cannot drift from what the loader actual
 Picking up keys added since your project was scaffolded is not its job any more: `spoolway
 update` rewrites the fenced key reference in every pipeline file that carries the markers.
 
-The `spoolway-pipeline` skill walks the whole procedure with a coding agent: it asks what one
+The `spoolway-config` skill walks the whole procedure with a coding agent: it asks what one
 pass has to produce, writes the YAML and any prompt its steps name, and runs both checks. The
 files are the output — a pipeline is short enough that reading it beats reading a description
 of it, and it is in git either way. It ships no template of its own any more: it runs
@@ -998,7 +1002,7 @@ prints.
 ## Generating a pipeline
 
 `spoolway pipeline gen [--plan <path>]` opens a fresh agent session, in a pane of the current
-checkout, and prompts the `spoolway-pipeline` skill — the same procedure as "convert a
+checkout, and prompts the `spoolway-config` skill — the same procedure as "convert a
 workflow", below, this time starting from a plan rather than a description typed by hand.
 Nothing is written by the command itself: it starts the session and hands the skill a plan
 path to read, and this project's own preferences to take as already answered rather than
@@ -1040,7 +1044,7 @@ production credentials" becomes a step, and nothing else — every lane reaches 
 started the dispatcher can reach, and a pipeline has nothing to say on the subject at all —
 see [Reach](concepts.md#reach).
 
-The `spoolway-pipeline` skill does the whole conversion with you: describe the flow you run
+The `spoolway-config` skill does the whole conversion with you: describe the flow you run
 today, and it works out which parts are steps and which are instructions belonging inside one,
 then writes the graph and the prompts its steps need — see [Writing your
 own](prompts.md#writing-your-own) for what goes in one of those.

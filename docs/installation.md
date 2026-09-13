@@ -129,26 +129,28 @@ each time:
 |---|---|
 | `spoolway-plan` | Turns one goal into a reviewable plan page, then — once you approve it — cuts the task breakdown into the project's pending directory as one document per task. Queues nothing; `spoolway queue`, the screen, does that |
 | `spoolway-tasks` | The task-cutting procedure `spoolway-plan`'s own step 7 invokes: settle the pipeline, decompose against the window its implementing step runs on, offer the shape, write and prove the documents. A second skill that cuts a breakdown calls it too, rather than carrying its own copy |
-| `spoolway-pipeline` | Turns a workflow you describe into a pipeline, or changes one you have, and writes any prompt its steps need — against the contract `spoolway prompt contract` prints. `spoolway-calibrate` hands it a shape finding too |
+| `spoolway-config` | Changes anything in the control plane — the pipelines in `.spoolway/pipelines/*.yml`, the prompts their steps run, `config.toml`, the task and lane templates, and the issue-tracking hooks — as a temporary override that leaves the checkout clean, or as an edit to the tracked file. `spoolway-calibrate` hands it a shape finding too |
 | `spoolway-doctor` | Runs every read-only check, collects the findings into one report, and changes nothing until you pick |
-| `spoolway-calibrate` | Reads a window of archived tasks and the spend ledger, turns what actually cost loops and money — a line that should go, a step running hot on context, a lap no step owns — into findings, and walks them one at a time so the person sends each to `spoolway-tasks`, `spoolway-plan`, `spoolway-pipeline`, or nowhere |
+| `spoolway-calibrate` | Reads a window of archived tasks and the spend ledger, turns what actually cost loops and money — a line that should go, a step running hot on context, a lap no step owns — into findings, and walks them one at a time so the person sends each to `spoolway-tasks`, `spoolway-plan`, `spoolway-config`, or nowhere |
 
 Three of these are human-invoked only — none of them fires on its own. `spoolway-tasks` and
-`spoolway-pipeline` are the exceptions: they carry no `disable-model-invocation`, because both
+`spoolway-config` are the exceptions: they carry no `disable-model-invocation`, because both
 have to stay reachable from inside another skill's own procedure, not only from a person's own
-prompt. Each lands as
+prompt — `spoolway pipeline gen` is what reaches `spoolway-config` this way. Each lands as
 `<provider's directory>/<name>/SKILL.md`: one directory per skill, which is the layout all
-three providers discover. None brings any file beside it — `spoolway-pipeline` used to ship an
-annotated pipeline to copy from, but that template is now printed by `spoolway pipeline
-contract` instead, so the skill fetches it at runtime rather than carrying a copy that can
-drift from the binary that enforces the format.
+three providers discover. None brings any file beside it — `spoolway-config` (renamed and
+widened from `spoolway-pipeline`) ships no format of its own at all: every contract it routes
+to — `pipeline`, `prompt`, `config`, `override`, `template` and `hook` — is printed by the
+binary itself, so the skill fetches each at runtime rather than carrying a copy that can drift
+from what actually loads.
 
 **One of these skills says almost nothing in the session.** `spoolway-plan` produces a page
 and then prints one line: the absolute path to it. Everything it worked out is on the page,
 where it can be read, revised and reread — and anything still undecided is marked in violet,
-so a document with none of it on it is one with nothing left to decide. `spoolway-pipeline`
-writes no page at all: a pipeline is a short YAML file and a prompt is prose, and both are
-read faster in the files themselves than in any description of them.
+so a document with none of it on it is one with nothing left to decide. `spoolway-config`
+writes no page at all: a pipeline is a short YAML file, a prompt is prose, and a value change
+is an override command — all read faster in the files and the printed contracts themselves
+than in any description of them.
 
 **Three providers, one set of skills.** The content is shared; a provider decides only where
 the directory goes, because all three converged on the same layout:
