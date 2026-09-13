@@ -1264,8 +1264,9 @@ Two things tmux has no opinion on, so spoolway carries them itself:
   has sat unchanged for a dozen seconds has settled and is promptable again. The reminder
   loop never depends on this: silence is measured on the agent's own transcript, and tmux
   has no cheaper way to tell whether a lane still holds a process of its own open, so
-  `Mux::lane_process_alive` answers `None` here exactly as it does on any other backend
-  that cannot check.
+  `Mux::lane_process_alive` answers `None` here exactly as it does on herdr, which cannot
+  check either: an agent's own tool calls never take the pane's foreground process group, so
+  there is nothing in herdr's process table for the method to key on.
 
 Prompts go in as one bracketed paste followed by Enter, so a multi-line prompt cannot
 self-submit halfway — and, as under herdr, a submission that visibly fails to start a turn

@@ -93,6 +93,16 @@ pub struct Lane {
     pub tab_id: String,
     pub workspace_id: String,
     pub cwd: PathBuf,
+    /// herdr's own read on whether the launch that started this row is still
+    /// settling — set while `agent start` is still waiting for the binary to
+    /// come up, and gone from the row entirely (along with the row itself)
+    /// once herdr gives up on it. `None` from a backend, or a row, that never
+    /// carries this: the ordinary case for every kind but herdr's own.
+    pub launch_pending: Option<bool>,
+    /// herdr's own read on whether this session is ready to be typed at
+    /// interactively. `None` the same way [`Lane::launch_pending`] is: absent
+    /// on a row that never carries it, not a `false` this backend invented.
+    pub interactive_ready: Option<bool>,
 }
 
 /// What [`Mux::vacate_lane`] found when it was done: the state the lane's pane
@@ -1181,6 +1191,19 @@ struct RawAgent {
     workspace_id: String,
     #[serde(default)]
     cwd: PathBuf,
+    /// Absent on every row but one herdr is still settling a launch for —
+    /// `#[serde(default)]` reads that absence as `None` rather than `Some(false)`,
+    /// which a launch path telling "not pending" apart from "never said"
+    /// needs kept distinct.
+    #[serde(default)]
+    launch_pending: Option<bool>,
+    /// Absent on a row herdr has not finished readying for interactive input
+    /// — observed `true` on a spoolway-started lane and missing outright on
+    /// an ad-hoc pane in the same listing, so, like `launch_pending`, this
+    /// stays an `Option` rather than defaulting a guess in for the rows that
+    /// never say.
+    #[serde(default)]
+    interactive_ready: Option<bool>,
 }
 
 fn unknown_status() -> LaneStatus {
@@ -1387,6 +1410,15 @@ impl Mux for Herdr {
         self.own_pane().map(|pane| pane.workspace_id)
     }
 
+    // `lane_process_alive` is deliberately left at the trait's own default,
+    // `None`, rather than overridden here — see the task's own report for
+    // why: `pane process-info` names only the pane's foreground process
+    // group, and an agent's own tool calls are never run as that group's
+    // foreground job (they are spawned on pipes, not handed the tty), so
+    // `foreground_processes` reads identically — the agent alone — whether
+    // or not a child is running. There is no field on this payload a
+    // comparison could key on that would ever answer `Some(true)`.
+
     fn list_lanes(&self) -> Result<Vec<Lane>> {
         let list: AgentList = self.call(&["agent", "list"])?;
 
@@ -1409,6 +1441,8 @@ impl Mux for Herdr {
                     tab_id: raw.tab_id,
                     workspace_id: raw.workspace_id,
                     cwd: raw.cwd,
+                    launch_pending: raw.launch_pending,
+                    interactive_ready: raw.interactive_ready,
                 })
             })
             .collect())
@@ -2144,6 +2178,40 @@ mod tests {
         // as tall as it is wide.
         assert_eq!(chosen.pane_id, "w5S:p1C");
         assert_eq!(chosen.direction, "down");
+    }
+
+    /// A row `agent list` carries while it is settling a launch, and while
+    /// it is ready for interactive input — both booleans, and both absent on
+    /// a row that never says, which `#[serde(default)]` reads as `None`
+    /// rather than a guessed `Some(false)`.
+    #[test]
+    fn agent_list_reads_launch_pending_and_interactive_ready_when_present() {
+        let payload = r#"{"agents": [
+            {"agent": "claude", "agent_status": "idle", "name": "demo__implement",
+             "pane_id": "w0:p1", "tab_id": "w0:t1", "workspace_id": "w0",
+             "cwd": "/tmp", "launch_pending": true, "interactive_ready": true}
+        ]}"#;
+        let list: AgentList = serde_json::from_str(payload).expect("a live agent list parses");
+        let row = &list.agents[0];
+        assert_eq!(row.launch_pending, Some(true));
+        assert_eq!(row.interactive_ready, Some(true));
+    }
+
+    /// The other row observed in the same live listing: an ad-hoc pane
+    /// herdr's own client opened, which carries neither field at all. A row
+    /// missing them must not fail the whole listing — see `RawAgent`'s own
+    /// doc for why `#[serde(default)]` rather than a required field is what
+    /// makes that true.
+    #[test]
+    fn a_row_missing_either_field_reads_as_absent_not_a_parse_failure() {
+        let payload = r#"{"agents": [
+            {"agent": "claude", "agent_status": "working", "name": null,
+             "pane_id": "w1:p6", "tab_id": "w1:t2", "workspace_id": "w1", "cwd": "/tmp"}
+        ]}"#;
+        let list: AgentList = serde_json::from_str(payload).expect("a live agent list parses");
+        let row = &list.agents[0];
+        assert_eq!(row.launch_pending, None);
+        assert_eq!(row.interactive_ready, None);
     }
 
     /// The failure this check exists for: a `.pane` file once held `w8:p4`

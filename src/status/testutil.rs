@@ -76,6 +76,8 @@ pub fn lane(name: &str, cwd: &Path) -> crate::mux::Lane {
         tab_id: "w1:t1".into(),
         workspace_id: "w1".into(),
         cwd: cwd.to_path_buf(),
+        launch_pending: None,
+        interactive_ready: None,
     }
 }
 

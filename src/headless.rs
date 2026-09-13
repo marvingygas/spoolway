@@ -776,6 +776,11 @@ impl Mux for Headless {
                 tab_id: record.tab_id,
                 workspace_id: record.workspace_id,
                 cwd: record.cwd,
+                // Neither herdr concept exists here: a headless lane is a
+                // directory of files, not a pane herdr is minding a launch or
+                // a readiness wait for.
+                launch_pending: None,
+                interactive_ready: None,
             })
             .collect())
     }

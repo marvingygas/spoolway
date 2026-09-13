@@ -5417,7 +5417,9 @@ mod tests {
         /// `with_busy_child`, the same sturdier-than-the-screen signal a
         /// backend able to read the process table gives. Everything else
         /// falls through to the trait's own default, `None` — this fake has
-        /// nothing to say either, same as `Herdr` today.
+        /// nothing to say either, same as `Herdr` today: see `Herdr`'s own
+        /// comment in `mux.rs` for why `pane process-info` cannot actually
+        /// answer this for an agent's own tool calls.
         fn lane_process_alive(&self, name: &str) -> Option<bool> {
             self.busy_children.borrow().contains(name).then_some(true)
         }
@@ -5718,6 +5720,8 @@ mod tests {
             tab_id: "w1:t1".into(),
             workspace_id: "w1".into(),
             cwd: cwd.to_path_buf(),
+            launch_pending: None,
+            interactive_ready: None,
         }
     }
 
@@ -6294,6 +6298,8 @@ mod tests {
             tab_id: "w1:t1".into(),
             workspace_id: "w1".into(),
             cwd: PathBuf::from("/tmp/spoolway-fake-worktree"),
+            launch_pending: None,
+            interactive_ready: None,
         };
         let mux = FakeMux::new(vec![lane]);
         let mut report = Report::default();
