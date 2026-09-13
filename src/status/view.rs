@@ -417,7 +417,7 @@ struct Spend {
 }
 
 /// One line per agent profile, its worker slots and nothing else — then, when
-/// a queued task routes onto one, a standing line per `local` model.
+/// any job is enabled, the job ledger naming every one of them.
 ///
 /// A line per profile rather than one summed line, because the two halves of a
 /// run are not comparable: a cloud slot and a local one are not the same kind
@@ -427,18 +427,20 @@ struct Spend {
 /// sake of being pointed at, and a board nothing has been started on should
 /// not carry an idle line about it.
 ///
-/// `local_models` is the names `super::queued_local_models` gathered — each
-/// gets one line under the whole slots block, since the slot figures above
-/// count only spoolway's own lanes and a person can reach the same server
-/// from another terminal. Empty on every board that routes onto no `local`
-/// model, which is every board this project draws.
+/// `jobs` is `crate::jobs::active_jobs_cached`'s own answer, already ordered
+/// by next firing — every enabled job gets one row under the whole slots
+/// block, on every board whether the queue is empty or busy: the slot
+/// figures above answer "what is spoolway running right now", and the ledger
+/// answers "what would still bring it back to life" — the two things a
+/// person needs the dispatcher resident to keep asking. Empty wherever no
+/// job is enabled, which is when this draws nothing at all.
 pub(super) fn footer(
     repo: &Repo,
     pipelines: &Pipelines,
     used: &BTreeMap<&str, usize>,
     model_used: &BTreeMap<&str, usize>,
     agent_model: &BTreeMap<&str, Vec<&str>>,
-    local_models: &[String],
+    jobs: &[crate::jobs::ActiveJob],
 ) -> Vec<String> {
     // Which profiles this project could actually start a lane on. Config
     // ships a profile per agent kind spoolway can drive, so a project that
@@ -527,7 +529,19 @@ pub(super) fn footer(
         .collect();
 
     let width = |of: &dyn Fn(&Spend) -> usize| spends.iter().map(of).max().unwrap_or(0);
-    let name_w = width(&|s| s.name.chars().count());
+    // Widened to fit "jobs" too, but only when the ledger below actually
+    // draws: a board with no enabled job never prints that label, and must
+    // not pad every slot line for a column nothing here uses. When it does
+    // draw, "jobs" shares this same column with every profile name — the
+    // mockup's own alignment — so a project running only short names (`pi`,
+    // four columns short of "jobs") still lines its ledger up under them.
+    let name_w = {
+        let profiles_w = width(&|s| s.name.chars().count());
+        match jobs.is_empty() {
+            true => profiles_w,
+            false => profiles_w.max("jobs".chars().count()),
+        }
+    };
 
     // One rendered line per `(figure, model)` pair a profile carries — the
     // profile's own name prints once, on the first, and every line after it
@@ -563,21 +577,42 @@ pub(super) fn footer(
         ));
     }
 
-    // One line per `local` model a queued task routes onto, below the whole
-    // slots block and never folded into a slots line — the slot figures above
-    // it count only the lanes spoolway started, and this is the standing
-    // admission that the card those figures describe is one a person can also
-    // load from another terminal. `local_models` is empty whenever nothing in
-    // the queue names such a model, so the block is absent then; and `footer`
-    // is drawn on the board alone, so `--plain` and a pipe never reach here.
-    if !local_models.is_empty() {
+    // The job ledger, below the whole slots block: every enabled job, ordered
+    // by next firing, naming what would still bring the dispatcher back to
+    // life once nothing above it is running. Absent wherever no job is
+    // enabled. Uses the same `name_w` the slots lines above align to, so
+    // "jobs" and every profile name share one column.
+    if !jobs.is_empty() {
         lines.push(String::new());
-        for model in local_models {
-            lines.push(format!(
-                "{BOLD}{:<name_w$}{RESET}{GUTTER}{model} — manually started \
-                 sessions are not considered by the slots pool",
-                "local"
-            ));
+        lines.push(format!(
+            "{BOLD}{:<name_w$}{RESET}{GUTTER}{n} active",
+            "jobs",
+            n = jobs.len(),
+        ));
+        // Job names get their own column, separate from `name_w` above: a
+        // routine's name has no reason to share a width with an agent
+        // profile's, and the mockup this follows gives each block its own.
+        let job_name_w = jobs
+            .iter()
+            .map(|j| j.name.chars().count())
+            .max()
+            .unwrap_or(0);
+        let indent = format!("{:name_w$}{GUTTER}", "");
+        let now = chrono::Local::now();
+        for job in jobs {
+            let when = match job.next {
+                Some(at) => format!(
+                    "{}{GUTTER}({})",
+                    at.format("%a %-d %b %H:%M"),
+                    crate::jobs::until(at - now)
+                ),
+                // The same fact `doctor`'s own "schedule fires" check names —
+                // a job whose expression parses but never comes round — kept
+                // on the ledger rather than dropped, so a person still sees
+                // it is there and broken.
+                None => "will never fire — run `spoolway doctor`".to_string(),
+            };
+            lines.push(format!("{indent}○ {:<job_name_w$}{GUTTER}{when}", job.name,));
         }
     }
     lines
@@ -2844,12 +2879,13 @@ mod tests {
         assert!(pi_lines[0].contains("slots 2/3"), "{lines:#?}");
     }
 
-    /// One `local` model a queued task routes onto draws one line, below the
-    /// whole slots block and after a blank line, naming the model. An empty
-    /// list draws nothing.
+    /// Every enabled job draws one row on the job ledger, below the whole
+    /// slots block and after a blank line, ordered by next firing and naming
+    /// each one's local date, time and countdown. An empty list draws
+    /// nothing.
     #[test]
-    fn a_local_model_a_queued_task_runs_draws_one_line_under_the_slots() {
-        let repo = fixture("footer-local-line");
+    fn every_enabled_job_draws_one_row_under_the_slots() {
+        let repo = fixture("footer-jobs-ledger");
         let pipelines = Pipelines::builtin();
         let mut used: BTreeMap<&str, usize> = BTreeMap::new();
         used.insert("claude", 1);
@@ -2866,20 +2902,28 @@ mod tests {
         .map(|l| strip(l))
         .collect();
         assert!(
-            !quiet
-                .iter()
-                .any(|l| l.contains("not considered by the slots pool")),
-            "no line without a local model to name: {quiet:#?}"
+            !quiet.iter().any(|l| l.contains("jobs")),
+            "no ledger without an enabled job: {quiet:#?}"
         );
 
-        let local = ["Ornith-1.5-35B-A3B".to_string()];
+        let soon = chrono::Local::now() + chrono::TimeDelta::hours(6);
+        let jobs = [
+            crate::jobs::ActiveJob {
+                name: "nightly-audit".to_string(),
+                next: Some(soon),
+            },
+            crate::jobs::ActiveJob {
+                name: "broken".to_string(),
+                next: None,
+            },
+        ];
         let lines: Vec<String> = footer(
             &repo,
             &pipelines,
             &used,
             &BTreeMap::new(),
             &BTreeMap::new(),
-            &local,
+            &jobs,
         )
         .iter()
         .map(|l| strip(l))
@@ -2887,20 +2931,84 @@ mod tests {
 
         let at = lines
             .iter()
-            .position(|l| {
-                l.starts_with("local")
-                    && l.contains(
-                        "Ornith-1.5-35B-A3B — manually started sessions are not \
-                         considered by the slots pool",
-                    )
-            })
-            .unwrap_or_else(|| panic!("no local line: {lines:#?}"));
+            .position(|l| l.starts_with("jobs") && l.contains("2 active"))
+            .unwrap_or_else(|| panic!("no ledger header: {lines:#?}"));
         // Below the whole slots block, with a blank line between.
         assert!(
             lines[..at].iter().any(|l| l.contains("slots")),
             "the slots block comes first: {lines:#?}"
         );
         assert_eq!(lines[at - 1], "", "a blank line separates it: {lines:#?}");
+        assert!(
+            lines[at + 1].contains("nightly-audit")
+                && lines[at + 1].contains(&soon.format("%a %-d %b %H:%M").to_string()),
+            "the first row names the job and its next firing: {lines:#?}"
+        );
+        assert!(
+            lines[at + 2].contains("broken") && lines[at + 2].contains("run `spoolway doctor`"),
+            "a job with no future firing stays visible with the doctor guidance: {lines:#?}"
+        );
+    }
+
+    /// "jobs" is four columns wide — wider than `pi`, the shortest shipped
+    /// profile name. The ledger's header and rows still have to start in the
+    /// very same column the slots lines do, so the width they all share has
+    /// to fit whichever label is wider, not just the profile names.
+    #[test]
+    fn a_short_profile_name_still_lines_up_under_the_jobs_label() {
+        let repo = fixture("footer-jobs-narrow-profile");
+        let pipelines = Pipelines::builtin();
+        let mut used: BTreeMap<&str, usize> = BTreeMap::new();
+        used.insert("pi", 1);
+
+        let jobs = [crate::jobs::ActiveJob {
+            name: "nightly".to_string(),
+            next: None,
+        }];
+        let lines: Vec<String> = footer(
+            &repo,
+            &pipelines,
+            &used,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &jobs,
+        )
+        .iter()
+        .map(|l| strip(l))
+        .collect();
+
+        let slots_line = lines
+            .iter()
+            .find(|l| l.starts_with("pi"))
+            .unwrap_or_else(|| panic!("no slots line: {lines:#?}"));
+        let jobs_line = lines
+            .iter()
+            .find(|l| l.starts_with("jobs"))
+            .unwrap_or_else(|| panic!("no ledger header: {lines:#?}"));
+        let job_row = lines
+            .iter()
+            .find(|l| l.contains('○'))
+            .unwrap_or_else(|| panic!("no job row: {lines:#?}"));
+        // Four columns for "jobs", plus the three-space gutter every column
+        // boundary here uses — see `GUTTER` — is where the figure after "pi"
+        // and the count after "jobs" both have to start, and where the
+        // row's own bullet has to land.
+        let column = 4 + GUTTER.chars().count();
+        assert_eq!(
+            slots_line.find("slots"),
+            Some(column),
+            "the pi slots line: {slots_line:?}"
+        );
+        assert_eq!(
+            jobs_line.find(char::is_numeric),
+            Some(column),
+            "the jobs ledger header: {jobs_line:?}"
+        );
+        assert_eq!(
+            job_row.find('○'),
+            Some(column),
+            "the job row's own bullet: {job_row:?}"
+        );
     }
 
     #[test]

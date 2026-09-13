@@ -484,53 +484,64 @@ pub struct StayingUp {
     pub next: Option<(String, chrono::DateTime<Local>)>,
 }
 
-/// A caller-held memo for [`staying_up`]. The status board asks on every
+/// One row of the dispatcher board's job ledger: an enabled job's name and
+/// its next local firing — `None` when its schedule parses but never comes
+/// round, the same fact `doctor`'s own "schedule fires" check names.
+#[derive(Debug, Clone)]
+pub struct ActiveJob {
+    pub name: String,
+    pub next: Option<chrono::DateTime<Local>>,
+}
+
+/// A caller-held memo for [`active_jobs`]. The status board asks on every
 /// one-second redraw, and [`next_fire`] behind it runs [`Cron::next_after`]'s
 /// calendar scan for every enabled job — so the board keeps one of these and
 /// only recomputes when the local minute turns over or a store file is
-/// touched. See [`staying_up_cached`].
-pub struct StayingUpMemo {
+/// touched. See [`active_jobs_cached`].
+pub struct ActiveJobsMemo {
     minute: i64,
     stores: [Option<std::time::SystemTime>; 2],
-    value: StayingUp,
+    value: Vec<ActiveJob>,
 }
 
 /// How many jobs are enabled across both stores. A store that will not load
 /// counts as none — cheap enough to call every idle pass, where
-/// [`staying_up`] (which also scans for the next firing) is not.
+/// [`active_jobs`] (which also scans for each one's next firing) is not.
 pub fn enabled_count(repo: &Repo) -> usize {
     load(repo)
         .map(|jobs| jobs.iter().filter(|job| job.spec.enabled).count())
         .unwrap_or(0)
 }
 
-/// The enabled-job count and the soonest next firing, for the dispatcher's
-/// "staying up for them" lines. A store that will not load counts as no
+/// Every enabled job across both stores, ordered by next firing — the
+/// dispatcher board's job ledger, shown on every frame whether the queue is
+/// empty or busy. A job whose schedule will never come round sorts last,
+/// carrying `next: None`, rather than being dropped: a person still needs to
+/// see it is there and broken. A store that will not load counts as no
 /// jobs — the dispatcher then behaves exactly as it does with none.
-pub fn staying_up(repo: &Repo) -> StayingUp {
+pub fn active_jobs(repo: &Repo) -> Vec<ActiveJob> {
     let Ok(jobs) = load(repo) else {
-        return StayingUp {
-            enabled: 0,
-            next: None,
-        };
+        return Vec::new();
     };
-    let next = jobs
+    let mut active: Vec<ActiveJob> = jobs
         .iter()
         .filter(|job| job.spec.enabled)
-        .filter_map(|job| Some((job.name.clone(), next_fire(&job.spec.schedule)?)))
-        .min_by_key(|(_, when)| *when);
-
-    StayingUp {
-        enabled: jobs.iter().filter(|job| job.spec.enabled).count(),
-        next,
-    }
+        .map(|job| ActiveJob {
+            name: job.name.clone(),
+            next: next_fire(&job.spec.schedule),
+        })
+        .collect();
+    // `None` sorts after every `Some`, so a job that will never fire always
+    // lands at the end rather than scattered among ones that will.
+    active.sort_by_key(|job| (job.next.is_none(), job.next));
+    active
 }
 
-/// [`staying_up`], reusing `memo`'s answer while the current local minute and
-/// both stores' modification times are unchanged — so a per-second caller
-/// pays the calendar scan at most once a minute, and at once when a store is
-/// edited.
-pub fn staying_up_cached(repo: &Repo, memo: &mut Option<StayingUpMemo>) -> StayingUp {
+/// [`active_jobs`], reusing `memo`'s answer while the current local minute
+/// and both stores' modification times are unchanged — so a per-second
+/// caller pays the calendar scan at most once a minute, and at once when a
+/// store is edited.
+pub fn active_jobs_cached(repo: &Repo, memo: &mut Option<ActiveJobsMemo>) -> Vec<ActiveJob> {
     let minute = Local::now().timestamp().div_euclid(60);
     let stores = [
         store_mtime(&repo.user_jobs_file()),
@@ -542,8 +553,8 @@ pub fn staying_up_cached(repo: &Repo, memo: &mut Option<StayingUpMemo>) -> Stayi
     {
         return memo.value.clone();
     }
-    let value = staying_up(repo);
-    *memo = Some(StayingUpMemo {
+    let value = active_jobs(repo);
+    *memo = Some(ActiveJobsMemo {
         minute,
         stores,
         value: value.clone(),
@@ -557,26 +568,54 @@ fn store_mtime(path: &Path) -> Option<std::time::SystemTime> {
         .ok()
 }
 
+/// The enabled-job count and the soonest next firing, for the plain run's
+/// "staying up for them" lines — see [`staying_up_lines`]. Built off
+/// [`active_jobs`], which is already sorted by next firing, so the soonest
+/// is whichever the first row names: `None` there only when every row is.
+pub fn staying_up(repo: &Repo) -> StayingUp {
+    let active = active_jobs(repo);
+    let next = active
+        .first()
+        .and_then(|job| job.next.map(|when| (job.name.clone(), when)));
+    StayingUp {
+        enabled: active.len(),
+        next,
+    }
+}
+
+/// The two lines common to both the plain run and the board: why the
+/// dispatcher is staying up on an empty queue, and that ctrl-c stops it.
+/// Assumes `enabled > 0`. The plain run's own [`staying_up_lines`] inserts a
+/// "next: ..." line between these two; the board leaves that line out, since
+/// its own job ledger below already names every enabled job's next firing —
+/// see `crate::status::view::footer`.
+pub fn staying_up_resident_lines(enabled: usize) -> Vec<String> {
+    vec![
+        format!(
+            "queue is empty. {enabled} job{s} enabled — staying up for {them}.",
+            s = if enabled == 1 { "" } else { "s" },
+            them = if enabled == 1 { "it" } else { "them" },
+        ),
+        "ctrl-c stops.".to_string(),
+    ]
+}
+
 /// The lines that say a job is keeping the dispatcher resident on an empty
-/// queue — the wording the plan draws. One source for both the plain run and
-/// the status board; each caller adds its own indent and styling. Assumes
-/// `jobs.enabled > 0`.
+/// queue — the wording the plan draws, for the plain run alone. The status
+/// board draws [`staying_up_resident_lines`] instead, without the "next: ..."
+/// line these insert, since its own job ledger already carries that fact per
+/// job. Assumes `jobs.enabled > 0`.
 pub fn staying_up_lines(jobs: &StayingUp) -> Vec<String> {
-    let mut lines = vec![format!(
-        "queue is empty. {} job{} enabled — staying up for {}.",
-        jobs.enabled,
-        if jobs.enabled == 1 { "" } else { "s" },
-        if jobs.enabled == 1 { "it" } else { "them" },
-    )];
-    match &jobs.next {
-        Some((name, when)) => lines.push(format!(
+    let mut lines = staying_up_resident_lines(jobs.enabled);
+    let next_line = match &jobs.next {
+        Some((name, when)) => format!(
             "next: {name}, {}  ({})",
             when.format("%a %-d %b %H:%M"),
             until(*when - Local::now()),
-        )),
-        None => lines.push("next: no job will fire — run `spoolway doctor`".to_string()),
-    }
-    lines.push("ctrl-c stops.".to_string());
+        ),
+        None => "next: no job will fire — run `spoolway doctor`".to_string(),
+    };
+    lines.insert(1, next_line);
     lines
 }
 
@@ -961,6 +1000,40 @@ mod tests {
 
         let names: Vec<String> = load(&repo).unwrap().into_iter().map(|j| j.name).collect();
         assert_eq!(names, vec!["b"]);
+    }
+
+    /// The dispatcher board's job ledger: every enabled job, ordered by next
+    /// firing, and a paused one left off entirely.
+    #[test]
+    fn active_jobs_orders_by_next_firing_and_omits_a_paused_one() {
+        let repo = fixture("jobs-active");
+        write_user_store(
+            &repo,
+            "[jobs.weekly]\nschedule = \"0 3 * * sun\"\npipeline = \"impl\"\nroutine = \"nightly\"\n\
+             [jobs.nightly]\nschedule = \"0 3 * * *\"\npipeline = \"impl\"\nroutine = \"nightly\"\n\
+             [jobs.paused]\nschedule = \"* * * * *\"\npipeline = \"impl\"\nroutine = \"nightly\"\n\
+             enabled = false\n",
+        );
+        let active = active_jobs(&repo);
+        let names: Vec<&str> = active.iter().map(|j| j.name.as_str()).collect();
+        // `nightly` fires sooner than `weekly`, and `paused` never appears.
+        assert_eq!(names, vec!["nightly", "weekly"], "{active:#?}");
+    }
+
+    /// A schedule that parses but never comes round still leaves its job on
+    /// the ledger, `next: None`, sorted after every job that will fire.
+    #[test]
+    fn active_jobs_keeps_a_job_whose_schedule_never_fires_at_the_end() {
+        let repo = fixture("jobs-active-impossible");
+        write_user_store(
+            &repo,
+            "[jobs.impossible]\nschedule = \"0 0 30 2 *\"\npipeline = \"impl\"\nroutine = \"nightly\"\n\
+             [jobs.nightly]\nschedule = \"0 3 * * *\"\npipeline = \"impl\"\nroutine = \"nightly\"\n",
+        );
+        let active = active_jobs(&repo);
+        let names: Vec<&str> = active.iter().map(|j| j.name.as_str()).collect();
+        assert_eq!(names, vec!["nightly", "impossible"], "{active:#?}");
+        assert!(active[1].next.is_none());
     }
 
     #[test]

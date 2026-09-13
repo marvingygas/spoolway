@@ -677,15 +677,15 @@ all. `spoolway doctor` reports a model carrying `exclusive = true` with no `slot
 nothing and caps nothing. It never reaches the scheduler, so a run takes the same decisions
 whether it is set or absent.
 
-Its one effect is on the dispatcher's board. When a task in the queue routes through a step
-naming this model, the footer carries a standing line below the slots block. The line names
-the model and reminds a person that sessions they start by hand are not counted against the
-slot pool. It stands in for a slot count that cannot see those sessions.
+Its one effect is on `spoolway doctor` alone. A model that carries `slots` or
+`exclusive` describes one card's worth of hardware, and so is almost certainly local: setting
+`local` on it says so plainly and quiets the note that it should. It changes nothing else —
+nothing about what a run decides, and nothing about what the dispatcher's board draws, whether
+or not the flag is set.
 
 spoolway never infers `local`. A model that sets `slots` or `exclusive` describes the same
 kind of hardware, but so does a local model nobody has sized. So `spoolway doctor` only notes
-a `slots` or `exclusive` model that has not set `local`, rather than assuming either way. The
-board line is drawn nowhere else — not under `--plain`, and not into a pipe.
+a `slots` or `exclusive` model that has not set `local`, rather than assuming either way.
 
 `spoolway doctor` also notes a `[models]` row that no agent step in this project's pipelines
 routes to — config left behind by a rename, naming a model nothing ever runs.

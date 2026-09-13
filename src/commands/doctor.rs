@@ -1049,13 +1049,14 @@ fn model_health_checks(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
     }
 
     // `slots` and `exclusive` both describe one card's worth of hardware, so a
-    // model carrying either is almost certainly local — and a local model that
-    // has not said so gets no board line when a queued task routes to it,
-    // which is the only thing that would ever tell a person the card is
-    // shared. Read straight off `config.models` rather than the `named` map:
-    // the flag is worth setting on a sized model whether or not a pipeline
-    // here points at it yet. `local` itself is never a failure — a run takes
-    // the same decisions with it set or absent — so this is a note.
+    // model carrying either is almost certainly local — and this note is the
+    // whole of what `local` still does for it: nothing here changes what the
+    // run decides, or what the board draws, whether or not the flag is set;
+    // setting it only says the fact plainly and quiets this note about it.
+    // Read straight off `config.models` rather than the `named` map: the flag
+    // is worth setting on a sized model whether or not a pipeline here points
+    // at it yet. `local` itself is never a failure — a run takes the same
+    // decisions with it set or absent — so this is a note.
     for (glob, price) in &config.models {
         if price.local || (price.slots == 0 && !price.exclusive) {
             continue;
@@ -1070,9 +1071,8 @@ fn model_health_checks(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
             "`exclusive`"
         };
         findings.push(Finding::Note(format!(
-            "model `{glob}` sets {which} but not `local`, so a run that puts lanes on it says \
-             nothing about the card being shared — set it with `spoolway config set \
-             models.'{glob}'.local true`"
+            "model `{glob}` sets {which} but not `local` — set it with `spoolway config set \
+             models.'{glob}'.local true` to say plainly it runs on hardware you own"
         )));
     }
 

@@ -302,10 +302,10 @@ pub struct Board {
     /// [`BoardMode`]. `Browsing` on every other key, including the plain
     /// cursor moves and `r`, which never open a panel at all.
     mode: BoardMode,
-    /// A one-minute memo for the "a job keeps this run resident" footer, so
-    /// the per-second redraw does not re-scan the calendar for every enabled
-    /// cron job — see [`crate::jobs::staying_up_cached`].
-    jobs_next: Option<crate::jobs::StayingUpMemo>,
+    /// A one-minute memo for the job ledger's own rows, so the per-second
+    /// redraw does not re-scan the calendar for every enabled cron job — see
+    /// [`crate::jobs::active_jobs_cached`].
+    jobs_next: Option<crate::jobs::ActiveJobsMemo>,
 }
 
 impl Board {
@@ -1409,7 +1409,7 @@ fn render(
     arrived: &mut BTreeMap<String, Instant>,
     recent: &mut VecDeque<RecentEvent>,
     cursor: Option<&str>,
-    jobs_next: &mut Option<crate::jobs::StayingUpMemo>,
+    jobs_next: &mut Option<crate::jobs::ActiveJobsMemo>,
 ) -> Result<String> {
     let (tasks, load_problems) = repo.tasks_and_problems()?;
     let graph = Graph::build_for_run(&tasks, pipelines, &repo.archive_dir(), repo.unattended());
@@ -1533,15 +1533,22 @@ fn render(
     frame.push_str(&masthead(&header.join(" · "), pane, spool_frame(running)));
     frame.push('\n');
 
+    // The job ledger's own rows — every enabled job, ordered by next firing —
+    // read once and shared between the empty-queue copy below and the
+    // footer's own ledger block. Memoised: this redraws every second and the
+    // calendar scan behind it is not cheap per enabled job.
+    let active_jobs = crate::jobs::active_jobs_cached(repo, jobs_next);
+
     if rows.is_empty() {
         // A cron job keeps the dispatcher resident on an empty queue, so the
         // board says why it is still up rather than "nothing queued" — the
-        // same facts the plain run prints, in the board's own dim style.
-        // Memoised: this redraws every second and the scan behind it is not
-        // cheap per enabled job.
-        let jobs = crate::jobs::staying_up_cached(repo, jobs_next);
-        if jobs.enabled > 0 {
-            for line in crate::jobs::staying_up_lines(&jobs) {
+        // same opening and closing the plain run prints, in the board's own
+        // dim style. The "next: ..." line the plain run inserts between them
+        // is left out here: the job ledger in the footer below already names
+        // every enabled job's own next firing, and printing it twice would
+        // read as two answers to the same question.
+        if !active_jobs.is_empty() {
+            for line in crate::jobs::staying_up_resident_lines(active_jobs.len()) {
                 frame.push_str(&format!(" {DIM}{line}{RESET}\n"));
             }
         } else {
@@ -1572,14 +1579,13 @@ fn render(
     // that wraps is two rules, and the second one lands where the footer goes.
     let rule = "─".repeat(60.min(pane.saturating_sub(1)));
     tail.push_str(&format!("\n {DIM}{rule}{RESET}\n"));
-    let local_notice = queued_local_models(repo, &tasks, pipelines);
     for line in footer(
         repo,
         pipelines,
         &used,
         &model_used,
         &agent_model,
-        &local_notice,
+        &active_jobs,
     ) {
         tail.push_str(&format!(" {line}\n"));
     }
@@ -1694,8 +1700,7 @@ fn slots_used<'a>(
     }
 
     // Widen `agent_model` past the live lanes above with every agent step of
-    // every task's own pipeline, whatever stage that task sits on — the same
-    // whole-pipeline walk [`queued_local_models`] already makes. A profile
+    // every task's own pipeline, whatever stage that task sits on. A profile
     // whose model carries its own `slots` is then a pool the footer can show
     // as soon as some task's pipeline routes onto it, rather than only once a
     // lane is actually open — see the footer section of `docs/dispatcher.md`
@@ -1725,44 +1730,6 @@ fn slots_used<'a>(
         }
     }
     out
-}
-
-/// The `local` models a task in the queue will run: any model an agent step
-/// of a queued task's pipeline names and that `[models]` flags `local =
-/// true`, deduped and in name order.
-///
-/// The whole pipeline's steps, not only the one a task sits on: a task that
-/// will reach a local step later is already a reason to keep the card clear.
-/// The footer draws one line per name this returns — the plain's own
-/// `d-notice-not-gate`. A model configured `local` but named by no queued
-/// task yields nothing here, which is why this project's board carries no
-/// such line: every pipeline it ships names cloud models.
-fn queued_local_models(
-    repo: &Repo,
-    tasks: &[crate::task::Task],
-    pipelines: &Pipelines,
-) -> Vec<String> {
-    let mut seen: BTreeSet<String> = BTreeSet::new();
-    for task in tasks {
-        let Ok(pipeline) = pipelines.for_task(task) else {
-            continue;
-        };
-        for step in &pipeline.steps {
-            if step.kind() != crate::pipeline::StepKind::Agent {
-                continue;
-            }
-            let Some(model) = step.model.as_deref().filter(|m| !m.trim().is_empty()) else {
-                continue;
-            };
-            if crate::models::resolve(&repo.config.models, model)
-                .price
-                .is_some_and(|price| price.local)
-            {
-                seen.insert(model.to_string());
-            }
-        }
-    }
-    seen.into_iter().collect()
 }
 
 /// What the run's live lanes are consuming, counted two ways.
@@ -2782,52 +2749,6 @@ mod tests {
         );
     }
 
-    /// A queued task whose pipeline names a `local` model puts that model's
-    /// name on the list the footer draws a line from; a model in `[models]`
-    /// that has not set `local` puts nothing there, however it is sized.
-    #[test]
-    fn queued_local_models_names_a_local_model_a_queued_task_will_run() {
-        let mut repo = fixture("queued-local-models");
-        add(&repo, "login", &[], Some("implement"));
-        let mut pipelines = Pipelines::builtin();
-        let tasks = repo.tasks().unwrap();
-
-        // Fresh shipped steps are blank. Give this fixture the local model a
-        // configured project would have chosen before asking what the footer
-        // reports about it.
-        pipelines
-            .pipelines
-            .get_mut("default")
-            .unwrap()
-            .steps
-            .iter_mut()
-            .find(|step| step.id == "implement")
-            .unwrap()
-            .model = Some(crate::models::PLACEHOLDER.to_string());
-        repo.config.models.insert(
-            crate::models::PLACEHOLDER.to_string(),
-            crate::usage::ModelPrice {
-                local: true,
-                ..Default::default()
-            },
-        );
-        assert_eq!(
-            queued_local_models(&repo, &tasks, &pipelines),
-            vec![crate::models::PLACEHOLDER.to_string()]
-        );
-
-        // Sized but silent on `local`: nothing to warn about.
-        repo.config.models.insert(
-            crate::models::PLACEHOLDER.to_string(),
-            crate::usage::ModelPrice {
-                slots: 3,
-                exclusive: true,
-                ..Default::default()
-            },
-        );
-        assert!(queued_local_models(&repo, &tasks, &pipelines).is_empty());
-    }
-
     /// A parked task's pane is kept open for a person to read, and the
     /// dispatcher hands the slot back the moment it does that. Counted here it
     /// would read as a profile with nothing running in it — the board saying no
@@ -3084,8 +3005,15 @@ mod tests {
         let frame = strip(&board.frame(&repo, &pipelines, Phase::Waiting).unwrap());
         assert!(frame.contains("1 job enabled"), "{frame}");
         assert!(frame.contains("staying up"), "{frame}");
-        assert!(frame.contains("next: nightly,"), "{frame}");
         assert!(!frame.contains("nothing queued"), "{frame}");
+        // The next firing is not repeated here — the job ledger in the
+        // footer below already names it once, for `nightly` itself.
+        assert!(!frame.contains("next: nightly,"), "{frame}");
+        assert!(
+            frame.contains("jobs") && frame.contains("1 active"),
+            "{frame}"
+        );
+        assert!(frame.contains("nightly"), "{frame}");
     }
 
     /// A task's `url:` frontmatter reaches the group band as a real OSC 8

@@ -320,9 +320,9 @@ pub const REFERENCE: &[Reference] = &[
         key: "models.<glob>.local",
         values: "true, false",
         default: "false",
-        sentence: "Whether this model runs on hardware you own — a board line asks \
-                    others off the card when a queued task routes to it, and it changes \
-                    nothing else.",
+        sentence: "Whether this model runs on hardware you own. Setting it on a model that \
+                    carries `slots` or `exclusive` silences doctor's note that it should \
+                    probably say so; it changes nothing else.",
     },
     Reference {
         key: "issue_tracking.hook",

@@ -585,20 +585,30 @@ task has been archived does not count, so a stale failure stops showing once the
 gone. A failed `fetch` run is keyed on an issue reference rather than a task and always
 counts. The line is absent entirely while nothing has failed.
 
-One more line joins the footer for each `local` model a task in the queue will run. It sits
-below the whole slots block, after a blank line, and is never folded into a slots line. The
-trigger is any agent step of that task's pipeline that names a model whose `[models]` entry
-sets `local = true`. The step the task currently sits on does not matter, and neither does
-its state — a queued, paused or blocked task all count.
+The slot figures count only the lanes spoolway itself started. A session a person started by
+hand — a local worker or a cloud model, from this project or any other — sits outside them:
+the card those figures describe is one a person can also load from another terminal, and no
+hand-started session, however it is billed, is one of the lanes they count.
 
-The line reads `local   <model> — manually started sessions are not considered by the slots
-pool`. The word `local` is bold and column-aligned under the slot names above it. The slot
-figures count only the lanes spoolway started. A person can load the same server from another
-terminal, and this line is the standing reminder of that gap.
+The job ledger sits below the whole slots block, after a blank line, on every board whether
+the queue is empty or busy. It names every enabled job, one row each, ordered by their next
+firing:
 
-The line is absent when nothing in the queue names a `local` model. It is also absent under
-`--plain` and in a pipe, where no board is drawn. Every pipeline this project ships names
-cloud models, so its own board never carries the line.
+```
+codex   slots 0/1
+pi      slots 0/2
+
+jobs    2 active
+        ○ nightly-audit       Sat 12 Sep 03:00   (in 6h 48m)
+        ○ release-readiness   Mon 14 Sep 08:00   (in 2d 12h)
+```
+
+The header reads `jobs    N active`, bold and column-aligned under the slot names above it;
+`N` is the number of enabled jobs. Each row reads `○ <name>  <local date and time>  (in <countdown>)`,
+the countdown until its next firing. A job whose schedule parses but never comes round stays
+on the ledger rather than dropped, with `will never fire — run spoolway doctor` in place of
+its countdown. A board with no enabled job draws the ledger nowhere at all, and it is absent
+under `--plain` and in a pipe, where no board is drawn.
 
 The header says whose process this is and how long it has been going, and nothing about
 when the next pass is due: `up` moves on every redraw, which is all a board needs to show it
