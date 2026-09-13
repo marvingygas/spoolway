@@ -73,6 +73,28 @@ reporting a pass.
 - **When you are reporting a failure, close everything.** Your findings are the whole of what
   carries; nobody opens a pane to read them.
 
+## Clearing up what you built to get there
+
+That one pane is the only thing this step is allowed to leave behind. Everything you stood up
+to reach it — a scratch project, a worktree, a queue you filled, an agent you started, a config
+key you flipped to force a state — comes down before your turn ends. A setup that outlives its
+task is not evidence. It is idle sessions holding panes nobody will ever read, in a project
+nobody remembers making, long after the task is archived.
+
+- **Tear a fixture down completely, not tidily.** The project directory, its worktrees, its
+  queue, and every lane you started under it. `herdr agent list` and `spoolway lane` say what
+  you actually left running; work from those two rather than from memory of what you started.
+- **Put back whatever you changed to provoke the state.** A `permission_mode` set to `manual`,
+  a config key flipped, a task queued to make a row appear — each one back as you found it. The
+  next run that reads them cannot tell a fixture's setting from somebody's decision.
+- **What has to survive to hold your pane up is named, not just left.** Usually that is the
+  project underneath the screen and any lane the screen is drawing. Say in your report exactly
+  what is still on disk and still running, and give the one command that removes it, so the
+  person who came to look can clear it when they are done.
+- **Nothing you started gets to be free.** A session idling at a prompt holds a worker slot, a
+  pane and a model cap for as long as it lives. "Safe to leave, it costs nothing" is how three
+  of them end up still sitting there when the task is long done.
+
 ## What to look at
 
 - **Alignment.** Columns that line up on the short rows and break on the long ones. Read a
@@ -104,3 +126,7 @@ reporting a pass.
 - Never tear down the last screen when your prompt says a person reads this pane. Closing it
   is not tidiness — it deletes the only thing they came here for.
 - Never leave a pane running when nothing says a person is coming to read this one.
+- Never end your turn with a fixture you have neither removed nor named in your report, with
+  the command that removes it.
+- Never leave an agent session running that the pane you left up does not need. The screen is
+  what a person came for; a session parked on a prompt behind it is litter.
