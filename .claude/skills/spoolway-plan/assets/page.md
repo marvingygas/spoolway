@@ -66,13 +66,16 @@ no marker and are never touched.
 
 - `<title>` and `.slug` — the plan's own slug, the same string twice.
 - The rail's nested lists — one `<li>` per decision and mockup step, added or removed to
-  match what the page actually has, each `href`/`id` pair using the same slug.
+  match what the page actually has, each `href`/`id` pair using the same slug. The index
+  scrolls on its own once it outgrows the viewport, so a long one costs the reader nothing
+  and is never a reason to trim the page down to fit.
 - `<h1>` — the branch's own name for this, not a title you invent.
 - `.tagline` — what is being built, in five words.
 - `.where` — the absolute path this page is written to; a fact you already have, never a
   question for the person.
-- `.standfirst` — one sentence a person can approve or reject.
-- Intend's paragraph — one sentence naming the outcome this plan means to produce.
+- Intend's paragraph, `.standfirst` — the one sentence a person can approve or reject, naming
+  the outcome this plan means to produce. It is the page's lead and there is no second one:
+  nothing stands above Intend but the name, the tagline and the path.
 - Context's paragraph — two or three sentences: what is true today, and the pressure on it.
 - Context's figure — the one view of the system as it is, inline SVG with an `aria-label`
   summarising it; delete the whole `<figure>` only when the context genuinely has no shape.

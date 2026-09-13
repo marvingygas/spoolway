@@ -55,7 +55,7 @@ Every plan is written on the same spine, in this order:
 
 | Section | What goes in it |
 |---|---|
-| **Intend** | The outcome this plan means to produce. One sentence. |
+| **Intend** | The outcome this plan means to produce, in one sentence a person can approve or reject — the page's lead, with nothing above it but the name, the tagline and the path. |
 | **Context** | What is true today, and the pressure on it. One drawing of the system as it is. |
 | **Decisions** | One record per decision, each led by a figure and closed by what it costs. |
 | **Mockup** | The finished thing, drawn: the walkthrough, or the run end to end. One heading and figure per step, no prose. |

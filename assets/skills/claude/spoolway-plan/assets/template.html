@@ -68,7 +68,14 @@ body {
 }
 @media (min-width: 64rem) {
   .page { grid-template-columns: 15rem minmax(0, 1fr); gap: 3rem; align-items: start; }
-  .rail { position: sticky; top: clamp(2rem, 6vw, 4rem); }
+  .rail {
+    position: sticky; top: clamp(2rem, 6vw, 4rem);
+    max-height: calc(100vh - clamp(2rem, 6vw, 4rem) - 1.5rem);
+  }
+  /* Only the index can outgrow the viewport — a plan with many records — so the
+     scrollbar is its own and the lockup, the slug and the toggle stay put. */
+  .rail nav { min-height: 0; display: flex; flex-direction: column; }
+  .rail nav .index { overflow-y: auto; overscroll-behavior: contain; padding-right: 0.5rem; }
 }
 
 .rail { display: flex; flex-direction: column; gap: 1.5rem; }
@@ -90,7 +97,14 @@ body {
   text-transform: uppercase; color: var(--ink-faint); margin: 0 0 0.35rem;
 }
 
-.index { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 0.45rem; }
+.index {
+  margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 0.45rem;
+  scrollbar-width: thin; scrollbar-color: var(--rule) transparent;
+}
+.index::-webkit-scrollbar { width: 6px; }
+.index::-webkit-scrollbar-track { background: transparent; }
+.index::-webkit-scrollbar-thumb { background: var(--rule); border-radius: 3px; }
+.index:hover::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--ink) 28%, var(--paper)); }
 .index a { color: var(--ink-soft); text-decoration: none; font-size: 0.9rem; }
 .index a:hover { color: var(--accent); }
 
@@ -292,12 +306,10 @@ td code { font-family: var(--mono); font-size: 0.85em; color: var(--accent); }
       <span class="file">[[the absolute path this page is written to]]</span>
     </p>
 
-    <p class="standfirst">[[One sentence a person can approve or reject: what this is and
-    what the breakdown claims.]]</p>
-
     <h2 id="intend">Intend</h2>
 
-    <p>[[The outcome this plan means to produce, in one sentence.]]</p>
+    <p class="standfirst">[[The outcome this plan means to produce, in one sentence a person
+    can approve or reject.]]</p>
 
     <h2 id="context">Context</h2>
 
