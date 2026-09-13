@@ -1943,10 +1943,13 @@ fn build_rows(
         // The board redraws about once a second and a pass runs every
         // `interval`, so between the two the lane list is the fresher answer
         // about a lane that has gone back to work — and when no dispatcher is
-        // running at all it is the only one. Only `Working` counts:
-        // `LaneStatus::Blocked` is busy too and means a lane waiting on a
-        // person, which is the state below, and `Unknown` is the multiplexer
-        // declining to say rather than saying no.
+        // running at all it is the only one. Only `Working` counts, and it is
+        // spelled out rather than named through a predicate because this is
+        // the one question being asked: is the lane mid-turn *this second*.
+        // `Blocked` is a lane holding a modal open for a person, so it falls
+        // through to the waiting state below on purpose — marking it is the
+        // pass's job, drawing it is this one's — and `Unknown` is the
+        // multiplexer declining to say rather than saying no.
         let working = live_lane.is_some_and(|l| l.status == crate::mux::LaneStatus::Working);
 
         // Parked in front of a person, rather than a lane spoolway is about to
@@ -2182,7 +2185,14 @@ fn build_rows(
 fn lane_busy(lanes: &[crate::mux::Lane], step_ids: &[&str], task_id: &str) -> bool {
     lanes.iter().any(|lane| {
         crate::mux::parse_lane_name(&lane.name, step_ids).is_some_and(|(_, id)| id == task_id)
-            && lane.status.is_busy()
+            // Spelled out rather than `is_busy()`: resuming into a lane on a
+            // permission prompt would race the prompt exactly as resuming
+            // into a working one would race the turn, so `Blocked` keeps a
+            // parked or paused task non-resumable too.
+            && matches!(
+                lane.status,
+                crate::mux::LaneStatus::Working | crate::mux::LaneStatus::Blocked
+            )
     })
 }
 

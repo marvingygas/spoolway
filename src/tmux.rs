@@ -748,6 +748,10 @@ impl Mux for Tmux {
                 tab_id: window.to_string(),
                 workspace_id: session.to_string(),
                 cwd: PathBuf::from(cwd),
+                // Neither is a tmux concept: nothing here minds a launch or a
+                // readiness wait the way herdr's own row does.
+                launch_pending: None,
+                interactive_ready: None,
             });
         }
         Ok(lanes)
