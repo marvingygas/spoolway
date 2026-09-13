@@ -1563,6 +1563,36 @@ pub fn new_run_id() -> String {
     format!("r{value:016x}")
 }
 
+/// A fresh trial id: `t` plus sixteen hex digits, minted once per trial
+/// launch so every arm the batch mints shares one and two trials of the same
+/// group are never indistinguishable in the ledger. Same shape and the same
+/// reason as [`new_run_id`]: `spoolway eval --runs --trial <id>` groups by
+/// this value exactly the way `group_by_run` groups a run, so a collision
+/// would silently fold two unrelated trials into one comparison table — the
+/// one question a trial exists to let a person answer.
+pub fn new_trial_id() -> String {
+    let mut bytes = [0u8; 8];
+    if !os_random(&mut bytes) {
+        distinct_fallback(&mut bytes);
+    }
+    let value = u64::from_le_bytes(bytes);
+    format!("t{value:016x}")
+}
+
+/// How many distinct tasks a trial's usage rows cover — what a trial's
+/// completion report names as kept, since the ledger is the one thing
+/// teardown leaves standing. Counts tasks, not rows: several steps of the
+/// same arm each bank their own row, and "kept usage rows for 3 trial
+/// tasks" (see the plan's own "Clean finish" mockup) counts arms.
+pub fn trial_task_count(repo: &Repo, trial: &str) -> usize {
+    read_cached(repo)
+        .iter()
+        .filter(|entry| entry.trial.as_deref() == Some(trial))
+        .map(|entry| entry.task.as_str())
+        .collect::<HashSet<_>>()
+        .len()
+}
+
 pub fn ledger_path(repo: &Repo) -> PathBuf {
     repo.usage_file()
 }
@@ -3349,6 +3379,47 @@ mod tests {
         // Not a strict guarantee — it is 64 bits of entropy — but a pair of
         // freshly minted ids colliding would be worth knowing about.
         assert_ne!(a, b);
+    }
+
+    /// The same shape and the same distinctness as [`new_run_id`], under its
+    /// own `t` prefix — two trials of the same group must read apart in the
+    /// ledger, which a reused value could never promise.
+    #[test]
+    fn trial_ids_are_wide_and_distinct() {
+        let a = new_trial_id();
+        let b = new_trial_id();
+        assert!(a.starts_with('t'));
+        assert_eq!(a.len(), 17, "{a}");
+        assert_ne!(a, b);
+    }
+
+    /// What a trial's own completion report reads to say what was kept: the
+    /// number of distinct tasks a trial's usage rows cover, not the row
+    /// count — several steps of the same arm each bank their own row, and
+    /// the mockup's "usage rows for 3 trial tasks" counts arms, not lanes.
+    #[test]
+    fn trial_task_count_counts_distinct_tasks_not_rows() {
+        let (repo, _) = fixture("trial-task-count");
+        let mut a1 = minimal_entry("alpha-1");
+        a1.trial = Some("t1".into());
+        a1.step = "implement".into();
+        let mut a2 = minimal_entry("alpha-1");
+        a2.trial = Some("t1".into());
+        a2.step = "review".into();
+        let mut b1 = minimal_entry("beta-1");
+        b1.trial = Some("t1".into());
+        let mut other = minimal_entry("gamma-1");
+        other.trial = Some("t2".into());
+        for entry in [&a1, &a2, &b1, &other] {
+            append(&repo, entry).unwrap();
+        }
+
+        assert_eq!(
+            trial_task_count(&repo, "t1"),
+            2,
+            "alpha-1's two rows are one arm, and t2's row is a different trial"
+        );
+        assert_eq!(trial_task_count(&repo, "nope"), 0);
     }
 
     /// The stand-in used when the CSPRNG cannot be reached still hands back

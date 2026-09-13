@@ -2270,6 +2270,8 @@ pub fn screen(repo: &Repo, pipelines: &Pipelines) -> Result<()> {
         task: None,
         run_group: None,
         trial: None,
+        discard: None,
+        force: false,
         csv: false,
         by: None,
     };
@@ -3345,6 +3347,8 @@ mod screen_tests {
             task: None,
             run_group: None,
             trial: None,
+            discard: None,
+            force: false,
             csv: false,
             by: None,
         }

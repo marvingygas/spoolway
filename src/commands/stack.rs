@@ -48,6 +48,19 @@ pub fn stack(repo: &Repo, args: &StackArgs) -> Result<()> {
             )
         })?;
     let task = repo.task(&id)?;
+    // A trial arm's whole comparison is banked in the usage ledger, not in a
+    // pull request nobody will read once the trial settles — see
+    // `Frontmatter::trial`. `spoolway stack` is the one built-in publishing
+    // boundary spoolway owns outright, so trial mode closes it here, before
+    // anything below reads a worktree, diffs a branch, or spends a `gh`
+    // call: there is no dependent branch to hand a real task's own
+    // `handover` a diff against, and nothing here for a custom pipeline
+    // command to have to be told to skip.
+    if task.front.trial.is_some() {
+        println!("{id}\n");
+        report_line("publish", "skipped — trial arm, no pull request");
+        return Ok(());
+    }
     // `title:` is required at queue time (`queue_add::parse_submission`), but
     // an older task file can still carry a blank one — checked here rather
     // than trusted, since this is the one place that value becomes the
@@ -807,6 +820,57 @@ fn parse_owner_repo(url: &str) -> Option<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Taken by every test in this module that sets `SPOOLWAY_WORKTREE` —
+    /// the same reasoning as `usage::tests::AMBIENT_ENV`: the environment is
+    /// the process's, not the test's, so two tests setting and restoring it
+    /// at once race each other rather than themselves.
+    static AMBIENT_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Acceptance criterion: trial dispatch closes the one publishing
+    /// boundary spoolway owns outright — `spoolway stack`'s own push and
+    /// pull request — so a trial arm's `stack` step must never reach either.
+    ///
+    /// `SPOOLWAY_WORKTREE` is pointed at a directory that is not a git
+    /// worktree at all, standing in for whatever a trial arm's own worktree
+    /// happens to be: if the no-op check below were ever skipped, the
+    /// function would still fail long before any push, since every git
+    /// command afterwards runs inside a directory with no `.git`.  Reaching
+    /// `Ok(())` is therefore only possible because the trial check returned
+    /// before any of that ran.
+    #[test]
+    fn a_trial_arm_s_stack_step_never_pushes_or_opens_a_pull_request() {
+        let _guard = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let repo = crate::commands::testutil::fixture("stack-trial-noop");
+        crate::commands::testutil::add(&repo, "demo", &[]);
+        let mut task = repo.task("demo").unwrap();
+        task.front.trial = Some("t1".into());
+        task.save().unwrap();
+
+        let not_a_worktree = crate::scratch::root("stack-trial-noop-worktree");
+        let _ = std::fs::remove_dir_all(&not_a_worktree);
+        std::fs::create_dir_all(&not_a_worktree).unwrap();
+        // SAFETY: serialized on `AMBIENT_ENV` above, restored before it is
+        // released.
+        unsafe {
+            std::env::set_var("SPOOLWAY_WORKTREE", &not_a_worktree);
+        }
+        let result = stack(
+            &repo,
+            &StackArgs {
+                task: Some("demo".to_string()),
+            },
+        );
+        unsafe {
+            std::env::remove_var("SPOOLWAY_WORKTREE");
+        }
+        std::fs::remove_dir_all(&not_a_worktree).ok();
+
+        assert!(
+            result.is_ok(),
+            "a trial arm's stack step must be a no-op, not fail: {result:?}"
+        );
+    }
 
     /// The question `handover` asks of its `cut_from` once a dependency has
     /// landed: a branch that exists answers with a ref to diff against, and

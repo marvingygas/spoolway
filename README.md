@@ -43,8 +43,8 @@ sometimes does. spoolway won't surprise you with a bill or an opinion.
   paying to rebuild context, bounded by how full the model's window already is.
 - **Unattended runs.** Overnight, nothing parks for a person: blocked work is resumed by
   an unblocker prompt, with an output-token ceiling as the brake.
-- **Trials.** Fork one task into an arm per pipeline and queue them together, then read the
-  arms side by side in eval.
+- **Trials.** Fork a whole group into one arm per task, each on its own pipeline, and queue
+  them together, then read the arms side by side in eval.
 - **Routines.** Keep the tasks you run over and over in `.spoolway/routines/`.
 - **Eval built in.** Every lane's spend and outcome land in a ledger, so you can see what
   your last pipeline edit did to pass rate and price.
