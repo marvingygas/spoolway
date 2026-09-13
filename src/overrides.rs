@@ -33,6 +33,13 @@ use crate::pipeline::{Pipeline, Step};
 const PIPELINES_SUBDIR: &str = "pipelines";
 const PROMPTS_SUBDIR: &str = "prompts";
 
+/// Where `spoolway dispatch`'s standing consent gate remembers a fingerprint
+/// it has already shown — directly under `Repo::home`, never inside
+/// [`dir_for`]'s own directory: that one is removed once it holds nothing
+/// (see [`remove_empty_dirs_up_to`]), and an acknowledgement has to survive
+/// the layer being emptied and refilled with byte-identical content.
+const ACK_FILE: &str = "override-ack";
+
 /// Where a project's patch layer lives, given any path already inside its
 /// tracked control plane: `repo.checkout` (most callers' `root` — a linked
 /// worktree's own checkout when a lane runs in one) or `repo.root` (always
@@ -222,6 +229,38 @@ fn render_config_leaf(value: &toml::Value) -> Result<String> {
 pub(crate) fn prompt_override(overrides: &Path, name: &str) -> Option<PathBuf> {
     let path = prompt_patch_path(overrides, name);
     path.is_file().then_some(path)
+}
+
+// ---------------------------------------------------------------------------
+// The gate: `commands::dispatch`'s standing consent check reads and writes
+// an acknowledgement here, keyed on `version::layer_fingerprint` rather than
+// on anything the merge above computes — an override is allowed to be
+// permanent, so this carries no timer and returns the moment a byte of the
+// layer changes underneath it.
+// ---------------------------------------------------------------------------
+
+/// Where the acknowledgement lives, given a project's home directory.
+fn ack_path(home: &Path) -> PathBuf {
+    home.join(ACK_FILE)
+}
+
+/// Whether `dispatch`'s gate still owes a person a question about the layer
+/// at `fingerprint`. `false` once the stored acknowledgement already names
+/// this exact fingerprint — an unreadable or missing file reads the same as
+/// one that names something else, since either way nobody has said yes to
+/// *this* layer yet.
+pub(crate) fn ack_needed(home: &Path, fingerprint: &str) -> bool {
+    std::fs::read_to_string(ack_path(home))
+        .map(|stored| stored.trim() != fingerprint)
+        .unwrap_or(true)
+}
+
+/// Record that a person has agreed to run under `fingerprint` — the layer's
+/// own, from [`crate::version::layer_fingerprint`], never `stamp`'s combined
+/// one: a tracked-file edit alone must not reopen a gate the layer itself
+/// has not moved.
+pub(crate) fn ack_write(home: &Path, fingerprint: &str) -> Result<()> {
+    crate::task::write_atomic(&ack_path(home), fingerprint)
 }
 
 // ---------------------------------------------------------------------------
@@ -673,6 +712,38 @@ fn promote_config_table(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// No acknowledgement on disk at all is the ordinary starting state: the
+    /// gate owes a question about any real fingerprint.
+    #[test]
+    fn ack_needed_with_nothing_recorded_yet() {
+        let home = crate::scratch::root("overrides-ack-nothing-recorded");
+        let _ = std::fs::remove_dir_all(&home);
+        assert!(ack_needed(&home, "abcd1234"));
+    }
+
+    /// Writing an acknowledgement clears the gate for that exact fingerprint,
+    /// and brings it right back the moment the fingerprint moves on —
+    /// whether or not the file already existed.
+    #[test]
+    fn ack_write_clears_the_gate_until_the_fingerprint_changes() {
+        let home = crate::scratch::root("overrides-ack-roundtrip");
+        let _ = std::fs::remove_dir_all(&home);
+
+        ack_write(&home, "abcd1234").unwrap();
+        assert!(!ack_needed(&home, "abcd1234"));
+        assert!(
+            ack_needed(&home, "ffff0000"),
+            "a different layer still asks"
+        );
+
+        ack_write(&home, "ffff0000").unwrap();
+        assert!(!ack_needed(&home, "ffff0000"));
+        assert!(
+            ack_needed(&home, "abcd1234"),
+            "the old fingerprint no longer satisfies the gate"
+        );
+    }
 
     /// A list value in a patch reaches [`crate::confkv::set`] as the comma
     /// separated text a person would type at `spoolway config set`, whatever

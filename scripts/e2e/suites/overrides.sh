@@ -62,6 +62,9 @@ says "override list names the pipeline patch and its key" \
 says "and prints the artifact count in its footer" \
   "1 artifact" \
   "$SPOOLWAY" override list
+says "naming the layer's own fingerprint, not the tracked files' combined one" \
+  "layer version" \
+  "$SPOOLWAY" override list
 
 says "override promote writes the tracked file and reports the new value" \
   "implement.model   fake-opus" \
@@ -88,5 +91,40 @@ works "the promote is a real, uncommitted change to the tracked file" \
 says "and it is exactly the one line the patch named — nothing else moved" \
   " 1 file changed, 1 insertion(+), 1 deletion(-)" \
   git diff --stat -- "$TRACKED"
+
+# --------------------------------------------------- dispatch's gate, no tty
+# Every command above ran through `$(...)`, which never hands the child a
+# terminal — so this is already the case the acceptance criteria asks for:
+# with a layer present and stdout not a terminal, `dispatch` must print the
+# notice and proceed without ever waiting on a key nobody can press.
+# `src/commands/dispatch.rs`'s own unit tests cover the same shape directly
+# against `overrides_gate_with`, with a scripted reader standing in for the
+# terminal; what only a real process can show is that a real `spoolway
+# dispatch` invocation, piped the way every script pipes it, never blocks on
+# this at all.
+BODY="$LIVE/body.md"
+task_body "$BODY"
+task_doc "$LIVE/gate.md" gate "$BODY" "group: live" "touches: [notes/gate.md]"
+must "a task to dispatch against" "$SPOOLWAY" queue add --from "$LIVE/gate.md"
+
+# The regression this guards: `overrides_gate`'s own `TermGuard` used to be
+# taken unconditionally, so a piped dispatch printed a hide/show-cursor
+# escape as its first bytes even with no layer at all. With nothing
+# overridden yet, this run must be byte-for-byte silent about the cursor.
+silent_about "a piped dispatch with no layer never touches the cursor" \
+  $'\x1b' \
+  "$SPOOLWAY" dispatch --dry-run
+
+must "forking a knob again, for the gate" \
+  "$SPOOLWAY" pipeline override default --set implement.model=fake-opus
+
+says "dispatch prints the layer's notice with no tty to ask" \
+  "overrides are active for this project" \
+  "$SPOOLWAY" dispatch --dry-run
+says "naming the pipeline it touches" \
+  "pipelines/default.yml" \
+  "$SPOOLWAY" dispatch --dry-run
+works "and proceeds without anybody there to answer" \
+  timeout 10 "$SPOOLWAY" dispatch --dry-run
 
 finish

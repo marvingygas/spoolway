@@ -1461,6 +1461,11 @@ must "removing its branch" git branch -D task/config-diff
 # proved in `src/pipeline.rs`'s own `with_override_fixture` tests.
 BEFORE_OUT=$("$SPOOLWAY" pipeline show)
 REVIEW_LINE_BEFORE=$(grep -E '^  review ' <<<"$BEFORE_OUT")
+# The untouched key the patch must leave alone, read off the tracked file
+# rather than named literally: `fixture.sh`'s `own_prompts` renames every
+# shipped prompt to a suite-local one (`implementer` becomes `builder`), so a
+# hard-coded name here asserts the fixture's naming, not the merge.
+IMPLEMENT_PROMPT_BEFORE=$(grep -oE 'prompt=[^ ]+' <<<"$(grep -E '^  implement ' <<<"$BEFORE_OUT")")
 
 OVERRIDE_MODEL="overridden-by-the-layer"
 mkdir -p "$SPOOLWAY_PROJECT_HOME/overrides/pipelines"
@@ -1473,7 +1478,12 @@ YML
 OUT=$("$SPOOLWAY" pipeline show)
 IMPLEMENT_LINE=$(grep -E '^  implement ' <<<"$OUT")
 REVIEW_LINE=$(grep -E '^  review ' <<<"$OUT")
-if grep -qF "model=$OVERRIDE_MODEL" <<<"$IMPLEMENT_LINE" && grep -qF "prompt=implementer" <<<"$IMPLEMENT_LINE"; then
+# The `-n` guard is load-bearing: an empty `IMPLEMENT_PROMPT_BEFORE` would
+# make `grep -qF ""` match anything at all, and the second half of this
+# assertion would pass while proving nothing.
+if grep -qF "model=$OVERRIDE_MODEL" <<<"$IMPLEMENT_LINE" \
+  && [ -n "$IMPLEMENT_PROMPT_BEFORE" ] \
+  && grep -qF "$IMPLEMENT_PROMPT_BEFORE" <<<"$IMPLEMENT_LINE"; then
   ok "pipeline show applies a patch from the overrides layer, from the main checkout"
 else
   bad "pipeline show applies a patch from the overrides layer, from the main checkout"

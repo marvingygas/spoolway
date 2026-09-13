@@ -287,6 +287,29 @@ dispatcher. An empty queue is never counted: a repo with nothing to do is not a 
 that actually runs, or one made with `--force`, clears the count. See [Restarting into a repo
 that cannot run](dispatcher.md#restarting-into-a-repo-that-cannot-run).
 
+With an [overrides layer](configuration.md#the-overrides-layer) active, a run started with a
+terminal on both ends is stopped one more time before the lock is taken — nothing about a
+layer shows in `git status`, so this is the one place a person sees what is patched before it
+runs:
+
+```
+$ spoolway dispatch
+
+  overrides are active for this project
+
+    pipelines/impl.yml        2 keys      implement.model, test.timeout
+    prompts/reviewer          whole file
+    config.toml               1 key       agents.claude.concurrency
+
+  [enter] start the run   [esc] back   [x] don't ask again until this changes
+```
+
+`enter` starts an otherwise ordinary run; `esc` exits without dispatching and without taking
+the repo lock; `x` starts the run and remembers the layer's own fingerprint, so an unchanged layer never asks
+again — editing so much as one byte of it brings the notice back. With stdin or stdout not a
+terminal — every unattended run, and every script piping this command — the notice is printed
+and the run proceeds without waiting on an answer nobody can give.
+
 `spoolway dispatch` exits 0 on a run that dispatched and stopped on its own, 3 on an empty
 queue with no job enabled, 4 when another dispatcher already holds the lock, 5 when the
 restart guard refuses a start, and 1 on any other error. With a job enabled the run stays
@@ -829,13 +852,18 @@ pipelines/impl.yml         patch       implement.model, test.timeout
 prompts/reviewer           whole file  —
 config.toml                patch       agents.claude.concurrency
 
-3 artifacts    `override promote <target>` to keep one
+layer version  a91c4f02    3 artifacts    `override promote <target>` to keep one
 ```
 
 A target is named either the short way — a bare pipeline name, since only a pipeline's own
 target is ever bare — or the way `list` prints it: `pipelines/<name>.yml`, `prompts/<name>` or
 `config.toml`. `list` says so plainly when the layer is empty or absent; `--json` prints the
 same rows as a JSON array, `[]` for an empty layer.
+
+The `layer version` footer line is the layer's own fingerprint — the same value `spoolway
+dispatch`'s standing consent gate keys its acknowledgement on, never `version::stamp`'s
+combined one over the tracked files too — so it says exactly what pressing `x` at the gate is
+agreeing to.
 
 `override promote <target>` writes the patched values into the tracked file and clears that
 entry from the layer, leaving an ordinary diff ready to review and commit:
@@ -1012,6 +1040,11 @@ By default it reports only what needs your attention: any failing check, any not
 a file that has fallen behind `spoolway update`, and a closing line such as `28 checks
 passed. Everything checks out.` A failing run instead prints each `FAIL` line, then `N of M
 checks passed.`, and exits non-zero.
+
+An active [overrides layer](configuration.md#the-overrides-layer) is one such note, naming
+every overridden artifact — printed whether or not `spoolway dispatch`'s own gate has been
+acknowledged, since agreeing to run under the layer once does not stop it being worth
+mentioning to somebody reading `doctor` cold.
 
 | Flag | Meaning |
 |---|---|

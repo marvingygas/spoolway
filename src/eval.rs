@@ -177,6 +177,14 @@ struct Version {
     project: String,
     /// Local date of its earliest lane in this window.
     since: String,
+    /// Whether the lanes banked under this version ran with a patch layer
+    /// active — read off `Entry::commit`'s own `+ovr` suffix (see
+    /// `crate::version::commit_of`) rather than kept as a fact of its own:
+    /// the fingerprint already forces every lane in one version to have run
+    /// under byte-identical files, layer included, so one entry's suffix
+    /// speaks for the whole group. Never changes which versions are cut —
+    /// only how a row already in the table is drawn.
+    ovr: bool,
 }
 
 /// One pipeline's block: its name, and its versions newest first.
@@ -230,6 +238,7 @@ fn versions_of(entries: &[Entry], pipeline: &str, limit: usize) -> Vec<Version> 
     let mut order: Vec<String> = Vec::new();
     let mut first: HashMap<String, String> = HashMap::new();
     let mut projects: HashMap<String, String> = HashMap::new();
+    let mut overridden: HashSet<String> = HashSet::new();
 
     for entry in entries.iter().filter(|e| e.pipeline == pipeline) {
         let name = version_of(entry).to_string();
@@ -237,6 +246,9 @@ fn versions_of(entries: &[Entry], pipeline: &str, limit: usize) -> Vec<Version> 
             order.push(name.clone());
             first.insert(name.clone(), entry.ts.clone());
             projects.insert(name.clone(), entry.project.clone());
+        }
+        if commit_has_ovr(entry) {
+            overridden.insert(name);
         }
     }
 
@@ -252,6 +264,7 @@ fn versions_of(entries: &[Entry], pipeline: &str, limit: usize) -> Vec<Version> 
                 .map(|ts| local_date(ts))
                 .unwrap_or_default(),
             project: projects.get(&name).cloned().unwrap_or_default(),
+            ovr: overridden.contains(&name),
             name,
         })
         .collect()
@@ -259,6 +272,15 @@ fn versions_of(entries: &[Entry], pipeline: &str, limit: usize) -> Vec<Version> 
 
 fn version_of(entry: &Entry) -> &str {
     entry.version.as_deref().unwrap_or(UNVERSIONED)
+}
+
+/// Whether `entry` banked under a patch layer — `Entry::commit`'s own `+ovr`
+/// suffix, the same one `version::commit_of` writes. A version's own
+/// fingerprint already forces every lane sharing it to have run under
+/// byte-identical files, layer included, so this is a fact of the version as
+/// a whole read off any one of its lines, not a per-lane distinction.
+fn commit_has_ovr(entry: &Entry) -> bool {
+    entry.commit.as_deref().is_some_and(|c| c.contains("+ovr"))
 }
 
 pub(crate) fn local_date(ts: &str) -> String {
@@ -906,6 +928,12 @@ fn full_row(show_project: bool, version: &Version, m: &Metrics, pw: usize, vw: u
         m.cost_per_task_str(),
         m.time_per_task_str(),
     ));
+    // The one flag this table draws: a version banked under a patch layer,
+    // trailing the row exactly as the mockup draws it, rather than a column
+    // of its own — every other version's row has nothing to say here at all.
+    if version.ovr {
+        line.push_str(" ovr");
+    }
     line
 }
 
@@ -2930,6 +2958,7 @@ mod tests {
             project: "demo".into(),
             name: "v1".into(),
             since: "2026-08-04".into(),
+            ovr: false,
         };
         let row = json_row("default", &version, &m);
         assert_eq!(row["unpriced"], 1);
@@ -2957,6 +2986,7 @@ mod tests {
             project: "demo".into(),
             name: "v1".into(),
             since: "2026-08-04".into(),
+            ovr: false,
         };
         let row = json_row("default", &version, &m);
         assert_eq!(row["unpriced"], 1);
@@ -2994,6 +3024,35 @@ mod tests {
         assert_eq!(versions.len(), 2);
         assert_eq!(versions[0].name, "v3");
         assert_eq!(versions[1].name, "v2");
+    }
+
+    /// A version whose lines carry `Entry::commit`'s `+ovr` suffix is marked
+    /// `ovr`, a version whose lines are plain (or merely `+dirty`) is not —
+    /// and the flag reaches the printed row exactly as the mockup draws it,
+    /// trailing the line rather than living in a column of its own.
+    #[test]
+    fn a_version_banked_under_a_layer_is_marked_ovr() {
+        let mut layered = lane("t", "implement", "a91c4f02", 1, Some("pass"));
+        layered.commit = Some("abc1234+ovr".into());
+        let mut dirty_only = lane("t", "implement", "72614d06", 1, Some("pass"));
+        dirty_only.commit = Some("def5678+dirty".into());
+        dirty_only.ts = "2026-08-02T07:00:00+00:00".into();
+
+        let versions = versions_of(&[dirty_only, layered], "default", 10);
+        let by_name = |name: &str| versions.iter().find(|v| v.name == name).unwrap();
+        assert!(by_name("a91c4f02").ovr);
+        assert!(!by_name("72614d06").ovr);
+
+        let m = Metrics::default();
+        let vw = name_width(&versions);
+        assert!(
+            full_row(false, by_name("a91c4f02"), &m, 0, vw).ends_with(" ovr"),
+            "the layered row's own line must end with the flag"
+        );
+        assert!(
+            !full_row(false, by_name("72614d06"), &m, 0, vw).ends_with(" ovr"),
+            "a merely dirty row carries no flag at all"
+        );
     }
 
     #[test]

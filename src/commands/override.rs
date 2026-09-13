@@ -141,15 +141,20 @@ pub fn config_override(repo: &Repo) -> Result<()> {
 /// One row of `spoolway override list` — its own type, and
 /// [`collect_override_rows`] its own function, so a test can check what the
 /// layer holds without parsing a column of printed text.
-struct OverrideRow {
-    target: String,
-    kind: &'static str,
-    overrides: String,
+///
+/// `pub(crate)`, fields included: `commands::dispatch`'s own gate and
+/// `commands::doctor`'s standing note both read the layer this same way,
+/// rather than each re-deriving "what is overridden" from `crate::overrides`
+/// on its own.
+pub(crate) struct OverrideRow {
+    pub(crate) target: String,
+    pub(crate) kind: &'static str,
+    pub(crate) overrides: String,
 }
 
 /// Every entry the layer under `dir` currently holds, in the order `override
 /// list` prints them: pipelines, then prompts, then config.
-fn collect_override_rows(dir: &Path) -> Result<Vec<OverrideRow>> {
+pub(crate) fn collect_override_rows(dir: &Path) -> Result<Vec<OverrideRow>> {
     let mut rows = Vec::new();
 
     for name in crate::overrides::list_pipeline_patches(dir)? {
@@ -248,12 +253,16 @@ pub fn override_list(repo: &Repo, json: bool) -> Result<()> {
         );
     }
     println!();
-    // The mockup's footer also opens with `layer version  <fingerprint>` —
-    // that fingerprint is `version::stamp`'s, which the task's own
-    // non-goals reserve for `override-visible` to wire up. This prints the
-    // rest of the line: how many artifacts, and the hint to keep one.
+    // `layer_fingerprint`, never `stamp`'s combined one: this line is about
+    // the layer alone, the same value `dispatch`'s gate keys its own
+    // acknowledgement on — not the tracked files stamped in beside it. Rows
+    // being non-empty means the layer has at least one real file under it,
+    // so `unwrap_or_else` here only stands in for a read racing this one.
+    let fingerprint =
+        crate::version::layer_fingerprint(repo).unwrap_or_else(|| "unknown".to_string());
     println!(
-        "{} artifact{}    `override promote <target>` to keep one",
+        "layer version  {fingerprint}    {} artifact{}    `override promote <target>` to keep \
+         one",
         rows.len(),
         if rows.len() == 1 { "" } else { "s" }
     );
