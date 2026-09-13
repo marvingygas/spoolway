@@ -896,8 +896,8 @@ fn report_gate_warnings(warnings: &[String]) {
 ///
 /// Nothing about a pipeline is written here: the session that opens reads
 /// `spoolway-config`'s own generation procedure and does the rest. This
-/// command's whole job is getting that session started, with the right
-/// preferences in front of it.
+/// command's whole job is getting that session started, with the plan in
+/// front of it.
 pub fn pipeline_gen(repo: &Repo, mux: &dyn Mux, args: &PipelineGenArgs) -> Result<()> {
     let cfg = &repo.config.pipeline_gen;
 

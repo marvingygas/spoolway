@@ -513,8 +513,8 @@ pub fn entries(repo: &Repo) -> Result<Vec<Entry>> {
 }
 
 /// Which `pipeline/step` pairs run each prompt. "Used by nothing" is what
-/// `list` says about a prompt that can be deleted.
-fn users(pipelines: &Pipelines) -> BTreeMap<String, Vec<String>> {
+/// `list` says about a prompt that can be deleted, and what `doctor` notes.
+pub(crate) fn users(pipelines: &Pipelines) -> BTreeMap<String, Vec<String>> {
     let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for pipeline in pipelines.pipelines.values() {
         for step in &pipeline.steps {
@@ -695,18 +695,24 @@ fn spoolway_variables(body: &str) -> BTreeSet<String> {
 /// two near-identical files a task means is this project's own business, not
 /// spoolway's vocabulary. A dot immediately before the match is what tells
 /// the two apart, so `.spoolway/prompts/…` never trips this while `run
-/// inside spoolway` still does.
+/// inside spoolway` still does. A slash on either side is the same signal:
+/// `github.com/marvingygas/spoolway/releases/…` is a path naming a
+/// repository, not the tool naming itself.
 fn names_the_tool_bare(body: &str) -> bool {
     let lower = body.to_lowercase();
+    let bytes = lower.as_bytes();
     let mut rest = lower.as_str();
     let mut offset = 0;
     while let Some(pos) = rest.find("spoolway") {
         let idx = offset + pos;
-        let preceded_by_dot = idx > 0 && lower.as_bytes()[idx - 1] == b'.';
-        if !preceded_by_dot {
+        let end = idx + "spoolway".len();
+        let before = idx.checked_sub(1).map(|i| bytes[i]);
+        let after = bytes.get(end).copied();
+        let in_a_path = matches!(before, Some(b'.') | Some(b'/')) || matches!(after, Some(b'/'));
+        if !in_a_path {
             return true;
         }
-        offset = idx + "spoolway".len();
+        offset = end;
         rest = &lower[offset..];
     }
     false
@@ -901,17 +907,30 @@ fn subcommands(node: &clap::Command) -> Vec<String> {
 /// Deliberately line-scoped: a prompt writes commands one to a line, in prose
 /// or in an indented block, and a flag three paragraphs later belongs to a
 /// different command. Anything in angle brackets is a placeholder a person is
-/// meant to substitute, and never a subcommand.
+/// meant to substitute, and never a subcommand. A closing backtick ends the
+/// command too: "`spoolway lane` say what you left running" names `spoolway
+/// lane`, and the prose after it is not a subcommand of anything.
 fn invocations(body: &str) -> Vec<(String, Vec<String>, Vec<String>)> {
     let mut out = Vec::new();
 
     for line in body.lines() {
-        // Backticks, list bullets and code fences are punctuation around the
+        for segment in line.split('`') {
+            invocations_in(line, segment, &mut out);
+        }
+    }
+
+    out
+}
+
+/// One backtick-delimited stretch of `line`, scanned for `spoolway …`.
+fn invocations_in(line: &str, segment: &str, out: &mut Vec<(String, Vec<String>, Vec<String>)>) {
+    {
+        // Quotes, list bullets and code fences are punctuation around the
         // command, not part of it.
-        let cleaned: String = line
+        let cleaned: String = segment
             .chars()
             .map(|c| match c {
-                '`' | '"' | '\'' | '(' | ')' | ',' | ';' => ' ',
+                '"' | '\'' | '(' | ')' | ',' | ';' => ' ',
                 other => other,
             })
             .collect();
@@ -964,8 +983,6 @@ fn invocations(body: &str) -> Vec<(String, Vec<String>, Vec<String>)> {
             out.push((line.to_string(), path, flags));
         }
     }
-
-    out
 }
 
 /// `spoolway prompt check`.

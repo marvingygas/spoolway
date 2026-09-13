@@ -82,8 +82,9 @@ task is not evidence. It is idle sessions holding panes nobody will ever read, i
 nobody remembers making, long after the task is archived.
 
 - **Tear a fixture down completely, not tidily.** The project directory, its worktrees, its
-  queue, and every lane you started under it. `herdr agent list` and `spoolway lane` say what
-  you actually left running; work from those two rather than from memory of what you started.
+  queue, and every lane you started under it. `herdr agent list` and the lane listing your
+  prompt already names say what you actually left running; work from those two rather than
+  from memory of what you started.
 - **Put back whatever you changed to provoke the state.** A `permission_mode` set to `manual`,
   a config key flipped, a task queued to make a row appear — each one back as you found it. The
   next run that reads them cannot tell a fixture's setting from somebody's decision.

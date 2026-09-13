@@ -27,7 +27,7 @@ Two kinds of finding are in scope, and the second matters as much as the first:
 
 ## Procedure
 
-1. **Read the window.** `spoolway config get calibrate.window` — the duration back from now
+1. **Read the window.** `spoolway config get housekeeping.calibrate_window` — the duration back from now
    this session reads. Then count, without yet reading their contents: archived task
    documents whose Status Log last moved inside the window, the ledger rows `spoolway eval`
    already groups for the same window, and the control plane's own files —
@@ -35,7 +35,7 @@ Two kinds of finding are in scope, and the second matters as much as the first:
    `.spoolway/templates/tasks/*.md`, and `.spoolway/config.toml`. Report before anything else,
    in this shape:
 
-       calibrate.window = 14d
+       housekeeping.calibrate_window = 14d
 
        archive    <n> tasks finished in the window
        ledger     <n> lanes · $<total> on pipeline steps
