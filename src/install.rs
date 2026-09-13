@@ -454,9 +454,9 @@ mod tests {
                 // Every skill here is human-triggered, except spoolway-tasks
                 // and spoolway-pipeline: both are called from inside another
                 // skill's own procedure (spoolway-plan's step 7, and
-                // spoolway-calibrate's step 7), and
-                // `disable-model-invocation: true` would make a skill
-                // unreachable from there.
+                // spoolway-calibrate's step 8 for spoolway-pipeline and step 9
+                // for spoolway-tasks), and `disable-model-invocation: true`
+                // would make a skill unreachable from there.
                 if matches!(name, "spoolway-tasks" | "spoolway-pipeline") {
                     assert!(
                         !skill_md.contains("disable-model-invocation"),
