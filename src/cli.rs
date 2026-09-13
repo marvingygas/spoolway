@@ -203,6 +203,14 @@ pub enum Command {
     #[command(subcommand)]
     Override(OverrideCommand),
 
+    /// Print or validate the task, lane-prompt, task-log and PR shapes.
+    #[command(subcommand)]
+    Template(TemplateCommand),
+
+    /// Print the environment an issue-tracking hook is handed.
+    #[command(subcommand)]
+    Hook(HookCommand),
+
     /// Check that everything the configured pipeline needs is actually present.
     Doctor(DoctorArgs),
 }
@@ -256,7 +264,8 @@ pub const HELP_GROUPS: &[(&str, &[&str])] = &[
     (
         "Shaping the project:",
         &[
-            "pipeline", "prompt", "agent", "task", "config", "models", "override",
+            "pipeline", "prompt", "agent", "task", "config", "models", "override", "template",
+            "hook",
         ],
     ),
     (
@@ -1113,7 +1122,7 @@ pub enum PipelineCommand {
     /// pipeline.
     ///
     /// Nothing is written by this command itself: it opens the pane, starts
-    /// the `[pipeline_gen]` profile, and prompts the `spoolway-pipeline`
+    /// the `[pipeline_gen]` profile, and prompts the `spoolway-config`
     /// skill to carry the procedure from there.
     Gen(PipelineGenArgs),
 
@@ -1235,6 +1244,26 @@ pub enum PromptCommand {
     },
 }
 
+/// Printing the shapes that are prose, not a pipeline: a task's own body, a
+/// lane's seven typed messages, the task-log headings, and the pull request
+/// body.
+#[derive(Debug, Subcommand)]
+pub enum TemplateCommand {
+    /// Print the task, lane-prompt, task-log and PR shapes: where each
+    /// project file lives, what a project may leave out, and every
+    /// placeholder substituted into it.
+    Contract,
+}
+
+/// Printing the environment an issue-tracking hook is handed.
+#[derive(Debug, Subcommand)]
+pub enum HookCommand {
+    /// Print every event a hook script runs on and the environment each one
+    /// carries, rendered from the same tables `crate::tracking` builds to
+    /// launch it.
+    Contract,
+}
+
 #[derive(Debug, Args)]
 #[command(after_long_help = "\x1b[1mExamples:\x1b[0m\n  \
         spoolway update --dry-run     what it would change, and nothing else\n  \
@@ -1282,6 +1311,11 @@ pub struct PromptContractArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum ConfigCommand {
+    /// Print the config format: every setting, its values, its default and
+    /// one sentence — rendered from the same register `config.toml`'s own
+    /// header table writes, so a setting is documented once.
+    Contract,
+
     /// Print the whole config.
     Show,
 
@@ -1319,6 +1353,10 @@ pub enum ConfigCommand {
 /// files. Nothing here touches the checkout, so `git status` never moves.
 #[derive(Debug, Subcommand)]
 pub enum OverrideCommand {
+    /// Print the merge rule, what a patch may carry, and the four `override`
+    /// commands.
+    Contract,
+
     /// One line per overridden artifact: its kind and the keys it carries.
     List,
 

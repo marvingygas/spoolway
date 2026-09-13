@@ -299,7 +299,7 @@ pub struct IssueTrackingConfig {
 }
 
 /// What `spoolway pipeline gen` opens, and what it hands the generation
-/// procedure — everything the `spoolway-pipeline` skill needs that is a
+/// procedure — everything the `spoolway-config` skill needs that is a
 /// per-project preference rather than a fact the skill decides for itself.
 ///
 /// No `prompt` key here, deliberately: the skill *is* the whole brief for
@@ -323,7 +323,7 @@ pub struct PipelineGenConfig {
     pub pipeline_effort: String,
 
     /// `true` skips asking and takes the procedure's own recommendation —
-    /// see the `spoolway-pipeline` skill's generation procedure.
+    /// see the `spoolway-config` skill's generation procedure.
     pub pipeline_auto: bool,
 
     /// The loop budget every loop a generated pipeline writes starts at.

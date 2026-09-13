@@ -308,6 +308,10 @@ struct Contract {
     existing: Vec<String>,
     preferences: PreferencesContract,
     template: String,
+    /// A second file, `overrides/pipelines/<name>.yml`, can patch what a
+    /// tracked pipeline file says without touching the checkout — see
+    /// `spoolway override contract` for the merge rule and what it may carry.
+    overrides: &'static str,
 }
 
 /// Every `<name>.md` this project has written under the task-templates
@@ -388,6 +392,8 @@ fn build_contract(repo: &Repo, pipelines: &Pipelines) -> Contract {
             auto: cfg.pipeline_auto,
         },
         template: template(),
+        overrides: "A second file, `overrides/pipelines/<name>.yml`, can patch a step's values \
+                    without touching this one — see `spoolway override contract`.",
     }
 }
 
@@ -899,7 +905,7 @@ fn report_gate_warnings(warnings: &[String]) {
 /// pipeline — never a step of the graph this binary walks itself.
 ///
 /// Nothing about a pipeline is written here: the session that opens reads
-/// `spoolway-pipeline`'s own generation procedure and does the rest. This
+/// `spoolway-config`'s own generation procedure and does the rest. This
 /// command's whole job is getting that session started, with the right
 /// preferences in front of it.
 pub fn pipeline_gen(repo: &Repo, mux: &dyn Mux, args: &PipelineGenArgs) -> Result<()> {
@@ -1006,7 +1012,7 @@ pub fn pipeline_gen(repo: &Repo, mux: &dyn Mux, args: &PipelineGenArgs) -> Resul
     );
     println!();
     println!("opened a pane on this checkout");
-    println!("prompted `spoolway-pipeline`");
+    println!("prompted `spoolway-config`");
     println!();
     println!("Nothing is written yet. Answer it in that pane.");
 
@@ -1015,15 +1021,15 @@ pub fn pipeline_gen(repo: &Repo, mux: &dyn Mux, args: &PipelineGenArgs) -> Resul
 
 /// The system prompt written to the project's own `scratch/`, for a kind whose argv
 /// template needs one — see [`crate::agent::Adapter::args`]'s `{prompt_file}`.
-/// There is no prompt for this session: the `spoolway-pipeline` skill is the
+/// There is no prompt for this session: the `spoolway-config` skill is the
 /// whole brief, so this names only the plan and says as much.
 fn pipeline_gen_system_prompt(plan: Option<&str>) -> String {
     match plan {
         Some(plan) => format!(
-            "Generating a pipeline for the plan at {plan}.\n\nThe `spoolway-pipeline` skill \
+            "Generating a pipeline for the plan at {plan}.\n\nThe `spoolway-config` skill \
              carries the whole procedure.\n"
         ),
-        None => "Generating a pipeline.\n\nThe `spoolway-pipeline` skill carries the whole \
+        None => "Generating a pipeline.\n\nThe `spoolway-config` skill carries the whole \
                   procedure.\n"
             .to_string(),
     }
@@ -1033,9 +1039,9 @@ fn pipeline_gen_system_prompt(plan: Option<&str>) -> String {
 fn pipeline_gen_opening_prompt(plan: Option<&str>) -> String {
     match plan {
         Some(plan) => format!(
-            "Use the `spoolway-pipeline` skill to generate a pipeline for the plan at {plan}."
+            "Use the `spoolway-config` skill to generate a pipeline for the plan at {plan}."
         ),
-        None => "Use the `spoolway-pipeline` skill to generate a pipeline.".to_string(),
+        None => "Use the `spoolway-config` skill to generate a pipeline.".to_string(),
     }
 }
 
@@ -1314,7 +1320,7 @@ mod tests {
 
         assert_eq!(mux.prompts.borrow().len(), 1);
         let (_, text) = &mux.prompts.borrow()[0];
-        assert!(text.contains("spoolway-pipeline"), "{text}");
+        assert!(text.contains("spoolway-config"), "{text}");
         assert!(text.contains(".spoolway/plans/my-plan.html"), "{text}");
 
         // The system prompt file itself, found by scanning the scratch
@@ -1331,7 +1337,7 @@ mod tests {
             contents.contains(".spoolway/plans/my-plan.html"),
             "{contents}"
         );
-        assert!(contents.contains("spoolway-pipeline"), "{contents}");
+        assert!(contents.contains("spoolway-config"), "{contents}");
     }
 
     /// `init` now claims a name under the real `~/.spoolway/`, so every test

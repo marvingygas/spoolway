@@ -1348,6 +1348,11 @@ fn doctor_update(repo: &Repo, report: &mut Report) {
             crate::update::Outcome::Blocked { path, why } => {
                 report.note(format!("{path}: {why}"));
             }
+            crate::update::Outcome::Removed { path, why } => {
+                if !behind.iter().any(|(known, _)| *known == path.as_str()) {
+                    behind.push((path, why));
+                }
+            }
             crate::update::Outcome::Kept => {}
         }
     }

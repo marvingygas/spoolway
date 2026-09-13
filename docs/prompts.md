@@ -243,7 +243,7 @@ The shape is one opening line saying what the role does and where its work stops
 headings `spoolway prompt contract`'s own seventh section prints — `## What you are looking
 at`, `## How to do it here`, `## Never` — as headings and bullets a small local model can
 skim, one default per choice rather than a menu. `spoolway prompt show implementer` is the
-house style, and the `spoolway-pipeline` skill carries the same shape in its own procedure.
+house style, and the `spoolway-config` skill carries the same shape in its own procedure.
 
 Then wire the step that runs it, in the pipeline file — the two are written together,
 because each is half of the same decision:
@@ -282,7 +282,7 @@ What they catch:
   pointing at a replacement. Naming the tool itself, with none of the above, is caught too —
   `.spoolway/`, this project's own layout, is exempted
 
-The `spoolway-pipeline` skill walks the whole procedure with a coding agent: read the
+The `spoolway-config` skill walks the whole procedure with a coding agent: read the
 contract, settle the role with you, write the file, wire the step, check both halves. It owns
 the graph and the roles on it together, because a step and the prompt it runs are halves of
 the same decision.

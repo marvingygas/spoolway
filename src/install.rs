@@ -26,11 +26,13 @@
 //! decision, with the artifact each row was read off recorded beside it.
 //!
 //! Which of those resources ship beside the skill depends on whether the file
-//! outlives the procedure that fills it. `spoolway-pipeline` ships none any
-//! more: the annotated template and the format it once copied from are both
-//! printed by `spoolway pipeline contract` and `spoolway prompt contract`
-//! now, so the skill fetches them at runtime instead of carrying a copy that
-//! can drift from the binary that actually enforces the format.
+//! outlives the procedure that fills it. `spoolway-config` (renamed and
+//! widened from `spoolway-pipeline`) ships none at all: every format it
+//! routes to is printed by the binary itself — `spoolway pipeline contract`,
+//! `prompt contract`, `config contract`, `override contract`, `template
+//! contract` and `hook contract` — so the skill fetches them at runtime
+//! instead of carrying a copy that can drift from the binary that actually
+//! enforces the format.
 //!
 //! The plan skeleton is not installed by this module at all: `spoolway-plan`'s
 //! `assets: &[]` here names nothing, so a fresh project running `spoolway
@@ -98,20 +100,25 @@ const SKILLS: &[Skill] = &[
         pi_skill_md: include_str!("../assets/skills/pi/spoolway-tasks/SKILL.md"),
         assets: &[],
     },
-    // Reshaping the flow itself: the graph, and the prompts its agent steps
-    // run. One skill rather than two, because a step and the role that runs it
-    // are halves of the same decision and changing either usually moves the
-    // other. It carries no `disable-model-invocation` either: `spoolway-
-    // calibrate` hands a shape finding straight to it, so it has to be
-    // reachable from inside another skill's own procedure. It ships no assets any more: the format it once copied from
-    // lives in `spoolway pipeline contract` and `spoolway prompt contract`
-    // now, fetched at runtime instead of drifting from the binary that
-    // enforces it.
+    // Reshaping the flow itself — the graph, and the prompts its agent steps
+    // run — and, since it was renamed and widened from `spoolway-pipeline`,
+    // routing over every other corner of the control plane: `config.toml`,
+    // the override layer, the task/lane/task-log templates, and the
+    // issue-tracking hooks. One skill rather than several, because a step and
+    // the value that runs it (a model, an effort, a timeout, a concurrency)
+    // are the same territory at different sizes. It carries no
+    // `disable-model-invocation` either: `spoolway-calibrate` hands a shape
+    // finding straight to it, so it has to be reachable from inside another
+    // skill's own procedure. It ships no assets: every format it routes to is
+    // printed by the binary itself — `spoolway pipeline contract`, `prompt
+    // contract`, `config contract`, `override contract`, `template contract`
+    // and `hook contract` — fetched at runtime instead of a copy that can
+    // drift from the binary that enforces it.
     Skill {
-        name: "spoolway-pipeline",
-        skill_md: include_str!("../assets/skills/claude/spoolway-pipeline/SKILL.md"),
-        codex_skill_md: include_str!("../assets/skills/codex/spoolway-pipeline/SKILL.md"),
-        pi_skill_md: include_str!("../assets/skills/pi/spoolway-pipeline/SKILL.md"),
+        name: "spoolway-config",
+        skill_md: include_str!("../assets/skills/claude/spoolway-config/SKILL.md"),
+        codex_skill_md: include_str!("../assets/skills/codex/spoolway-config/SKILL.md"),
+        pi_skill_md: include_str!("../assets/skills/pi/spoolway-config/SKILL.md"),
         assets: &[],
     },
     // Reading a pipeline's health is CLI calls too, and the same shape as the
@@ -137,6 +144,15 @@ const SKILLS: &[Skill] = &[
         assets: &[],
     },
 ];
+
+/// Skill directories this project once shipped under a name it no longer
+/// uses — a short, hand-written literal, and never derived from [`SKILLS`]:
+/// a skill this binary actively ships must never appear here by
+/// construction, or `spoolway update` would delete what `install` is about
+/// to rewrite in the very same pass. `spoolway-pipeline` is the one entry
+/// today, renamed and widened into `spoolway-config` — see [`SKILLS`]'s own
+/// comment above.
+pub const RETIRED_SKILLS: &[&str] = &["spoolway-pipeline"];
 
 /// One file an install would write.
 #[derive(Debug, Clone, PartialEq)]
@@ -303,7 +319,7 @@ mod tests {
             let expected = vec![
                 skills.join("spoolway-plan").join("SKILL.md"),
                 skills.join("spoolway-tasks").join("SKILL.md"),
-                skills.join("spoolway-pipeline").join("SKILL.md"),
+                skills.join("spoolway-config").join("SKILL.md"),
                 skills.join("spoolway-doctor").join("SKILL.md"),
                 skills.join("spoolway-calibrate").join("SKILL.md"),
             ];
@@ -452,12 +468,13 @@ mod tests {
                     "{name}'s {provider} copy has a frontmatter name that does not match its file"
                 );
                 // Every skill here is human-triggered, except spoolway-tasks
-                // and spoolway-pipeline: both are called from inside another
+                // and spoolway-config: both are called from inside another
                 // skill's own procedure (spoolway-plan's step 7, and
-                // spoolway-calibrate's step 7), and
-                // `disable-model-invocation: true` would make a skill
-                // unreachable from there.
-                if matches!(name, "spoolway-tasks" | "spoolway-pipeline") {
+                // spoolway-calibrate's step 7 — the invocation exception
+                // survives spoolway-config's rename from spoolway-pipeline
+                // unchanged), and `disable-model-invocation: true` would make
+                // a skill unreachable from there.
+                if matches!(name, "spoolway-tasks" | "spoolway-config") {
                     assert!(
                         !skill_md.contains("disable-model-invocation"),
                         "{name}'s {provider} copy must stay reachable from another skill's own \

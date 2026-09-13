@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # The override command surface, end to end: forking a knob out of the
-# tracked checkout, seeing it listed, and promoting it back in.
+# tracked checkout, seeing it listed, and promoting it back in. Also carries
+# the four new `contract` commands (`config`, `override`, `template`, `hook`)
+# and `spoolway update`'s removal of the skill directory `spoolway-pipeline`
+# was renamed from — CLI-level checks with nowhere better-fitting to live,
+# for the same reason the rest of this file is a suite rather than a unit
+# test: what matters is the process actually wired up, not the render.
 #
 # Everything a unit test can decide about this already is — `src/overrides.rs`
 # asserts the promoted file is byte-identical apart from the named values,
@@ -126,5 +131,48 @@ says "naming the pipeline it touches" \
   "$SPOOLWAY" dispatch --dry-run
 works "and proceeds without anybody there to answer" \
   timeout 10 "$SPOOLWAY" dispatch --dry-run
+
+# ------------------------------------------------- the four new contracts
+# Each one is a unit-tested render in src/commands/{config,override,template,
+# hook}.rs already; what a unit test cannot see is the command actually
+# wired up end to end — clap routing the subcommand, `main.rs` calling the
+# right function, and the process exiting zero with something on stdout.
+works "config contract exits zero" "$SPOOLWAY" config contract
+says "and prints the register config.toml's own header renders from" \
+  "dispatch.backend" \
+  "$SPOOLWAY" config contract
+
+works "override contract exits zero" "$SPOOLWAY" override contract
+says "and names the merge rule" \
+  "already exist on the tracked pipeline" \
+  "$SPOOLWAY" override contract
+
+works "template contract exits zero" "$SPOOLWAY" template contract
+says "and names all four shapes" \
+  "TASK-LOG" \
+  "$SPOOLWAY" template contract
+
+works "hook contract exits zero" "$SPOOLWAY" hook contract
+says "and names the events a hook script runs on" \
+  "SPOOLWAY_EVENT" \
+  "$SPOOLWAY" hook contract
+
+# --------------------------------------------- update removes the old skill
+# `spoolway-pipeline` was renamed to `spoolway-config`; a project that ran
+# `install` before the rename has the old directory on disk, and `update`
+# is the one chance to clean it up without touching anything else there.
+STALE=.claude/skills/spoolway-pipeline
+UNRELATED=.claude/skills/a-projects-own-skill
+mkdir -p "$STALE" "$UNRELATED"
+echo "the old skill" > "$STALE/SKILL.md"
+echo "not spoolway's" > "$UNRELATED/SKILL.md"
+
+must "update, to clean up the rename" "$SPOOLWAY" update
+
+works "the stale renamed skill is gone" test ! -e "$STALE"
+works "a directory not on the retired list is untouched" \
+  test -f "$UNRELATED/SKILL.md"
+works "and the renamed skill itself is installed" \
+  test -f .claude/skills/spoolway-config/SKILL.md
 
 finish

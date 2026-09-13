@@ -62,8 +62,9 @@ use std::path::PathBuf;
 use anyhow::Result;
 
 use cli::{
-    AgentCommand, Cli, Command, ConfigCommand, GroupCommand, IssueCommand, JobsCommand,
-    ModelsCommand, OverrideCommand, PipelineCommand, PromptCommand, QueueCommand, TaskCommand,
+    AgentCommand, Cli, Command, ConfigCommand, GroupCommand, HookCommand, IssueCommand,
+    JobsCommand, ModelsCommand, OverrideCommand, PipelineCommand, PromptCommand, QueueCommand,
+    TaskCommand, TemplateCommand,
 };
 use pipeline::Pipelines;
 use repo::Repo;
@@ -200,6 +201,9 @@ fn run() -> Result<()> {
         // command answers about the file actually in front of it. `set` is
         // the one exception — it writes `repo.root`, and refuses first if a
         // linked worktree's `checkout` differs from it.
+        Command::Config(ConfigCommand::Contract) => {
+            commands::config_contract(&Repo::discover(&cwd)?, cli.json)
+        }
         Command::Config(ConfigCommand::Show) => {
             commands::config_show(&Repo::discover(&cwd)?, cli.json)
         }
@@ -404,6 +408,7 @@ fn run() -> Result<()> {
                     commands::prompt_override(&repo, name)
                 }
 
+                Command::Override(OverrideCommand::Contract) => commands::override_contract(),
                 Command::Override(OverrideCommand::List) => {
                     commands::override_list(&repo, cli.json)
                 }
@@ -413,6 +418,9 @@ fn run() -> Result<()> {
                 Command::Override(OverrideCommand::Drop(args)) => {
                     commands::override_drop(&repo, args.target.as_deref())
                 }
+
+                Command::Template(TemplateCommand::Contract) => commands::template_contract(&repo),
+                Command::Hook(HookCommand::Contract) => commands::hook_contract(),
 
                 Command::Group(GroupCommand::List) => commands::group_list(&repo),
 

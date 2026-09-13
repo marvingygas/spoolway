@@ -14,6 +14,7 @@ are pipeline facts now, written once in the graph rather than duplicated in both
 ## Editing it
 
 ```
+spoolway config contract       # every setting, its values and its default, printed
 spoolway config edit           # open the file in $EDITOR, re-validated on save
 spoolway config show           # the whole config
 spoolway config list           # every scalar key, as `key = value`, in key order
@@ -99,7 +100,7 @@ and `prompt::path_for`, and nowhere else. Every command, the dispatcher and the 
 keep receiving one assembled set exactly as if the patch layer did not exist; nothing
 downstream of those three learns that a second source was consulted. `spoolway pipeline
 override`, `prompt override` and `config override` write into it, and `spoolway override
-list | promote | drop` inspect and clear it — see [`spoolway override`](cli-reference.md#spoolway-override-list--promote--drop)
+contract | list | promote | drop` inspect and clear it — see [`spoolway override`](cli-reference.md#spoolway-override-list--promote--drop)
 in the CLI reference.
 
 It holds up to three things:
@@ -382,7 +383,7 @@ pipeline_loop_default = 1
 pipeline_local_models = false
 ```
 
-What `spoolway pipeline gen` opens, and what it hands the `spoolway-pipeline` skill's
+What `spoolway pipeline gen` opens, and what it hands the `spoolway-config` skill's
 generation procedure once the session starts — see [`spoolway pipeline
 gen`](cli-reference.md#spoolway-pipeline-gen---plan-path).
 
@@ -398,7 +399,7 @@ than asking about them again. **`pipeline_loop_default`** is also the budget eve
 generated pipeline writes starts at; it binds generation only — `assets/pipelines/*.yml` keep
 whatever numbers they already have, and this key never reaches back to change them.
 
-There is no `prompt` key here. The `spoolway-pipeline` skill is the whole brief for this
+There is no `prompt` key here. The `spoolway-config` skill is the whole brief for this
 session, deliberately — a second file layered on top would only be one more place the
 instructions could disagree with each other.
 

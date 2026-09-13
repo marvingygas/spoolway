@@ -221,6 +221,57 @@ pub fn open_ticket(
     })
 }
 
+/// Every variable every event carries — `spoolway hook contract` prints this
+/// table first, before any event's own.
+pub(crate) const COMMON_EVENT_VARS: &[(&str, &str)] = &[
+    ("SPOOLWAY_EVENT", "which of the six events this run is"),
+    (
+        "SPOOLWAY_PROJECT_KEY",
+        "`issue_tracking.project_key`, verbatim, opaque to spoolway",
+    ),
+];
+
+/// Every variable [`open_env`] adds beyond [`COMMON_EVENT_VARS`], plus the
+/// three [`open_ticket`] inserts itself once `open_env`'s own map comes back
+/// — kept beside the function that builds them rather than copied into
+/// `commands::hook`, so `spoolway hook contract` renders this table instead
+/// of a second copy of it.
+/// `tests::open_and_dispatch_vars_match_a_real_environment` is what checks
+/// the two never drift apart.
+pub(crate) const OPEN_EVENT_VARS: &[(&str, &str)] = &[
+    ("SPOOLWAY_TASK", "the id it is about to be queued under"),
+    ("SPOOLWAY_SOURCE", "the task document's own `source:`"),
+    ("SPOOLWAY_GROUP", "its `group:`"),
+    ("SPOOLWAY_BRANCH", "its `branch:`"),
+    ("SPOOLWAY_TITLE", "its title"),
+    ("SPOOLWAY_TASK_FILE", "the queued document's path"),
+    (
+        "SPOOLWAY_GROUP_SIZE",
+        "how many tasks this group is opening at once",
+    ),
+    (
+        "SPOOLWAY_EPIC",
+        "the group's already-open epic, if this is not its first task",
+    ),
+    (
+        "SPOOLWAY_DEPENDS_TICKETS",
+        "tickets of the tasks this one's `depends_on:` names",
+    ),
+    (
+        "SPOOLWAY_OUT",
+        "where to write the answer: `epic=`, `ticket=`, `slug=` and `url=` lines, any \
+         order, all optional",
+    ),
+    (
+        "SPOOLWAY_EPIC_BODY",
+        "a file rendered from `.spoolway/templates/tracking/epic.md`",
+    ),
+    (
+        "SPOOLWAY_TICKET_BODY",
+        "a file rendered from `.spoolway/templates/tracking/ticket.md`",
+    ),
+];
+
 /// The environment [`open_ticket`] runs its hook with — everything
 /// [`build_env`] gives the four dispatch events that also makes sense before
 /// a task has ever moved: no `SPOOLWAY_FROM`, since nothing has happened to
@@ -322,6 +373,32 @@ pub enum FetchResult {
     Failed { exit_code: Option<i32> },
 }
 
+/// Every variable [`fetch_env`] adds beyond [`COMMON_EVENT_VARS`], plus
+/// `SPOOLWAY_OUT`, which [`fetch_issue`] inserts itself once `fetch_env`'s
+/// own map comes back — see [`OPEN_EVENT_VARS`] for why this lives beside
+/// the function it describes rather than in `commands::hook`.
+pub(crate) const FETCH_EVENT_VARS: &[(&str, &str)] = &[
+    (
+        "SPOOLWAY_REF",
+        "the reference exactly as typed — never parsed by spoolway",
+    ),
+    (
+        "SPOOLWAY_OUT",
+        "where to write the answer: whatever this prints as JSON",
+    ),
+];
+
+/// The environment [`fetch_issue`] runs its hook with, minus `SPOOLWAY_OUT`
+/// — added by the caller once the tracking directory it points into exists,
+/// the same split [`open_env`] and [`open_ticket`] keep.
+fn fetch_env(reference: &str, project_key: &str) -> BTreeMap<String, String> {
+    BTreeMap::from([
+        ("SPOOLWAY_EVENT".to_string(), "fetch".to_string()),
+        ("SPOOLWAY_REF".to_string(), reference.to_string()),
+        ("SPOOLWAY_PROJECT_KEY".to_string(), project_key.to_string()),
+    ])
+}
+
 /// A filesystem-safe stem for one `fetch` run's tracking files, keyed on the
 /// issue reference rather than a task id — `spoolway issue show` runs before
 /// any document naming the issue exists, so there is no task to key on.
@@ -393,14 +470,7 @@ pub fn fetch_issue(repo: &Repo, reference: &str) -> Result<FetchResult> {
     let out_path = dir.join(format!("{key}.out"));
     let _ = std::fs::remove_file(&out_path);
 
-    let mut env = BTreeMap::from([
-        ("SPOOLWAY_EVENT".to_string(), "fetch".to_string()),
-        ("SPOOLWAY_REF".to_string(), reference.to_string()),
-        (
-            "SPOOLWAY_PROJECT_KEY".to_string(),
-            repo.config.issue_tracking.project_key.clone(),
-        ),
-    ]);
+    let mut env = fetch_env(reference, &repo.config.issue_tracking.project_key);
     env.insert("SPOOLWAY_OUT".to_string(), out_path.display().to_string());
 
     let run_line = crate::platform::Shell::Posix.quote(&hook.display().to_string());
@@ -690,6 +760,30 @@ pub fn failure_count(repo: &Repo) -> usize {
     }
     failing.len()
 }
+
+/// Every variable [`build_env`] adds beyond [`COMMON_EVENT_VARS`], for the
+/// four events that fire once a task settles — see [`OPEN_EVENT_VARS`] for
+/// why this lives beside the function it describes rather than in
+/// `commands::hook`.
+pub(crate) const DISPATCH_EVENT_VARS: &[(&str, &str)] = &[
+    ("SPOOLWAY_TASK", "the task's id"),
+    ("SPOOLWAY_FROM", "the step it arrived from"),
+    ("SPOOLWAY_SOURCE", "its `source:`"),
+    ("SPOOLWAY_GROUP", "its `group:`"),
+    ("SPOOLWAY_BRANCH", "its `branch:`"),
+    ("SPOOLWAY_TITLE", "its title"),
+    ("SPOOLWAY_TASK_FILE", "its path"),
+    (
+        "SPOOLWAY_GROUP_SIZE",
+        "how many tasks in its group are still open",
+    ),
+    ("SPOOLWAY_EPIC", "the epic `open` answered, if any"),
+    ("SPOOLWAY_TICKET", "the ticket `open` answered, if any"),
+    (
+        "SPOOLWAY_GROUP_LAST",
+        "`1`, and only on `done`, only on a group's last open task",
+    ),
+];
 
 fn build_env(repo: &Repo, task: &Task, event: &str, group_open: usize) -> BTreeMap<String, String> {
     let front = &task.front;
@@ -1004,6 +1098,69 @@ mod tests {
         assert!(
             !build_env(&repo, &t, crate::pipeline::BLOCKED, 1).contains_key("SPOOLWAY_GROUP_LAST"),
             "only the done event ever carries it"
+        );
+    }
+
+    /// `spoolway hook contract` prints [`COMMON_EVENT_VARS`],
+    /// [`OPEN_EVENT_VARS`], [`DISPATCH_EVENT_VARS`] and [`FETCH_EVENT_VARS`]
+    /// rather than a second, hand-kept copy of what these functions actually
+    /// build — this is what keeps the two from drifting apart: the name set
+    /// each table documents has to be exactly the name set a real call
+    /// produces, common variables included.
+    #[test]
+    fn open_dispatch_and_fetch_vars_match_a_real_environment() {
+        use std::collections::BTreeSet;
+
+        fn names(table: &[(&'static str, &'static str)]) -> BTreeSet<&'static str> {
+            table.iter().map(|(name, _)| *name).collect()
+        }
+
+        let repo = fixture("hook-contract-vars");
+        let t = task("demo", |f| f.group = Some("g".into()));
+
+        // `open_env` never sees `SPOOLWAY_OUT`, `SPOOLWAY_EPIC_BODY` or
+        // `SPOOLWAY_TICKET_BODY` — `open_ticket` adds those three once the
+        // tracking directory it points into exists — so they are added here
+        // exactly the way that caller does, rather than expected of
+        // `open_env` itself.
+        let mut open = open_env(&repo, &t, 1, "", "");
+        open.insert("SPOOLWAY_OUT".to_string(), String::new());
+        open.insert("SPOOLWAY_EPIC_BODY".to_string(), String::new());
+        open.insert("SPOOLWAY_TICKET_BODY".to_string(), String::new());
+        let open_keys: BTreeSet<&str> = open.keys().map(String::as_str).collect();
+        assert_eq!(
+            open_keys,
+            names(COMMON_EVENT_VARS)
+                .into_iter()
+                .chain(names(OPEN_EVENT_VARS))
+                .collect(),
+        );
+
+        // `SPOOLWAY_GROUP_LAST` is the one variable `build_env` only
+        // sometimes carries — called here the way it is at a group's last
+        // open task on `done`, so this run's own keys are the full set
+        // `DISPATCH_EVENT_VARS` documents.
+        let dispatch = build_env(&repo, &t, crate::pipeline::DONE, 1);
+        let dispatch_keys: BTreeSet<&str> = dispatch.keys().map(String::as_str).collect();
+        assert_eq!(
+            dispatch_keys,
+            names(COMMON_EVENT_VARS)
+                .into_iter()
+                .chain(names(DISPATCH_EVENT_VARS))
+                .collect(),
+        );
+
+        // `fetch_env` never sees `SPOOLWAY_OUT` either — `fetch_issue` adds
+        // it the same way `open_ticket` adds its own three.
+        let mut fetch = fetch_env("o/r#42", "");
+        fetch.insert("SPOOLWAY_OUT".to_string(), String::new());
+        let fetch_keys: BTreeSet<&str> = fetch.keys().map(String::as_str).collect();
+        assert_eq!(
+            fetch_keys,
+            names(COMMON_EVENT_VARS)
+                .into_iter()
+                .chain(names(FETCH_EVENT_VARS))
+                .collect(),
         );
     }
 

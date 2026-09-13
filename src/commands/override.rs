@@ -216,6 +216,71 @@ fn render_override_rows_json(rows: &[OverrideRow]) -> Result<String> {
     Ok(serde_json::to_string_pretty(&payload)?)
 }
 
+/// `spoolway override contract`: the merge rule, what a patch may carry, and
+/// the four `override` commands — this one included.
+///
+/// Printed rather than copied into the skill that reaches for it: the shape a
+/// patch may take is [`crate::overrides::PipelinePatch`] and
+/// [`crate::overrides::apply_config_patch`]'s own rules, so a paragraph
+/// stating them here separately would be the second copy that drifts.
+pub fn override_contract() -> Result<()> {
+    print!("{}", render_override_contract());
+    Ok(())
+}
+
+/// One line of [`render_override_contract`], kept as a slice so a test can
+/// walk it looking for the facts the acceptance criteria name, without
+/// capturing stdout.
+const OVERRIDE_CONTRACT_LINES: &[&str] = &[
+    "THE OVERRIDE CONTRACT",
+    "=====================",
+    "",
+    "A layer outside the checkout, read live at every dispatcher pass, `pipeline show` and",
+    "lane start, alongside the tracked files — nothing here touches the checkout, so `git",
+    "status` never moves.",
+    "",
+    "THE MERGE RULE",
+    "  A pipeline patch overlays one key at a time onto the step it names — every key the",
+    "  patch is silent about is left exactly as the tracked file wrote it. A step id must",
+    "  already exist on the tracked pipeline: a patch may set a value on a step, never add,",
+    "  remove or reposition one — position decides scheduling priority, and that is a change",
+    "  to the graph, not to a value on it.",
+    "  A config patch merges by dotted key through the same validated path `spoolway config",
+    "  set` writes through, so a patch can never produce a config that command would have",
+    "  refused.",
+    "  A prompt override replaces the tracked file whole: prose carries no key for a patch to",
+    "  aim at.",
+    "",
+    "WHAT A PATCH MAY CARRY",
+    "  pipelines/<name>.yml   `description`, `task_template`, and `steps.<id>.<key>=<value>`",
+    "                         for any key `spoolway pipeline contract` lists except `id` —",
+    "                         renaming a step is refused by name. `override promote` only",
+    "                         ever writes a step's own keys: a layered `description` or",
+    "                         `task_template` is refused there by name too, and has to be",
+    "                         edited into the tracked file by hand instead.",
+    "  config.toml            any key `spoolway config contract` lists, exactly as `config",
+    "                         set` would accept it.",
+    "  prompts/<name>         the whole file — see the merge rule above.",
+    "",
+    "THE FOUR `override` COMMANDS",
+    "  spoolway override contract          this",
+    "  spoolway override list              what is layered right now, and over what",
+    "  spoolway override promote <target>  write a patched artifact into the tracked file,",
+    "                                       then clear it from the layer",
+    "  spoolway override drop [<target>]   remove one entry, or the whole layer",
+    "",
+    "A patch is written by `spoolway pipeline override <name> --set <step>.<key>=<value>`,",
+    "`spoolway prompt override <name>` or `spoolway config override` — never by hand.",
+];
+
+/// [`override_contract`]'s body, built as a string so a test can assert on
+/// it directly rather than capturing stdout.
+fn render_override_contract() -> String {
+    let mut out = OVERRIDE_CONTRACT_LINES.join("\n");
+    out.push('\n');
+    out
+}
+
 /// `spoolway override list`.
 pub fn override_list(repo: &Repo, json: bool) -> Result<()> {
     let dir = repo.overrides_dir();
@@ -404,6 +469,25 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&fake_home).ok();
         result
+    }
+
+    /// The acceptance shape: the merge rule, what a patch may carry, the
+    /// step-id rule, and all four `override` commands, `contract` included.
+    #[test]
+    fn override_contract_names_the_merge_rule_and_all_four_commands() {
+        override_contract().unwrap();
+        let text = render_override_contract();
+        for fact in [
+            "already exist on the tracked pipeline",
+            "config.toml",
+            "prompts/<name>",
+            "override contract",
+            "override list",
+            "override promote",
+            "override drop",
+        ] {
+            assert!(text.contains(fact), "override contract drops `{fact}`");
+        }
     }
 
     #[test]

@@ -55,7 +55,7 @@ pub const STATES: &[&str] = &[
 /// Every placeholder [`render`] substitutes. A section naming one of these is
 /// asking for a fact this module already has; a section naming anything else
 /// is asking for nothing this module can answer, and [`lint`] says so.
-const PLACEHOLDERS: &[&str] = &["task_file", "step", "skills", "report_contract"];
+pub(crate) const PLACEHOLDERS: &[&str] = &["task_file", "step", "skills", "report_contract"];
 
 /// Where a project overrides these seven messages, relative to its checkout.
 pub fn path(repo: &Repo) -> std::path::PathBuf {

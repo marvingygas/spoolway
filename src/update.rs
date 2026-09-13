@@ -36,7 +36,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use crate::cli::UpdateArgs;
 use crate::repo::Repo;
@@ -63,6 +63,13 @@ pub enum Outcome {
         path: String,
         why: String,
     },
+    /// A stale directory this project no longer ships — [`crate::install::
+    /// RETIRED_SKILLS`], and nothing else — removed outright rather than
+    /// rewritten.
+    Removed {
+        path: String,
+        why: String,
+    },
 }
 
 impl Outcome {
@@ -74,6 +81,12 @@ impl Outcome {
     }
     fn blocked(path: impl Into<String>, why: impl Into<String>) -> Outcome {
         Outcome::Blocked {
+            path: path.into(),
+            why: why.into(),
+        }
+    }
+    fn removed(path: impl Into<String>, why: impl Into<String>) -> Outcome {
+        Outcome::Removed {
             path: path.into(),
             why: why.into(),
         }
@@ -112,18 +125,31 @@ pub fn run(repo: &Repo, args: &UpdateArgs) -> Result<()> {
 
     // Deduped, because one file can be written for several reasons at once —
     // a config gains a setting and drops a retired one in the same rewrite —
-    // and a path printed twice reads as two files.
+    // and a path printed twice reads as two files. Kept as two lists rather
+    // than one: a directory removed outright (a stale skill renamed out from
+    // under a project) has to read as removed, not as a file this pass
+    // wrote, or the person reading it would think a deletion was a rewrite.
     let outcomes = scan(repo, args)?;
-    let mut written: Vec<&str> = Vec::new();
+    let mut wrote: Vec<&str> = Vec::new();
+    let mut removed: Vec<(&str, &str)> = Vec::new();
     for outcome in &outcomes {
-        if let Outcome::Wrote { path, .. } = outcome
-            && !written.contains(&path.as_str())
-        {
-            written.push(path);
+        match outcome {
+            Outcome::Wrote { path, .. } if !wrote.contains(&path.as_str()) => wrote.push(path),
+            Outcome::Removed { path, why } if !removed.iter().any(|(p, _)| *p == path) => {
+                removed.push((path, why))
+            }
+            Outcome::Wrote { .. }
+            | Outcome::Removed { .. }
+            | Outcome::Kept
+            | Outcome::Blocked { .. } => {}
         }
     }
-    for path in &written {
-        println!("{path}");
+    for path in &wrote {
+        println!("  wrote    {path}");
+    }
+    for (path, why) in &removed {
+        println!("  removed  {path}");
+        println!("           ({why})");
     }
 
     println!();
@@ -239,6 +265,7 @@ pub fn scan(repo: &Repo, args: &UpdateArgs) -> Result<Vec<Outcome>> {
     config(repo, args, &mut outcomes)?;
     templates(repo, args, &mut outcomes)?;
     skills(repo, args, &mut outcomes)?;
+    retired_skills(repo, args, &mut outcomes)?;
     pipelines(repo, args, &mut outcomes)?;
     Ok(outcomes)
 }
@@ -678,6 +705,36 @@ fn skills(repo: &Repo, args: &UpdateArgs, outcomes: &mut Vec<Outcome>) -> Result
     Ok(())
 }
 
+/// Remove a stale skill directory left behind by a rename — from every
+/// provider a project has installed, the same way [`skills`] rewrites every
+/// provider's own current set.
+///
+/// [`crate::install::RETIRED_SKILLS`] is the whole of what may be removed
+/// here: a short, hand-written literal rather than anything derived from what
+/// [`crate::install::SKILLS`] ships today, so a skill this binary still ships
+/// can never end up on this list by construction — see that constant's own
+/// doc. A project's own skill directory, named by neither list, is never
+/// touched: this only ever joins a provider's skills directory onto a name
+/// this project once shipped and no longer does.
+fn retired_skills(repo: &Repo, args: &UpdateArgs, outcomes: &mut Vec<Outcome>) -> Result<()> {
+    for provider in <crate::cli::Provider as clap::ValueEnum>::value_variants() {
+        let dir = provider.skills_dir(&repo.root);
+        for name in crate::install::RETIRED_SKILLS {
+            let stale = dir.join(name);
+            if !stale.is_dir() {
+                continue;
+            }
+            let shown = crate::platform::relative(&repo.root, &stale);
+            if !args.dry_run {
+                std::fs::remove_dir_all(&stale)
+                    .with_context(|| format!("removing {}", stale.display()))?;
+            }
+            outcomes.push(Outcome::removed(&shown, "renamed to spoolway-config"));
+        }
+    }
+    Ok(())
+}
+
 /// The key reference in a pipeline file: the fenced block, and nothing else.
 ///
 /// A pipeline is the project's flow, written in the project's words, so almost
@@ -910,6 +967,7 @@ mod tests {
                 Outcome::Wrote { path, detail } => format!("wrote {path} ({detail})"),
                 Outcome::Kept => "kept".to_string(),
                 Outcome::Blocked { path, why } => format!("blocked {path}: {why}"),
+                Outcome::Removed { path, why } => format!("removed {path}: {why}"),
             })
             .collect()
     }
@@ -1370,6 +1428,62 @@ mod tests {
                 "{provider_dir} skills not refreshed: {lines:?}"
             );
         }
+    }
+
+    /// A project that ran `install` before the rename has a stale
+    /// `spoolway-pipeline/` directory sitting beside its skills — `update`
+    /// removes it, and a directory update has no reason to touch (a
+    /// project's own skill, sharing no name with anything on the retired
+    /// list) is left exactly as it was.
+    #[test]
+    fn update_removes_a_stale_renamed_skill_and_leaves_everything_else() {
+        let repo = fixture("retired-skill");
+        let claude_dir = crate::cli::Provider::Claude.skills_dir(&repo.root);
+        let stale = claude_dir.join("spoolway-pipeline");
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::write(stale.join("SKILL.md"), "the old skill\n").unwrap();
+
+        let untouched = claude_dir.join("a-projects-own-skill");
+        std::fs::create_dir_all(&untouched).unwrap();
+        std::fs::write(untouched.join("SKILL.md"), "not spoolway's\n").unwrap();
+
+        let mut outcomes = Vec::new();
+        retired_skills(&repo, &args(), &mut outcomes).unwrap();
+
+        assert!(!stale.exists(), "the retired directory must be removed");
+        assert!(
+            untouched.is_dir() && untouched.join("SKILL.md").is_file(),
+            "a directory not on the retired list must never be touched"
+        );
+        let lines = outcome_lines(&outcomes);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("removed") && l.contains("spoolway-pipeline")),
+            "{lines:?}"
+        );
+    }
+
+    /// A dry run reports the removal without actually deleting anything —
+    /// the same promise every other `update` scan already keeps.
+    #[test]
+    fn update_dry_run_reports_a_stale_skill_without_removing_it() {
+        let repo = fixture("retired-skill-dry-run");
+        let stale = crate::cli::Provider::Claude
+            .skills_dir(&repo.root)
+            .join("spoolway-pipeline");
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::write(stale.join("SKILL.md"), "the old skill\n").unwrap();
+
+        let mut outcomes = Vec::new();
+        let dry = UpdateArgs {
+            dry_run: true,
+            replace: Vec::new(),
+        };
+        retired_skills(&repo, &dry, &mut outcomes).unwrap();
+
+        assert!(stale.is_dir(), "a dry run must not delete anything");
+        assert_eq!(outcome_lines(&outcomes).len(), 1);
     }
 
     /// Codex moved its repository skill root from `.codex/skills` to

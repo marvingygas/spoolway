@@ -226,7 +226,7 @@ steps:
     on_fail: blocked
 ```
 
-**You do not have to write one by hand.** The `/spoolway-pipeline` skill writes a pipeline
+**You do not have to write one by hand.** The `/spoolway-config` skill writes a pipeline
 for you, and edits the one you already have.
 
 ## Issue tracker
