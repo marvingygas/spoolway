@@ -392,6 +392,8 @@ prints a note to stderr saying where the table moved to, and otherwise behaves e
 | `--task <ID>` | `--runs` only: one task's runs. A trial forks a whole group, one arm per source task (`alpha-1`, `beta-1`, …), so this is not how to see a trial side by side — that is `--runs --trial <id>` |
 | `--group <GROUP>` | `--runs` only: only runs whose task carries this `group:` |
 | `--trial <ID>` | `--runs` only: one trial's arms, side by side on pass rate, cost and time, plus a delta line per arm against the first |
+| `--discard <ID>` | Throw a whole trial away now: every arm's document wherever it sits (pending, queue or archive), its worktree, its local branch whether or not anything pushed it, pane, scratch directory, session and run files. The usage rows stay in the ledger and the source group the trial forked is never touched; the other way a trial is cleaned up is settlement, by itself once every arm reaches `done`. Refused together with `--runs`, `--csv` and `--by`. See [Trial arms](dispatcher.md#trial-arms) |
+| `--force` | `--discard` only: stop a live agent lane or a running command step and discard anyway, throwing away whatever turn it was mid-way through. Without it, a trial with work still in flight is refused and the busy arms are named — the same trade `spoolway queue pause --force` makes |
 | `--csv` | The same rows this would print, as CSV. Refused together with the global `--json` |
 | `--by [<task\|group\|step\|model\|project\|month\|lane>]` | Deprecated: see `spoolway spend --help` |
 

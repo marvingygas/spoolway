@@ -1250,7 +1250,12 @@ impl<'a> Dispatcher<'a> {
         if !crate::pipeline::RESERVED.contains(&stage) {
             return Ok(Routed::NotReserved);
         }
-        if !self.dry_run {
+        // A trial arm's `queued`/`done` are not the moments this project's
+        // own issue tracker should hear about: the arm is a disposable copy,
+        // not real work, and the trial runtime boundary makes that
+        // invariant rather than something a person has to remember to skip
+        // — see `Frontmatter::trial`.
+        if !self.dry_run && task.front.trial.is_none() {
             let group_open = graph.group_open(task.id());
             if let Err(err) = crate::tracking::fire(self.repo, task, stage, group_open) {
                 report.problems.push(format!(
@@ -1418,8 +1423,13 @@ impl<'a> Dispatcher<'a> {
         // `!self.dry_run`: a dry run has nothing to read either, since
         // `fire` never ran for it, and holding on `holds_on_fail` alone
         // would report a real pass's "would start" as "nothing to do" —
-        // the opposite of what a dry run is for.
-        if self.dry_run || !crate::tracking::holds_on_fail(self.repo) {
+        // the opposite of what a dry run is for. A trial arm is the same
+        // shape: `route_reserved_stage` never calls `fire` for one (see its
+        // own trial check just above its call site), so there is never a
+        // code here to read, and holding on `Pending` forever would deadlock
+        // every trial arm at `queued`.
+        if self.dry_run || task.front.trial.is_some() || !crate::tracking::holds_on_fail(self.repo)
+        {
             return TrackingGate::Inactive;
         }
         match crate::tracking::exit_code(self.repo, task, stage) {
@@ -6362,6 +6372,246 @@ mod tests {
         );
     }
 
+    /// Acceptance criterion: a trial's archived arms are not removed while a
+    /// sibling of the same trial is still active — only once every arm has
+    /// settled does the disposal in `a_trial_removes_every_arms_archive_
+    /// once_the_last_one_settles` below fire.
+    #[test]
+    fn a_trial_arms_archive_is_kept_while_a_sibling_is_still_queued() {
+        let repo = fixture("trial-settle-not-yet");
+        add_task_with(&repo, "beta-1", "implement", |f| {
+            f.trial = Some("t1".into());
+            f.group = Some("demo-group".into());
+        });
+        let path = add_task(&repo, "alpha-1", "implement");
+        let mut task = reload(&path);
+        task.front.trial = Some("t1".into());
+        task.front.group = Some("demo-group".into());
+        task.save().unwrap();
+
+        let mux = FakeMux::new(vec![]);
+        let mut report = Report::default();
+        Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
+            .clean_up(&mut task, &[], &mut report)
+            .unwrap();
+
+        assert!(
+            repo.archive_dir().join("alpha-1.md").exists(),
+            "the arm that just finished is archived as usual"
+        );
+        assert!(
+            !report.actions.iter().any(|a| a.contains("settled")),
+            "beta-1 is still queued, so the trial has not settled: {:?}",
+            report.actions
+        );
+    }
+
+    /// Acceptance criterion: once every task in a trial settles, its archive
+    /// documents are removed — not merely aged out by `retain.rs`'s own
+    /// `retention.days` — and the completion report names what was kept
+    /// (the source group, the usage rows) and what was removed.
+    #[test]
+    fn a_trial_removes_every_arms_archive_once_the_last_one_settles() {
+        let repo = fixture("trial-settle-last");
+        // `alpha-1` settled earlier — already in the archive, the way its
+        // own `clean_up` would have left it.
+        std::fs::create_dir_all(repo.archive_dir()).unwrap();
+        std::fs::write(
+            repo.archive_dir().join("alpha-1.md"),
+            "---\nid: alpha-1\ntitle: alpha, done\ngroup: demo-group\ntrial: t1\nstage: done\n---\n## Goal\n",
+        )
+        .unwrap();
+
+        let path = add_task(&repo, "beta-1", "implement");
+        let mut task = reload(&path);
+        task.front.trial = Some("t1".into());
+        task.front.group = Some("demo-group".into());
+        task.save().unwrap();
+
+        let mux = FakeMux::new(vec![]);
+        let mut report = Report::default();
+        Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
+            .clean_up(&mut task, &[], &mut report)
+            .unwrap();
+
+        assert!(
+            !repo.archive_dir().join("alpha-1.md").exists(),
+            "every arm's archive document is removed once the trial settles"
+        );
+        assert!(
+            !repo.archive_dir().join("beta-1.md").exists(),
+            "including the arm that just settled last"
+        );
+        let report = report.actions.join("\n");
+        assert!(report.contains("t1"), "{report}");
+        assert!(report.contains("settled"), "{report}");
+        assert!(
+            report.contains("kept") && report.contains("demo-group"),
+            "the source group is named as kept: {report}"
+        );
+        assert!(
+            report.contains("removed") && report.contains("2"),
+            "both arms' documents are named as removed: {report}"
+        );
+        assert!(
+            report.contains("read      spoolway eval --runs --trial t1"),
+            "the report points back at the evidence a settled trial keeps, in the same \
+             column its kept/removed lines use: {report}"
+        );
+    }
+
+    /// Acceptance criterion: a trial is cleaned up either once every arm
+    /// settles or when it is explicitly discarded. This is the second
+    /// trigger, and it reaches every document a trial can have left lying
+    /// about — one still in the pending directory, one live in the queue,
+    /// one already archived — not only the queued ones.
+    ///
+    /// The control in this fixture is `real-1`: same group, no `trial:`. It
+    /// is the source group the trial forked, and a discard must never touch
+    /// it however the arms were named.
+    #[test]
+    fn discarding_a_trial_removes_every_arms_document_wherever_it_sits() {
+        let repo = fixture("trial-discard-everywhere");
+        std::fs::create_dir_all(repo.archive_dir()).unwrap();
+        std::fs::write(
+            repo.archive_dir().join("alpha-1.md"),
+            "---\nid: alpha-1\ntitle: alpha\ngroup: demo-group\ntrial: t1\nstage: done\n---\n## Goal\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(repo.pending_dir()).unwrap();
+        std::fs::write(
+            repo.pending_dir().join("gamma-1.md"),
+            "---\nid: gamma-1\ntitle: gamma\ngroup: demo-group\ntrial: t1\nstage: queued\n---\n## Goal\n",
+        )
+        .unwrap();
+        let queued = add_task_with(&repo, "beta-1", "implement", |front| {
+            front.trial = Some("t1".into());
+            front.group = Some("demo-group".into());
+        });
+        let control = add_task_with(&repo, "real-1", "implement", |front| {
+            front.group = Some("demo-group".into());
+        });
+
+        let mux = FakeMux::new(vec![]);
+        crate::teardown::discard_trial(&repo, &Pipelines::builtin(), &mux, "t1", false).unwrap();
+
+        assert!(
+            !repo.archive_dir().join("alpha-1.md").exists(),
+            "an arm that already settled loses its archive document"
+        );
+        assert!(!queued.exists(), "an arm still in the queue loses its own");
+        assert!(
+            !repo.pending_dir().join("gamma-1.md").exists(),
+            "and so does one that was never dispatched"
+        );
+        assert!(
+            control.exists(),
+            "the source group the trial forked is never touched by a discard"
+        );
+    }
+
+    /// The same exemption settlement makes, at the other trigger: an arm's
+    /// branch is debris whether or not a remote ever saw it, because the
+    /// comparison the arm was run for lives in the usage ledger rather than
+    /// on the branch. Nothing under `task/beta-1` is pushed here.
+    #[test]
+    fn discarding_a_trial_removes_an_arms_branch_even_when_unpushed() {
+        let repo = fixture("trial-discard-branch");
+        crate::repo::run(&repo.root, "git", &["branch", "task/beta-1"]).unwrap();
+        add_task_with(&repo, "beta-1", "implement", |front| {
+            front.trial = Some("t1".into());
+            front.group = Some("demo-group".into());
+            front.branch = Some("task/beta-1".into());
+            front.workspace_id = Some("w1".into());
+        });
+
+        let mux = FakeMux::new(vec![]);
+        crate::teardown::discard_trial(&repo, &Pipelines::builtin(), &mux, "t1", false).unwrap();
+
+        assert!(
+            !has_branch(&repo, "task/beta-1"),
+            "a discarded arm's branch goes with it, pushed or not"
+        );
+    }
+
+    /// The branch case `tear_down_checkout` alone cannot get right: `alpha-1`
+    /// is named in `beta-1`'s own `depends_on`, so its branch is retained
+    /// while `beta-1` is still in the queue — and inside a trial that
+    /// dependent is a sibling arm being discarded in the same breath. Nothing
+    /// revisits it afterwards either, since the sweep that ordinarily frees
+    /// an orphaned branch identifies its owner by reading the task document a
+    /// discard has just removed.
+    #[test]
+    fn discarding_a_trial_frees_an_arms_branch_a_sibling_arm_was_holding() {
+        let repo = fixture("trial-discard-held-branch");
+        for arm in ["alpha-1", "beta-1"] {
+            crate::repo::run(&repo.root, "git", &["branch", &format!("task/{arm}")]).unwrap();
+        }
+        add_task_with(&repo, "alpha-1", "implement", |front| {
+            front.trial = Some("t1".into());
+            front.group = Some("demo-group".into());
+            front.branch = Some("task/alpha-1".into());
+        });
+        add_task_with(&repo, "beta-1", "implement", |front| {
+            front.trial = Some("t1".into());
+            front.group = Some("demo-group".into());
+            front.branch = Some("task/beta-1".into());
+            front.depends_on = vec!["alpha-1".into()];
+        });
+
+        let mux = FakeMux::new(vec![]);
+        crate::teardown::discard_trial(&repo, &Pipelines::builtin(), &mux, "t1", false).unwrap();
+
+        assert!(
+            !has_branch(&repo, "task/alpha-1"),
+            "the branch a sibling arm was holding goes with the trial"
+        );
+        assert!(
+            !has_branch(&repo, "task/beta-1"),
+            "and so does the sibling's"
+        );
+    }
+
+    /// A trial id nobody recognises is a typo, and silently removing nothing
+    /// reads exactly like success. Named instead.
+    #[test]
+    fn discarding_a_trial_that_does_not_exist_is_an_error_rather_than_a_quiet_no_op() {
+        let repo = fixture("trial-discard-unknown");
+        add_task(&repo, "real-1", "implement");
+
+        let mux = FakeMux::new(vec![]);
+        let err = crate::teardown::discard_trial(&repo, &Pipelines::builtin(), &mux, "t1", false)
+            .unwrap_err();
+
+        assert!(format!("{err:#}").contains("t1"), "{err:#}");
+    }
+
+    /// Acceptance criterion: active trial tasks remain recoverable until
+    /// settlement or explicit discard. An arm on a live agent lane is
+    /// mid-turn, so a bare discard refuses and names it rather than killing
+    /// it — the same trade `spoolway queue pause --force` makes.
+    #[test]
+    fn a_trial_with_a_live_agent_lane_is_refused_until_force_says_otherwise() {
+        let repo = fixture("trial-discard-live");
+        let queued = add_task_with(&repo, "beta-1", "implement", |front| {
+            front.trial = Some("t1".into());
+            front.group = Some("demo-group".into());
+        });
+        let mux = FakeMux::new(vec![lane(
+            &repo,
+            &lane_name("implement", "beta-1"),
+            LaneStatus::Working,
+        )]);
+
+        let err = crate::teardown::discard_trial(&repo, &Pipelines::builtin(), &mux, "t1", false)
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("beta-1"), "{err:#}");
+        assert!(queued.exists(), "and nothing is removed while it refuses");
+
+        crate::teardown::discard_trial(&repo, &Pipelines::builtin(), &mux, "t1", true).unwrap();
+        assert!(!queued.exists(), "`--force` stops the lane and discards");
+    }
+
     /// The whole point of this check: a `handover` that never ran, or a push
     /// that failed silently, must not turn into the deletion of the only
     /// copy of a finished task's work. Nothing under `task/demo` is on any
@@ -6397,6 +6647,38 @@ mod tests {
             "and the reason is recorded on the run's problem list, naming the \
              task and the branch: {:?}",
             report.problems
+        );
+    }
+
+    /// Acceptance criterion: a trial arm's local branch is removed even
+    /// unpushed — the protection `a_branch_with_unpushed_commits_survives_
+    /// its_own_tasks_archiving` proves for an ordinary task exists to save
+    /// the only copy of real work, and a trial arm's work is a disposable
+    /// copy that has already been measured into the usage ledger. Keeping
+    /// its branch around would be exactly the debris the trial boundary
+    /// exists to remove.
+    #[test]
+    fn a_trial_arms_branch_is_removed_even_when_unpushed() {
+        let repo = fixture("cleanup-branch-trial-unpushed");
+        crate::repo::run(&repo.root, "git", &["branch", "task/demo"]).unwrap();
+        let path = add_task(&repo, "demo", "implement");
+        let mut task = reload(&path);
+        task.front.workspace_id = Some("w1".into());
+        task.front.branch = Some("task/demo".into());
+        task.front.trial = Some("t1".into());
+        task.save().unwrap();
+
+        let mux = FakeMux::new(vec![]);
+        let mut report = Report::default();
+        let archived = Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
+            .clean_up(&mut task, &[], &mut report)
+            .unwrap();
+
+        assert!(archived, "the task itself still finishes");
+        assert!(!path.exists(), "and still leaves the queue");
+        assert!(
+            !has_branch(&repo, "task/demo"),
+            "a trial arm's branch must go whether or not it was ever pushed"
         );
     }
 
@@ -12088,6 +12370,58 @@ mod tests {
         );
     }
 
+    /// Acceptance criterion: a trial arm's branch, still unpushed, is freed
+    /// by the same deferred sweep once its own dependent has finished with
+    /// it — not held forever the way an ordinary task's would be. `first`
+    /// archives before `second` (its dependent, same trial) has even
+    /// started, so the immediate deletion `a_trial_arms_branch_is_removed_
+    /// even_when_unpushed` proves cannot fire yet; this is the other half,
+    /// the sweep that runs once nothing queued needs it any more.
+    #[test]
+    fn a_trial_arms_orphaned_unpushed_branch_is_freed_by_the_next_cleanup_that_finds_it() {
+        let repo = fixture("branch-freed-later-trial");
+        repo.git(&["checkout", "-q", "-b", "task/first"]).unwrap();
+        repo.git(&["commit", "-q", "--allow-empty", "-m", "first"])
+            .unwrap();
+        repo.git(&["checkout", "-q", "work"]).unwrap();
+        // Never pushed, unlike the ordinary-task version of this test — a
+        // trial arm's branch is never pushed at all, so this is the shape
+        // that actually occurs.
+
+        let first = add_task_with(&repo, "first", "done", |f| {
+            f.branch = Some("task/first".into());
+            f.trial = Some("t1".into());
+        });
+        let second = add_task_with(&repo, "second", "done", |f| {
+            f.branch = Some("task/second".into());
+            f.depends_on = vec!["first".into()];
+            f.trial = Some("t1".into());
+        });
+
+        let mux = FakeMux::new(vec![]);
+        let pipelines = Pipelines::builtin();
+        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux, false);
+        let mut report = Report::default();
+
+        dispatcher
+            .clean_up(&mut reload(&first), &[], &mut report)
+            .unwrap();
+        assert!(
+            repo.git(&["rev-parse", "--verify", "--quiet", "task/first"])
+                .is_ok(),
+            "second is still queued and has not been cut from it yet"
+        );
+
+        dispatcher
+            .clean_up(&mut reload(&second), &[], &mut report)
+            .unwrap();
+        assert!(
+            repo.git(&["rev-parse", "--verify", "--quiet", "task/first"])
+                .is_err(),
+            "unpushed or not, nothing queued needs a trial arm's branch any more"
+        );
+    }
+
     /// The same sweep recovers a task id from a branch
     /// `issue_tracking.key_in_names` prefixed — `task/<slug>-<id>` — so a
     /// prefixed orphan branch is freed exactly as a bare one is.
@@ -14239,6 +14573,63 @@ mod tests {
             "the task must never have started a lane: {:?}",
             mux.calls()
         );
+    }
+
+    /// Acceptance criterion: a trial arm never fires `[issue_tracking]` at
+    /// all — trial dispatch is a runtime boundary against spoolway-owned
+    /// side effects, and the queued/done hook is exactly one, not a skip
+    /// choice a person ticks. A hook that would fail this task under
+    /// `on_fail = "pause"` is proof the hook never ran: an ordinary task
+    /// with the same hook is held at `paused` (see the test above this
+    /// one), so a trial task reaching its first step instead means `fire`
+    /// was never called for it.
+    #[cfg(unix)]
+    #[test]
+    fn a_trial_arm_never_fires_the_queued_issue_tracking_hook() {
+        let mut repo = fixture("hook-queued-trial-suppressed");
+        write_hook(&repo, "fail.sh", "exit 1");
+        repo.config.issue_tracking.hook = "fail.sh".into();
+        repo.config.issue_tracking.on_fail = "pause".into();
+        let path = add_task_with(&repo, "demo", crate::pipeline::QUEUED, |front| {
+            front.trial = Some("t1".into());
+        });
+        let mux = FakeMux::new(vec![]);
+
+        let stage = pass_until_settled(&repo, &mux, &path, crate::pipeline::QUEUED);
+        assert_eq!(
+            stage, "implement",
+            "a trial arm must never be held on a hook it never fired"
+        );
+    }
+
+    /// The `done` half of the same boundary: a hook that would hold an
+    /// ordinary task out of the archive under `on_fail = "pause"` (see
+    /// `a_failing_done_hook_under_on_fail_pause_holds_the_task_out_of_the_archive`)
+    /// must never run for a trial arm, so the arm archives straight through.
+    #[cfg(unix)]
+    #[test]
+    fn a_trial_arm_never_fires_the_done_issue_tracking_hook() {
+        let mut repo = fixture("hook-done-trial-suppressed");
+        write_hook(&repo, "fail.sh", "exit 1");
+        repo.config.issue_tracking.hook = "fail.sh".into();
+        repo.config.issue_tracking.on_fail = "pause".into();
+        let path = add_task_with(&repo, "demo", crate::pipeline::DONE, |front| {
+            front.trial = Some("t1".into());
+        });
+        let mux = FakeMux::new(vec![]);
+
+        for _ in 0..50 {
+            run_pass(&repo, &mux);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !path.exists(),
+            "a trial arm must never be held out of the archive by a hook it never fired"
+        );
+        // As the trial's only arm, reaching `done` also settles the trial —
+        // see `Dispatcher::settle_trial_if_last_arm` — so its archive
+        // document is removed again immediately rather than left standing.
+        assert!(!repo.archive_dir().join("demo.md").exists());
     }
 
     /// The bug a first pass at this task left in: a hook slower than

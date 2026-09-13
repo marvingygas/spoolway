@@ -485,6 +485,27 @@ pub struct EvalArgs {
     #[arg(long, value_name = "ID", requires = "runs")]
     pub trial: Option<String>,
 
+    /// Throw a whole trial away now: every arm's task document, worktree,
+    /// local branch, pane, scratch directory, session and run files, whether
+    /// or not the arms have finished. The trial's own answer survives — its
+    /// usage rows stay in the ledger, and the source group it forked is
+    /// never touched. The other way a trial is cleaned up is settlement,
+    /// which happens by itself once every arm reaches `done`.
+    ///
+    /// Uncommitted work in an arm's worktree goes with it. An arm is a
+    /// throwaway copy of a task that still exists, so there is nothing here
+    /// a discard could be preserving.
+    #[arg(long, value_name = "ID", conflicts_with_all = ["runs", "csv", "by"])]
+    pub discard: Option<String>,
+
+    /// `--discard` only: stop a live agent lane or a running command step
+    /// and discard anyway, throwing away whatever turn it was mid-way
+    /// through. Without it, a trial with work still in flight is refused
+    /// rather than killed on a script's say-so — the same trade
+    /// `spoolway queue pause --force` makes.
+    #[arg(long, requires = "discard")]
+    pub force: bool,
+
     /// The same rows this would print, as CSV.
     #[arg(long)]
     pub csv: bool,

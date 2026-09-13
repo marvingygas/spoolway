@@ -1,16 +1,30 @@
 //! Giving a task's checkout back: panes and workspaces closed, worktrees
 //! removed, its branch deleted.
 //!
-//! One moment calls this: a task that reached `done` has finished, so its
-//! branch is spent litter the moment nothing else still needs it — see
+//! Two moments call this now, and they disagree on purpose. The ordinary one
+//! is a task reaching `done`, which has finished, so its branch is spent
+//! litter the moment nothing else still needs it — see
 //! [`Dispatcher::clean_up`]. Stopping the dispatcher itself never reaches
 //! here any more; [`Dispatcher::sweep_on_stop`] banks an interrupted lane's
 //! spend and forgives its launch counter without touching its checkout,
 //! since the task has not finished and the next run resumes it exactly where
 //! it stood. Even a finished task's branch is spared while some remote still
 //! lacks a commit of it — the keep is named on the run's problem list — see
-//! the push check in [`Dispatcher::tear_down_checkout`] below. Everything
-//! below is which parts of a checkout exist to give back, and in what order.
+//! the push check in [`Dispatcher::tear_down_checkout`] below.
+//!
+//! The other is [`discard_trial`], called from `spoolway eval --discard` for
+//! a trial arm that has not finished and never will: a person has seen
+//! enough and wants it gone now. [`Dispatcher::discard_arm`] shares
+//! `tear_down_checkout` with the ordinary path, but nowhere near its care —
+//! it commits nothing, refuses nothing, and deletes a branch whether or not
+//! any remote ever saw it, because a trial arm's own answer is already
+//! banked in the usage ledger and its worktree holds nothing this project
+//! means to keep. What is common to both is that
+//! [`Dispatcher::settle_trial_if_last_arm`] and [`discard_trial`] leave
+//! exactly the same two things standing: the source group a trial forked,
+//! and the usage rows every arm banked. Everything else below is which parts
+//! of a checkout exist to give back, and in what order — ordinary care by
+//! default, none of it for a trial arm being thrown away.
 //!
 //! Kept apart from the rest of [`crate::dispatch`] because this is the one
 //! cluster of it that ends a task's residence in the queue rather than
@@ -212,7 +226,84 @@ impl<'a> Dispatcher<'a> {
         report
             .actions
             .push(format!("{}: cleaned up and archived", task.id()));
+
+        self.settle_trial_if_last_arm(task, &remaining, report);
+
         Ok(true)
+    }
+
+    /// Once a trial arm reaches `done`, ask whether it was the trial's last
+    /// one still active — and if so, remove every arm's archive document
+    /// rather than leave them for `retain.rs`'s own `retention.days` to age
+    /// out eventually. Everything else a settled trial disposes of (its
+    /// worktrees, branches, panes, scratch directories, sessions and run
+    /// files) is already gone by the time this runs: each arm's own
+    /// `clean_up` already reclaimed its own, and
+    /// [`Dispatcher::tear_down_checkout`] already drops a trial arm's branch
+    /// whether or not it was ever pushed. What is left standing only for a
+    /// trial is the archive copy itself, since an ordinary task's archive
+    /// document is exactly the durable record cleanup means to keep.
+    ///
+    /// `remaining` is the queue read *after* `task`'s own file left it for
+    /// the archive (see the rename above), so a sibling arm still on any
+    /// active stage — including `paused` or `blocked`, per "active or paused
+    /// trial tasks remain recoverable until settlement" — is read here
+    /// exactly as it would be by `sweep_orphaned_branches` just above.
+    fn settle_trial_if_last_arm(&self, task: &Task, remaining: &[Task], report: &mut Report) {
+        let Some(trial) = task.front.trial.clone() else {
+            return;
+        };
+        let still_active = remaining
+            .iter()
+            .any(|t| t.front.trial.as_deref() == Some(trial.as_str()));
+        if still_active {
+            return;
+        }
+
+        let Ok(entries) = std::fs::read_dir(self.repo.archive_dir()) else {
+            return;
+        };
+        let mut removed = 0usize;
+        let mut source_group = task.front.group.clone().unwrap_or_default();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+            let Ok(arm) = Task::load(&path) else {
+                continue;
+            };
+            if arm.front.trial.as_deref() != Some(trial.as_str()) {
+                continue;
+            }
+            if source_group.is_empty() {
+                source_group = arm.front.group.clone().unwrap_or_default();
+            }
+            if std::fs::remove_file(&path).is_ok() {
+                removed += 1;
+            }
+        }
+        if removed == 0 {
+            return;
+        }
+
+        let usage_tasks = crate::usage::trial_task_count(self.repo, &trial);
+        report.actions.push(format!("trial {trial} settled"));
+        report
+            .actions
+            .push(format!("  kept      source group {source_group}"));
+        report.actions.push(format!(
+            "  kept      usage rows for {usage_tasks} trial tasks"
+        ));
+        report.actions.push(format!(
+            "  removed   {removed} task documents, worktrees and local branches"
+        ));
+        report.actions.push(format!(
+            "  removed   {removed} panes, scratch dirs, sessions and run-file sets"
+        ));
+        report
+            .actions
+            .push(format!("  read      spoolway eval --runs --trial {trial}"));
     }
 
     /// Close this project's shared tab, once the project has nothing left in
@@ -360,7 +451,13 @@ impl<'a> Dispatcher<'a> {
             // last thing that happens to a finished task being the deletion of
             // the only copy of its work — which is exactly how one task lost
             // twelve commits to this path.
-            if self.branch_fully_pushed(&branch) {
+            //
+            // A trial arm is exempt from that protection: its comparison is
+            // already banked in the usage ledger by the time it reaches here
+            // (see `Dispatcher::record_usage`, called above), so an unpushed
+            // branch is not the only copy of anything worth keeping — it is
+            // exactly the debris the trial boundary exists to remove.
+            if task.front.trial.is_some() || self.branch_fully_pushed(&branch) {
                 let _ = self.repo.git(&["branch", "-D", &branch]);
             } else {
                 report.problems.push(format!(
@@ -456,7 +553,12 @@ impl<'a> Dispatcher<'a> {
             if owner.front.borrowed {
                 continue;
             }
-            if !self.branch_fully_pushed(branch) {
+            // The same trial exemption `tear_down_checkout` applies
+            // immediately: a trial arm's own branch is never the only copy
+            // of anything, whether it is freed the moment its own task
+            // archives or, as here, only once a dependent still queued at
+            // that moment has finished with it too.
+            if owner.front.trial.is_none() && !self.branch_fully_pushed(branch) {
                 continue;
             }
             let _ = self.repo.git(&["branch", "-D", branch]);
@@ -630,6 +732,97 @@ impl<'a> Dispatcher<'a> {
 
         Ok(())
     }
+
+    /// Take one trial arm apart, with none of the care [`Dispatcher::clean_up`]
+    /// takes over a finished task's work.
+    ///
+    /// The difference is the whole point of a discard. `clean_up` commits what
+    /// a worktree still holds, and holds the task at `blocked` rather than
+    /// tearing the worktree down when it cannot — a finished task's
+    /// uncommitted work is work. A discarded trial arm's is not: the arm is a
+    /// throwaway copy of somebody else's task, and the answer it was run to
+    /// produce is already in the usage ledger, which this never touches. So
+    /// nothing here commits, nothing here can refuse, and the branch goes
+    /// whether or not a remote ever saw it — the same exemption
+    /// [`Dispatcher::tear_down_checkout`] already makes for a trial arm that
+    /// settles the ordinary way.
+    ///
+    /// What it does keep is the arm's spend. The lane is killed mid-turn, and
+    /// those tokens were spent exactly as much as a finished lane's, so they
+    /// are banked before the session home that holds the transcript is
+    /// reclaimed. `record_usage` diffs against what the ledger already holds,
+    /// so a dispatcher that banks the same lane later still writes nothing
+    /// twice.
+    fn discard_arm(&mut self, task: &mut Task, lanes: &[Lane], report: &mut Report) {
+        let pipeline = self
+            .pipelines
+            .for_task(task)
+            .map(|p| p.name.clone())
+            .unwrap_or_default();
+
+        // The arm's live lane, named off the stage it is sitting on — the
+        // same derivation `sweep_on_stop` makes, and right for the same
+        // reason: a discarded arm is stopped mid-step, so its stage and its
+        // lane still agree.
+        let step_id = task.stage().to_string();
+        let name = lane_name(&step_id, task.id());
+        if let Some(lane) = lanes.iter().find(|l| l.name == name) {
+            let ledger = self.ledger();
+            let record = self
+                .lanes
+                .get(&name)
+                .cloned()
+                .unwrap_or_else(|| LaneRecord::readopted(&name, now_secs(), &ledger));
+            self.record_usage(&record, task.id(), &step_id, Some(task), &pipeline);
+            let _ = self.mux.stop_lane(&lane.name, &lane.pane_id);
+        }
+
+        // A background command step left running is running inside the
+        // worktree about to be removed, and a pane a failed run left standing
+        // has no later arrival to replace it — both go, exactly as they do
+        // when an ordinary task cleans up.
+        let runs = crate::command_step::Runs::new(&self.repo.commands_dir());
+        for key in runs.keys_for_task(task.id()) {
+            if let Some(pane) = runs.pane(&key) {
+                let _ = self.mux.close_pane(&pane);
+                runs.forget_pane(&key);
+            }
+            runs.stop(&key);
+        }
+
+        self.tear_down_checkout(task, report);
+
+        // `tear_down_checkout` retains a branch that something still queued
+        // names in its own `depends_on` — and inside a trial that dependent
+        // is a sibling arm being discarded in the same breath, so the reason
+        // to keep it is gone before the call even returns. Nothing else will
+        // free it either: `sweep_orphaned_branches` finds a branch's owner by
+        // reading the task document that recorded it, and a discard has just
+        // removed that document. So the arm's own branch goes here, directly.
+        // A second delete of one `tear_down_checkout` already took is a git
+        // failure and nothing more.
+        if let Some(branch) = task.front.branch.clone().filter(|_| !task.front.borrowed) {
+            let _ = self.repo.git(&["branch", "-D", &branch]);
+        }
+
+        runs.reclaim_task(task.id());
+        crate::tracking::reclaim(self.repo, task.id());
+
+        // Every session home this arm was ever given, not just the lane
+        // banked above: a copied `auth.json` under one outlives every
+        // credential rotation otherwise (review finding 63).
+        let stale: Vec<String> = self
+            .lanes
+            .keys()
+            .filter(|name| crate::mux::lane_task(name) == task.id())
+            .cloned()
+            .collect();
+        for name in stale {
+            if let Some(record) = self.lanes.remove(&name) {
+                record.reclaim_session_home();
+            }
+        }
+    }
 }
 
 /// The task that recorded `branch` as its own `branch:` — matched exactly,
@@ -667,4 +860,139 @@ fn task_for_branch(repo: &crate::repo::Repo, branch: &str) -> Option<Task> {
             _ => return None,
         }
     }
+}
+
+/// Every task document that belongs to `trial`, wherever it is sitting.
+///
+/// Read straight off the three directories rather than through
+/// [`crate::repo::Repo::tasks`], which only ever reads the queue: a discard
+/// has to reach a pending arm nobody dispatched and an archived arm that
+/// already settled as well as the live ones. A document that will not parse
+/// is skipped rather than guessed at — it carries no readable `trial:`, so
+/// nothing here can claim it belongs to this trial.
+///
+/// Matching is on `trial:` alone, which is the whole safety argument for
+/// this command: the source group's own documents never carry one, so a
+/// discard cannot reach them however the arms were named.
+fn trial_arms(repo: &crate::repo::Repo, trial: &str) -> Vec<Task> {
+    let mut arms = Vec::new();
+    for dir in [repo.pending_dir(), repo.queue_dir(), repo.archive_dir()] {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut here: Vec<Task> = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("md"))
+            .filter_map(|path| Task::load(&path).ok())
+            .filter(|task| task.front.trial.as_deref() == Some(trial))
+            .collect();
+        // Filesystem order is arbitrary; a stable one keeps the report's own
+        // lines the same from run to run.
+        here.sort_by(|a, b| a.path.cmp(&b.path));
+        arms.append(&mut here);
+    }
+    arms
+}
+
+/// `spoolway eval --discard <trial>`: throw a whole trial away now, rather
+/// than waiting for its last arm to settle.
+///
+/// The second of the two triggers a trial's cleanup has. The first is
+/// settlement, which [`Dispatcher::settle_trial_if_last_arm`] handles once
+/// every arm has reached `done` of its own accord. This is the other one: a
+/// person has seen enough, and the arms still in flight are no longer worth
+/// the lanes they are holding. Both leave exactly the same two things
+/// standing — the source group the trial forked, which is never touched
+/// here at all, and the usage rows every arm banked, which are what the
+/// trial was run to produce.
+///
+/// **What this destroys.** Every arm's worktree, local branch (pushed or
+/// not), pane, workspace, scratch directory, session home, command run files
+/// and hook run files, and its task document wherever it sits. Uncommitted
+/// work in an arm's worktree goes with it, unasked — see
+/// [`Dispatcher::discard_arm`] for why that is the right trade for an arm
+/// and would not be for an ordinary task.
+///
+/// **What `--force` is for.** An arm on a live agent lane or a running
+/// command step is mid-turn, and killing it throws away whatever that turn
+/// was doing. A person typing this at a terminal may not know a lane is
+/// still going, so the plain form refuses and names the arms responsible;
+/// `--force` says the caller already knows what it is choosing. This is the
+/// same trade `spoolway queue pause --force` makes, for the same reason. A
+/// trial with nothing running needs no flag: the arms are idle, and the
+/// documents are a copy of documents that still exist.
+pub fn discard_trial(
+    repo: &crate::repo::Repo,
+    pipelines: &crate::pipeline::Pipelines,
+    mux: &dyn crate::mux::Mux,
+    trial: &str,
+    force: bool,
+) -> Result<()> {
+    let arms = trial_arms(repo, trial);
+    if arms.is_empty() {
+        anyhow::bail!(
+            "no trial `{trial}` — nothing in pending, the queue or the archive carries that \
+             trial id"
+        );
+    }
+
+    // Only an arm still in the queue can be running anything; a pending one
+    // was never dispatched and an archived one has already finished.
+    let queued: Vec<Task> = repo
+        .tasks()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|task| task.front.trial.as_deref() == Some(trial))
+        .collect();
+    let lanes = mux.list_lanes().unwrap_or_default();
+    let live = crate::status::live_agent_lane_tasks(repo, &queued, pipelines, &lanes);
+    let running = crate::status::running_command_steps(repo, &queued, pipelines);
+    if !force && (!live.is_empty() || !running.is_empty()) {
+        let mut busy: Vec<String> = live
+            .iter()
+            .map(|i| queued[*i].id().to_string())
+            .chain(running.iter().map(|run| run.task.clone()))
+            .collect();
+        busy.sort();
+        busy.dedup();
+        anyhow::bail!(
+            "trial `{trial}` still has work in flight ({}) — pass `--force` to stop it and \
+             discard anyway",
+            busy.join(", ")
+        );
+    }
+
+    let mut dispatcher = Dispatcher::new(repo, pipelines, mux, false);
+    let mut report = Report::default();
+    let mut removed = 0usize;
+    // Named from whichever arm carries it: every arm of one trial forked the
+    // same group, so the first one that names it answers for all of them.
+    let mut source_group = String::new();
+    for mut arm in arms {
+        if source_group.is_empty() {
+            source_group = arm.front.group.clone().unwrap_or_default();
+        }
+        dispatcher.discard_arm(&mut arm, &lanes, &mut report);
+        if std::fs::remove_file(&arm.path).is_ok() {
+            removed += 1;
+        }
+        dispatcher.close_project_tab_if_empty(&arm);
+    }
+
+    // The same shape `settle_trial_if_last_arm` prints, so the two triggers
+    // read alike — a person should not have to work out which one ran.
+    let usage_tasks = crate::usage::trial_task_count(repo, trial);
+    println!("trial {trial} discarded");
+    if !source_group.is_empty() {
+        println!("  kept      source group {source_group}");
+    }
+    println!("  kept      usage rows for {usage_tasks} trial tasks");
+    println!("  removed   {removed} task documents, worktrees and local branches");
+    println!("  removed   {removed} panes, scratch dirs, sessions and run-file sets");
+    println!("  read      spoolway eval --runs --trial {trial}");
+    for problem in &report.problems {
+        eprintln!("  {problem}");
+    }
+    Ok(())
 }

@@ -1405,3 +1405,63 @@ cleanup and any older lane record still held for the task. All of this runs only
 task file has moved into `archive/`, past the point where cleanup can still turn back and
 hold the task at `blocked`, so a held task keeps its scratch tree, its run files and its
 session homes for `spoolway resume`.
+
+### Trial arms
+
+A trial is a whole group forked under one freshly minted trial id — `p` on a group in the
+queue screen, one arm per source task, all sharing the same `group:` and one `trial:` id new on
+every launch (see [Trials](planning.md#trials)). An arm is a disposable copy of somebody else's
+task, and the trial boundary treats it that way from the moment it is dispatched until it is
+torn down.
+
+Dispatch closes two things a trial arm must never do on its own. Its `queued` and `done` events
+never fire the project's `[issue_tracking]` hook: the reserved-stage hook handler drops a trial
+arm before it calls out, so an arm opens no pull request and posts no issue however its steps are
+ticked. And `spoolway stack` — the one built-in publishing boundary spoolway owns outright — is a
+no-op for a trial arm, returning before it ever reads a worktree, diffs a branch or spends a
+`gh` call, so there is no dependent branch to hand a real task's own `handover` a diff against
+and nothing for a custom pipeline command to be told to skip. The trial's own comparison is
+already banked in the usage ledger by the time an arm runs, which is why neither needs the pull
+request.
+
+A trial arm's branch is spent without ordinary care. An ordinary task's unpushed branch is kept
+past cleanup — it is the only copy of its work, and the last thing that used to happen to a
+finished task was deleting that copy — but a trial arm's comparison is already in the ledger, so
+an unpushed branch is exactly the debris the boundary exists to remove and is deleted whether or
+not any remote ever saw it. The same exemption applies when the branch would otherwise be held:
+a still-queued dependent that names it in `depends_on` is, inside a trial, a sibling arm being
+torn down in the same breath, so the reason to keep it is gone before the call returns.
+
+A trial is cleaned up in two ways, and both leave exactly the same two things standing: the
+source group the trial forked, which is never touched, and the usage rows every arm banked, which
+are what the trial was run to produce. Everything else is removed.
+
+Settlement is the automatic one. Once every arm of a trial has reached `done`, the last one to
+settle removes every arm's archive document rather than leaving them to `retain.rs`'s own
+`retention.days` to age out; each arm's own cleanup has already reclaimed its worktree, branch,
+pane, scratch directory, session and run files, so the archive copy was the only thing left
+standing for a trial. The completion report names what survived and what was thrown away, and
+ends by pointing back at the evidence a settled trial deliberately keeps:
+
+```
+trial t9f3a settled
+
+  kept      source group board-step-grace-window
+  kept      usage rows for 3 trial tasks
+  removed   3 task documents, worktrees and local branches
+  removed   3 panes, scratch dirs, sessions and run-file sets
+
+  read      spoolway eval --runs --trial t9f3a
+```
+
+An explicit discard is the other. `spoolway eval --discard <id>` throws a whole trial away while
+its arms are still in flight, so a person who has seen enough does not have to wait for the last
+one to settle. It reaches every arm's document wherever it sits — pending, queue or archive — and
+tears down each arm's worktree, local branch (pushed or not), pane, scratch directory, session
+home and command run files, banking the arm's spend before the session it was spent in is
+reclaimed. A trial with nothing running needs no flag: the arms are idle, and the documents are a
+copy of documents that still exist. An arm on a live agent lane or a running command step is
+mid-turn, though, and killing it throws away whatever that turn was doing, so the plain form
+refuses and names the arms responsible; `--force` says the caller already knows what it is
+choosing, the same trade `spoolway queue pause --force` makes. A discard reaches further than
+settlement does, and still never touches the source group the trial forked.

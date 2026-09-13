@@ -281,11 +281,22 @@ over, and nothing in the trial is written. The source documents themselves are t
 arms, not arms of their own — they are left in the pending directory exactly where `p` found them,
 and no bare-id copy of any of them ever reaches the queue.
 
-The ticked steps land in `skip:` so that a trial arm never pushes a branch or opens a pull
-request on its own — see [`skip`](tasks.md#the-task-file). Every arm shares one freshly minted
+A trial arm never pushes a branch or opens a pull request on its own. `spoolway stack` is a
+no-op for any arm carrying a `trial:` id, whatever its steps are ticked to in `skip:` —
+publishing is closed as a runtime invariant rather than left to the picker.
+[`skip`](tasks.md#the-task-file) is what an ordinary arm still honours; a trial arm honours
+neither. Every arm shares one freshly minted
 trial id — a `t` plus sixteen hex digits, new on every launch — so `spoolway eval --runs
 --trial <id>` finds them together and puts them side by side on pass rate, cost and time — the
 comparison a trial exists to answer. See [Comparing versions](eval.md#spend-by-spoolway-spend).
+
+Once every arm of a trial has run, the trial is cleaned up. The last arm to reach `done` removes
+every arm's disposable copy — its document, worktree, branch, pane, scratch directory, session and
+run files — leaving only the source group the trial forked and the usage rows every arm banked; a
+trial can likewise be discarded outright before it settles with `spoolway eval --discard <id>`,
+which reaches an arm held mid-flight (refusing, unless `--force`, while a lane or command step is
+still running). Both leave the source group untouched and the usage rows standing — see
+[Trial arms](dispatcher.md#trial-arms).
 
 ### Routines
 

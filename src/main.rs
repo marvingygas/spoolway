@@ -288,6 +288,23 @@ fn run() -> Result<()> {
                 {
                     eval::screen(&repo, routing(&graph)?)
                 }
+                // `--discard` is the one thing `eval` does rather than
+                // prints, so it is answered before the printing path and
+                // never reaches `eval::run`. It needs the two things a
+                // reader never does — the pipelines, to tell a live agent
+                // lane from a running command step, and a multiplexer to
+                // stop either with.
+                Command::Eval(args) if args.discard.is_some() => {
+                    let mux = mux::backend(&repo);
+                    let trial = args.discard.clone().expect("checked by the guard");
+                    teardown::discard_trial(
+                        &repo,
+                        routing(&graph)?,
+                        mux.as_ref(),
+                        &trial,
+                        args.force,
+                    )
+                }
                 Command::Eval(args) => eval::run(&repo, args, cli.json),
                 Command::Spend(args) => spend::run(&repo, args, cli.json),
                 Command::Report(args) => {
