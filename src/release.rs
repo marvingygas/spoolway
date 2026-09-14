@@ -16,12 +16,20 @@
 //! executable is the one thing [`crate::config`]'s own documentation warns
 //! kills a dispatcher mid-pass.
 //!
-//! The check on the command path reads a **cache and only a cache**. A lookup
-//! older than [`MAX_AGE`] spawns a detached child that refreshes it for the
-//! *next* command; this one carries on. That is the whole reason a version
-//! check can sit in front of every subcommand without making any of them
-//! slower, and it means the worst case is an answer a day stale rather than a
-//! command that hangs on a plane.
+//! The passive check in front of every subcommand reads a **cache and only a
+//! cache**. A lookup older than [`MAX_AGE`] spawns a detached child that
+//! refreshes it for the *next* command; this one carries on. That is the
+//! whole reason a version check can sit in front of every subcommand without
+//! making any of them slower, and it means the worst case is an answer a day
+//! stale rather than a command that hangs on a plane.
+//!
+//! [`upgrade`] is the one exception, because it is the one caller somebody
+//! ran specifically to get the newer binary: it asks npm directly, and only
+//! falls back to the cache's (possibly stale, possibly silent) answer when
+//! that lookup itself fails. Answering `spoolway update` from a cache that
+//! has not caught up yet is the bug this module exists to have fixed —
+//! installing nothing on the one run somebody asked for the upgrade, and
+//! only catching up on a second, unasked-for run.
 //!
 //! Every failure in here is swallowed, and deliberately. A machine offline, an
 //! npm that was never installed, a registry that answers slowly — none of that
@@ -461,6 +469,9 @@ pub enum Upgrade {
 
 /// Take the newer release, when there is one and it is safe to.
 ///
+/// Asks npm directly rather than trusting [`newer`]'s cache — see the module
+/// doc for why this is the one caller that does.
+///
 /// `lock_file` is the project's own dispatch lock —
 /// [`crate::repo::Repo::lock_file`] for every real caller.
 ///
@@ -472,7 +483,35 @@ pub fn upgrade(lock_file: &Path) -> Upgrade {
     if std::env::var_os(ENV_UPGRADED).is_some() {
         return Upgrade::Current;
     }
-    let Some(version) = newer() else {
+    decide_upgrade(lock_file, published, newer)
+}
+
+/// The decision half of [`upgrade`], with the live lookup and the cache
+/// fallback passed in rather than called directly.
+///
+/// Split out so a test can hand in a stubbed `live` answer and a `cached`
+/// closure that panics if ever called — proving the cache is bypassed
+/// outright, and only reached on a failed lookup — without seeding a real
+/// cache file, standing up a fake `npm` on `PATH`, or touching the process
+/// environment at all.
+fn decide_upgrade(
+    lock_file: &Path,
+    live: impl FnOnce() -> Option<String>,
+    cached: impl FnOnce() -> Option<String>,
+) -> Upgrade {
+    // Asked live, because this is the one call somebody made specifically to
+    // get the newer binary — a cache the passive notice would happily wait a
+    // day on is exactly what left `update` installing nothing on the run
+    // that mattered. `live()` returning `None` is "npm could not answer"
+    // (offline, not installed, npm itself erroring) rather than "nothing
+    // newer", so that and only that falls back to the cache's own answer;
+    // npm actually answering settles it either way, cache or no cache.
+    let version = match live() {
+        Some(latest) if is_newer(&latest, current()) => Some(latest),
+        Some(_) => None,
+        None => cached(),
+    };
+    let Some(version) = version else {
         return Upgrade::Current;
     };
     if Channel::detect() == Channel::Other {
@@ -752,6 +791,62 @@ mod tests {
             .and_then(|(_, value)| value)
             .and_then(|value| value.to_str());
         assert_eq!(carried, Some(current()));
+    }
+
+    /// The bug this task exists to close: on the one run somebody actually
+    /// asked for the upgrade, `upgrade()` still answered from the cache. A
+    /// stubbed `live` closure stands in for npm answering `0.3.0`, and a
+    /// `cached` closure that panics if called proves the cache is bypassed
+    /// outright rather than merely happening not to disagree — the failure
+    /// this repro predicted was `upgrade()` never asking npm at all.
+    ///
+    /// Exercised against [`decide_upgrade`] rather than [`upgrade`] itself,
+    /// and with no process environment touched at all: no cache file to
+    /// seed, no fake `npm` to place on `PATH` and keep in step with
+    /// `npm_program()`'s own Windows/Unix split, and nothing to race against
+    /// another test's own use of the same ambient variables — the class of
+    /// problem a stubbed lookup exists to avoid.
+    #[test]
+    fn upgrade_asks_npm_rather_than_trusting_a_cache_that_has_not_caught_up() {
+        let result = decide_upgrade(
+            Path::new("/does/not/exist/lock"),
+            || Some("0.3.0".to_string()),
+            || panic!("the cache must not be consulted once npm has answered"),
+        );
+
+        // A test binary is never laid out the way npm installs one, so this
+        // is `Unmanaged` rather than `Installed` either way — the point is
+        // which version it names: npm's live answer, not a cache that has
+        // not caught up.
+        assert_eq!(result, Upgrade::Unmanaged("0.3.0".to_string()));
+    }
+
+    /// The other half of the same decision: a lookup that fails — offline, no
+    /// npm, npm itself erroring — still has to fall back to whatever the
+    /// cache knows, rather than telling `update` there is nothing to do.
+    #[test]
+    fn a_failed_live_lookup_falls_back_to_the_cache() {
+        let result = decide_upgrade(
+            Path::new("/does/not/exist/lock"),
+            || None,
+            || Some("0.4.0".to_string()),
+        );
+        assert_eq!(result, Upgrade::Unmanaged("0.4.0".to_string()));
+    }
+
+    /// The third branch, and the one that keeps the cache from getting a
+    /// second vote: npm answering with nothing newer settles the question on
+    /// its own. Falling back to a cache here would let a stale entry claim an
+    /// upgrade npm has just said is not there, so the `cached` closure panics
+    /// if it is ever reached.
+    #[test]
+    fn npm_answering_with_nothing_newer_ends_it_without_the_cache() {
+        let result = decide_upgrade(
+            Path::new("/does/not/exist/lock"),
+            || Some(current().to_string()),
+            || panic!("the cache must not get a second vote once npm has answered"),
+        );
+        assert_eq!(result, Upgrade::Current);
     }
 
     /// The state file is the machine's, not the project's: every checkout runs

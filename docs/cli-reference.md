@@ -1058,8 +1058,11 @@ file-only updates, unmanaged installs, dispatcher-blocked upgrades, and captured
 print that digest.
 
 The binary half only happens where npm installed spoolway, because npm is what upgrades it —
-anything else is told which release is out and left alone. A running dispatcher stops the
-install outright: replacing the executable underneath one kills the run mid-pass. Neither
+anything else is told which release is out and left alone. `update` finds that release by
+asking npm when it runs, falling back to the cached answer only if npm cannot be reached, so it
+installs the version that is actually out rather than one the cache has not caught up to. A
+running dispatcher stops the install outright: replacing the executable underneath one kills the
+run mid-pass. Neither
 case stops the files being brought forward.
 
 | Flag | Meaning |

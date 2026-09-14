@@ -217,6 +217,10 @@ spoolway update               # take it
 It is also what takes the newer spoolway. When a release is out and npm is what installed
 this binary, `update` runs `npm install -g spoolway@<version> --ignore-scripts` first and
 then hands over to the binary it just installed, so the files written are that release's own.
+The version it installs is the one npm reports when `update` runs — this is the one command
+spoolway asks the registry directly, rather than the cache the passive notice below reads. If
+npm cannot be reached it falls back to that cache, so `update` still does its file work rather
+than failing on an offline or slow registry.
 At a terminal, a successful handover finishes by showing the old and new versions, a compact
 digest of what changed, every migration that applies, and links to the full notes. A one-release
 update includes three to five highlights; a jump across releases keeps one theme per release
