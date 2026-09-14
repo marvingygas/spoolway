@@ -30,9 +30,10 @@ it and hand back to the command, and the command decides.
    notices when they go stale.
 3. **Add coverage only for what a unit test cannot reach.** This is the whole of what the suites
    are for now, and it is a narrow bar: a real git repository, a real detached process, a real
-   forge. Anything decidable from files and exit codes is a unit test in `src/*.rs`, where about
-   seven hundred of them already decide it against the code rather than against a fixture. If
-   the behaviour this task introduced can be asserted there, assert it there and add no suite.
+   forge, and a project on disk written by an older release. Anything decidable from files and
+   exit codes is a unit test in `src/*.rs`, where about seven hundred of them already decide it
+   against the code rather than against a fixture. If the behaviour this task introduced can be
+   asserted there, assert it there and add no suite.
 4. **When you are sent back here by `suite`, diagnose before you touch.** The command wrote
    everything it did to `.spoolway/commands/<task> · suite.log`, and the failure is in there.
    Which of the two it is decides everything:
@@ -41,6 +42,40 @@ it and hand back to the command, and the command decides.
    - **The code is wrong** — the suite asks for something the task promised and did not deliver.
      Fix the code. You may; this is not somebody else's step to defer to.
 5. **Say what you added or updated, and why it needed a suite** rather than a unit test.
+
+## The upgrade suite
+
+`scripts/e2e/suites/upgrade.sh` asks one question, and it is the only suite that asks it: does
+this binary still read what an older one wrote? Its fixtures are whole `.spoolway/` trees under
+`scripts/e2e/fixtures/`, one per released version, each scaffolded by the binary of that
+version. The suite copies one, runs `spoolway update` over the copy, and says what survived.
+
+It is in the `nightly` tier and not in `pr`, and that is the only place this project's two tiers
+differ. So the `suite` step never runs it, it cannot send a task back to you, and it costs the
+per-task flow nothing. What runs it is the daily scheduled run on main and the release workflow,
+which is the last point a migration break can still be caught cheaply.
+
+That is also why this is the one suite you may run yourself. `scripts/e2e/run.sh --suite upgrade`
+runs it alone and takes seconds, because the fixtures are already on disk and no old binary is
+built at run time. Run it when your change touches a config key, a pipeline key, a generated block
+or the prompt layout, and skip it otherwise — nothing downstream of you will run it in time to
+help.
+
+Every other suite asserts against a system this same commit built. This one asserts against files
+nobody will ever touch again, so it goes stale on its own, and it is the first suite to fail when
+any of those four things move. That failure is the suite working. Three shapes it takes:
+
+- **A config key was retired or renamed.** The old spelling is still in every fixture that had it.
+  What has to carry it across is `Config::migrate` in `src/config.rs`, and a missing arm there is
+  the defect. Fix the migration, not the fixture.
+- **A generated block changed shape.** The command `spoolway update` swaps that one region and
+  copies every byte around it through unread. Assert that the prose around the block came back
+  unchanged, because that is the promise it would break.
+- **A released version has no fixture.** Somebody cut a release without adding one. Say so in your
+  handoff; do not scaffold a fixture yourself, since only that version's own binary can write one.
+
+A fixture is a record of what an old version wrote. Editing one to reach green destroys the record
+and the suite stops testing anything.
 
 ## Traps
 
@@ -56,6 +91,10 @@ it and hand back to the command, and the command decides.
 - Never run the `cloud` or `live` tiers. They spend real tokens and need real binaries.
 - Never delete a check, loosen a match, or skip a suite to get to green. A test that is right to
   fail is the pipeline working.
+- Never edit a file under `scripts/e2e/fixtures/`. Each tree there is a record of what one
+  released version actually wrote, and a hand-edit turns it into a record of nothing. The only
+  correct change to that tree is deleting a whole version's directory when that version stops
+  being supported.
 - Never add a suite for something a unit test already covers. Fifteen suites were deleted for
   being exactly that, and they cost seven thousand lines of shell and eleven minutes a run.
 - Never write or edit a document. That is everything under `docs/`, plus `README.md` and
