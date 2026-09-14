@@ -186,7 +186,7 @@ PROFILE
 # itself — and no suite names one any more.
 #
 # The prompts are short on purpose. A stand-in never reads them; what they are
-# for is `spoolway prompt check`, which reads a prompt against the step that
+# for is `spoolway pipeline check`, which reads a prompt against the step that
 # runs it, and a pipeline whose prompts were missing would not dispatch at all.
 #
 # `blocked`'s prompt is not in any pipeline file to `sed` over any more — it
@@ -209,7 +209,7 @@ MAP
   must "the unblocker's prompt" "$SPOOLWAY" config set unattended.blocked_prompt clearer
 
   # Written once, whatever the pipelines turned out to name. A prompt nobody
-  # names is harmless — `prompt check` reads the ones a step runs.
+  # names is harmless — `spoolway pipeline check` reads the ones a step runs.
   suite_prompt builder "You write the change a task asks for, and nothing beside it."
   suite_prompt judge   "You read a diff against the task's acceptance criteria and say pass or fail."
   suite_prompt closer  "You bring this project's documents back in line with what a plan built."

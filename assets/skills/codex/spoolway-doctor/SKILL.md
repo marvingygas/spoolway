@@ -22,14 +22,12 @@ turning each into a fix concrete enough to approve.
 
 1. **Run the checks — all of them, none that write.** From the project root, or any
    directory with `-C <dir>`. `doctor` and `queue list` take `--json`; parse that rather than
-   their plain-text form. The other three do not — `spoolway pipeline check`, `spoolway
-   prompt check` and `spoolway queue conflicts` still print for a person, so read them as
-   text:
+   their plain-text form. The other two do not — `spoolway pipeline check` and `spoolway
+   queue conflicts` still print for a person, so read them as text:
 
    ```
    spoolway doctor --json           # the preflight: config, pipelines, agents, documents, prompts
-   spoolway pipeline check          # the graphs and the agents they name
-   spoolway prompt check            # doctor only counts these findings; this prints them
+   spoolway pipeline check          # the graphs and the agents they name, and every prompt against its step
    spoolway queue list --json       # the dispatcher, and where every task is sitting
    spoolway queue conflicts         # overlapping `touches` with no `depends_on` between them
    spoolway spend                   # what has been spent, and which models are unpriced
@@ -116,7 +114,6 @@ turning each into a fix concrete enough to approve.
 | note: no git remote | nothing can be handed over: every task's change goes out as a pull request | add the remote | outside |
 | ``prompt contract``: ``profile `x` never uses `{prompt_file}` `` | the prompt file is written but never handed to the agent | point the profile at a `kind` spoolway knows (the argv per kind is fixed in the binary; `args` is retired) | decision — the kind is theirs |
 | note: `dispatch.max_launches` / `max_attempts` retired | the launch guard it sized is a constant now (one launch, then a person) | nothing to set — the key is dropped on the next `config` save | mechanical |
-| note: `n prompt finding(s)` | prose a lane will act on that its step does not permit, or a command this spoolway does not have | report what `spoolway prompt check` printed, not the count | decision |
 | ``prompt names `spoolway <verb>` `` | that lane runs a command this release does not have, and finds out mid-run | fix the prose, or `spoolway update --replace .spoolway/prompts/<name>/PROMPT.md` to take the shipped one | decision — it is their text |
 | `queue list --json`: `"state": "blocked"` | it is out of the pipeline until someone puts it back | address the blocker it names, then `spoolway resume <task>` | decision |
 | `queue list --json`: `"state": "waiting_on_you"` | a lane asked a question and is holding its pane | answer it in the pane | theirs |

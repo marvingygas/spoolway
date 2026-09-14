@@ -60,8 +60,8 @@ off an existing one:
   `pipeline gen` handed you, verbatim except for the one narrow rewrite this
   skill ever makes to a human's prose: compressing it to a single sentence
   when it runs longer, per the exception below.
-- Check both halves until clean: `spoolway pipeline check`, then
-  `spoolway prompt check <name>`.
+- Check it clean: `spoolway pipeline check`, which reads every prompt
+  against the steps that run it too.
 
 **Changing a value** — a model, an effort, a timeout, a concurrency, a
 whole prompt, or any key `spoolway config contract` lists:

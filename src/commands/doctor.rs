@@ -248,7 +248,7 @@ pub fn doctor(
     // to find out which one it is. Report the load failure as a failed row
     // and run the checks that read no pipeline — config, issue tracking,
     // retired keys, the multiplexer, the update check — since the graph,
-    // agent and prompt checks below all need a loaded pipeline set.
+    // agent and prompt-validity checks below all need a loaded pipeline set.
     let pipelines = match pipelines {
         Ok(pipelines) => pipelines,
         Err(err) => {
