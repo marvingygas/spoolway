@@ -1,6 +1,6 @@
 ---
 name: spoolway-tasks
-description: Cut an already-approved shape into task documents in the pending directory — gather each pipeline's own contract, route each subject to one before sizing it, offer the shape, write the documents, verify the chain and its `last:` step, and prove the set with `spoolway task contract`. Invoked from another skill's own step, such as spoolway-plan's step 7 once a plan is approved, or run directly once a shape is already agreed.
+description: Cut an already-approved shape into task documents in the pending directory — gather each pipeline's own contract, route each subject to one before sizing it, offer the shape, write the documents, verify the chain, and prove the set with `spoolway task contract`. Invoked from another skill's own step, such as spoolway-plan's step 7 once a plan is approved, or run directly once a shape is already agreed.
 ---
 
 # spoolway-tasks
@@ -30,7 +30,7 @@ comment, not the body.
 
 1. **Gather, before anything is sized.** One command, and nothing is opened past it:
    `spoolway task contract` — the project's default pipeline, its own `sizing` guidance, and
-   per pipeline its `description:`, `id_budget`, `gate_at` steps, `last_of_chain`, and
+   per pipeline its `description:`, `id_budget`, `gate_at` steps, and
    skeleton `body`.
 
 2. **Route each subject to a pipeline, then decompose against that pipeline's own shape.**
@@ -119,16 +119,6 @@ comment, not the body.
    through with no `depends_on` invented, and `spoolway queue conflicts` is the only place an
    overlap is named now. So say the pair out loud to the caller if you left one knowingly, and
    never tell them something downstream will raise it; do not invent a section for it.
-
-   **Then check the top of the chain carries its own `last:` step.** The task with no
-   dependent — the one nothing else in this breakdown depends on, or the only task where
-   there is no chain at all — is the only one whose run of the pipeline ever reaches a step
-   marked `last-of-chain` in step 1's contract. When that task's own routed pipeline
-   carries none, the whole group loses that step silently: nobody after it ever runs it, since
-   every other task in the chain walks straight past. Re-route that one task — to the
-   project's default pipeline when it carries a `last-of-chain` step, otherwise to the first
-   pipeline from step 1's gathering that does — and say the swap out loud to the caller
-   instead of just writing a different `pipeline:` into its document.
 
 5. **Prove the documents.** `spoolway task contract --from ~/.spoolway/<project>/pending` —
    the same validation `queue add --from` runs, stopping short of the save. Fix what it
