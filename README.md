@@ -5,6 +5,12 @@
   </picture>
 </p>
 
+<p align="center">
+  <a href="LICENSE"><img alt="license" src="https://img.shields.io/github/license/marvingygas/spoolway?style=flat-square&label=license&labelColor=3f3f46&color=18181b"></a>
+  <a href="https://github.com/marvingygas/spoolway/actions/workflows/ci.yml"><img alt="ci" src="https://img.shields.io/github/actions/workflow/status/marvingygas/spoolway/ci.yml?branch=main&style=flat-square&label=ci&labelColor=3f3f46"></a>
+  <a href="https://github.com/marvingygas/spoolway/releases/latest"><img alt="release" src="https://img.shields.io/github/v/release/marvingygas/spoolway?style=flat-square&label=release&labelColor=3f3f46&color=18181b"></a>
+</p>
+
 Minimalistic command line state machine for turning coding agents into a pipeline you can actually reason about. No dependencies, terminal native. Runs headless or controls supported multiplexers. Worktree management and built-in support for GitHub's stacked pull requests.
 
 Supported providers:
