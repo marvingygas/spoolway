@@ -3646,8 +3646,20 @@ impl<'a> Dispatcher<'a> {
         // main checkout's months-old binary. `OLDPWD`, `SHLVL` and `_` are the
         // same kind of shell bookkeeping and are dropped for the same reason.
         const SHELL_OWNED: [&str; 4] = ["PWD", "OLDPWD", "SHLVL", "_"];
+        // The multiplexer's own bookkeeping, for the same reason and with a
+        // sharper edge. herdr gives every pane it opens its own
+        // `HERDR_PANE_ID`, `HERDR_TAB_ID` and `HERDR_WORKSPACE_ID`; replaying
+        // the dispatcher's copy on top overwrites them with the identity of
+        // the board pane the dispatcher happens to be sitting in. Anything
+        // inside the lane that reads those — the herdr skill an agent step
+        // runs, a `run:` line calling `herdr pane …` — then addresses the
+        // dispatcher's own pane instead of its own, which at worst closes the
+        // board out from under the run that is driving it.
+        const MUX_OWNED: [&str; 3] = ["HERDR_PANE_ID", "HERDR_TAB_ID", "HERDR_WORKSPACE_ID"];
         let mut pane_env: BTreeMap<String, String> = std::env::vars()
-            .filter(|(name, _)| !SHELL_OWNED.contains(&name.as_str()))
+            .filter(|(name, _)| {
+                !SHELL_OWNED.contains(&name.as_str()) && !MUX_OWNED.contains(&name.as_str())
+            })
             .collect();
         pane_env.extend(env.iter().map(|(k, v)| (k.clone(), v.clone())));
         match self
@@ -13312,6 +13324,46 @@ mod tests {
                 !env_call.split(' ').any(|word| word == name),
                 "`{name}` is the shell's own, derived from the pane's cwd — \
                  the dispatcher's copy must not be handed over: {env_call}"
+            );
+        }
+    }
+
+    /// The other thing a pane must not inherit: which pane the dispatcher is
+    /// sitting in.
+    ///
+    /// herdr stamps every pane it opens with its own `HERDR_PANE_ID`,
+    /// `HERDR_TAB_ID` and `HERDR_WORKSPACE_ID`. Replaying the dispatcher's
+    /// copy into a lane pane overwrites all three with the board pane's
+    /// identity, and anything in the lane that reads them — the herdr skill
+    /// an agent runs, a `run:` line calling `herdr pane …` — then acts on the
+    /// dispatcher's pane rather than its own.
+    #[cfg(unix)]
+    #[test]
+    fn a_paned_command_never_inherits_the_dispatchers_own_pane_identity() {
+        let repo = fixture("command-pane-mux-identity");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]).offering_panes();
+        let pipelines = pipelines_running("echo paned", false);
+
+        // The board pane the dispatcher itself would be running in.
+        crate::platform::set_test_env("HERDR_PANE_ID", "w2:p7");
+        crate::platform::set_test_env("HERDR_TAB_ID", "w2:t2");
+        crate::platform::set_test_env("HERDR_WORKSPACE_ID", "w2");
+        drive(&repo, &pipelines, &mux, &path, "review");
+        for name in ["HERDR_PANE_ID", "HERDR_TAB_ID", "HERDR_WORKSPACE_ID"] {
+            crate::platform::remove_test_env(name);
+        }
+
+        let env_call = mux
+            .did("run_in_pane env")
+            .into_iter()
+            .next()
+            .expect("run_in_pane should have logged the environment it was handed");
+        for name in ["HERDR_PANE_ID", "HERDR_TAB_ID", "HERDR_WORKSPACE_ID"] {
+            assert!(
+                !env_call.split(' ').any(|word| word == name),
+                "`{name}` belongs to the pane herdr opened, not to the \
+                 dispatcher's own: {env_call}"
             );
         }
     }
