@@ -894,7 +894,12 @@ mod tests {
     fn a_second_run_keeps_the_first_ones_log() {
         let f = Fixture::new("prev-log");
         f.start("build-demo", "echo first-run-said-this; exit 3");
-        assert_eq!(f.settle("build-demo"), RunState::Exited(3));
+        assert_eq!(
+            f.settle("build-demo"),
+            RunState::Exited(3),
+            "first run's log: {:?}",
+            std::fs::read_to_string(f.runs.log_path("build-demo"))
+        );
         // Wait for the first run's own line to land before rolling it aside.
         // `settle` waits on the `.exit` marker the wrapper's exec group
         // writes, and the stage that actually writes the log sits downstream
@@ -909,9 +914,9 @@ mod tests {
         f.runs.forget("build-demo");
 
         f.start("build-demo", "echo second-run-said-this");
-        // The log goes into the failure message: this assertion fired on CI
-        // for a run whose `run:` line was fine, and the log was the only
-        // thing that would have said so.
+        // The log goes into both failure messages above and below: this test
+        // fired on CI for a run whose `run:` line was fine, and the log is
+        // the only thing that would have said what actually went wrong.
         assert_eq!(
             f.settle("build-demo"),
             RunState::Exited(0),
