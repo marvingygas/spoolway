@@ -19,7 +19,7 @@ Keep internal task bookkeeping out of them and describe user-visible outcomes.
 
 ## 0.2.0 — A run you can leave alone
 
-Spoolway's second release is about what happens when nobody is watching: work arrives on a schedule, a stop leaves every lane standing, and one honest `paused` state replaces the several ways a task used to go quiet. A command step's exit code is now read correctly under load, so a step that actually succeeded can no longer be misrouted as a failure.
+Spoolway's second release is about what happens when nobody is watching: work arrives on a schedule, a stop leaves every lane standing, and one honest `paused` state replaces the several ways a task used to go quiet. Three fixes close every known way a Windows run's own status file could go stale, so a step's reported result — and what a stop actually signals — can be trusted.
 
 ### Highlights
 - Cron jobs run a routine on a schedule, with a `spoolway jobs` screen to write one from and a catch-up pass so a window between two dispatcher passes is never missed. (#17, #20, #86)
@@ -45,14 +45,16 @@ Spoolway's second release is about what happens when nobody is watching: work ar
 - `spoolway queue add --dry-run` validates a batch and prints the project, home directory and base it resolved without writing anything.
 
 ### Reliability
-- A command step's exit file could be read while the wrapper was still writing it, and empty or unreadable content was treated as exit code 1. A step that had actually succeeded could be routed down `on_fail` at random. Reading is now correct in that window on every platform. (#97)
-- On Windows, re-running a command step could lose the previous run's log: Windows refuses to rename a file that still has an open handle, and the previous run's own handle could still be open when the roll-aside ran. The rename is now retried for up to two seconds before giving up. (#97)
+- A command step's exit file could be read while the wrapper was still writing it, and empty content was treated as exit code 1, so a step that had actually succeeded could be routed down `on_fail` at random. Reading now waits for a real answer instead of guessing at a half-written file. (#97)
+- Deleting a finished run's leftover status files could silently fail on Windows, because a just-exited wrapper's handle can still hold them; a step re-run at the same key could then be routed on the previous attempt's exit code without having run at all. Those files are now emptied when they cannot be deleted, which a stale read can no longer mistake for an answer. (#98)
+- On Windows, re-running a command step could also lose the previous run's log to the same lingering-handle problem; the rename that rolls it aside is now retried for up to two seconds before giving up. (#97)
+- Stopping an already-finished run could signal the wrong process on Windows, because a recycled process id can belong to something else by the time the stop reaches it. Stopping now checks that the run is still actually running before it signals, on Windows only; Unix's process-group signal is unchanged, since it is still correct to reach a group whose leader has already exited. (#99)
 
 ### Fixes
 - On Windows, a job whose `routine` began with a leading `/` escaped `.spoolway/routines/` and resolved against the drive root instead. Such a path is now refused on every platform, as it already was elsewhere.
 
 ### Contributors
-- Every commit and all 76 merged pull requests since v0.1.0 (#1–#96, with #70 closed unmerged and the gaps in between never opened as pull requests) came from one author, Marvin Gygas, across three git identities.
+- Every commit and all 79 merged pull requests since v0.1.0 (#1–#99, with #70 closed unmerged and the remaining gaps never opened as pull requests) came from one author, Marvin Gygas, across three git identities.
 - Implementation across many of those commits was co-authored with Claude Opus 5, Claude Opus 5 (1M context), Claude Sonnet 5 and Claude Fable 5.1, credited by their `Co-Authored-By` trailers.
 
 ### Upgrading
