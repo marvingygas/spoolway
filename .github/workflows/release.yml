@@ -102,12 +102,13 @@ jobs:
             echo "Tag $GITHUB_REF_NAME does not match Cargo.toml version $version" >&2
             exit 1
           fi
-          heading="## $version — "
+          heading="## $version"
 
-          # Counted by literal prefix rather than a regex, so a version whose
-          # dots would otherwise act as wildcards cannot match a neighbour.
+          # Compared as a whole line rather than a regex, so a version whose
+          # dots would otherwise act as wildcards cannot match a neighbour,
+          # and `## 0.2.0` never matches `## 0.2.01`.
           found="$(awk -v heading="$heading" '
-            index($0, heading) == 1 { total++ }
+            $0 == heading { total++ }
             END { print total + 0 }
           ' CHANGELOG.md)"
           if [ "$found" != "1" ]; then
@@ -120,8 +121,8 @@ jobs:
           # release body is created from is byte-identical no matter how much
           # whitespace separates one section from the next.
           body="$(awk -v heading="$heading" '
-            index($0, heading) == 1 { inside = 1 }
-            inside && /^## / && index($0, heading) != 1 { inside = 0 }
+            $0 == heading { inside = 1 }
+            inside && /^## / && $0 != heading { inside = 0 }
             inside { print }
           ' CHANGELOG.md)"
           printf '%s\n' "$body" > release-body.md

@@ -18,10 +18,9 @@ inspect and verify, but do not choose the final version or publish anything.
    unresolved candidate failure before recommending release.
 3. Read the version in `Cargo.toml`, the latest reachable `v*` tag, and the exact commit at the tip
    of main. Confirm `Cargo.lock` agrees with the manifest before making any recommendation.
-4. Inspect every commit and merged pull request since the last tag, and name every contributor who
-   authored or co-authored one. Separate user-visible behaviour, breaking interfaces, changed
-   defaults, renamed keys or flags, fixes, platform work, packaging, documentation, and internal-only
-   changes. Use diffs and current help/contracts as evidence; do not infer impact from commit
+4. Inspect every commit and merged pull request since the last tag. Separate user-visible
+   behaviour, breaking interfaces, changed defaults, renamed keys or flags, fixes, platform work,
+   packaging, documentation, and internal-only changes. Use diffs and current help/contracts as evidence; do not infer impact from commit
    subjects alone.
 5. The complete diff and the merged pull requests are the proof of coverage, and they are always
    available. Archived task files may explain why something was done when they happen to still be
@@ -43,8 +42,8 @@ inspect and verify, but do not choose the final version or publish anything.
    every checkout uses the run's SHA, and both npm publication and GitHub release creation depend
    on successful verification and are disabled in rehearsal. Report drift instead of editing it.
 9. Hand off the main commit, current version, previous tag, proposed version and reason, categorized
-   changes with pull-request numbers, breaking changes and migrations, contributor credits, the
-   changelog contract findings from step 6, and all local and hosted verification results with
+   changes with pull-request numbers, breaking changes and migrations, the changelog contract
+   findings from step 6, and all local and hosted verification results with
    their SHAs. If this is a return from publishing because main moved, say exactly what changed
    since the previously approved candidate, and say whether an earlier attempt left an untagged
    version bump or changelog section behind.

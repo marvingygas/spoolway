@@ -46,8 +46,8 @@ skipped is not a fresh full test run. Missing or older hosted evidence does not 
 excuse the local gate; the release workflow will verify the new release commit independently.
 A known unresolved failure on the candidate must be investigated before proceeding.
 
-Read every commit and merged pull request since the latest reachable `v*` tag. Credit authors
-and co-authors; archived tasks are supplementary evidence only. For major zero, bump minor for
+Read every commit and merged pull request since the latest reachable `v*` tag; archived tasks
+are supplementary evidence only. For major zero, bump minor for
 changed user-facing shape (new behavior, changed defaults, renamed or removed interfaces),
 and patch for fixes or internal changes alone. Confirm manifest and lock versions agree.
 

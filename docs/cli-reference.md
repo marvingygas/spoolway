@@ -1070,8 +1070,8 @@ case stops the files being brought forward.
 ### `spoolway whats-new`
 
 Read the release record embedded in the installed binary. With no flag it prints that binary's
-full release section: theme, overview, three to five highlights, any migration instructions,
-other recorded sections, and the GitHub release URL. It does not discover a project or contact
+full release section: three to five highlights, any migration instructions, other recorded
+sections, and the GitHub release URL. It does not discover a project or contact
 GitHub, so it works from any directory and remains available offline.
 
 | Flag | Meaning |

@@ -58,8 +58,6 @@ struct Section {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Release {
     pub version: Version,
-    pub theme: String,
-    overview: String,
     highlights: Vec<String>,
     migrations: Vec<String>,
     details: Vec<Section>,
@@ -76,7 +74,7 @@ pub fn parse(text: &str) -> Result<Vec<Release>> {
         }
     }
     if starts.is_empty() {
-        bail!("The changelog contains no release sections; add one headed `## X.Y.Z — Theme`.");
+        bail!("The changelog contains no release sections; add one headed `## X.Y.Z`.");
     }
 
     let lines: Vec<&str> = text.lines().collect();
@@ -101,30 +99,14 @@ pub fn parse(text: &str) -> Result<Vec<Release>> {
 }
 
 fn parse_release(heading: &str, lines: &[&str]) -> Result<Release> {
-    let (raw_version, theme) = heading.split_once(" — ").with_context(|| {
-        format!("Release heading `{heading}` is invalid; write it as `## X.Y.Z — Theme`.")
+    // The heading carries the version alone. Prose belongs in a named `### `
+    // section, so there is nothing here to keep in step with the sections
+    // below it.
+    let version = Version::parse(heading.trim()).with_context(|| {
+        format!("Release heading `{heading}` is invalid; write it as `## X.Y.Z` and nothing else.")
     })?;
-    let version = Version::parse(raw_version)?;
-    if theme.trim().is_empty() {
-        bail!("Release {version} has no theme; add one after ` — ` in its heading.");
-    }
 
     let mut cursor = 0;
-    while lines.get(cursor).is_some_and(|line| line.trim().is_empty()) {
-        cursor += 1;
-    }
-    let mut overview_lines = Vec::new();
-    while let Some(line) = lines.get(cursor) {
-        if line.trim().is_empty() || line.starts_with("### ") || line.starts_with("Release: ") {
-            break;
-        }
-        overview_lines.push(line.trim());
-        cursor += 1;
-    }
-    if overview_lines.is_empty() {
-        bail!("Release {version} has no overview; add a non-empty paragraph below its heading.");
-    }
-
     let mut sections = Vec::new();
     let mut url = None;
     while cursor < lines.len() {
@@ -199,7 +181,7 @@ fn parse_release(heading: &str, lines: &[&str]) -> Result<Release> {
         })?;
     if highlight_index != 0 {
         bail!(
-            "Release {version} puts another section before Highlights; move `### Highlights` immediately after the overview."
+            "Release {version} puts another section before Highlights; move `### Highlights` directly below the heading."
         );
     }
     let highlights = sections.remove(highlight_index).bullets;
@@ -240,8 +222,6 @@ fn parse_release(heading: &str, lines: &[&str]) -> Result<Release> {
 
     Ok(Release {
         version,
-        theme: theme.trim().to_string(),
-        overview: overview_lines.join(" "),
         highlights,
         migrations,
         details: sections,
@@ -288,9 +268,7 @@ fn render_full(releases: &[&Release]) -> String {
         if index > 0 {
             out.push('\n');
         }
-        out.push_str(&format!("{} — {}\n\n", release.version, release.theme));
-        out.push_str("Overview\n");
-        out.push_str(&format!("  {}\n\n", release.overview));
+        out.push_str(&format!("{}\n\n", release.version));
         render_bullets(&mut out, "Highlights", &release.highlights);
         if !release.migrations.is_empty() {
             render_bullets(
@@ -350,7 +328,7 @@ fn digest_for(releases: &[Release], previous: Version, installed: Version) -> Op
     let mut out = format!("Updated spoolway {previous} → {installed}\n\n");
     if crossed.len() == 1 {
         let release = crossed[0];
-        out.push_str(&format!("What's new — {}\n", release.theme));
+        out.push_str(&format!("What's new in {}\n", release.version));
         for highlight in &release.highlights {
             out.push_str(&format!("  • {highlight}\n"));
         }
@@ -364,7 +342,7 @@ fn digest_for(releases: &[Release], previous: Version, installed: Version) -> Op
     } else {
         out.push_str("What's new\n");
         for release in &crossed {
-            out.push_str(&format!("  {} — {}\n", release.version, release.theme));
+            out.push_str(&format!("  {}\n", release.version));
         }
         let migrations: Vec<_> = crossed
             .iter()
@@ -392,7 +370,7 @@ fn digest_for(releases: &[Release], previous: Version, installed: Version) -> Op
 mod tests {
     use super::*;
 
-    const TWO: &str = "# Changelog\n\n## 0.2.0 — Second\n\nOverview two.\n\n### Highlights\n- One\n- Two\n- Three\n\n### Breaking changes and migration\n- Rename old to new.\n\nRelease: https://github.com/marvingygas/spoolway/releases/tag/v0.2.0\n\n## 0.1.0 — First\n\nOverview one.\n\n### Highlights\n- A\n- B\n- C\n\nRelease: https://github.com/marvingygas/spoolway/releases/tag/v0.1.0\n";
+    const TWO: &str = "# Changelog\n\n## 0.2.0\n\n### Highlights\n- One\n- Two\n- Three\n\n### Breaking changes and migration\n- Rename old to new.\n\nRelease: https://github.com/marvingygas/spoolway/releases/tag/v0.2.0\n\n## 0.1.0\n\n### Highlights\n- A\n- B\n- C\n\nRelease: https://github.com/marvingygas/spoolway/releases/tag/v0.1.0\n";
 
     #[test]
     fn embedded_history_has_the_installed_release() {
@@ -430,7 +408,8 @@ mod tests {
             ))
             .is_err()
         );
-        assert!(parse(&TWO.replace("Overview two.\n", "Overview two.\n\nLoose text.\n")).is_err());
+        assert!(parse(&TWO.replace("## 0.2.0\n", "## 0.2.0\n\nLoose text.\n")).is_err());
+        assert!(parse(&TWO.replace("## 0.2.0\n", "## 0.2.0 — Second\n")).is_err());
     }
 
     #[test]
@@ -461,9 +440,6 @@ mod tests {
             .find(|release| release.version == installed)
             .expect("the installed version has a changelog section");
         assert!(digest.contains(&format!("Updated spoolway 0.0.0 → {installed}")));
-        // The theme, in whichever shape the range takes: one release names
-        // it after `What's new —`, several list it beside their version.
-        assert!(digest.contains(&newest.theme), "{digest}");
         // The release URL is carried either way; only the line above it
         // differs between the one-release and the several-release shape.
         assert!(digest.contains(&newest.url), "{digest}");
@@ -475,7 +451,7 @@ mod tests {
             Version::parse("0.2.0").unwrap(),
         )
         .unwrap();
-        assert!(one.contains("What's new — Second"));
+        assert!(one.contains("What's new in 0.2.0"));
         assert!(one.contains("  • One\n  • Two\n  • Three\n"));
         assert!(one.contains("Breaking changes and migration\n  • Rename old to new."));
     }
@@ -487,7 +463,7 @@ mod tests {
         let releases = parse(TWO).unwrap();
         let digest = digest_for(&releases, previous, Version::parse("0.2.0").unwrap()).unwrap();
         assert!(digest.contains("Updated spoolway 0.1.0 → 0.2.0"));
-        assert!(digest.contains("What's new — Second"));
+        assert!(digest.contains("What's new in 0.2.0"));
         assert!(
             handover_version("2").is_err(),
             "only the published sentinel is compatible"
@@ -495,7 +471,7 @@ mod tests {
     }
 
     #[test]
-    fn a_multi_release_digest_keeps_themes_migrations_commands_and_links() {
+    fn a_multi_release_digest_keeps_versions_migrations_commands_and_links() {
         let releases = parse(TWO).unwrap();
         let digest = digest_for(
             &releases,
@@ -503,13 +479,13 @@ mod tests {
             Version::parse("0.2.0").unwrap(),
         )
         .unwrap();
-        assert!(digest.contains("0.1.0 — First"));
-        assert!(digest.contains("0.2.0 — Second"));
+        assert!(digest.contains("  0.1.0\n"));
+        assert!(digest.contains("  0.2.0\n"));
         assert!(digest.contains("0.2.0: Rename old to new."));
         assert!(digest.contains("spoolway whats-new --since 0.0.0"));
         assert_eq!(digest.matches("https://github.com/").count(), 2);
         assert!(
-            !digest.contains("Overview one"),
+            !digest.contains("  • One"),
             "multi-release output stays compact"
         );
     }

@@ -3,10 +3,10 @@
 This file is spoolway's durable, offline release record. Release sections use
 the following contract so the binary can parse and replay them:
 
-- A section starts with `## X.Y.Z — Theme`, using canonical ASCII digits with
-  no prefix, suffix, plus sign, or leading zero in a multi-digit component.
-- The first non-empty paragraph is the overview.
-- `### Highlights` follows with three to five `- ` bullets.
+- A section starts with `## X.Y.Z`, using canonical ASCII digits with no
+  prefix, suffix, plus sign, or leading zero in a multi-digit component. The
+  heading carries the version and nothing else.
+- `### Highlights` comes first, with three to five `- ` bullets.
 - `### Breaking changes and migration` follows only when migration work exists;
   every migration is a `- ` bullet and the section must not be empty.
 - Other `###` sections may follow and are replayed in their written order.
@@ -14,12 +14,10 @@ the following contract so the binary can parse and replay them:
 - Versions are unique. File order is not significant; commands sort releases by
   version and print ranges oldest first.
 
-The overview, theme, highlights, migrations, and release URL are public copy.
-Keep internal task bookkeeping out of them and describe user-visible outcomes.
+The highlights, migrations, and release URL are public copy. Keep internal task
+bookkeeping out of them and describe user-visible outcomes.
 
-## 0.2.0 — A run you can leave alone
-
-Spoolway's second release is about what happens when nobody is watching: work arrives on a schedule, a stop leaves every lane standing, and one honest `paused` state replaces the several ways a task used to go quiet. Three fixes close every known way a Windows run's own status file could go stale, so a step's reported result — and what a stop actually signals — can be trusted.
+## 0.2.0
 
 ### Highlights
 - Cron jobs run a routine on a schedule, with a `spoolway jobs` screen to write one from and a catch-up pass so a window between two dispatcher passes is never missed. (#17, #20, #86)
@@ -53,10 +51,6 @@ Spoolway's second release is about what happens when nobody is watching: work ar
 ### Fixes
 - On Windows, a job whose `routine` began with a leading `/` escaped `.spoolway/routines/` and resolved against the drive root instead. Such a path is now refused on every platform, as it already was elsewhere.
 
-### Contributors
-- Every commit and all 79 merged pull requests since v0.1.0 (#1–#99, with #70 closed unmerged and the remaining gaps never opened as pull requests) came from one author, Marvin Gygas, across three git identities.
-- Implementation across many of those commits was co-authored with Claude Opus 5, Claude Opus 5 (1M context), Claude Sonnet 5 and Claude Fable 5.1, credited by their `Co-Authored-By` trailers.
-
 ### Upgrading
 - Install or update with `npm install -g spoolway@0.2.0`, or run it without installing via `npx spoolway@0.2.0`.
 - The `spoolway` wrapper package selects one of six platform packages at install time: linux-x64-gnu, linux-arm64-gnu, linux-x64-musl, darwin-arm64, darwin-x64 and win32-x64.
@@ -64,9 +58,7 @@ Spoolway's second release is about what happens when nobody is watching: work ar
 
 Release: https://github.com/marvingygas/spoolway/releases/tag/v0.2.0
 
-## 0.1.0 — Deterministic agent pipelines arrive
-
-Spoolway's first release turns multi-agent work into a local-first pipeline whose scheduling, isolation, and handoff rules remain explicit and inspectable.
+## 0.1.0
 
 ### Highlights
 - A model-free dispatcher moves tasks through declared pipeline steps without spending an LLM call on orchestration.

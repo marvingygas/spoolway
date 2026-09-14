@@ -219,8 +219,8 @@ this binary, `update` runs `npm install -g spoolway@<version> --ignore-scripts` 
 then hands over to the binary it just installed, so the files written are that release's own.
 At a terminal, a successful handover finishes by showing the old and new versions, a compact
 digest of what changed, every migration that applies, and links to the full notes. A one-release
-update includes three to five highlights; a jump across releases keeps one theme per release
-instead and points to `spoolway whats-new --since <old-version>` for the full history. That
+update includes three to five highlights; a jump across releases lists the versions instead and
+points to `spoolway whats-new --since <old-version>` for the full history. That
 digest is deliberately absent from dry runs, file-only updates, unmanaged or dispatcher-blocked
 upgrades, and non-terminal output.
 
