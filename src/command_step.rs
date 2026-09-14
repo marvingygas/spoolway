@@ -459,7 +459,9 @@ impl Runs {
     /// End a run and everything under it. Silent about a run that is already
     /// over, which is the ordinary case.
     pub fn stop(&self, key: &str) {
-        if let Some(pid) = self.read_pid(key) {
+        if let Some(pid) = self.read_pid(key)
+            && may_signal(cfg!(windows), self.state(key))
+        {
             crate::headless::kill_group(pid);
         }
         // Nowhere to report a clearing that failed, and nothing that needs it
@@ -544,6 +546,40 @@ impl Runs {
             }
         }
     }
+}
+
+/// Whether [`Runs::stop`] may signal the pid a run wrote down, given what
+/// that run is doing now.
+///
+/// Always, on Unix, including a run that has already finished. A pid there
+/// addresses a process *group*, [`crate::headless::kill_group`] refuses a
+/// group with nothing left in it, and reaching a group whose leader has
+/// already exited is the reason that function exists — a `run:` line that
+/// backgrounded a server and then returned leaves exactly that shape behind,
+/// and it is the leader's own exit that makes it invisible to every other
+/// check. Membership is the guard, and it is also what makes a recycled pid
+/// safe: a reused number is only a group again if something new leads one.
+///
+/// Only while it is running, on Windows, because none of that holds. A pid
+/// there is one process, and `kill_group` falls back to `taskkill /T /F` on
+/// the bare number whenever it cannot open the run's job object by name —
+/// which is every call from a later dispatch pass, since a job's name lives
+/// only as long as the process that created it. Windows also hands pids out
+/// again within seconds. So signalling a run that has already written its
+/// exit code ends whatever process now holds that number, which may be
+/// nothing to do with spoolway at all.
+///
+/// The platform is an argument rather than a `#[cfg]`, the same way
+/// [`Runs::wrapper_body`] takes its dialect: both answers are then checked
+/// from a single build, on whichever machine runs the suite. The caller
+/// passes `cfg!(windows)`, which is the same question
+/// [`crate::headless::kill_group`]'s own fork is compiled against.
+///
+/// What is lost on Windows is the backgrounded-server case above. Leaving a
+/// process running is the smaller harm of the two, and the platform gives
+/// nothing to tell the two situations apart.
+fn may_signal(windows: bool, state: RunState) -> bool {
+    !windows || state == RunState::Running
 }
 
 /// Spawn a wrapper script detached, so it outlives the pass that started it.
@@ -1002,6 +1038,23 @@ mod tests {
             "the command survived its run being stopped"
         );
         assert_eq!(f.runs.state("bench-demo"), RunState::Fresh);
+    }
+
+    /// Both arms of [`may_signal`], from whichever platform runs the suite —
+    /// read its doc for why the two differ, and for what Windows gives up.
+    #[test]
+    fn a_finished_runs_pid_is_only_unixs_to_signal() {
+        for state in [
+            RunState::Exited(0),
+            RunState::Exited(7),
+            RunState::Interrupted,
+            RunState::Fresh,
+        ] {
+            assert!(may_signal(false, state), "unix, {state:?}");
+            assert!(!may_signal(true, state), "windows, {state:?}");
+        }
+        assert!(may_signal(false, RunState::Running));
+        assert!(may_signal(true, RunState::Running));
     }
 
     /// A run whose process is gone without an exit code — killed, or the machine
