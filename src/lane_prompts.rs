@@ -18,17 +18,18 @@
 //! other six.
 //!
 //! Four names are substituted for the seven states: `{task_file}`, `{step}`,
-//! `{skills}`, `{report_contract}` — see [`PLACEHOLDERS`], what [`lint`]
-//! checks a state's own section against. A `{...}` naming anything else is
-//! left exactly as written rather than rendered empty — a project's own
-//! placeholder-shaped prose is not this module's to eat, and blanking it
-//! silently is how a typo in a project's own template would go unnoticed.
+//! `{skills}`, `{report_contract}` — see [`PLACEHOLDERS`], the set
+//! `spoolway template contract` prints alongside each state. A `{...}` naming
+//! anything else is left exactly as written rather than rendered empty — a
+//! project's own placeholder-shaped prose is not this module's to eat, and
+//! blanking it silently is how a typo in a project's own template would go
+//! unnoticed.
 //!
 //! [`render`] itself answers for more than the seven states: `## arrived-by-
 //! fail`, an eighth section composed straight into the system prompt by
 //! [`crate::compose::policy`] rather than typed into a pane, goes through it
-//! too, substituting a fifth name — `{from}` — that [`lint`] never checks
-//! because the section names no state in [`STATES`].
+//! too, substituting a fifth name — `{from}` — that names no state in
+//! [`STATES`].
 //!
 //! `init` writes the whole shipped file; `spoolway update` never touches it
 //! once it exists, the same rule a prompt already keeps;
@@ -52,9 +53,9 @@ pub const STATES: &[&str] = &[
     "reminder",
 ];
 
-/// Every placeholder [`render`] substitutes. A section naming one of these is
-/// asking for a fact this module already has; a section naming anything else
-/// is asking for nothing this module can answer, and [`lint`] says so.
+/// Every placeholder [`render`] substitutes — what `spoolway template
+/// contract` prints against `LANE-PROMPT`, and the only reader left for this
+/// set now that nothing checks a project's own section against it.
 pub(crate) const PLACEHOLDERS: &[&str] = &["task_file", "step", "skills", "report_contract"];
 
 /// Where a project overrides these seven messages, relative to its checkout.
@@ -137,95 +138,6 @@ fn substitute(template: &str, values: &[(&str, &str)]) -> String {
     out
 }
 
-/// Every `{name}`-shaped token in `body`, whether or not [`PLACEHOLDERS`]
-/// answers for it — what [`lint`] checks for an unknown one against.
-fn placeholder_names(body: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut rest = body;
-    while let Some(start) = rest.find('{') {
-        let tail = &rest[start..];
-        let Some(end) = tail.find('}') else { break };
-        let name = &tail[1..end];
-        // Only an identifier-shaped token is a placeholder attempt; a bare
-        // `{` in ordinary prose — "a step `{`the pipeline names`}`", say —
-        // is not one, and flagging it as an unknown placeholder would be a
-        // false alarm over punctuation.
-        if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-            out.push(name.to_string());
-        }
-        rest = &tail[end + 1..];
-    }
-    out
-}
-
-/// The placeholders a state's message needs to do its one job, and what goes
-/// wrong for a lane when a project's own section leaves one out.
-fn needed(state: &str) -> &'static [(&'static str, &'static str)] {
-    match state {
-        "opening" | "resume" | "resume-unattended" | "carry" | "park-escalated" => {
-            &[("task_file", "so a lane is never told which file to read")]
-        }
-        "reminder" => &[
-            ("step", "so the reminder never says which step it is for"),
-            (
-                "report_contract",
-                "so the reminder never repeats the report contract",
-            ),
-        ],
-        // `park` names nothing: nothing was blocked and nothing changed, so
-        // there is no fact left for it to ask this module for.
-        _ => &[],
-    }
-}
-
-/// Read the project's own sections against what each state needs — never the
-/// built-in wording, which is exempt from its own rule the way a shipped
-/// prompt is exempt from [`crate::prompt::lint`]'s.
-///
-/// Two kinds of finding, both prose read by a machine rather than a reason a
-/// lane refuses to start: a section that leaves out a placeholder its state
-/// needs, and a section that names a `{...}` this module does not
-/// substitute — a typo, most often, since the four real names are short and
-/// easy to misspell.
-pub fn lint(repo: &Repo) -> Vec<crate::prompt::Finding> {
-    let Ok(text) = std::fs::read_to_string(path(repo)) else {
-        return Vec::new();
-    };
-
-    let mut out = Vec::new();
-    for state in STATES {
-        let Some(body) = section(&text, state) else {
-            continue;
-        };
-        if body.trim().is_empty() {
-            continue;
-        }
-
-        for (name, why) in needed(state) {
-            if !body.contains(&format!("{{{name}}}")) {
-                out.push(finding(format!("## {state} names no {{{name}}}, {why}")));
-            }
-        }
-
-        for name in placeholder_names(&body) {
-            if !PLACEHOLDERS.contains(&name.as_str()) {
-                out.push(finding(format!(
-                    "## {state} names {{{name}}}, which nothing substitutes"
-                )));
-            }
-        }
-    }
-    out
-}
-
-fn finding(message: String) -> crate::prompt::Finding {
-    crate::prompt::Finding {
-        prompt: "lane-prompts".to_string(),
-        at: String::new(),
-        message,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,65 +209,5 @@ mod tests {
     #[test]
     fn an_unclosed_brace_is_left_verbatim() {
         assert_eq!(substitute("read this {", &[]), "read this {");
-    }
-
-    /// A project's own opening that never mentions `{task_file}` is a
-    /// finding — a lane opened from it is never told which file to read.
-    #[test]
-    fn an_opening_section_missing_task_file_is_a_finding() {
-        let root = fixture("missing-task-file");
-        let repo = repo_with(&root, "## opening\n\nGet started, whatever it takes.\n");
-        let findings = lint(&repo);
-        assert_eq!(
-            findings.len(),
-            1,
-            "{:?}",
-            findings.iter().map(|f| &f.message).collect::<Vec<_>>()
-        );
-        assert!(findings[0].message.contains("no {task_file}"));
-    }
-
-    /// A section naming a placeholder this module does not substitute is a
-    /// finding, distinct from a missing one.
-    #[test]
-    fn a_section_naming_an_unknown_placeholder_is_a_finding() {
-        let root = fixture("unknown-placeholder");
-        let repo = repo_with(
-            &root,
-            "## reminder\n\n`{step}` again. {report_contract}\n\nAlso {task_id}.\n",
-        );
-        let findings = lint(&repo);
-        assert_eq!(
-            findings.len(),
-            1,
-            "{:?}",
-            findings.iter().map(|f| &f.message).collect::<Vec<_>>()
-        );
-        assert!(findings[0].message.contains("{task_id}"));
-        assert!(findings[0].message.contains("which nothing substitutes"));
-    }
-
-    /// `park` needs nothing, so a project's own section with no placeholder
-    /// at all is not a finding.
-    #[test]
-    fn a_park_section_with_no_placeholder_is_not_a_finding() {
-        let root = fixture("park-clean");
-        let repo = repo_with(&root, "## park\n\nCarry on.\n");
-        assert!(lint(&repo).is_empty());
-    }
-
-    /// A state the project's file never mentions is silent — there is
-    /// nothing of the project's to check, only spoolway's own built-in,
-    /// which is exempt from its own rule.
-    #[test]
-    fn a_state_the_project_never_wrote_is_not_checked() {
-        let root = fixture("unwritten-state");
-        let repo = repo_with(&root, "## park\n\nCarry on.\n");
-        let findings = lint(&repo);
-        assert!(
-            findings.iter().all(|f| !f.message.contains("## opening")),
-            "{:?}",
-            findings.iter().map(|f| &f.message).collect::<Vec<_>>()
-        );
     }
 }

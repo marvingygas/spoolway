@@ -34,7 +34,7 @@ runs — including when `-C` names the project explicitly. In the main checkout 
 print exactly what they always did.
 
 The commands that print it are `pipeline show`, `pipeline check`, `pipeline list`, `pipeline
-override`, `prompt list`, `prompt check`, `prompt override`, `config show`, `config list`,
+override`, `prompt list`, `prompt override`, `config show`, `config list`,
 `config get`, `config path` and `config override`. `doctor` reports on both sides at once and
 prints the line once. Commands reading only the queue, the lane state, the archive or the usage
 ledger never print it: they answer for the project and always did.
@@ -579,7 +579,8 @@ definitions were read from. In the main checkout nothing extra is printed.
 ### `spoolway pipeline check`
 
 Validate the pipeline definitions and their agent references against the config they will run
-with. Includes the prompt checks. Also validates the two shipped pipelines,
+with. Also runs the prompt lint, which fails the check on a prompt that names a `spoolway …`
+command or flag this binary no longer has. Also validates the two shipped pipelines,
 `assets/pipelines/default.yml` and `assets/pipelines/bugfix.yml`, checking their `run:` commands
 against this same config — even when a project's own `.spoolway/pipelines/` overrides them, so a
 shipped `run:` line that would only work inside this repository is caught before it ships.
@@ -594,7 +595,7 @@ The [`checkout:` line](#the-checkout-line) is the whole of the addition, and is 
 checkout.
 
 A missing or overlong `description:` is a warning, not a problem. The check still passes, and
-the warning prints under the verdict beside the gate and prompt findings:
+the warning prints under the verdict beside the gate warning:
 
 ```
   warning: pipeline `local` has no `description:` — nothing reading `pipeline list` can tell what it is for
@@ -754,11 +755,6 @@ comes first; in the main checkout it is suppressed.
 ### `spoolway prompt show <name>`
 
 Print one prompt file.
-
-### `spoolway prompt check [<name>]`
-
-Read prompts against the steps that run them. Also part of `pipeline check`. In a linked
-worktree the [`checkout:` line](#the-checkout-line) comes first; in the main checkout it is suppressed.
 
 ### `spoolway prompt override <name>`
 

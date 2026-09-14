@@ -420,10 +420,6 @@ fn run() -> Result<()> {
                     prompt::list(&repo, &read, cli.json)
                 }
                 Command::Prompt(PromptCommand::Show { name }) => prompt::show(&repo, name),
-                Command::Prompt(PromptCommand::Check { name }) => {
-                    let read = Pipelines::load(&repo.checkout, &repo.config)?;
-                    prompt::check(&repo, &read, name.as_ref(), cli.json)
-                }
                 Command::Prompt(PromptCommand::Override { name }) => {
                     commands::prompt_override(&repo, name)
                 }

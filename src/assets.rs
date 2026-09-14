@@ -465,7 +465,11 @@ mod tests {
     /// The shipped `spoolway-doctor` skill proposes only commands and keys this
     /// binary accepts — no `config set agents.*.model` (retired, refused), no
     /// "the profile's `args`" (retired), no flat `.spoolway/prompts/<name>.md`
-    /// (the shape is `<name>/PROMPT.md`), no `gates` (gone) — finding 29.
+    /// (the shape is `<name>/PROMPT.md`), no `gates` (gone), and no retired
+    /// `prompt`-reading subcommand that `pipeline check` replaced — finding 29.
+    /// (That banned phrase is built at runtime below, not spelled out here or
+    /// in the literal list, so this file does not itself fail the repo-wide
+    /// grep for it.)
     #[test]
     fn the_shipped_doctor_skill_names_nothing_retired() {
         // Every provider's copy, not just Claude's: they are three separate
@@ -495,5 +499,13 @@ mod tests {
                 "spoolway-doctor skill still names `{banned}`"
             );
         }
+
+        // Built from two halves rather than written as one literal, so this
+        // guard's own source does not fail the same repo-wide grep it enforces.
+        let retired_subcommand = ["prompt", "check"].join(" ");
+        assert!(
+            !skill.contains(&retired_subcommand),
+            "spoolway-doctor skill still names the retired `{retired_subcommand}` subcommand"
+        );
     }
 }

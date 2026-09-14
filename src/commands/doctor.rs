@@ -248,7 +248,7 @@ pub fn doctor(
     // to find out which one it is. Report the load failure as a failed row
     // and run the checks that read no pipeline — config, issue tracking,
     // retired keys, the multiplexer, the update check — since the graph,
-    // agent and prompt checks below all need a loaded pipeline set.
+    // agent and prompt-validity checks below all need a loaded pipeline set.
     let pipelines = match pipelines {
         Ok(pipelines) => pipelines,
         Err(err) => {
@@ -1179,8 +1179,9 @@ fn agent_kind_checks(config: &Config) -> Vec<Finding> {
 }
 
 /// Every prompt a pipeline's agent steps actually run: whether its file
-/// exists, and — once, for the whole project rather than per file — whether
-/// `spoolway prompt check`'s lint has anything to say.
+/// exists. The lint over a prompt's own prose is `spoolway pipeline check`'s
+/// alone now, since a surviving finding there fails the build — doctor would
+/// only be repeating a check that already has a sharper place to fail.
 fn prompt_checks(repo: &Repo, pipelines: &Pipelines) -> Vec<Finding> {
     let mut findings = Vec::new();
 
@@ -1216,19 +1217,6 @@ fn prompt_checks(repo: &Repo, pipelines: &Pipelines) -> Vec<Finding> {
         ));
     }
 
-    // Read as a note, never a failure: a finding is prose read by a machine,
-    // and the project is the one that knows whether it is wrong.
-    match crate::prompt::lint(repo, pipelines) {
-        Ok(lints) if lints.is_empty() => {
-            findings.push(Finding::Check("prompts read clean".into(), Ok(None)));
-        }
-        Ok(lints) => findings.push(Finding::Note(format!(
-            "{} prompt finding(s) — `spoolway prompt check` to read them",
-            lints.len()
-        ))),
-        Err(err) => findings.push(Finding::Note(format!("prompts could not be read: {err:#}"))),
-    }
-
     // A prompt directory nothing runs is what a release leaves behind when it
     // stops shipping one — `summariser` went with `[stack.summary]` — and
     // what a step rename leaves when its prompt was not renamed with it.
@@ -1259,20 +1247,6 @@ fn prompt_checks(repo: &Repo, pipelines: &Pipelines) -> Vec<Finding> {
                 crate::platform::relative(&repo.root, &unit)
             )));
         }
-    }
-
-    // Same read, over the seven typed messages a lane's pane receives rather
-    // than a role's own prose — see `crate::lane_prompts`. A section that
-    // names none of the placeholders its state needs, or names one this
-    // binary does not substitute, is a finding here too.
-    let lane_prompt_findings = crate::lane_prompts::lint(repo);
-    if lane_prompt_findings.is_empty() {
-        findings.push(Finding::Check("lane prompts read clean".into(), Ok(None)));
-    } else {
-        findings.push(Finding::Note(format!(
-            "{} lane-prompts finding(s) — `spoolway prompt check` to read them",
-            lane_prompt_findings.len()
-        )));
     }
 
     findings

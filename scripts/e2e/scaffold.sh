@@ -439,7 +439,6 @@ git push -q -u origin "$BRANCH"
 
 say "checking what was installed"
 spoolway pipeline check
-spoolway prompt check
 spoolway doctor || true
 
 cat <<EOF

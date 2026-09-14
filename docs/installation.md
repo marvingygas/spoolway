@@ -285,7 +285,7 @@ either, and changing what a task records is a spoolway release rather than a mig
 your repository.
 
 The trade is that a sharper default in a later release does not reach you on its own.
-`spoolway prompt check` is what tells you when your prose has fallen behind the CLI — it
+`spoolway pipeline check` is what tells you when your prose has fallen behind the CLI — it
 validates every `spoolway` command and flag in a prompt against the real command tree.
 
 For any file, `spoolway update --replace <path>` writes the shipped one over yours, saving
