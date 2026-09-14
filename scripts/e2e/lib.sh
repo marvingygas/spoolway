@@ -328,7 +328,17 @@ _config_stamp() {
 # so a scenario only says this out loud when it wants a dispatcher running with
 # nothing to drive yet.
 dispatcher_start() {
-  [ -n "${E2E_DISPATCHER_PID:-}" ] && return 0
+  # Alive, not merely remembered. The loop below exits on its own when a pass
+  # is refused — a scenario that deliberately breaks the pipeline is exactly
+  # that — and the pid stays in this variable after it is gone. Taking it on
+  # trust left every later scenario driving a queue nothing was serving, which
+  # is a timeout rather than the failure it actually is. A dead one is
+  # forgotten here and replaced below, so a suite that broke the dispatcher on
+  # purpose gets a working one back the moment it stops breaking it.
+  if [ -n "${E2E_DISPATCHER_PID:-}" ]; then
+    kill -0 -- "-$E2E_DISPATCHER_PID" 2>/dev/null && return 0
+    E2E_DISPATCHER_PID=""
+  fi
   E2E_CONFIG_STAMP=$(_config_stamp)
   E2E_DISPATCH_DIR=${E2E_DISPATCH_DIR:-${LIVE:-${WORK:-$PWD}}}
   local pidfile="$E2E_DISPATCH_DIR/dispatcher.pid"
@@ -470,19 +480,26 @@ _still_in_group() {
 # same number in both modes would be a suite that gives up on a lane
 # mid-sentence and calls it stuck — which is exactly what the first real run did.
 drive() {
-  local task=$1 want=$2 secs=${3:-40} stage i
+  local task=$1 want=$2 secs=${3:-40} stage i from
   [ "${E2E_AGENTS:-mock}" = real ] && secs=$((secs * 10))
   if [ -n "${E2E_DISPATCHER_PID:-}" ] && [ "$(_config_stamp)" != "$E2E_CONFIG_STAMP" ]; then
     dispatcher_restart
   fi
   dispatcher_start
+  # Where this call starts reading the log. It is emptied once per suite and
+  # appended to for the rest of it, so a refusal a *previous* scenario proved
+  # on purpose stays in the file for good — and reading the whole file failed
+  # every later `drive` with a reason that had nothing to do with it. Only a
+  # refusal written after this line is this call's own.
+  from=$(wc -c < "$E2E_DISPATCH_LOG" 2>/dev/null || echo 0)
   for ((i = 0; i < secs * 5; i++)); do
     stage=$(stage_of "$task")
     case "$want" in
       gone) [ -z "$stage" ] && return 0 ;;
       *)    [ "$stage" = "$want" ] && return 0 ;;
     esac
-    if grep -q E2E-DISPATCH-REFUSED "$E2E_DISPATCH_LOG" 2>/dev/null; then
+    if tail -c "+$((from + 1))" "$E2E_DISPATCH_LOG" 2>/dev/null \
+      | grep -q E2E-DISPATCH-REFUSED; then
       printf '  \033[31mrefused\033[0m the dispatcher would not run:\n' >&2
       tail -20 "$E2E_DISPATCH_LOG" | sed 's/^/        /' >&2
       _still_in_group
