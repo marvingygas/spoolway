@@ -1229,6 +1229,38 @@ fn prompt_checks(repo: &Repo, pipelines: &Pipelines) -> Vec<Finding> {
         Err(err) => findings.push(Finding::Note(format!("prompts could not be read: {err:#}"))),
     }
 
+    // A prompt directory nothing runs is what a release leaves behind when it
+    // stops shipping one — `summariser` went with `[stack.summary]` — and
+    // what a step rename leaves when its prompt was not renamed with it.
+    // `update` never deletes a prompt, since the project may have written in
+    // it; so it is said here, once, rather than found by whoever opens the
+    // directory next.
+    if let Ok(entries) = crate::prompt::entries(repo) {
+        let used = crate::prompt::users(pipelines);
+        for entry in entries {
+            if used.contains_key(&entry.name) {
+                continue;
+            }
+            // The directory for the directory shape, the file itself for a
+            // legacy flat `<name>.md` — whichever a person would delete.
+            let unit = match entry.path.parent() {
+                Some(dir)
+                    if entry.path.file_name().and_then(|f| f.to_str())
+                        == Some(crate::assets::PROMPT_FILE) =>
+                {
+                    dir.to_path_buf()
+                }
+                _ => entry.path.clone(),
+            };
+            findings.push(Finding::Note(format!(
+                "prompt `{}` is run by no step in this project's pipelines — delete `{}`, or \
+                 point a step at it; `spoolway prompt list` shows what each one runs on",
+                entry.name,
+                crate::platform::relative(&repo.root, &unit)
+            )));
+        }
+    }
+
     // Same read, over the seven typed messages a lane's pane receives rather
     // than a role's own prose — see `crate::lane_prompts`. A section that
     // names none of the placeholders its state needs, or names one this
@@ -1820,6 +1852,36 @@ mod tests {
         assert_eq!(notes.len(), 1, "{notes:#?}");
         assert!(notes[0].contains("model `Qwen3.6-35B-A3B`"), "{}", notes[0]);
         assert!(!notes[0].contains("Ornith"), "{}", notes[0]);
+    }
+
+    /// A prompt directory no step runs is noted — the `summariser/` a 0.1.0
+    /// install keeps after 0.2.0 stopped shipping it — and one a step does run
+    /// is not.
+    #[test]
+    fn a_prompt_no_step_runs_is_noted_and_a_used_one_is_silent() {
+        let repo = scratch_repo("orphan-prompt");
+        for name in ["worker", "summariser"] {
+            let file = crate::prompt::directory_form(&repo, name);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, "do the work\n").unwrap();
+        }
+        let pipelines = single_step_pipelines(
+            "  - id: build\n    agent: pi\n    prompt: worker\n    model: m\n    \
+             on_pass: finish\n  - id: finish\n    end: true\n",
+        );
+
+        let notes: Vec<String> = prompt_checks(&repo, &pipelines)
+            .iter()
+            .filter_map(|f| match f {
+                Finding::Note(text) if text.contains("run by no step") => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(notes.len(), 1, "{notes:#?}");
+        assert!(notes[0].contains("prompt `summariser`"), "{}", notes[0]);
+        assert!(notes[0].contains("summariser"), "{}", notes[0]);
+        assert!(!notes[0].contains("`worker`"), "{}", notes[0]);
     }
 
     #[test]

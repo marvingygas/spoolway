@@ -697,7 +697,6 @@ $ spoolway pipeline gen --plan ~/.spoolway/myproject/plans/my-plan.html
 
 agent         claude · claude-opus-5 · effort high
 plan          ~/.spoolway/myproject/plans/my-plan.html
-preferences   auto = false · loop_default = 1 · local_models = true
 
 opened a pane on this checkout
 prompted `spoolway-config`

@@ -265,8 +265,12 @@ never_draws "with no panel to answer" "Pausing aborts" "$MARK"
 lacks "and writes no \`parked_from\` for a task that was still \`queued\`" \
   "parked_from:" "$SPOOLWAY_PROJECT_HOME/queue/never-run.md"
 
+# A task that never started has no step to go back to, and the entry is the
+# wrong answer: it would skip the dependency gate only `queued` applies. So
+# it goes back onto `queued` — and stays there, because `late`, which it
+# depends on, is still parked above.
 must "resuming it by hand" "$SPOOLWAY" resume never-run
-stage_reaches "it lands on the pipeline's own entry step" never-run implement 25
+stage_reaches "it goes back onto queued, gated again by its paused dependency" never-run queued 25
 lacks "carrying no leftover \`parked_from\`" "parked_from:" \
   "$SPOOLWAY_PROJECT_HOME/queue/never-run.md"
 lacks "or \`resume:\`" "resume:" "$SPOOLWAY_PROJECT_HOME/queue/never-run.md"
@@ -275,24 +279,26 @@ lacks "or \`resume:\`" "resume:" "$SPOOLWAY_PROJECT_HOME/queue/never-run.md"
 # The other panels this task hands the same two answers `p`/`P`'s own already
 # had: `U` still opens unconditionally, but the letter that opened it no
 # longer closes it — only `enter` does, the same rule proven above for the
-# pause panel.
+# pause panel. Two tasks sit on `queued` now: `stalled`, and `never-run`
+# back where its resume put it.
 queue_idle stalled late
 sleep 2
 press U
-draws "\`U\` opens the unqueue-all panel" "1 task has not started:"
+draws "\`U\` opens the unqueue-all panel" "2 tasks have not started:"
 draws "answered with enter or esc, and nothing else" "[enter] unqueue them   [esc] cancel"
 stage_stays "nothing is written while the panel is open" stalled queued
 
 press U
 sleep 3
 stage_stays "the old confirming letter no longer answers the panel" stalled queued
-draws "and the panel is still up" "1 task has not started:"
+draws "and the panel is still up" "2 tasks have not started:"
 
 _gone() { [ ! -e "$SPOOLWAY_PROJECT_HOME/queue/$1.md" ]; }
 press $'\r'
 if poll_until 25 _gone stalled; then ok "enter carries out the unqueue"
 else bad "enter carries out the unqueue"; tail -30 "$BOARD_LOG" | sed 's/^/        /'; fi
 has "the document lands back in pending" "id: stalled" "$SPOOLWAY_PROJECT_HOME/pending/stalled.md"
+has "and so does the one that never ran" "id: never-run" "$SPOOLWAY_PROJECT_HOME/pending/never-run.md"
 
 board_stop
 finish

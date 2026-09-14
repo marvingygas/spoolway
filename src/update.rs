@@ -101,6 +101,10 @@ impl Outcome {
 const KEPT: &str =
     "Files were overwritten; your config values, prompts and task skeletons were kept.";
 
+/// The same line for a dry run, which has to say the opposite: the paths
+/// above it are what an update *would* take, and nothing was touched.
+const DRY_RUN: &str = "Dry run: nothing was written. Run without --dry-run to take it.";
+
 pub fn run(repo: &Repo, args: &UpdateArgs) -> Result<()> {
     use std::io::IsTerminal;
 
@@ -144,16 +148,25 @@ pub fn run(repo: &Repo, args: &UpdateArgs) -> Result<()> {
             | Outcome::Blocked { .. } => {}
         }
     }
+    // A dry run reports the same paths in the conditional: "wrote" over a
+    // tree nothing touched reads as a lie the moment `git status` is run.
+    let (wrote_word, removed_word) = match args.dry_run {
+        true => ("would write ", "would remove"),
+        false => ("wrote       ", "removed     "),
+    };
     for path in &wrote {
-        println!("  wrote    {path}");
+        println!("  {wrote_word} {path}");
     }
     for (path, why) in &removed {
-        println!("  removed  {path}");
-        println!("           ({why})");
+        println!("  {removed_word} {path}");
+        println!("               ({why})");
     }
 
     println!();
-    println!("{KEPT}");
+    match args.dry_run {
+        true => println!("{DRY_RUN}"),
+        false => println!("{KEPT}"),
+    }
 
     let upgraded = std::env::var(crate::release::ENV_UPGRADED).ok();
     if let Some(previous) =
@@ -585,7 +598,7 @@ fn replace(repo: &Repo, args: &UpdateArgs) -> Result<()> {
         );
     }
     match args.dry_run {
-        true => println!("Dry run: nothing was written. Run without --dry-run to take it."),
+        true => println!("{DRY_RUN}"),
         false => println!("`git diff` shows exactly what changed."),
     }
     Ok(())
@@ -671,40 +684,99 @@ fn shipped_for(repo: &Repo, path: &Path) -> Option<String> {
 /// Every provider, not just `claude`: `init` and `install` write the same
 /// skills under `.agents/skills/` and `.pi/skills/` too, and a codex or pi
 /// project that never sees them refreshed keeps stale skills after every
-/// update. The `planned.path.exists()` check below still limits the writes to
-/// providers a project actually installed. Codex's former `.codex/skills/`
-/// root counts as an installation too: writing the current set under
-/// `.agents/skills/` migrates it without deleting anything from the old root.
+/// update. Whether a provider is installed is decided once, for the whole
+/// set: any skill this binary ships already on disk there, or one it has
+/// since retired — a project installed before a rename has only the old
+/// name to show for it. Decided per file instead, a skill this release
+/// newly ships would never reach a project that installed the last one,
+/// and a rename would remove the old directory without ever writing the
+/// new — which is exactly what happened to `spoolway-config`. Codex's
+/// former `.codex/skills/` root counts as an installation too: writing the
+/// current set under `.agents/skills/` migrates it, and then the copies
+/// spoolway itself put under the old root — its own skills and any it has
+/// since retired, never a directory the project made — are removed, since
+/// Codex no longer reads that root and a stale set nothing loads is what a
+/// person finds and edits by mistake. The old root itself, and `.codex/`
+/// above it, are left in place unless the move emptied them.
 fn skills(repo: &Repo, args: &UpdateArgs, outcomes: &mut Vec<Outcome>) -> Result<()> {
     for provider in <crate::cli::Provider as clap::ValueEnum>::value_variants() {
         let planned = provider.plan(&repo.root);
+        let dir = provider.skills_dir(&repo.root);
+        let old_codex_root = repo.root.join(".codex").join("skills");
         let migrate_codex = *provider == crate::cli::Provider::Codex
             && planned.iter().any(|file| {
                 let relative = file
                     .path
-                    .strip_prefix(provider.skills_dir(&repo.root))
+                    .strip_prefix(&dir)
                     .expect("a provider's plan is below its skills directory");
-                repo.root
-                    .join(".codex")
-                    .join("skills")
-                    .join(relative)
-                    .exists()
+                old_codex_root.join(relative).exists()
             });
+        let installed = migrate_codex
+            || planned.iter().any(|file| file.path.exists())
+            || crate::install::RETIRED_SKILLS
+                .iter()
+                .any(|name| dir.join(name).is_dir());
+        if !installed {
+            continue;
+        }
 
         for planned in planned {
-            if !planned.path.exists() && !migrate_codex {
-                continue;
-            }
             let shown = crate::platform::relative(&repo.root, &planned.path);
-            let on_disk = std::fs::read_to_string(&planned.path).unwrap_or_default();
-            if on_disk == planned.contents {
-                outcomes.push(Outcome::Kept);
-                continue;
-            }
+            let detail = match std::fs::read_to_string(&planned.path) {
+                Ok(on_disk) if on_disk == planned.contents => {
+                    outcomes.push(Outcome::Kept);
+                    continue;
+                }
+                Ok(_) => "rewritten",
+                Err(_) => "added",
+            };
             if !args.dry_run {
                 write_atomic(&planned.path, planned.contents)?;
             }
-            outcomes.push(Outcome::wrote(&shown, "rewritten"));
+            outcomes.push(Outcome::wrote(&shown, detail));
+        }
+
+        if migrate_codex {
+            let mut names: Vec<String> = provider
+                .plan(&repo.root)
+                .iter()
+                .filter_map(|file| {
+                    file.path
+                        .strip_prefix(&dir)
+                        .ok()?
+                        .components()
+                        .next()
+                        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                })
+                .collect();
+            names.extend(crate::install::RETIRED_SKILLS.iter().map(|s| s.to_string()));
+            names.sort();
+            names.dedup();
+            for name in names {
+                let stale = old_codex_root.join(&name);
+                if !stale.is_dir() {
+                    continue;
+                }
+                let shown = crate::platform::relative(&repo.root, &stale);
+                if !args.dry_run {
+                    std::fs::remove_dir_all(&stale)
+                        .with_context(|| format!("removing {}", stale.display()))?;
+                }
+                outcomes.push(Outcome::removed(
+                    &shown,
+                    format!(
+                        "moved to {}, which is where Codex reads skills from now",
+                        crate::platform::relative(&repo.root, &dir)
+                    ),
+                ));
+            }
+            // The old root, and `.codex/` above it, go too once the move
+            // has emptied them — `remove_dir` refuses a directory holding
+            // anything, so a project's own files there are never at risk.
+            if !args.dry_run {
+                let _ = std::fs::remove_dir(&old_codex_root);
+                let _ = std::fs::remove_dir(repo.root.join(".codex"));
+            }
         }
     }
     Ok(())
@@ -1435,6 +1507,196 @@ mod tests {
         }
     }
 
+    /// A skill this release newly ships lands in every provider a project
+    /// already installed — the guard is per provider, not per file. Decided
+    /// per file, `spoolway-config` never reached a project that installed
+    /// before the rename, while `retired_skills` removed `spoolway-pipeline`
+    /// from under it: the project ended one skill short and doctor said
+    /// everything checked out.
+    #[test]
+    fn update_adds_a_newly_shipped_skill_to_an_installed_provider() {
+        let repo = fixture("skills-new-skill");
+        let claude_dir = crate::cli::Provider::Claude.skills_dir(&repo.root);
+        let plan = claude_dir.join("spoolway-plan").join("SKILL.md");
+        std::fs::create_dir_all(plan.parent().unwrap()).unwrap();
+        std::fs::write(&plan, "stale, from an older release\n").unwrap();
+
+        let mut outcomes = Vec::new();
+        skills(&repo, &args(), &mut outcomes).unwrap();
+        let lines = outcome_lines(&outcomes);
+
+        let config = claude_dir.join("spoolway-config").join("SKILL.md");
+        assert!(config.exists(), "{lines:?}");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("spoolway-config/SKILL.md") && l.contains("added")),
+            "a file that was not there is added, not rewritten: {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("spoolway-plan/SKILL.md") && l.contains("rewritten")),
+            "{lines:?}"
+        );
+        assert!(
+            !crate::cli::Provider::Pi.skills_dir(&repo.root).exists(),
+            "a provider the project never installed gets nothing"
+        );
+    }
+
+    /// The rename case in full: a project whose only trace of an install is
+    /// the retired directory still counts as installed, so the skill that
+    /// replaced it is written in the same pass that removes the old one.
+    #[test]
+    fn update_writes_the_renamed_skill_where_only_the_retired_one_stood() {
+        let repo = fixture("skills-only-retired");
+        let claude_dir = crate::cli::Provider::Claude.skills_dir(&repo.root);
+        let stale = claude_dir.join("spoolway-pipeline");
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::write(stale.join("SKILL.md"), "the old skill\n").unwrap();
+
+        let mut outcomes = Vec::new();
+        skills(&repo, &args(), &mut outcomes).unwrap();
+        retired_skills(&repo, &args(), &mut outcomes).unwrap();
+
+        assert!(claude_dir.join("spoolway-config").join("SKILL.md").exists());
+        assert!(!stale.exists());
+        for planned in crate::cli::Provider::Claude.plan(&repo.root) {
+            assert!(planned.path.exists(), "{}", planned.path.display());
+        }
+    }
+
+    /// A dry run over the same tree reports every addition and writes none.
+    #[test]
+    fn a_dry_run_reports_a_missing_skill_without_writing_it() {
+        let repo = fixture("skills-new-skill-dry");
+        let claude_dir = crate::cli::Provider::Claude.skills_dir(&repo.root);
+        let plan = claude_dir.join("spoolway-plan").join("SKILL.md");
+        std::fs::create_dir_all(plan.parent().unwrap()).unwrap();
+        std::fs::write(&plan, "stale\n").unwrap();
+
+        let mut outcomes = Vec::new();
+        skills(
+            &repo,
+            &UpdateArgs {
+                dry_run: true,
+                ..args()
+            },
+            &mut outcomes,
+        )
+        .unwrap();
+
+        assert!(!claude_dir.join("spoolway-config").exists());
+        assert_eq!(std::fs::read_to_string(&plan).unwrap(), "stale\n");
+        let lines = outcome_lines(&outcomes);
+        assert!(
+            lines.iter().any(|l| l.contains("spoolway-config/SKILL.md")),
+            "{lines:?}"
+        );
+    }
+
+    /// Codex moved its repository skill root from `.codex/skills` to
+    /// `.agents/skills`, and a 0.1.0 install lives under the old one. An
+    /// update is the one chance to carry it forward without asking every
+    /// project to reinstall by hand: the current set is written where Codex
+    /// reads it now, and the copies spoolway itself put under the old root —
+    /// current names and retired ones alike — go with the move. Skills carry
+    /// no local edits by design, which is what makes that safe; a directory
+    /// the project made there is not spoolway's and stays.
+    #[test]
+    fn update_moves_codex_skills_out_of_the_old_root() {
+        let repo = fixture("skills-codex-old-root");
+        let old_root = repo.root.join(".codex").join("skills");
+        for name in ["spoolway-plan", "spoolway-pipeline", "a-projects-own-skill"] {
+            let dir = old_root.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("SKILL.md"), "from 0.1.0\n").unwrap();
+        }
+
+        let mut outcomes = Vec::new();
+        skills(&repo, &args(), &mut outcomes).unwrap();
+        let lines = outcome_lines(&outcomes);
+
+        let new_root = crate::cli::Provider::Codex.skills_dir(&repo.root);
+        for planned in crate::cli::Provider::Codex.plan(&repo.root) {
+            assert_eq!(
+                std::fs::read_to_string(&planned.path).unwrap(),
+                planned.contents,
+                "{} was not migrated",
+                planned.path.display()
+            );
+        }
+        assert!(new_root.join("spoolway-config").is_dir());
+        assert!(!old_root.join("spoolway-plan").exists(), "{lines:?}");
+        assert!(!old_root.join("spoolway-pipeline").exists(), "{lines:?}");
+        assert!(
+            old_root
+                .join("a-projects-own-skill")
+                .join("SKILL.md")
+                .exists(),
+            "a directory spoolway never shipped is not spoolway's to remove"
+        );
+        assert!(old_root.is_dir(), "and so the root holding it stays");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("removed .codex/skills/spoolway-plan")),
+            "{lines:?}"
+        );
+    }
+
+    /// A 0.1.0 codex root holding only spoolway's own skills is empty after
+    /// the move, and an empty `.codex/` is nothing but a question — so both
+    /// go with it.
+    #[test]
+    fn an_emptied_codex_root_goes_with_the_move() {
+        let repo = fixture("skills-codex-emptied");
+        let dir = repo
+            .root
+            .join(".codex")
+            .join("skills")
+            .join("spoolway-plan");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("SKILL.md"), "from 0.1.0\n").unwrap();
+
+        let mut outcomes = Vec::new();
+        skills(&repo, &args(), &mut outcomes).unwrap();
+
+        assert!(!repo.root.join(".codex").exists());
+    }
+
+    /// The same move in a dry run is reported and not made.
+    #[test]
+    fn a_dry_run_reports_the_codex_move_without_making_it() {
+        let repo = fixture("skills-codex-old-root-dry");
+        let old_root = repo.root.join(".codex").join("skills");
+        let dir = old_root.join("spoolway-plan");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("SKILL.md"), "from 0.1.0\n").unwrap();
+
+        let mut outcomes = Vec::new();
+        skills(
+            &repo,
+            &UpdateArgs {
+                dry_run: true,
+                ..args()
+            },
+            &mut outcomes,
+        )
+        .unwrap();
+
+        assert!(dir.join("SKILL.md").exists());
+        assert!(!crate::cli::Provider::Codex.skills_dir(&repo.root).exists());
+        assert!(
+            outcome_lines(&outcomes)
+                .iter()
+                .any(|l| l.starts_with("removed .codex/skills/spoolway-plan")),
+            "{:?}",
+            outcome_lines(&outcomes)
+        );
+    }
+
     /// A project that ran `install` before the rename has a stale
     /// `spoolway-pipeline/` directory sitting beside its skills — `update`
     /// removes it, and a directory update has no reason to touch (a
@@ -1489,31 +1751,5 @@ mod tests {
 
         assert!(stale.is_dir(), "a dry run must not delete anything");
         assert_eq!(outcome_lines(&outcomes).len(), 1);
-    }
-
-    /// Codex moved its repository skill root from `.codex/skills` to
-    /// `.agents/skills`. An update is the one chance to carry existing
-    /// installations forward without asking every project to reinstall by
-    /// hand. The old files are deliberately left in place: they may include
-    /// work that is not spoolway's to remove.
-    #[test]
-    fn skills_migrates_a_legacy_codex_install_without_deleting_it() {
-        let repo = fixture("skills-codex-legacy");
-        let legacy = repo.root.join(".codex/skills/spoolway-plan/SKILL.md");
-        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-        std::fs::write(&legacy, "stale, from an older release\n").unwrap();
-
-        let mut outcomes = Vec::new();
-        skills(&repo, &args(), &mut outcomes).unwrap();
-
-        for planned in crate::cli::Provider::Codex.plan(&repo.root) {
-            assert_eq!(
-                std::fs::read_to_string(&planned.path).unwrap(),
-                planned.contents,
-                "{} was not migrated",
-                planned.path.display()
-            );
-        }
-        assert!(legacy.exists(), "the legacy install must not be deleted");
     }
 }

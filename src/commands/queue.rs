@@ -8053,12 +8053,19 @@ mod tests {
     }
 
     /// Nothing in the pending directory is not an error — the screen opens
-    /// onto an empty list rather than refusing, and reads nothing off stdin
-    /// at all when there is nothing to browse.
+    /// onto an empty list rather than refusing. Driven through `run_screen`
+    /// with a scripted input, never `queue_screen`: that one reads the test
+    /// process's own stdin, and whether it ever returns depends on what the
+    /// harness handed it — a closed `/dev/null` ends the screen at once, a
+    /// pipe with a writer that never closes keeps it redrawing forever,
+    /// which is how this test once hung `cargo test` for ten minutes.
     #[test]
     fn opening_the_screen_with_nothing_pending_does_not_error() {
         let repo = fixture("screen-nothing-pending");
-        assert!(queue_screen(&repo, &Pipelines::builtin(), &repo.root).is_ok());
+        let groups = listed(&repo);
+        assert_eq!(opening_message(&repo, &groups), None);
+        let (exit, _) = screen_exit(&repo, groups, "");
+        assert_eq!(exit, ScreenExit::Quit);
     }
 
     /// An empty pending directory prints nothing and opens the screen. It

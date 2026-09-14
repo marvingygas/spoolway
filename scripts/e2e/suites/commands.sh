@@ -55,12 +55,16 @@ CTL="$LIVE/ctl"
 # This is intentionally before any fixture creates a repository: the history
 # belongs to the installed binary, and requiring project discovery here would
 # make the recovery command least useful immediately after installation.
-says "whats-new works outside a project" "0.1.0 — Deterministic agent pipelines arrive" \
+# The bare command prints the release this binary is, so the expectation is
+# read off the binary rather than written down: a version bump used to fail
+# these two checks until somebody noticed the suite still said 0.1.0.
+CURRENT=$("$SPOOLWAY" --version | awk '{print $2}')
+says "whats-new works outside a project" "$CURRENT — " \
   env -C "$LIVE" "$SPOOLWAY" whats-new
 says "a release range selects the embedded release" "0.1.0 — Deterministic agent pipelines arrive" \
   env -C "$LIVE" "$SPOOLWAY" whats-new --since 0.0.0
-says "an empty release range is explicit" "No releases follow 0.1.0." \
-  env -C "$LIVE" "$SPOOLWAY" whats-new --since 0.1.0
+says "an empty release range is explicit" "No releases follow $CURRENT." \
+  env -C "$LIVE" "$SPOOLWAY" whats-new --since "$CURRENT"
 refuses "a malformed release range is refused" "canonical numeric components" \
   env -C "$LIVE" "$SPOOLWAY" whats-new --since yesterday
 
