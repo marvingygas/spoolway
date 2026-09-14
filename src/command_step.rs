@@ -455,11 +455,40 @@ impl Runs {
 
     /// End a run and everything under it. Silent about a run that is already
     /// over, which is the ordinary case.
+    ///
+    /// Silent there means *nothing is signalled*, and it has to: a finished
+    /// run's pid is not a handle on anything any more. Windows hands pids out
+    /// again within seconds, and [`crate::headless::kill_group`] falls back to
+    /// `taskkill /T /F` whenever it cannot open the run's job by name — which
+    /// is every call from a later dispatch pass, since the job's name lives
+    /// only as long as the process that created it. So stopping a run that had
+    /// already exited ended whatever process happened to hold that number now,
+    /// with the exit code 1 that `taskkill /F` leaves behind.
+    ///
+    /// That was not hypothetical. It is where this module's own Windows test
+    /// run kept finding a `run:` line reported as exit 1 for no reason in the
+    /// command at all: the suite runs these tests alongside every other
+    /// caller of `stop`, and one of them was ending a pid this one had just
+    /// been given.
+    ///
+    /// The bookkeeping is cleared either way — that half was never about the
+    /// process.
     pub fn stop(&self, key: &str) {
-        if let Some(pid) = self.read_pid(key) {
+        if let Some(pid) = self.running_pid(key) {
             crate::headless::kill_group(pid);
         }
         self.files.clear(key);
+    }
+
+    /// The pid [`Runs::stop`] is allowed to signal, which is only ever a pid
+    /// still doing this run's work. A named seam rather than a condition
+    /// inside `stop`, because "whose process is this number" is the whole
+    /// question that doc is about and it is worth a test of its own.
+    fn running_pid(&self, key: &str) -> Option<u32> {
+        match self.state(key) {
+            RunState::Running => self.read_pid(key),
+            _ => None,
+        }
     }
 
     /// Forget a finished run's bookkeeping, keeping its log.
@@ -987,6 +1016,27 @@ mod tests {
             !crate::headless::alive(pid),
             "the command survived its run being stopped"
         );
+        assert_eq!(f.runs.state("bench-demo"), RunState::Fresh);
+    }
+
+    /// `stop` signals a run that is still going, and nothing at all once it
+    /// has finished — see [`Runs::stop`] for what signalling a finished run's
+    /// pid actually ends.
+    #[test]
+    fn only_a_run_still_going_is_stops_to_signal() {
+        let f = Fixture::new("stop-finished");
+        let running = f.start("bench-demo", "sleep 60");
+        assert_eq!(f.runs.running_pid("bench-demo"), Some(running));
+
+        f.start("build-demo", "exit 0");
+        assert_eq!(f.settle("build-demo"), RunState::Exited(0));
+        assert_eq!(f.runs.running_pid("build-demo"), None);
+
+        // The bookkeeping still goes, which is the half that was never about
+        // the process.
+        f.runs.stop("build-demo");
+        assert_eq!(f.runs.state("build-demo"), RunState::Fresh);
+        f.runs.stop("bench-demo");
         assert_eq!(f.runs.state("bench-demo"), RunState::Fresh);
     }
 
