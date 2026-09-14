@@ -18,8 +18,8 @@
 //! inside them to keep current: what a lane is told about finishing comes from
 //! the opening prompt, and a task's frontmatter is serialised from a struct in
 //! the binary on every save. Upgrading spoolway therefore cannot disturb a word
-//! a project wrote in any of them, and `spoolway prompt check` is what catches
-//! prose that has fallen behind the CLI.
+//! a project wrote in any of them, and `spoolway pipeline check` is what
+//! catches a command name that has fallen behind the CLI.
 //!
 //! A prompt's assets are the document skeletons, and they were a page template
 //! until they moved under the archivist. That move was the whole point: a

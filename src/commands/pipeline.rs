@@ -817,10 +817,9 @@ pub fn pipeline_check(repo: &Repo, pipelines: Result<Pipelines>, json: bool) -> 
 
     pipelines.validate()?;
 
-    // Gate and description warnings, gathered up front like the prompt
-    // findings below: they are worth a person's attention but never fail
-    // this check on their own — see `Pipeline::gate_warnings` and
-    // `Pipeline::description_warnings`.
+    // Gate and description warnings, gathered up front: they are worth a
+    // person's attention but never fail this check on their own — see
+    // `Pipeline::gate_warnings` and `Pipeline::description_warnings`.
     let mut gate_warnings = Vec::new();
     for pipeline in pipelines.pipelines.values() {
         gate_warnings.extend(pipeline.gate_warnings());
@@ -851,12 +850,17 @@ pub fn pipeline_check(repo: &Repo, pipelines: Result<Pipelines>, json: bool) -> 
         }
     }
 
-    // Read the prompts against the steps that run them. These are findings,
-    // not problems: they come out of prose and a project may have a reason for
-    // any one of them, so they are printed and the check still passes. A
-    // capability a prompt asks for and its step does not grant is the one that
-    // matters — it fails mid-lane otherwise, in a pane nobody is watching.
-    let findings = crate::prompt::lint(repo, pipelines)?;
+    // Read the prompts against the steps that run them: the one rule left in
+    // this lint is a fact, not an opinion — a prompt naming a `spoolway …`
+    // command this binary does not have, checked against clap's own command
+    // tree. Nothing regenerates a prompt on upgrade any more, so this is the
+    // only place left that catches the drift, and it fails the check rather
+    // than printing beneath a green result — the alternative is a lane
+    // running a command that no longer exists, twenty minutes in, in a pane
+    // nobody is watching.
+    for finding in crate::prompt::lint(repo, pipelines)? {
+        problems.push(finding.render());
+    }
 
     if problems.is_empty() {
         println!(
@@ -866,7 +870,6 @@ pub fn pipeline_check(repo: &Repo, pipelines: Result<Pipelines>, json: bool) -> 
             pipelines.referenced_agents().keys().collect::<Vec<_>>()
         );
         report_gate_warnings(&gate_warnings);
-        report_prompt_findings(&findings);
         return Ok(());
     }
 
@@ -874,13 +877,11 @@ pub fn pipeline_check(repo: &Repo, pipelines: Result<Pipelines>, json: bool) -> 
         println!("  problem: {problem}");
     }
     report_gate_warnings(&gate_warnings);
-    report_prompt_findings(&findings);
     bail!("{} problem(s) found", problems.len())
 }
 
-/// Print the gate and description warnings `pipeline_check` gathered,
-/// exactly the way it prints the prompt findings beside them — findings a
-/// person should see, but never a reason this check fails.
+/// Print the gate and description warnings `pipeline_check` gathered —
+/// worth a person's attention, but never a reason this check fails.
 fn report_gate_warnings(warnings: &[String]) {
     if warnings.is_empty() {
         return;
@@ -1105,21 +1106,6 @@ pub fn pipeline_override(repo: &Repo, name: &str, set: &str) -> Result<()> {
     println!();
     println!("  active on the next dispatcher pass. `spoolway override drop {name}` to clear it.");
     Ok(())
-}
-
-fn report_prompt_findings(findings: &[crate::prompt::Finding]) {
-    if findings.is_empty() {
-        return;
-    }
-    println!();
-    for finding in findings {
-        println!("  prompt: {}", finding.render());
-    }
-    println!();
-    println!(
-        "  {} prompt finding(s) — `spoolway prompt check` for these alone.",
-        findings.len()
-    );
 }
 
 #[cfg(test)]

@@ -63,9 +63,9 @@ pub enum Command {
         old `.gitignore` block spoolway used to manage is removed. Skills for every provider \
         you have installed are refreshed too.\n\n\
         Prompts, their assets, and task skeletons are not touched, ever. They are prose a \
-        project owns outright, with nothing generated inside them; `spoolway prompt check` \
-        is what tells you when one has fallen behind the CLI, and `--replace` is how to take \
-        a shipped one back on purpose.\n\n\
+        project owns outright, with nothing generated inside them; `spoolway pipeline check` \
+        is what tells you when one names a command this binary no longer has, and `--replace` \
+        is how to take a shipped one back on purpose.\n\n\
         `init` is still how a project starts. This is how one keeps up."
     )]
     Update(UpdateArgs),
@@ -1245,7 +1245,10 @@ pub struct AgentVerifyArgs {
     pub model: Option<String>,
 }
 
-/// Writing a prompt, and checking one against the step that will run it.
+/// Writing a prompt, and reading one back. Checking a prompt against the
+/// step that will run it is `spoolway pipeline check`'s, not a subcommand
+/// here — a prompt naming a command this binary lacks is exactly the kind
+/// of thing that stops a pipeline being valid.
 ///
 /// `contract` is the one that matters: a prompt is written against what a lane
 /// is handed and what it may reach for, and that lives in the code rather than
@@ -1263,13 +1266,6 @@ pub enum PromptCommand {
 
     /// Print one prompt file.
     Show { name: String },
-
-    /// Read prompts against the steps that run them. Also part of
-    /// `spoolway pipeline check`.
-    Check {
-        /// Only this prompt. Default: every one.
-        name: Option<String>,
-    },
 
     /// Copy the tracked prompt into the patch layer, so editing starts from
     /// it instead of from a blank file — the whole file is what an override

@@ -42,7 +42,7 @@ The shipped prose is a starting point: a project sharpens it in place, wherever 
 commands, conventions and standards belong, rather than in one section set aside for them.
 **`spoolway update` never touches a prompt**, so upgrading spoolway cannot disturb a word
 you wrote in one. The price is that a sharper default in a later
-release does not reach you on its own: [`spoolway prompt check`](#writing-your-own) is
+release does not reach you on its own: [`spoolway pipeline check`](#writing-your-own) is
 what tells you when your prose has fallen behind the CLI, and `spoolway update --replace
 .spoolway/prompts/<name>/PROMPT.md` is how to take a shipped one back on purpose.
 
@@ -256,29 +256,20 @@ because each is half of the same decision:
 
 **The step declares placement; the prompt declares behaviour.** That division is the whole
 design, and nothing enforces it at run time — a lane reaches whatever the person who started
-the dispatcher reaches. So the checks read the prose instead, before a lane is ever started:
+the dispatcher reaches. So the check reads the prose instead, before a lane is ever started:
 
 ```
-spoolway prompt check               # read every prompt against the steps that run it
-spoolway prompt check auditor       # just one
-spoolway pipeline check             # includes the above
+spoolway pipeline check             # reads every prompt against the steps that run it
 ```
 
-What they catch:
+What it catches:
 
 - **a `spoolway` command or flag this release does not have**, validated against the CLI's
   own definitions. This is the check that replaces the update cycle: nothing rewrites a
-  prompt for you, so prose that has fallen behind the binary has to be found by reading
-- a prompt that names routing (`on_pass`, `on_fail`, `stage:`), which is the pipeline's
-  business and the thing that stops a prompt being movable
-- spoolway's own vocabulary, named where a prompt no longer needs it: a frontmatter field
-  (`base:`, `depends_on:`, `touches`), a `SPOOLWAY_…` variable, or a `spoolway` command.
-  Everything one of those would have said is resolved and handed to the lane in its prompt,
-  under `WHAT YOU HAVE`, so a prompt still naming it has learned not to trust its own
-  briefing. `eval`, `doctor` and `config` are a person's view of the run or the
-  install, never a lane's, and a finding for one of them says to delete the line rather than
-  pointing at a replacement. Naming the tool itself, with none of the above, is caught too —
-  `.spoolway/`, this project's own layout, is exempted
+  prompt for you, so prose that has fallen behind the binary has to be found by reading. It
+  is the only rule left in this lint — what it once also read for was an opinion about a
+  prompt's style, and a check that can only be somebody's taste is not one worth failing
+  `pipeline check` over.
 
 The `spoolway-config` skill walks the whole procedure with a coding agent: read the
 contract, settle the role with you, write the file, wire the step, check both halves. It owns
@@ -319,7 +310,7 @@ Four properties, together:
    spoolway either way.
 4. **Nothing in a prompt is generated.** So there is no half of the file an upgrade has to
    keep current, and no upgrade that can lose what you wrote. What can still drift is a
-   command name, and `spoolway prompt check` reads for exactly that.
+   command name, and `spoolway pipeline check` reads for exactly that.
 
 What was ever missing was not the mechanism — it was knowing what to write against. That is
 what the contract prints.

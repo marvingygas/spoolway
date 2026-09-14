@@ -20,17 +20,16 @@
 //! dispatcher's own functions. A document saying the same things would be wrong
 //! the first time one of them changed, and nothing would fail to say so.
 //!
-//! And it *reads* what a project wrote, against the step that runs it — for
-//! vocabulary that belongs to the pipeline, for a `spoolway` command this
-//! release does not have, and for spoolway's own vocabulary generally: a
-//! command, a `SPOOLWAY_` variable, a frontmatter field, the word `spoolway`
-//! itself. Every one of those is now a fact the system prompt hands a lane
-//! resolved (`dispatch::what_you_have`, `dispatch::toolbox`), so a prompt
-//! that still names it has stopped trusting its own briefing — and, for the
-//! stale-command half, this is what an upgrade used to prevent by
-//! regenerating half the file. Nothing is regenerated now, so the drift has
-//! to be found by reading instead, which is the trade the format's removal
-//! actually made.
+//! And it *reads* what a project wrote, against the step that runs it — for a
+//! `spoolway …` command this release does not have, checked against clap's
+//! own command tree ([`stale_commands`]). This is the one rule left in this
+//! lint: the others read prose for style and opinion, and a check that can
+//! only ever be somebody's taste is not one worth failing a build over. This
+//! rule is different, because it is a fact rather than an opinion — this is
+//! what an upgrade used to prevent by regenerating half the file, and nothing
+//! is regenerated now, so the drift has to be found by reading instead, which
+//! is the trade the format's removal actually made. A surviving finding fails
+//! `spoolway pipeline check`, the only command that reaches this lint.
 //!
 //! What it no longer reads for is a git verb the step was not granted. Nothing
 //! grants git verbs any more: git up to the pull request is `spoolway
@@ -113,38 +112,6 @@ impl Finding {
         }
     }
 }
-
-/// Vocabulary that belongs to the pipeline, not to a prompt. A prompt that
-/// names any of it has learned the shape of the graph, which is exactly what
-/// keeps prompts swappable when they do not.
-/// `spoolway_step` is here for a mistake that is easy to make and reads as
-/// reasonable: one role that runs at two steps, branching on `$SPOOLWAY_STEP` to
-/// decide which half of itself to be. That variable is the dispatcher's own,
-/// not the prompt's — a prompt that reads it has learned how many steps run
-/// it and what they are called, and no longer moves to a pipeline shaped
-/// differently. Two roles are two files.
-const MECHANICS: &[&str] = &[
-    "on_pass",
-    "on_fail",
-    "pipeline.yml",
-    "stage:",
-    "spoolway_step",
-];
-
-/// Frontmatter fields a lane's prompt has already turned into a resolved
-/// fact — `base:` and `depends_on:` into `WHAT YOU HAVE`'s `you sit on` line,
-/// `touches:` into `THIS PASS`'s scope sentence — so a prompt has no reason
-/// left to name the field itself. Matched with the colon so the check leaves
-/// the ordinary English word alone: "the paths it touches" is prose a
-/// prompt stays free to write, `touches:` is the frontmatter key.
-const FRONTMATTER_FIELDS: &[&str] = &["base:", "depends_on:", "touches:"];
-
-/// `spoolway` subcommands that answer for a run or an installation as a
-/// whole — a person's question, and never a lane's. `dispatch::toolbox`
-/// never hands one of these to a lane, blocked step included, so a prompt
-/// naming one has no fact to ask the prompt for: the fix is deleting the
-/// line, not rephrasing it.
-const PERSONS_VIEW: &[&str] = &["eval", "doctor", "config"];
 
 /// `spoolway prompt contract` — the whole of what a prompt is written against.
 pub fn contract(repo: &Repo, pipelines: &Pipelines, args: &PromptContractArgs) -> Result<()> {
@@ -592,7 +559,10 @@ pub fn show(repo: &Repo, name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Read every prompt against the steps that run it.
+/// Read every prompt against the steps that run it. The only rule left is
+/// [`stale_commands`]; a prompt no step runs yet still gets read, the same as
+/// every other rule this lint ever had, since a prompt written before its
+/// step is wired up is the normal state halfway through adding one.
 pub fn lint(repo: &Repo, pipelines: &Pipelines) -> Result<Vec<Finding>> {
     let mut findings = Vec::new();
     let mut seen = BTreeSet::new();
@@ -609,11 +579,7 @@ pub fn lint(repo: &Repo, pipelines: &Pipelines) -> Result<Vec<Finding>> {
                 continue;
             };
             let at = format!("{}/{}", pipeline.name, step.id);
-            let mine = read(name, &body, Some(&at))
-                .into_iter()
-                .chain(stale_commands(name, &body, &at))
-                .chain(spoolway_vocabulary(name, &body, &at));
-            for finding in mine {
+            for finding in stale_commands(name, &body, &at) {
                 // One prompt on two steps must not say the same thing twice.
                 if seen.insert((finding.prompt.clone(), finding.message.clone())) {
                     findings.push(finding);
@@ -622,20 +588,13 @@ pub fn lint(repo: &Repo, pipelines: &Pipelines) -> Result<Vec<Finding>> {
         }
     }
 
-    // Prompts nothing runs yet — a prompt written before its step is wired up
-    // is the normal state halfway through adding one, and the findings that do
-    // not need a step still apply.
     let used: BTreeSet<String> = users(pipelines).keys().cloned().collect();
     for entry in entries(repo)? {
         if used.contains(&entry.name) {
             continue;
         }
         let body = std::fs::read_to_string(&entry.path)?;
-        for finding in read(&entry.name, &body, None)
-            .into_iter()
-            .chain(stale_commands(&entry.name, &body, ""))
-            .chain(spoolway_vocabulary(&entry.name, &body, ""))
-        {
+        for finding in stale_commands(&entry.name, &body, "") {
             if seen.insert((finding.prompt.clone(), finding.message.clone())) {
                 findings.push(finding);
             }
@@ -643,155 +602,6 @@ pub fn lint(repo: &Repo, pipelines: &Pipelines) -> Result<Vec<Finding>> {
     }
 
     Ok(findings)
-}
-
-/// The rules themselves. `at` is where this prompt runs, as `pipeline/step`,
-/// absent when nothing runs it yet.
-fn read(name: &str, body: &str, at: Option<&str>) -> Vec<Finding> {
-    let mut out = Vec::new();
-    let at = at.unwrap_or_default().to_string();
-    let lower = body.to_lowercase();
-
-    for mechanic in MECHANICS {
-        if lower.contains(mechanic) {
-            out.push(Finding {
-                prompt: name.to_string(),
-                at: at.clone(),
-                message: format!(
-                    "names `{mechanic}`, which is the pipeline's business — a prompt that knows \
-                     the graph stops being swappable. Report an outcome and let the pipeline route it."
-                ),
-            });
-        }
-    }
-
-    out
-}
-
-/// Every `SPOOLWAY_…` variable named in some prose, deduplicated so a
-/// variable spelled twice is one finding rather than two.
-///
-/// Scanned by hand rather than with `regex`: the shape is fixed — the
-/// literal prefix, then the run of uppercase letters and underscores a shell
-/// variable is written in — and a dependency bought for one five-line loop is
-/// a dependency this binary carries for nothing else.
-fn spoolway_variables(body: &str) -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
-    let mut rest = body;
-    while let Some(pos) = rest.find("SPOOLWAY_") {
-        let start = pos;
-        let tail = &rest[start..];
-        let end = tail
-            .find(|c: char| !(c.is_ascii_uppercase() || c == '_'))
-            .unwrap_or(tail.len());
-        out.insert(tail[..end].to_string());
-        rest = &tail[end.max(1)..];
-    }
-    out
-}
-
-/// Whether `body` names the tool as a bare word, as against `.spoolway/`, the
-/// repository's own layout — a non-goal explicitly keeps that one: which of
-/// two near-identical files a task means is this project's own business, not
-/// spoolway's vocabulary. A dot immediately before the match is what tells
-/// the two apart, so `.spoolway/prompts/…` never trips this while `run
-/// inside spoolway` still does. A slash on either side is the same signal:
-/// `github.com/marvingygas/spoolway/releases/…` is a path naming a
-/// repository, not the tool naming itself.
-fn names_the_tool_bare(body: &str) -> bool {
-    let lower = body.to_lowercase();
-    let bytes = lower.as_bytes();
-    let mut rest = lower.as_str();
-    let mut offset = 0;
-    while let Some(pos) = rest.find("spoolway") {
-        let idx = offset + pos;
-        let end = idx + "spoolway".len();
-        let before = idx.checked_sub(1).map(|i| bytes[i]);
-        let after = bytes.get(end).copied();
-        let in_a_path = matches!(before, Some(b'.') | Some(b'/')) || matches!(after, Some(b'/'));
-        if !in_a_path {
-            return true;
-        }
-        offset = end;
-        rest = &lower[offset..];
-    }
-    false
-}
-
-/// spoolway's own vocabulary, named where it no longer needs to be: a
-/// frontmatter field, an environment variable, a `spoolway …` command, or —
-/// failing all three — the tool naming itself with no more specific reason
-/// given. Every one of the first three is a fact `dispatch::system_prompt`
-/// now hands the lane resolved (`WHAT YOU HAVE`, the environment table, or —
-/// for the three commands in [`PERSONS_VIEW`] — nowhere at all), so a prompt
-/// still naming it has learned not to trust its own briefing.
-///
-/// The bare-word case only fires when none of the specific ones did: a
-/// command or a variable already explains itself, and reporting the same
-/// sentence a second time in generic terms would only be noise under it.
-fn spoolway_vocabulary(name: &str, body: &str, at: &str) -> Vec<Finding> {
-    let mut out = Vec::new();
-
-    for field in FRONTMATTER_FIELDS {
-        if body.contains(field) {
-            out.push(Finding {
-                prompt: name.to_string(),
-                at: at.to_string(),
-                message: format!(
-                    "names `{field}`, which is frontmatter and spoolway's. The command that \
-                     reads off it is already in your prompt, under WHAT YOU HAVE."
-                ),
-            });
-        }
-    }
-
-    for var in spoolway_variables(body) {
-        out.push(Finding {
-            prompt: name.to_string(),
-            at: at.to_string(),
-            message: format!(
-                "names `${var}`. Its value is handed to you resolved, in your prompt — ask for \
-                 it there instead of spelling the variable."
-            ),
-        });
-    }
-
-    let mut seen_cmds = BTreeSet::new();
-    for (_, path, _) in invocations(body) {
-        let cmd = format!("spoolway {}", path.join(" "));
-        if !seen_cmds.insert(cmd.clone()) {
-            continue;
-        }
-        let message = if PERSONS_VIEW.contains(&path[0].as_str()) {
-            format!(
-                "names `{cmd}`, which is a person's view of the run or the install, never a \
-                 lane's — delete the line."
-            )
-        } else {
-            format!(
-                "names `{cmd}`, which is spoolway's to state — a prompt that names one stops \
-                 being swappable and goes stale where nothing reads it back. It is already in \
-                 your prompt."
-            )
-        };
-        out.push(Finding {
-            prompt: name.to_string(),
-            at: at.to_string(),
-            message,
-        });
-    }
-
-    if out.is_empty() && names_the_tool_bare(body) {
-        out.push(Finding {
-            prompt: name.to_string(),
-            at: at.to_string(),
-            message: "names `spoolway`, the tool running you, rather than the role. Describe \
-                       what the role is for; the tool already knows to run it."
-                .to_string(),
-        });
-    }
-
-    out
 }
 
 /// Every `spoolway …` command a prompt names, checked against the CLI this
@@ -985,61 +795,6 @@ fn invocations_in(line: &str, segment: &str, out: &mut Vec<(String, Vec<String>,
     }
 }
 
-/// `spoolway prompt check`.
-pub fn check(repo: &Repo, pipelines: &Pipelines, name: Option<&String>, json: bool) -> Result<()> {
-    if let Some(note) = repo.checkout_note()? {
-        note.print(json)?;
-    }
-    let mut findings = lint(repo, pipelines)?;
-    if let Some(name) = name {
-        // Without this, checking a prompt whose name is a typo reports that
-        // there is nothing wrong with it.
-        let path = path_for(repo, name);
-        if !path.exists() {
-            bail!(
-                "no prompt `{name}` at {} — `spoolway prompt list`",
-                path.display()
-            );
-        }
-        findings.retain(|finding| &finding.prompt == name);
-    }
-
-    // `.spoolway/templates/lane-prompts.md` findings are not about any one
-    // named role, so a `--name` filter — asking about one prompt — has
-    // nothing here to answer for and gets none.
-    let lane_prompts = match name {
-        Some(_) => Vec::new(),
-        None => crate::lane_prompts::lint(repo),
-    };
-
-    if findings.is_empty() && lane_prompts.is_empty() {
-        match name {
-            Some(name) => println!("{name}: nothing to report."),
-            None => println!("prompts: nothing to report."),
-        }
-        return Ok(());
-    }
-
-    // Prefixed by source now that two kinds of finding share this listing —
-    // a role prompt's own prose, and the typed messages in
-    // `lane-prompts.md` — so a person can tell at a glance which file to go
-    // fix. `lane_prompts::Finding::render` already spells its own source
-    // (`self.prompt` is the literal string `"lane-prompts"`), so only the
-    // role findings need a label added here.
-    for finding in &findings {
-        println!("  prompt: {}", finding.render());
-    }
-    for finding in &lane_prompts {
-        println!("  {}", finding.render());
-    }
-    println!();
-    println!(
-        "{} finding(s) — none of these stop a lane starting.",
-        findings.len() + lane_prompts.len()
-    );
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1138,162 +893,6 @@ mod tests {
     #[test]
     fn alternatives_written_with_a_pipe_are_read_as_separate_flags() {
         assert!(stale_commands("ok", "`spoolway report --pass|--fail|--block`", "").is_empty());
-    }
-
-    #[test]
-    fn a_prompt_that_knows_the_graph_is_a_finding() {
-        let body = "On success the task follows on_pass. `spoolway report --pass` when done.";
-        let findings = read("knowing", body, None);
-        assert_eq!(findings.len(), 1);
-        assert!(findings[0].message.contains("on_pass"));
-    }
-
-    /// The specific way a prompt learns the graph without meaning to: one file
-    /// covering two steps, reading `$SPOOLWAY_STEP` to pick a half. It reads as
-    /// reasonable and it is not — that variable is the dispatcher's own, and a
-    /// role that needs to branch on it is two roles.
-    #[test]
-    fn a_prompt_that_branches_on_which_step_runs_it_is_a_finding() {
-        let body = "Read `$SPOOLWAY_STEP` first, then `spoolway report --pass`.";
-        let findings = read("two-faced", body, None);
-        assert_eq!(findings.len(), 1);
-        assert!(
-            findings[0].message.contains("spoolway_step"),
-            "{}",
-            findings[0].message
-        );
-    }
-
-    /// The shipped set has to obey the rule it is the example of.
-    #[test]
-    fn no_shipped_prompt_knows_the_pipeline() {
-        for shipped in crate::assets::PROMPTS {
-            let findings = read(shipped.name, shipped.body, None);
-            assert!(
-                findings.is_empty(),
-                "{}: {:?}",
-                shipped.name,
-                findings.iter().map(|f| &f.message).collect::<Vec<_>>()
-            );
-        }
-    }
-
-    /// Every shipped prompt, read against the step that runs it. Every step a
-    /// shipped pipeline declares must have prose to run, and none of that prose
-    /// may name the graph — which is what keeps a prompt swappable.
-    #[test]
-    fn every_shipped_prompt_is_written_and_knows_nothing_of_the_graph() {
-        let pipelines = Pipelines::builtin();
-        for pipeline in pipelines.pipelines.values() {
-            for step in &pipeline.steps {
-                if step.kind() != StepKind::Agent {
-                    continue;
-                }
-                let name = step.prompt_name();
-                let role = crate::assets::PROMPTS
-                    .iter()
-                    .find(|shipped| shipped.name == name)
-                    .map(|shipped| shipped.body)
-                    .unwrap_or_else(|| panic!("`{name}` runs `{}` but is not shipped", step.id));
-                let at = format!("{}/{}", pipeline.name, step.id);
-                let findings = read(name, role, Some(&at));
-                assert!(
-                    findings.is_empty(),
-                    "{name} at {at}: {:?}",
-                    findings.iter().map(|f| &f.message).collect::<Vec<_>>()
-                );
-            }
-        }
-    }
-
-    /// A frontmatter field a lane's prompt already resolves for it — `base:`
-    /// into `WHAT YOU HAVE`'s `you sit on` line — is a finding, and the
-    /// ordinary English word it is spelled without a colon is not.
-    #[test]
-    fn a_frontmatter_field_is_a_finding_but_the_english_word_is_not() {
-        let field = spoolway_vocabulary("fielded", "Read the task's `base:`.", "");
-        assert_eq!(field.len(), 1, "{:?}", messages(&field));
-        assert!(field[0].message.contains("base:"), "{}", field[0].message);
-
-        let prose = spoolway_vocabulary(
-            "prosy",
-            "Open the paths it says it touches, then read the code.",
-            "",
-        );
-        assert!(prose.is_empty(), "{:?}", messages(&prose));
-    }
-
-    /// A `SPOOLWAY_` variable is a finding, named once even when the prompt
-    /// spells it twice.
-    #[test]
-    fn a_spoolway_variable_is_a_finding_once() {
-        let findings = spoolway_vocabulary(
-            "varied",
-            "Write the plan to `$SPOOLWAY_SCRATCH/plan.md`. Never `$SPOOLWAY_SCRATCH` elsewhere.",
-            "",
-        );
-        assert_eq!(findings.len(), 1, "{:?}", messages(&findings));
-        assert!(
-            findings[0].message.contains("SPOOLWAY_SCRATCH"),
-            "{}",
-            findings[0].message
-        );
-    }
-
-    /// A `spoolway` command a lane's prompt already resolves is a finding
-    /// that tells the author to ask for it there instead.
-    #[test]
-    fn a_spoolway_command_is_a_finding_naming_the_prompt() {
-        let findings = spoolway_vocabulary(
-            "commanded",
-            "Read it with `spoolway queue show <task>`.",
-            "",
-        );
-        assert_eq!(findings.len(), 1, "{:?}", messages(&findings));
-        assert!(
-            findings[0].message.contains("in your prompt"),
-            "{}",
-            findings[0].message
-        );
-    }
-
-    /// The three commands that are a person's view of the run get their own
-    /// message: delete the line, because there is nothing to ask for.
-    #[test]
-    fn a_persons_view_command_is_a_finding_saying_delete_the_line() {
-        for cmd in ["spoolway eval", "spoolway doctor", "spoolway config get x"] {
-            let findings = spoolway_vocabulary("viewer", &format!("Run `{cmd}`."), "");
-            assert_eq!(findings.len(), 1, "{cmd}: {:?}", messages(&findings));
-            assert!(
-                findings[0].message.contains("delete the line"),
-                "{cmd}: {}",
-                findings[0].message
-            );
-        }
-    }
-
-    /// A bare mention of the tool, with none of the more specific reasons
-    /// above, is still a finding — the role should not need to name what is
-    /// already running it.
-    #[test]
-    fn a_bare_mention_of_the_tool_is_a_finding() {
-        let findings = spoolway_vocabulary("selfaware", "You are running inside spoolway.", "");
-        assert_eq!(findings.len(), 1, "{:?}", messages(&findings));
-    }
-
-    /// The shipped set has to obey the rule it is the example of, same as
-    /// the graph-vocabulary check above.
-    #[test]
-    fn no_shipped_prompt_names_spoolway() {
-        for shipped in crate::assets::PROMPTS {
-            let findings = spoolway_vocabulary(shipped.name, shipped.body, "");
-            assert!(
-                findings.is_empty(),
-                "{}: {:?}",
-                shipped.name,
-                messages(&findings)
-            );
-        }
     }
 
     /// A repo whose `home` is a scratch directory of its own — `overrides_dir`
