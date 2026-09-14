@@ -30,7 +30,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
@@ -193,7 +193,7 @@ impl Runs {
         // rename also leaves no log at `log_path`, which is what the wrapper's
         // `>>` append below needs: a fresh run must not open onto the tail of
         // the last one.
-        let _ = std::fs::rename(self.log_path(key), self.prev_log_path(key));
+        self.roll_log_aside(key);
         // Created here, before anything is spawned, rather than left for the
         // wrapper's own `>>` redirect to bring into existence: a wrapper that
         // never got as far as running at all — no `sh` on PATH, a backend
@@ -202,6 +202,46 @@ impl Runs {
         std::fs::File::create(self.log_path(key))
             .with_context(|| format!("creating {}", self.log_path(key).display()))?;
         Ok(())
+    }
+
+    /// Move the last run's log out of the way, waiting out a writer that has
+    /// not finished letting go of it.
+    ///
+    /// One `rename` was enough on Unix, where a file renames whoever has it
+    /// open. Windows refuses to rename a file with an open handle, and the
+    /// previous run reliably still has one here: the wrapper writes its exit
+    /// marker from inside the group that is *piped* to `Out-File`, so the run
+    /// reads as over while the wrapper process, and the handle it holds on
+    /// the log, are still there for a few milliseconds more.
+    ///
+    /// Leaving that rename to fail silently did more than lose one previous
+    /// log. The fresh run's `Out-File` then opened the very path the old
+    /// writer was still holding, was refused it, and took the `run:` line's
+    /// stdout down with it — so a command that had done nothing wrong
+    /// reported exit 1, about one run in three under load. Renaming the file
+    /// out from under the old writer is what stops that, because the new run
+    /// then gets a path nobody else has open at all.
+    ///
+    /// So retry, briefly. The old writer is already on its way out by the
+    /// time this runs, so this waits milliseconds in the case it exists for
+    /// and not at all in any other. The bound is there so a log held open by
+    /// something that is *not* leaving costs a moment rather than the whole
+    /// dispatch pass, and giving up leaves exactly the old behaviour.
+    fn roll_log_aside(&self, key: &str) {
+        let from = self.log_path(key);
+        let to = self.prev_log_path(key);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match std::fs::rename(&from, &to) {
+                Ok(()) => return,
+                // No log to roll aside: the first arrival at this step.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+                Err(_) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                Err(_) => return,
+            }
+        }
     }
 
     /// The pid write, the environment, the `run:` line itself, and the exit
@@ -854,19 +894,35 @@ mod tests {
     fn a_second_run_keeps_the_first_ones_log() {
         let f = Fixture::new("prev-log");
         f.start("build-demo", "echo first-run-said-this; exit 3");
-        assert_eq!(f.settle("build-demo"), RunState::Exited(3));
+        assert_eq!(
+            f.settle("build-demo"),
+            RunState::Exited(3),
+            "first run's log: {:?}",
+            std::fs::read_to_string(f.runs.log_path("build-demo"))
+        );
         // Wait for the first run's own line to land before rolling it aside.
         // `settle` waits on the `.exit` marker the wrapper's exec group
         // writes, and the stage that actually writes the log sits downstream
         // of a pipe from that group — `tee` on Unix, `Out-File` under
-        // PowerShell. It can still hold the file open here, and Windows
-        // refuses to rename a file with an open handle, so the second run
-        // starts against a log it cannot take and exits 1.
+        // PowerShell — so the line can still be in flight here, and the
+        // assertion below is about that line being in the *kept* log.
+        // The handle that stage is still holding is a separate problem, and
+        // one this test deliberately leaves to the product: re-running the
+        // instant a step exits is what a lane really does, and
+        // [`Runs::roll_log_aside`] is what has to survive it.
         f.log_containing("build-demo", "first-run-said-this");
         f.runs.forget("build-demo");
 
         f.start("build-demo", "echo second-run-said-this");
-        assert_eq!(f.settle("build-demo"), RunState::Exited(0));
+        // The log goes into both failure messages above and below: this test
+        // fired on CI for a run whose `run:` line was fine, and the log is
+        // the only thing that would have said what actually went wrong.
+        assert_eq!(
+            f.settle("build-demo"),
+            RunState::Exited(0),
+            "second run's log: {:?}",
+            std::fs::read_to_string(f.runs.log_path("build-demo"))
+        );
 
         let now = std::fs::read_to_string(f.runs.log_path("build-demo")).unwrap();
         let before = std::fs::read_to_string(f.runs.prev_log_path("build-demo")).unwrap();
