@@ -940,7 +940,15 @@ mod tests {
         let linked_dir = git_dir(&wt).unwrap();
 
         assert!(main_dir.is_dir(), "{main_dir:?} must exist");
-        assert_eq!(main_dir, work.join(".git"));
+        // Both sides canonicalized: git answers with the fully resolved path,
+        // where `work` came from the scratch root as the platform hands it
+        // over. On Windows that is the 8.3 short form — `RUNNER~1` against
+        // git's `runneradmin` — and the two name one directory but compare
+        // unequal.
+        assert_eq!(
+            main_dir.canonicalize().unwrap(),
+            work.join(".git").canonicalize().unwrap()
+        );
         assert_eq!(
             linked_dir, main_dir,
             "a linked worktree's git dir is the *common* dir it shares with \
@@ -1237,13 +1245,30 @@ mod tests {
         let inside = state_root.join(crate::config::STATE_DIR).join("deep");
         std::fs::create_dir_all(&inside).unwrap();
 
-        let err = crate::platform::test_home::with_home(&home, || Repo::discover(&inside))
-            .expect_err("no directory under ~/.spoolway is a project");
-        let said = format!("{err:#}");
-        assert!(
-            said.contains("no spoolway project found"),
-            "the walk must fall through to the not-found error: {said}"
-        );
+        // `Repo::root` rather than `Repo::discover`, because the walk is what
+        // the bug was about and the walk is all this can assert everywhere.
+        // On Windows the scratch root sits inside the real user profile, so an
+        // ancestor above the scratch `$HOME` may carry a `.spoolway` of its
+        // own and finding it is not this walk misbehaving.
+        let found = crate::platform::test_home::with_home(&home, || Repo::root(&inside, None));
+        match &found {
+            // Nothing above carries a `.spoolway`: the walk fell all the way
+            // through, which is the answer wherever the scratch tree is not
+            // nested inside another project.
+            Err(err) => {
+                let said = format!("{err:#}");
+                assert!(
+                    said.contains("no spoolway project found"),
+                    "the walk must fall through to the not-found error: {said}"
+                );
+            }
+            // It stopped somewhere above. That is allowed — but never at
+            // `$HOME` and never at `~/.spoolway`, which is the whole bug.
+            Ok(root) => {
+                assert_ne!(root, &home, "$HOME is never a project");
+                assert_ne!(root, &state_root, "~/.spoolway is never a project");
+            }
+        }
         assert!(
             !state_root.join(home.file_name().unwrap()).exists(),
             "nothing may be created under the state root for a misread project"

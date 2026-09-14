@@ -39,6 +39,9 @@ Spoolway's second release is about what happens when nobody is watching: work ar
 - `spoolway queue remove <task>` takes a task out of the queue and carries its document back to pending, refusing anything with a lane, a command step or a worktree still in flight.
 - `spoolway queue add --dry-run` validates a batch and prints the project, home directory and base it resolved without writing anything.
 
+### Fixes
+- On Windows, a job whose `routine` began with a leading `/` escaped `.spoolway/routines/` and resolved against the drive root instead. Such a path is now refused on every platform, as it already was elsewhere.
+
 Release: https://github.com/marvingygas/spoolway/releases/tag/v0.2.0
 
 ## 0.1.0 — Deterministic agent pipelines arrive

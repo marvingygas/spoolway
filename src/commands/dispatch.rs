@@ -1224,7 +1224,11 @@ mod tests {
         let repo = fixture("index-lock");
         assert!(check_index_lock(&repo).unwrap().is_none());
 
-        let lock = repo.root.join(".git/index.lock");
+        // Joined a component at a time, the way `check_index_lock` builds it
+        // from git's own answer. `join(".git/index.lock")` keeps the embedded
+        // `/` verbatim, which renders as a mixed-separator path on Windows and
+        // matches nothing in the message under test.
+        let lock = repo.root.join(".git").join("index.lock");
         std::fs::write(&lock, "").unwrap();
 
         let bare = format!("{:#}", check_index_lock(&repo).unwrap_err());

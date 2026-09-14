@@ -26,6 +26,14 @@ new_repo "${WORK:-$(mktemp -d)}/proj"
 
 works "init scaffolds .spoolway" "$SPOOLWAY" init
 agent_models
+# Pin the backend. Every start below is meant to be answered by the restart
+# guard, the dispatch lock, the empty queue or the missing git identity — and
+# `dispatch` checks its backend is reachable before it ever reaches the
+# identity check. The shipped default is herdr, so on a machine with no herdr
+# running the last scenario here is refused for the wrong reason. Headless
+# needs nothing to be running and changes none of the answers this suite
+# asserts.
+must "the headless backend" "$SPOOLWAY" config set dispatch.backend headless
 must "the spoolway commit" git add -A
 must "the spoolway commit" git commit -qm "spoolway"
 must "the plan branch" git checkout -q -b plan/demo

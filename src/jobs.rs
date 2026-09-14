@@ -112,11 +112,18 @@ impl Job {
     /// caller touches the path.
     pub fn target(&self, repo: &Repo) -> Result<PathBuf> {
         let rel = Path::new(&self.spec.routine);
+        // `RootDir` as well as `is_absolute`, because the two are not the same
+        // thing on Windows: `/etc/passwd` has a root but no drive prefix, so
+        // `is_absolute` is false there and `join` still throws the routines
+        // directory away and answers `C:/etc/passwd`. Matching the component
+        // refuses a leading `/` identically on both platforms.
         let escapes = rel.is_absolute()
             || rel.components().any(|c| {
                 matches!(
                     c,
-                    std::path::Component::ParentDir | std::path::Component::Prefix(_)
+                    std::path::Component::ParentDir
+                        | std::path::Component::Prefix(_)
+                        | std::path::Component::RootDir
                 )
             });
         if escapes {
