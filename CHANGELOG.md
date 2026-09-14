@@ -19,28 +19,46 @@ Keep internal task bookkeeping out of them and describe user-visible outcomes.
 
 ## 0.2.0 — A run you can leave alone
 
-Spoolway's second release is about what happens when nobody is watching: work arrives on a schedule, a stop leaves every lane standing, and one honest `paused` state replaces the several ways a task used to go quiet.
+Spoolway's second release is about what happens when nobody is watching: work arrives on a schedule, a stop leaves every lane standing, and one honest `paused` state replaces the several ways a task used to go quiet. A command step's exit code is now read correctly under load, so a step that actually succeeded can no longer be misrouted as a failure.
 
 ### Highlights
-- Cron jobs run a routine on a schedule, with a screen to write one from and a catch-up pass so a window between two dispatcher passes is not missed.
-- Stopping a run no longer takes anything down: lanes, worktrees and branches stay exactly where they are, so a stop is a pause rather than a teardown.
-- Everything that holds a task for a person — a gate, a question, a park, a lane that went quiet — now reads as `paused` and resumes with one key.
-- `spoolway doctor` checks the project over and refuses to start a run that cannot succeed, naming the missing piece and the command that supplies it, alongside new `config`, `prompt`, `agent`, `group` and `whats-new` commands.
-- Model prices come from a layered table refreshed straight from litellm, so spend is priced against current rates rather than whatever shipped.
+- Cron jobs run a routine on a schedule, with a `spoolway jobs` screen to write one from and a catch-up pass so a window between two dispatcher passes is never missed. (#17, #20, #86)
+- Stopping a run no longer takes anything down: lanes, worktrees and branches stay exactly where they are, so a stop is a pause rather than a teardown. (#68)
+- Everything that holds a task for a person — a gate, a question, a park, a lane that went quiet — now reads as `paused` and resumes with one key. (#50, #51, #63, #77)
+- `spoolway doctor` refuses to start a run that cannot succeed, naming the missing piece and the command that supplies it, and opens a real pane instead of leaving the check to fail silently later. (#69)
+- Model prices come from a layered table refreshed straight from litellm, with `spoolway models refresh` and an age report, so spend is priced against current rates rather than whatever shipped. (#36, #38, #42)
 
 ### Breaking changes and migration
 - A project must be claimed by `spoolway init` before any other command will run in it. Earlier versions created the project's state directory silently on first use, which let a checkout on the wrong branch quietly adopt a directory belonging to something else. Run `spoolway init` once in each checkout you use; projects already initialised need nothing.
-- `spoolway handover` and `spoolway adopt` are gone. The work they did is carried by `spoolway stack` and the ordinary pipeline steps; remove any script that calls them.
-- `spoolway queue list --json` reports `"state": "paused"` where 0.1.0 reported `waiting_on_you`. Scripts matching on the old value need updating; the `next` field still says which kind of hold it is.
-- Retired settings are now dropped rather than refused: a config carrying `tear_lanes_on_stop` or `cleanup_on_stop`, or a pipeline step carrying `cleanup:`, loads with a note and is cleaned up on the next save.
+- `spoolway handover` and `spoolway adopt` are gone. The work they did is carried by `spoolway stack` and the ordinary pipeline steps; remove any script that calls the retired verbs.
+- `spoolway queue list --json` reports `"state": "paused"` where 0.1.0 reported `waiting_on_you`. Update any script matching on the old value; the `next` field still says which kind of hold it is.
+- Retired settings are now dropped rather than refused: a config carrying `tear_lanes_on_stop` (or its older spelling `cleanup_on_stop`), or a pipeline step carrying `cleanup:`, still parses, loads with a note that the key is no longer read, and is removed on the next save.
+
+### Commands
+- `spoolway override` reads a patch layer from outside the checkout and applies it to pipelines, prompts and config at dispatch time, stamped and confirmed before it runs; `spoolway override promote` and `drop` manage what's active. (#76, #78, #82)
+- `spoolway template` and `spoolway hook` print the pipeline and step conventions that skills previously had to hardcode, so a skill reads them from the binary instead of guessing. (#74)
+- `spoolway whats-new` prints the changelog record for the version currently installed, or a chosen range with `--since`. (#37)
 
 ### Queueing
 - A task document may name its own `base:`, so one checkout can queue work against several long-lived branches. A document that leaves it out is still based on the branch the checkout has out.
 - `spoolway queue remove <task>` takes a task out of the queue and carries its document back to pending, refusing anything with a lane, a command step or a worktree still in flight.
 - `spoolway queue add --dry-run` validates a batch and prints the project, home directory and base it resolved without writing anything.
 
+### Reliability
+- A command step's exit file could be read while the wrapper was still writing it, and empty or unreadable content was treated as exit code 1. A step that had actually succeeded could be routed down `on_fail` at random. Reading is now correct in that window on every platform. (#97)
+- On Windows, re-running a command step could lose the previous run's log: Windows refuses to rename a file that still has an open handle, and the previous run's own handle could still be open when the roll-aside ran. The rename is now retried for up to two seconds before giving up. (#97)
+
 ### Fixes
 - On Windows, a job whose `routine` began with a leading `/` escaped `.spoolway/routines/` and resolved against the drive root instead. Such a path is now refused on every platform, as it already was elsewhere.
+
+### Contributors
+- Every commit and all 76 merged pull requests since v0.1.0 (#1–#96, with #70 closed unmerged and the gaps in between never opened as pull requests) came from one author, Marvin Gygas, across three git identities.
+- Implementation across many of those commits was co-authored with Claude Opus 5, Claude Opus 5 (1M context), Claude Sonnet 5 and Claude Fable 5.1, credited by their `Co-Authored-By` trailers.
+
+### Upgrading
+- Install or update with `npm install -g spoolway@0.2.0`, or run it without installing via `npx spoolway@0.2.0`.
+- The `spoolway` wrapper package selects one of six platform packages at install time: linux-x64-gnu, linux-arm64-gnu, linux-x64-musl, darwin-arm64, darwin-x64 and win32-x64.
+- After upgrading, run `spoolway whats-new` to read this record back from the installed binary.
 
 Release: https://github.com/marvingygas/spoolway/releases/tag/v0.2.0
 
