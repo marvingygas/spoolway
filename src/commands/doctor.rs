@@ -824,7 +824,10 @@ fn live_pane(mux: &dyn Mux) -> Result<Option<String>> {
             })
         })
         .and_then(|pane| runs.await_started(key).map(|_pid| pane));
-    runs.forget(key);
+    // Nothing routes on this run's code — the check's own outcome is read
+    // above — so a clearing that could not happen is not this check's to
+    // fail on.
+    let _ = runs.forget(key);
 
     // Best-effort either way: a pane left standing after a failed check is a
     // worse trail to leave than a close call whose own error is swallowed.

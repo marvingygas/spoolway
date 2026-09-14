@@ -14,7 +14,9 @@
 //! code" using bookkeeping this module knows nothing about (see
 //! [`crate::headless::Headless::status`] and [`crate::command_step::Runs::state`]).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result};
 
 /// The pid and exit files kept for every key under one directory.
 #[derive(Debug, Clone)]
@@ -86,15 +88,90 @@ impl RunFiles {
     /// Make room for a fresh run: drop whatever an earlier arrival at this key
     /// left behind, so it cannot make the run about to start look finished
     /// before it has written a line.
-    pub(crate) fn clear(&self, key: &str) {
-        let _ = std::fs::remove_file(self.exit_path(key));
-        let _ = std::fs::remove_file(self.pid_path(key));
+    ///
+    /// The result is worth reading. This used to be two deletions with both
+    /// errors thrown away, and on Windows a deletion that failed was the
+    /// ordinary case rather than an exotic one — see [`disown`]. A caller
+    /// that carried on regardless left the previous arrival's exit code
+    /// sitting where the next read would find it, and
+    /// [`crate::command_step::Runs::state`] reads the exit code before the
+    /// pid, so that stale file decided the answer and nothing later
+    /// corrected it. A step re-run at a key it had been at before was routed
+    /// on the last attempt's result without having run at all.
+    pub(crate) fn clear(&self, key: &str) -> Result<()> {
+        disown(&self.exit_path(key))?;
+        disown(&self.pid_path(key))?;
+        Ok(())
     }
+}
+
+/// Leave nothing at `path` that a later read could believe.
+///
+/// Deleting it is the whole intent, and on Unix the first line is the end of
+/// the story. Windows refuses to delete a file anything still holds open, and
+/// something reliably does: the wrapper writes its exit code one statement
+/// before the process carrying that handle goes away, so the moment a run is
+/// read as finished is the same moment its files are hardest to remove. This
+/// is the exact asymmetry [`crate::command_step::Runs::roll_log_aside`] was
+/// written for, one call later in the same function — it waits the handle out
+/// while the deletion beside it did not.
+///
+/// So *empty* it when it will not go. That is a plain write, which the same
+/// lingering handle does allow where a delete is refused, and it settles the
+/// question rather than waiting on it: an empty file carries no pid and no
+/// exit code, and both readers here already answer `None` for one. The file
+/// itself is tidied on the second attempt if it can be, and left harmless if
+/// it cannot.
+///
+/// An error means neither was possible, which is a filesystem a run has no
+/// business being started against — see [`RunFiles::clear`]'s own doc.
+fn disown(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => return Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => {}
+    }
+    std::fs::File::create(path).with_context(|| {
+        format!(
+            "could not remove or empty {} — a stale run file a new run would be read by",
+            path.display()
+        )
+    })?;
+    let _ = std::fs::remove_file(path);
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `clear` has to leave nothing a later read could believe, and deleting
+    /// is only its first choice — see [`disown`] for the platform that
+    /// refuses it. Emptying is the fallback, and it settles the same question
+    /// because neither reader here believes an empty file.
+    ///
+    /// What is asserted is the contract, not the branch: after this, neither
+    /// file answers. Which of the two ways got there is the platform's to
+    /// decide, and only Windows ever takes the second — there is no portable
+    /// way to arrange a file that refuses to be deleted but agrees to be
+    /// written, so that arm is covered by the Windows job rather than here.
+    #[test]
+    fn clearing_leaves_nothing_a_later_read_can_believe() {
+        let dir = crate::scratch::root("runfiles-cleared");
+        std::fs::create_dir_all(&dir).unwrap();
+        let files = RunFiles::new(dir.clone());
+
+        std::fs::write(files.pid_path("demo"), "4242").unwrap();
+        std::fs::write(files.exit_path("demo"), "3").unwrap();
+        files.clear("demo").unwrap();
+        assert_eq!(files.read_pid("demo"), None);
+        assert_eq!(files.read_exit_code("demo"), None);
+
+        // Clearing a key that was never used is not a failure.
+        files.clear("never-ran").unwrap();
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// The wrapper creates the exit file and then writes to it, so a reader
     /// can arrive in between — see [`RunFiles::read_exit_code`] for what
@@ -151,7 +228,7 @@ mod tests {
         std::fs::write(files.exit_path("demo"), "not-a-number").unwrap();
         assert_eq!(files.read_exit_code("demo"), Some(1));
 
-        files.clear("demo");
+        files.clear("demo").unwrap();
         assert_eq!(files.read_pid("demo"), None);
         assert_eq!(files.read_exit_code("demo"), None);
 
