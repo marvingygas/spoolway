@@ -81,7 +81,18 @@ jobs:
       # not claim to cover. The build above already produced the release
       # binary, so this costs seconds rather than a build of its own.
       - name: check this repo's own control plane still loads
-        run: ./target/release/spoolway pipeline check
+        run: |
+          # Every command reads a *claimed* project, and a fresh runner has
+          # claimed nothing — `init` is what claims one. It also writes any
+          # shipped file this repo does not carry, `pipelines/default.yml`
+          # among them, and a scaffolded pipeline with no model on its steps
+          # is not this repo's control plane and does not check out. So drop
+          # what it added: the checkout is pristine here, which makes
+          # "untracked under .spoolway/" exactly "written by the line above".
+          ./target/release/spoolway init
+          git clean -fd .spoolway
+          git diff --exit-code
+          ./target/release/spoolway pipeline check
 
       # The suites keep their trees under a mktemp root and print it; collecting
       # the lot is simpler than parsing for it, and only happens on a failure.

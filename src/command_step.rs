@@ -855,6 +855,14 @@ mod tests {
         let f = Fixture::new("prev-log");
         f.start("build-demo", "echo first-run-said-this; exit 3");
         assert_eq!(f.settle("build-demo"), RunState::Exited(3));
+        // Wait for the first run's own line to land before rolling it aside.
+        // `settle` waits on the `.exit` marker the wrapper's exec group
+        // writes, and the stage that actually writes the log sits downstream
+        // of a pipe from that group — `tee` on Unix, `Out-File` under
+        // PowerShell. It can still hold the file open here, and Windows
+        // refuses to rename a file with an open handle, so the second run
+        // starts against a log it cannot take and exits 1.
+        f.log_containing("build-demo", "first-run-said-this");
         f.runs.forget("build-demo");
 
         f.start("build-demo", "echo second-run-said-this");
