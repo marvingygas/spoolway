@@ -248,7 +248,7 @@ impl Headless {
 
         // A stale exit code would make the turn about to start look finished
         // before it has written a line.
-        self.run_files().clear(&record.name);
+        self.run_files().clear(&record.name)?;
 
         let mut script = String::new();
 
@@ -981,7 +981,7 @@ impl Mux for Headless {
         // The record goes; the log stays. One is bookkeeping the next pass
         // would trip over, the other is the only account of what this lane did.
         let _ = std::fs::remove_file(self.record_path(name));
-        self.run_files().clear(name);
+        self.run_files().clear(name)?;
         Ok(())
     }
 

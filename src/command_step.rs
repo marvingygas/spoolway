@@ -187,8 +187,11 @@ impl Runs {
     fn prepare(&self, key: &str) -> Result<()> {
         std::fs::create_dir_all(&self.dir)?;
         // A stale exit code from an earlier arrival at this step would make the
-        // run about to start look finished before it had written a line.
-        self.files.clear(key);
+        // run about to start look finished before it had written a line. The
+        // `?` is the point: a run that cannot be given a clean slate must not
+        // be spawned into a dirty one, because the code it would be read by is
+        // the one the last arrival left.
+        self.files.clear(key)?;
         // Rolled aside rather than deleted — see [`Runs::prev_log_path`]. The
         // rename also leaves no log at `log_path`, which is what the wrapper's
         // `>>` append below needs: a fresh run must not open onto the tail of
@@ -459,7 +462,11 @@ impl Runs {
         if let Some(pid) = self.read_pid(key) {
             crate::headless::kill_group(pid);
         }
-        self.files.clear(key);
+        // Nowhere to report a clearing that failed, and nothing that needs it
+        // to have succeeded: this run is over either way, and the next arrival
+        // at this key goes through [`Runs::prepare`], which does not carry on
+        // past it.
+        let _ = self.files.clear(key);
     }
 
     /// Forget a finished run's bookkeeping, keeping its log.
@@ -467,8 +474,15 @@ impl Runs {
     /// Called once the exit code has been routed on: without it a task that
     /// comes back round to the same step would read the last arrival's code and
     /// route on it without running anything.
-    pub fn forget(&self, key: &str) {
-        self.files.clear(key);
+    ///
+    /// That sentence describes a real failure rather than a hypothetical one,
+    /// which is why this answers with a result instead of swallowing one. The
+    /// next arrival does not necessarily start a run: a dispatch pass reads
+    /// the state first, so a code left lying here is routed on before
+    /// [`Runs::prepare`] is ever reached and gets a chance to refuse. Forget
+    /// has to have actually forgotten.
+    pub fn forget(&self, key: &str) -> Result<()> {
+        self.files.clear(key)
     }
 
     /// Every run belonging to one task, whatever step started it.
@@ -814,7 +828,7 @@ mod tests {
         f.start("demo · build", "exit 1");
         assert_eq!(f.settle("demo · build"), RunState::Exited(1));
         f.runs.record_pane("demo · build", "w1:p9").unwrap();
-        f.runs.forget("demo · build");
+        f.runs.forget("demo · build").unwrap();
 
         assert_eq!(f.runs.state("demo · build"), RunState::Fresh);
         assert_eq!(
@@ -879,7 +893,7 @@ mod tests {
         f.start("build-demo", "exit 7");
         assert_eq!(f.settle("build-demo"), RunState::Exited(7));
 
-        f.runs.forget("build-demo");
+        f.runs.forget("build-demo").unwrap();
         assert_eq!(f.runs.state("build-demo"), RunState::Fresh);
         // The log outlives the bookkeeping: it is the account of what the run
         // did, and the next arrival has not happened yet.
@@ -911,7 +925,7 @@ mod tests {
         // instant a step exits is what a lane really does, and
         // [`Runs::roll_log_aside`] is what has to survive it.
         f.log_containing("build-demo", "first-run-said-this");
-        f.runs.forget("build-demo");
+        f.runs.forget("build-demo").unwrap();
 
         f.start("build-demo", "echo second-run-said-this");
         // The log goes into both failure messages above and below: this test
@@ -941,7 +955,7 @@ mod tests {
         let f = Fixture::new("prev-keys");
         f.start("demo · gate", "exit 1");
         assert_eq!(f.settle("demo · gate"), RunState::Exited(1));
-        f.runs.forget("demo · gate");
+        f.runs.forget("demo · gate").unwrap();
         f.start("demo · gate", "exit 0");
         assert_eq!(f.settle("demo · gate"), RunState::Exited(0));
 

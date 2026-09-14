@@ -671,7 +671,7 @@ pub fn retry_if_failed(repo: &Repo, task: &Task, event: &str) {
         RunState::Exited(_) | RunState::Interrupted => {
             let _ = std::fs::create_dir_all(repo.tracking_dir());
             let _ = std::fs::write(failed_marker(repo, &key), "");
-            runs.forget(&key);
+            let _ = runs.forget(&key);
         }
     }
 }

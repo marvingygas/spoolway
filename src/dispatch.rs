@@ -896,7 +896,7 @@ impl<'a> Dispatcher<'a> {
                     // own report put it, and the next pass reads the code
                     // again against that.
                     if self.persist(&mut tasks[index])? {
-                        crate::command_step::Runs::new(&self.repo.commands_dir()).forget(&key);
+                        crate::command_step::Runs::new(&self.repo.commands_dir()).forget(&key)?;
                     }
                     continue;
                 }
@@ -3407,7 +3407,7 @@ impl<'a> Dispatcher<'a> {
                 // Read once and cleared, so a task that comes back round to this
                 // step runs the command again instead of routing on the code the
                 // last arrival left behind.
-                runs.forget(&key);
+                runs.forget(&key)?;
                 // A passing command's pane has nothing left to show — closed
                 // here, the same instant the step itself is judged done. A
                 // failing one is left standing: see the `Fresh` arm below,
@@ -3471,7 +3471,7 @@ impl<'a> Dispatcher<'a> {
                 // is a dispatcher shutting down or the machine going down —
                 // neither of which is a loop this could break out of by
                 // escalating instead.
-                runs.forget(&key);
+                runs.forget(&key)?;
                 // Closed rather than left standing: the run is about to be
                 // started again from `Fresh`, which would only replace it
                 // anyway, and a killed multiplexer is the one case a pane
