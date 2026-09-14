@@ -14982,7 +14982,12 @@ mod tests {
     #[test]
     fn a_slow_failing_queued_hook_under_on_fail_pause_never_starts_the_task() {
         let mut repo = fixture("hook-queued-slow-pause");
-        write_hook(&repo, "slow-fail.sh", "sleep 0.3; exit 1");
+        // A second, not three tenths of one. The three passes below have to
+        // land inside the hook's own run, and on a loaded CI runner a pass
+        // plus its 50ms wait was taking a tenth of a second on its own — so
+        // the old margin ran out and the hook had already failed by the
+        // third pass, which read as this test's own claim being false.
+        write_hook(&repo, "slow-fail.sh", "sleep 1; exit 1");
         repo.config.issue_tracking.hook = "slow-fail.sh".into();
         repo.config.issue_tracking.on_fail = "pause".into();
         let path = add_task(&repo, "demo", crate::pipeline::QUEUED);
