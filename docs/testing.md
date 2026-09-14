@@ -55,8 +55,11 @@ SPOOLWAY="$PWD/target/release/spoolway" scripts/e2e/run.sh --tier nightly
 Every lane runs a stand-in agent — one script per launchable kind under `scripts/e2e/agents/`
 (`pi`, `claude`, `codex`; `codex` is a thin front over `pi` that reads the
 prompt and session home the way its kind is handed them), ordinary scripts copied onto the
-lane's `PATH` and configured through the environment — and
-every project is built from a seed written inline (`fixture.sh`'s `new_repo`). The whole
+lane's `PATH` and configured through the environment — and every project is built from a
+seed written inline (`fixture.sh`'s `new_repo`). The one exception is the `upgrade` suite,
+which stages a committed fixture instead: a `.spoolway/` tree that an old binary actually
+scaffolded at its own tag, because the only way to have something genuinely behind is to have
+really been that old release once. The whole
 harness needs `git`, `bash`, `curl`, `setsid` and `flock` and nothing else — no toolchain, no
 model, no multiplexer.
 
@@ -129,7 +132,7 @@ A tier is a named set of suites, so a command step has something short to name.
 |---|---|---|
 | `smoke` | flow | Nothing automatic; the fast signal for a person running it by hand |
 | `pr` | flow, commands, stacking, stack, conflicts, forge, disaster, lock, trials, routines, jobs, jobs-screen, restart | The last task of a chain, through the `suite` step in `.spoolway/pipelines/*.yml` |
-| `nightly` | the same as `pr` | The nightly routine, run by a person |
+| `nightly` | the `pr` suites plus `upgrade` | The nightly routine and the release workflow, which ask whether a current binary still reads what a past release wrote |
 | `cloud` | warmth | Nothing automatic. It spends real tokens, and refuses to run without `SPOOLWAY_E2E_CLOUD=1` |
 | `live` | live | Nothing automatic. It runs the real `codex` binary, and skips it unless `SPOOLWAY_E2E_CODEX_MODEL` names it a model |
 
@@ -155,6 +158,7 @@ spends nothing when its models resolve to a local endpoint — see
 | `jobs` | A cron job in a store, fired by a real dispatcher pass against a matching minute: the routine's documents reach the queue under minted ids with `depends_on` remapped and the job's pipeline set, the routine tree is left untouched, and `spoolway doctor` names a job whose expression will not parse, never comes round, points at a missing routine, or names an undefined pipeline | A real dispatcher driving a real `.spoolway/routines/` tree |
 | `jobs-screen` | The `spoolway jobs` screen writing a job: the routine/schedule/pipeline walk lands a `[jobs.<name>]` table in the user store with the typed expression, the picked routine and the default pipeline, `jobs list` then shows it, `space` pauses and resumes it, and `x` then `y` deletes it | Real keystrokes piped into the real binary, against a real store file on disk |
 | `restart` | `spoolway dispatch`'s restart guard: four starts in a row against a held lock each report exit 4, a fifth is refused with exit 5, `--force` starts one anyway and clears the count, and an empty queue reports exit 3 without ever tripping the guard. It also proves a start that would actually commit but has no git identity is refused outright (exit 1) rather than starting, and that this refusal is told apart from the empty-queue exit 3 by its exit code | A real lock file, an identity unset on the checkout, and real process exit codes across repeated real invocations |
+| `upgrade` | Whether the current binary still reads what an older release wrote: a value set under a retired table (`[retention]` at 0.1.0, and directly under `[housekeeping]` at 0.2.0, once the fold had happened) arrives at its current home across a real `spoolway update`, and hand-written prose around a generated block comes back byte for byte. Each half runs over a `.spoolway/` tree that the matching tag's own binary scaffolded, committed under `scripts/e2e/fixtures/` | A real old tree an old binary scaffolded, a real `spoolway update` over it, and a byte-for-byte comparison of prose a `diff` or `awk` pass would smooth over |
 | `warmth` | **cloud tier only.** Real `claude-haiku-4-5` lanes, because a stand-in's transcript agrees with the parser by construction | A real model writes the transcript |
 | `live` | **live tier only.** The real `codex` binary through `agent verify --live` — a turn, then a resume — because a stand-in written from the adapter row cannot notice a CLI changing its flag grammar | The real binary |
 

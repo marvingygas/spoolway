@@ -96,7 +96,7 @@ REPO=$(cd "$E2E_DIR/../.." && pwd)
 #               it spends nothing.
 smoke_suites=(flow)
 pr_suites=(flow commands stacking stack conflicts forge disaster lock trials routines jobs jobs-screen board-pause restart overrides)
-nightly_suites=(flow commands stacking stack conflicts forge disaster lock trials routines jobs jobs-screen board-pause restart overrides)
+nightly_suites=(flow commands stacking stack conflicts forge disaster lock trials routines jobs jobs-screen board-pause restart overrides upgrade)
 cloud_suites=(warmth)
 live_suites=(live)
 
