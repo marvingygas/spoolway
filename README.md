@@ -42,10 +42,12 @@ sometimes does. spoolway won't surprise you with a bill or an opinion.
 - **Session reuse.** A step can resume its prompt's earlier conversation instead of
   paying to rebuild context, bounded by how full the model's window already is.
 - **Unattended runs.** Overnight, nothing parks for a person: blocked work is resumed by
-  an unblocker prompt, with an output-token ceiling as the brake.
+  an unblocker prompt, with a token or dollar ceiling as the brake.
 - **Trials.** Fork a whole group into one arm per task, each on its own pipeline, and queue
   them together, then read the arms side by side in eval.
 - **Routines.** Keep the tasks you run over and over in `.spoolway/routines/`.
+- **Jobs.** Run a routine on a cron schedule. The dispatcher fires it from its own pass, so
+  nightly work needs nothing but a dispatcher left running.
 - **Eval built in.** Every lane's spend and outcome land in a ledger, so you can see what
   your last pipeline edit did to pass rate and price.
 
@@ -108,9 +110,10 @@ spoolway queue
 <img src="docs/screenshots/queue.png" alt="the queue screen">
 
 *The queue screen lists the groups on the left and previews the selected group's tasks on the
-right — `enter` queues what is checked and offers to start dispatching on the spot. `g` gates
-a task on the fly, `p` forks one across several pipelines as a trial, and `r` opens the
-repeatable tasks you keep in `.spoolway/routines/`.*
+right. Each task names its own pipeline. `enter` queues what is checked and offers to start
+dispatching on the spot. `g` gates a task on the fly, `p` forks one across several pipelines as
+a trial, `s` saves a group as a routine, and `r` opens the routines you keep in
+`.spoolway/routines/`.*
 
 ### 4. Dispatch
 
@@ -122,7 +125,8 @@ spoolway dispatch      # watch the board, and step in only where you are needed
 
 *One row per task, grouped by `group:`. The board says what each lane is spending as it
 spends it, what every queued task is waiting on, and which tasks are paused for you. NEXT
-distinguishes a lane holding a question from a task waiting to be resumed past a gate.*
+distinguishes a lane holding a question from a task waiting to be resumed past a gate. The
+ledger at the bottom shows the slots in use and every scheduled job with its next firing.*
 
 Every task on the board is in one of a few states:
 
@@ -130,14 +134,10 @@ Every task on the board is in one of a few states:
 |---|---|
 | `queued` | Waiting for its dependencies and a free slot. |
 | `running` | An agent is working the task's current step, or it has just moved there and a lane is starting. |
-| `paused` | Needs a person: NEXT names either a pane holding a question or the route for resuming a gated task. |
-| `blocked` | Something needs a person. |
+| `paused` | Waiting for you on purpose: a gate, a question in its pane, or a park. `r` on the board resumes it. |
+| `blocked` | A step reported a block, or ran out of loops. Read the task's `## Blocker`, then `spoolway resume`. An unattended run hands it to the unblocker prompt instead. |
 | `unreachable` | A task it depends on is blocked, so it cannot start until you clear that one. |
 | `done` | Finished: the branch is handed over, the worktree removed, the task archived. |
-
-For JSON consumers, question-held rows now report `"state": "paused"` instead of
-`"state": "waiting_on_you"`. Use `next` to distinguish ``look at pane `<lane>``` from a
-gate's resume instruction.
 
 ### 5. Calibrate
 
@@ -186,7 +186,7 @@ steps:
     description: Write the code to satisfy the task's acceptance criteria.
     agent: pi
     prompt: implementer
-    model: qwen3-coder-30b
+    model: Ornith-1.5-35B-A3B
     session: true
     on_pass: review
     on_fail: blocked
@@ -207,7 +207,7 @@ steps:
     description: Bring the domain documents in line with what this task changed.
     agent: pi
     prompt: archivist
-    model: qwen3-coder-30b
+    model: Ornith-1.5-35B-A3B
     on_pass: handover
     on_fail: blocked
 
@@ -228,6 +228,54 @@ steps:
 
 **You do not have to write one by hand.** The `/spoolway-config` skill writes a pipeline
 for you, and edits the one you already have.
+
+## Jobs
+
+A job runs a routine on a schedule. It is three things: a cron expression, a pipeline, and a
+routine you saved under `.spoolway/routines/`.
+
+spoolway has no clock of its own. The dispatcher fires a due job at the top of its pass, and
+while any job is enabled it stays up on an empty queue instead of exiting. A `spoolway dispatch`
+left running overnight is all a job needs.
+
+```
+spoolway jobs              # the screen: write, edit, pause, delete, or fire a job
+spoolway jobs list         # every job, its schedule, and when it fires next
+spoolway jobs run <name>   # fire one now, ignoring its schedule
+```
+
+<img src="docs/screenshots/jobs.png" alt="the jobs screen">
+
+*The jobs screen. `n` walks three choices: the routine, the cron expression, and the pipeline.
+A job fires once per matching minute and skips a window while its previous run is still in the
+queue. A window that passes while no dispatcher is running is not caught up later.*
+
+A job is a few lines of TOML. Yours live in `~/.spoolway/<project>/jobs.toml`. Put one in
+`.spoolway/jobs.toml` inside the checkout to share it with the team.
+
+```toml
+[jobs.nightly-audit]
+schedule = "0 3 * * 1-5"   # weekdays at 03:00, local time
+pipeline = "impl_fast"
+routine  = "nightly"       # a folder or a single .md under .spoolway/routines/
+```
+
+### Routines
+
+A routine is work you run more than once. Queueing a group deletes its documents from
+`pending/`, so repeatable tasks live in `.spoolway/routines/` instead, tracked in git. Press `s`
+on a group in the queue screen to save it there, and `r` to browse and queue what is saved.
+Every queued copy gets a fresh id, so a routine can run again without colliding with its last
+run. The saved files are never changed.
+
+### Trials
+
+A trial answers one question: which pipeline does this task best? Press `p` on a group in the
+queue screen, pick a pipeline per task, and tick any steps to skip. Every task becomes one arm,
+queued under its chosen pipeline, and all arms share one trial id. Read them side by side with
+`spoolway eval --runs --trial <id>`. An arm never pushes a branch or opens a pull request. When
+the last arm finishes, every arm's copy is removed, and only the source group and the ledger
+rows stay.
 
 ## Issue tracker
 
@@ -257,18 +305,22 @@ See **[Issue Tracking](docs/configuration.md#issue_tracking--a-hook-fired-on-fou
 [dispatch]
 backend = "herdr"            # herdr, tmux, or headless
 herdr_mode = "split"         # "split": a workspace per task; "grouped": one shared tab, a pane per task
-interval = "10s"
+tmux_mode = "grouped"        # "grouped": one session for the run; "split": a session per task
+worktree_root = ""           # where a task's worktree is cut; blank is ~/.spoolway/<project>/worktrees
+interval = "10s"             # how long the dispatcher waits between passes
 lane_quiet = "15m"           # silence before a lane is reminded to report
 default_pipeline = "default" # which pipeline a task runs when it names none
-auto_commit = true
+auto_commit = true           # commit a lane's leftover work when its step settles
 
 [unattended]
 enabled = true               # the overnight switch
-max_output_tokens = 0        # spend ceiling for a run with nobody watching; 0 is none
-skip_blocked_lane = true     # an agent step's cleared block carries the task past the step it blocked on
+max_output_tokens = 0        # output-token ceiling for a run with nobody watching; 0 is none
+max_cost_usd = 0.0           # dollar ceiling for the same run; 0 is none
+skip_blocked_lane = true     # a cleared block carries the task past the step it blocked on
 blocked_agent = "claude"     # who staffs `blocked` when nobody is at the keyboard
 blocked_model = "claude-opus-5"
 blocked_effort = "medium"
+blocked_session = true       # the unblocker carries its own earlier session forward
 blocked_prompt = "unblocker"
 
 [pipeline_gen]
@@ -279,21 +331,39 @@ pipeline_effort = "medium"
 [housekeeping]
 update_check = true          # tell a person at a keyboard that a newer release is out
 calibrate_window = "14d"     # how far back `/spoolway-calibrate` reads
-
-[agents.pi]
-kind = "pi"
-session_reuse_ctx = 50       # % of the window before a carried session restarts fresh
+retention_days = 30          # how long run records and archived tasks are kept; 0 keeps everything
+price_max_age_days = 30      # how old the price table may be before `spoolway doctor` says so
 
 [agents.claude]
 kind = "claude"
-concurrency = 3
-session_reuse_ctx = 50
+concurrency = 3              # most lanes of this profile at once
+session_reuse_ctx = 50       # % of the window before a carried session restarts fresh
+session_blocked_ctx = 0      # % of the window at which a running lane is stopped and blocked; 0 is off
 permission_mode = "auto"
 
-[models."*qwen3-coder-30b*"]
+[agents.codex]
+kind = "codex"
+concurrency = 3
+session_reuse_ctx = 50
+session_blocked_ctx = 0
+permission_mode = "never"
+
+[agents.pi]
+kind = "pi"
+session_reuse_ctx = 50
+session_blocked_ctx = 0
+
+[models."Ornith-1.5-35B-A3B"]  # a local model, served by llama.cpp
 context_window = 100096
-slots = 3                    # parallel lanes the local server can actually hold
+slots = 2                    # parallel lanes the local server can actually hold
 exclusive = true             # never alongside another exclusive model
+local = true                 # runs on hardware you own
+
+[issue_tracking]
+hook = ""                    # a script in .spoolway/hooks/, e.g. "github.sh"; blank runs none
+project_key = ""             # handed to the hook verbatim, e.g. owner/repo
+on_fail = "ignore"           # what a failing hook does: ignore it, or pause the task
+key_in_names = false         # prefix branch and worktree names with the tracker's slug
 ```
 
 See **[Configuration](docs/configuration.md)**.
