@@ -269,11 +269,14 @@ jobs:
       # record the tag already carries, extracted once by the `notes` job and
       # carried here as an artifact so the page cannot drift from the bytes
       # that job validated. `dist/*` is still the only upload glob, so the
-      # notes file is never attached as an asset.
+      # notes file is never attached as an asset. `--title` is explicit
+      # because a release created without one shows the tagged commit's
+      # subject line on the repository page instead of the version.
       - name: Create the release
         run: |
           gh release create "$GITHUB_REF_NAME" dist/* \
             --verify-tag \
+            --title "$GITHUB_REF_NAME" \
             --notes-file artifacts/release-body/release-body.md
         env:
           GH_TOKEN: ${{ github.token }}
