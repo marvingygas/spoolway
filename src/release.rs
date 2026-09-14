@@ -24,12 +24,13 @@
 //! stale rather than a command that hangs on a plane.
 //!
 //! [`upgrade`] is the one exception, because it is the one caller somebody
-//! ran specifically to get the newer binary: it asks npm directly, and only
-//! falls back to the cache's (possibly stale, possibly silent) answer when
-//! that lookup itself fails. Answering `spoolway update` from a cache that
-//! has not caught up yet is the bug this module exists to have fixed —
-//! installing nothing on the one run somebody asked for the upgrade, and
-//! only catching up on a second, unasked-for run.
+//! ran specifically to get the newer binary: it asks npm directly, bounded by
+//! [`LOOKUP_DEADLINE`] rather than left to npm's own unbounded retries, and
+//! only falls back to the cache's (possibly stale) answer when that lookup
+//! itself fails or does not finish in time — saying so on the way. Answering
+//! `spoolway update` from a cache that has not caught up yet is the bug this
+//! module exists to have fixed — installing nothing on the one run somebody
+//! asked for the upgrade, and only catching up on a second, unasked-for run.
 //!
 //! Every failure in here is swallowed, and deliberately. A machine offline, an
 //! npm that was never installed, a registry that answers slowly — none of that
@@ -486,6 +487,45 @@ pub fn upgrade(lock_file: &Path) -> Upgrade {
     decide_upgrade(lock_file, published, newer)
 }
 
+/// How long a lookup made on `update`'s behalf may run before it is treated
+/// as a failure.
+///
+/// Short, and deliberately not configurable — the task this bound exists for
+/// rules that out. [`refresh`]'s detached child is where an open-ended wait
+/// belongs; this one runs in front of somebody who just typed `spoolway
+/// update` and is watching the terminal, and npm does not fail fast against a
+/// registry it cannot reach — it retries first. Three seconds is long enough
+/// for a real answer and short enough that the retries of an unreachable
+/// registry never finish inside it.
+const LOOKUP_DEADLINE: Duration = Duration::from_secs(3);
+
+/// Run `live` on its own thread and stop waiting on it after `deadline`.
+///
+/// The thread is never joined: a `live` that is still blocked in npm's own
+/// retries when the deadline passes is left to finish (or not) on its own,
+/// the same way [`spawn_refresh`]'s detached child is never waited on. Its
+/// eventual answer, if any, is simply never read.
+fn bounded(
+    live: impl FnOnce() -> Option<String> + Send + 'static,
+    deadline: Duration,
+) -> Option<String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    // The fallible builder, not `thread::spawn`: this module's whole contract
+    // is that every failure is swallowed, and `thread::spawn` panics when the
+    // OS cannot start a thread — which would abort `update` on exactly the
+    // kind of resource exhaustion this function exists to be quiet about.
+    let spawned = std::thread::Builder::new().spawn(move || {
+        // The receiver may already be gone (deadline passed) — a send into a
+        // dropped channel is exactly the "nobody is listening any more" case
+        // and is not an error worth doing anything about.
+        let _ = tx.send(live());
+    });
+    if spawned.is_err() {
+        return None;
+    }
+    rx.recv_timeout(deadline).ok().flatten()
+}
+
 /// The decision half of [`upgrade`], with the live lookup and the cache
 /// fallback passed in rather than called directly.
 ///
@@ -493,23 +533,31 @@ pub fn upgrade(lock_file: &Path) -> Upgrade {
 /// closure that panics if ever called — proving the cache is bypassed
 /// outright, and only reached on a failed lookup — without seeding a real
 /// cache file, standing up a fake `npm` on `PATH`, or touching the process
-/// environment at all.
+/// environment at all. `live` runs bounded by [`LOOKUP_DEADLINE`], on its own
+/// thread, so a stub that never answers proves the bound rather than hanging
+/// the test.
 fn decide_upgrade(
     lock_file: &Path,
-    live: impl FnOnce() -> Option<String>,
+    live: impl FnOnce() -> Option<String> + Send + 'static,
     cached: impl FnOnce() -> Option<String>,
 ) -> Upgrade {
+    println!("Checking npm for a newer spoolway...");
     // Asked live, because this is the one call somebody made specifically to
     // get the newer binary — a cache the passive notice would happily wait a
     // day on is exactly what left `update` installing nothing on the run
     // that mattered. `live()` returning `None` is "npm could not answer"
-    // (offline, not installed, npm itself erroring) rather than "nothing
-    // newer", so that and only that falls back to the cache's own answer;
-    // npm actually answering settles it either way, cache or no cache.
-    let version = match live() {
+    // (offline, not installed, npm itself erroring, or the deadline above
+    // passing) rather than "nothing newer", so that and only that falls back
+    // to the cache's own answer; npm actually answering settles it either
+    // way, cache or no cache.
+    let version = match bounded(live, LOOKUP_DEADLINE) {
         Some(latest) if is_newer(&latest, current()) => Some(latest),
         Some(_) => None,
-        None => cached(),
+        None => {
+            println!("No answer from npm, carrying on with the version already known.");
+            println!();
+            cached()
+        }
     };
     let Some(version) = version else {
         return Upgrade::Current;
@@ -847,6 +895,39 @@ mod tests {
             || panic!("the cache must not get a second vote once npm has answered"),
         );
         assert_eq!(result, Upgrade::Current);
+    }
+
+    /// The bug this task exists to close: before the fix, `decide_upgrade`
+    /// called `live()` directly, with nothing bounding how long it may run —
+    /// exactly what turns npm's own retries against a registry it cannot
+    /// reach into a command that never returns (`spoolway update` hanging on
+    /// a machine with no network). Now it runs `live()` through [`bounded`]
+    /// instead. A closure that blocks far longer than any reasonable deadline
+    /// stands in for that hang, the same way the task's own acceptance
+    /// criteria describe: "the reproduction drives the deadline against a
+    /// stubbed lookup that never returns". Falling back to the cache's answer
+    /// once the deadline passes is what `update` should do instead of sitting
+    /// through the rest of the wait.
+    #[test]
+    fn a_live_lookup_that_never_answers_gives_up_after_a_bounded_wait() {
+        let start = std::time::Instant::now();
+        let result = decide_upgrade(
+            Path::new("/does/not/exist/lock"),
+            || {
+                std::thread::sleep(Duration::from_secs(20));
+                Some("0.9.9".to_string())
+            },
+            || Some("0.4.0".to_string()),
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "decide_upgrade waited {:?} on a lookup that never answers — it must give up after \
+             a short bounded wait instead of hanging the command",
+            start.elapsed()
+        );
+        // A lookup that gave up is exactly a failed lookup: the cache's
+        // answer is what `update` should fall back to.
+        assert_eq!(result, Upgrade::Unmanaged("0.4.0".to_string()));
     }
 
     /// The state file is the machine's, not the project's: every checkout runs
