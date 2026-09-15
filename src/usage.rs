@@ -1517,6 +1517,17 @@ fn distinct_fallback(buf: &mut [u8]) {
     }
 }
 
+/// Fill `buf` with [`os_random`] bytes, or [`distinct_fallback`]'s stand-in
+/// when the CSPRNG cannot be reached — the one rule every id below shares,
+/// including [`crate::repo::stamped_id`]'s own id, minted here too rather
+/// than duplicating the fallback logic in a module that has no other reason
+/// to know about `/dev/urandom` or `ProcessPrng`.
+pub(crate) fn fill_random(buf: &mut [u8]) {
+    if !os_random(buf) {
+        distinct_fallback(buf);
+    }
+}
+
 /// A v4-shaped UUID, which is what `claude --session-id` insists on.
 ///
 /// From [`os_random`], with a [`distinct_fallback`] so that a machine whose
@@ -1524,9 +1535,7 @@ fn distinct_fallback(buf: &mut [u8]) {
 /// on the launch path of every lane.
 pub fn new_session_id() -> String {
     let mut bytes = [0u8; 16];
-    if !os_random(&mut bytes) {
-        distinct_fallback(&mut bytes);
-    }
+    fill_random(&mut bytes);
     // Version 4, variant 1.
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
@@ -1556,9 +1565,7 @@ pub fn new_session_id() -> String {
 /// apart even when the CSPRNG cannot be reached.
 pub fn new_run_id() -> String {
     let mut bytes = [0u8; 8];
-    if !os_random(&mut bytes) {
-        distinct_fallback(&mut bytes);
-    }
+    fill_random(&mut bytes);
     let value = u64::from_le_bytes(bytes);
     format!("r{value:016x}")
 }
@@ -1572,9 +1579,7 @@ pub fn new_run_id() -> String {
 /// one question a trial exists to let a person answer.
 pub fn new_trial_id() -> String {
     let mut bytes = [0u8; 8];
-    if !os_random(&mut bytes) {
-        distinct_fallback(&mut bytes);
-    }
+    fill_random(&mut bytes);
     let value = u64::from_le_bytes(bytes);
     format!("t{value:016x}")
 }
@@ -2277,9 +2282,19 @@ pub fn sweep(repo: &Repo) -> Vec<Entry> {
 }
 
 /// Read one project's ledger, tagging every entry with the project's name.
+///
+/// A project whose home cannot be resolved reads as no entries rather than
+/// an error: this is `spend`'s own read of *other* registered projects, used
+/// to report spend across a machine, so one unreadable project must not stop
+/// a report on every other one. Nothing is written here, so the risk a
+/// writer runs on a resolution failure — landing in the wrong directory —
+/// does not apply.
 pub fn read_project(root: &Path) -> Vec<Entry> {
+    let Ok(home) = crate::mux::project_home(root) else {
+        return Vec::new();
+    };
     let name = registry::name_of(root);
-    let path = crate::mux::project_home(root).join(LEDGER_FILE);
+    let path = home.join(LEDGER_FILE);
     let mut entries = read_at(&path).unwrap_or_default();
     for entry in &mut entries {
         entry.project = name.clone();
@@ -2296,8 +2311,10 @@ pub fn read_project(root: &Path) -> Vec<Entry> {
 /// finding 45). A non-empty file is the same yes this needs, at the cost of
 /// one `stat`.
 pub fn project_has_ledger(root: &Path) -> bool {
-    let path = crate::mux::project_home(root).join(LEDGER_FILE);
-    std::fs::metadata(&path)
+    let Ok(home) = crate::mux::project_home(root) else {
+        return false;
+    };
+    std::fs::metadata(home.join(LEDGER_FILE))
         .map(|m| m.len() > 0)
         .unwrap_or(false)
 }

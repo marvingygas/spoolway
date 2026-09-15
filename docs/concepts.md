@@ -14,8 +14,11 @@ A project is a git repository that has been set up with spoolway. Setup creates 
 `.spoolway/` directory in the checkout holding the configuration, the pipeline definitions
 and the prompts — tracked, and committed alongside the rest of the repository. Everything
 spoolway *writes while it runs* — the task queue included — lives elsewhere: at
-`~/.spoolway/<basename of the checkout>/`, outside the repository entirely. See [Runtime
-state](configuration.md#runtime-state).
+`~/.spoolway/<label>-<id>/`, where `<id>` is a short id stamped into the project's own `.git`
+directory and `<label>` a cleaned-up version of the checkout's name. The stamp lives in the git
+directory, which every branch, subdirectory and linked worktree of one clone shares, so the home
+— and the queue that lives under it — belongs to the project rather than to any single checkout.
+See [Runtime state](configuration.md#runtime-state).
 
 Every spoolway command finds the project through git rather than by walking up the
 filesystem for a `.spoolway/` directory. This matters because a task's worktree carries a

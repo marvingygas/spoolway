@@ -261,7 +261,7 @@ pub fn queue_remove(repo: &Repo, pipelines: &Pipelines, id: &str) -> Result<()> 
     let task = &tasks[idx];
     let stage = task.stage();
 
-    let mux = crate::mux::backend(repo);
+    let mux = crate::mux::backend(repo)?;
     let lanes = mux.list_lanes().unwrap_or_default();
     if crate::status::live_agent_lane_tasks(repo, &tasks, pipelines, &lanes).contains(&idx) {
         bail!(
@@ -1576,7 +1576,7 @@ pub fn queue_pause(repo: &Repo, pipelines: &Pipelines, id: &str, force: bool) ->
         .position(|t| t.id() == id)
         .with_context(|| format!("no queued task `{id}`"))?;
 
-    let mux = crate::mux::backend(repo);
+    let mux = crate::mux::backend(repo)?;
     let lanes = mux.list_lanes().unwrap_or_default();
     if crate::status::live_agent_lane_tasks(repo, &tasks, pipelines, &lanes).contains(&idx) {
         let name = crate::mux::lane_name(tasks[idx].stage(), tasks[idx].id());
@@ -2684,7 +2684,10 @@ fn open_highlighted(repo: &Repo, groups: &[Group], state: &ScreenState) -> Mode 
         return Mode::Browsing;
     };
     let command = crate::status::editor_command(&task.path);
-    let mux = crate::mux::backend(repo);
+    let mux = match crate::mux::backend(repo) {
+        Ok(mux) => mux,
+        Err(err) => return Mode::Outcome(format!("o: {err:#}")),
+    };
     match mux.open_command(&repo.root, &format!("{} · edit", task.id), &command) {
         Ok(()) => Mode::Browsing,
         Err(err) => Mode::Outcome(format!("o: {err:#}")),

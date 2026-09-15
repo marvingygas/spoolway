@@ -126,12 +126,12 @@ struct Record {
 impl Headless {
     /// `lane_dir` is where lane records and logs live —
     /// [`crate::repo::Repo::headless_dir`] for every real caller.
-    pub fn new(root: &Path, config: &DispatchConfig, lane_dir: PathBuf) -> Headless {
-        Headless {
+    pub fn new(root: &Path, config: &DispatchConfig, lane_dir: PathBuf) -> Result<Headless> {
+        Ok(Headless {
             root: root.to_path_buf(),
-            worktree_root: worktree_root(root, config),
+            worktree_root: worktree_root(root, config)?,
             lanes_dir: lane_dir,
-        }
+        })
     }
 
     fn lane_dir(&self) -> PathBuf {
@@ -1081,7 +1081,7 @@ mod tests {
             config.worktree_root = root.join("worktrees").display().to_string();
 
             Fixture {
-                mux: Headless::new(&root, &config, root.join(LANE_DIR)),
+                mux: Headless::new(&root, &config, root.join(LANE_DIR)).unwrap(),
                 root,
                 bin,
             }
@@ -1607,7 +1607,7 @@ mod tests {
     #[test]
     fn worktrees_are_cut_outside_the_project() {
         let root = Path::new("/home/x/dev/myproject");
-        let default = worktree_root(root, &DispatchConfig::default());
+        let default = worktree_root(root, &DispatchConfig::default()).unwrap();
         assert!(
             !default.starts_with(root),
             "worktrees landed inside the checkout: {}",
@@ -1621,7 +1621,10 @@ mod tests {
 
         let mut config = DispatchConfig::default();
         config.worktree_root = "~/elsewhere".into();
-        assert_eq!(worktree_root(root, &config), home().join("elsewhere"));
+        assert_eq!(
+            worktree_root(root, &config).unwrap(),
+            home().join("elsewhere")
+        );
     }
 
     /// A workspace id carries its checkout so nothing has to keep a table of

@@ -165,6 +165,49 @@ impl Answers {
 /// The file naming which checkout a project's home directory belongs to.
 pub(crate) const PROJECT_FILE: &str = "project.toml";
 
+/// How wide the path column is on the `stamped` line `init` prints, so that
+/// the id lands in the same column as the value on every `wrote` row above
+/// it rather than one space after a path of whatever length. Eleven
+/// characters of `"  stamped  "` plus this is column 34, which is where the
+/// task's own mockup puts it.
+const STAMP_PATH_WIDTH: usize = 23;
+
+/// Right-pads `path` to the column [`STAMP_PATH_WIDTH`] fixes — the column
+/// every `wrote`/`stamped` row's value starts at — without ever letting a
+/// long path swallow the separator outright.
+///
+/// `{:<width$}` alone pads only up to `width`; handed a path already that
+/// wide or wider — the common git directory `init` stamps from inside a
+/// linked worktree is an absolute path, easily past 23 characters — it adds
+/// no padding at all, so the value that follows would run straight up
+/// against the path with nothing between them. One explicit space is what a
+/// path this long falls back to instead.
+fn pad_to_value_column(path: &str) -> String {
+    if path.chars().count() < STAMP_PATH_WIDTH {
+        format!("{path:<width$}", width = STAMP_PATH_WIDTH)
+    } else {
+        format!("{path} ")
+    }
+}
+
+/// One `wrote` row for the mockup's report block, aligned to the same
+/// column [`pad_to_value_column`] gives the `stamped` row below it.
+///
+/// `count_noun` is `None` for a single file's row, which ends right after
+/// the path — there is nothing to count — and `Some((n, noun))` for a
+/// directory's row, which reports how many of `noun` it holds and pluralizes
+/// accordingly.
+fn wrote_row(path: &str, count_noun: Option<(usize, &str)>) -> String {
+    match count_noun {
+        None => format!("  wrote    {path}"),
+        Some((count, noun)) => format!(
+            "  wrote    {}{count} {noun}{}",
+            pad_to_value_column(path),
+            if count == 1 { "" } else { "s" }
+        ),
+    }
+}
+
 /// What a project's own home directory (`~/.spoolway/<name>/`) is pointed
 /// back at — see [`crate::mux::project_home`].
 ///
@@ -220,7 +263,7 @@ pub(crate) fn claim(root: &Path, take_over: bool) -> Result<Option<String>> {
     let absolute = root
         .canonicalize()
         .with_context(|| format!("resolving {}", root.display()))?;
-    let home = crate::mux::project_home(root);
+    let home = crate::mux::project_home(root)?;
     let pointer_path = home.join(PROJECT_FILE);
 
     // A missing pointer is the only case this proceeds past: nobody has
@@ -376,14 +419,60 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
 
     // A repeat run is how a project adds another provider's skills. Keep that
     // successful outcome distinct from creating (or deliberately replacing)
-    // the project's scaffold.
+    // the project's scaffold. Read before anything below writes `config.toml`.
     let already_initialized = Config::path_in(root).exists() && !args.force;
 
-    // Before anything is written: a name clash is a refusal, not a partial
-    // scaffold left for the next run to trip over. `claim` says what it did
-    // only when there was something to say — a fresh or repeat claim is
-    // silent, and a reclaim or take-over names the dead registration it
-    // found.
+    // A project's home is keyed off an id stamped into its own common git
+    // directory now (see `crate::repo::stamped_id`), not off its basename
+    // alone — so a directory with no git repository behind it has nowhere
+    // to stamp one, and is refused here by name rather than falling back to
+    // a basename-keyed home a rename would silently orphan. This call also
+    // does the stamping (writing `spoolway-id` and `spoolway-label` into
+    // `.git`), so `claim` below already reads a home keyed on it — the
+    // first write this command makes, even though it is not the write a
+    // person asked for. `stamped_id` is the crate's one writer of either
+    // file; every other reader only ever peeks at what this already wrote.
+    //
+    // The `None`/`Err` split matters here specifically: `None` is the real
+    // "there is nothing to stamp" fact this refuses on, while `Err` is
+    // something else going wrong (a permissions problem, git itself
+    // failing) that must not be reported as "no git repository" — that
+    // would name the wrong reason, which is exactly what this refusal
+    // exists to avoid doing.
+    let (id, minted) = match crate::repo::stamped_id(root) {
+        Ok(Some(stamp)) => stamp,
+        Ok(None) => bail!(
+            "{} has no git repository behind it — spoolway keys a project's home \
+             off an id stamped into its own `.git`, so there is nowhere to write \
+             one. Run `git init` here first.",
+            root.display()
+        ),
+        Err(err) => {
+            return Err(err).context(format!("stamping {}'s home", root.display()));
+        }
+    };
+    // The mockup's own "stamped" line, held for now and printed at the
+    // mockup's own position — right before the skills report, after every
+    // `wrote`/`note` line above it — rather than here at the top, before
+    // any of those. `minted` is `stamped_id`'s own atomic answer for
+    // whether *this* call is the one that wrote the id, not a separate
+    // existence check made before or after it that a second racing process
+    // could have invalidated either way: a repeat `init` reads the same id
+    // back and says nothing.
+    let stamped_line = minted
+        .then(|| crate::repo::id_file_path(root).ok().flatten())
+        .flatten()
+        .map(|path| {
+            format!(
+                "  stamped  {}{id}",
+                pad_to_value_column(&relative(root, &path))
+            )
+        });
+
+    // A name clash is a refusal, not a partial scaffold left for the next
+    // run to trip over. `claim` says what it did only when there was
+    // something to say — a fresh or repeat claim is silent, and a reclaim
+    // or take-over names the dead registration it found.
     if let Some(note) = claim(root, args.take_over)? {
         println!("{note}");
     }
@@ -417,9 +506,14 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     std::fs::create_dir_all(state.join("prompts"))
         .with_context(|| format!("creating {}", state.join("prompts").display()))?;
 
-    let place = |path: std::path::PathBuf, contents: &[u8], exec: bool| -> Result<()> {
+    // Whether `place` actually wrote `path`, so the `wrote` rows below
+    // report only what a run actually did — a repeat `init` that adds
+    // nothing new says nothing about `config.toml`, pipelines or prompts,
+    // the same way `claim` and the stamped line already say nothing on a
+    // repeat run.
+    let place = |path: std::path::PathBuf, contents: &[u8], exec: bool| -> Result<bool> {
         if path.exists() && !args.force {
-            return Ok(());
+            return Ok(false);
         }
         write_atomic(&path, contents)?;
         if exec {
@@ -436,42 +530,76 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
                 std::fs::set_permissions(&path, perms)?;
             }
         }
-        Ok(())
+        Ok(true)
     };
 
-    place(
+    // The mockup's three `wrote` rows, collected as they happen rather than
+    // guessed from whether a config already existed: `--force` writes every
+    // one of these again on a project that was already initialized, and a
+    // plain repeat run writes none of them, so what actually happened is
+    // the only thing worth trusting.
+    let mut wrote_rows: Vec<String> = Vec::new();
+
+    if place(
         Config::path_in(root),
         config
             .render()
             .context("rendering default config")?
             .as_bytes(),
         false,
-    )?;
+    )? {
+        wrote_rows.push(wrote_row(".spoolway/config.toml", None));
+    }
     // One file per pipeline, named for the pipeline it holds. A project adds
     // its own by writing another file here and nothing else.
+    let mut pipelines_written = 0usize;
     for (name, body) in crate::pipeline::BUILTIN_PIPELINES {
-        place(
+        if place(
             Pipelines::file_in(root, name),
             answers.fill(body).as_bytes(),
             false,
-        )?;
+        )? {
+            pipelines_written += 1;
+        }
+    }
+    if pipelines_written > 0 {
+        wrote_rows.push(wrote_row(
+            ".spoolway/pipelines/",
+            Some((pipelines_written, "pipeline")),
+        ));
     }
     // Written whole, and never looked at again. A prompt is the project's from
     // the moment `init` finishes: no update rewrites one, so nothing here has to
     // be a shape a later binary can still find its way around in.
+    let mut prompts_written = 0usize;
     for prompt in assets::PROMPTS {
         let dir = state.join("prompts").join(prompt.name);
-        place(dir.join(assets::PROMPT_FILE), prompt.body.as_bytes(), false)?;
+        // A directory counts as written the moment anything in it is — its
+        // own `PROMPT.md` or, on a repeat run, only one of its assets that
+        // had gone missing — so `|=` rather than overwriting: the first
+        // `place` that actually writes must not be undone by a later one
+        // that finds nothing to do.
+        let mut wrote_this_prompt =
+            place(dir.join(assets::PROMPT_FILE), prompt.body.as_bytes(), false)?;
         // A prompt's belongings follow its prose: written once, never updated,
         // and the project's to restyle from here on. No setting names them —
         // the prompt that fills them is the only thing that reads them.
         for (name, body) in prompt.assets {
-            place(
+            wrote_this_prompt |= place(
                 dir.join(assets::PROMPT_ASSETS).join(name),
                 body.as_bytes(),
                 false,
             )?;
         }
+        if wrote_this_prompt {
+            prompts_written += 1;
+        }
+    }
+    if prompts_written > 0 {
+        wrote_rows.push(wrote_row(
+            ".spoolway/prompts/",
+            Some((prompts_written, "prompt")),
+        ));
     }
     // One task skeleton per shipped pipeline, named for the pipeline that takes
     // it. A project adds a pipeline's shape by writing a file beside these, and
@@ -563,8 +691,14 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
 
     crate::usage::registry::register(root);
 
+    for row in &wrote_rows {
+        println!("{row}");
+    }
     for note in &notes {
         println!("{note}");
+    }
+    if let Some(line) = &stamped_line {
+        println!("{line}");
     }
     // The skills, in the provider's own convention. Run from here rather than
     // suggested, because "and now run this other command" is the manual step
@@ -572,6 +706,15 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     // were shipped, documented, and never installed.
     let installed = crate::install::install(root, answers.provider, args.force)?;
     crate::install::report(installed);
+    // The mockup above ends its transcript at `crate::install::report`'s
+    // line, but it is an excerpt of the run this task changes, not a
+    // contract for every line `init` has ever printed: it also elides the
+    // tracker question and the claim note. These two closing lines are
+    // documented behaviour — `docs/cli-reference.md` and
+    // `docs/installation.md` both promise a person exactly them — and the
+    // one place `init` says what to do next, so they stay on stdout where
+    // they were. Nothing in this task's acceptance criteria asks about
+    // them.
     if !already_initialized {
         println!("Project initialized successfully.");
         println!(
@@ -656,6 +799,74 @@ mod tests {
 
         // And the default provider's skills, installed rather than suggested.
         assert!(root.join(".claude").join("skills").is_dir());
+    }
+
+    /// `spoolway init` stamps a project's home off its own `.git`, and a
+    /// directory with none is refused for that reason — not silently handed
+    /// a basename-keyed home it could never move or rename without losing.
+    #[test]
+    fn init_refuses_a_directory_with_no_git_repository() {
+        let root = crate::scratch::root("init-no-git");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let err = run_init(&root, &InitArgs::default()).expect_err("no .git here at all");
+        let said = format!("{err:#}");
+        assert!(
+            said.contains("git repository"),
+            "the refusal names the actual reason: {said}"
+        );
+    }
+
+    /// A real git repository whose stamp cannot be written — the common git
+    /// directory itself is read-only — must be refused for that reason, not
+    /// reported as "no git repository behind it", which would be a lie about
+    /// a project that is a real, ordinary git repository.
+    #[cfg(unix)]
+    #[test]
+    fn init_names_a_real_write_failure_rather_than_claiming_no_git_repository() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = crate::scratch::root("init-write-failure");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        crate::scratch::git_init(&root, &["-b", "plan/demo"]);
+        let git_dir = root.join(".git");
+        let mut perms = std::fs::metadata(&git_dir).unwrap().permissions();
+        perms.set_mode(0o500); // read + execute, no write
+
+        std::fs::set_permissions(&git_dir, perms.clone()).unwrap();
+        let err = run_init(&root, &InitArgs::default());
+
+        // Restore before asserting, so a failed assertion still leaves this
+        // test's own directory cleanup able to remove it.
+        perms.set_mode(0o700);
+        std::fs::set_permissions(&git_dir, perms).unwrap();
+
+        let said = format!("{:#}", err.expect_err("a read-only .git cannot be stamped"));
+        assert!(
+            !said.contains("has no git repository behind it"),
+            "a real write failure must not be reported as no repository: {said}"
+        );
+    }
+
+    /// The id the mockup shows: six characters, stamped into `.git/`.
+    #[test]
+    fn init_stamps_an_id_into_the_common_git_directory() {
+        let root = crate::scratch::root("init-stamp");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        crate::scratch::git_init(&root, &["-b", "plan/demo"]);
+
+        run_init(&root, &InitArgs::default()).expect("init");
+
+        let on_disk = std::fs::read_to_string(root.join(".git").join("spoolway-id")).unwrap();
+        let id = on_disk.trim();
+        assert_eq!(id.len(), 6, "{id}");
+        assert!(
+            id.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()),
+            "{id}"
+        );
     }
 
     /// The planning-agent answer supplies the profile, every step reference,
@@ -811,8 +1022,14 @@ mod tests {
         crate::scratch::git_init(&old_root, &["-b", "plan/demo"]);
         crate::platform::test_home::with_home(&home, || claim(&old_root, false)).unwrap();
         let old_root_canonical = old_root.canonicalize().unwrap();
+        let home_dir =
+            crate::platform::test_home::with_home(&home, || crate::mux::project_home(&old_root))
+                .unwrap();
 
-        // The checkout the name was registered to is gone.
+        // The checkout the name was registered to is gone. Neither `claim`
+        // above nor this test ever stamped either checkout's `.git`, so
+        // `project_home` reads each by its plain basename — both directories
+        // are named `proj`, which is what makes this a collision at all.
         std::fs::remove_dir_all(&old_root).unwrap();
 
         let new_root = base.join("new").join("proj");
@@ -829,7 +1046,7 @@ mod tests {
         );
         assert!(note.contains("no archive and no queued tasks"), "{note}");
 
-        let pointer_path = home.join(".spoolway").join("proj").join(PROJECT_FILE);
+        let pointer_path = home_dir.join(PROJECT_FILE);
         let pointer: ProjectPointer =
             toml::from_str(&std::fs::read_to_string(&pointer_path).unwrap()).unwrap();
         assert_eq!(pointer.root, new_root.canonicalize().unwrap());
@@ -850,8 +1067,11 @@ mod tests {
         crate::scratch::git_init(&old_root, &["-b", "plan/demo"]);
         crate::platform::test_home::with_home(&home, || claim(&old_root, false)).unwrap();
         let old_root_canonical = old_root.canonicalize().unwrap();
+        let home_dir =
+            crate::platform::test_home::with_home(&home, || crate::mux::project_home(&old_root))
+                .unwrap();
 
-        let archive_dir = home.join(".spoolway").join("proj").join("archive");
+        let archive_dir = home_dir.join("archive");
         std::fs::create_dir_all(&archive_dir).unwrap();
         std::fs::write(
             archive_dir.join("done-task.md"),
@@ -859,6 +1079,9 @@ mod tests {
         )
         .unwrap();
 
+        // Neither checkout was ever stamped, so `project_home` reads each by
+        // its plain basename — both are named `proj`, which is the
+        // collision this test is about.
         std::fs::remove_dir_all(&old_root).unwrap();
 
         let new_root = base.join("new").join("proj");
@@ -871,7 +1094,7 @@ mod tests {
         assert!(err.to_string().contains("archive"), "{err:#}");
 
         // Untouched: the refusal must not have moved the pointer.
-        let pointer_path = home.join(".spoolway").join("proj").join(PROJECT_FILE);
+        let pointer_path = home_dir.join(PROJECT_FILE);
         let pointer: ProjectPointer =
             toml::from_str(&std::fs::read_to_string(&pointer_path).unwrap()).unwrap();
         assert_eq!(pointer.root, old_root_canonical);
@@ -903,7 +1126,9 @@ mod tests {
         crate::scratch::git_init(&root, &["-b", "plan/demo"]);
 
         let home = home_for(&root);
-        let pointer_dir = home.join(".spoolway").join(root.file_name().unwrap());
+        let pointer_dir =
+            crate::platform::test_home::with_home(&home, || crate::mux::project_home(&root))
+                .unwrap();
         std::fs::create_dir_all(&pointer_dir).unwrap();
         let pointer_path = pointer_dir.join(PROJECT_FILE);
         std::fs::write(&pointer_path, "this is not = = toml\n").unwrap();
@@ -1020,6 +1245,32 @@ mod tests {
             std::fs::read_to_string(&hook).unwrap(),
             mine,
             "`spoolway update` must never touch a hook `init` has already written"
+        );
+    }
+
+    /// A path at least [`STAMP_PATH_WIDTH`] wide must still be followed by a
+    /// separating space before whatever value comes next — `{:<width$}`
+    /// alone pads only up to `width`, so a path already that long or longer
+    /// gets none, and the value would land concatenated straight onto the
+    /// path with nothing between them. `init` run from inside a linked
+    /// worktree stamps at the main checkout's common git directory, which is
+    /// an absolute path easily past the mockup's short `.git/spoolway-id`.
+    #[test]
+    fn a_long_path_still_gets_a_separating_space_before_its_value() {
+        let short = ".git/spoolway-id";
+        assert!(short.len() < STAMP_PATH_WIDTH);
+        assert_eq!(
+            pad_to_value_column(short),
+            format!("{short:<width$}", width = STAMP_PATH_WIDTH)
+        );
+
+        let long = "/home/marvin/projects/some-very-long-checkout-name/.git/spoolway-id";
+        assert!(long.len() >= STAMP_PATH_WIDTH);
+        let padded = pad_to_value_column(long);
+        assert_eq!(padded, format!("{long} "));
+        assert!(
+            padded.ends_with(' '),
+            "a path this long must still be followed by a separator: {padded:?}"
         );
     }
 }

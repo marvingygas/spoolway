@@ -109,7 +109,13 @@ new_repo "$LIVE/proj"
 # an id the archive already holds. Every task this suite mints is named below
 # (`warm`, `thaw`, `chill`, `stuck`), so the stale home is this suite's own
 # leavings and nothing else's: sweep it before init writes the fresh one.
-rm -rf "$SPOOLWAY_PROJECT_HOME"
+#
+# A home is `<label>-<id>` now, and every run's `$LIVE` is a fresh `mktemp`
+# checkout, so it mints a fresh id every time — there is no one path left to
+# name here, only every home a `proj` label has ever answered to.
+# `SPOOLWAY_PROJECT_HOME` (still the pre-init, id-less guess at this point)
+# is no help either; glob the real family instead.
+rm -rf "$HOME"/.spoolway/proj-*
 configure_project plan/live "$LIVE/worktrees" --take-over
 publish plan/live
 

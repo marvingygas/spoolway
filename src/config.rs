@@ -1600,7 +1600,8 @@ impl Config {
     /// dotted key — see [`crate::overrides`]. See [`Self::path_in`] for
     /// which directory a caller should hand it.
     pub fn load(root: &Path) -> Result<Config> {
-        Config::load_impl(root, Some(&crate::overrides::dir_for(root)))
+        let overrides = crate::overrides::dir_for(root)?;
+        Config::load_impl(root, Some(&overrides))
     }
 
     /// [`Config::load`], with no patch layer applied — for a caller that
@@ -2978,7 +2979,7 @@ mod tests {
             "dotted-key",
             "[unattended]\nenabled = false\n[dispatch]\ndefault_pipeline = \"impl\"\n",
             |root| {
-                let overrides = crate::overrides::dir_for(root);
+                let overrides = crate::overrides::dir_for(root).unwrap();
                 std::fs::create_dir_all(&overrides).unwrap();
                 std::fs::write(
                     overrides.join(CONFIG_FILE),
@@ -3002,7 +3003,7 @@ mod tests {
     #[test]
     fn load_tracked_ignores_a_patch_on_disk() {
         with_override_fixture("load-tracked", "[unattended]\nenabled = false\n", |root| {
-            let overrides = crate::overrides::dir_for(root);
+            let overrides = crate::overrides::dir_for(root).unwrap();
             std::fs::create_dir_all(&overrides).unwrap();
             std::fs::write(
                 overrides.join(CONFIG_FILE),
@@ -3036,7 +3037,7 @@ mod tests {
                 "the tracked file alone earns all four notices: {bare:?}"
             );
 
-            let overrides = crate::overrides::dir_for(root);
+            let overrides = crate::overrides::dir_for(root).unwrap();
             std::fs::create_dir_all(&overrides).unwrap();
             std::fs::write(
                 overrides.join(CONFIG_FILE),

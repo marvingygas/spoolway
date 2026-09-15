@@ -4316,7 +4316,7 @@ fn ensure_workspace(
                         // own for `Mux::create_workspace` to cut one under —
                         // see `Mux::remove_checkout`, the removal this pairs
                         // with.
-                        let path = crate::mux::worktree_root(&repo.root, &repo.config.dispatch)
+                        let path = crate::mux::worktree_root(&repo.root, &repo.config.dispatch)?
                             .join(task.id());
                         crate::mux::cut_worktree(&repo.root, &path, &branch, &cut_from)?;
                         // Opened on this exact worktree — the first task
@@ -12429,7 +12429,7 @@ mod tests {
     #[test]
     fn no_fixture_cuts_a_worktree_in_the_real_home() {
         let repo = fixture("home-leak-guard");
-        let cut = crate::mux::worktree_root(&repo.root, &repo.config.dispatch);
+        let cut = crate::mux::worktree_root(&repo.root, &repo.config.dispatch).unwrap();
 
         let real_home = crate::mux::home();
         assert!(
@@ -12461,7 +12461,9 @@ mod tests {
         // sibling this lands in, and
         // `no_fixture_cuts_a_worktree_in_the_real_home` is what keeps it out
         // of the real `~/.spoolway/`.
-        let worktree = crate::mux::worktree_root(&repo.root, &repo.config.dispatch).join("second");
+        let worktree = crate::mux::worktree_root(&repo.root, &repo.config.dispatch)
+            .unwrap()
+            .join("second");
         let _ = std::fs::remove_dir_all(&worktree);
 
         // A finished dependency's branch: real commits, exactly what `done`
@@ -12523,7 +12525,9 @@ mod tests {
     #[test]
     fn a_dependency_that_cannot_be_found_fails_by_name_not_at_the_worktree_cut() {
         let repo = fixture("dep-not-found");
-        let worktree = crate::mux::worktree_root(&repo.root, &repo.config.dispatch).join("second");
+        let worktree = crate::mux::worktree_root(&repo.root, &repo.config.dispatch)
+            .unwrap()
+            .join("second");
         let _ = std::fs::remove_dir_all(&worktree);
 
         // `second` names `first` as a dependency, but no `first` task file

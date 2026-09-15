@@ -149,15 +149,15 @@ pub struct Tmux {
 }
 
 impl Tmux {
-    pub fn new(cwd: &Path, config: &DispatchConfig) -> Tmux {
-        Tmux {
+    pub fn new(cwd: &Path, config: &DispatchConfig) -> Result<Tmux> {
+        Ok(Tmux {
             cwd: cwd.to_path_buf(),
             mode: config.tmux_mode,
-            worktree_root: worktree_root(cwd, config),
+            worktree_root: worktree_root(cwd, config)?,
             root_window: RefCell::new(None),
             socket: std::env::var_os(ENV_SOCKET).map(PathBuf::from),
             quiescence: QUIESCENCE,
-        }
+        })
     }
 
     /// Run one tmux command and return its stdout.
@@ -1168,7 +1168,7 @@ mod tests {
             config.tmux_mode = mode;
             config.worktree_root = root.join("worktrees").display().to_string();
 
-            let mut mux = Tmux::new(&repo, &config);
+            let mut mux = Tmux::new(&repo, &config).unwrap();
             mux.socket = Some(root.join("sock"));
             // Milliseconds, so a settling lane is a fast test rather than a
             // twelve-second one.

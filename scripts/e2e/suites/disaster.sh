@@ -390,7 +390,10 @@ must "problem-log queues" "$SPOOLWAY" queue add --from "$LIVE/problem-log.md"
 # in `src/dispatch.rs`.
 sed -i 's/^stage: .*/stage: not-a-real-step/' "$SPOOLWAY_PROJECT_HOME/queue/problem-log.md"
 
-PROJECT_LOG="$HOME/.spoolway/logs/$(basename "$SPOOLWAY_PROJECT_HOME").log"
+# `problem_log::path` keys this off `project_label` — the checkout's plain
+# basename, never the stamped id — so it is not under `$SPOOLWAY_PROJECT_HOME`
+# and does not move when a home does; see `src/problem_log.rs`.
+PROJECT_LOG="$HOME/.spoolway/logs/$(basename "$LIVE/proj").log"
 rm -f "$PROJECT_LOG"
 # However many lines the shared dispatch log already carries — only what
 # lands after this point is this case's own to judge.
@@ -418,7 +421,7 @@ forget problem-log
 # every `spoolway report` and the board at once. Now the bad file is skipped
 # and named in the project log, and everything else still moves.
 sweep
-PROJECT_LOG="$HOME/.spoolway/logs/$(basename "$SPOOLWAY_PROJECT_HOME").log"
+PROJECT_LOG="$HOME/.spoolway/logs/$(basename "$LIVE/proj").log"
 rm -f "$PROJECT_LOG"
 queue_hang survivor
 printf -- '---\nid: broken\nstage: queued\n' \

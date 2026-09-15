@@ -1108,9 +1108,10 @@ split.
 
 The tab is named for the project's own directory, and found again by that name alone — there is
 no pane or directory left to check it against. Nor is one needed: a project's directory name is
-already unique on this machine, since `spoolway init` refuses a second checkout that claims a
-basename another one already has, so two same-named projects sharing this workspace cannot
-happen to begin with.
+already unique for one project: `spoolway init` keys that project's home off an id stamped into
+its own `.git`, so a second checkout of the same clone claims the same home and is refused, and
+the name cannot drift once stamped. Two separate clones with the same basename are both allowed,
+so same-named projects in different locations can still share this workspace.
 
 Spoolway cuts a task's worktree itself, with `git worktree add`, under
 `~/.spoolway/<project>/worktrees/` by default — because the shared workspace holds no

@@ -62,8 +62,12 @@ directory, so `set` behaves exactly as it does everywhere else in this section.
 plane, and stay in the checkout. Everything spoolway *writes while it runs* — the queue, the
 archive, pending task documents, scratch worktrees, composed prompts, the headless backend's
 own records, command-step logs, `lanes.json`, `usage.jsonl`, `dispatch.pid`, `jobs.state.json`,
-and the two scratch queue indexes — lives outside it, at `~/.spoolway/<basename of the
-checkout>/`.
+and the two scratch queue indexes — lives outside it, at `~/.spoolway/<label>-<id>/`.
+`<id>` is a short id stamped into the project's own `.git` directory — the one shared by every
+branch and worktree of one clone — and `<label>` is a cleaned-up version of the checkout's name;
+`spoolway init` writes the stamp, and is the only command allowed to. A fresh clone that has not
+been initialised carries no stamp yet, and resolves to the checkout's own name until `init` has
+run in it.
 `spoolway init` claims that name by writing `~/.spoolway/<name>/project.toml`, holding the
 checkout's own path, and refuses to run in a second checkout that would claim a name already
 taken by a different one — rename one of the two directories to get past it. When the

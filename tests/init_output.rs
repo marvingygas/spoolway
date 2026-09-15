@@ -60,8 +60,16 @@ fn stdout(output: &Output) -> String {
     String::from_utf8(output.stdout.clone()).expect("stdout is utf-8")
 }
 
-const CONFIGURE_STEPS: &str =
-    "Set model and effort on every agent step in .spoolway/pipelines/*.yml before dispatching.\n";
+/// The two lines `init` closes a fresh run with. Not in the task mockup,
+/// which is an excerpt of the run this task changes rather than a pin on
+/// every line `init` prints — `docs/cli-reference.md` and
+/// `docs/installation.md` both document these to a person.
+const CLOSING_LINES: &str = "Project initialized successfully.\n\
+     Set model and effort on every agent step in .spoolway/pipelines/*.yml before dispatching.\n";
+
+fn stderr(output: &Output) -> String {
+    String::from_utf8(output.stderr.clone()).expect("stderr is utf-8")
+}
 
 fn assert_scaffold(project: &Project, agent: &str) {
     let config = std::fs::read_to_string(project.as_ref().join(".spoolway/config.toml"))
@@ -109,16 +117,57 @@ fn assert_scaffold(project: &Project, agent: &str) {
 }
 
 #[test]
-fn fresh_init_prints_success_and_the_single_configuration_instruction() {
+fn fresh_init_prints_every_mockup_row_then_the_documented_closing_lines() {
     let project = Project::new("fresh");
 
+    let result = project.init("claude");
+    let id = std::fs::read_to_string(project.as_ref().join(".git/spoolway-id"))
+        .expect("init stamps a project id");
+    let id = id.trim();
+    // The mockup's own counts (`6 pipelines`, `9 prompts`) are this
+    // project's numbers as of an earlier draft, not a fixed contract — this
+    // project ships two pipelines and five prompts. Printing the mockup's
+    // literal digits regardless of what is actually on disk would be
+    // printing something false; read the real counts instead and hold every
+    // row's exact wording and column to the letter.
+    let pipelines = std::fs::read_dir(project.as_ref().join(".spoolway/pipelines"))
+        .expect("read pipeline dir")
+        .count();
+    let prompts = std::fs::read_dir(project.as_ref().join(".spoolway/prompts"))
+        .expect("read prompt dir")
+        .count();
+
+    // The whole visible transcript, stdout and stderr both: every row the
+    // mockup shows, in its order and column, and then the two closing lines
+    // `docs/cli-reference.md` and `docs/installation.md` document. The
+    // mockup stops at the skills line because it is an excerpt of the run
+    // this task changes, not a pin on everything `init` prints — it elides
+    // the tracker question the same way.
+    assert_eq!(stderr(&result), "");
     assert_eq!(
-        stdout(&project.init("claude")),
+        stdout(&result),
         format!(
-            "Skills installed successfully.\nProject initialized successfully.\n{CONFIGURE_STEPS}"
+            "  wrote    .spoolway/config.toml\n\
+             {}\n\
+             {}\n\
+             \x20 stamped  .git/spoolway-id       {id}\n\
+             Skills installed successfully.\n\
+             {CLOSING_LINES}",
+            wrote_row(".spoolway/pipelines/", pipelines, "pipeline"),
+            wrote_row(".spoolway/prompts/", prompts, "prompt"),
         )
     );
     assert_scaffold(&project, "claude");
+}
+
+/// The mockup's `wrote` row: the same left column every `wrote`/`stamped`
+/// row shares, followed by a count and the plural noun it counts.
+fn wrote_row(path: &str, count: usize, noun: &str) -> String {
+    format!(
+        "  wrote    {path:<width$}{count} {noun}{plural}",
+        width = 23,
+        plural = if count == 1 { "" } else { "s" }
+    )
 }
 
 #[test]
@@ -150,6 +199,39 @@ fn repeat_init_that_adds_skills_omits_project_success() {
     );
 }
 
+/// A repeat `init` that restores nothing but a missing prompt *asset* —
+/// `archivist`'s `document.md`, never its own `PROMPT.md` — must still say
+/// it wrote to `.spoolway/prompts/`: the row counts prompt directories a
+/// run touched at all, not only the ones whose own `PROMPT.md` was missing.
+#[test]
+fn repeat_init_that_restores_only_a_missing_prompt_asset_reports_the_prompts_row() {
+    let project = Project::new("asset-only");
+    project.init("claude");
+    std::fs::remove_file(
+        project
+            .as_ref()
+            .join(".spoolway/prompts/archivist/assets/document.md"),
+    )
+    .expect("remove the archivist prompt's document.md");
+
+    let output = stdout(&project.run(&["init", "--provider", "claude"]));
+
+    assert_eq!(
+        output,
+        format!(
+            "{}\nSkills installed successfully.\n",
+            wrote_row(".spoolway/prompts/", 1, "prompt")
+        )
+    );
+    assert!(
+        project
+            .as_ref()
+            .join(".spoolway/prompts/archivist/assets/document.md")
+            .exists(),
+        "the missing asset must actually be restored"
+    );
+}
+
 #[test]
 fn repeat_init_keeps_actionable_tracker_warnings() {
     let project = Project::new("warning");
@@ -162,23 +244,41 @@ fn repeat_init_keeps_actionable_tracker_warnings() {
 }
 
 #[test]
-fn forced_init_reports_that_the_project_was_initialized_again() {
+fn forced_init_reprints_every_wrote_row_and_closes_like_a_fresh_run() {
     let project = Project::new("force");
     project.init("claude");
 
+    let result = project.run(&[
+        "init",
+        "--force",
+        "--provider",
+        "codex",
+        "--tracker",
+        "none",
+    ]);
+    let pipelines = std::fs::read_dir(project.as_ref().join(".spoolway/pipelines"))
+        .expect("read pipeline dir")
+        .count();
+    let prompts = std::fs::read_dir(project.as_ref().join(".spoolway/prompts"))
+        .expect("read prompt dir")
+        .count();
+
+    // `--force` rewrites the scaffold, so every `wrote` row fires again —
+    // but the id is already stamped from the first `init`, and `--force`
+    // does not re-stamp it, so there is no `stamped` row here at all.
     assert_eq!(
-        stdout(&project.run(&[
-            "init",
-            "--force",
-            "--provider",
-            "codex",
-            "--tracker",
-            "none",
-        ])),
+        stdout(&result),
         format!(
-            "Skills installed successfully.\nProject initialized successfully.\n{CONFIGURE_STEPS}"
+            "  wrote    .spoolway/config.toml\n\
+             {}\n\
+             {}\n\
+             Skills installed successfully.\n\
+             {CLOSING_LINES}",
+            wrote_row(".spoolway/pipelines/", pipelines, "pipeline"),
+            wrote_row(".spoolway/prompts/", prompts, "prompt"),
         )
     );
+    assert_eq!(stderr(&result), "");
     assert_scaffold(&project, "codex");
 }
 
@@ -205,4 +305,38 @@ fn standalone_install_uses_the_concise_success_message() {
         stdout(&project.run(&["install", "codex"])),
         "Skills installed successfully.\n"
     );
+}
+
+/// Where the `stamped` line sits among everything else a fresh `init`
+/// prints. The mockup puts it last of the indented report rows — after the
+/// provider prompt and every `wrote`/`removed` row — and immediately before
+/// the skills result, not first, before `init` has done any of the work a
+/// person actually asked for. A project carrying spoolway's old
+/// `.gitignore` block is the one fresh run that prints a row above it, so
+/// it is the only way to pin that order from the outside.
+#[test]
+fn a_fresh_init_prints_the_stamped_line_below_its_other_rows() {
+    let project = Project::new("ordering");
+    std::fs::write(
+        project.as_ref().join(".gitignore"),
+        "# >>> spoolway >>>\n.spoolway/queue/\n# <<< spoolway <<<\n",
+    )
+    .expect("write a legacy ignore block");
+
+    let output = stdout(&project.init("claude"));
+    let id = std::fs::read_to_string(project.as_ref().join(".git/spoolway-id"))
+        .expect("init stamps a project id");
+    let id = id.trim();
+
+    let removed = "  removed .gitignore (spoolway's rules are gone)";
+    let stamped = format!("  stamped  .git/spoolway-id       {id}");
+    let lines: Vec<&str> = output.lines().collect();
+    let at = |needle: &str| {
+        lines
+            .iter()
+            .position(|line| *line == needle)
+            .unwrap_or_else(|| panic!("{needle:?} is not in {output:?}"))
+    };
+    assert!(at(removed) < at(&stamped), "{output:?}");
+    assert_eq!(lines[at(&stamped) + 1], "Skills installed successfully.");
 }

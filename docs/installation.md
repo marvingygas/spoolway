@@ -98,7 +98,10 @@ the shipped config back.
 
 **Everything spoolway writes while it runs — the queue, the archive, plans, lane
 bookkeeping, the usage ledger — lives outside the checkout, at
-`~/.spoolway/<basename of the checkout>/`.** `init` claims that name by writing the pointer
+`~/.spoolway/<label>-<id>/`.** The `<id>` is a short id stamped into the project's own `.git`
+directory — the one shared by every branch and worktree of one clone — and `<label>` is a
+cleaned-up version of the checkout's name; `init` writes the stamp, and is the only command
+allowed to. `init` claims that name by writing the pointer
 file above; running `init` again in a different checkout that would claim the same name is
 refused, naming both. Where the checkout a name was registered to is gone but its archive or
 queue is still there, `init --take-over` claims the name and keeps that state rather than
@@ -199,7 +202,10 @@ thing anyone looks at is the failure count.
 other command dies on that error, including the one you would reach for to find it; `doctor`
 reports the error with the line it is on, and still runs the checks that read no settings.
 
-A pipeline file that does not parse is handled the same way. `doctor` and `spoolway pipeline
+It runs the same way when the project's stamped home cannot be resolved — a permissions
+problem, a corrupt repository — reporting that as one failed check and skipping the checks
+that would otherwise read the project's own state, rather than pretending the project is
+fine. A pipeline file that does not parse is handled the same way. `doctor` and `spoolway pipeline
 check` report the load failure as one failed check and run everything that does not need the
 pipeline graph, rather than exiting before they can tell you which file is broken.
 

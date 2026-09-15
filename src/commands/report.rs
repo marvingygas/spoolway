@@ -979,7 +979,9 @@ fn unpark(repo: &Repo, pipelines: &Pipelines, mut task: Task) -> Result<()> {
 /// alone: work that is genuinely running is the dispatcher's to watch, not
 /// ours to kill.
 fn free_stale_lanes(repo: &Repo, pipelines: &Pipelines, task: &Task) {
-    let mux = crate::mux::backend(repo);
+    let Ok(mux) = crate::mux::backend(repo) else {
+        return;
+    };
     if let Ok(lanes) = mux.list_lanes() {
         let step_ids = pipelines.all_step_ids();
         for lane in lanes {
@@ -2851,7 +2853,8 @@ mod tests {
         task.save().unwrap();
 
         let headless =
-            crate::headless::Headless::new(&repo.root, &repo.config.dispatch, repo.headless_dir());
+            crate::headless::Headless::new(&repo.root, &repo.config.dispatch, repo.headless_dir())
+                .unwrap();
         headless
             .start_lane(&crate::mux::LaneSpec {
                 name: &crate::mux::lane_name("implement", "stuck"),
@@ -2957,7 +2960,8 @@ mod tests {
         // The lane that blocked, exactly as it survives a report: settled in
         // its pane, never yet freed by a pass.
         let headless =
-            crate::headless::Headless::new(&repo.root, &repo.config.dispatch, repo.headless_dir());
+            crate::headless::Headless::new(&repo.root, &repo.config.dispatch, repo.headless_dir())
+                .unwrap();
         headless
             .start_lane(&crate::mux::LaneSpec {
                 name: "stuck · handover",

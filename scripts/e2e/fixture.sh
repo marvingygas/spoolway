@@ -43,12 +43,12 @@ new_repo() {
 
   cd "$dir" || return 1
 
-  # Where this project's own runtime state lives now — see
-  # `crate::repo::Repo::home` — and `lib.sh`'s own helpers read this rather
-  # than `.spoolway/` for the queue, the lanes and the headless backend's
-  # records: `basename "$dir"` is what `spoolway init` claims the project as,
-  # and it moves with whichever project a suite most recently built, `homed`
-  # after `proj` in `suites/flow.sh` among them.
+  # Where this project's own runtime state lives — see
+  # `crate::repo::Repo::home`. A home is now `<label>-<id>`, keyed off the six
+  # characters `spoolway init` stamps into `.git/spoolway-id`, not the bare
+  # checkout basename — so this is only a placeholder until init has run.
+  # `project_home_after_init`, below, corrects it once the id exists on disk;
+  # every caller of `spoolway init` in this harness runs that right after.
   export SPOOLWAY_PROJECT_HOME="$HOME/.spoolway/$(basename "$dir")"
 
   must "git init"     git init -q -b main .
@@ -71,6 +71,22 @@ SEED
   # repo-local path any more.
   must "the seed commit" git add -A
   must "the seed commit" git commit -qm "seed"
+}
+
+# project_home_after_init
+#
+# `spoolway init`, just run in the current directory, stamped an id into
+# `.git/spoolway-id` and keyed this project's home off `<label>-<id>` — see
+# `crate::repo::Repo::home`. Re-derive `SPOOLWAY_PROJECT_HOME` from that id:
+# `new_repo`'s own guess is only the bare basename, written before the id
+# existed, and no longer where the real project home is.
+project_home_after_init() {
+  local id
+  id=$(cat .git/spoolway-id 2>/dev/null) || {
+    printf '  \033[31mSETUP\033[0m project_home_after_init: no .git/spoolway-id — did spoolway init run first?\n' >&2
+    exit 2
+  }
+  export SPOOLWAY_PROJECT_HOME="$HOME/.spoolway/$(basename "$PWD")-$id"
 }
 
 # new_forge <dir>
@@ -135,6 +151,7 @@ configure_project() {
   local branch=${1:-plan/demo} worktrees=${2:-}
   shift $(( $# > 2 ? 2 : $# ))
   must "spoolway init" "$SPOOLWAY" init "$@"
+  project_home_after_init
   # Fresh init deliberately writes only the selected profile and points every
   # scaffolded step at it. The dispatcher suites also exercise the older
   # mixed-profile shape, because existing projects keep supporting Pi: restore
