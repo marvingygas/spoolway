@@ -908,6 +908,7 @@ mod tests {
             prompts: Default::default(),
             rounds: Default::default(),
             launch_failures: Default::default(),
+            launch_busy_since: Default::default(),
             arrived_from: None,
             extra: Default::default(),
         };

@@ -501,6 +501,22 @@ pub struct Frontmatter {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub launch_failures: BTreeMap<String, u32>,
 
+    /// When a step's launch was first refused with herdr's `agent_pane_busy`
+    /// — the pane it was asked to start in has not yet reached its shell
+    /// prompt — in epoch seconds. Keyed by step, like [`Self::launch_failures`]
+    /// beside it, whose lifecycle this copies: a busy-pane refusal is
+    /// transient by construction and must not spend one of that field's
+    /// strikes, but three passes in a row of nothing else still has to
+    /// resolve somewhere, ten minutes after the *first* one — not the most
+    /// recent — which is why only the first refusal writes anything here.
+    ///
+    /// Cleared the same two ways `launch_failures` is: [`Task::set_stage`]
+    /// and [`Task::set_stage_unbanked`] on arrival, and
+    /// [`Task::clear_launch_busy`] the moment a launch of the step actually
+    /// starts.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub launch_busy_since: BTreeMap<String, i64>,
+
     /// The step this task last moved here from, written by [`Task::set_stage`]
     /// and read by the dispatcher to key the two counters above.
     ///
@@ -605,6 +621,25 @@ impl Task {
         self.front.launch_failures.remove(step).is_some()
     }
 
+    /// Stamp `step`'s first `agent_pane_busy` refusal, or answer the stamp
+    /// already there — see [`Frontmatter::launch_busy_since`]. Only the
+    /// first refusal writes anything: the wait is measured from when the
+    /// pane first went busy, not reset on every pass that still finds it so.
+    pub fn stamp_launch_busy(&mut self, step: &str, now: i64) -> i64 {
+        *self
+            .front
+            .launch_busy_since
+            .entry(step.to_string())
+            .or_insert(now)
+    }
+
+    /// Forgive `step`'s pane-busy stamp: a launch of it just started, or the
+    /// wait ran out and the step is moving on. Answers whether there was
+    /// anything to forgive, matching [`Task::clear_launch_failures`].
+    pub fn clear_launch_busy(&mut self, step: &str) -> bool {
+        self.front.launch_busy_since.remove(step).is_some()
+    }
+
     pub fn load(path: &Path) -> Result<Task> {
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("reading task file {}", path.display()))?;
@@ -700,6 +735,7 @@ impl Task {
         // would otherwise ceiling on its *first* failure the second time
         // around, having inherited a count nothing had reset.
         self.front.launch_failures.remove(stage);
+        self.front.launch_busy_since.remove(stage);
 
         let stamp: DateTime<Utc> = Utc::now();
         let line = match message {
@@ -731,6 +767,7 @@ impl Task {
         self.front.attempts = 0;
         self.front.launched_at = None;
         self.front.launch_failures.remove(stage);
+        self.front.launch_busy_since.remove(stage);
 
         let stamp: DateTime<Utc> = Utc::now();
         let line = format!(

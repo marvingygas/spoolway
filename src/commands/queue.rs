@@ -556,6 +556,7 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: &str) -> Result<Task
     front.prompts = Default::default();
     front.rounds = Default::default();
     front.launch_failures = Default::default();
+    front.launch_busy_since = Default::default();
     front.arrived_from = None;
 
     let body = ends_with_newline(body.to_string());
