@@ -794,16 +794,23 @@ pub(crate) fn check_index_lock(repo: &Repo) -> Result<Option<String>> {
 /// Refuse a start (or fail a `doctor` row) on a backend that cannot actually
 /// open this checkout — caught here rather than left for the first lane's
 /// own workspace to fail on, since nothing about it is likely to change
-/// between one dispatch pass and the next.
+/// between one dispatch pass and the next. `Herdr::new` itself no longer
+/// resolves or falls back through `main_checkout` at all — it takes
+/// `repo.checkout` exactly as handed to it, see `Herdr::anchor`'s doc in
+/// `src/mux.rs` — so this check is the one place either of the following is
+/// caught, not a second opinion on something `Herdr::new` also checks:
 ///
-/// A linked worktree is not this: `Herdr::new` resolves its own
-/// `project_root` through [`crate::repo::main_checkout`] before it ever
-/// opens anything, in `src/mux.rs`, and hands *that* to `worktree open` as
-/// `--cwd` — so herdr is never actually given a linked worktree to refuse.
-/// What it genuinely cannot open is a checkout `main_checkout` cannot
-/// resolve at all, the same call `Herdr::new` itself makes — a bare
-/// repository, or a `.git` too unusual for it to place. Resolved here the
-/// same way, so this only refuses what herdr would too.
+/// - `repo.root` has no main checkout `main_checkout` can place at all — a
+///   bare repository, or a `.git` too unusual for it to place.
+/// - Under `MuxMode::Split` (`Mux::task_owns_workspace`) only: `repo.checkout`
+///   — the checkout the dispatcher actually ran in, and what `Herdr` hands
+///   herdr as `--cwd` — is itself a linked worktree. herdr refuses a `--cwd`
+///   that is a linked worktree with `linked_worktree_source` (verified
+///   against a live herdr; see `Herdr::anchor`'s doc), and only `split`'s own
+///   routes hand that failure nowhere to fall back to. `grouped` is not
+///   refused this same checkout — see
+///   `backend_checkout_passes_herdr_on_a_dispatcher_started_in_a_linked_worktree_under_grouped_mode`
+///   in this module's tests for why.
 pub(crate) fn check_backend_checkout(
     repo: &Repo,
     mux: &dyn crate::mux::Mux,
@@ -811,16 +818,57 @@ pub(crate) fn check_backend_checkout(
     if !mux.is_available() {
         bail!("{}", mux.unavailable());
     }
-    if mux.name() == "herdr" && crate::repo::main_checkout(&repo.root).is_none() {
-        return Err(anyhow::Error::new(Refusal {
-            reason: format!(
-                "{} has no main checkout herdr can resolve a workspace onto",
-                repo.root.display()
-            ),
-            fix: "a bare repository, say. Switch backends:\n\n  spoolway config set \
-                  dispatch.backend tmux"
-                .to_string(),
-        }));
+    if mux.name() == "herdr" {
+        if crate::repo::main_checkout(&repo.root).is_none() {
+            return Err(anyhow::Error::new(Refusal {
+                reason: format!(
+                    "{} has no main checkout herdr can resolve a workspace onto",
+                    repo.root.display()
+                ),
+                fix: "a bare repository, say. Switch backends:\n\n  spoolway config set \
+                      dispatch.backend tmux"
+                    .to_string(),
+            }));
+        }
+        // Only `MuxMode::Split` (`Mux::task_owns_workspace`) ever hands
+        // herdr this checkout as `--cwd` at all: `MuxMode::Grouped`'s own
+        // per-task route, `project_tab` in `src/dispatch.rs`, takes the
+        // `false` arm of `task_owns_workspace` unconditionally — borrowed
+        // checkout or freshly cut, `grouped` never calls `Mux::create_pane`
+        // or reaches `open_worktree_workspace` from the ordinary dispatch
+        // loop at all. `split`'s own first cut, `Mux::create_workspace`,
+        // propagates a refused anchor with no fallback; `split`'s other two
+        // routes, `Mux::create_pane` (a borrowed checkout) and the default
+        // `Mux::reopen_owned_pane` (which is exactly `create_pane`), each
+        // already fall back to a plain `workspace create` when herdr
+        // refuses the anchor they tried first — but a checkout the anchor
+        // is genuinely wrong for is refused here regardless of which of the
+        // three a given task would have hit, so every `split` task started
+        // on it fails or degrades the same way rather than some of them
+        // working oddly while others crash. Refusing `grouped` the same
+        // checkout would be a new failure it never had, not the bug this
+        // task fixes.
+        //
+        // A linked worktree's own top always carries a `.git` *file*
+        // pointing at the common git dir; the main checkout's is a
+        // directory. The same test herdr itself makes of `--cwd`.
+        if mux.task_owns_workspace() && repo.checkout.join(".git").is_file() {
+            let main = crate::repo::main_checkout(&repo.checkout).unwrap_or(repo.root.clone());
+            return Err(anyhow::Error::new(Refusal {
+                reason: format!(
+                    "herdr cannot open a workspace on this checkout\n  dispatching from  {}\n  \
+                     main checkout     {}",
+                    repo.checkout.display(),
+                    main.display()
+                ),
+                fix: format!(
+                    "herdr refuses a linked worktree as a workspace root, so every lane \
+                     would be filed under {} instead.\n\n  run the dispatcher from {}",
+                    main.display(),
+                    main.display()
+                ),
+            }));
+        }
     }
     Ok(Some(format!("{} · main checkout", mux.name())))
 }
@@ -1249,8 +1297,8 @@ mod tests {
     }
 
     /// A bare repository stands in for a checkout `main_checkout` cannot
-    /// place — the one case herdr genuinely cannot open a workspace on
-    /// (`Herdr::new` makes the same call before it ever opens anything).
+    /// place at all — one of the two cases `check_backend_checkout` refuses
+    /// herdr on, its own doc above.
     fn bare_repo(name: &str) -> Repo {
         let dir = crate::scratch::root(&format!("bare-checkout-{name}"));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1263,13 +1311,67 @@ mod tests {
         }
     }
 
+    /// A repo dispatched from a linked worktree — `checkout` a sibling
+    /// worktree cut off `root`, `root` the main checkout beside it — paired
+    /// with a closure that removes the worktree and the scratch tree
+    /// afterwards. Shared by the refusal test below and its `grouped`
+    /// counterpart, which differ only in what `Mux` they hand it.
+    fn linked_worktree_repo(name: &str) -> (Repo, std::path::PathBuf, impl FnOnce()) {
+        let root_dir = crate::scratch::root(&format!("linked-worktree-checkout-{name}"));
+        let _ = std::fs::remove_dir_all(&root_dir);
+        let main = root_dir.join("main");
+        std::fs::create_dir_all(&main).unwrap();
+        crate::scratch::git_init(&main, &["-b", "main"]);
+        std::fs::write(main.join("README"), "hi\n").unwrap();
+        crate::repo::run(&main, "git", &["add", "-A"]).unwrap();
+        crate::repo::run(&main, "git", &["commit", "-q", "-m", "root"]).unwrap();
+
+        let release = root_dir.join("release");
+        crate::repo::run(
+            &main,
+            "git",
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "release/3",
+                release.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+
+        let repo = Repo {
+            root: main.clone(),
+            checkout: release.clone(),
+            config: Config::default(),
+            home: main.join(".home"),
+        };
+        let main_for_cleanup = main.clone();
+        let cleanup = move || {
+            crate::repo::run(
+                &main_for_cleanup,
+                "git",
+                &["worktree", "remove", "--force", release.to_str().unwrap()],
+            )
+            .unwrap();
+            std::fs::remove_dir_all(&root_dir).ok();
+        };
+        (repo, main, cleanup)
+    }
+
     /// A `Mux` standing in for herdr (or anything else), answering only
-    /// `name`/`is_available` for real — the only two [`check_backend_checkout`]
-    /// ever reads — and refusing every other call outright, so a test that
-    /// somehow reached one fails loudly rather than doing something real.
+    /// `name`/`is_available`/`task_owns_workspace` for real — the only three
+    /// [`check_backend_checkout`] ever reads — and refusing every other call
+    /// outright, so a test that somehow reached one fails loudly rather than
+    /// doing something real.
     struct StubMux {
         name: &'static str,
         available: bool,
+        /// `Mux::task_owns_workspace`'s own default (`true`) unless a test
+        /// sets it otherwise — see `backend_checkout_passes_herdr_under_grouped_mode`,
+        /// the one case this matters for `check_backend_checkout`.
+        owns_workspace: bool,
     }
 
     impl Mux for StubMux {
@@ -1281,6 +1383,9 @@ mod tests {
         }
         fn unavailable(&self) -> String {
             "the stub backend is never available".into()
+        }
+        fn task_owns_workspace(&self) -> bool {
+            self.owns_workspace
         }
         fn resident_while_waiting(&self) -> bool {
             unimplemented!()
@@ -1356,6 +1461,7 @@ mod tests {
         let mux = StubMux {
             name: "tmux",
             available: true,
+            owns_workspace: true,
         };
         assert!(check_backend_checkout(&repo, &mux).unwrap().is_some());
     }
@@ -1368,19 +1474,20 @@ mod tests {
         let mux = StubMux {
             name: "herdr",
             available: true,
+            owns_workspace: true,
         };
         assert!(check_backend_checkout(&repo, &mux).unwrap().is_some());
     }
 
     /// herdr against a bare repository — no main checkout `main_checkout`
-    /// can place, so `Herdr::new` itself would fall back to a `--cwd` it
-    /// cannot open either — is refused, naming the path and a way out.
+    /// can place at all — is refused, naming the path and a way out.
     #[test]
     fn backend_checkout_refuses_herdr_on_a_bare_repository() {
         let repo = bare_repo("herdr-bare");
         let mux = StubMux {
             name: "herdr",
             available: true,
+            owns_workspace: true,
         };
         let bare = format!("{:#}", check_backend_checkout(&repo, &mux).unwrap_err());
         assert!(bare.contains(&repo.root.display().to_string()), "{bare}");
@@ -1394,6 +1501,90 @@ mod tests {
             refuse(check_backend_checkout(&repo, &mux)).unwrap_err()
         );
         assert!(refused.contains("dispatch.backend"), "{refused}");
+    }
+
+    /// herdr against a dispatcher started inside a linked worktree of its
+    /// own project — `repo.checkout` a sibling worktree, `repo.root` the
+    /// main checkout beside it — is refused, under `split`. Naming both
+    /// checkouts and no backend to switch to is the acceptance criterion in
+    /// full: unlike the bare-repository refusal above, there is no other
+    /// backend that would fix this, so none is offered.
+    ///
+    /// `split` specifically: `owns_workspace: true`, the same as the real
+    /// `Herdr` under `MuxMode::Split`, whose `Mux::create_workspace` — the
+    /// route a task's first cut always takes — hands `open_worktree_workspace`
+    /// no fallback at all, a `--cwd` herdr refuses fails that task outright.
+    /// See `check_backend_checkout`'s own doc, above it in this module, for
+    /// why `split`'s other two routes are still refused the same checkout
+    /// here even though each degrades on its own rather than failing
+    /// outright, and
+    /// `backend_checkout_passes_herdr_on_a_dispatcher_started_in_a_linked_worktree_under_grouped_mode`
+    /// for why `grouped` is not refused it at all.
+    #[test]
+    fn backend_checkout_refuses_herdr_on_a_dispatcher_started_in_a_linked_worktree() {
+        let (repo, main, cleanup) = linked_worktree_repo("split");
+        let mux = StubMux {
+            name: "herdr",
+            available: true,
+            owns_workspace: true,
+        };
+
+        let bare = format!("{:#}", check_backend_checkout(&repo, &mux).unwrap_err());
+        assert!(
+            bare.contains(&repo.checkout.display().to_string()),
+            "{bare}"
+        );
+        assert!(bare.contains(&main.display().to_string()), "{bare}");
+
+        let refused = format!(
+            "{:#}",
+            refuse(check_backend_checkout(&repo, &mux)).unwrap_err()
+        );
+        assert!(
+            refused.contains(&main.display().to_string()),
+            "the fix names the checkout to run from instead: {refused}"
+        );
+        assert!(
+            !refused.contains("dispatch.backend"),
+            "no backend switch is offered — herdr is refused this checkout, not this project: \
+             {refused}"
+        );
+
+        cleanup();
+    }
+
+    /// The same dispatcher-in-a-linked-worktree shape as the `split` test
+    /// above, but under `grouped` — `owns_workspace: false`, matching
+    /// `Herdr::task_owns_workspace` under `MuxMode::Grouped` — passes.
+    ///
+    /// `grouped`'s own per-task route is `project_tab`, in `src/dispatch.rs`:
+    /// every branch of `start_one`'s dispatch match — a borrowed checkout, a
+    /// freshly cut one, a healed stale pane — takes the `task_owns_workspace
+    /// == false` arm into `project_tab` unconditionally, which opens the
+    /// shared dispatch workspace on `dispatch_home()` and the task's own tab
+    /// on the task's checkout directly, through `Mux::dispatch_workspace`
+    /// and `Mux::open_tab`. Neither reads `Herdr::anchor` or calls
+    /// `open_worktree_workspace` at all, so `grouped`'s ordinary dispatch
+    /// loop never hands herdr this checkout as `--cwd` in the first place —
+    /// there is nothing here for a linked worktree to break, and this
+    /// non-goal is preserved by never refusing it up front.
+    #[test]
+    fn backend_checkout_passes_herdr_on_a_dispatcher_started_in_a_linked_worktree_under_grouped_mode()
+     {
+        let (repo, _main, cleanup) = linked_worktree_repo("grouped");
+        let mux = StubMux {
+            name: "herdr",
+            available: true,
+            owns_workspace: false,
+        };
+
+        assert!(
+            check_backend_checkout(&repo, &mux).unwrap().is_some(),
+            "grouped dispatch never hands herdr this checkout as --cwd, so it is not this \
+             refusal's to make"
+        );
+
+        cleanup();
     }
 
     /// A project with no layer at all is nothing to ask about — the gate

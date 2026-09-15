@@ -614,13 +614,15 @@ fn shorten_home(path: &Path) -> String {
 /// `.git`, so its parent is that checkout. In the main checkout the two git
 /// dirs are the same and this returns it unchanged.
 ///
-/// `pub(crate)` rather than private: the herdr backend calls this a second
-/// time, on [`Repo::root`] itself, to resolve the `--cwd` it gives `worktree
-/// open` — see [`crate::mux::Herdr::new`]. `Repo::root` usually already names
-/// the main checkout, but a project whose `.spoolway/` sits inside a linked
-/// worktree finds that worktree first, through [`Repo::root`]'s own ancestor
-/// search, and herdr refuses a `--cwd` that is itself a linked worktree with
-/// `linked_worktree_source`.
+/// `pub(crate)` rather than private: `crate::commands::dispatch::check_backend_checkout`
+/// calls this a second time, on [`Repo::checkout`] as well as [`Repo::root`],
+/// to name the main checkout in its own refusal when herdr cannot take the
+/// dispatch checkout as `--cwd` — a checkout that is itself a linked worktree
+/// (`.git` a file, not a directory), which herdr refuses with
+/// `linked_worktree_source`. `Repo::root` usually already names the main
+/// checkout, but a project whose `.spoolway/` sits inside a linked worktree
+/// finds that worktree first, through [`Repo::root`]'s own ancestor search —
+/// which is the other of `check_backend_checkout`'s two calls.
 pub(crate) fn main_checkout(dir: &Path) -> Option<PathBuf> {
     let common = run(
         dir,

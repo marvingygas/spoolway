@@ -58,10 +58,15 @@ CTL="$LIVE/ctl"
 # The bare command prints the release this binary is, so the expectation is
 # read off the binary rather than written down: a version bump used to fail
 # these two checks until somebody noticed the suite still said 0.1.0.
+# Matched on each release's own URL rather than its heading: a heading is now
+# the bare version (see `parse_release` in `src/release_notes.rs`), and a bare
+# version is not unique to its own section — 0.2.0's migration notes mention
+# 0.1.0 by name, so matching that alone would pass even if the range below
+# selected nothing.
 CURRENT=$("$SPOOLWAY" --version | awk '{print $2}')
-says "whats-new works outside a project" "$CURRENT — " \
+says "whats-new works outside a project" "releases/tag/v$CURRENT" \
   env -C "$LIVE" "$SPOOLWAY" whats-new
-says "a release range selects the embedded release" "0.1.0 — Deterministic agent pipelines arrive" \
+says "a release range selects the embedded release" "releases/tag/v0.1.0" \
   env -C "$LIVE" "$SPOOLWAY" whats-new --since 0.0.0
 says "an empty release range is explicit" "No releases follow $CURRENT." \
   env -C "$LIVE" "$SPOOLWAY" whats-new --since "$CURRENT"
