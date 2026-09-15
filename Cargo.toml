@@ -42,3 +42,14 @@ libc = "0.2"
 # Win32_Security_Cryptography: `ProcessPrng`, the CSPRNG `usage::os_random`
 # fills a session or run id from where there is no `/dev/urandom` to read.
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Cryptography", "Win32_System_JobObjects", "Win32_System_Threading"] }
+
+# Linux answers `repo::process_cwd_under` for itself by reading `/proc`
+# directly, same as `lock::is_running`/`lock::started_at` do — no need for
+# this here. macOS and Windows have no equivalent file to read: a process's
+# cwd is either libproc (`proc_pidinfo`) or a PEB read behind an undocumented
+# syscall, and hand-rolling either risks getting a live-work check silently
+# wrong on a platform this checkout never runs its own tests on. `sysinfo`
+# already carries both, audited and exercised far more than a first attempt
+# here would be.
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+sysinfo = { version = "0.39", default-features = false, features = ["system"] }

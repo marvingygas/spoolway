@@ -204,19 +204,23 @@ fn wrote_row(path: &str, count_noun: Option<(usize, &str)>) -> String {
 /// The mockup's second `bound` row: how much was already sitting under a
 /// home a checkout was just pointed at by name — the queue and archive
 /// task counts, whether a usage ledger exists, and how many worktrees are
-/// cut. Only `--adopt` prints this: it is the one case that can bind a
+/// cut. `--adopt` prints this because it is the one case that can bind a
 /// checkout to a home carrying real state a person did not just watch
-/// `init` create empty.
+/// `init` create empty; `migrate-legacy-home`'s own move prints it for the
+/// same reason, against the home it just moved.
 ///
 /// Worktrees are counted at `root`'s own configured
 /// `dispatch.worktree_root` when it has one, and at `home`'s own default
 /// location otherwise — reading `root`'s tracked `config.toml` directly
 /// rather than going through `Repo::discover`, which is not safe to call
-/// mid-`init`, before the binding this call is itself establishing exists.
-/// A config that fails to load, or a configured root `crate::mux::worktree_root`
-/// cannot resolve, falls back to the default location rather than erroring
-/// out of an inventory line that only ever reports, never fails a bind.
-fn home_inventory_line(root: &Path, home: &Path) -> String {
+/// mid-`init` (before the binding this call is itself establishing exists)
+/// and not yet safe mid-migration either (`crate::repo::migrate_legacy_home`
+/// calls this before the move it is reporting on has finished settling into
+/// `Repo::discover`'s own accessors). A config that fails to load, or a
+/// configured root `crate::mux::worktree_root` cannot resolve, falls back
+/// to the default location rather than erroring out of an inventory line
+/// that only ever reports, never fails a bind.
+pub(crate) fn home_inventory_line(root: &Path, home: &Path) -> String {
     let count_docs = |dir: std::path::PathBuf| -> usize {
         std::fs::read_dir(dir)
             .into_iter()

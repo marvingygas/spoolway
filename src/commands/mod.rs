@@ -61,7 +61,7 @@ mod dispatch;
 mod doctor;
 mod group;
 mod hook;
-mod init;
+pub(crate) mod init;
 mod issue;
 mod jobs;
 mod lanes;
