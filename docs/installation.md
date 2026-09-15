@@ -162,6 +162,10 @@ If npm installed this binary and a newer release is out, `update` first runs
 a terminal it then prints the old and new versions, the highlights, every migration that
 applies, and links to the full notes.
 
+`update` asks npm which release is out each time it runs. The wait is bounded. If npm does
+not answer in time, `update` says so, uses the last known version and carries on with the
+file work.
+
 The release notes are compiled into the binary:
 
 ```

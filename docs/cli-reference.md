@@ -689,6 +689,8 @@ spoolway update
 | `--replace <PATH>` | | Replace one file with the shipped version. Yours is saved beside it as `.bak`. Repeatable |
 
 The binary is only updated where npm installed it. A running dispatcher stops the install.
+`update` asks npm which release is out each time it runs. The wait is bounded. If npm does
+not answer in time, `update` uses the last known version and carries on.
 
 ### `spoolway whats-new`
 
