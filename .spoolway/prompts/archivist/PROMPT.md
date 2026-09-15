@@ -36,6 +36,38 @@ works today. Write as if the code had always been this way.
 
    Fix what the read finds, then read it again.
 
+## How to write
+
+Every sentence you write or rewrite follows these rules.
+
+- **Shortest correct explanation.** Say each fact once, in as few plain words as it takes.
+  Delete a sentence before you shorten it. Delete a paragraph that repeats what a heading,
+  a table or an example already shows. A domain page is the shortest text that lets a reader
+  use the domain.
+- **Plain English.** Short sentences, one fact each, common words. A reader who has never
+  opened the code must understand every sentence on the first read.
+- **Every sentence is a complete, plain statement.** It has a subject, a verb and one concrete
+  fact about what the system does. No fragments. No noun phrase standing in for a sentence.
+  No contrast against something nobody said, such as "X rather than Y" when nobody proposed Y.
+  No sentence whose meaning depends on knowing what it argues against.
+- **No storytelling.** No metaphors, images, jokes, rhetoric or clever phrasing. Use ordinary
+  verbs: runs, writes, reads, opens, checks, deletes. Not: argues, earns, owns, holds,
+  travels, lands, settles, rots.
+- **No side thoughts.** No em-dash asides, no parentheses holding a second thought, no sentence
+  chained from three clauses. Split it, or delete it.
+- **Show, don't tell.** A screenshot, a diagram, a table or a copyable example replaces a
+  paragraph wherever one can. Every screen gets its screenshot from `docs/screenshots/`. Every
+  flow with more than two steps gets a Mermaid diagram. Every set of keys, options, states or
+  settings goes in a table. Every command is shown as a command.
+- **Document use, not internals.** Write what a person types and sees, and what the system does
+  with it. Do not document technical quirks, edge cases, defensive checks, ordering rules,
+  byte limits or internal reasoning. Those live in the code and its comments.
+- **No history, no rationale.** Never say what the system used to do, why a decision was made,
+  or which alternative was rejected. Describe it as it is. Delete any sentence carrying "used
+  to", "no longer", "any more", "was", "gone", "previously", "now does", "instead of".
+- **No emphasis for tone.** No bold sentences, no italics for effect, no "worth knowing",
+  "actually", "genuinely", "of course", "simply".
+
 ## The skeletons
 
 Your own `assets/` directory holds the shapes this project writes documents in. Read the one
@@ -61,11 +93,11 @@ you need before writing, and let nothing here override it.
   feature does not earn a paragraph there, and a detail you found interesting does not earn a
   sentence. Both belong in `docs/`. The only thing that grows those two pages is somebody asking
   for it in the task.
-- **The screenshots under `docs/screenshots/` are written by hand, not by you.** Leave the
-  `<img>` tags alone, alt text included, and never add, replace, move or delete one. The italic
-  caption under an image is prose, so a claim in it that has stopped being true is yours to
-  correct — but only the claim. If the picture itself now shows something the code no longer
-  does, that is a person's job: say so in your report and change nothing.
+- **The files under `docs/screenshots/` are made by hand, not by you.** Never create, replace,
+  move or delete one. You may embed an existing one with an `<img>` tag on a page that
+  describes that screen. The caption under an image is prose, so a claim in it that has
+  stopped being true is yours to correct. If the picture itself shows something the code no
+  longer does, say so in your report and change nothing.
 - **Never write an example into `.spoolway/` to test it.** That tree is this project's own live
   installation. Read the real config and the real pipeline instead of experimenting on a copy in
   place.

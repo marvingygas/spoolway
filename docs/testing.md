@@ -5,436 +5,185 @@ covers: ["scripts/e2e/**", "scripts/e2e-*.sh", "scripts/gate.sh", ".github/workf
 
 # Testing
 
-spoolway drives models, and models are neither cheap nor deterministic. So the tests are
-split by the **question they answer**, not by how fast they are:
+The tests are split by the question they answer.
 
-| Instrument | Where | Answers | Runs |
-|---|---|---|---|
-| Unit | `src/**` (`#[cfg(test)]`) | Does each piece decide correctly? | `cargo test` |
-| Suites | `scripts/e2e/suites/` | Does it still work when it is really running processes? | `scripts/e2e/run.sh` |
-| Plans | `scripts/e2e/plans/` | What does a real run *do* — panes, gates, focus? | You queue one |
+| Kind | Where | Answers | Needs a model? | Command |
+|---|---|---|---|---|
+| Unit tests | `src/**`, `#[cfg(test)]` | Does each piece decide correctly? | No | `cargo test` |
+| Suites | `scripts/e2e/suites/` | Does it work with real processes, git and a forge? | No | `scripts/e2e/run.sh` |
+| Plans | `scripts/e2e/plans/` | What does a real run do on screen: panes, gates, focus? | Yes | You queue one |
 
-The first two are offline and free, and every task runs both through its own `test` step. The
-third spends GPU time on a machine with a model server and a multiplexer, and happens when a
-person queues it.
-
-**Nothing overlaps, and the suites have the narrowest remit of the three.** Anything decidable
-from files and exit codes is a unit test, where about a thousand of them decide it against
-the code rather than against a fixture. A suite earns its place only when the thing under test
-needs something a unit test cannot have: a real git repository, a real detached process, or a
-real forge. Anything only a screen can show belongs to a plan.
-
-That remit was applied in earnest once. Fifteen suites — `queue`, `config`, `settings`,
-`pipelines`, `prompts`, `plan`, `plans`, `gates`, `sessions`, `eval`, `bugfix`, `kinds`,
-`parallel`, `escalation` and `large` — asserted things a unit test already decided, in seven
-thousand lines of shell, and were deleted. The `pr` tier went from nineteen suites and about
-eleven minutes to five suites and under two.
-
-**The end-to-end test of record is a plan, not a suite.** A person queues a plan under
-`scripts/e2e/plans/` into a project `scripts/e2e/scaffold.sh` builds, and a real agent drives a
-real dispatcher against a real model — the same thing a person does, done by an agent. That is
-the test that answers whether spoolway works. The suites are a fast mechanical floor beneath
-it.
+Anything decidable from files and exit codes is a unit test. A suite needs a real git
+repository, a real detached process or a real forge. Anything only a screen can show is a plan.
 
 ## Running the suites
 
 ```sh
-scripts/e2e/run.sh                        # the pr tier, what every push and every pull request runs
-scripts/e2e/run.sh --tier smoke           # the fast signal, for a person running it by hand
+scripts/e2e/run.sh                        # the pr tier
+scripts/e2e/run.sh --tier smoke           # the fast signal
 scripts/e2e/run.sh --suite flow           # one suite
-scripts/e2e/run.sh --list                 # the suites, and the setting-to-case map
+scripts/e2e/run.sh --list                 # every suite, and which setting each case covers
 ```
 
-It uses whatever `spoolway` is on `PATH`. To test a build:
+To run against a fresh build:
 
 ```sh
 cargo build --release
 SPOOLWAY="$PWD/target/release/spoolway" scripts/e2e/run.sh --tier nightly
 ```
 
-Every lane runs a stand-in agent — one script per launchable kind under `scripts/e2e/agents/`
-(`pi`, `claude`, `codex`; `codex` is a thin front over `pi` that reads the
-prompt and session home the way its kind is handed them), ordinary scripts copied onto the
-lane's `PATH` and configured through the environment — and
-every project is built from a seed written inline (`fixture.sh`'s `new_repo`). The whole
-harness needs `git`, `bash`, `curl`, `setsid` and `flock` and nothing else — no toolchain, no
-model, no multiplexer.
-
-The exceptions are the `cloud` and `live` tiers, below — the two that run a real agent
-binary instead of a stand-in.
-
-### Flags
-
 | Flag | Default | What it does |
 |---|---|---|
-| `--tier smoke\|pr\|nightly\|cloud\|live` | `pr` | Runs a named set of suites |
-| `--suite <name>` | — | Runs one suite. Repeatable; overrides `--tier` |
-| `--keep` | off | Leaves each suite's scratch tree on disk for a postmortem |
-| `--list` | — | Prints the suites, every setting, and which case covers it |
+| `--tier smoke\|pr\|nightly\|cloud\|live` | `pr` | Run a named set of suites |
+| `--suite <name>` | | Run one suite. Repeatable. Overrides `--tier`. |
+| `--keep` | off | Keep each suite's scratch tree on disk. `KEEP=1` does the same. |
+| `--list` | | Print the suites and the setting-to-case map |
 
-`KEEP=1` in the environment does what `--keep` does, for a caller that cannot pass a flag.
+Every lane runs a stand-in agent script from `scripts/e2e/agents/`. The harness needs `git`,
+`bash`, `curl`, `setsid` and `flock`. Only the `cloud` and `live` tiers run a real agent binary.
 
-## Coverage is enumerated, and the gaps are printed
+### Coverage
 
-`--list` does not read a table anybody maintains. It enumerates the settings surface from its
-two sources — the keys in `.spoolway/config.toml`, and the step and top-level keys documented
-in the comment block of `assets/pipelines/default.yml` — and matches each against the cases
-that claim it:
+`--list` reads every key in `.spoolway/config.toml` and in `assets/pipelines/default.yml`, and
+matches each against the cases that claim it. A suite claims a setting with a
+`# covers: <setting> — <what the case is>` line, a plan in its coverage block, and a unit test
+with a `// covers:` line.
 
-```
-settings:
-  dispatch.auto_commit         off, a lane's leftovers are reported and not committed
-  models                       a model with no window is never sized, and says so
-                               a window from the project's own table beats the built-in one
-  ...
-  1 of 45 settings have no case here.
-```
-
-A setting two cases cover reads as two lines. That is information rather than a conflict, and
-the map prints every claim it finds, sorted — which claim you see no longer depends on the order
-a directory happened to be walked in. It used to take the first, and it bit: two suites both
-claimed `session_reuse_ctx`, and the weaker "a bad value is refused" won on some runs and not
-others.
-
-Most settings now read `no case — unit <path>`. That is the expected answer, not a gap: the
-setting is covered where it is decided. A bare `no case` is the real one.
-
-A case claims a setting with a `# covers: <setting> — <what the case is>` line in its own suite
-file; a plan claims one the same way inside its coverage block; a unit test claims one with a
-`// covers:` line beside the test. So the map is assembled from the files that do the covering,
-and deleting a case takes its claim with it.
-
-Four readings, and they mean different things:
-
-- **a case** — a suite fails when that setting stops working.
-- **`no case — plans/x`** — nothing headless can see it; the named plan is where a person does.
-- **`no case — unit <path>`** — no end-to-end instrument can reach it at all, and a unit test in
-  that file is what holds it instead.
-- **`no case`** — a real gap. `scripts/e2e/run.sh --list` names 17 today:
-  `housekeeping.calibrate_window`, `housekeeping.update_check`, `dispatch.default_pipeline`,
-  `dispatch.tmux_mode`, the three `pipeline_gen.pipeline_*` keys, the five
-  `unattended.blocked_*` keys plus `unattended.skip_blocked_lane` and
-  `unattended.max_cost_usd`, `pipeline.description`, `step.description`, and `step.headless`.
-
-The last three all count toward the tally, because none of them is an end-to-end case. What the
-line after the tally buys is knowing which are gaps and which are simply covered elsewhere.
-
-Adding a key to `config.toml` or to the pipeline key table adds a row here. That is the point.
+| Reading | Meaning |
+|---|---|
+| a case | A suite fails when the setting stops working |
+| `no case — plans/x` | Only a plan run can see it |
+| `no case — unit <path>` | A unit test in that file covers it |
+| `no case` | A gap |
 
 ## Tiers
 
-A tier is a named set of suites, so a command step has something short to name.
-
 | Tier | Suites | Used by |
 |---|---|---|
-| `smoke` | flow | Nothing automatic; the fast signal for a person running it by hand |
-| `pr` | flow, commands, stacking, stack, conflicts, forge, disaster, lock, trials, routines, jobs, jobs-screen, restart | The last task of a chain, through the `suite` step in `.spoolway/pipelines/*.yml` |
-| `nightly` | the same as `pr` | The nightly routine, run by a person |
-| `cloud` | warmth | Nothing automatic. It spends real tokens, and refuses to run without `SPOOLWAY_E2E_CLOUD=1` |
-| `live` | live | Nothing automatic. It runs the real `codex` binary, and skips it unless `SPOOLWAY_E2E_CODEX_MODEL` names it a model |
-
-`cloud` and `live` are in none of the others. `cloud` is the one place this project spends a
-cloud model — see [The one suite that spends money](#the-one-suite-that-spends-money); `live`
-spends nothing when its models resolve to a local endpoint — see
-[The suite that runs the real binaries](#the-suite-that-runs-the-real-binaries).
+| `smoke` | flow | A person, by hand |
+| `pr` | flow, commands, stacking, stack, conflicts, forge, disaster, lock, trials, routines, jobs, jobs-screen, board-pause, restart, overrides | The `suite` step of the pipelines, on the last task of a chain |
+| `nightly` | the same as `pr` | Daily CI and the release workflow |
+| `cloud` | warmth | Nothing automatic. Runs only with `SPOOLWAY_E2E_CLOUD=1`. |
+| `live` | live | Nothing automatic. Runs only with `SPOOLWAY_E2E_CODEX_MODEL=<model>`. |
 
 ## The suites
 
-| Suite | Covers | Why not a unit test |
-|---|---|---|
-| `flow` | A task's whole life: queued → implement → review → handover → archived, including its command run files under `commands/` being reclaimed once it archives | Real detached processes, a real worktree, a real pull request |
-| `commands` | Command steps: a `run:` line in the graph, its exit code routing, `background:`, `timeout:`, and that nothing confines it; the queue screen submitting a group and clearing its documents from the pending directory; `issue_tracking.key_in_names` prefixing the group and branch and storing the `slug:`/`url:`, through the real binary and a real `open` hook | A real spawned process with a pid, a log and an exit file; real keystrokes piped into the real binary; and, for its pane cases, a real tmux server of its own and a herdr double whose panes are real shells |
-| `stacking` | Three chained tasks: each pull request targets the branch it is cut from, and really sits on it — the third names both earlier ones and is cut from, and stacks on, the deeper of the two | A real rebase, in a real git repository |
-| `stack` | `spoolway stack` itself: the squash to one commit and that a rejecting `commit-msg` hook cannot strand it, a refused lease, the empty-diff refusal, a `branch:` that is neither `task/<id>` nor a slug-prefixed `task/<slug>-<id>` refused when the task loads, and the body taken verbatim from the task file | Real git, and a forge double the command really shells out to |
-| `conflicts` | A base that moves under a waiting branch, and the rebase that rescues it | The same, with the base actually moving |
-| `forge` | The `gh` test double, and a hand-off that hands nothing over | A real forge interaction |
-| `disaster` | The ways a run ends badly: a hard kill with lanes live, the stale lock it leaves, a restart over a still-running lane, a lane that reports with nobody listening, a stop with live lanes that leaves every worktree and lane standing and the next run resuming the same lane, a retention sweep that spares a still-queued task's scratch tree and headless record, an `eval` read that banks no catch-up line for a lane still in flight, and a multiplexer that dies under worktrees that outlive it | Real detached processes, a real lock file, and — for the last case — a real tmux server on a scratch socket of its own |
-| `lock` | `run.sh`'s own `pr`-tier lock: a second `--tier pr` invocation blocks until the first releases it, rather than running beside it and contending for the same disk and CPU | Two real `run.sh` invocations, pointed at a lock file of their own through `SPOOLWAY_E2E_PR_LOCK` so the suite never nests against the lock the run driving it is already holding |
-| `trials` | The queue screen's `p` picker, driven end to end: `p` forks a whole group, one pipeline assigned per task on the first popup and one skip set per task on the second, one new arm per source task under one freshly minted trial id with `depends_on` remapped onto the sibling arms, then the reset-for-reuse case. The first half writes only queue files and asserts the queue; the second half drives a real dispatcher, a real (local) forge and a real `[issue_tracking]` hook through two trial arms and one ordinary control task, proving the runtime boundary — the arms' queued/done hooks never fire and publishing is a no-op — and both cleanup triggers, settlement (every arm's document, worktree and branch gone once the last settles, the control keeps all three, usage rows stay correlated by trial id) and an explicit `eval --discard` of an arm held mid-flight. The control task beside the arms is what isolates trial mode from ordinary teardown | Real keystrokes for the queue half, a real spawned dispatcher process, a real forge double and a real issue-tracking hook for the dispatch-and-cleanup half |
-| `routines` | The repeatable documents under `.spoolway/routines/`, through the queue screen's `r` pane and `s` panel: `enter` lands the right task files under minted ids with their bodies untouched, and `s` copies a pending group's documents back into the checkout | The same, against a real tracked `.spoolway/routines/` tree |
-| `jobs` | A cron job in a store, fired by a real dispatcher pass against a matching minute: the routine's documents reach the queue under minted ids with `depends_on` remapped and the job's pipeline set, the routine tree is left untouched, and `spoolway doctor` names a job whose expression will not parse, never comes round, points at a missing routine, or names an undefined pipeline | A real dispatcher driving a real `.spoolway/routines/` tree |
-| `jobs-screen` | The `spoolway jobs` screen writing a job: the routine/schedule/pipeline walk lands a `[jobs.<name>]` table in the user store with the typed expression, the picked routine and the default pipeline, `jobs list` then shows it, `space` pauses and resumes it, and `x` then `y` deletes it | Real keystrokes piped into the real binary, against a real store file on disk |
-| `restart` | `spoolway dispatch`'s restart guard: four starts in a row against a held lock each report exit 4, a fifth is refused with exit 5, `--force` starts one anyway and clears the count, and an empty queue reports exit 3 without ever tripping the guard. It also proves a start that would actually commit but has no git identity is refused outright (exit 1) rather than starting, and that this refusal is told apart from the empty-queue exit 3 by its exit code | A real lock file, an identity unset on the checkout, and real process exit codes across repeated real invocations |
-| `warmth` | **cloud tier only.** Real `claude-haiku-4-5` lanes, because a stand-in's transcript agrees with the parser by construction | A real model writes the transcript |
-| `live` | **live tier only.** The real `codex` binary through `agent verify --live` — a turn, then a resume — because a stand-in written from the adapter row cannot notice a CLI changing its flag grammar | The real binary |
+| Suite | Covers |
+|---|---|
+| `flow` | A task's whole life: queued, implement, review, handover, archived |
+| `commands` | Command steps: `run:`, exit-code routing, `background:`, `timeout:`; the queue screen submitting a group; `issue_tracking.key_in_names` |
+| `stacking` | Three chained tasks, each pull request on the branch it is cut from |
+| `stack` | `spoolway stack`: the squash, a refused lease, an empty diff, a bad `branch:`, the body from the task file |
+| `conflicts` | A base that moves under a waiting branch, and the rebase |
+| `forge` | The `gh` test double, and a hand-off with nothing to hand over |
+| `disaster` | A hard kill with lanes live, a stale lock, a restart over a running lane, a stop with live lanes, retention, a dead multiplexer |
+| `lock` | A second `--tier pr` run waits for the first |
+| `trials` | The `p` picker on the queue screen, the arms it queues, and their cleanup |
+| `routines` | The `r` pane and `s` panel on the queue screen |
+| `jobs` | A cron job fired by a real dispatcher pass, and what `spoolway doctor` says about a bad job |
+| `jobs-screen` | The `spoolway jobs` screen writing, pausing and deleting a job |
+| `board-pause` | The board's confirm panels: `p`, `P`, `U` over a live lane |
+| `restart` | The dispatcher's restart guard and its exit codes |
+| `overrides` | The override commands: fork a setting out of the checkout, list it, promote it back |
+| `warmth` | `cloud` tier. Real `claude-haiku-4-5` lanes, to check session reuse against a real transcript. |
+| `live` | `live` tier. The real `codex` binary through `agent verify codex --live`. |
 
-Each suite runs in a process and a scratch tree of its own, so a suite that ends in `blocked`
-on purpose — several do — cannot make the next one's assertions a fiction.
-
-### Scratch directories
-
-Every fixture builds its world under a directory in `/tmp`, named after the caller and unique
-within the process — `src/scratch.rs` — so two `cargo test` processes walking the same suite
-side by side never share a directory. The name still leads, so a directory left by a crashed
-run is still legible; and nothing reclaimed them, so one machine reached a few hundred thousand
-of them. The first `root` of each process therefore sweeps up to 2,000 finished runs'
-directories out of the system temporary directory. That sweep is a side effect of the shipped
-binary as well as the tests: the `spoolway doctor` live pane check opens a scratch directory on a
-real machine, so an ordinary `spoolway doctor` pays the same cost.
-
-### A suite writes its own prompts
-
-`configure_project` rewrites every shipped prompt name out of the project's pipelines and
-writes the prompts that replace them: `builder`, `judge`, `stacker`, `closer`, `repro`.
-An assertion that a `(closer)` lane ran is still an assertion about routing — which
-step started which role — it just no longer breaks when somebody rewords
-`assets/prompts/archivist/PROMPT.md`.
-
-No suite names a shipped prompt any more. The one that did — `suites/prompts.sh` — was about
-the shipped set itself, which `src/prompt.rs` decides without a fixture. A `grep` for those
-names across `scripts/e2e/suites/` should match nothing.
-
-### The resident dispatcher
-
-`dispatcher_start` runs `spoolway dispatch` in a loop inside a `setsid` process group, for
-every suite that needs a dispatcher actually driving a task. That loop is bounded, so a suite
-that leaves something re-queuing itself fails quickly and says why, rather than spinning until
-the outer timeout kills it with nothing in the postmortem but a bare timeout.
-
-Between rounds it waits, starting at 0.5 seconds and doubling on a round that found nothing to
-do, up to a 4 second ceiling; a round that did real work (exit 0) resets the wait back down to
-0.5 seconds. Every round after the first logs the previous round's exit status and how long it
-waited, so a postmortem reads what the supervisor was doing rather than inferring it from
-timing.
-
-It also stops on its own after `E2E_DISPATCH_MAX_ROUNDS` rounds, 60 by default, and writes a
-line naming the cap it reached — the harness's own backstop against a `dispatch` that keeps
-exiting cleanly forever, distinct from the restart guard `spoolway` itself enforces against a
-caller in a tight restart loop. Exit 3 (an empty queue) is treated as an ordinary ending, the
-same as exit 0, and rounds again rather than failing.
-
-When `drive` gives up waiting for a task to reach a stage, or the log shows the dispatcher was
-refused, it prints everything still alive in the supervisor's own process group — a wedged run
-this way names what is holding it, rather than leaving the log tail as the only evidence.
-
-Alongside `works` (exit 0 only) and `refuses` (any non-zero exit), the harness has `exit_code`,
-which asserts a command ends on one exact exit code — the assertion `restart` needs to tell
-`spoolway dispatch`'s exit 3, 4 and 5 apart from each other and from an ordinary 0.
+Each suite runs in its own process and scratch tree under `/tmp`, with its own prompts, so no
+suite depends on the shipped prompt text.
 
 ## The one suite that spends money
-
-`warmth` is the `cloud` tier, and it exists for a chain nothing else can reach:
-
-```
-a real transcript → usage::touched_at → carried_session → resume
-```
-
-The size bound and the idle bound are both unit tests in `src/dispatch.rs`, decided against a
-transcript written to order — and a transcript written to order agrees with spoolway's parser by
-construction. The idle horizon is read straight off the store's own mtime rather than off
-anything inside the transcript, so a stand-in's fixture can prove it by moving the file's clock
-back, which is exactly what those tests do. `warmth` still runs the same bound against a
-real `claude` session on top of that, because that is the one place this project spends a cloud
-model at all, and it is worth keeping an eye on the shape a real transcript actually writes even
-where this particular reading no longer depends on it.
 
 ```sh
 SPOOLWAY_E2E_CLOUD=1 scripts/e2e/run.sh --tier cloud
 ```
 
-Eight turns of `claude-haiku-4-5` against a fixture repo of two files — six through the
-pipeline scenarios, two more through `agent verify --live` at the end, fractions of a cent
-altogether — and it skips itself without that variable. It uses your real `$HOME`, because the
-real `claude` needs your credentials; what it writes there is its own new sessions in a
-project directory of its own. The one transcript it edits is one of those, and only its clock:
-proving the idle half means a store older than `session_reuse_idle`, which is not a wait a
-test can perform, so that case backdates the file's own mtime and leaves every other field as
-Claude Code wrote it.
-
-Two things it needs that a stand-in suite does not, both on the lane's `PATH`: the real
-`claude`, and **the build under test**. A stand-in calls `"$SPOOLWAY" report` by absolute path;
-a real lane runs the prompt's own words, and the prompt says `spoolway report` — which
-resolves to whatever is installed on the machine. The first run of this suite reported to a
-`~/.local/bin/spoolway` that predated `paused`, and every scenario silently measured a
-conversation that had never stopped.
+`warmth` runs eight turns of `claude-haiku-4-5` against a two-file repo. It uses your real
+`$HOME` and the real `claude`. Put the build under test on `PATH`, because the prompt runs
+`spoolway report`.
 
 ## The suite that runs the real binaries
 
-`live` is the `live` tier, and it is `warmth`'s shape aimed at the other kind that needs a
-real binary. The codex adapter row was settled by hand against one version of the CLI —
-codex-cli 0.147.0; `docs/agents.md` records what the probe said — and the
-stand-in the harness drives was written *from* that row, so it agrees with it by
-construction. When the CLI changes its flag grammar, the first thing to notice must not be
-a person's plan run failing an hour in.
-
-One command is the whole suite: `spoolway agent verify codex --live` runs a real
-turn, reads every accounting clause back through the same functions the dispatcher uses, then
-resumes the session once and asserts the resume spelling — `codex exec resume --last` — still
-means "continue this lane's session" on the binary installed today.
-
 ```sh
-SPOOLWAY_E2E_CODEX_MODEL=<model> \
-  scripts/e2e/run.sh --tier live
+SPOOLWAY_E2E_CODEX_MODEL=<model> scripts/e2e/run.sh --tier live
 ```
 
-codex is opt-in by naming it a model, and skipped with a pointer otherwise — so no
-machine is required to carry this CLI, and a machine that opts it in must have it: a
-model named while the binary is missing fails rather than skips. The name is expected to
-resolve to a local endpoint through codex's own provider config (it needs
-`wire_api = "responses"`), in which case the turns cost nothing. It uses your real `$HOME`,
-because the real binary needs its own credentials and provider config; what it writes is a
-scratch tree and per-session homes under spoolway's own state directory, the same as any lane.
+`live` runs `spoolway agent verify codex --live`: one turn, then one resume, on the installed
+`codex`. A model served by a local endpoint (`wire_api = "responses"` in codex's provider
+config) costs nothing.
 
-## Plan runs: the half with a person in it
+## Plan runs
 
-Workspaces, tabs, panes, focus, a gate somebody answers, a notification arriving — none of that
-can be asserted headlessly, and a suite that stubbed it would be asserting about the stub. It is
-covered instead by small plans you queue by hand into a throwaway project:
+Panes, focus, gates and notifications can only be checked by a person. Queue a plan into a
+throwaway project:
 
 ```sh
-scripts/e2e/scaffold.sh --list                    # the plans there are
+scripts/e2e/scaffold.sh --list                    # the plans
 scripts/e2e/scaffold.sh --plan gates              # build a project for one
 cd ~/dev/project/spoolway-e2e-gates
-# claude, then: open scripts/e2e/plans/gates.html, approve it, and let
-# /spoolway-plan cut the tasks — then: spoolway queue, to open the screen
-# and submit them
-spoolway dispatch                                 # and watch
-scripts/e2e/scaffold.sh --plan gates --clean      # when you are done
+# in claude: open scripts/e2e/plans/gates.html, approve it, let /spoolway-plan cut the tasks
+spoolway queue                                    # submit them
+spoolway dispatch                                 # watch
+scripts/e2e/scaffold.sh --plan gates --clean      # when done
 ```
 
-`scaffold.sh` seeds a repo, builds a local forge out of `scripts/e2e-fake-gh.sh`, installs
-`scripts/e2e/runtime/end-to-end.yml` — every step `agent: pi`, so a run spends nothing but
-GPU time — prints the `SPOOLWAY_GH` export that points `handover`'s `spoolway stack` at the
-local forge, and applies whatever `config:` lines
-the plan itself asks for. It refuses to build anything until `pi` is on `PATH` and the model
-server has actually heard of the model the lanes will name.
+`scaffold.sh` seeds a repo, builds a local forge from `scripts/e2e-fake-gh.sh`, and installs
+`scripts/e2e/runtime/end-to-end.yml` with every step on `pi`. It needs `pi` on `PATH` and a
+model server that knows the model.
 
 | Plan | What it is for |
 |---|---|
-| `escalation` | A block, a review that runs out of conversations, a lane that goes quiet |
-| `gates` | A gated step stopping in its pane, and the notification that fires |
-| `workspace` | Two lanes, two worktrees, one file between them, and an interrupted run |
-| `observer` | The backgrounded observer, and the record it leaves in `observations.md` |
+| `escalation` | A block, a review that runs out of loops, a lane that goes quiet |
+| `gates` | A gated step stopping in its pane, and the notification |
+| `workspace` | Two lanes, two worktrees, one shared file, an interrupted run |
+| `observer` | The backgrounded observer and its `observations.md` |
 
-Each plan is a page small enough to read without scrolling, styled inline so it reads right
-opened on its own, and carrying a `spoolway-plan` JSON block naming its tasks and the settings
-it reaches — the shape a plan page argued in before the block went with the store, kept here
-because `queue-plan.sh` still reads it directly rather than through the skill. Its tasks ask a
-local model for a **behaviour** — block on your first turn, say nothing for three minutes —
-because what is under test is spoolway's answer to that behaviour, not the model's answer to a
-problem.
-
-### The observer
-
-`scripts/e2e/observe.sh` is started by the `observe` step of the runtime pipeline: a
-backgrounded `run:` step every task passes through on its way in, and the pipeline's entry, so
-the observer is up before the first lane is. It takes a lock, so exactly
-one runs whatever the task count, and polls `spoolway lane` — with no argument to list the
-lanes, with one to read a pane — appending lane, time and what it saw to `observations.md` in
-the project root. No spoolway feature is behind it; that is the whole mechanism.
-
-## What is deliberately *not* an end-to-end suite
-
-A hollow suite is worse than none, so two domains are covered elsewhere:
-
-- **Backend parity.** Comparing `herdr` against `headless` needs a multiplexer, and most of the
-  suites have to pass on a machine with none. The backend's behaviour is unit-tested in
-  `src/headless.rs`; what a multiplexer actually does is `scripts/e2e/plans/`. Two cases are the
-  exception: `commands.sh` opens a real tmux server of its own for the question "did a command
-  step get a pane at all", and runs the herdr handover against `scripts/e2e/herdr-stub.sh`, whose
-  header says why there is no isolated herdr server to use instead.
-- **The board.** What a dispatch run draws between passes is rendering, not routing: the pieces
-  with any logic in them are unit-tested in `src/status.rs`.
-- **A herdr multiplexer dying.** `disaster` proves the heal path — a workspace verified live
-  before it is reused, and a fresh pane opened when it is not — against a real tmux server on a
-  scratch socket of its own, because tmux alone can run detached, on nothing but the machine
-  this harness already needs. The same case against herdr would need a herdr of its own to run
-  in, and herdr cannot be nested inside the one this project itself runs under — so that case
-  stays a plan a person queues under `scripts/e2e/plans/`, never a suite.
+The observer is `scripts/e2e/observe.sh`. It polls `spoolway lane` and appends what it sees
+to `observations.md` in the project root.
 
 ## Local gates and daily CI
 
-`.github/workflows/ci.yml` runs daily on the default branch (`main`) at 03:17 UTC —
-05:17 in Berlin during summer, 04:17 in winter. Pushes, pull requests and stacks do not
-trigger it. GitHub may delay scheduled runs; this is a daily integration check, not a
-per-merge gate.
-
-The Linux job runs formatting, Clippy, the full Cargo tests, a release build, the `nightly`
-end-to-end tier and the pipeline contract. A Windows job runs the full Cargo tests on a real
-Windows runner. Both jobs skip a commit that already has a successful scheduled run of this
-workflow. Failed runs are retried at the next daily opportunity; a successful manual run with
-a narrower tier does not qualify a commit for skipping. Dependency advisories refresh daily
-even when source is unchanged.
-
-Manual runs always execute all checks, with `nightly` as the default end-to-end tier:
-
-    gh workflow run ci --ref main -f tier=nightly
-    gh run list --workflow ci --limit 5
-    gh run view <run-id> --json headSha,conclusion,jobs
-
-Use a manual run before a release or to verify a fix immediately. Inspect the actual job
-conclusions and record `headSha`: the result covers that commit, not newer work on the branch.
-Daily CI and releases share `.github/workflows/verify.yml`. The release workflow always runs
-its full nightly verification, including real Windows tests, in both rehearsal and tag runs.
-It never uses daily CI's unchanged-commit shortcut. Platform builds and publication depend on
-that verification passing at the run's exact commit. See [Releasing spoolway](releasing.md).
-
-Standard hosted runners are free for this public repository; artifact and cache storage have
-separate allowances. See [GitHub Actions billing](https://docs.github.com/en/billing/concepts/product-billing/github-actions).
-CI caches Rust builds, replaces older runs on the same ref, bounds Linux testing to 45 minutes,
-Windows testing to 30 and the audit to 10, and retains failure artifacts for three days.
-
-**The local `test` and `suite` command steps remain the mechanical verdict before handover.**
-Implementation lanes add coverage, run focused tests for changed behaviour and affected callers,
-confirm those tests ran, and format before handoff. They broaden checks when the impact demands
-it and report exactly what was checked. The downstream gate owns routine full tests and Clippy;
-TDD still requires observed red and green results. Work committed directly on `main` bypasses
-these lanes and needs its own local validation before the daily integration check.
+```mermaid
+flowchart LR
+  A[e2e] --> B[test: scripts/gate.sh] --> C[suite: scripts/e2e-pr.sh<br/>last task only] --> D[document]
+  B -- fail --> A
+  C -- fail --> A
+```
 
 `test` runs `scripts/gate.sh` for every task:
 
-    cargo fmt --check
-    cargo deny check advisories
-    cargo clippy --all-targets --locked -- -D warnings
-    cargo test --all-targets --locked
-    cargo check --target x86_64-pc-windows-gnu --all-targets --locked
-    cargo build --release
-    ./target/release/spoolway pipeline check
+```sh
+cargo fmt --check
+cargo deny check advisories
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --all-targets --locked
+cargo check --target x86_64-pc-windows-gnu --all-targets --locked
+cargo build --release
+./target/release/spoolway pipeline check
+```
 
-`suite` runs `scripts/e2e-pr.sh`, and carries `last:` — see [`last:` — a step the chain runs
-once](pipelines.md#last--a-step-the-chain-runs-once):
+`suite` runs `scripts/e2e-pr.sh` on the last task of a chain, through `last:` (see
+[`last:`](pipelines.md#last--a-step-the-chain-runs-once)):
 
-    SPOOLWAY="$PWD/target/release/spoolway" scripts/e2e/run.sh --tier pr
+```sh
+SPOOLWAY="$PWD/target/release/spoolway" scripts/e2e/run.sh --tier pr
+```
 
-They are two steps rather than one because `last:` applies to a whole step. Folded together,
-every task but the top of a stack would lose fmt, clippy and the compiler along with the
-suite, and those are the checks worth having per task. The suite is not: every branch in a
-plan is rebased onto the one below, so the task at the top carries every change beneath it and
-one run there covers all of them.
+A failure sends the task back to the step before `test` (`e2e` in `impl`, `reproduce-again`
+in `bugfix`), at most twice, then `on_loop_max` parks it. The gate needs `cargo-deny` and the
+`x86_64-pc-windows-gnu` target installed.
 
-Cheapest first, so the commonest failure costs the least to find. A failure in either routes
-the task back to the step before them — `e2e` in `impl`, `impl_tdd` and `impl_ui`,
-`reproduce-again` in `bugfix` — bounded to two laps from each of `test` and `suite`, and then
-`on_loop_max` parks it for a person. `impl_fast` runs the full `test` gate, routes failures
-back to `implement`, and has no `suite` step.
+`.github/workflows/ci.yml` runs daily on `main` at 03:17 UTC. Pushes and pull requests do
+not trigger it. The Linux job runs the same gate plus the `nightly` tier. A Windows job runs
+the Cargo tests on a Windows runner. A commit that already has a successful run is skipped.
 
-`pipeline check` is in the list because this project is developed with the spoolway it builds, so
-`.spoolway/` here is a live control plane rather than a fixture. A retired pipeline key reaching
-main once stopped the dispatcher from loading at all. It runs against the task's own worktree,
-using the binary the line above it just built.
+Run it by hand before a release or to check a fix:
 
-Real Windows tests run in hosted CI. They can also be run locally in the nightly routine:
+```sh
+gh workflow run ci --ref main -f tier=nightly
+gh run list --workflow ci --limit 5
+gh run view <run-id> --json headSha,conclusion,jobs
+```
 
-- `cargo test --target x86_64-pc-windows-gnu --all-targets --locked`, the Windows tests actually
-  run rather than only compiled. WSL interop executes Windows binaries on the machine this
-  project is developed on, which is the only reason it is possible at all.
-
-`cargo deny check advisories` runs per task instead, in `test` above: the advisory database
-moves without this repository moving, so a nightly-only run would leave a task landing on a
-green check that had already gone stale.
-
-**No hosted check starts automatically for a pull request.** This project's pipelines carry
-no `checks` step: daily CI is not a promised per-PR check, and waiting for one would park
-ordinary tasks — see [The shipped `default` pipeline](pipelines.md#the-shipped-default-pipeline).
-
-Local gates cover each task worktree and the chain's top. Independently landed changes can
-still break each other on `main`; daily CI checks that integrated tree. Newer commits have only
-their local validation until a scheduled or manual run verifies them.
-
-Nothing is installed and nothing needs to be, except `cargo-deny` and the
-`x86_64-pc-windows-gnu` target. The four checked-in fixture projects that used to drag `python3`
-and `node` in are gone; a suite builds its own subject.
-
-The one layer no gate reaches is the plans, and that is deliberate: they need a model server, a
-multiplexer and somebody watching. `--list` says which settings they cover and which are covered
-nowhere.
+Daily CI and the release workflow share `.github/workflows/verify.yml`. See
+[Releasing spoolway](releasing.md). The pipelines have no `checks` step, so no hosted check
+runs for a pull request. Daily CI checks the integrated tree.
