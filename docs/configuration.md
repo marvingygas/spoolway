@@ -199,6 +199,30 @@ What `spoolway pipeline gen` opens its session as. See
 | `pipeline_model` | blank | The model it runs. Blank refuses the command. |
 | `pipeline_effort` | blank | The effort passed to that profile. Blank uses the kind's default. |
 
+## `[watch]` — directories whose own sessions count as this project's spend
+
+```toml
+[watch]
+# Directories whose own sessions are counted beside the lanes. The project
+# root is always watched; these are extra. Absolute, or ~-relative.
+dirs = ["~/notes"]
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `dirs` | `[]` | Directories, beside the project root, whose own agent sessions count as this project's spend |
+
+The ledger holds one line per settled lane. A person also runs agent sessions by hand, and this
+project pays for those too. This list names the directories those sessions run in. See
+[Directory spend](cost.md#directory-spend).
+
+Each entry is absolute, `~`-relative, or relative to the repo root. The project root is always
+watched and never has to be named. An entry naming nothing that exists, or naming a file, is
+dropped, and the rest of the config still loads.
+
+Set the list with `spoolway config set watch.dirs ~/notes,docs`, comma-separated, the same as
+every other list-valued key. `spoolway update` keeps whatever a project has put there.
+
 ## `[agents.*]` — who runs a step
 
 ```toml

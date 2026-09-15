@@ -39,15 +39,22 @@ prints the table instead.
 | `pipelines` | One block per pipeline, one row per version |
 | `steps` | Per pipeline, one row per step |
 | `runs` | One row per run, newest first |
+| `dirs` | One row per watched directory, over its own sessions |
+| `sessions` | One row per session outside the lanes, newest first |
 
 | Key | What it does |
 |---|---|
 | `tab` | Next view |
 | `↑` `↓` | Move the cursor |
-| `f` | Open the filter panel: `pipeline`, `step`, `since`, `until`. `←`/`→` cycle pipeline and step. `enter` on a date opens a calendar. `enter` applies, `esc` cancels. |
+| `f` | Open the filter panel. On `pipelines`, `steps` and `runs` the rows are `pipeline`, `step`, `since`, `until`. On `dirs` and `sessions`, `dir` and `skill` replace the first two. `←`/`→` cycle a row's value. `enter` on a date opens a calendar. `enter` applies, `esc` cancels. |
 | `e` | Export the rows on screen to `.spoolway/evals/eval-<view>-<date>-<time>.csv` |
 | `r` | Re-read the ledger |
 | `q` | Quit |
+
+The `dirs` and `sessions` views read the ledger's directory lines. See [Directory
+spend](cost.md#directory-spend). The other three views never show a directory line, and these
+two never show a lane. On `dirs`, `SESSIONS` counts distinct sessions rather than ledger lines.
+The `skill` filter keeps whole sessions whose transcript names that skill.
 
 In the calendar, `←`/`→` move a day, `↑`/`↓` a week, `pgup`/`pgdn` a month. `enter` picks the
 day, `x` clears the bound, `esc` goes back.

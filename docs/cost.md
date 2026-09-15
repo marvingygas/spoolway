@@ -34,6 +34,25 @@ A transcript can grow after the lane is torn down. Every `spoolway eval` and `sp
 reads settled sessions again and appends one line for the turns that arrived later. That
 line carries no `outcome`. Lanes still running are left alone.
 
+### Directory spend
+
+A watched directory has sessions of its own that never went through the dispatcher: a person
+running `claude` or `pi` by hand inside it. See
+[`[watch]`](configuration.md#watch--directories-whose-own-sessions-count-as-this-projects-spend).
+Every read of the ledger sweeps those too, and banks one line per session under `dir`. The `dir`
+is the most specific watched root the session ran under.
+
+A directory line carries no `task`, `step`, `pipeline`, `agent`, `outcome`, `run` or `version`,
+because spoolway dispatched no such work. `spoolway spend` skips these lines, so its tables show
+lanes only. The `dirs` and `sessions` views of `spoolway eval` read them, and read nothing else.
+See [The screen](eval.md#the-screen).
+
+A session already banked as a lane is never banked again under `dir`. A transcript that has not
+changed since its last banked line is not read again.
+
+codex sessions are not swept. Its session store records no working directory, so there is
+nothing to match against a watched root.
+
 ## Reading it
 
 ```

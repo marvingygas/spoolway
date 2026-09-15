@@ -1147,14 +1147,17 @@ fn footer(
 // a string as one column, and an ANSI escape slipped into a row would throw
 // the frame's own border out of line with it.
 
-/// Which of the three views is on screen. `Tab` cycles through them in this
+/// Which of the five views is on screen. `Tab` cycles through them in this
 /// order, which is also the order their rows read most naturally: the whole
-/// pipeline, then one step of it, then one run.
+/// pipeline, then one step of it, then one run — then, the work outside the
+/// lanes, one directory and then one session of it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum View {
     Pipelines,
     Steps,
     Runs,
+    Dirs,
+    Sessions,
 }
 
 impl View {
@@ -1162,7 +1165,9 @@ impl View {
         match self {
             View::Pipelines => View::Steps,
             View::Steps => View::Runs,
-            View::Runs => View::Pipelines,
+            View::Runs => View::Dirs,
+            View::Dirs => View::Sessions,
+            View::Sessions => View::Pipelines,
         }
     }
 
@@ -1171,7 +1176,17 @@ impl View {
             View::Pipelines => "pipelines",
             View::Steps => "steps",
             View::Runs => "runs",
+            View::Dirs => "dirs",
+            View::Sessions => "sessions",
         }
+    }
+
+    /// Whether this view reads the directory population — see
+    /// [`Entry::dir`] — rather than lanes. What picks the filter panel's own
+    /// rows (`dir`/`skill` in place of `pipeline`/`step`) and which of
+    /// [`Loaded`]'s two populations a view's own lines are built from.
+    fn is_outside_the_lanes(self) -> bool {
+        matches!(self, View::Dirs | View::Sessions)
     }
 }
 
@@ -1212,6 +1227,15 @@ impl Scope {
 struct Filters {
     pipeline: Option<String>,
     step: Option<String>,
+    /// The watched root a `dirs`/`sessions` row must have banked under — see
+    /// [`Entry::dir`]. Unused by `pipelines`, `steps` and `runs`, the same way
+    /// `pipeline`/`step` are unused by `dirs` and `sessions`.
+    dir: Option<String>,
+    /// The `<command-name>` a `dirs`/`sessions` session's transcript must
+    /// hold — see [`crate::usage::skill_markers`]. Keeps whole sessions, not
+    /// stretches of one: see [`scoped_dirs`]'s own note on why that is an
+    /// upper bound.
+    skill: Option<String>,
     since: String,
     until: String,
     scope: Scope,
@@ -1228,6 +1252,8 @@ impl Filters {
         Filters {
             pipeline: args.pipeline.clone(),
             step: args.step.clone(),
+            dir: None,
+            skill: None,
             since: args.since.clone().unwrap_or_default(),
             until: args.until.clone().unwrap_or_default(),
             scope,
@@ -1255,6 +1281,26 @@ struct Loaded {
     /// than whatever the current view happens to already be narrowed to. An
     /// interactive line never reaches here at all — see `Entry::is_lane`.
     entries: Vec<Entry>,
+    /// Every directory line in scope and window — see [`Entry::dir`] — the
+    /// population `dirs` and `sessions` read, unfiltered by `dir` or `skill`.
+    /// Disjoint from `entries`: a line is either a lane or a directory
+    /// session, never both.
+    dirs: Vec<Entry>,
+    /// Every `<command-name>` marker each of `dirs`' own sessions' transcripts
+    /// holds, keyed by session id — read once here rather than on every draw,
+    /// since a transcript scan is a file read `draw` cannot afford to repeat
+    /// on every keypress. What the `skill` filter row cycles over, and what a
+    /// chosen `skill` narrows `dirs` by — see [`scoped_dirs`].
+    skills_by_session: HashMap<String, BTreeSet<String>>,
+    /// Each of `dirs`' own sessions' transcript span — see
+    /// [`crate::usage::session_span`] — keyed by session id, for the same
+    /// reason `skills_by_session` is read once here: `list_sessions` reads
+    /// this on every draw, over every session on screen, and a transcript
+    /// read is exactly as expensive whether it is hunting for a marker or a
+    /// span. Absent for a session whose span could not be read at all —
+    /// `list_sessions` falls back to its own line's `ts` for that one.
+    spans_by_session:
+        HashMap<String, (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
     fallback: HashMap<(String, String), String>,
     models: BTreeMap<String, ModelPrice>,
     scope_label: String,
@@ -1268,9 +1314,17 @@ fn load(repo: &Repo, filters: &Filters) -> Result<Loaded> {
         Scope::Named(name) => (Some(name.as_str()), false),
         Scope::All => (None, true),
     };
-    let (mut entries, _scope) = crate::spend::collect_scoped(repo, project, all)?;
+    let (all_entries, _scope) = crate::spend::collect_scoped(repo, project, all)?;
 
-    entries.retain(Entry::is_lane);
+    let mut entries: Vec<Entry> = all_entries
+        .iter()
+        .filter(|e| e.is_lane())
+        .cloned()
+        .collect();
+    let mut dirs: Vec<Entry> = all_entries
+        .into_iter()
+        .filter(|e| e.dir.is_some())
+        .collect();
 
     let fallback = fallback_keys(&entries);
 
@@ -1278,9 +1332,35 @@ fn load(repo: &Repo, filters: &Filters) -> Result<Loaded> {
         crate::spend::window_of(None, non_empty(&filters.since), non_empty(&filters.until))?;
     entries.retain(|entry| window.contains(&entry.ts));
     entries.sort_by(|a, b| a.ts.cmp(&b.ts));
+    dirs.retain(|entry| window.contains(&entry.ts));
+    dirs.sort_by(|a, b| a.ts.cmp(&b.ts));
+
+    let mut skills_by_session: HashMap<String, BTreeSet<String>> = HashMap::new();
+    let mut spans_by_session = HashMap::new();
+    for session in dirs
+        .iter()
+        .map(|e| e.session.as_str())
+        .collect::<BTreeSet<_>>()
+    {
+        let kind = dirs
+            .iter()
+            .find(|e| e.session == session)
+            .map(|e| e.kind.as_str())
+            .unwrap_or_default();
+        skills_by_session.insert(
+            session.to_string(),
+            crate::usage::skill_markers(kind, session),
+        );
+        if let Some(span) = crate::usage::session_span(kind, session) {
+            spans_by_session.insert(session.to_string(), span);
+        }
+    }
 
     Ok(Loaded {
         entries,
+        dirs,
+        skills_by_session,
+        spans_by_session,
         fallback,
         models: repo.config.models.clone(),
         scope_label: filters.scope.label(repo),
@@ -1288,13 +1368,43 @@ fn load(repo: &Repo, filters: &Filters) -> Result<Loaded> {
 }
 
 /// `entries`, narrowed by the pipeline and step filters — the input every
-/// view is built from.
+/// lane-grained view is built from.
 fn scoped_entries<'a>(loaded: &'a Loaded, filters: &Filters) -> Vec<&'a Entry> {
     loaded
         .entries
         .iter()
         .filter(|e| filters.pipeline.as_deref().is_none_or(|p| e.pipeline == p))
         .filter(|e| filters.step.as_deref().is_none_or(|s| e.step == s))
+        .collect()
+}
+
+/// `loaded.dirs`, narrowed by the `dir` and `skill` filters — the input
+/// `dirs` and `sessions` are built from.
+///
+/// A `skill` filter keeps a *whole session* the moment any of its lines'
+/// transcript held that marker, and drops the rest — never a stretch of one
+/// session, which is exactly what the task's own context rules out as
+/// unanswerable. That is why choosing a skill only ever narrows which
+/// sessions are counted, not what any of them cost: the figure it leaves on
+/// screen is an upper bound on that skill's own spend, not its true share.
+fn scoped_dirs<'a>(loaded: &'a Loaded, filters: &Filters) -> Vec<&'a Entry> {
+    loaded
+        .dirs
+        .iter()
+        .filter(|e| {
+            filters
+                .dir
+                .as_deref()
+                .is_none_or(|d| e.dir.as_deref() == Some(d))
+        })
+        .filter(|e| {
+            filters.skill.as_deref().is_none_or(|skill| {
+                loaded
+                    .skills_by_session
+                    .get(&e.session)
+                    .is_some_and(|markers| markers.contains(skill))
+            })
+        })
         .collect()
 }
 
@@ -1319,6 +1429,33 @@ fn step_candidates(loaded: &Loaded, pipeline: Option<&str>) -> Vec<String> {
         .iter()
         .filter(|e| pipeline.is_none_or(|p| e.pipeline == p))
         .map(|e| e.step.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// Distinct directories `loaded.dirs` actually has — the candidate list the
+/// filter panel's `dir` row cycles over on `dirs` and `sessions`.
+fn dir_candidates(loaded: &Loaded) -> Vec<String> {
+    loaded
+        .dirs
+        .iter()
+        .filter_map(|e| e.dir.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// Every `<command-name>` marker held by any of `loaded.dirs`' own sessions —
+/// the candidate list the filter panel's `skill` row cycles over. Built from
+/// the watched transcripts themselves, never from a configured list: see the
+/// task's own non-goal against naming skills anywhere.
+fn skill_candidates(loaded: &Loaded) -> Vec<String> {
+    loaded
+        .skills_by_session
+        .values()
+        .flatten()
+        .cloned()
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
@@ -1657,6 +1794,324 @@ fn runs_lines(entries: &[&Entry], loaded: &Loaded) -> Vec<Line> {
     out
 }
 
+// -------------------------------------------------------------------- dirs
+//
+// The work outside the lanes: a session nobody dispatched, banked by
+// `usage::sweep`'s watched-directory walk — see `Entry::dir`. `dirs` groups
+// by the watched root a session ran in; `sessions` below is the same
+// population one row per session. Both read `Loaded::dirs`, never
+// `Loaded::entries`: the two populations never mix on one row, the same rule
+// `Entry::is_lane` already enforces for every other view.
+
+/// One session outside the lanes, folded down to what `sessions` and `dirs`
+/// both need — the same grain `RunRow` is to a lane-grained row, but a
+/// session has no `run`, no `outcome` and no per-line `wall_s` to sum: its own
+/// span comes from its transcript's first and last `timestamp` instead, see
+/// [`crate::usage::session_span`].
+struct SessionRow {
+    dir: String,
+    model: String,
+    /// The session's own first `timestamp`, or — when its transcript could
+    /// not be read a second time to answer that — the line's own `ts`
+    /// (when it was banked, not when it ran).
+    when: chrono::DateTime<chrono::Utc>,
+    /// Its transcript's own span, in seconds — `0` where the span could not
+    /// be read at all, the same "nothing to divide by" `RunRow::time_s`
+    /// leaves a run with no wall time.
+    time_s: i64,
+    cost: f64,
+    /// Every ledger line banked for this session — more than one where the
+    /// sweep caught it across several passes.
+    lines: usize,
+    unpriced: usize,
+    ctx_peak_tokens: Option<u64>,
+    ctx_peak_pct: Option<f64>,
+}
+
+/// Every distinct session in `entries`, oldest first — matching
+/// [`list_runs`]'s own convention, so `sessions_lines` below has to reverse
+/// it for the same reason `runs_lines` reverses `list_runs`.
+///
+/// `spans` is [`Loaded::spans_by_session`] — read once at `load` rather than
+/// here, since this runs on every draw.
+fn list_sessions(
+    entries: &[&Entry],
+    models: &BTreeMap<String, ModelPrice>,
+    spans: &HashMap<String, (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+) -> Vec<SessionRow> {
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: HashMap<String, Vec<&Entry>> = HashMap::new();
+    for entry in entries {
+        if !groups.contains_key(entry.session.as_str()) {
+            order.push(entry.session.clone());
+        }
+        groups.entry(entry.session.clone()).or_default().push(entry);
+    }
+
+    let mut rows: Vec<SessionRow> = order
+        .into_iter()
+        .map(|session| {
+            let lines = groups.remove(&session).unwrap_or_default();
+            let latest = lines
+                .iter()
+                .max_by(|a, b| a.ts.cmp(&b.ts))
+                .expect("a session always has at least one line");
+            let dir = latest.dir.clone().unwrap_or_default();
+            let cost: f64 = lines.iter().filter_map(|e| e.cost_usd).sum();
+            let unpriced = lines
+                .iter()
+                .filter(|e| e.cost_usd.is_none() && !e.tokens.is_zero())
+                .count();
+            let (ctx_peak_tokens, ctx_peak_pct) = ctx_peak_of(&lines, models);
+            let (when, time_s) = match spans.get(&session) {
+                Some((first, last)) => (*first, (*last - *first).num_seconds().max(0)),
+                None => (
+                    chrono::DateTime::parse_from_rfc3339(&latest.ts)
+                        .map(|at| at.with_timezone(&chrono::Utc))
+                        .unwrap_or_else(|_| chrono::Utc::now()),
+                    0,
+                ),
+            };
+            SessionRow {
+                dir,
+                model: latest.model.clone(),
+                when,
+                time_s,
+                cost,
+                lines: lines.len(),
+                unpriced,
+                ctx_peak_tokens,
+                ctx_peak_pct,
+            }
+        })
+        .collect();
+    rows.sort_by_key(|a| a.when);
+    rows
+}
+
+/// One watched directory's row in `dirs`: every session it has run, folded to
+/// a per-session average the same way a pipeline block's row divides by
+/// `RUNS` — see `docs/eval.md`'s own reasoning for why a plain total would
+/// just reward whichever directory happened to run the most.
+struct DirRow {
+    dir: String,
+    sessions: usize,
+    cost: f64,
+    lines: usize,
+    unpriced: usize,
+    ctx_peak_tokens: Option<u64>,
+    ctx_peak_pct: Option<f64>,
+    time_s: i64,
+    /// The latest of its own sessions' `when` — what orders the rows, the
+    /// same "this morning's work heads the stack" rule `pipeline_blocks`
+    /// follows.
+    latest: chrono::DateTime<chrono::Utc>,
+}
+
+fn dir_rows(
+    entries: &[&Entry],
+    models: &BTreeMap<String, ModelPrice>,
+    spans: &HashMap<String, (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+) -> Vec<DirRow> {
+    let mut order: Vec<String> = Vec::new();
+    let mut by_dir: HashMap<String, Vec<&Entry>> = HashMap::new();
+    for entry in entries {
+        let Some(dir) = entry.dir.clone() else {
+            continue;
+        };
+        if !by_dir.contains_key(&dir) {
+            order.push(dir.clone());
+        }
+        by_dir.entry(dir).or_default().push(entry);
+    }
+
+    let mut rows: Vec<DirRow> = order
+        .into_iter()
+        .map(|dir| {
+            let lines = by_dir.remove(&dir).unwrap_or_default();
+            let sessions = list_sessions(&lines, models, spans);
+            let cost: f64 = lines.iter().filter_map(|e| e.cost_usd).sum();
+            let unpriced = lines
+                .iter()
+                .filter(|e| e.cost_usd.is_none() && !e.tokens.is_zero())
+                .count();
+            let (ctx_peak_tokens, ctx_peak_pct) = ctx_peak_of(&lines, models);
+            let time_s: i64 = sessions.iter().map(|s| s.time_s).sum();
+            let latest = sessions
+                .iter()
+                .map(|s| s.when)
+                .max()
+                .unwrap_or_else(chrono::Utc::now);
+            DirRow {
+                sessions: sessions.len(),
+                cost,
+                lines: lines.len(),
+                unpriced,
+                ctx_peak_tokens,
+                ctx_peak_pct,
+                time_s,
+                latest,
+                dir,
+            }
+        })
+        .collect();
+    rows.sort_by_key(|a| std::cmp::Reverse(a.latest));
+    rows
+}
+
+fn dirs_header_plain(dw: usize) -> String {
+    format!(
+        "{:<dw$}  {:>8}  {:>11}  {:>8}  {:>12}",
+        "DIR", "SESSIONS", "USD/SESSION", "CTX PEAK", "TIME/SESSION",
+    )
+}
+
+fn dirs_row_line(row: &DirRow, dw: usize) -> String {
+    format!(
+        "{:<dw$}  {:>8}  {:>11}  {:>8}  {:>12}",
+        row.dir,
+        row.sessions,
+        cost_of(
+            row.cost / row.sessions.max(1) as f64,
+            row.lines,
+            row.unpriced
+        ),
+        ctx_cell(row.ctx_peak_tokens, row.ctx_peak_pct),
+        crate::status::human_secs((row.time_s as f64 / row.sessions.max(1) as f64).round() as i64),
+    )
+}
+
+/// The task's own mockup draws `DIR` 18 columns wide on its own (short)
+/// example data — wider than either name it actually holds — so this is a
+/// floor rather than a measurement: a directory name longer than the
+/// mockup's own still grows the column, but nothing narrower than the
+/// mockup's drawing is allowed to shrink it back.
+const DIRS_DIR_MIN_WIDTH: usize = 18;
+
+fn dirs_lines(entries: &[&Entry], loaded: &Loaded) -> Vec<Line> {
+    if entries.is_empty() {
+        return vec![Line::Text(
+            "Nothing outside the lanes in this window.".to_string(),
+        )];
+    }
+    let rows = dir_rows(entries, &loaded.models, &loaded.spans_by_session);
+    let dw = rows
+        .iter()
+        .map(|r| r.dir.len())
+        .max()
+        .unwrap_or(3)
+        .max("DIR".len())
+        .max(DIRS_DIR_MIN_WIDTH);
+
+    let mut out = vec![Line::Text(dirs_header_plain(dw))];
+    for row in &rows {
+        out.push(Line::Row(Row {
+            text: dirs_row_line(row, dw),
+        }));
+    }
+    out
+}
+
+// ----------------------------------------------------------------- sessions
+
+/// `WHEN` is always exactly `MM-DD HH:MM` — 11 characters — but the task's
+/// own mockup draws the column 13 wide, two columns of trailing pad beyond
+/// the content. Pinned as a plain width, not a floor: nothing ever makes the
+/// content itself longer or shorter.
+const SESSIONS_WHEN_WIDTH: usize = 13;
+/// The same floor `DIRS_DIR_MIN_WIDTH` is for `dirs`, measured off the
+/// mockup's own `sessions` drawing instead — the two differ because the two
+/// mockups were drawn at different widths, not because either column answers
+/// to a different rule.
+const SESSIONS_DIR_MIN_WIDTH: usize = 10;
+const SESSIONS_MODEL_MIN_WIDTH: usize = 16;
+/// `TIME` reads a whole `human_secs` string (`1h 04m`, `42m 18s`), unlike the
+/// fixed-length `WHEN` above — measured off the mockup the same way
+/// `SESSIONS_DIR_MIN_WIDTH` is, as a floor rather than a cap.
+const SESSIONS_TIME_WIDTH: usize = 9;
+/// One narrower than `USD/RUN`'s own 7 elsewhere in this file — the mockup
+/// draws `sessions`' own `USD` column 6 wide, not 7; rebuilding the mockup's
+/// header and every data row from this width is what pins it, not eyeballed
+/// token offsets, which is how a 7 got in here in the first place. A cost
+/// above $999.99 still prints — `cost_of`/`money_plain` are never truncated,
+/// only under-padded here.
+const SESSIONS_USD_WIDTH: usize = 6;
+
+fn sessions_header_plain(dw: usize, mw: usize) -> String {
+    format!(
+        "{:<w$}  {:<dw$}  {:<mw$}  {:>u$}  {:>8}  {:>t$}",
+        "WHEN",
+        "DIR",
+        "MODEL",
+        "USD",
+        "CTX PEAK",
+        "TIME",
+        w = SESSIONS_WHEN_WIDTH,
+        u = SESSIONS_USD_WIDTH,
+        t = SESSIONS_TIME_WIDTH,
+    )
+}
+
+/// `MM-DD HH:MM` in local time — a session has no run and no version to lead
+/// a row with, so `WHEN` carries the minute a lane's own `WHEN` leaves at the
+/// day: the population here is a person's own hands-on work, not a lane
+/// launched once and read back later.
+fn session_when(at: chrono::DateTime<chrono::Utc>) -> String {
+    at.with_timezone(&chrono::Local)
+        .format("%m-%d %H:%M")
+        .to_string()
+}
+
+fn sessions_row_line(row: &SessionRow, dw: usize, mw: usize) -> String {
+    format!(
+        "{:<w$}  {:<dw$}  {:<mw$}  {:>u$}  {:>8}  {:>t$}",
+        session_when(row.when),
+        row.dir,
+        row.model,
+        cost_of(row.cost, row.lines, row.unpriced),
+        ctx_cell(row.ctx_peak_tokens, row.ctx_peak_pct),
+        crate::status::human_secs(row.time_s.max(0)),
+        w = SESSIONS_WHEN_WIDTH,
+        u = SESSIONS_USD_WIDTH,
+        t = SESSIONS_TIME_WIDTH,
+    )
+}
+
+fn sessions_lines(entries: &[&Entry], loaded: &Loaded) -> Vec<Line> {
+    if entries.is_empty() {
+        return vec![Line::Text(
+            "No sessions outside the lanes in that window.".to_string(),
+        )];
+    }
+    // Newest first, the same reversal `runs_lines` applies to `list_runs`'
+    // own oldest-first order — see `list_sessions`' own doc.
+    let mut rows = list_sessions(entries, &loaded.models, &loaded.spans_by_session);
+    rows.reverse();
+
+    let dw = rows
+        .iter()
+        .map(|r| r.dir.len())
+        .max()
+        .unwrap_or(3)
+        .max("DIR".len())
+        .max(SESSIONS_DIR_MIN_WIDTH);
+    let mw = rows
+        .iter()
+        .map(|r| r.model.len())
+        .max()
+        .unwrap_or(5)
+        .max("MODEL".len())
+        .max(SESSIONS_MODEL_MIN_WIDTH);
+
+    let mut out = vec![Line::Text(sessions_header_plain(dw, mw))];
+    for row in &rows {
+        out.push(Line::Row(Row {
+            text: sessions_row_line(row, dw, mw),
+        }));
+    }
+    out
+}
+
 // ---------------------------------------------------------------- one view
 
 fn view_lines(loaded: &Loaded, filters: &Filters, pipelines: &Pipelines, view: View) -> Vec<Line> {
@@ -1664,6 +2119,8 @@ fn view_lines(loaded: &Loaded, filters: &Filters, pipelines: &Pipelines, view: V
         View::Pipelines => pipelines_lines(&scoped_entries(loaded, filters), loaded, filters),
         View::Steps => steps_lines(&scoped_entries(loaded, filters), loaded, pipelines),
         View::Runs => runs_lines(&scoped_entries(loaded, filters), loaded),
+        View::Dirs => dirs_lines(&scoped_dirs(loaded, filters), loaded),
+        View::Sessions => sessions_lines(&scoped_dirs(loaded, filters), loaded),
     }
 }
 
@@ -1738,7 +2195,64 @@ fn export_rows(
             let lines = rows.iter().map(csv_run_row).collect();
             (header, lines)
         }
+        View::Dirs => {
+            let entries = scoped_dirs(loaded, filters);
+            let rows = dir_rows(&entries, &loaded.models, &loaded.spans_by_session);
+            let header = "dir,sessions,cost_usd,cost_per_session,unpriced,ctx_peak_tokens,\
+                           ctx_peak_pct,time_s,time_per_session_s"
+                .to_string();
+            let lines = rows.iter().map(csv_dir_row).collect();
+            (header, lines)
+        }
+        View::Sessions => {
+            let entries = scoped_dirs(loaded, filters);
+            // Newest first, the same reversal `sessions_lines` applies.
+            let mut rows = list_sessions(&entries, &loaded.models, &loaded.spans_by_session);
+            rows.reverse();
+            let header =
+                "when,dir,model,cost_usd,unpriced,ctx_peak_tokens,ctx_peak_pct,time_s".to_string();
+            let lines = rows.iter().map(csv_session_row).collect();
+            (header, lines)
+        }
     }
+}
+
+fn csv_dir_row(row: &DirRow) -> String {
+    let ctx_tokens = row.ctx_peak_tokens.map_or(String::new(), |t| t.to_string());
+    let ctx_pct = row
+        .ctx_peak_pct
+        .map_or(String::new(), |p| format!("{p:.2}"));
+    let per_session = row.time_s as f64 / row.sessions.max(1) as f64;
+    format!(
+        "{},{},{},{},{},{ctx_tokens},{ctx_pct},{},{}",
+        csv_field(&row.dir),
+        row.sessions,
+        csv_cost(row.cost, row.lines, row.unpriced),
+        csv_cost(
+            row.cost / row.sessions.max(1) as f64,
+            row.lines,
+            row.unpriced
+        ),
+        row.unpriced,
+        row.time_s.max(0),
+        per_session.round() as i64,
+    )
+}
+
+fn csv_session_row(row: &SessionRow) -> String {
+    let ctx_tokens = row.ctx_peak_tokens.map_or(String::new(), |t| t.to_string());
+    let ctx_pct = row
+        .ctx_peak_pct
+        .map_or(String::new(), |p| format!("{p:.2}"));
+    format!(
+        "{},{},{},{},{},{ctx_tokens},{ctx_pct},{}",
+        csv_field(&session_when(row.when)),
+        csv_field(&row.dir),
+        csv_field(&row.model),
+        csv_cost(row.cost, row.lines, row.unpriced),
+        row.unpriced,
+        row.time_s.max(0),
+    )
 }
 
 fn csv_pipeline_row(project: &str, pipeline: &str, version: &Version, m: &Metrics) -> String {
@@ -1893,24 +2407,41 @@ fn frame_width() -> usize {
 /// What `frame_rows` subtracts from the terminal's own height: two borders,
 /// the footer, one spare line — so the last line's own newline does not
 /// scroll the top of the frame away, the same reasoning `commands::queue`'s
-/// own `PANE_CHROME_ROWS` gives — and, when `note_row` is set, the
-/// unpriced-cost note's own row. Pulled out of `frame_rows` so the count
-/// itself is a pure function a test can pin without a real terminal behind
-/// it.
-fn frame_chrome(note_row: bool) -> usize {
-    4 + usize::from(note_row)
+/// own `PANE_CHROME_ROWS` gives — and, one for each of `notes`, such as the
+/// unpriced-cost note. Pulled out of `frame_rows` so the count itself is a
+/// pure function a test can pin without a real terminal behind it.
+fn frame_chrome(notes: usize) -> usize {
+    4 + notes
 }
 
 /// How many body rows the frame gets once `frame_chrome` is counted. `None`
 /// where there is no terminal to measure, which is what lets a piped run
 /// keep every row rather than losing the ones past some guessed height.
-fn frame_rows(note_row: bool) -> Option<usize> {
+fn frame_rows(notes: usize) -> Option<usize> {
     terminal_size::terminal_size()
-        .map(|(_, h)| (h.0 as usize).saturating_sub(frame_chrome(note_row)).max(1))
+        .map(|(_, h)| (h.0 as usize).saturating_sub(frame_chrome(notes)).max(1))
 }
 
-fn frame_top(view: View, right: &str, width: usize) -> String {
-    let left = format!("─ eval · {} ", view.label());
+/// The view name, plus — on `dirs` and `sessions` only — the `dir`/`skill`
+/// filter, exactly as the mockup draws it: `sessions · skill /spoolway-plan`.
+/// `pipeline`/`step` never join this: they stay in [`filters_label`], on the
+/// other side of the border, unmoved from where the three existing views
+/// have always drawn them.
+fn view_title(view: View, filters: &Filters) -> String {
+    let mut title = view.label().to_string();
+    if view.is_outside_the_lanes() {
+        if let Some(d) = &filters.dir {
+            title.push_str(&format!(" · dir {d}"));
+        }
+        if let Some(s) = &filters.skill {
+            title.push_str(&format!(" · skill {s}"));
+        }
+    }
+    title
+}
+
+fn frame_top(title: &str, right: &str, width: usize) -> String {
+    let left = format!("─ eval · {title} ");
     let right = format!(" {right} ─");
     let dashes = width.saturating_sub(left.chars().count() + right.chars().count());
     format!("┌{left}{}{right}┐", "─".repeat(dashes.max(1)))
@@ -2009,13 +2540,20 @@ fn cursor_line_index(lines: &[Line], cursor: usize) -> usize {
 /// because it has no filters at all. `limit` names no row of its own any
 /// more either, for the same reason: nothing on the screen can move it, so
 /// naming it on every frame would say nothing a reader could act on.
-fn filters_label(loaded: &Loaded, filters: &Filters) -> String {
+/// The scope and window only — see [`view_title`] for `dir`/`skill`, which
+/// the mockup draws in the top border's *left* segment beside the view name
+/// rather than here, on the right beside the scope. `pipeline`/`step` stay
+/// here, on the right, exactly where they always have: only `dirs` and
+/// `sessions` move their own filter to the other side.
+fn filters_label(loaded: &Loaded, filters: &Filters, view: View) -> String {
     let mut parts = vec![loaded.scope_label.clone()];
-    if let Some(p) = &filters.pipeline {
-        parts.push(format!("pipeline {p}"));
-    }
-    if let Some(s) = &filters.step {
-        parts.push(format!("step {s}"));
+    if !view.is_outside_the_lanes() {
+        if let Some(p) = &filters.pipeline {
+            parts.push(format!("pipeline {p}"));
+        }
+        if let Some(s) = &filters.step {
+            parts.push(format!("step {s}"));
+        }
     }
     if let (None, None) = (non_empty(&filters.since), non_empty(&filters.until)) {
         // No bound either side: naming a window would say nothing a person
@@ -2050,12 +2588,15 @@ fn draw(
 ) {
     let _ = write!(out, "\x1b[2J\x1b[H");
 
-    // Computed before `frame_rows`, which has to know whether that note is
-    // about to take a row of its own — see `frame_rows`'s own doc comment.
-    let note = screen_unpriced_note(loaded, &state.filters, state.view);
+    // Computed before `frame_rows`, which has to know how many of these are
+    // about to take a row of their own — see `frame_rows`'s own doc comment.
+    let mut notes = Vec::new();
+    if let Some(note) = screen_unpriced_note(loaded, &state.filters, state.view) {
+        notes.push(note);
+    }
 
     let width = frame_width();
-    let rows = frame_rows(note.is_some());
+    let rows = frame_rows(notes.len());
     let lines = view_lines(loaded, &state.filters, pipelines, state.view);
     let body = render_lines(&lines, state.cursor, width);
     let cursor_line = cursor_line_index(&lines, state.cursor);
@@ -2105,8 +2646,9 @@ fn draw(
     let blank = pad_to("", width);
     body.resize(target, blank);
 
-    let right = filters_label(loaded, &state.filters);
-    let mut frame = vec![frame_top(state.view, &right, width)];
+    let right = filters_label(loaded, &state.filters, state.view);
+    let title = view_title(state.view, &state.filters);
+    let mut frame = vec![frame_top(&title, &right, width)];
     for line in &body {
         frame.push(format!("│{line}│"));
     }
@@ -2119,11 +2661,11 @@ fn draw(
     for line in &frame {
         let _ = writeln!(out, "{line}");
     }
-    // Between the frame's own bottom border and the keys line, so it never
-    // takes a body row and so it never throws off `clip`'s own scroll
-    // indicator — see the task's own non-goal against printing it inside the
-    // frame. Its own row was already reserved above, in `frame_rows`.
-    if let Some(note) = &note {
+    // Between the frame's own bottom border and the keys line, so neither
+    // takes a body row and so neither throws off `clip`'s own scroll
+    // indicator — see the task's own non-goal against printing either inside
+    // the frame. Their rows were already reserved above, in `frame_rows`.
+    for note in &notes {
         let _ = writeln!(out, "  {note}");
     }
     let _ = writeln!(out, "{FOOTER}");
@@ -2139,6 +2681,9 @@ fn screen_unpriced_note(loaded: &Loaded, filters: &Filters, view: View) -> Optio
         // neither view truncates by `filters.limit` — so the plain scoped
         // entries are exactly what is on screen.
         View::Steps | View::Runs => unpriced_note(scoped_entries(loaded, filters).into_iter()),
+        // Neither `dirs` nor `sessions` truncates — every row its own
+        // filters admit is on screen.
+        View::Dirs | View::Sessions => unpriced_note(scoped_dirs(loaded, filters).into_iter()),
         // Pipelines narrows to `filters.limit` versions per block, the same
         // truncation `footer` accounts for in the printed table — without
         // it, a model priced fine on every version still on screen could be
@@ -2174,25 +2719,56 @@ fn screen_unpriced_note(loaded: &Loaded, filters: &Filters, view: View) -> Optio
 enum FilterField {
     Pipeline,
     Step,
+    /// In place of `Pipeline` on `dirs` and `sessions` — see [`filter_fields`].
+    Dir,
+    /// In place of `Step` on `dirs` and `sessions`.
+    Skill,
     Since,
     Until,
 }
 
-const FILTER_FIELDS: &[FilterField] = &[
-    FilterField::Pipeline,
-    FilterField::Step,
-    FilterField::Since,
-    FilterField::Until,
-];
+/// The four rows the filter panel draws for `view` — `pipeline`/`step` for a
+/// lane-grained view, `dir`/`skill` for `dirs` and `sessions`, since neither
+/// view's rows mean anything to the other's population. `since` and `until`
+/// are the last two either way: the window bounds every view the same way.
+fn filter_fields(view: View) -> [FilterField; 4] {
+    match view.is_outside_the_lanes() {
+        true => [
+            FilterField::Dir,
+            FilterField::Skill,
+            FilterField::Since,
+            FilterField::Until,
+        ],
+        false => [
+            FilterField::Pipeline,
+            FilterField::Step,
+            FilterField::Since,
+            FilterField::Until,
+        ],
+    }
+}
 
 /// A copy of [`Filters`] a person is editing in the filter panel, plus which
-/// row the cursor is on. `esc` drops this untouched; `enter` turns it back
-/// into the real `Filters` and reloads — see `run_screen`'s own handling of
-/// [`Mode::Filter`].
+/// row the cursor is on and which four [`FilterField`]s this draft's own view
+/// draws — fixed at the moment `f` opened the panel, since nothing in
+/// [`Mode::Filter`] lets `tab` change the view while it is up. `esc` drops
+/// this untouched; `enter` turns it back into the real `Filters` and
+/// reloads — see `run_screen`'s own handling of [`Mode::Filter`].
 #[derive(Debug, Clone)]
 struct Draft {
     field: usize,
+    fields: [FilterField; 4],
     filters: Filters,
+}
+
+impl Draft {
+    fn new(view: View, filters: Filters) -> Draft {
+        Draft {
+            field: 0,
+            fields: filter_fields(view),
+            filters,
+        }
+    }
 }
 
 /// What a key press means right now.
@@ -2316,7 +2892,7 @@ fn run_screen(
                     draft.field = draft.field.saturating_sub(1);
                 }
                 Key::Down | Key::Char('j') => {
-                    draft.field = (draft.field + 1).min(FILTER_FIELDS.len() - 1);
+                    draft.field = (draft.field + 1).min(draft.fields.len() - 1);
                 }
                 Key::Left | Key::Right => {
                     handle_filter_change(&loaded, draft, key == Key::Right);
@@ -2326,11 +2902,11 @@ fn run_screen(
                 // Everywhere else it applies the draft and reloads.
                 Key::Enter
                     if matches!(
-                        FILTER_FIELDS[draft.field],
+                        draft.fields[draft.field],
                         FilterField::Since | FilterField::Until
                     ) =>
                 {
-                    let field = FILTER_FIELDS[draft.field];
+                    let field = draft.fields[draft.field];
                     let text = match field {
                         FilterField::Since => draft.filters.since.as_str(),
                         FilterField::Until => draft.filters.until.as_str(),
@@ -2401,10 +2977,7 @@ fn run_screen(
                     state.cursor = 0;
                 }
                 Key::Char('f') => {
-                    state.mode = Mode::Filter(Draft {
-                        field: 0,
-                        filters: state.filters.clone(),
-                    });
+                    state.mode = Mode::Filter(Draft::new(state.view, state.filters.clone()));
                 }
                 Key::Char('r') => match load(repo, &state.filters) {
                     Ok(fresh) => loaded = fresh,
@@ -2456,7 +3029,7 @@ fn field_text_mut(draft: &mut Draft, field: FilterField) -> &mut String {
 }
 
 fn handle_filter_change(loaded: &Loaded, draft: &mut Draft, forward: bool) {
-    match FILTER_FIELDS[draft.field] {
+    match draft.fields[draft.field] {
         FilterField::Pipeline => {
             let candidates = pipeline_candidates(loaded);
             draft.filters.pipeline = cycle_option(&candidates, &draft.filters.pipeline, forward);
@@ -2475,6 +3048,14 @@ fn handle_filter_change(loaded: &Loaded, draft: &mut Draft, forward: bool) {
             let candidates = step_candidates(loaded, draft.filters.pipeline.as_deref());
             draft.filters.step = cycle_option(&candidates, &draft.filters.step, forward);
         }
+        FilterField::Dir => {
+            let candidates = dir_candidates(loaded);
+            draft.filters.dir = cycle_option(&candidates, &draft.filters.dir, forward);
+        }
+        FilterField::Skill => {
+            let candidates = skill_candidates(loaded);
+            draft.filters.skill = cycle_option(&candidates, &draft.filters.skill, forward);
+        }
         // Neither answers to `←`/`→` any more — a calendar is the only way
         // to change either now, reached through `enter` instead.
         FilterField::Since | FilterField::Until => {}
@@ -2485,6 +3066,8 @@ fn filter_field_label(field: FilterField) -> &'static str {
     match field {
         FilterField::Pipeline => "pipeline",
         FilterField::Step => "step",
+        FilterField::Dir => "dir",
+        FilterField::Skill => "skill",
         FilterField::Since => "since",
         FilterField::Until => "until",
     }
@@ -2500,6 +3083,8 @@ fn filter_field_value(draft: &Draft, field: FilterField) -> String {
             format!("‹ {} ›", draft.filters.pipeline.as_deref().unwrap_or("all"))
         }
         FilterField::Step => format!("‹ {} ›", draft.filters.step.as_deref().unwrap_or("all")),
+        FilterField::Dir => format!("‹ {} ›", draft.filters.dir.as_deref().unwrap_or("all")),
+        FilterField::Skill => format!("‹ {} ›", draft.filters.skill.as_deref().unwrap_or("all")),
         FilterField::Since => date_field_value(&draft.filters.since, "(blank — the start)"),
         FilterField::Until => date_field_value(&draft.filters.until, "(blank — now)"),
     }
@@ -2525,8 +3110,8 @@ const FILTER_DATE_KEYS: &str = "↑↓ row   enter calendar   esc back";
 /// one row per [`FilterField`], the cursor marked on whichever it is on, and
 /// a key line that names what `enter` does on the row the cursor is on.
 fn filter_panel(draft: &Draft) -> Vec<String> {
-    let mut body = Vec::with_capacity(FILTER_FIELDS.len() + 2);
-    for (i, field) in FILTER_FIELDS.iter().enumerate() {
+    let mut body = Vec::with_capacity(draft.fields.len() + 2);
+    for (i, field) in draft.fields.iter().enumerate() {
         let marker = if i == draft.field { ">" } else { " " };
         let label = filter_field_label(*field);
         let value = filter_field_value(draft, *field);
@@ -2534,11 +3119,13 @@ fn filter_panel(draft: &Draft) -> Vec<String> {
     }
     body.push(String::new());
     body.push("enter opens a calendar on since and until".to_string());
-    let keys = match FILTER_FIELDS[draft.field] {
+    let keys = match draft.fields[draft.field] {
         FilterField::Since | FilterField::Until => {
             pad_to(FILTER_DATE_KEYS, FILTER_APPLY_KEYS.chars().count())
         }
-        FilterField::Pipeline | FilterField::Step => FILTER_APPLY_KEYS.to_string(),
+        FilterField::Pipeline | FilterField::Step | FilterField::Dir | FilterField::Skill => {
+            FILTER_APPLY_KEYS.to_string()
+        }
     };
     panel("filters", &body, &keys)
 }
@@ -2746,6 +3333,7 @@ mod tests {
             outcome: outcome.map(str::to_string),
             run: None,
             trial: None,
+            dir: None,
             project: "demo".into(),
         }
     }
@@ -3247,6 +3835,125 @@ mod tests {
         assert!(line.contains("pass -100pp"), "{line:?}");
         assert!(line.contains("cost +$2.00"), "{line:?}");
     }
+
+    // -------------------------------------------------- dirs and sessions
+
+    /// A directory line, the way `usage::sweep`'s directory walk banks one:
+    /// no `task`, `step`, `pipeline`, `agent`, `outcome`, `run` or `version` —
+    /// see `Entry::dir`.
+    fn dir_line(dir: &str, session: &str, ts: &str, cost: f64) -> Entry {
+        Entry {
+            ts: ts.into(),
+            task: String::new(),
+            plan: None,
+            step: String::new(),
+            pipeline: String::new(),
+            agent: String::new(),
+            kind: "claude".into(),
+            model: "claude-opus-5".into(),
+            session: session.into(),
+            round: 0,
+            wall_s: 0,
+            turns: 1,
+            tokens: crate::usage::Tokens {
+                output: 10,
+                ..crate::usage::Tokens::default()
+            },
+            cost_usd: Some(cost),
+            ctx_peak: None,
+            version: None,
+            commit: None,
+            outcome: None,
+            run: None,
+            trial: None,
+            dir: Some(dir.into()),
+            project: "demo".into(),
+        }
+    }
+
+    /// A session the sweep caught across two passes is one row in `sessions`,
+    /// its cost the sum of what each pass banked — the same "one row, one
+    /// count" rule the task's own acceptance criteria state for `SESSIONS`.
+    #[test]
+    fn list_sessions_dedupes_a_session_the_sweep_banked_across_several_passes() {
+        let a = dir_line("proj", "s1", "2026-09-01T09:00:00+00:00", 0.10);
+        let b = dir_line("proj", "s1", "2026-09-01T09:05:00+00:00", 0.20);
+        let entries: Vec<&Entry> = vec![&a, &b];
+        let rows = list_sessions(&entries, &no_models(), &HashMap::new());
+        assert_eq!(rows.len(), 1, "one session, however many sweeps banked it");
+        assert!(
+            (rows[0].cost - 0.30).abs() < 1e-9,
+            "the deltas sum to the total"
+        );
+        assert_eq!(rows[0].lines, 2);
+    }
+
+    /// `SESSIONS` counts distinct session ids, not ledger rows.
+    #[test]
+    fn dir_rows_counts_distinct_sessions_not_ledger_rows() {
+        let a = dir_line("proj", "s1", "2026-09-01T09:00:00+00:00", 0.10);
+        let b = dir_line("proj", "s1", "2026-09-01T09:05:00+00:00", 0.20);
+        let c = dir_line("proj", "s2", "2026-09-02T09:00:00+00:00", 0.50);
+        let entries: Vec<&Entry> = vec![&a, &b, &c];
+        let rows = dir_rows(&entries, &no_models(), &HashMap::new());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].sessions, 2,
+            "s1 across two lines and s2 are two sessions, not three rows"
+        );
+        assert!((rows[0].cost - 0.80).abs() < 1e-9);
+    }
+
+    /// Two directories keep their own rows, newest activity leading — the
+    /// same "this morning's work heads the stack" rule `pipeline_blocks`
+    /// follows.
+    #[test]
+    fn dir_rows_orders_by_latest_activity() {
+        let old = dir_line("notes", "s1", "2026-09-01T09:00:00+00:00", 0.10);
+        let recent = dir_line("spoolway", "s2", "2026-09-10T09:00:00+00:00", 0.20);
+        let entries: Vec<&Entry> = vec![&old, &recent];
+        let rows = dir_rows(&entries, &no_models(), &HashMap::new());
+        assert_eq!(
+            rows.iter().map(|r| r.dir.as_str()).collect::<Vec<_>>(),
+            ["spoolway", "notes"]
+        );
+    }
+
+    /// Pinned to the task's own mockup, measured column by column: `SESSIONS`
+    /// at content column 20, `USD/SESSION` at 30, `CTX PEAK` at 43,
+    /// `TIME/SESSION` at 53 — one less than the mockup's own marker-relative
+    /// offsets (21, 31, 44, 54), since the marker `render_lines` prefixes
+    /// sits outside this string. `DIRS_DIR_MIN_WIDTH` is what makes it so.
+    #[test]
+    fn dirs_header_matches_the_mockups_own_column_offsets() {
+        let header = dirs_header_plain(DIRS_DIR_MIN_WIDTH);
+        assert_eq!(header.find("SESSIONS"), Some(20), "{header:?}");
+        assert_eq!(header.find("USD/SESSION"), Some(30), "{header:?}");
+        assert_eq!(header.find("CTX PEAK"), Some(43), "{header:?}");
+        assert_eq!(header.find("TIME/SESSION"), Some(53), "{header:?}");
+    }
+
+    /// The same pin for `sessions`, all content-relative (one less than the
+    /// mockup's own marker-inclusive offsets, exactly as `dirs`' own pin
+    /// above states it): `DIR` at 15, `MODEL` at 27, `USD` ending at 51 (a
+    /// 6-wide field), `CTX PEAK` at 53, `TIME` ending at 72 (a 9-wide field).
+    #[test]
+    fn sessions_header_matches_the_mockups_own_column_offsets() {
+        let header = sessions_header_plain(SESSIONS_DIR_MIN_WIDTH, SESSIONS_MODEL_MIN_WIDTH);
+        assert_eq!(header.find("DIR"), Some(15), "{header:?}");
+        assert_eq!(header.find("MODEL"), Some(27), "{header:?}");
+        assert_eq!(
+            header.find("USD").map(|i| i + "USD".len()),
+            Some(51),
+            "{header:?}"
+        );
+        assert_eq!(header.find("CTX PEAK"), Some(53), "{header:?}");
+        assert_eq!(
+            header.rfind("TIME").map(|i| i + "TIME".len()),
+            Some(72),
+            "{header:?}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -3283,6 +3990,7 @@ mod screen_tests {
             outcome: Some("pass".into()),
             run: None,
             trial: None,
+            dir: None,
             project: "demo".into(),
         }
     }
@@ -3325,6 +4033,7 @@ mod screen_tests {
                 outcome: outcome.map(str::to_string),
                 run: Some(format!("r-{task}")),
                 trial: None,
+                dir: None,
                 project: String::new(),
             },
         )
@@ -3359,6 +4068,8 @@ mod screen_tests {
         Filters {
             pipeline: None,
             step: None,
+            dir: None,
+            skill: None,
             since: String::new(),
             until: String::new(),
             scope: Scope::Mine,
@@ -3372,6 +4083,9 @@ mod screen_tests {
         Loaded {
             fallback: fallback_keys(&entries),
             entries,
+            dirs: Vec::new(),
+            skills_by_session: HashMap::new(),
+            spans_by_session: HashMap::new(),
             models: BTreeMap::new(),
             scope_label: "demo".to_string(),
         }
@@ -3426,6 +4140,7 @@ mod screen_tests {
                 outcome: None,
                 run: None,
                 trial: None,
+                dir: None,
                 project: String::new(),
             },
         )
@@ -3453,12 +4168,17 @@ mod screen_tests {
     /// builds on; pinned directly since `terminal_size` reads `None` in this
     /// harness and so never exercises `frame_rows`'s own subtraction.
     #[test]
-    fn frame_chrome_reserves_one_more_row_when_the_unpriced_note_will_be_drawn() {
-        assert_eq!(frame_chrome(false), 4);
+    fn frame_chrome_reserves_one_more_row_per_note_on_screen() {
+        assert_eq!(frame_chrome(0), 4);
         assert_eq!(
-            frame_chrome(true),
+            frame_chrome(1),
             5,
-            "the note takes a row of its own, on top of the usual chrome"
+            "one note takes a row of its own, on top of the usual chrome"
+        );
+        assert_eq!(
+            frame_chrome(2),
+            6,
+            "frame_chrome scales with however many notes draw() actually collects"
         );
     }
 
@@ -3495,7 +4215,7 @@ mod screen_tests {
             since: "2026-08-01".to_string(),
             ..no_filters()
         };
-        let label = filters_label(&loaded, &filters);
+        let label = filters_label(&loaded, &filters, View::Pipelines);
         assert_eq!(label, "demo · 2026-08-01 → now");
         assert!(!label.contains("limit"), "{label}");
     }
@@ -3684,6 +4404,33 @@ mod screen_tests {
         assert!(body.contains(",default,v1,2026-08-01,1,1,"));
     }
 
+    /// `e` on `dirs` and on `sessions` writes their own header, built from
+    /// their own columns — the same promise `export_writes_the_rows_on_
+    /// screen_to_dot_spoolway_evals` checks for `pipelines`.
+    #[test]
+    fn export_writes_dirs_and_sessions_with_their_own_header() {
+        let repo = fixture("export-dirs-and-sessions");
+        bank_dir(&repo, "2026-09-01T09:00:00+00:00", "spoolway", "s1", 0.70);
+        let filters = no_filters();
+        let loaded = load(&repo, &filters).unwrap();
+        let pipelines = Pipelines::builtin();
+
+        let (path, rows) = export(&repo, &loaded, &filters, &pipelines, View::Dirs).unwrap();
+        assert_eq!(rows, 1);
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            body.starts_with("dir,sessions,cost_usd,cost_per_session,"),
+            "{body}"
+        );
+        assert!(body.contains("spoolway,1,0.70,0.70,"), "{body}");
+
+        let (path, rows) = export(&repo, &loaded, &filters, &pipelines, View::Sessions).unwrap();
+        assert_eq!(rows, 1);
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.starts_with("when,dir,model,cost_usd,"), "{body}");
+        assert!(body.contains(",spoolway,claude-opus-5,0.70,"), "{body}");
+    }
+
     // --------------------------------------------------------- run_screen
 
     /// Bare, with an empty ledger: the screen says so rather than drawing an
@@ -3741,6 +4488,7 @@ mod screen_tests {
                 outcome: Some("pass".into()),
                 run: Some("r-a".into()),
                 trial: None,
+                dir: None,
                 project: String::new(),
             },
         )
@@ -3826,7 +4574,7 @@ mod screen_tests {
     #[test]
     fn the_filter_panel_draws_exactly_four_rows_with_no_chevrons_on_the_date_rows() {
         assert_eq!(
-            FILTER_FIELDS,
+            filter_fields(View::Pipelines),
             [
                 FilterField::Pipeline,
                 FilterField::Step,
@@ -3834,11 +4582,18 @@ mod screen_tests {
                 FilterField::Until,
             ]
         );
+        assert_eq!(
+            filter_fields(View::Dirs),
+            [
+                FilterField::Dir,
+                FilterField::Skill,
+                FilterField::Since,
+                FilterField::Until,
+            ],
+            "dirs and sessions swap in dir/skill for pipeline/step"
+        );
 
-        let draft = Draft {
-            field: 0,
-            filters: no_filters(),
-        };
+        let draft = Draft::new(View::Pipelines, no_filters());
         let panel = filter_panel(&draft).join("\n");
         for label in ["pipeline", "step", "since", "until"] {
             assert!(panel.contains(label), "{label}\n{panel}");
@@ -3861,12 +4616,10 @@ mod screen_tests {
     #[test]
     fn the_filter_panel_is_the_same_width_on_every_row() {
         let base = no_filters();
-        let widths: Vec<usize> = (0..FILTER_FIELDS.len())
+        let widths: Vec<usize> = (0..filter_fields(View::Pipelines).len())
             .map(|field| {
-                let draft = Draft {
-                    field,
-                    filters: base.clone(),
-                };
+                let mut draft = Draft::new(View::Pipelines, base.clone());
+                draft.field = field;
                 filter_panel(&draft)[0].chars().count()
             })
             .collect();
@@ -3978,6 +4731,131 @@ mod screen_tests {
     /// "at some point during the session".
     fn last_frame(text: &str) -> &str {
         text.rsplit("\x1b[2J\x1b[H").next().unwrap_or(text)
+    }
+
+    /// A directory line, written straight to `repo`'s own ledger — the same
+    /// shape `usage::sweep`'s directory walk banks, but skipping the walk
+    /// itself: these tests care what `dirs` and `sessions` do with a line
+    /// already on disk, not how it got there.
+    fn bank_dir(repo: &Repo, ts: &str, dir: &str, session: &str, cost: f64) {
+        crate::usage::append(
+            repo,
+            &Entry {
+                ts: ts.to_string(),
+                task: String::new(),
+                plan: None,
+                step: String::new(),
+                pipeline: String::new(),
+                agent: String::new(),
+                kind: "claude".to_string(),
+                model: "claude-opus-5".to_string(),
+                session: session.to_string(),
+                round: 0,
+                wall_s: 0,
+                turns: 1,
+                tokens: crate::usage::Tokens {
+                    output: 10,
+                    ..crate::usage::Tokens::default()
+                },
+                cost_usd: Some(cost),
+                ctx_peak: None,
+                version: None,
+                commit: None,
+                outcome: None,
+                run: None,
+                trial: None,
+                dir: Some(dir.to_string()),
+                project: String::new(),
+            },
+        )
+        .unwrap();
+    }
+
+    /// A `.claude/projects/<escaped>/<session>.jsonl` transcript under a
+    /// fresh scratch home, so `skill_markers` has something real to read —
+    /// the same shape `usage`'s own directory-sweep tests build.
+    fn claude_home_with(name: &str, session: &str, lines: &str) -> std::path::PathBuf {
+        let root = crate::scratch::root(&format!("eval-skill-{name}"));
+        let dir = root.join(".claude/projects/-nonsense-escaping-nobody-should-read");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{session}.jsonl")), lines).unwrap();
+        root
+    }
+
+    /// The task's own mockup, end to end: three tabs reach `dirs`, naming
+    /// every directory the ledger holds; opening the filter panel and
+    /// cycling `skill` to the one marker `s1`'s transcript holds keeps only
+    /// the session that ran it, and names the filter in the top border.
+    #[test]
+    fn tab_reaches_dirs_and_a_skill_filter_narrows_to_the_session_that_ran_it() {
+        let repo = fixture("screen-dirs-and-skill");
+        bank_dir(&repo, "2026-09-01T09:00:00+00:00", "spoolway", "s1", 0.70);
+        bank_dir(&repo, "2026-09-02T09:00:00+00:00", "notes", "s2", 0.18);
+
+        let home = claude_home_with(
+            "narrows",
+            "s1",
+            &format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "user",
+                    "timestamp": "2026-09-01T09:00:00.000Z",
+                    "message": {"role": "user", "content":
+                        "<command-name>/spoolway-plan</command-name>\n<command-args></command-args>"},
+                }),
+            ),
+        );
+
+        let text = crate::platform::test_home::with_home(&home, || screen(&repo, "\t\t\tq"));
+        let dirs_frame = last_frame(&text);
+        assert!(dirs_frame.contains("eval · dirs"), "{dirs_frame}");
+        assert!(dirs_frame.contains("SESSIONS"), "{dirs_frame}");
+        assert!(dirs_frame.contains("spoolway"), "{dirs_frame}");
+        assert!(dirs_frame.contains("notes"), "{dirs_frame}");
+
+        // `f`, down to `skill`, `→` to its one candidate, `enter` applies.
+        let text = crate::platform::test_home::with_home(&home, || {
+            screen(&repo, "\t\t\tf\x1b[B\x1b[C\rq")
+        });
+        let filtered = last_frame(&text);
+        // The mockup joins the skill filter to the view name, on the left of
+        // the top border — `eval · sessions · skill /spoolway-plan` — not to
+        // the scope and window on the right.
+        assert!(
+            filtered.contains("eval · dirs · skill /spoolway-plan "),
+            "the skill filter belongs beside the view name, not the scope\n{filtered}"
+        );
+        assert!(filtered.contains("spoolway"), "{filtered}");
+        assert!(
+            !filtered.contains("notes"),
+            "a session with no `<command-name>` marker of that skill drops out\n{filtered}"
+        );
+        assert!(
+            !filtered.contains("Whole sessions, not stretches"),
+            "the upper-bound note was dropped — see the task's own Status Log\n{filtered}"
+        );
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// `sessions` is the same population one row per session: `WHEN`,
+    /// `MODEL` and `TIME` all draw, and `tab` reaches it one step past
+    /// `dirs`.
+    #[test]
+    fn tab_reaches_sessions_with_its_own_columns() {
+        let repo = fixture("screen-sessions");
+        bank_dir(&repo, "2026-09-01T09:00:00+00:00", "spoolway", "s1", 0.70);
+
+        let text = screen(&repo, "\t\t\t\tq");
+        let sessions_frame = last_frame(&text);
+        assert!(
+            sessions_frame.contains("eval · sessions"),
+            "{sessions_frame}"
+        );
+        assert!(sessions_frame.contains("WHEN"), "{sessions_frame}");
+        assert!(sessions_frame.contains("MODEL"), "{sessions_frame}");
+        assert!(sessions_frame.contains("claude-opus-5"), "{sessions_frame}");
+        assert!(sessions_frame.contains("spoolway"), "{sessions_frame}");
     }
 
     /// Nothing on the date rows is typed into any more: a run of ordinary

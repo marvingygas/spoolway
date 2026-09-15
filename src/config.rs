@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use toml_edit::{DocumentMut, Item};
 
 /// Directory, relative to the repo root, holding the project's tracked
 /// control plane — config, pipelines, prompts, task templates — and marking
@@ -171,6 +172,9 @@ pub struct Config {
     #[allow(dead_code)]
     #[serde(default, skip_serializing)]
     prices: LegacyPrices,
+    /// Extra directories whose own agent sessions count beside this
+    /// project's lanes. See [`WatchConfig`] and [`Config::watch_roots`].
+    pub watch: WatchConfig,
     /// Where an old `[plans]` table lands so an existing config still
     /// parses. See [`LegacyPlans`]; the binary keeps no notion of a plan
     /// store any more — spoolway-plan writes its page wherever it is told
@@ -252,6 +256,7 @@ impl Default for Config {
             calibrate: LegacyCalibrate::default(),
             retention: LegacyRetention::default(),
             prices: LegacyPrices::default(),
+            watch: WatchConfig::default(),
             plans: LegacyPlans::default(),
             docs: LegacyDocs::default(),
             agents: AgentProfile::defaults(),
@@ -509,6 +514,20 @@ impl Default for LegacyPrices {
     fn default() -> Self {
         Self { max_age_days: 30 }
     }
+}
+
+/// [`Config::watch`]: directories, beside the repo root, whose own agent
+/// sessions should count as this project's spend. The project root itself is
+/// never named here; it is always in the resolved set — see
+/// [`Config::watch_roots`], which is also the only reader of this list so
+/// far. Nothing here reads a transcript.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WatchConfig {
+    /// Absolute, `~`-relative, or relative to the repo root. An entry
+    /// resolving to a directory that does not exist is dropped rather than
+    /// failing the whole config load — see [`Config::watch_roots`].
+    pub dirs: Vec<String>,
 }
 
 /// Tab 1 — the run loop itself.
@@ -1787,7 +1806,10 @@ impl Config {
     /// says the same things once, in the shape a person scanning the whole
     /// surface actually wants, and [`crate::confkv::REFERENCE`] is the one
     /// place that prose is written now: this table and the settings screen
-    /// both render from it.
+    /// both render from it. `watch.dirs` is the single carve-out —
+    /// [`annotate_watch_dirs`] stands its `REFERENCE` sentence above the key
+    /// too, because a bare `dirs = []` gives no hint on its own that an
+    /// entry may be `~`-relative or that the project root need not be named.
     ///
     /// It is **not** how one setting is written. `config set` goes through
     /// [`Config::save_key`], which edits the document in place, because a person
@@ -1795,6 +1817,7 @@ impl Config {
     /// them. See [`crate::confdoc`].
     pub fn render(&self) -> Result<String> {
         let rendered = toml::to_string_pretty(self).context("serialising config")?;
+        let rendered = annotate_watch_dirs(&rendered)?;
         Ok(format!("{}{rendered}", crate::confkv::reference_table()))
     }
 
@@ -1883,16 +1906,95 @@ impl Config {
             )
         })
     }
+
+    /// Every directory whose own agent sessions should count beside this
+    /// project's lanes: `repo_root`, always and first, followed by each
+    /// `watch.dirs` entry that resolves to a directory that still exists.
+    ///
+    /// An entry naming nothing that exists is dropped rather than failing —
+    /// a stale line in this list is a fact about the filesystem, not the
+    /// config, and is no reason to refuse a load. Every path is
+    /// canonicalised before it is compared, so a `dirs` entry naming the
+    /// repo root — by any spelling that resolves to it, symlinks included —
+    /// never appears twice.
+    ///
+    /// Nothing here reads a transcript; this only says which directories a
+    /// later reader should look in — [`crate::usage::sweep`]'s directory walk
+    /// is that reader.
+    pub fn watch_roots(&self, repo_root: &Path) -> Vec<PathBuf> {
+        let home = crate::platform::home_dir();
+        let mut roots = Vec::new();
+
+        let mut push = |path: &Path| {
+            let Ok(canon) = path.canonicalize() else {
+                return;
+            };
+            if canon.is_dir() && !roots.contains(&canon) {
+                roots.push(canon);
+            }
+        };
+
+        push(repo_root);
+        for raw in &self.watch.dirs {
+            push(&resolve_watch_dir(raw, home.as_deref(), repo_root));
+        }
+
+        roots
+    }
+}
+
+/// One `watch.dirs` entry, expanded against the home directory and the repo
+/// root — not yet checked for existence, which [`Config::watch_roots`] does
+/// once, after every entry has been resolved the same way.
+fn resolve_watch_dir(raw: &str, home: Option<&Path>, repo_root: &Path) -> PathBuf {
+    if let Some(rest) = raw.strip_prefix("~/") {
+        if let Some(home) = home {
+            return home.join(rest);
+        }
+    } else if raw == "~"
+        && let Some(home) = home
+    {
+        return home.to_path_buf();
+    }
+
+    let path = Path::new(raw);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        repo_root.join(path)
+    }
+}
+
+/// Stand `watch.dirs`'s own reference sentence directly above the key, the
+/// one field in a fresh render that gets this. Every other key's
+/// explanation lives only in the header table on top, but a bare
+/// `dirs = []` gives no hint that an entry may be `~`-relative or that the
+/// project root need not be named, and that is worth restating right where
+/// a person is about to edit it.
+fn annotate_watch_dirs(rendered: &str) -> Result<String> {
+    let mut doc: DocumentMut = rendered.parse().context("re-parsing rendered config")?;
+    let note = crate::confkv::note("watch.dirs").context("watch.dirs has no reference entry")?;
+    if let Some(mut key) = doc
+        .get_mut("watch")
+        .and_then(Item::as_table_mut)
+        .and_then(|table| table.key_mut("dirs"))
+    {
+        key.leaf_decor_mut().set_prefix(comment_block(note));
+    }
+    Ok(doc.to_string())
 }
 
 /// One note, as the comment lines that stand above its key.
 ///
 /// The single spelling of a note-as-comment: `config set` uses it in
 /// [`crate::confdoc`] when it adds a key the file never had, so that a key
-/// arriving alone still carries its one-sentence explanation. Everything
+/// arriving alone still carries its one-sentence explanation. Everywhere
 /// else about the surface — the reference table [`Config::render`] writes on
 /// top of a whole file — reads the same sentence straight out of
-/// [`crate::confkv::REFERENCE`] rather than through a comment at all.
+/// [`crate::confkv::REFERENCE`] rather than through a comment at all, with
+/// one exception: [`annotate_watch_dirs`] calls this too, to stand
+/// `watch.dirs`'s sentence above that one key on every render, not only
+/// when `config set` adds it.
 pub(crate) fn comment_block(note: &str) -> String {
     let mut out = String::new();
     for chunk in wrap(note, 74) {
@@ -2152,6 +2254,91 @@ mod tests {
         // The old table itself is gone from the rewritten file — it is not
         // simply carried forward alongside the new key.
         assert!(!saved.contains("[update]"));
+    }
+
+    #[test]
+    fn watch_dirs_parses_and_round_trips() {
+        let text = "[watch]\ndirs = [\"~/notes\"]\n";
+        let parsed: Config = toml::from_str(text).unwrap();
+        assert_eq!(parsed.watch.dirs, vec!["~/notes".to_string()]);
+
+        let rendered = parsed.render().unwrap();
+        let reparsed: Config = toml::from_str(&rendered).unwrap();
+        assert_eq!(reparsed.watch.dirs, parsed.watch.dirs);
+    }
+
+    /// The one key whose sentence is written twice: once in the header table
+    /// every key gets, and again right above `dirs` itself, in the same
+    /// wrapped voice [`comment_block`] gives every other note it writes.
+    #[test]
+    fn written_config_explains_watch_dirs_above_the_key_too() {
+        let rendered = Config::default().render().unwrap();
+        assert!(rendered.contains("watch.dirs"), "{rendered}");
+        assert!(
+            rendered.contains(
+                "# Directories whose own sessions are counted beside the lanes. The project\n\
+                 # root is always watched; these are extra. Absolute, or ~-relative.\n\
+                 dirs = []"
+            ),
+            "the comment above `dirs` does not match the reference sentence:\n{rendered}"
+        );
+
+        let parsed: Config = toml::from_str(&rendered).unwrap();
+        assert!(parsed.watch.dirs.is_empty());
+    }
+
+    /// An absent `[watch]` table is exactly the same as an empty `dirs`: no
+    /// existing config fails to load because of this key.
+    #[test]
+    fn an_absent_watch_table_loads_as_no_extra_dirs() {
+        let parsed: Config = toml::from_str("[dispatch]\ninterval = \"10s\"\n").unwrap();
+        assert!(parsed.watch.dirs.is_empty());
+    }
+
+    /// With no `dirs` at all, the resolved set is the project root alone.
+    #[test]
+    fn watch_roots_with_no_dirs_is_the_project_root_alone() {
+        let root = crate::scratch::root("watch-roots-alone");
+        std::fs::create_dir_all(&root).unwrap();
+        let config = Config::default();
+
+        let roots = config.watch_roots(&root);
+
+        assert_eq!(roots, vec![root.canonicalize().unwrap()]);
+    }
+
+    /// Every named form resolves: `~`-relative against the home directory,
+    /// relative against the repo root, and absolute as itself — and the
+    /// project root is never duplicated even though it is also named
+    /// explicitly, by a relative spelling that lands right back on it.
+    #[test]
+    fn watch_roots_resolves_every_form_and_drops_what_does_not_exist() {
+        let root = crate::scratch::root("watch-roots-forms");
+        let home = crate::scratch::root("watch-roots-home");
+        std::fs::create_dir_all(home.join("notes")).unwrap();
+        let absolute = crate::scratch::root("watch-roots-absolute");
+        std::fs::create_dir_all(&absolute).unwrap();
+        std::fs::create_dir_all(root.join("logs")).unwrap();
+
+        let mut config = Config::default();
+        config.watch.dirs = vec![
+            "~/notes".to_string(),
+            "logs".to_string(),
+            absolute.display().to_string(),
+            ".".to_string(),
+            "nowhere/at/all".to_string(),
+        ];
+
+        let roots = crate::platform::test_home::with_home(&home, || config.watch_roots(&root));
+
+        let expected: Vec<_> = [&root, &home.join("notes"), &root.join("logs"), &absolute]
+            .into_iter()
+            .map(|p| p.canonicalize().unwrap())
+            .collect();
+        assert_eq!(roots.len(), expected.len(), "{roots:?}");
+        for path in &expected {
+            assert!(roots.contains(path), "{path:?} missing from {roots:?}");
+        }
     }
 
     /// A setting that changes nothing at runtime is exactly the one people

@@ -373,8 +373,9 @@ spoolway eval
 
 <img src="docs/screenshots/eval.png" alt="the eval screen">
 
-*The eval screen on its runs view, one row per attempt at a task. `tab` cycles the three
-views: per pipeline, per step, and runs. `f` filters, `e` exports CSV.*
+*The eval screen on its runs view, one row per attempt at a task. `tab` cycles the views: per
+pipeline, per step, runs, per watched directory, and per session outside the lanes. `f` filters,
+`e` exports CSV.*
 
 ## Documentation
 
