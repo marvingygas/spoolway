@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 use crate::task::{self, Task};
@@ -53,24 +53,15 @@ impl Repo {
         let root = Repo::root(&start, main.as_deref())?;
         let checkout = checkout_of(&start, &root, main.as_deref());
         let config = Config::load(&root)?;
-        let home = crate::mux::project_home(&root)?;
-        // Refused here, once, rather than in every accessor that creates a
-        // directory under `home` on demand: a project nobody has run `init`
-        // in has no claim on `~/.spoolway/<name>/`, and a command that went
-        // on regardless would create that directory — queue, archive and
-        // all — for a checkout the name may not even belong to. `doctor`
-        // takes the same fact as a finding through `discover_lenient`, and a
-        // test fixture that sets `home` by hand never comes through here.
-        if !crate::commands::registered(&home) {
-            bail!(
-                "{} is not registered as a spoolway project: {} does not exist. Run \
-                 `spoolway init` in {} first, so that this checkout claims its state \
-                 directory before anything is written there.",
-                root.display(),
-                home.join(crate::commands::PROJECT_FILE).display(),
-                root.display(),
-            );
-        }
+        // Checked here, once, rather than in every accessor that creates a
+        // directory under a home on demand: `bind` is what decides which
+        // `~/.spoolway/<name>/` this checkout is allowed to write into,
+        // proceeding, recording a move, or refusing outright — see `bind`'s
+        // own doc for the seven states this settles between. `doctor` takes
+        // the same fact as a finding through `discover_lenient`'s
+        // `bind_lenient`, and a test fixture that sets `home` by hand never
+        // comes through here.
+        let home = bind(&root)?;
         Ok(Repo {
             root,
             checkout,
@@ -114,7 +105,7 @@ impl Repo {
         let main = main_checkout(&start);
         let root = Repo::root(&start, main.as_deref())?;
         let checkout = checkout_of(&start, &root, main.as_deref());
-        let (home, home_error) = crate::mux::project_home_lenient(&root);
+        let (home, home_error) = bind_lenient(&root);
         // `Config::load` resolves the overrides layer through
         // `crate::mux::project_home` — the same call `home_error` above
         // just failed — so calling it the ordinary way here would fail
@@ -195,7 +186,8 @@ impl Repo {
             // error about a question nobody asked.
             if let Some(pointer) = crate::mux::project_home(project)
                 .ok()
-                .and_then(|home| crate::commands::pointer_root(&home))
+                .and_then(|home| read_binding(&home).ok().flatten())
+                .map(|binding| binding.root)
                 && (pointer == project || pointer == top)
             {
                 bail!(
@@ -259,10 +251,15 @@ impl Repo {
     /// `lanes.json`, `usage.jsonl`, `dispatch.pid`, and the two scratch queue
     /// indexes.
     ///
-    /// Created silently — a fresh clone, or a home directory deleted by hand,
-    /// gets one back the moment anything is asked to resolve under it, rather
-    /// than failing or printing a note nobody asked for: an empty queue is the
-    /// honest answer for a machine that has run nothing yet.
+    /// Created silently the moment anything is asked to resolve under it —
+    /// a fresh clone nobody has bound to a home yet gets one, empty, rather
+    /// than failing or printing a note nobody asked for: an empty queue is
+    /// the honest answer for a machine that has run nothing yet. A home
+    /// deleted by hand out from under an *already bound* checkout is a
+    /// different case, caught earlier — `bind`, called from
+    /// [`Repo::discover`] before a `Repo` exists to call this on, refuses a
+    /// valid stamp with no home behind it rather than quietly recreating
+    /// one for a checkout something else may still be recording.
     ///
     /// Deliberately outside the checkout. `queue/` and `archive/` are this
     /// machine's in-flight work, not the project's tracked control plane —
@@ -756,13 +753,16 @@ const ID_ALPHABET: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
 ///
 /// `Ok(None)` only when `dir` has no git repository behind it at all: that
 /// is the one case [`crate::commands::init::init`] turns into a refusal
-/// rather than falling back to a basename-keyed home. This is
-/// [`commands::init::init`]'s call alone — every other reader of a
-/// project's identity goes through [`project_identity`], which only ever
-/// reads what this has already written, and mints nothing: a plain `git
-/// clone` carries no `.git/spoolway-id` of its own (it is not a tracked
-/// file), so a second clone stays unresolvable, not silently self-stamped,
-/// until someone actually runs `spoolway init` in it.
+/// rather than falling back to a basename-keyed home. Two callers reach
+/// this now — `init` itself, and [`bind_unstamped`], which mints the same
+/// way when a command finds a checkout that carries no stamp and nothing
+/// else records it (acceptance criterion 7 of the `binding-record` task).
+/// Every other reader of a project's identity goes through
+/// [`project_identity`], which only ever reads what this has already
+/// written, and mints nothing: a plain `git clone` carries no
+/// `.git/spoolway-id` of its own (it is not a tracked file), so a second
+/// clone stays unresolvable — refused by [`bind`] naming both files — until
+/// something actually mints it a stamp of its own.
 ///
 /// The `bool` is whether *this call* is the one that minted the id — read
 /// straight off [`read_or_mint`]'s own atomic result, not a separate
@@ -812,13 +812,17 @@ pub(crate) fn id_file_path(dir: &Path) -> Result<Option<PathBuf>> {
 /// Read-only, unlike [`stamped_id`]: `Ok(None)` both when `dir` has no git
 /// repository behind it, and when it does but nothing has stamped it yet —
 /// `project_home` falls back to `dir`'s own current basename either way,
-/// matching what every caller always got before this stamp existed. This is
-/// deliberate and load-bearing, not a shortcut: every reader that is not
-/// `spoolway init` itself — `Repo::discover`'s own "is this checkout
-/// registered under a different name" nicety included — must never *create*
-/// a stamp merely by asking about one, or running any ordinary command
-/// against an unrelated git repository would silently write into its
-/// `.git`.
+/// matching what every caller always got before this stamp existed. This
+/// function itself never *creates* a stamp merely by being asked about
+/// one — `Repo::root`'s own "is this checkout registered under a different
+/// name" nicety, `usage::registry` and every other plain lookup all read
+/// through here (or through [`crate::mux::project_home`], which calls it)
+/// and mint nothing, so running any of them against an unrelated git
+/// repository never silently writes into its `.git`. `Repo::discover` is
+/// the one deliberate exception: it goes through [`bind`] instead, which
+/// mints a stamp on purpose for a checkout carrying no id and nothing
+/// recording it (acceptance criterion 7 of `binding-record`) — a choice
+/// `bind` makes explicitly, never a side effect of calling this.
 pub fn project_identity(dir: &Path) -> Result<Option<(PathBuf, String, String)>> {
     let Some(common) = common_git_dir(dir)? else {
         return Ok(None);
@@ -836,6 +840,547 @@ pub fn project_identity(dir: &Path) -> Result<Option<(PathBuf, String, String)>>
     Ok(Some((checkout, label, id)))
 }
 
+/// The file a project's home holds recording which checkout it belongs to,
+/// and which id that checkout was carrying the last time the two were
+/// checked against each other — see [`bind`].
+pub(crate) const BINDING_FILE: &str = "project.toml";
+
+/// What a home's `project.toml` says: the id its checkout was stamped with,
+/// and the checkout itself. The two files that must agree — the checkout's
+/// own `.git/spoolway-id` and this — are read and reconciled together only
+/// by [`bind`]; nothing else ever writes this file except `spoolway init
+/// --adopt`/`--new-id`, by a person's own request.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct Binding {
+    id: String,
+    root: PathBuf,
+}
+
+/// The binding recorded at `home`, if there is one readable. `Ok(None)` only
+/// for "nothing written there yet" (a missing file); a file that exists but
+/// will not parse is a real error, never silently treated the same as no
+/// record at all — that distinction is exactly what tells acceptance
+/// criterion 4 (no record) apart from a corrupted one, which this project
+/// leaves for a person to look at rather than guessing past.
+fn read_binding(home: &Path) -> Result<Option<Binding>> {
+    let path = home.join(BINDING_FILE);
+    match std::fs::read_to_string(&path) {
+        Ok(raw) => {
+            let binding: Binding =
+                toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
+            Ok(Some(binding))
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err).with_context(|| format!("reading {}", path.display())),
+    }
+}
+
+/// The id and root `home`'s own `project.toml` records, for a caller
+/// outside this module that wants to say more than just "this home
+/// exists". Two callers: `doctor`'s own binding check, and
+/// `usage::registry::list`, which trusts this over its own last-registered
+/// guess whenever a home has a real record — see that module's doc for
+/// why. `None` collapses two different facts for both of them: no record
+/// at all, and one that exists but will not parse. Neither caller treats
+/// that as an error worth surfacing on its own — `doctor` reads its own
+/// `home_error` for the distinction instead, and `registry::list` simply
+/// falls back to its last-registered root — so a corrupt `project.toml`
+/// reads the same as an absent one here rather than failing either
+/// caller's own read. This is only ever asked about a home `bind` has
+/// already settled on, or one `registry` once registered a root under.
+pub(crate) fn binding_at(home: &Path) -> Option<(String, PathBuf)> {
+    read_binding(home).ok().flatten().map(|b| (b.id, b.root))
+}
+
+/// Write `binding` to `home`'s `project.toml`, whole — the atomic write
+/// `spoolway init`'s old pointer file already used, reused here since this
+/// replaces it. The one place either a fresh binding or a moved one
+/// (acceptance criteria 2 and 7) is written outside a person's own
+/// `--adopt`/`--new-id`.
+fn write_binding(home: &Path, binding: &Binding) -> Result<()> {
+    std::fs::create_dir_all(home).with_context(|| format!("creating {}", home.display()))?;
+    let body = format!(
+        "# Which checkout this directory holds the state of, and the id its\n\
+         # `.git` is stamped with. Checked against each other on every\n\
+         # command — see the `binding-record` task. Updated on its own only\n\
+         # to record a checkout that moved (the one it named is gone, or no\n\
+         # longer carries this id); replaced outright only by a person\n\
+         # running `spoolway init --adopt`/`--new-id` by hand.\n{}",
+        toml::to_string_pretty(binding).context("serialising project.toml")?
+    );
+    crate::task::write_atomic(&home.join(BINDING_FILE), body)
+}
+
+/// How a checkout's own stamp read, for [`bind`] to react to each
+/// differently. [`peek`] alone collapses "missing" and "wrong format" into
+/// one `None`, which is right for [`project_identity`]'s silent basename
+/// fallback but wrong here: a wrong-format stamp is a fact worth its own
+/// refusal (acceptance criterion 5), not read the same as nothing stamped
+/// at all.
+enum Stamp {
+    None,
+    Invalid(String),
+    Valid(String),
+}
+
+/// Read `root`'s own stamp file directly, telling the three [`Stamp`]
+/// outcomes apart rather than collapsing two of them into `None` the way
+/// [`peek`] does.
+fn read_stamp(root: &Path) -> Result<Stamp> {
+    let Some(common) = common_git_dir(root)? else {
+        return Ok(Stamp::None);
+    };
+    match std::fs::read_to_string(common.join(ID_FILE)) {
+        Ok(raw) => {
+            let trimmed = raw.trim().to_string();
+            if is_valid_id(&trimmed) {
+                Ok(Stamp::Valid(trimmed))
+            } else {
+                Ok(Stamp::Invalid(trimmed))
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Stamp::None),
+        Err(err) => Err(err).with_context(|| format!("reading {}", common.join(ID_FILE).display())),
+    }
+}
+
+/// Check `root`'s own stamp against its home's record of it, settling
+/// whatever can be settled on its own and refusing what cannot — the seven
+/// states the `binding-record` task defines, and the one place a home's
+/// `project.toml` is written short of a person asking for it by name with
+/// `spoolway init --adopt`/`--new-id`. Called from [`Repo::discover`] on
+/// every command, not only `init`.
+///
+/// `root` is already canonicalized, as every caller's is.
+pub(crate) fn bind(root: &Path) -> Result<PathBuf> {
+    match read_stamp(root)? {
+        Stamp::Invalid(raw) => {
+            // `read_stamp` already found the file, so the common git
+            // directory — and therefore this path — resolves; the `expect`
+            // only documents that, it never actually has to recover from
+            // anything.
+            let stamp_path = id_file_path(root)?.expect("a stamp was just read from this path");
+            // The second file a malformed id cannot be used to build: an
+            // invalid id is exactly what must never reach a path joined
+            // onto `state_root()`, so this looks the other way round
+            // instead — by `root`, not by `raw` — the same scan
+            // [`home_recording`] does for criterion 6. When nothing under
+            // `~/.spoolway/` records this checkout by path either, there is
+            // no *real* second file to name — but the criterion still
+            // wants an absolute path, not only prose, so this names the
+            // one place a project.toml for this exact checkout would sit
+            // absent any stamp at all: the plain-basename home
+            // `crate::mux::project_home` already falls back to whenever
+            // nothing else settles it, built from `root`'s own basename,
+            // never from the untrusted `raw` id.
+            let record_line = match home_recording(root) {
+                Some(home) => home.join(BINDING_FILE).display().to_string(),
+                None => {
+                    let fallback = crate::mux::state_root()
+                        .join(crate::mux::project_label(root))
+                        .join(BINDING_FILE);
+                    format!(
+                        "{} (does not exist — nothing records this checkout)",
+                        fallback.display()
+                    )
+                }
+            };
+            bail!(
+                "{} does not hold a usable id: {raw:?} is not six lowercase letters and \
+                 digits\n  {}\n  fix it by hand, or run `spoolway init --new-id` in {} to \
+                 mint a fresh one",
+                stamp_path.display(),
+                record_line,
+                root.display(),
+            );
+        }
+        Stamp::Valid(id) => bind_stamped(root, &id),
+        Stamp::None => bind_unstamped(root),
+    }
+}
+
+/// [`bind`], tolerant of its own failure — the one caller allowed to be:
+/// [`Repo::discover_lenient`], for the same reason
+/// [`crate::mux::project_home_lenient`] exists. Falls back to that same
+/// basename-keyed guess for `home` on failure, paired with the real error
+/// — never silently, the way an ordinary caller of [`bind`] would be.
+fn bind_lenient(root: &Path) -> (PathBuf, Option<anyhow::Error>) {
+    match bind(root) {
+        Ok(home) => (home, None),
+        Err(err) => {
+            let (home, _) = crate::mux::project_home_lenient(root);
+            (home, Some(err))
+        }
+    }
+}
+
+/// `bind`'s branch for a checkout carrying a valid stamp — acceptance
+/// criteria 1 through 4.
+fn bind_stamped(root: &Path, id: &str) -> Result<PathBuf> {
+    let home = crate::mux::project_home(root)?;
+    let record_path = home.join(BINDING_FILE);
+    // Already known to exist and parse: `read_stamp` just read it.
+    let stamp_path = id_file_path(root)?.expect("a valid stamp was just read");
+
+    let Some(binding) = read_binding(&home)? else {
+        // Criterion 4: a valid stamp, but no home records it at all —
+        // either the directory itself is gone, or it exists but nobody
+        // has ever bound a checkout to it. `--adopt {id}` is not offered
+        // here: nothing under `~/.spoolway/` carries this id by
+        // definition, so naming it back would send a person straight into
+        // the same refusal a second time.
+        bail!(
+            "no home holds the id {id}\n  {}  {id}\n  nothing under {} records it\n  \
+             if a home under {} already holds this project's state under a different \
+             name, run `spoolway init --adopt <name>` naming it\n  \
+             `spoolway init --new-id` mints this checkout a fresh id and a fresh home \
+             instead",
+            stamp_path.display(),
+            record_path.display(),
+            crate::mux::state_root().display(),
+        );
+    };
+
+    if binding.root == root && binding.id == id {
+        // Criterion 1: both files already agree. Nothing to do.
+        return Ok(home);
+    }
+
+    if binding.root == root {
+        // The record names this exact checkout, but a different id than
+        // the stamp does — the stamp was edited by hand after the record
+        // was written, or vice versa. Neither file is more likely right
+        // than the other, so this refuses rather than silently trusting
+        // one over the other.
+        bail!(
+            "{} and {} disagree about this checkout's id: the stamp says {id}, the record \
+             says {}\n  `spoolway init --new-id` mints a fresh id both files will agree on",
+            stamp_path.display(),
+            record_path.display(),
+            binding.id,
+        );
+    }
+
+    // The record names a different checkout entirely. Whether that
+    // checkout is still the rightful owner turns on whether it still
+    // exists *and* still carries this same id — both have to hold for the
+    // two to genuinely be in conflict (criterion 3); either one failing
+    // means the record is simply stale (criterion 2), and this checkout
+    // may take it over rather than being refused over a claim nothing can
+    // still make. A real failure reading the other checkout's own stamp —
+    // a permissions problem, a corrupt repository — is neither of those:
+    // it is refused outright rather than read as "no longer carries the
+    // id" and silently taken as licence to transfer the binding.
+    let other_stamp = if binding.root.exists() {
+        Some(read_stamp(&binding.root))
+    } else {
+        None
+    };
+    match other_stamp {
+        Some(Ok(Stamp::Valid(other))) if other == id => bail!(
+            "two checkouts carry the id {id}\n  {}  recorded in {}, and still carries it\n  \
+             {}  this one, stamped at {}\n  re-stamp this one with `spoolway init --new-id`",
+            binding.root.display(),
+            record_path.display(),
+            root.display(),
+            stamp_path.display(),
+        ),
+        Some(Err(err)) => {
+            return Err(err).with_context(|| {
+                format!(
+                    "could not tell whether {} still carries the id {id} recorded in {} — \
+                     refusing rather than guessing which checkout this binding belongs to. \
+                     Fix whatever stopped that checkout's own stamp from being read (often a \
+                     permissions problem) and run this again, or run `spoolway init --new-id` \
+                     in {} to stop depending on the answer at all.",
+                    binding.root.display(),
+                    record_path.display(),
+                    root.display(),
+                )
+            });
+        }
+        // The checkout on record is gone, or its own stamp read fine but
+        // no longer names this id — either way nothing there can still be
+        // telling the truth, so criterion 2 follows below.
+        _ => {}
+    }
+
+    write_binding(
+        &home,
+        &Binding {
+            id: id.to_string(),
+            root: root.to_path_buf(),
+        },
+    )?;
+    println!(
+        "spoolway: {} now records {} (was {})",
+        record_path.display(),
+        root.display(),
+        binding.root.display(),
+    );
+    Ok(home)
+}
+
+/// The home under `~/.spoolway/` whose `project.toml` already names `root`
+/// as its checkout, if any. The one way an unstamped checkout can be told
+/// apart from one nothing has ever recorded at all (criteria 6 and 7):
+/// without a stamp there is no id to look a home up by directly, so this
+/// scans every home's own record for one instead.
+fn home_recording(root: &Path) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(crate::mux::state_root()).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if let Ok(Some(binding)) = read_binding(&path)
+            && binding.root == root
+        {
+            return Some(path);
+        }
+    }
+    None
+}
+
+/// `bind`'s branch for a checkout carrying no stamp at all — acceptance
+/// criteria 6 and 7.
+fn bind_unstamped(root: &Path) -> Result<PathBuf> {
+    if let Some(home) = home_recording(root) {
+        // Criterion 6: some home already names this exact checkout, but the
+        // checkout itself carries no id to confirm it with — the stamp was
+        // deleted or never made it into this clone. Refused rather than
+        // silently re-stamped: writing a fresh id here would leave that
+        // home's record pointing at an id nothing on disk carries any more.
+        // `home` is already known by name, so `--adopt` is offered naming
+        // exactly it, not a placeholder — the one refusal that can.
+        let home_name = home
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| home.display().to_string());
+        bail!(
+            "{} has no id, but {} already records this checkout\n  \
+             restore the stamp from the id in that file, or run \
+             `spoolway init --adopt {home_name}` to re-stamp this checkout with it",
+            common_git_dir(root)?
+                .map(|dir| dir.join(ID_FILE).display().to_string())
+                .unwrap_or_else(|| root.display().to_string()),
+            home.join(BINDING_FILE).display(),
+        );
+    }
+
+    // Criterion 7: nothing records this checkout anywhere, and it carries
+    // no stamp of its own — there is nothing to guess, so it binds itself,
+    // the same mint `spoolway init` has always done, just no longer gated
+    // on someone having run `init` first.
+    let Some((id, _minted)) = stamped_id(root)? else {
+        bail!(
+            "{} has no git repository behind it — spoolway keys a project's home off an id \
+             stamped into its own `.git`, so there is nowhere to write one. Run `git init` \
+             here first.",
+            root.display()
+        );
+    };
+    let home = crate::mux::project_home(root)?;
+    write_binding(
+        &home,
+        &Binding {
+            id,
+            root: root.to_path_buf(),
+        },
+    )?;
+    Ok(home)
+}
+
+/// Overwrite `root`'s own stamp with `id`, whatever it already held —
+/// [`read_or_mint`]'s idempotent read is exactly what [`adopt`] and
+/// [`restamp`] must not get, since both exist to force a disagreement
+/// straight rather than read back whatever was already there.
+///
+/// `label`, unlike `id`, is `None` for [`restamp`]: a fresh id does not
+/// mean a fresh name, so the checkout's own label is left alone once it
+/// exists (frozen at a checkout's first stamp by design, see
+/// [`stamped_id`]), and only written at all for one stamped for the very
+/// first time, which needs one for [`crate::mux::project_home`] to key
+/// off. [`adopt`] passes `Some`, forcing the label to match — the home
+/// being adopted may carry a different one than this checkout's own
+/// basename, and [`crate::mux::project_home`] has to key off *that* label
+/// afterwards or a checkout adopting `api-8w4r2c` while its own current
+/// basename is `fresh` would resolve straight back to `fresh-8w4r2c`, a
+/// home nothing wrote, the moment anything asks again.
+fn stamp_over(root: &Path, id: &str, label: Option<&str>) -> Result<()> {
+    let common = common_git_dir(root)?.with_context(|| {
+        format!(
+            "{} has no git repository behind it — spoolway keys a project's home off an id \
+             stamped into its own `.git`.",
+            root.display()
+        )
+    })?;
+    crate::task::write_atomic(&common.join(ID_FILE), id)?;
+    match label {
+        Some(label) => {
+            crate::task::write_atomic(&common.join(LABEL_FILE), label)?;
+        }
+        None if peek(&common.join(LABEL_FILE), is_valid_label)?.is_none() => {
+            crate::task::write_atomic(
+                &common.join(LABEL_FILE),
+                sanitize_label(&crate::mux::project_label(root)),
+            )?;
+        }
+        None => {}
+    }
+    Ok(())
+}
+
+/// `spoolway init --adopt <name>`: bind `root` to the home already at
+/// `~/.spoolway/<name>/`, overwriting the checkout's own stamp and that
+/// home's own record to match — the one way two disagreeing files are made
+/// to agree on a person's own say-so rather than [`bind`]'s own judgement,
+/// which never does more than record a move or refuse (see the
+/// `binding-record` task's non-goals). `name` is the home's own directory
+/// name, `<label>-<id>` — the mockup's own `spoolway init --adopt
+/// api-8w4r2c`, not the bare id alone: a bare id can be handed straight to
+/// [`is_valid_id`] and joined without a lookup, but a home a person is
+/// pointing at by name may have been renamed by hand, or may be a home
+/// this checkout has never carried a matching id for at all — the very
+/// case `--adopt` exists for.
+///
+/// `name` is validated as an ordinary, single path component before
+/// anything is built from it: a separator, a `..`, or a character outside
+/// what a directory name can hold must never reach a path joined onto
+/// `state_root()`.
+pub(crate) fn adopt(root: &Path, name: &str) -> Result<PathBuf> {
+    if !crate::tracking::is_bare_filename(name) {
+        bail!(
+            "`{name}` is not a plain directory name, so it cannot name a home under {} — an \
+             id can never carry a path separator or a `..`. Run `spoolway init --adopt <name>` \
+             again with the home's own directory name, exactly as `ls {}` lists it.",
+            crate::mux::state_root().display(),
+            crate::mux::state_root().display(),
+        );
+    }
+    let home = crate::mux::state_root().join(name);
+    if !home.is_dir() {
+        bail!(
+            "no home named {name} exists under {} — check `ls {}` for the name actually there, \
+             or run `spoolway init --new-id` to bind this checkout to a fresh home instead of \
+             adopting an existing one.",
+            crate::mux::state_root().display(),
+            crate::mux::state_root().display(),
+        );
+    }
+    // `name` is `<label>-<id>` by construction — every home this project
+    // ever wrote is named that way — so splitting on the last `-` recovers
+    // both halves regardless of which one ends up actually used below.
+    let (name_label, name_id) = match name.rsplit_once('-') {
+        Some((label, id)) => (label, Some(id)),
+        None => (name, None),
+    };
+    // `name` passing `is_bare_filename` only proves the whole string is one
+    // plain path component — splitting it on its last `-` can still strand
+    // a label half that is not, such as the empty label `-abc123` splits
+    // into. `stamp_over` writes `name_label` into `spoolway-label`
+    // unchecked, and `project_home` joins it straight onto `state_root()`,
+    // so an unusable label here would only surface the next time this
+    // checkout is resolved — refuse it now, before anything is written.
+    if !is_valid_label(name_label) {
+        bail!(
+            "{name} is not a usable home name — splitting it on its last `-` leaves the label \
+             {name_label:?}, which is not a plain directory name, so re-running `spoolway init \
+             --adopt {name}` cannot succeed. Rename {} to a `<label>-<id>` name with a real \
+             label before adopting it, or run `spoolway init --new-id` in this checkout \
+             instead to bind a fresh home rather than adopting this one.",
+            home.display(),
+        );
+    }
+    // The id this home is keyed on: read back from its own record when it
+    // has one — the only place a home's id is written down apart from its
+    // own directory name — and otherwise trust the name's own suffix, for
+    // a home that has a directory but no `project.toml` of its own yet.
+    // Either way, validated before it is stamped anywhere: a hand-edited
+    // record is exactly what must not silently mint a checkout an
+    // unusable or disagreeing id.
+    let record_path = home.join(BINDING_FILE);
+    let id = match read_binding(&home)? {
+        Some(binding) => {
+            if !is_valid_id(&binding.id) {
+                bail!(
+                    "{} carries an id that is not six lowercase letters and digits: {:?} — \
+                     fix it by hand, or run `spoolway init --new-id` in {} to mint this \
+                     checkout a fresh id and a fresh home instead of adopting this one.",
+                    record_path.display(),
+                    binding.id,
+                    root.display(),
+                );
+            }
+            if let Some(name_id) = name_id
+                && name_id != binding.id
+            {
+                bail!(
+                    "{} is named for the id {name_id}, but {} records the id {} — fix one to \
+                     match the other by hand before adopting it, or run `spoolway init \
+                     --new-id` in {} to sidestep both.",
+                    home.display(),
+                    record_path.display(),
+                    binding.id,
+                    root.display(),
+                );
+            }
+            binding.id
+        }
+        None => {
+            let Some(name_id) = name_id else {
+                bail!(
+                    "{} carries no {} of its own, and its name has no `-<id>` suffix either, \
+                     so there is no id to stamp this checkout with — run `spoolway init \
+                     --new-id` in {} instead to mint one from scratch.",
+                    home.display(),
+                    record_path.display(),
+                    root.display(),
+                );
+            };
+            if !is_valid_id(name_id) {
+                bail!(
+                    "{} carries no {} of its own, and its name's own id, {name_id:?}, is not \
+                     six lowercase letters and digits — fix the name by hand, write a valid \
+                     {} yourself, or run `spoolway init --new-id` in {} instead.",
+                    home.display(),
+                    record_path.display(),
+                    record_path.display(),
+                    root.display(),
+                );
+            }
+            name_id.to_string()
+        }
+    };
+    stamp_over(root, &id, Some(name_label))?;
+    write_binding(
+        &home,
+        &Binding {
+            id,
+            root: root.to_path_buf(),
+        },
+    )?;
+    Ok(home)
+}
+
+/// `spoolway init --new-id`: mint `root` a fresh id it has never carried
+/// before, and bind it to the fresh home that id keys — the other of the
+/// two ways a person forces a disagreement straight, for the checkout that
+/// would rather stop sharing an id than fight over who it belongs to.
+pub(crate) fn restamp(root: &Path) -> Result<PathBuf> {
+    let id = generate_id();
+    stamp_over(root, &id, None)?;
+    let home = crate::mux::project_home(root)?;
+    write_binding(
+        &home,
+        &Binding {
+            id,
+            root: root.to_path_buf(),
+        },
+    )?;
+    Ok(home)
+}
+
 /// Read the value at `path` if it is there and valid — never minting,
 /// unlike [`read_or_mint`]. `Ok(None)` for "nothing usable there", whether
 /// that is because the file is missing or because its content fails
@@ -851,7 +1396,16 @@ fn peek(path: &Path, valid: impl Fn(&str) -> bool) -> Result<Option<String>> {
     }
 }
 
-fn is_valid_id(candidate: &str) -> bool {
+/// Whether `candidate` is a usable id: exactly [`ID_LEN`] lowercase
+/// letters-and-digits. `pub(crate)` for [`adopt`], which parses one back
+/// out of a home directory's own `<label>-<id>` suffix rather than trust
+/// it blind — the id-shaped alphabet this checks against is itself what
+/// keeps a parsed suffix from ever being able to escape `~/.spoolway/`
+/// (the acceptance criterion this alphabet exists to satisfy); `adopt`'s
+/// own escape guard on the *name* it is actually handed is
+/// [`crate::tracking::is_bare_filename`], a separate, wider check, since a
+/// home's directory name is not required to end in a valid id at all.
+pub(crate) fn is_valid_id(candidate: &str) -> bool {
     candidate.len() == ID_LEN
         && candidate
             .bytes()
@@ -1144,22 +1698,21 @@ mod tests {
         home.canonicalize().unwrap()
     }
 
-    /// `Repo::discover`, on a checkout `spoolway init` has claimed under a
-    /// scratch home of its own — the one registration discovery insists on,
-    /// written the way `init` writes it, and never into the real
-    /// `~/.spoolway/`.
+    /// `Repo::discover`, under a scratch home of its own — never the real
+    /// `~/.spoolway/`. Binding is automatic now (`Repo::discover` calls
+    /// `bind` itself, criterion 7: nothing recorded, no stamp, binds on its
+    /// own), so there is nothing left to claim first.
     fn discover_registered(work: &Path) -> Result<Repo> {
         discover_registered_as(work, work)
     }
 
-    /// The same, started from `start` — a linked worktree of `project`, in
-    /// the tests that need one — with `project` being what `init` claimed.
-    fn discover_registered_as(project: &Path, start: &Path) -> Result<Repo> {
+    /// The same, started from `start` — a linked worktree of `_project`, in
+    /// the tests that need one. `_project` is unused now that binding is
+    /// automatic; kept as a parameter so every call site naming the project
+    /// a worktree belongs to still reads that way.
+    fn discover_registered_as(_project: &Path, start: &Path) -> Result<Repo> {
         let home = scratch_home("registered");
-        crate::platform::test_home::with_home(&home, || {
-            crate::commands::claim(project, false).unwrap();
-            Repo::discover(start)
-        })
+        crate::platform::test_home::with_home(&home, || Repo::discover(start))
     }
 
     /// A bare "origin", a checkout wired to it, and spoolway state in the
@@ -1406,7 +1959,6 @@ mod tests {
 
         let home = scratch_home("unparsable");
         let (strict, lenient) = crate::platform::test_home::with_home(&home, || {
-            crate::commands::claim(&work, false).unwrap();
             (Repo::discover(&work), Repo::discover_lenient(&work))
         });
         assert!(strict.is_err(), "every other command dies");
@@ -1700,53 +2252,369 @@ mod tests {
         );
     }
 
-    /// The registration `init` writes is what every other command insists
-    /// on: a `.spoolway/` in the checkout is not enough, because every
-    /// accessor under `Repo` creates its home on demand, and a home nobody
-    /// claimed is how `~/.spoolway/<name>/` was conjured up for the wrong
-    /// checkout. `doctor` still gets a `Repo` to report the fact with.
+    /// A project nobody has ever bound is not refused any more — the
+    /// registration guard `claim`/`registered` used to insist on is gone,
+    /// and this is acceptance criterion 7 of `binding-record`: nothing
+    /// records this checkout anywhere, it carries no stamp, so it binds
+    /// itself and proceeds.
     #[test]
-    fn discovery_refuses_a_project_init_never_registered() {
-        let (_origin, work) = fixture("unregistered");
-        let home = scratch_home("unregistered");
+    fn discovery_binds_a_project_nobody_has_bound_before() {
+        let (_origin, work) = fixture("unbound");
+        let home = scratch_home("unbound");
 
-        let (strict, lenient) = crate::platform::test_home::with_home(&home, || {
-            (Repo::discover(&work), Repo::discover_lenient(&work))
-        });
-        let err = strict.expect_err("a project nobody ran `init` in is refused");
-        let said = format!("{err:#}");
-        assert!(
-            said.contains("not registered") && said.contains("`spoolway init` in"),
-            "the error says what to do: {said}"
-        );
-        assert!(
-            !home.join(crate::config::STATE_DIR).exists(),
-            "refusing must not create the very directory it refuses to claim"
-        );
-
-        let (repo, config_error, home_error) = lenient.unwrap();
-        assert!(config_error.is_none());
-        assert!(home_error.is_none());
+        let repo = crate::platform::test_home::with_home(&home, || Repo::discover(&work))
+            .expect("a project with no home yet binds itself and proceeds");
         assert_eq!(
             repo.root.canonicalize().unwrap(),
             work.canonicalize().unwrap()
         );
         assert!(
-            !crate::commands::registered(&repo.home),
-            "doctor's own Repo carries the unregistered home, to report on"
+            repo.home.join(crate::repo::BINDING_FILE).is_file(),
+            "the fresh binding is on disk"
+        );
+        assert!(
+            std::fs::read_to_string(work.join(".git").join("spoolway-id")).is_ok(),
+            "the checkout was stamped as part of binding itself"
         );
     }
 
+    /// A plain git checkout, no `.spoolway/` and no commit needed — `bind`
+    /// only ever reads and writes its own stamp and its home's record, so
+    /// the lighter fixture the seven-state tests below share is enough.
+    fn bind_fixture(name: &str) -> PathBuf {
+        let root = crate::scratch::root(&format!("bind-{name}"));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        crate::scratch::git_init(&root, &["-b", "plan/demo"]);
+        root
+    }
+
+    /// Criterion 1: a valid stamp whose home already records this exact
+    /// checkout proceeds, unchanged — the second of two calls changes
+    /// nothing on disk.
+    #[test]
+    fn bind_criterion_1_an_already_correct_binding_proceeds_unchanged() {
+        let work = bind_fixture("criterion-1");
+        let home = scratch_home("criterion-1");
+        crate::platform::test_home::with_home(&home, || {
+            let first = bind(&work).unwrap();
+            let record_before = std::fs::read_to_string(first.join(BINDING_FILE)).unwrap();
+            let second = bind(&work).unwrap();
+            assert_eq!(first, second);
+            assert_eq!(
+                std::fs::read_to_string(second.join(BINDING_FILE)).unwrap(),
+                record_before,
+                "an already-correct binding must not be rewritten"
+            );
+        });
+    }
+
+    /// Criterion 1's other half: the record naming this exact checkout is
+    /// not enough on its own — the id it recorded has to agree with the
+    /// stamp too, or a hand-edited stamp (or a hand-edited record) would
+    /// proceed silently on a disagreement between the two files that must
+    /// agree, exactly the failure the Goal names by name.
+    #[test]
+    fn bind_criterion_1_a_matching_root_but_a_disagreeing_id_refuses() {
+        let work = bind_fixture("criterion-1b");
+        let home = scratch_home("criterion-1b");
+        let err = crate::platform::test_home::with_home(&home, || {
+            let bound_home = bind(&work).unwrap();
+            // The home's own directory name (and so the checkout's real
+            // stamp) never changes here — only the `id` field inside
+            // `project.toml`, hand-edited to something else. That is the
+            // one way `binding.root == root` and `binding.id != id` can
+            // happen at all: a home's directory is always named after the
+            // id any *freshly written* record there carries, so only a
+            // record tampered with after the fact can disagree with it.
+            write_binding(
+                &bound_home,
+                &Binding {
+                    id: "zzzzzz".to_string(),
+                    root: work.canonicalize().unwrap(),
+                },
+            )
+            .unwrap();
+            bind(&work)
+        })
+        .expect_err("a root match with a disagreeing id must not proceed silently");
+        let said = format!("{err:#}");
+        assert!(said.contains("disagree about this checkout's id"), "{said}");
+        assert!(said.contains(".git"), "names the stamp file: {said}");
+        assert!(
+            said.contains("project.toml"),
+            "names the record file: {said}"
+        );
+        assert!(said.contains("--new-id"), "{said}");
+    }
+
+    /// Criterion 2: a home recording a checkout that is gone updates the
+    /// record to this one instead of refusing over a claim nothing can
+    /// still make.
+    #[test]
+    fn bind_criterion_2_a_home_recording_a_gone_checkout_moves_to_this_one() {
+        let base = crate::scratch::root("bind-criterion-2");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let before = base.join("before");
+        std::fs::create_dir_all(&before).unwrap();
+        crate::scratch::git_init(&before, &["-b", "plan/demo"]);
+        let home = scratch_home("criterion-2");
+
+        crate::platform::test_home::with_home(&home, || {
+            let bound_home = bind(&before).unwrap();
+            let after = base.join("after");
+            std::fs::rename(&before, &after).unwrap();
+
+            let resolved = bind(&after).unwrap();
+            assert_eq!(resolved, bound_home, "the same home, now updated");
+            let binding: Binding =
+                toml::from_str(&std::fs::read_to_string(bound_home.join(BINDING_FILE)).unwrap())
+                    .unwrap();
+            assert_eq!(binding.root, after.canonicalize().unwrap());
+        });
+    }
+
+    /// Criterion 2, the other of its two causes: a home recording a
+    /// checkout that still physically exists, but whose own stamp has
+    /// since changed to something else — re-stamped by hand, or by
+    /// `--new-id` — moves to this one exactly as a gone checkout does. Not
+    /// reachable through `rename` the way the first cause is, so this
+    /// writes the disagreeing files directly.
+    #[test]
+    fn bind_criterion_2_the_other_cause_a_checkout_that_no_longer_carries_the_id_moves_to_this_one()
+    {
+        let base = crate::scratch::root("bind-criterion-2b");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let home = scratch_home("criterion-2b");
+
+        // The checkout the home's record still names — real, and still
+        // where it was, but carrying a different id now.
+        let old_checkout = base.join("old-checkout");
+        std::fs::create_dir_all(&old_checkout).unwrap();
+        crate::scratch::git_init(&old_checkout, &["-b", "plan/demo"]);
+
+        // The checkout actually carrying the id the home is keyed on.
+        let new_checkout = base.join("new-checkout");
+        std::fs::create_dir_all(&new_checkout).unwrap();
+        crate::scratch::git_init(&new_checkout, &["-b", "plan/demo"]);
+
+        crate::platform::test_home::with_home(&home, || {
+            stamp_over(&old_checkout, "aaaaaa", None).unwrap();
+            stamp_over(&new_checkout, "bbbbbb", None).unwrap();
+            let home_dir = crate::mux::project_home(&new_checkout).unwrap();
+            write_binding(
+                &home_dir,
+                &Binding {
+                    id: "bbbbbb".to_string(),
+                    root: old_checkout.canonicalize().unwrap(),
+                },
+            )
+            .unwrap();
+
+            let resolved = bind(&new_checkout).unwrap();
+            assert_eq!(resolved, home_dir);
+            let binding: Binding =
+                toml::from_str(&std::fs::read_to_string(home_dir.join(BINDING_FILE)).unwrap())
+                    .unwrap();
+            assert_eq!(binding.root, new_checkout.canonicalize().unwrap());
+            assert_eq!(binding.id, "bbbbbb");
+        });
+    }
+
+    /// Criterion 3: a home recording a checkout that still exists and
+    /// still carries the same id refuses — two real checkouts sharing one
+    /// id is a conflict `bind` cannot settle on its own.
+    #[test]
+    fn bind_criterion_3_two_checkouts_sharing_one_id_refuses() {
+        let base = crate::scratch::root("bind-criterion-3");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let original = base.join("original");
+        std::fs::create_dir_all(&original).unwrap();
+        crate::scratch::git_init(&original, &["-b", "plan/demo"]);
+        let home = scratch_home("criterion-3");
+
+        let err = crate::platform::test_home::with_home(&home, || {
+            bind(&original).unwrap();
+            // A `cp -r` carries `.git` with it, so the copy stamps the same
+            // id — the exact scenario the task's own mockup draws.
+            let copy = base.join("copy");
+            copy_dir(&original, &copy);
+            bind(&copy)
+        })
+        .expect_err("two real checkouts must not both bind to the one home");
+        let said = format!("{err:#}");
+        assert!(said.contains("two checkouts carry the id"), "{said}");
+        assert!(said.contains("--new-id"), "{said}");
+    }
+
+    /// A real failure reading the recorded checkout's own stamp — a
+    /// permissions problem here, a corrupt repository in general — must
+    /// refuse rather than being read the same as "no longer carries the
+    /// id" and silently taken as licence to transfer the binding: neither
+    /// proceeding nor guessing is allowed, only recording a move whose
+    /// cause is actually known (see the task's non-goals).
+    #[cfg(unix)]
+    #[test]
+    fn bind_an_indeterminate_read_of_the_other_checkout_refuses_rather_than_guessing() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let base = crate::scratch::root("bind-indeterminate");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let original = base.join("original");
+        std::fs::create_dir_all(&original).unwrap();
+        crate::scratch::git_init(&original, &["-b", "plan/demo"]);
+        let home = scratch_home("indeterminate");
+
+        let bound_home = crate::platform::test_home::with_home(&home, || {
+            let bound_home = bind(&original).unwrap();
+            let copy = base.join("copy");
+            copy_dir(&original, &copy);
+
+            // `original`'s own stamp becomes unreadable, not merely absent
+            // — a real I/O failure, distinct from every other cause `bind`
+            // already tells apart.
+            let stamp = original.join(".git").join("spoolway-id");
+            let mut perms = std::fs::metadata(&stamp).unwrap().permissions();
+            perms.set_mode(0o000);
+            std::fs::set_permissions(&stamp, perms).unwrap();
+
+            let err = bind(&copy).expect_err("an unreadable stamp must not be read as stale");
+            let said = format!("{err:#}");
+            assert!(said.contains("could not tell whether"), "{said}");
+            assert!(said.contains(&original.display().to_string()), "{said}");
+
+            // Restored before the rest of cleanup, so a failed assertion
+            // above still leaves this directory removable.
+            let mut perms = std::fs::metadata(&stamp).unwrap().permissions();
+            perms.set_mode(0o644);
+            std::fs::set_permissions(&stamp, perms).unwrap();
+
+            bound_home
+        });
+
+        // Untouched: the refusal must not have transferred the binding.
+        let binding: Binding =
+            toml::from_str(&std::fs::read_to_string(bound_home.join(BINDING_FILE)).unwrap())
+                .unwrap();
+        assert_eq!(binding.root, original.canonicalize().unwrap());
+    }
+
+    /// Criterion 4: a valid stamp, but no home recording it at all — the
+    /// home was deleted, or nothing ever bound this checkout to it — must
+    /// refuse, naming both files and the two commands that resolve it.
+    #[test]
+    fn bind_criterion_4_a_valid_stamp_with_no_home_refuses() {
+        let work = bind_fixture("criterion-4");
+        let home = scratch_home("criterion-4");
+        let err = crate::platform::test_home::with_home(&home, || {
+            // Stamped directly, bypassing `bind` — so a stamp exists but no
+            // `project.toml` was ever written for it.
+            stamped_id(&work).unwrap();
+            bind(&work)
+        })
+        .expect_err("a stamped checkout with no home behind it must refuse");
+        let said = format!("{err:#}");
+        assert!(said.contains("no home holds the id"), "{said}");
+        assert!(said.contains(".git"), "names the stamp file: {said}");
+        assert!(
+            said.contains("project.toml"),
+            "names the record file: {said}"
+        );
+        assert!(
+            said.contains("--adopt") && said.contains("--new-id"),
+            "{said}"
+        );
+    }
+
+    /// Criterion 5: a stamp that is not six lowercase base36 characters
+    /// refuses, naming the format rather than treating it as unstamped.
+    #[test]
+    fn bind_criterion_5_a_malformed_stamp_refuses_naming_the_format() {
+        let work = bind_fixture("criterion-5");
+        let home = scratch_home("criterion-5");
+        let git_dir = work.join(".git");
+        std::fs::write(git_dir.join("spoolway-id"), "NOT-VALID!!\n").unwrap();
+
+        let err = crate::platform::test_home::with_home(&home, || bind(&work))
+            .expect_err("a malformed stamp must be refused, not read as unstamped");
+        let said = format!("{err:#}");
+        assert!(
+            said.contains("not six lowercase letters and digits"),
+            "{said}"
+        );
+        assert!(said.contains("--new-id"), "{said}");
+    }
+
+    /// Criterion 6: no stamp, but some home already records this exact
+    /// checkout — the stamp was deleted or never made it into this clone —
+    /// refuses rather than silently minting a fresh id that home's record
+    /// would then disagree with.
+    #[test]
+    fn bind_criterion_6_no_stamp_where_a_home_already_records_this_path_refuses() {
+        let work = bind_fixture("criterion-6");
+        let home = scratch_home("criterion-6");
+        let err = crate::platform::test_home::with_home(&home, || {
+            bind(&work).unwrap();
+            std::fs::remove_file(work.join(".git").join("spoolway-id")).unwrap();
+            bind(&work)
+        })
+        .expect_err("a home already records this checkout by path");
+        let said = format!("{err:#}");
+        assert!(said.contains("no id"), "{said}");
+        assert!(
+            said.contains("project.toml"),
+            "names the record file: {said}"
+        );
+        assert!(said.contains("--adopt"), "{said}");
+    }
+
+    /// Criterion 7: no stamp, and nothing records this checkout anywhere —
+    /// there is nothing to guess, so it binds itself and proceeds. Already
+    /// exercised through `Repo::discover` by
+    /// `discovery_binds_a_project_nobody_has_bound_before`; this is the
+    /// same fact at `bind`'s own level.
+    #[test]
+    fn bind_criterion_7_nothing_recorded_anywhere_binds_itself() {
+        let work = bind_fixture("criterion-7");
+        let home = scratch_home("criterion-7");
+        let bound = crate::platform::test_home::with_home(&home, || bind(&work))
+            .expect("nothing recorded anywhere binds itself and proceeds");
+        assert!(bound.join(BINDING_FILE).is_file());
+        assert!(work.join(".git").join("spoolway-id").is_file());
+    }
+
+    /// A plain recursive copy, `cp -r`'s own behaviour: every file under
+    /// `from`, `.git` included, landing at the same relative path under
+    /// `to`. Used only to build the "two checkouts, one id" fixture
+    /// criterion 3 needs — a real `cp -r`, not a fresh `git clone`, is what
+    /// carries the untracked `.git/spoolway-id` file along with it.
+    fn copy_dir(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap().flatten() {
+            let dest = to.join(entry.file_name());
+            let file_type = entry.file_type().unwrap();
+            if file_type.is_dir() {
+                copy_dir(&entry.path(), &dest);
+            } else {
+                std::fs::copy(entry.path(), &dest).unwrap();
+            }
+        }
+    }
+
     /// `.spoolway/` is tracked, so a checkout is a project on one branch
-    /// and not on another. A registered project on a branch that lacks it
+    /// and not on another. A bound project on a branch that lacks it
     /// is told exactly that, by branch name, rather than the generic
     /// not-found error a never-initialised directory gets.
     #[test]
-    fn a_registered_project_on_a_branch_without_its_state_dir_is_told_so() {
+    fn a_bound_project_on_a_branch_without_its_state_dir_is_told_so() {
         let (_origin, work) = fixture("branch-without-state");
         let home = scratch_home("branch-without-state");
         let err = crate::platform::test_home::with_home(&home, || {
-            crate::commands::claim(&work, false).unwrap();
+            Repo::discover(&work).expect("binds on the branch that still carries .spoolway/");
             git(&work, &["checkout", "-q", "-b", "bare"]);
             git(&work, &["rm", "-q", "-r", crate::config::STATE_DIR]);
             git(&work, &["commit", "-q", "-m", "drop the control plane"]);

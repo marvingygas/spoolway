@@ -64,27 +64,42 @@ archive, pending task documents, scratch worktrees, composed prompts, the headle
 own records, command-step logs, `lanes.json`, `usage.jsonl`, `dispatch.pid`, `jobs.state.json`,
 and the two scratch queue indexes — lives outside it, at `~/.spoolway/<label>-<id>/`.
 `<id>` is a short id stamped into the project's own `.git` directory — the one shared by every
-branch and worktree of one clone — and `<label>` is a cleaned-up version of the checkout's name;
-`spoolway init` writes the stamp, and is the only command allowed to. A fresh clone that has not
-been initialised carries no stamp yet, and resolves to the checkout's own name until `init` has
-run in it.
-`spoolway init` claims that name by writing `~/.spoolway/<name>/project.toml`, holding the
-checkout's own path, and refuses to run in a second checkout that would claim a name already
-taken by a different one — rename one of the two directories to get past it. When the
-registered checkout no longer exists, `init` reclaims the name outright if its state holds no
-archive and no queued tasks, and otherwise refuses, naming `spoolway init --take-over`, which
-claims the name and keeps whatever archive or queue was already there. `.dispatcher` is refused
-as a name too, because that one belongs to the shared
-dispatch workspace every project's lanes open in — see [One home for every run, in every
+branch and worktree of one clone — and `<label>` is a cleaned-up version of the checkout's name.
+The home holds a `project.toml` recording that same id and the checkout it belongs to. The
+binding is therefore two files that have to agree: the stamp at `.git/spoolway-id`, and the
+record at `~/.spoolway/<label>-<id>/project.toml`.
+
+Every command checks the two against each other before doing anything else. A checkout whose
+home already records it proceeds silently. A checkout with no stamp that nothing records
+anywhere stamps itself and writes the record, once — a fresh clone no longer needs `spoolway
+init` before any other command. Where the record names a checkout that is gone, or one that no
+longer carries the id, the record is rewritten to name this checkout and one line says so.
+
+Everything else refuses, naming both files by absolute path and the command that resolves it:
+two live checkouts carrying one id, a valid stamp that no home holds, a stamp that is not six
+lowercase letters and digits, a checkout that some home records but that carries no stamp of
+its own, a record and a stamp that name the same checkout but disagree about its id, and a
+home whose recorded checkout can no longer be read.
+
+Exactly two commands write a binding over one that already exists. `spoolway init --adopt
+<name>` binds this checkout to the home already at `~/.spoolway/<name>/` and stamps the checkout
+with that home's own id; `<name>` is the home's directory name as `ls ~/.spoolway/` lists it,
+such as `api-8w4r2c`. `spoolway init --new-id` mints the checkout a fresh id and binds it to the
+fresh home that id keys. `--take-over` is still accepted but now does nothing, because the
+basename collision it forced past cannot happen once every home is keyed by an id. The shared
+dispatch workspace sits at `~/.spoolway/.dispatcher/` and can never collide with a project home,
+which always ends in `-<id>` — see [One home for every run, in every
 project](dispatcher.md#one-home-for-every-run-in-every-project).
 
 The default cron-job store, `jobs.toml`, sits here too, beside `lanes.json`. A job may
 instead be kept in `.spoolway/jobs.toml` in the checkout, tracked and shared with the team.
 Neither is a config key — see [Jobs](jobs.md).
 
-Every directory under it is created silently the first time anything resolves it, so a fresh
-clone or a home directory deleted by hand gets one back without a command failing or a note
-being printed — an empty queue is the honest answer for a machine that has run nothing yet.
+Every directory inside a home is created silently the first time anything resolves it, so a
+fresh clone gets its queue and its archive without a command failing or a note being printed.
+A home deleted by hand is the one case that is no longer silent. The checkout still carries its
+stamp, nothing under `~/.spoolway/` records that id any more, and the command refuses rather
+than quietly starting an empty queue in a new home.
 `overrides/` is the one exception: it is never created on spoolway's behalf, because its
 absence is how "off" is spelled for the patch layer described below — see [The overrides
 layer](#the-overrides-layer).

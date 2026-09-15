@@ -1951,13 +1951,17 @@ pub fn project_label(root: &Path) -> String {
 /// tests below [`crate::overrides::dir_for`] and
 /// [`crate::pipeline::Pipelines::load`]), or it does but nothing has stamped
 /// it yet, which is every project that predates this stamp and has not been
-/// migrated onto one (`migrate-legacy-home`, not this task). `project_home`
-/// never stamps anything itself — only `spoolway init` does, through
-/// [`crate::repo::stamped_id`] — so a checkout with a real `.git` and no
-/// stamp reaches this same fallback until `init` is actually run in it.
-/// `spoolway init` refuses the first of those two cases outright instead of
-/// reaching this fallback — see [`crate::commands::init::init`] — so it is
-/// only ever a caller other than `init` that lands here.
+/// migrated onto one (`migrate-legacy-home`, not this task) — or a checkout
+/// `crate::repo::bind` has not been asked about yet either, straight after
+/// a fresh `git clone` and before any spoolway command has run in it at
+/// all. `project_home` itself never stamps anything — the same call
+/// [`crate::repo::stamped_id`] `spoolway init` always used — but it is no
+/// longer `init`'s alone: `bind` reaches for it too, the moment an
+/// ordinary command finds a checkout with no stamp and nothing recording
+/// it (`binding-record`'s own acceptance criterion 7), so this fallback is
+/// read far more often than it is ever actually the final answer — every
+/// caller through `Repo::discover` sees `bind`'s settled home instead,
+/// never this one.
 ///
 /// A real failure resolving the stamp — a permissions problem, a corrupt
 /// repository, git itself misbehaving — is `Err`, propagated rather than

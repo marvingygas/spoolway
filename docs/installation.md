@@ -85,7 +85,7 @@ It creates, in one pass:
 | `.spoolway/templates/task-log.md` | What belongs under each heading spoolway appends to a task file. Yours from this moment; no update touches it |
 | `.spoolway/templates/tracking/` | The `epic.md` and `ticket.md` bodies a tracker hook renders for a new issue |
 | `.spoolway/hooks/` | The tracker hook scripts — `github.sh`/`jira.sh` on Unix, `github.ps1`/`jira.ps1` on a native Windows install — written whichever tracker you answered, or none at all. See [`[issue_tracking]`](configuration.md#issue_tracking--a-hook-fired-on-four-task-events) |
-| `~/.spoolway/<project>/project.toml` | The pointer that claims this project's name — see below |
+| `~/.spoolway/<label>-<id>/project.toml` | The record of which checkout this home belongs to — see below |
 | The provider's skills directory | The five pipeline skills, in the convention of whichever provider you chose. See [the pipeline skills](#the-pipeline-skills) below |
 
 An existing file is kept rather than overwritten. `--force` overwrites.
@@ -100,15 +100,22 @@ the shipped config back.
 bookkeeping, the usage ledger — lives outside the checkout, at
 `~/.spoolway/<label>-<id>/`.** The `<id>` is a short id stamped into the project's own `.git`
 directory — the one shared by every branch and worktree of one clone — and `<label>` is a
-cleaned-up version of the checkout's name; `init` writes the stamp, and is the only command
-allowed to. `init` claims that name by writing the pointer
-file above; running `init` again in a different checkout that would claim the same name is
-refused, naming both. Where the checkout a name was registered to is gone but its archive or
-queue is still there, `init --take-over` claims the name and keeps that state rather than
-deleting it — refused without the flag, because state that old is not one to walk into by
-accident. Delete the whole directory to forget every task, plan and lane a
-project has ever run — nothing under it is tracked, and nothing in the checkout points back
-at it besides the name. See [Runtime state](configuration.md#runtime-state).
+cleaned-up version of the checkout's name. The home records that same id, and this checkout's
+own path, in the `project.toml` listed above. Those two files are a binding, and every command
+checks them against each other before it runs.
+
+A checkout nothing has recorded yet stamps itself and writes that record on its first command,
+so a fresh clone works without running `init` first. Where the two files disagree, the command
+refuses and names both of them by absolute path. Two flags on `init` write a binding over one
+that already exists, and nothing else does. `--adopt <name>` binds this checkout to the home
+already at `~/.spoolway/<name>/`, and `--new-id` mints a fresh id and a fresh home for it.
+`--take-over` is still accepted but does nothing now, because the basename collision it forced
+past cannot happen once every home is keyed by an id.
+
+Delete the whole directory to forget every task, plan and lane a project has ever run — nothing
+under it is tracked. The next command in that checkout will refuse, because the checkout still
+carries a stamp no home holds; run `spoolway init --new-id` to start clean. See [Runtime
+state](configuration.md#runtime-state).
 
 `init` never writes to your `.gitignore` any more — runtime state moved out of the checkout,
 so there is nothing left for a rule to keep out of git. A project set up before the move has

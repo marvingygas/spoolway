@@ -984,9 +984,15 @@ See [Pricing](cost.md#pricing).
 
 Scaffold `.spoolway/` in a repository: config, both pipelines, the six prompts, the
 skeletons, the four issue-tracker hook scripts — and the skills, in the convention of
-whichever coding agent you plan in. It also claims this project's own name under
-`~/.spoolway/`, where the queue, the archive and everything else spoolway writes while it
-runs will live; see [Runtime state](configuration.md#runtime-state).
+whichever coding agent you plan in. It also binds this checkout to its own home under
+`~/.spoolway/`, where the queue, the archive and everything else spoolway writes while it runs
+will live; see [Runtime state](configuration.md#runtime-state).
+
+The binding is two files that have to agree: an id stamped into the checkout's own `.git`, and
+a `project.toml` in the home recording that id and this checkout's path. Every command checks
+them, so `init` is no longer what creates the binding — a fresh clone binds itself on whatever
+command it runs first. What `init` alone can do is write a binding over one that already
+exists, through `--adopt` or `--new-id` below.
 
 At a terminal it asks three things, each of which is otherwise a file to go and edit
 afterwards: the coding agent you plan in, whose convention the skills go in and which
@@ -1010,7 +1016,9 @@ placeholder standing. Add or change profiles with `spoolway config set`.
 | `--tracker <github\|jira\|none>` | The tracker `[issue_tracking]` names. The prompt's menu notes whether the tool each one calls — `gh` or `acli` — is on `PATH`. Defaults to `none` |
 | `--project-key <KEY>` | The project the chosen tracker's tickets open into: `owner/repo` on github, a project key on jira. Ignored when `--tracker` is `none` or unset |
 | `--force` | Overwrite existing config, pipeline and prompt files |
-| `--take-over` | Claim this project's name even though the machine's record of it still holds an archive or queued tasks, when the checkout that name was registered to no longer exists. Refused without this flag — nothing is deleted either way, but a state that old is not yours to walk into by accident |
+| `--adopt <NAME>` | Bind this checkout to the home already at `~/.spoolway/<NAME>/`, even though the checkout's stamp or that home's record currently disagrees. `NAME` is the home's own directory name, `<label>-<id>` — `api-8w4r2c`, not the bare id. Prints what was already sitting in that home: queue and archive counts, whether a ledger exists, and how many worktrees are cut |
+| `--new-id` | Mint this checkout a fresh id, and bind it to the fresh home that id keys, even if it already carries one. The way out of a conflict when two checkouts share an id, or when the home an id named is gone |
+| `--take-over` | Accepted for compatibility; does nothing. It used to force a basename claim through, and a home keyed by id cannot have that collision |
 
 Run again in a project that already has a config, `init` installs skills and changes
 nothing else — `--tracker` and `--project-key` are reported as not applied rather than

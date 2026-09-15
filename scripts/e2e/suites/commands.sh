@@ -57,11 +57,15 @@ CTL="$LIVE/ctl"
 # make the recovery command least useful immediately after installation.
 # The bare command prints the release this binary is, so the expectation is
 # read off the binary rather than written down: a version bump used to fail
-# these two checks until somebody noticed the suite still said 0.1.0.
+# these two checks until somebody noticed the suite still said 0.1.0. A
+# release heading carries the version and nothing else, so the range check
+# pins one of 0.1.0's own highlights rather than a title the heading no
+# longer holds.
 CURRENT=$("$SPOOLWAY" --version | awk '{print $2}')
-says "whats-new works outside a project" "$CURRENT — " \
+says "whats-new works outside a project" "$CURRENT" \
   env -C "$LIVE" "$SPOOLWAY" whats-new
-says "a release range selects the embedded release" "0.1.0 — Deterministic agent pipelines arrive" \
+says "a release range selects the embedded release" \
+  "A model-free dispatcher moves tasks through declared pipeline steps" \
   env -C "$LIVE" "$SPOOLWAY" whats-new --since 0.0.0
 says "an empty release range is explicit" "No releases follow $CURRENT." \
   env -C "$LIVE" "$SPOOLWAY" whats-new --since "$CURRENT"
@@ -827,7 +831,10 @@ else
   bad "the reason lands on the task's own Status Log exactly once (found $STATUS_HITS)"
 fi
 
-PROBLEM_LOG="$HOME/.spoolway/logs/$(basename "$LIVE/proj").log"
+# `problem_log::path` keys this off `$SPOOLWAY_PROJECT_HOME`'s own
+# basename (`<label>-<id>`) now, not the checkout's plain basename — see
+# `src/problem_log.rs` and the `binding-record` task.
+PROBLEM_LOG="$HOME/.spoolway/logs/$(basename "$SPOOLWAY_PROJECT_HOME").log"
 PROBLEM_HITS=$(grep -c "$REASON" "$PROBLEM_LOG" 2>/dev/null || echo 0)
 if [ "$PROBLEM_HITS" -eq 1 ]; then
   ok "and once in the project's problem log — not once per one of the three attempts"

@@ -466,41 +466,32 @@ fn doctor_unconfigured(
     finish(&report, verbose, json)
 }
 
-/// Whether `init` ever claimed this project's `~/.spoolway/<name>/`. Every
-/// other command refuses to run without it — see `Repo::discover` — and
-/// `doctor` is the one that comes through `discover_lenient` instead, so it
-/// is the one place the fact is reported rather than fatal.
+/// Whether this checkout's stamp and its home's own record of it agree.
+/// Every other command refuses to run when they do not — see
+/// `Repo::discover` and `crate::repo::bind` — and `doctor` is the one that
+/// comes through `discover_lenient` instead, so it is the one place the
+/// fact is reported rather than fatal.
 ///
-/// `home_error` is `Repo::discover_lenient`'s own report of a real failure
-/// resolving the stamped home itself — a permissions problem, a corrupt
-/// repository — the case `repo.home` is only a placeholder for. Asking
-/// `crate::commands::registered` about that placeholder would answer a
-/// question nobody asked ("is *this* unrelated path claimed?"), so this
-/// reports the real failure instead whenever there is one, rather than
-/// falling through to the ordinary check.
+/// `home_error` is `Repo::discover_lenient`'s own `bind_lenient` report — the
+/// binding [`crate::repo::bind`] found or could not settle, already naming
+/// both files and the command that resolves it. `doctor` has nothing to add
+/// to that message, only to carry it here as its own finding rather than
+/// the fatal refusal every other command gives it. A settled binding is
+/// reported by both facts it settled — the id and the root
+/// [`crate::repo::binding_at`] reads back off `project.toml` — not merely
+/// that a directory called `repo.home` happens to exist, which is all the
+/// old pointer-file report ever said.
 fn registration_check(repo: &Repo, home_error: Option<&anyhow::Error>) -> Finding {
-    if let Some(err) = home_error {
-        return Finding::Check(
-            "registered under ~/.spoolway".into(),
-            Err(anyhow::anyhow!(
-                "{:#} — {}'s stamped home could not be resolved, so whether it is registered \
-                 cannot be answered",
-                err,
-                repo.root.display()
-            )),
-        );
-    }
     Finding::Check(
-        "registered under ~/.spoolway".into(),
-        if crate::commands::registered(&repo.home) {
-            Ok(Some(repo.home.display().to_string()))
-        } else {
-            Err(anyhow::anyhow!(
-                "{} does not exist, so every command but `doctor` refuses this project — run \
-                 `spoolway init` in {} first",
-                repo.home.join(crate::commands::PROJECT_FILE).display(),
-                repo.root.display()
-            ))
+        "bound to its home".into(),
+        match home_error {
+            Some(err) => Err(anyhow::anyhow!("{err:#}")),
+            None => Ok(Some(match crate::repo::binding_at(&repo.home) {
+                Some((id, root)) => {
+                    format!("{} — id {id}, root {}", repo.home.display(), root.display())
+                }
+                None => repo.home.display().to_string(),
+            })),
         },
     )
 }
@@ -2400,10 +2391,13 @@ mod tests {
         assert!(notes[0].starts_with("2 file(s) here are behind this spoolway"));
     }
 
-    /// The registration every other command dies without is a finding here.
+    /// A settled binding is an `Ok` check naming the home it settled on —
+    /// and, when that home actually carries a record, the id and root the
+    /// stamp and `project.toml` agreed on, not only that a directory by
+    /// that name exists.
     #[test]
-    fn an_unregistered_project_is_a_failed_check_naming_init() {
-        let root = crate::scratch::root("doctor-unregistered");
+    fn a_bound_project_is_an_ok_check_naming_its_home() {
+        let root = crate::scratch::root("doctor-bound");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let repo = Repo {
@@ -2413,58 +2407,56 @@ mod tests {
             home: root.join(".home"),
         };
 
+        // No record yet — the plain home path is all there is to say.
         let Finding::Check(label, outcome) = registration_check(&repo, None) else {
             panic!("registration is a check, not a note");
         };
-        assert_eq!(label, "registered under ~/.spoolway");
-        let err = outcome.expect_err("nothing claimed this home");
-        assert!(
-            format!("{err:#}").contains("run `spoolway init`"),
-            "{err:#}"
-        );
+        assert_eq!(label, "bound to its home");
+        assert_eq!(outcome.unwrap(), Some(repo.home.display().to_string()));
 
+        // A home that actually carries a binding reports what it settled
+        // on, not only that the directory exists.
         std::fs::create_dir_all(&repo.home).unwrap();
         std::fs::write(
-            repo.home.join(crate::commands::PROJECT_FILE),
-            "root = \"/x\"\n",
+            repo.home.join("project.toml"),
+            format!(
+                "id = \"a1b2c3\"\nroot = \"{}\"\n",
+                root.display().to_string().replace('\\', "\\\\")
+            ),
         )
         .unwrap();
         let Finding::Check(_, outcome) = registration_check(&repo, None) else {
             panic!("registration is a check, not a note");
         };
-        assert!(outcome.is_ok());
+        let note = outcome.unwrap().unwrap();
+        assert!(note.contains("id a1b2c3"), "{note}");
+        assert!(note.contains(&root.display().to_string()), "{note}");
     }
 
-    /// A real failure resolving the stamped home — `Repo::discover_lenient`'s
-    /// own `home_error` — must be the reason this check reports, not the
-    /// unrelated placeholder path `repo.home` falls back to: checking
-    /// whether *that* is registered would answer a question nobody asked.
+    /// Whatever `bind` could not settle — every one of the seven states the
+    /// `binding-record` task defines, surfaced here as `Repo::discover_lenient`'s
+    /// own `home_error` — is a failed check carrying `bind`'s own message,
+    /// not a fact this rederives from `repo.home` on its own.
     #[test]
-    fn a_home_resolution_failure_is_reported_instead_of_the_placeholder_check() {
-        let root = crate::scratch::root("doctor-home-error");
+    fn an_unsettled_binding_is_a_failed_check_naming_binds_own_error() {
+        let root = crate::scratch::root("doctor-unbound");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        // A placeholder home that is registered — proving the failure is
-        // reported instead of this being read, not merely instead of a
-        // negative answer.
-        let home = root.join(".home");
-        std::fs::create_dir_all(&home).unwrap();
-        std::fs::write(home.join(crate::commands::PROJECT_FILE), "root = \"/x\"\n").unwrap();
         let repo = Repo {
             checkout: root.clone(),
             root: root.clone(),
             config: Config::default(),
-            home,
+            home: root.join(".home"),
         };
-        let home_error = anyhow::anyhow!("permission denied reading spoolway-id");
+        let home_error = anyhow::anyhow!("no home holds the id abc123");
 
         let Finding::Check(label, outcome) = registration_check(&repo, Some(&home_error)) else {
             panic!("registration is a check, not a note");
         };
-        assert_eq!(label, "registered under ~/.spoolway");
-        let err = outcome.expect_err("a resolution failure must not read as registered");
+        assert_eq!(label, "bound to its home");
+        let err = outcome.expect_err("bind could not settle this checkout's binding");
         assert!(
-            format!("{err:#}").contains("permission denied reading spoolway-id"),
+            format!("{err:#}").contains("no home holds the id abc123"),
             "{err:#}"
         );
     }
@@ -2540,7 +2532,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("no {label:?} check in {findings:?}"))
         };
         assert!(
-            find("registered under ~/.spoolway").is_err(),
+            find("bound to its home").is_err(),
             "the real failure is reported"
         );
         assert!(

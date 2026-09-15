@@ -340,3 +340,115 @@ fn a_fresh_init_prints_the_stamped_line_below_its_other_rows() {
     assert!(at(removed) < at(&stamped), "{output:?}");
     assert_eq!(lines[at(&stamped) + 1], "Skills installed successfully.");
 }
+
+/// Every file and directory under `from`, copied to the same relative path
+/// under `to` — a real `cp -r`, `.git` included, which is what lets a copy
+/// carry the same stamp its original had. Used only to build the "still
+/// exists, no longer carries the id" fixture below.
+fn copy_dir_all(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).expect("create destination");
+    for entry in std::fs::read_dir(from).expect("read source dir").flatten() {
+        let dest = to.join(entry.file_name());
+        if entry.file_type().expect("file type").is_dir() {
+            copy_dir_all(&entry.path(), &dest);
+        } else {
+            std::fs::copy(entry.path(), &dest).expect("copy file");
+        }
+    }
+}
+
+/// Acceptance criterion 2 of `binding-record`, its "gone" cause, at the
+/// level a unit test cannot reach: the one line a real command prints when
+/// it moves a stale record, and only one — never once per file the check
+/// touches, never once for every accessor a lane's worth of commands might
+/// call.
+#[test]
+fn a_moved_checkout_prints_exactly_one_line_when_the_old_one_is_gone() {
+    let project = Project::new("moved-gone");
+    project.init("claude");
+    let old = project.as_ref().to_path_buf();
+    let renamed = old.parent().unwrap().join(format!(
+        "{}-renamed",
+        old.file_name().unwrap().to_string_lossy()
+    ));
+    std::fs::rename(&old, &renamed).expect("rename the checkout");
+    let home = renamed.join("home"); // moved along with everything else.
+
+    let output = Command::new(env!("CARGO_BIN_EXE_spoolway"))
+        .args(["queue", "list"])
+        .current_dir(&renamed)
+        .env("HOME", &home)
+        .output()
+        .expect("run spoolway");
+    assert!(
+        output.status.success(),
+        "spoolway failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let out = String::from_utf8_lossy(&output.stdout);
+    let moves: Vec<&str> = out
+        .lines()
+        .filter(|line| line.contains("now records"))
+        .collect();
+    assert_eq!(moves.len(), 1, "expected exactly one move notice: {out:?}");
+
+    std::fs::remove_dir_all(&renamed).ok();
+}
+
+/// The same criterion's other cause: a home's recorded checkout still
+/// exists, but its own stamp has since moved on (`--new-id`, or a hand
+/// edit) — a stale copy taken before that still carries the old id prints
+/// the same one line, not two.
+#[test]
+fn a_re_stamped_checkout_prints_exactly_one_line_when_the_old_one_moved_on() {
+    let project = Project::new("moved-restamped");
+    project.init("claude");
+    let root = project.as_ref().to_path_buf();
+    let home = root.join("home");
+    let old_id = std::fs::read_to_string(root.join(".git/spoolway-id"))
+        .expect("read the original stamp")
+        .trim()
+        .to_string();
+
+    // The original checkout mints itself a fresh id — the home keyed on
+    // `old_id` is now stale, though the checkout on record for it still
+    // exists right where it was.
+    let restamp = Command::new(env!("CARGO_BIN_EXE_spoolway"))
+        .args(["init", "--new-id"])
+        .current_dir(&root)
+        .env("HOME", &home)
+        .output()
+        .expect("run spoolway");
+    assert!(
+        restamp.status.success(),
+        "spoolway failed: {}",
+        String::from_utf8_lossy(&restamp.stderr)
+    );
+
+    // A second checkout — a full copy of the first, taken before the
+    // restamp — still carries `old_id`.
+    let copy = root.parent().unwrap().join("moved-restamped-copy");
+    copy_dir_all(&root, &copy);
+    std::fs::write(copy.join(".git/spoolway-id"), format!("{old_id}\n"))
+        .expect("restore the old stamp on the copy");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_spoolway"))
+        .args(["queue", "list"])
+        .current_dir(&copy)
+        .env("HOME", &home) // the same home both checkouts share.
+        .output()
+        .expect("run spoolway");
+    assert!(
+        output.status.success(),
+        "spoolway failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let out = String::from_utf8_lossy(&output.stdout);
+    let moves: Vec<&str> = out
+        .lines()
+        .filter(|line| line.contains("now records"))
+        .collect();
+    assert_eq!(moves.len(), 1, "expected exactly one move notice: {out:?}");
+
+    std::fs::remove_dir_all(&copy).ok();
+}

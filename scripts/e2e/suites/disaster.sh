@@ -390,10 +390,11 @@ must "problem-log queues" "$SPOOLWAY" queue add --from "$LIVE/problem-log.md"
 # in `src/dispatch.rs`.
 sed -i 's/^stage: .*/stage: not-a-real-step/' "$SPOOLWAY_PROJECT_HOME/queue/problem-log.md"
 
-# `problem_log::path` keys this off `project_label` — the checkout's plain
-# basename, never the stamped id — so it is not under `$SPOOLWAY_PROJECT_HOME`
-# and does not move when a home does; see `src/problem_log.rs`.
-PROJECT_LOG="$HOME/.spoolway/logs/$(basename "$LIVE/proj").log"
+# `problem_log::path` keys this off `$SPOOLWAY_PROJECT_HOME`'s own basename
+# now — `<label>-<id>`, not the checkout's plain basename — so it survives
+# a rename the same way the home itself does; see `src/problem_log.rs` and
+# the `binding-record` task.
+PROJECT_LOG="$HOME/.spoolway/logs/$(basename "$SPOOLWAY_PROJECT_HOME").log"
 rm -f "$PROJECT_LOG"
 # However many lines the shared dispatch log already carries — only what
 # lands after this point is this case's own to judge.
@@ -421,7 +422,7 @@ forget problem-log
 # every `spoolway report` and the board at once. Now the bad file is skipped
 # and named in the project log, and everything else still moves.
 sweep
-PROJECT_LOG="$HOME/.spoolway/logs/$(basename "$LIVE/proj").log"
+PROJECT_LOG="$HOME/.spoolway/logs/$(basename "$SPOOLWAY_PROJECT_HOME").log"
 rm -f "$PROJECT_LOG"
 queue_hang survivor
 printf -- '---\nid: broken\nstage: queued\n' \
@@ -603,5 +604,34 @@ fi
 : > "$CTL/transcript"
 sweep
 forget evallive
+
+# ---------------- a home deleted by hand refuses, naming both files
+# `binding-record`'s own Goal names three ways the checkout's stamp and its
+# home's record can stop agreeing, and says each one "stops with an error
+# naming both files instead of quietly starting an empty queue" — this is
+# the first of the three, held against a real dispatcher-adjacent command
+# the way every other hand-broken state in this suite is, rather than as a
+# unit test against a bare fixture `$HOME` (the seven states themselves
+# already are — see `src/repo.rs`'s `bind_criterion_*` tests). A separate,
+# freshly configured project, so deleting its home cannot disturb any case
+# still to come.
+new_repo "$LIVE/broken"
+configure_project plan/broken
+BROKEN_STAMP="$PWD/.git/spoolway-id"
+BROKEN_HOME="$SPOOLWAY_PROJECT_HOME"
+[ -d "$BROKEN_HOME" ] || {
+  printf '  \033[31mSETUP\033[0m the broken-binding case: %s does not exist yet\n' "$BROKEN_HOME" >&2
+  exit 2
+}
+rm -rf "$BROKEN_HOME"
+if OUT=$("$SPOOLWAY" queue list 2>&1); then
+  bad "a home deleted by hand is refused (it was accepted)"
+  printf '%s\n' "$OUT" | sed 's/^/        /'
+elif grep -qF "$BROKEN_STAMP" <<<"$OUT" && grep -qF "$BROKEN_HOME/project.toml" <<<"$OUT"; then
+  ok "a home deleted by hand is refused, naming both the stamp and the record"
+else
+  bad "a home deleted by hand is refused, naming both the stamp and the record"
+  printf '%s\n' "$OUT" | sed 's/^/        /'
+fi
 
 finish

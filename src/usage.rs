@@ -1927,9 +1927,11 @@ pub fn month_of(ts: &str) -> String {
 /// nobody asked for. The cost of that choice is that nothing knows where the
 /// ledgers are, so a question spanning projects cannot be asked at all.
 ///
-/// This is the index that fixes it, and deliberately nothing more: a list of
-/// roots. It holds no usage of its own, so it can be deleted at any time and
-/// the worst that happens is `--all` forgets a project until its next dispatch.
+/// This is the index that fixes it, and deliberately nothing more: one
+/// entry per project, each a home and the checkout it was last registered
+/// from — see [`Entry`]. It holds no usage of its own, so it can be
+/// deleted at any time and the worst that happens is `--all` forgets every
+/// project until each next registers.
 pub mod registry {
     use super::*;
 
@@ -1946,7 +1948,32 @@ pub mod registry {
         Some(base.join("spoolway").join("projects.json"))
     }
 
-    /// Note that `root` is a spoolway project, if it is not already known.
+    /// One project the registry knows about: the home it was last resolved
+    /// to, and the checkout it was registered from at the time.
+    ///
+    /// `home` is the identity a project keeps across an ordinary rename —
+    /// the id and label frozen at its first stamp — so it is what
+    /// `register` dedupes on; `root` is only a fallback for a home with no
+    /// binding of its own to read a current root back out of (a fixture
+    /// with no `.git` at all, or a project stamped before this existed).
+    /// See the `binding-record` task.
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    struct Entry {
+        home: PathBuf,
+        root: PathBuf,
+    }
+
+    /// Note that `root` is a spoolway project, if it is not already known —
+    /// replacing whichever entry was already this same project's, rather
+    /// than adding a second one beside it.
+    ///
+    /// "Same project" is decided by home, not by the literal path: two
+    /// roots that resolve to the same `~/.spoolway/<label>-<id>/` are one
+    /// project under two names, most often a rename. A root with no
+    /// resolvable home (no git repository behind it — every fixture
+    /// directory the tests below use) falls back to the home
+    /// `project_home` still answers for it (a plain basename), so it still
+    /// dedupes rather than growing one entry per call.
     ///
     /// Best-effort throughout: a read-only home, a corrupt index, a racing
     /// dispatcher — none of them are worth failing a command over, because
@@ -1955,11 +1982,18 @@ pub mod registry {
         let Some(path) = path() else { return };
         let mut known = list_at(&path);
         let root = root.to_path_buf();
-        if known.contains(&root) {
+        let Ok(home) = crate::mux::project_home(&root) else {
             return;
+        };
+        match known.iter().position(|entry| entry.home == home) {
+            Some(i) if known[i].root == root => return,
+            Some(i) => known[i].root = root,
+            None => known.push(Entry {
+                home,
+                root: root.clone(),
+            }),
         }
-        known.push(root);
-        known.sort();
+        known.sort_by(|a, b| a.home.cmp(&b.home));
         if let Some(parent) = path.parent()
             && std::fs::create_dir_all(parent).is_err()
         {
@@ -1972,25 +2006,57 @@ pub mod registry {
         }
     }
 
-    /// Known project roots that still look like projects, oldest registration
-    /// order aside — a root whose `.spoolway` is gone was moved or deleted, and
-    /// silently skipping it is better than reporting a total that omits it
-    /// without saying so.
+    /// Known project roots that still look like projects, oldest
+    /// registration order aside — a root whose `.spoolway` is gone was
+    /// moved or deleted, and silently skipping it is better than reporting
+    /// a total that omits it without saying so.
+    ///
+    /// Each entry's root is read fresh off its own home's `project.toml`
+    /// when it has one — the binding [`crate::repo::bind`] keeps current
+    /// on every ordinary command, not only on a `register` call — falling
+    /// back to the root last registered directly for a home with no
+    /// binding of its own. This is what lets a renamed checkout stay
+    /// listed without a fresh `register(new_root)`: any command run in the
+    /// new location already keeps the home's own record current; `list`
+    /// only has to trust it instead of its own last-registered guess.
     pub fn list() -> Vec<PathBuf> {
         let Some(path) = path() else {
             return Vec::new();
         };
         list_at(&path)
             .into_iter()
+            .map(|entry| {
+                crate::repo::binding_at(&entry.home)
+                    .map(|(_id, root)| root)
+                    .unwrap_or(entry.root)
+            })
             .filter(|root| root.join(crate::config::STATE_DIR).is_dir())
             .collect()
     }
 
-    fn list_at(path: &Path) -> Vec<PathBuf> {
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|raw| serde_json::from_str::<Vec<PathBuf>>(&raw).ok())
+    /// Read `path` as the current `Vec<Entry>` shape, falling back to the
+    /// bare `Vec<PathBuf>` shape every registry on disk before
+    /// `binding-record` still is — read once, upgraded on the next
+    /// `register`, never rewritten just for reading. A root from the old
+    /// shape resolves its own home the same way `register` always has;
+    /// one with no resolvable home (no git repository behind it, or a
+    /// permissions problem) is dropped rather than kept as an entry
+    /// nothing could ever look up again.
+    fn list_at(path: &Path) -> Vec<Entry> {
+        let Ok(raw) = std::fs::read_to_string(path) else {
+            return Vec::new();
+        };
+        if let Ok(entries) = serde_json::from_str::<Vec<Entry>>(&raw) {
+            return entries;
+        }
+        serde_json::from_str::<Vec<PathBuf>>(&raw)
             .unwrap_or_default()
+            .into_iter()
+            .filter_map(|root| {
+                let home = crate::mux::project_home(&root).ok()?;
+                Some(Entry { home, root })
+            })
+            .collect()
     }
 
     /// What a project is called on a report: the last component of its path.
@@ -3596,8 +3662,18 @@ mod tests {
         assert_eq!(month_of("nonsense"), "?");
     }
 
+    /// `XDG_STATE_HOME` is process-global, and every test below that points
+    /// the registry at a scratch directory has to set it — so two of them
+    /// running at once (the ordinary case; `cargo test` is parallel by
+    /// default) race on the same variable and each can read back the
+    /// other's value. This is that lock, held for the whole of a test
+    /// rather than just around the `set_test_env` call, since the race is
+    /// really over the whole read-modify-write the env var gates.
+    static REGISTRY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn the_registry_keeps_one_entry_per_project_and_forgets_deleted_ones() {
+        let _guard = REGISTRY_ENV_LOCK.lock().unwrap();
         let home = crate::scratch::root("registry-test");
         std::fs::remove_dir_all(&home).ok();
         std::fs::create_dir_all(&home).unwrap();
@@ -3626,6 +3702,98 @@ mod tests {
             None => crate::platform::remove_test_env("XDG_STATE_HOME"),
         }
         std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A `projects.json` written by every version before `binding-record`
+    /// — a bare array of checkout paths — still reads back, rather than
+    /// every existing registry looking corrupt and empty (and `spend
+    /// --all` forgetting every project until each re-registers) the
+    /// moment the schema changed underneath it.
+    #[test]
+    fn an_old_schema_registry_still_reads_back() {
+        let _guard = REGISTRY_ENV_LOCK.lock().unwrap();
+        let home = crate::scratch::root("registry-old-schema");
+        std::fs::remove_dir_all(&home).ok();
+        std::fs::create_dir_all(&home).unwrap();
+        let previous = std::env::var_os("XDG_STATE_HOME");
+        crate::platform::set_test_env("XDG_STATE_HOME", &home);
+
+        let live = home.join("live");
+        std::fs::create_dir_all(live.join(crate::config::STATE_DIR)).unwrap();
+        let path = registry::path().unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // The old shape, written by hand rather than through `register` —
+        // exactly what a real upgrade finds already on disk.
+        std::fs::write(&path, serde_json::to_string(&vec![live.clone()]).unwrap()).unwrap();
+
+        assert_eq!(
+            registry::list(),
+            vec![live.clone()],
+            "an old-shape registry must still list its projects"
+        );
+
+        match previous {
+            Some(value) => crate::platform::set_test_env("XDG_STATE_HOME", value),
+            None => crate::platform::remove_test_env("XDG_STATE_HOME"),
+        }
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A renamed checkout replaces its old registry entry rather than
+    /// piling up a second one beside it — both resolve to the one home its
+    /// frozen label-and-id keys, unaffected by the rename. See the
+    /// `binding-record` task.
+    #[test]
+    fn a_renamed_checkout_replaces_its_old_entry_rather_than_duplicating() {
+        let _guard = REGISTRY_ENV_LOCK.lock().unwrap();
+        let scratch_home = crate::scratch::root("registry-rename-home");
+        std::fs::remove_dir_all(&scratch_home).ok();
+        std::fs::create_dir_all(&scratch_home).unwrap();
+        let previous = std::env::var_os("XDG_STATE_HOME");
+        crate::platform::set_test_env("XDG_STATE_HOME", &scratch_home);
+
+        let base = crate::scratch::root("registry-rename-project");
+        std::fs::remove_dir_all(&base).ok();
+        let before = base.join("before");
+        std::fs::create_dir_all(&before).unwrap();
+        crate::scratch::git_init(&before, &["-b", "plan/demo"]);
+        // `registry::list` only counts a root that still looks like a
+        // project — see its own doc — so the fixture needs the tracked
+        // control plane too, not only a `.git`.
+        std::fs::create_dir_all(before.join(crate::config::STATE_DIR)).unwrap();
+
+        crate::platform::test_home::with_home(&scratch_home, || {
+            // Actually bound, not just registered — the checkout must
+            // carry a real stamp for its home to be id-keyed rather than
+            // basename-keyed, or a rename changes which home it resolves
+            // to and there is nothing for `register` to dedupe against.
+            crate::repo::bind(&before).unwrap();
+            registry::register(&before);
+
+            // The checkout is renamed on disk — its `.git` moves with it,
+            // so the same id (and the same frozen label) still stamps it,
+            // and so the same home. Only `bind` runs again here, the way
+            // any ordinary command would after the rename — never
+            // `registry::register` — proving `list` needs no fresh
+            // registration to find the checkout at its new path.
+            let after = base.join("renamed");
+            std::fs::rename(&before, &after).unwrap();
+            crate::repo::bind(&after).unwrap();
+
+            let listed = registry::list();
+            assert_eq!(
+                listed,
+                vec![after.canonicalize().unwrap()],
+                "the rename must replace the old entry, not sit beside it: {listed:?}"
+            );
+        });
+
+        match previous {
+            Some(value) => crate::platform::set_test_env("XDG_STATE_HOME", value),
+            None => crate::platform::remove_test_env("XDG_STATE_HOME"),
+        }
+        std::fs::remove_dir_all(&base).ok();
+        std::fs::remove_dir_all(&scratch_home).ok();
     }
 
     /// The accounting half is reached through the adapter table now, so the

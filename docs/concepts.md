@@ -18,6 +18,9 @@ spoolway *writes while it runs* — the task queue included — lives elsewhere:
 directory and `<label>` a cleaned-up version of the checkout's name. The stamp lives in the git
 directory, which every branch, subdirectory and linked worktree of one clone shares, so the home
 — and the queue that lives under it — belongs to the project rather than to any single checkout.
+The home records that same id, and the checkout it belongs to, in its own `project.toml`. Every
+command checks the two files against each other and refuses when they disagree, so a deleted
+home or a copied checkout stops with an error rather than quietly opening an empty queue.
 See [Runtime state](configuration.md#runtime-state).
 
 Every spoolway command finds the project through git rather than by walking up the

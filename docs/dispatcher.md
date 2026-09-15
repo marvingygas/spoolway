@@ -1061,7 +1061,8 @@ It holds no checkout of its own, opened instead on `~/.spoolway/.dispatcher/`, w
 not a repository — that absence of a checkout is the other half of how it is found again: a
 workspace opened anywhere inside a repository comes back bound to it, and this directory binds
 to nothing. Named with a leading dot so it sorts apart from every project's own directory
-beside it, and so no checkout can claim the name for itself — `spoolway init` refuses it.
+beside it. No checkout can take the name either: every project's home is named
+`<label>-<id>`, so one can never come out as `.dispatcher`.
 
 `herdr_mode` and `tmux_mode` both take the same two answers: `grouped` and `split`. (The
 herdr-era spellings `workspace` and `worktrees` still parse and mean the same thing; so does
