@@ -3590,10 +3590,18 @@ mod tests {
         let root = Path::new("/repo");
 
         config.herdr_mode = MuxMode::Grouped;
-        assert!(!Herdr::new(root, root, &config).unwrap().task_owns_workspace());
+        assert!(
+            !Herdr::new(root, root, &config)
+                .unwrap()
+                .task_owns_workspace()
+        );
 
         config.herdr_mode = MuxMode::Split;
-        assert!(Herdr::new(root, root, &config).unwrap().task_owns_workspace());
+        assert!(
+            Herdr::new(root, root, &config)
+                .unwrap()
+                .task_owns_workspace()
+        );
     }
 
     /// `MuxMode::Grouped`'s own per-task route is `project_tab`, in
