@@ -2067,6 +2067,7 @@ impl<'a> Dispatcher<'a> {
             outcome,
             run: task.and_then(|t| t.front.run.clone()),
             trial: task.and_then(|t| t.front.trial.clone()),
+            dir: None,
             // Never written: the ledger's own location says which project this
             // is, and only a reader spanning several needs the answer.
             project: String::new(),
@@ -9870,6 +9871,7 @@ mod tests {
                 outcome: None,
                 run: None,
                 trial: None,
+                dir: None,
                 project: String::new(),
             },
         )
@@ -9905,6 +9907,7 @@ mod tests {
                 outcome: None,
                 run: None,
                 trial: None,
+                dir: None,
                 project: String::new(),
             },
         )
@@ -9977,6 +9980,7 @@ mod tests {
                 outcome: None,
                 run: None,
                 trial: None,
+                dir: None,
                 project: String::new(),
             },
         )

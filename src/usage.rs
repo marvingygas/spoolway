@@ -111,12 +111,27 @@ impl Tokens {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Entry {
     pub ts: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub task: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub step: String,
+    // No `skip_serializing_if` here: `bank_lane`'s headless-interrupt path
+    // already writes this blank on a real lane line — see its own doc — and
+    // `spoolway spend --json` dumps that key as `""` today. Omitting it would
+    // turn `jq '.pipeline'` into `null` on lines this task never touched,
+    // which the Goal's "nothing on screen changes" rules out. A directory
+    // line satisfies the "no pipeline" criterion by carrying it blank, the
+    // same way [`Entry::agent`] does — the test beside `sweep_dirs` asserts
+    // `== ""`, not an absent key.
+    #[serde(default)]
     pub pipeline: String,
     /// Agent *profile* name from config — `pi`, `claude` — not the binary.
+    ///
+    /// No `skip_serializing_if`: see [`Entry::pipeline`]'s comment — the same
+    /// headless-interrupt path leaves this blank on a real lane line too.
+    #[serde(default)]
     pub agent: String,
     /// Agent kind: the CLI that ran, and so which transcript format was read.
     pub kind: String,
@@ -178,6 +193,16 @@ pub struct Entry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trial: Option<String>,
 
+    /// The watched root — see [`crate::config::Config::watch_roots`] — a
+    /// session's `cwd` sat under, when this line was banked by
+    /// [`sweep`]'s directory walk rather than dispatched as a lane. `None` on
+    /// every lane line, historical or fresh: this is what [`Entry::is_lane`]
+    /// tests, and a line carrying it also carries no `task`, `step`,
+    /// `pipeline`, `agent`, `outcome`, `run` or `version`, since none of
+    /// those describe a session spoolway never dispatched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<String>,
+
     /// Which project this lane ran in. Never written to disk — a ledger lives
     /// inside its project, so storing the answer in every line would be a
     /// thousand copies of the file's own path. Filled in at load time, and only
@@ -203,11 +228,13 @@ const SYNTHETIC_MODEL: &str = "<synthetic>";
 impl Entry {
     /// Whether this line belongs to a lane, and so is worth a row in
     /// `spoolway eval` or `spoolway spend`: every reader over those two asks
-    /// this. Historical interactive lines — nothing writes one any more, but
-    /// the ledger is append-only, so old ones stay on disk — are the one
-    /// thing this skips.
+    /// this. Two populations are excluded: historical interactive lines —
+    /// nothing writes one any more, but the ledger is append-only, so old
+    /// ones stay on disk — and a directory line [`sweep`]'s watched-root walk
+    /// banked, told apart by [`Entry::dir`] rather than by a fixed agent name
+    /// the way the interactive population is.
     pub fn is_lane(&self) -> bool {
-        self.agent != INTERACTIVE_AGENT
+        self.agent != INTERACTIVE_AGENT && self.dir.is_none()
     }
 }
 
@@ -2002,6 +2029,52 @@ fn bank_lane_from(
     )
 }
 
+/// What a transcript's harvest adds up to that the ledger has not already
+/// banked for its session — the arithmetic [`bank_lane_at`] and
+/// [`bank_dir_session`] both need, since both are "diff a harvest against
+/// every line already banked for this session, and stop if the two already
+/// agree". `None` from [`banked_delta`] when they do.
+struct Delta {
+    model: String,
+    tokens: Tokens,
+    turns: u32,
+    cost_usd: Option<f64>,
+}
+
+/// The delta itself: every line in `ledger` naming `session` is summed and
+/// subtracted from `harvest`'s own totals, and `cost_usd` is either the
+/// harvest's own reported cost minus what was already banked of it, or —
+/// when the agent reports no cost of its own — the delta priced fresh from
+/// this project's `[models]` table.
+fn banked_delta(repo: &Repo, session: &str, ledger: &[Entry], harvest: &Harvest) -> Option<Delta> {
+    let mut banked = Tokens::default();
+    let mut banked_cost = 0.0f64;
+    let mut banked_turns = 0u32;
+    for entry in ledger {
+        if entry.session == session {
+            banked.add(&entry.tokens);
+            banked_cost += entry.cost_usd.unwrap_or(0.0);
+            banked_turns += entry.turns;
+        }
+    }
+
+    let tokens = harvest.tokens.since(&banked);
+    if tokens.is_zero() {
+        return None;
+    }
+    let model = harvest.model.clone();
+    let cost_usd = match harvest.cost_usd {
+        Some(total) => Some((total - banked_cost).max(0.0)),
+        None => price(&repo.config.models, &model, &tokens),
+    };
+    Some(Delta {
+        model,
+        tokens,
+        turns: harvest.turns.saturating_sub(banked_turns),
+        cost_usd,
+    })
+}
+
 /// The diff-and-append behind [`bank_lane_from`], with the ledger already read
 /// and [`crate::lock::LedgerLock`] already held.
 ///
@@ -2040,26 +2113,7 @@ fn bank_lane_at(
     ledger: &[Entry],
     harvest: &Harvest,
 ) -> Option<Entry> {
-    let mut banked = Tokens::default();
-    let mut banked_cost = 0.0f64;
-    let mut banked_turns = 0u32;
-    for entry in ledger {
-        if entry.session == session {
-            banked.add(&entry.tokens);
-            banked_cost += entry.cost_usd.unwrap_or(0.0);
-            banked_turns += entry.turns;
-        }
-    }
-
-    let tokens = harvest.tokens.since(&banked);
-    if tokens.is_zero() {
-        return None;
-    }
-    let model = harvest.model.clone();
-    let cost_usd = match harvest.cost_usd {
-        Some(total) => Some((total - banked_cost).max(0.0)),
-        None => price(&repo.config.models, &model, &tokens),
-    };
+    let delta = banked_delta(repo, session, ledger, harvest)?;
     let stamp = crate::version::stamp(repo);
     let entry = Entry {
         ts: banked_at.to_rfc3339(),
@@ -2069,13 +2123,13 @@ fn bank_lane_at(
         pipeline: carry.map(|c| c.pipeline.clone()).unwrap_or_default(),
         agent: carry.map(|c| c.agent.clone()).unwrap_or_default(),
         kind: kind.to_string(),
-        model,
+        model: delta.model,
         session: session.to_string(),
         round: carry.map(|c| c.round).unwrap_or(0),
         wall_s: 0,
-        turns: harvest.turns.saturating_sub(banked_turns),
-        tokens,
-        cost_usd,
+        turns: delta.turns,
+        tokens: delta.tokens,
+        cost_usd: delta.cost_usd,
         ctx_peak: Some(harvest.ctx_peak),
         version: Some(stamp.version),
         commit: stamp.commit,
@@ -2085,6 +2139,7 @@ fn bank_lane_at(
         outcome: None,
         run: carry.and_then(|c| c.run.clone()),
         trial: carry.and_then(|c| c.trial.clone()),
+        dir: None,
         project: String::new(),
     };
     append(repo, &entry).ok()?;
@@ -2223,7 +2278,253 @@ pub fn sweep(repo: &Repo) -> Vec<Entry> {
             appended.push(entry);
         }
     }
+    appended.extend(sweep_dirs(repo, &ledger, &live));
     appended
+}
+
+/// Catch every session that ran inside a watched directory — see
+/// [`crate::config::Config::watch_roots`] — up to its transcript, the same
+/// job [`sweep`] does for a settled lane above, over a population that never
+/// dispatched at all.
+///
+/// A session already carrying a lane line anywhere in the ledger is skipped
+/// outright, even if its own `cwd` happens to sit under a watched root:
+/// [`crate::mux`] cuts a lane's worktree outside every checkout, so the two
+/// populations do not overlap in the ordinary case, but a watched root may
+/// be anything a project names, and a session banked once must never be
+/// banked twice under a different name.
+///
+/// `live` is the same set [`sweep`]'s own lane loop skips, and for the same
+/// reason: a lane in its first round has no ledger line yet to be caught by
+/// the check above, and `watch.dirs` accepts a bare `~`, so a lane's
+/// worktree under `~/.spoolway/<project>/worktrees/` can sit inside a
+/// watched root even though the two populations do not overlap in the
+/// ordinary case. Banking it here would be banked a second time at teardown,
+/// against the snapshot `record_usage` already took.
+fn sweep_dirs(repo: &Repo, ledger: &[Entry], live: &HashSet<String>) -> Vec<Entry> {
+    let Some(home) = home_dir() else {
+        return Vec::new();
+    };
+    let roots = repo.config.watch_roots(&repo.root);
+    if roots.is_empty() {
+        return Vec::new();
+    }
+
+    let mut lane_sessions: HashSet<&str> = HashSet::new();
+    // The most recent directory line already banked for a session, if any —
+    // its `ts` is the mtime gate's watermark and its `dir` is reused rather
+    // than re-read off the transcript every sweep.
+    let mut dir_lines: BTreeMap<&str, (chrono::DateTime<chrono::Utc>, &str)> = BTreeMap::new();
+    for entry in ledger {
+        if entry.session.is_empty() {
+            continue;
+        }
+        if entry.is_lane() {
+            lane_sessions.insert(&entry.session);
+            continue;
+        }
+        let Some(dir) = entry.dir.as_deref() else {
+            continue;
+        };
+        let Ok(ts) = chrono::DateTime::parse_from_rfc3339(&entry.ts) else {
+            continue;
+        };
+        let ts = ts.with_timezone(&chrono::Utc);
+        dir_lines
+            .entry(entry.session.as_str())
+            .and_modify(|(seen, seen_dir)| {
+                if ts > *seen {
+                    *seen = ts;
+                    *seen_dir = dir;
+                }
+            })
+            .or_insert((ts, dir));
+    }
+
+    let mut appended = Vec::new();
+    for adapter in watched_kinds() {
+        for (session, path) in dir_candidates(&home, adapter) {
+            if lane_sessions.contains(session.as_str()) || live.contains(&session) {
+                continue;
+            }
+
+            // Taken before the gate and the harvest below read the file, and
+            // for the same reason [`catch_up_settled_lane`] does — see
+            // [`bank_lane_at`]'s own paragraph on why a stamp chosen after
+            // the read would make a future sweep's mtime gate skip a tail
+            // that landed during this harvest.
+            let banked_at = chrono::Utc::now();
+            let known = dir_lines.get(session.as_str()).copied();
+            if let Some((last_banked, _)) = known {
+                let moved = touched_at(&path)
+                    .map(|at| chrono::DateTime::<chrono::Utc>::from(at) >= last_banked)
+                    .unwrap_or(false);
+                if !moved {
+                    continue;
+                }
+            }
+
+            let root = match known {
+                Some((_, dir)) => dir.to_string(),
+                None => {
+                    let Some(cwd) = transcript_cwd(&path) else {
+                        continue;
+                    };
+                    let Some(root) = matching_root(&cwd, &roots) else {
+                        continue;
+                    };
+                    root.to_string_lossy().into_owned()
+                }
+            };
+
+            let Some(harvest) = harvest_file(adapter.kind, &path) else {
+                continue;
+            };
+            if let Some(entry) = bank_dir_session(
+                repo,
+                adapter.kind,
+                &session,
+                &root,
+                banked_at,
+                ledger,
+                &harvest,
+            ) {
+                appended.push(entry);
+            }
+        }
+    }
+    appended
+}
+
+/// The kinds whose transcripts a directory sweep can walk at all: a kind
+/// enumerable by [`FileShape::Exact`] or [`FileShape::AfterUnderscore`],
+/// where the session id is read straight off the filename. Not
+/// [`FileShape::OwnHome`] — codex's home has no working directory in it, only
+/// a date shard of codex's own choosing, so there is no `cwd` to match a
+/// watched root against; see the task's own non-goals.
+fn watched_kinds() -> impl Iterator<Item = &'static crate::agent::Adapter> {
+    crate::agent::ADAPTERS.iter().filter(|adapter| {
+        matches!(
+            adapter.accounting.as_ref().map(|a| a.store),
+            Some(Store::Transcript(
+                FileShape::Exact | FileShape::AfterUnderscore
+            ))
+        )
+    })
+}
+
+/// Every transcript under `home` for `adapter`'s session store, paired with
+/// the session id its filename carries — the same two [`FileShape`] rules
+/// [`session_file_in`] matches by, read the other way round: there the id is
+/// known and the file is searched for, here the file is found by the walk and
+/// the id is read back out of its name.
+fn dir_candidates(home: &Path, adapter: &crate::agent::Adapter) -> Vec<(String, PathBuf)> {
+    let Some(accounting) = &adapter.accounting else {
+        return Vec::new();
+    };
+    let Store::Transcript(shape) = accounting.store;
+    let root = home.join(accounting.sessions_dir);
+    let mut found = Vec::new();
+    transcripts_matching(&root, |_| true, &mut |_, path| {
+        let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+        let session = match shape {
+            FileShape::Exact => Some(stem.into_owned()),
+            FileShape::AfterUnderscore => stem.rsplit_once('_').map(|(_, id)| id.to_string()),
+            FileShape::OwnHome { .. } => None,
+        };
+        if let Some(session) = session {
+            found.push((session, path));
+        }
+    });
+    found
+}
+
+/// The working directory a transcript's records were written from, off the
+/// cheapest read that can answer it.
+///
+/// The field is carried verbatim on (nearly) every record a lane-capable kind
+/// writes, so the first line that has it is read and the rest of a
+/// transcript that can run to tens of megabytes is never touched — the same
+/// one-line cost [`last_record`] pays for a different question.
+fn transcript_cwd(path: &Path) -> Option<PathBuf> {
+    let file = std::fs::File::open(path).ok()?;
+    for line in std::io::BufRead::lines(std::io::BufReader::new(file)) {
+        // A line that will not even read as UTF-8 is skipped like any other
+        // unparseable one — see [`read_transcript`]'s own `filter_map`.
+        // Returning out of the whole search on the first bad byte would make
+        // a transcript unbankable on every sweep for a reason indistinguishable
+        // from having no `cwd` at all.
+        let Ok(line) = line else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if let Some(cwd) = value.get("cwd").and_then(|c| c.as_str()) {
+            return Some(PathBuf::from(cwd));
+        }
+    }
+    None
+}
+
+/// The most specific watched root `cwd` sits under, or `None` outside every
+/// one of them.
+///
+/// Longest match wins: the project root is always in the set, and a project
+/// may also watch a directory nested inside it, so a `cwd` under the nested
+/// one is banked to that root rather than to its ancestor.
+fn matching_root(cwd: &Path, roots: &[PathBuf]) -> Option<PathBuf> {
+    roots
+        .iter()
+        .filter(|root| cwd.starts_with(root))
+        .max_by_key(|root| root.as_os_str().len())
+        .cloned()
+}
+
+/// Bank one directory session's spend from its transcript, diffed against
+/// what the ledger already carries for it.
+///
+/// The same arithmetic [`bank_lane_at`] does for a settled lane, repeated for
+/// a population that never dispatched at all — which is exactly why the line
+/// this appends carries no `task`, `step`, `pipeline`, `agent`, `outcome`,
+/// `run` or `version`: none of those describe a session spoolway did not
+/// start.
+fn bank_dir_session(
+    repo: &Repo,
+    kind: &str,
+    session: &str,
+    dir: &str,
+    banked_at: chrono::DateTime<chrono::Utc>,
+    ledger: &[Entry],
+    harvest: &Harvest,
+) -> Option<Entry> {
+    let delta = banked_delta(repo, session, ledger, harvest)?;
+    let entry = Entry {
+        ts: banked_at.to_rfc3339(),
+        task: String::new(),
+        plan: None,
+        step: String::new(),
+        pipeline: String::new(),
+        agent: String::new(),
+        kind: kind.to_string(),
+        model: delta.model,
+        session: session.to_string(),
+        round: 0,
+        wall_s: 0,
+        turns: delta.turns,
+        tokens: delta.tokens,
+        cost_usd: delta.cost_usd,
+        ctx_peak: Some(harvest.ctx_peak),
+        version: None,
+        commit: None,
+        outcome: None,
+        run: None,
+        trial: None,
+        dir: Some(dir.to_string()),
+        project: String::new(),
+    };
+    append(repo, &entry).ok()?;
+    Some(entry)
 }
 
 /// Read one project's ledger, tagging every entry with the project's name.
@@ -3170,6 +3471,7 @@ mod tests {
             outcome: Some("pass".into()),
             run: Some("r00001".into()),
             trial: None,
+            dir: None,
             project: String::new(),
         };
         let line = serde_json::to_string(&entry).unwrap();
@@ -3209,6 +3511,7 @@ mod tests {
             outcome: None,
             run: None,
             trial: None,
+            dir: None,
             project: String::new(),
         }
     }
@@ -3690,6 +3993,7 @@ mod tests {
             outcome: None,
             run: None,
             trial: None,
+            dir: None,
             project: String::new(),
         }
     }
@@ -3775,6 +4079,31 @@ mod tests {
         assert!(
             !json.contains("\"skill\""),
             "a freshly written line must carry no skill key: {json}"
+        );
+    }
+
+    /// `bank_lane`'s headless-interrupt path writes a real lane line with
+    /// `pipeline` and `agent` both blank — see its own doc comment — and
+    /// `spoolway spend --json` has always dumped that as `"pipeline":""` and
+    /// `"agent":""`. Neither key may start disappearing because of a change
+    /// this task makes for an unrelated population: `jq '.pipeline'` reading
+    /// `null` instead of `""` on a line nobody touched is exactly the
+    /// on-screen change the task's own Goal rules out.
+    #[test]
+    fn a_blank_pipeline_and_agent_still_serialise_their_keys() {
+        let entry = Entry {
+            pipeline: String::new(),
+            agent: String::new(),
+            ..plain_entry()
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(
+            json.contains("\"pipeline\":\"\""),
+            "a headless-interrupt line's blank pipeline must stay a key: {json}"
+        );
+        assert!(
+            json.contains("\"agent\":\"\""),
+            "a headless-interrupt line's blank agent must stay a key: {json}"
         );
     }
 
@@ -4104,6 +4433,373 @@ mod tests {
         let tail = catch_up(&repo, "claude", "s", &path, &ledger)
             .expect("the tail written past the watermark is not lost to the gate");
         assert_eq!(tail.tokens.output, 7);
+    }
+
+    // -------------------------------------------- watched directories, swept
+
+    /// A scratch repo whose `[watch]` table names nothing extra — its own root
+    /// is always in the resolved set — paired with a scratch home laid out the
+    /// way `home_with` lays claude's and pi's out, so `sweep_dirs` can be
+    /// driven with both real directories on disk that `Config::watch_roots`
+    /// requires.
+    fn dir_fixture(name: &str) -> (Repo, PathBuf) {
+        let (mut repo, _) = fixture(name);
+        std::fs::create_dir_all(&repo.root).unwrap();
+        repo.root = repo.root.canonicalize().unwrap();
+        let root = repo.root.clone();
+        (repo, root)
+    }
+
+    /// A transcript in the shape a real one carries `cwd` in: one record per
+    /// turn, each stamped with the session's working directory the way both
+    /// claude and pi write it on every line.
+    fn transcript_in(cwd: &Path, records: &[(&str, u64)]) -> String {
+        let mut out = String::new();
+        for (n, (marker, output)) in records.iter().enumerate() {
+            if !marker.is_empty() {
+                out += &format!(
+                    "{}\n",
+                    serde_json::json!({
+                        "type": "user",
+                        "cwd": cwd.to_string_lossy(),
+                        "message": {"role": "user", "content":
+                            format!("<command-name>{marker}</command-name>\n<command-args></command-args>")},
+                    })
+                );
+            }
+            out += &format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "assistant",
+                    "requestId": format!("req-{n}"),
+                    "cwd": cwd.to_string_lossy(),
+                    "message": {
+                        "model": "claude-opus-5",
+                        "usage": {"input_tokens": 10, "output_tokens": output},
+                    },
+                })
+            );
+        }
+        out
+    }
+
+    /// A `.claude/projects/<escaped>/<session>.jsonl` transcript under a fresh
+    /// scratch home — the directory name is nonsense on purpose, since the
+    /// walk must read `cwd` off the transcript and never reproduce the
+    /// escaping that names the directory.
+    fn claude_home_with(name: &str, session: &str, lines: &str) -> PathBuf {
+        let root = crate::scratch::root(&format!("dir-sweep-{name}"));
+        let dir = root.join(".claude/projects/-nonsense-escaping-nobody-should-read");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{session}.jsonl")), lines).unwrap();
+        root
+    }
+
+    /// A transcript whose `cwd` sits under a watched root is banked as a
+    /// directory line: `dir` names the root, and the line is invisible to
+    /// `is_lane`.
+    #[test]
+    fn a_transcript_under_a_watched_root_is_banked_as_a_directory_line() {
+        let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let (repo, root) = dir_fixture("dir-match");
+        let session = "0198e2c0-1111-4000-8000-00000000d001";
+        let home = claude_home_with("match", session, &transcript_in(&root, &[("", 42)]));
+
+        let appended =
+            crate::platform::test_home::with_home(&home, || out_of_lane(|| sweep(&repo)));
+        assert_eq!(appended.len(), 1, "one directory line");
+        assert_eq!(appended[0].session, session);
+        assert_eq!(
+            appended[0].dir.as_deref(),
+            Some(root.to_string_lossy().as_ref())
+        );
+        assert_eq!(appended[0].tokens.output, 42);
+        assert!(!appended[0].is_lane(), "invisible to eval and spend");
+        assert_eq!(appended[0].task, "");
+        assert_eq!(appended[0].step, "");
+        assert_eq!(appended[0].pipeline, "");
+        assert_eq!(appended[0].outcome, None);
+        assert_eq!(appended[0].run, None);
+        assert_eq!(appended[0].version, None);
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A transcript whose `cwd` sits outside every watched root banks
+    /// nothing.
+    #[test]
+    fn a_transcript_outside_every_watched_root_banks_nothing() {
+        let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let (repo, _root) = dir_fixture("dir-no-match");
+        let elsewhere = crate::scratch::root("dir-sweep-elsewhere-cwd");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let session = "0198e2c0-2222-4000-8000-00000000d002";
+        let home = claude_home_with("no-match", session, &transcript_in(&elsewhere, &[("", 42)]));
+
+        let appended =
+            crate::platform::test_home::with_home(&home, || out_of_lane(|| sweep(&repo)));
+        assert!(appended.is_empty(), "cwd never entered a watched root");
+        assert!(read(&repo).unwrap().is_empty());
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A transcript with no readable `cwd` at all banks nothing — absence is
+    /// never guessed at.
+    #[test]
+    fn a_transcript_with_no_readable_cwd_banks_nothing() {
+        let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let (repo, _root) = dir_fixture("dir-no-cwd");
+        let session = "0198e2c0-3333-4000-8000-00000000d003";
+        let lines = format!(
+            "{}\n",
+            serde_json::json!({"type": "mode", "mode": "normal", "sessionId": session})
+        );
+        let home = claude_home_with("no-cwd", session, &lines);
+
+        let appended =
+            crate::platform::test_home::with_home(&home, || out_of_lane(|| sweep(&repo)));
+        assert!(appended.is_empty(), "no cwd to match against");
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A byte that will not even read as UTF-8 ahead of the first `cwd` must
+    /// not make the whole transcript unbankable — it is skipped like any
+    /// other unparseable line, and the search continues to the one after it.
+    #[test]
+    fn transcript_cwd_skips_a_line_that_will_not_read_as_utf8() {
+        let root = crate::scratch::root("transcript-cwd-bad-utf8");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("session.jsonl");
+        let mut bytes = vec![0xff, 0xfe, 0xfd];
+        bytes.push(b'\n');
+        bytes.extend_from_slice(
+            serde_json::json!({"type": "user", "cwd": "/home/someone/work"})
+                .to_string()
+                .as_bytes(),
+        );
+        bytes.push(b'\n');
+        std::fs::write(&path, bytes).unwrap();
+
+        assert_eq!(
+            transcript_cwd(&path),
+            Some(PathBuf::from("/home/someone/work")),
+            "the bad line must cost only itself"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A session already banked as a lane is never banked again as a
+    /// directory line, even though its transcript's `cwd` sits under a
+    /// watched root.
+    #[test]
+    fn a_session_already_banked_as_a_lane_is_never_banked_as_a_directory_line() {
+        let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let (repo, root) = dir_fixture("dir-lane-drop");
+        let session = "0198e2c0-4444-4000-8000-00000000d004";
+        let home = claude_home_with("lane-drop", session, &transcript_in(&root, &[("", 42)]));
+
+        // Already caught up to the whole transcript, so the settled-lane
+        // catch-up this same sweep also runs has nothing left to append —
+        // what is under test here is the directory walk leaving it alone,
+        // not the catch-up's own idempotence.
+        let lane = Entry {
+            task: "demo".into(),
+            step: "implement".into(),
+            session: session.into(),
+            turns: 1,
+            tokens: Tokens {
+                input: 10,
+                output: 42,
+                ..Tokens::default()
+            },
+            ..plain_entry()
+        };
+        append(&repo, &lane).unwrap();
+
+        let appended =
+            crate::platform::test_home::with_home(&home, || out_of_lane(|| sweep(&repo)));
+        assert!(
+            appended.is_empty(),
+            "a lane session must never gain a directory line"
+        );
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A lane still in its first round has no ledger line yet — the check
+    /// above cannot see it — but `lanes.json` already names it, and its
+    /// worktree can sit inside a watched root when `watch.dirs` names `~`.
+    /// The directory walk must still leave it alone, or `record_usage`
+    /// double-banks it at teardown against the snapshot it already took.
+    #[test]
+    fn sweep_dirs_leaves_a_lane_the_dispatcher_still_owns_alone_even_with_no_ledger_line_yet() {
+        let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let (repo, root) = dir_fixture("dir-live-lane");
+        let session = "0198e2c0-8080-4000-8000-00000000d008";
+        let home = claude_home_with("live-lane", session, &transcript_in(&root, &[("", 42)]));
+
+        std::fs::create_dir_all(repo.home()).unwrap();
+        std::fs::write(
+            repo.lanes_file(),
+            format!(
+                "{{\"demo · implement\":{{\"started_at\":0,\"last_progress\":0,\
+                 \"output_hash\":0,\"session\":\"{session}\"}}}}"
+            ),
+        )
+        .unwrap();
+
+        let appended =
+            crate::platform::test_home::with_home(&home, || out_of_lane(|| sweep(&repo)));
+        assert!(
+            appended.is_empty(),
+            "a live lane with no ledger line yet must still be left for record_usage"
+        );
+        assert!(read(&repo).unwrap().is_empty(), "no line was appended");
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A sweep with nothing new on disk appends no line at all, and a session
+    /// swept twice with turns in between appends only the delta — summing the
+    /// session's lines equals the transcript's own total.
+    #[test]
+    fn a_directory_session_swept_twice_appends_only_the_delta() {
+        let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let (repo, root) = dir_fixture("dir-delta");
+        let session = "0198e2c0-5555-4000-8000-00000000d005";
+        let home = claude_home_with("delta", session, &transcript_in(&root, &[("", 42)]));
+
+        let first = crate::platform::test_home::with_home(&home, || out_of_lane(|| sweep(&repo)));
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].tokens.output, 42);
+
+        // Nothing new: a second sweep appends nothing at all.
+        let again = crate::platform::test_home::with_home(&home, || out_of_lane(|| sweep(&repo)));
+        assert!(again.is_empty(), "idempotent with nothing new on disk");
+
+        // Turns landed after the first sweep.
+        let path = home
+            .join(".claude/projects/-nonsense-escaping-nobody-should-read")
+            .join(format!("{session}.jsonl"));
+        std::fs::write(&path, transcript_in(&root, &[("", 42), ("", 17)])).unwrap();
+
+        let second = crate::platform::test_home::with_home(&home, || out_of_lane(|| sweep(&repo)));
+        assert_eq!(second.len(), 1, "only the delta");
+        assert_eq!(second[0].tokens.output, 17);
+
+        let total: u64 = read(&repo)
+            .unwrap()
+            .iter()
+            .filter(|e| e.session == session)
+            .map(|e| e.tokens.output)
+            .sum();
+        assert_eq!(total, 59, "sums to the transcript's own total");
+        let ledger = read(&repo).unwrap();
+        let distinct: HashSet<&str> = ledger.iter().map(|e| e.session.as_str()).collect();
+        assert_eq!(distinct.len(), 1, "one distinct session value");
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A transcript whose mtime has not moved since its last banked directory
+    /// line is not parsed at all.
+    #[test]
+    fn a_directory_sessions_transcript_untouched_since_its_last_line_is_not_read() {
+        let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let (repo, root) = dir_fixture("dir-mtime-gate");
+        let session = "0198e2c0-6666-4000-8000-00000000d006";
+        let home = claude_home_with("mtime-gate", session, &transcript_in(&root, &[("", 42)]));
+
+        let first = crate::platform::test_home::with_home(&home, || out_of_lane(|| sweep(&repo)));
+        assert_eq!(first.len(), 1);
+
+        // The clock on disk sits before the line just banked, even though the
+        // bytes on disk would total to more if they were re-read.
+        let path = home
+            .join(".claude/projects/-nonsense-escaping-nobody-should-read")
+            .join(format!("{session}.jsonl"));
+        std::fs::write(&path, transcript_in(&root, &[("", 42), ("", 999)])).unwrap();
+        crate::scratch::set_mtime(
+            &path,
+            std::time::SystemTime::now() - std::time::Duration::from_secs(120),
+        );
+
+        let again = crate::platform::test_home::with_home(&home, || out_of_lane(|| sweep(&repo)));
+        assert!(again.is_empty(), "the gate must not even parse the file");
+        let total: u64 = read(&repo)
+            .unwrap()
+            .iter()
+            .filter(|e| e.session == session)
+            .map(|e| e.tokens.output)
+            .sum();
+        assert_eq!(total, 42, "the un-gated write past the mtime is not seen");
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// [`Entry::is_lane`] over both non-lane populations: the historical
+    /// interactive line, told apart by its fixed agent name, and a directory
+    /// line, told apart by `dir`.
+    #[test]
+    fn is_lane_tells_a_directory_line_from_a_lane_too() {
+        let dir_line = Entry {
+            dir: Some("/home/someone/notes".into()),
+            ..plain_entry()
+        };
+        assert!(!dir_line.is_lane());
+
+        let lane = Entry {
+            task: "login".into(),
+            ..plain_entry()
+        };
+        assert!(lane.is_lane());
+    }
+
+    /// pi shards by [`FileShape::AfterUnderscore`], not [`FileShape::Exact`]
+    /// — the session id has to be read back out of a filename that also
+    /// carries a timestamp prefix, which is exactly what
+    /// [`dir_candidates`]'s `rsplit_once('_')` is for.
+    #[test]
+    fn a_pi_transcript_under_a_watched_root_is_banked_too() {
+        let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let (repo, root) = dir_fixture("dir-pi-match");
+        let session = "0198e2c0-7777-4000-8000-00000000d007";
+        let scratch_root = crate::scratch::root(&format!("dir-sweep-pi-{session}"));
+        let dir = scratch_root.join(".pi/agent/sessions/nonsense-escaping");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("2026-08-04T06-14-15-743Z_{session}.jsonl")),
+            format!(
+                "{}\n{}\n",
+                serde_json::json!({"type": "session", "id": "s", "cwd": root.to_string_lossy()}),
+                serde_json::json!({
+                    "type": "message",
+                    "id": "m1",
+                    "cwd": root.to_string_lossy(),
+                    "message": {
+                        "role": "assistant",
+                        "model": "Qwen3.6-35B-A3B",
+                        "usage": {"input": 5, "output": 9, "cacheRead": 0, "cacheWrite": 0, "cost": {"total": 0.0}},
+                    },
+                })
+            ),
+        )
+        .unwrap();
+
+        let appended =
+            crate::platform::test_home::with_home(&scratch_root, || out_of_lane(|| sweep(&repo)));
+        assert_eq!(appended.len(), 1);
+        assert_eq!(appended[0].session, session, "the id after the underscore");
+        assert_eq!(appended[0].tokens.output, 9);
+        assert_eq!(
+            appended[0].dir.as_deref(),
+            Some(root.to_string_lossy().as_ref())
+        );
+
+        std::fs::remove_dir_all(&scratch_root).ok();
     }
 
     #[test]

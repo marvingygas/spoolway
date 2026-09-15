@@ -68,7 +68,8 @@ total                    131.1k     399.7k     64.21M     811.5k       43.27
 One table and one total. The rows are the ledger grouped by the named cut; the last row, `total`,
 is the sum of every row above it — the same columns, all of them filled, with no second
 population left to hold apart. Every line of spend that is not a lane is skipped wherever this
-table is read, so it shows lanes only.
+table is read, so it shows lanes only — see [Directory spend](#directory-spend) for what else
+the ledger holds.
 
 ### Reading a row
 
@@ -120,9 +121,34 @@ largest file in every finished run. A tie is read rather than skipped: a line ba
 same second the last turn landed is no proof nothing came after it.
 
 A lane still in flight is left alone. Any session named in `lanes.json` is the dispatcher's
-to bank at teardown, so the sweep skips it. The dispatcher diffs a lane's spend against a
-ledger snapshot it took once at the start of the pass, so a catch-up line slipped in behind
-it would be counted a second time.
+to bank at teardown, so the sweep skips it — the directory walk below honours the same
+exclusion, for the same reason. The dispatcher diffs a lane's spend against a ledger snapshot
+it took once at the start of the pass, so a catch-up line slipped in behind it would be
+counted a second time.
+
+### Directory spend
+
+A watched directory — see [`[watch]`](configuration.md#watch--directories-whose-own-sessions-count-as-this-projects-spend) — has sessions of its own that
+never went through the dispatcher at all: a person running `claude` or `pi` by hand inside it.
+Reading the ledger sweeps those too, the same pass that catches up a settled lane, and banks
+one line per session under `dir`, set to the most specific watched root the session's
+transcript `cwd` sat under.
+
+A directory line carries no `task`, `step`, `pipeline`, `agent`, `outcome`, `run` or `version`
+— nothing here describes work spoolway dispatched, because it didn't. `spoolway eval` and
+`spoolway spend` skip it exactly like a historical interactive line: both are lines
+`is_lane()` returns false for, so the table above shows lanes only, unchanged. Reading it back
+still requires `--json`, over the raw ledger.
+
+A session already banked as a lane is never banked again under `dir`, even if its own `cwd`
+happens to sit under a watched root — a lane's worktree is cut outside every checkout in the
+ordinary case, but a watched root may name anything. The same mtime gate and per-session delta
+that [catch up a settled lane](#settled-lanes) apply here: a transcript that has not moved
+since its last banked directory line is not reparsed, and a session swept twice banks only
+what landed since the last sweep.
+
+codex is out of scope for this walk: its session store is sharded by date with no working
+directory recorded in it, so there is no `cwd` to match a watched root against.
 
 ### Windows
 

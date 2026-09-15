@@ -1839,11 +1839,8 @@ impl Config {
     /// never appears twice.
     ///
     /// Nothing here reads a transcript; this only says which directories a
-    /// later reader should look in.
-    ///
-    /// No caller yet — proven by the unit tests beside it, until
-    /// `dir-spend-ledger` reads a transcript out of each of these roots.
-    #[allow(dead_code)]
+    /// later reader should look in — [`crate::usage::sweep`]'s directory walk
+    /// is that reader.
     pub fn watch_roots(&self, repo_root: &Path) -> Vec<PathBuf> {
         let home = crate::platform::home_dir();
         let mut roots = Vec::new();
