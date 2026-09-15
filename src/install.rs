@@ -117,9 +117,8 @@ const SKILLS: &[Skill] = &[
     // issue-tracking hooks. One skill rather than several, because a step and
     // the value that runs it (a model, an effort, a timeout, a concurrency)
     // are the same territory at different sizes. It carries no
-    // `disable-model-invocation` either: `spoolway-calibrate` hands a shape
-    // finding straight to it, so it has to be reachable from inside another
-    // skill's own procedure. It ships no assets: every format it routes to is
+    // `disable-model-invocation` either: `spoolway pipeline gen` reaches it
+    // from another procedure. It ships no assets: every format it routes to is
     // printed by the binary itself — `spoolway pipeline contract`, `prompt
     // contract`, `config contract`, `override contract`, `template contract`
     // and `hook contract` — fetched at runtime instead of a copy that can
@@ -142,10 +141,9 @@ const SKILLS: &[Skill] = &[
         pi_skill_md: include_str!("../assets/skills/pi/spoolway-doctor/SKILL.md"),
         assets: &[],
     },
-    // Reads a window of archived tasks and the spend ledger back into the
-    // control plane that produced them — nothing else in this file does
-    // that, and nothing here writes: a kept finding is handed to
-    // `spoolway-tasks` the same as any other breakdown.
+    // Reads lane-written task records and step-level evaluation and spend data
+    // back into the control plane that produced them. It uses both the agents'
+    // own reports and the numbers, then applies the changes the person chooses.
     Skill {
         name: "spoolway-calibrate",
         skill_md: include_str!("../assets/skills/claude/spoolway-calibrate/SKILL.md"),
@@ -501,10 +499,8 @@ mod tests {
                 );
                 // Every skill here is human-triggered, except spoolway-tasks
                 // and spoolway-config: both are called from inside another
-                // skill's own procedure (spoolway-plan's step 7, and
-                // spoolway-calibrate's step 8 for spoolway-config and step 9
-                // for spoolway-tasks — the invocation exception survives
-                // spoolway-config's rename from spoolway-pipeline unchanged),
+                // procedure (spoolway-plan's step 7 and `spoolway pipeline
+                // gen` for spoolway-config),
                 // and `disable-model-invocation: true` would make a skill
                 // unreachable from there.
                 if matches!(name, "spoolway-tasks" | "spoolway-config") {

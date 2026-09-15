@@ -2,20 +2,21 @@
 
 ## What you are looking at
 
-Prove that the repository is ready for a release and assemble the evidence the release-note writer
-needs. Read `docs/releasing.md` in full before acting. You are the bounded, read-heavy pass:
-inspect and verify, but do not choose the final version or publish anything.
+Freeze the exact `main` already proven by the readiness loop and assemble the evidence the
+release-note writer needs. Read `docs/releasing.md` in full before acting. You are the bounded,
+read-heavy release-record pass: inspect and verify, but do not repair, choose the final version or
+publish anything.
 
 ## How to do it here
 
 1. Work from the source-checkout path given under WHAT YOU HAVE, not the disposable task worktree.
-   Confirm it is clean `main`, fast-forwarded to `origin/main`, and that no other queued work can
-   still produce a pull request. This release task explains why its own dispatcher is running.
-2. Run the runbook's complete local gate in the prescribed order. A failed check is a block.
-   Inspect available daily CI evidence and record run ids, head SHAs and actual job conclusions,
-   including skipped jobs. Missing or older CI evidence does not prove this candidate; the
-   publisher's new release commit must pass its own full rehearsal. Investigate any known
-   unresolved candidate failure before recommending release.
+   Confirm it is clean `main`, fast-forwarded to `origin/main`, matches the readiness handoff's
+   locally and host-verified SHA, and has no other queued work able to produce a pull request. This
+   release task explains why its own dispatcher is running.
+2. Audit the readiness handoff: record its local commands, hosted run id, head SHA and actual job
+   conclusions, including skipped jobs. Missing, older or mismatched evidence fails back to the
+   readiness fixer; it does not prove this candidate. The publisher's new release commit must still
+   pass its own full rehearsal.
 3. Read the version in `Cargo.toml`, the latest reachable `v*` tag, and the exact commit at the tip
    of main. Confirm `Cargo.lock` agrees with the manifest before making any recommendation.
 4. Inspect every commit and merged pull request since the last tag. Separate user-visible
@@ -41,11 +42,11 @@ inspect and verify, but do not choose the final version or publish anything.
    Confirm release calls the shared verification workflow with the nightly tier and tests enabled,
    every checkout uses the run's SHA, and both npm publication and GitHub release creation depend
    on successful verification and are disabled in rehearsal. Report drift instead of editing it.
-9. Hand off the main commit, current version, previous tag, proposed version and reason, categorized
+9. Hand off the main commit, readiness run id, current version, previous tag, proposed version and reason, categorized
    changes with pull-request numbers, breaking changes and migrations, the changelog contract
    findings from step 6, and all local and hosted verification results with
    their SHAs. If this is a return from publishing because main moved, say exactly what changed
-   since the previously approved candidate, and say whether an earlier attempt left an untagged
+   since the previously recorded candidate, and say whether an earlier attempt left an untagged
    version bump or changelog section behind.
 
 ## Never
@@ -57,3 +58,5 @@ inspect and verify, but do not choose the final version or publish anything.
 - Never treat this task's own running dispatcher as unreleased work; only other tasks count.
 - Never recommend a version from commit-message prefixes alone.
 - Never hide a dirty tree, open pull request, failed check, workflow drift, or manifest/lock mismatch.
+- Never block on a repository change the readiness fixer can make; report a failure with the exact
+  file, command and evidence it needs.

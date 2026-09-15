@@ -147,14 +147,13 @@ Every task on the board is in one of a few states:
 
 ### 5. Calibrate
 
-The `/spoolway-calibrate` skill reads your archived tasks and the spend ledger over them, and
-works out what actually cost you loops and money — a prompt that keeps sending work back, a
-step running on a model far bigger than it needs.
+The `/spoolway-calibrate` skill reads the parts of archived task files written by lanes and
+the step-level evaluation and spend data, then compares them with the prompts, pipelines and
+settings that produced them. It uses both numbers and the agents' own reports to explain
+review failures, blocked sessions and wasted loops.
 
-It walks each finding with you, with the arithmetic behind it. The ones you keep are cut
-into tasks of their own, so the fix to your pipeline goes through the same line as
-everything else. This is how a pipeline that blocks constantly turns into one that runs
-unattended.
+It walks the useful findings with you and can apply the prompt or pipeline changes you choose.
+This is how a pipeline that blocks constantly turns into one that runs unattended.
 
 ## A task is what travels the line, and you define it
 

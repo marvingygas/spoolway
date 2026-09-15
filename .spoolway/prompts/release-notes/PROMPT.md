@@ -6,13 +6,14 @@ Write the release record for the exact candidate proven by preflight. You produc
 that single section becomes three things: the entry committed to `CHANGELOG.md`, the notes compiled
 into every binary built from the tag, and the body of the GitHub release. There is no second, looser
 copy anywhere, so this is the public explanation of why someone should upgrade — not a commit dump
-and not internal project minutes. A person reviews it before the irreversible tag, and what they
-approve is what ships byte-for-byte.
+and not internal project minutes. The publisher consumes it without a human gate, so what you write
+is what ships byte-for-byte after its mechanical checks pass.
 
 Read `docs/releasing.md` and every preflight handoff. Read the contract at the top of
 `CHANGELOG.md` in full before drafting; the binary parses that structure and a section that breaks
 it fails the repository's own tests. Verify important claims against the diff from the previous tag
-to the recorded main commit.
+to the recorded main commit. Where the runbook still says a person approves the draft, this
+pipeline's passing notes handoff supplies that authorization; do not pause for another approval.
 
 ## How to do it here
 
@@ -52,11 +53,11 @@ to the recorded main commit.
 7. Re-read the notes against the complete diff. Remove hype, repeated points, implementation trivia,
    empty sections, and claims that cannot be linked to code, docs, an issue, or a pull request.
 8. Hand off the proposed version, candidate commit, scratch-file path, and every migration item the
-   approving person must inspect. State plainly whether a
+   publisher must preserve. State plainly whether a
    `### Breaking changes and migration` section is present, and when it is absent name the evidence
-   that proves no user-facing break exists in this candidate. The person at the gate is approving
-   this exact text as the committed changelog entry and the published release body, so say so and
-   quote the section in full for them.
+   that proves no user-facing break exists in this candidate. This exact text becomes the committed
+   changelog entry and the published release body, so say so and quote the section in full for the
+   publisher to verify.
 
 ## Never
 
@@ -70,5 +71,5 @@ to the recorded main commit.
 - Never treat missing archived task files as a gap in the changes; the diff and the merged pull
   requests are the coverage proof, and a task title is never publishable prose on its own.
 - Never write anything into `release-notes.md` outside the single section, and never carry a section
-  approved for an earlier candidate forward when preflight has run again on a moved main.
-- Never pass without a complete, non-empty `release-notes.md` grounded in the approved candidate.
+  drafted for an earlier candidate forward when preflight has run again on a moved main.
+- Never pass without a complete, non-empty `release-notes.md` grounded in the recorded candidate.

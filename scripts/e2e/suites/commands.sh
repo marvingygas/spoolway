@@ -161,7 +161,7 @@ works "and the provider's skills are installed, not suggested" \
   test -f "$INITDIR/asked/.agents/skills/spoolway-plan/SKILL.md"
 works "including the task-cutting skill spoolway-plan's step 7 invokes" \
   test -f "$INITDIR/asked/.agents/skills/spoolway-tasks/SKILL.md"
-works "and spoolway-calibrate, which hands its own kept findings to it" \
+works "and spoolway-calibrate lands beside it" \
   test -f "$INITDIR/asked/.agents/skills/spoolway-calibrate/SKILL.md"
 works "in that provider's directory alone" \
   test ! -e "$INITDIR/asked/.claude"

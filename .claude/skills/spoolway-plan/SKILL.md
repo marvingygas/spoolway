@@ -107,8 +107,10 @@ day it changes; a path stays true. Name the file that already holds the ground n
    57" — run `spoolway issue show <ref>` first and read its title, body, labels and comments
    before anything else: a correction or a scope cut often lives in a comment, and planning
    off the body alone plans off a stale draft. Then read the relevant code yourself before
-   proposing anything — where that survey is genuinely large, offer **one or two read-only
-   research subagents** with AskUserQuestion, and spawn them only on a yes.
+   proposing anything. Where that survey is genuinely large, spawn **one to three read-only
+   research subagents** without asking: use one by default, and add a second or third only for
+   independent areas that can be researched in parallel. Give each a distinct, bounded question;
+   never delegate a survey small enough to read directly.
 
 2. **Settle everything, before a single line of the page is written.** List every open question
    and put them to the person with **AskUserQuestion**, batched.
