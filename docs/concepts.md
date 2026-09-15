@@ -137,7 +137,9 @@ Confinement is your own agent's settings. See
 ## Gate
 
 A step with `gate: true` stops the task on `paused` after its pass. A single task can do the
-same with `gate_at: <step>` in its document. `spoolway resume` sends the task on by `on_pass`.
+same with `gate_at: <step>` in its document. A `gate_at` is spent when it fires. The task pauses
+once, and a later pass through the same step runs straight through unless something writes a
+fresh `gate_at`. `spoolway resume` sends the task on by `on_pass`.
 `spoolway resume --reject` sends it back by `on_fail`, or to `blocked` when the step has no
 `on_fail`.
 

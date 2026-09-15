@@ -237,14 +237,25 @@ pub fn report(
     // Two ways a step earns this, not one: the pipeline's own `gate: true`,
     // which holds every task that reaches the step, and a task's own
     // `gate_at`, set by whoever wrote its document to hold this one task
-    // without giving it a pipeline of its own. Both land on the same pause —
-    // nothing downstream tells them apart.
-    let gated = (step.gate || task.front.gate_at.as_deref() == Some(current.as_str()))
+    // without giving it a pipeline of its own. Both land on the same
+    // pause — but they are not spent the same way, and the `if scheduled`
+    // block below is where that difference is made.
+    let scheduled = task.front.gate_at.as_deref() == Some(current.as_str());
+    let gated = (step.gate || scheduled)
         && outcome == Outcome::Pass
         && destination != crate::pipeline::BLOCKED;
     if gated {
         task.front.paused_at = Some(current.clone());
         destination = crate::pipeline::PAUSED.to_string();
+        // Spent, not standing, whoever wrote it — the board's `s` is the
+        // example, but a `gate_at` typed by hand into the document fires and
+        // clears exactly the same way. A step's own `gate: true` is the one
+        // that holds every task that ever reaches it. Left set, a later
+        // route that brought this task back onto the same step — a loop, a
+        // `--stage` reroute — would gate it a second time nobody asked for.
+        if scheduled {
+            task.front.gate_at = None;
+        }
     }
 
     // And in an unattended run, that is as far towards `blocked` as it gets.
@@ -2465,6 +2476,10 @@ mod tests {
         let task = queued(&repo, "ship");
         assert_eq!(task.stage(), crate::pipeline::PAUSED);
         assert_eq!(task.front.paused_at.as_deref(), Some("build"));
+        // Spent the moment it fired, unlike a pipeline's own `gate: true`,
+        // which never comes off — a later route back onto `build` must not
+        // find it still armed.
+        assert_eq!(task.front.gate_at, None);
 
         // `resume` reads `paused_at` exactly as it does for a pipeline's own
         // gate — nothing downstream needed to learn a second way to get here.
@@ -2482,6 +2497,49 @@ mod tests {
         .unwrap();
         let task = queued(&repo, "ship");
         assert_eq!(task.stage(), "deploy", "resume takes `build`'s on_pass");
+
+        // A later route back onto `build` — `deploy` failing round-trips
+        // here through its own `on_fail` — passes straight through this
+        // time: the schedule was a one-time answer, not a standing gate.
+        report(
+            &repo,
+            &pipelines,
+            &ReportArgs {
+                task: Some("ship".into()),
+                pass: false,
+                fail: true,
+                block: false,
+                pause: false,
+                message: Some("needs another pass".into()),
+                handoff: vec![],
+            },
+            Some("deploy"),
+        )
+        .unwrap();
+        assert_eq!(queued(&repo, "ship").stage(), "build");
+
+        report(
+            &repo,
+            &pipelines,
+            &ReportArgs {
+                task: Some("ship".into()),
+                pass: true,
+                fail: false,
+                block: false,
+                pause: false,
+                message: Some("built again".into()),
+                handoff: vec![],
+            },
+            Some("build"),
+        )
+        .unwrap();
+        let task = queued(&repo, "ship");
+        assert_eq!(
+            task.stage(),
+            "deploy",
+            "the second arrival at `build` is not gated again"
+        );
+        assert_eq!(task.front.paused_at, None);
     }
 
     /// The other answer. A rejection is written to `## Handoff`, credited to

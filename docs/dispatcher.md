@@ -114,7 +114,7 @@ task id marks `parallel: true`.
 | OUT | Output tokens this step has produced. |
 | COST | What this step has cost. |
 | TIME | How long the lane has been on this step. |
-| NEXT | For a running task, the step it goes to on pass. For a queued task, what it waits on. For a paused task, the pane to look at. |
+| NEXT | For a running task, the step it goes to on pass. For one with a scheduled pause, `→ paused after <step>`. For a queued task, what it waits on. For a paused task, the pane to look at. |
 
 `spoolway spend task` gives the task's whole bill.
 
@@ -158,12 +158,17 @@ Lowercase acts on the row under the `▸` cursor. Uppercase acts on the whole ru
 | `R` | Resume every paused task. Asks first if any of them is at a real gate. |
 | `p` | Pause the row. Asks first if it would interrupt a running agent turn or command. |
 | `P` | Pause every task in the run. Asks first, listing what it would interrupt. |
+| `s` | On an open pause panel, schedule the pause instead of carrying it out. |
 | `u` | Take a `queued` task out of the queue and write its document back to `~/.spoolway/<project>/pending/`. Asks first. |
 | `U` | Do the same for every task that has not started. Asks first. |
 | `ctrl-c` | Stop the run. |
 
 Pausing an agent turn sends Escape to the pane, so a resume picks the session back up. Pausing
 a command step kills the run, and the command runs again in full on resume.
+
+`s` on a pause panel interrupts nothing. It writes a `gate_at` for the step the panel named, so
+each named task pauses itself once that step passes. Under `P`, the tasks with nothing running
+still park at once. Press `s` again on a row that already has a scheduled pause to clear it.
 
 ### Footer
 

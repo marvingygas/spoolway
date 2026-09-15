@@ -52,7 +52,7 @@ as JSON.
 | `touches` | you | Globs of the files this task changes. Drives conflict detection and the `document` step. |
 | `depends_on` | you | Task ids that must reach `done` before this one starts. |
 | `parallel` | you | `true` marks a missing `depends_on` to another `parallel: true` task of the same group as chosen on purpose. See [Declaring a fan on purpose](#declaring-a-fan-on-purpose). |
-| `gate_at` | you | A step id. The task pauses after that step passes. See [Paused is the other one, and it is not a block](#paused-is-the-other-one-and-it-is-not-a-block). |
+| `gate_at` | you | A step id. The task pauses after that step passes, once. See [Paused is the other one, and it is not a block](#paused-is-the-other-one-and-it-is-not-a-block). |
 | `base` | you | The branch the group lands in. Empty means the branch checked out when you queued the task. |
 | `source` | you | Where the task came from: an issue URL, a plan page path, a name. Never parsed. |
 | `plan` | you | The plan page's absolute path, when `source` holds an issue. Never parsed. |
