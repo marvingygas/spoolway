@@ -136,6 +136,27 @@ pub struct Workspace {
     pub checkout_path: PathBuf,
 }
 
+/// One tab [`Mux::tabs_for_sweep`] found, with the four facts
+/// [`crate::dispatch::sweep_anchor_tabs`] judges against its own conditions.
+/// Raw material for that policy, not a verdict — see [`Mux::tabs_for_sweep`]'s
+/// own doc for why the split sits there.
+#[derive(Debug, Clone)]
+pub struct SweepTab {
+    pub workspace_id: String,
+    pub tab_id: String,
+    /// The workspace's own worktree. [`Mux::tabs_for_sweep`] never answers
+    /// with a tab at all for a workspace bound to no checkout — see its own
+    /// doc — so there is no absent case here to represent: condition one,
+    /// "sits in a spoolway-owned workspace", is `owns_cwd` against this path
+    /// alone, in [`crate::dispatch::tabs_to_sweep`].
+    pub checkout_path: PathBuf,
+    /// Does any pane in this tab still hold a live agent session?
+    pub holds_agent: bool,
+    /// Every pane this tab currently has, checked against a run's `.pane`
+    /// file — see condition three, "holds no recorded command pane".
+    pub pane_ids: HashSet<String>,
+}
+
 /// How to start one agent in one pane.
 #[derive(Debug, Clone)]
 pub struct LaneSpec<'a> {
@@ -300,6 +321,20 @@ pub trait Mux {
         Ok(None)
     }
 
+    /// Every tab this backend currently has open on a checkout of ours,
+    /// with just enough about each to judge
+    /// [`crate::dispatch::sweep_anchor_tabs`]'s four conditions — never a
+    /// judgement of its own, since deciding which of these to close is
+    /// policy the dispatcher owns, not a backend.
+    ///
+    /// `Ok(vec![])` from a backend with no tabs to sweep: headless has none
+    /// at all, and tmux is not reached by this sweep — it shares
+    /// [`Herdr::create_pane`]'s old bug under its own `task_window`, but
+    /// that is a task of its own.
+    fn tabs_for_sweep(&self) -> Result<Vec<SweepTab>> {
+        Ok(Vec::new())
+    }
+
     /// Move the dispatcher's own pane into the run's workspace, so the board
     /// draws in the same group as the lanes it is drawing.
     ///
@@ -401,7 +436,7 @@ pub trait Mux {
     ///
     /// Which pane in the tab actually gets split is this call's own decision,
     /// not the caller's: herdr has no rebalance command, so spoolway chooses
-    /// the biggest one, ties to the newest, along its longer side, every
+    /// the smallest one, ties to the newest, along its longer side, every
     /// time. tmux needs none of that — `select-layout tiled` retiles the
     /// whole window after every split.
     fn split_pane(&self, tab_id: &str, cwd: &Path) -> Result<String>;
@@ -829,25 +864,20 @@ impl Herdr {
     }
 
     /// Which pane in `tab_id` the next lane should split off, and along which
-    /// side: the biggest pane with no agent running in it, falling back to
-    /// the biggest overall once every pane holds one, split `down` while
-    /// both halves would keep at least [`MIN_ROWS_AFTER_SPLIT`] rows and
-    /// `right` below that — herdr has no rebalance command, so a tab left to
-    /// grow by always splitting the newest pane degenerates into slivers,
-    /// and this is spoolway's decision to make every time.
+    /// side: the smallest pane in the tab's live geometry, halved along its
+    /// longer side — herdr has no rebalance command, so a tab left to grow by
+    /// always splitting the newest pane degenerates into slivers, and this
+    /// is spoolway's decision to make every time.
     ///
-    /// Three calls. `pane list` names a pane in the tab, because `pane
+    /// Two calls. `pane list` names a pane in the tab, because `pane
     /// layout` is addressed by pane rather than by tab and the layout that
     /// pane is in is the whole tab's, rects and all — asking `pane layout`
     /// for a tab directly is a usage error herdr answers on stderr, which
     /// arrives here as an unparseable envelope and reads, one layer up, as a
-    /// tab this multiplexer has never heard of. `agent list` then says which
-    /// of those panes are free to give up their space: a command step's pane
-    /// runs a shell script rather than an agent, so it reads as agentless and
-    /// is a valid target, same as any pane whose agent has already exited.
+    /// tab this multiplexer has never heard of.
     ///
     /// Also answers the tab's own pane ids, read off this same `pane
-    /// layout` call rather than a fourth one — see [`Herdr::split_pane`],
+    /// layout` call rather than a third one — see [`Herdr::split_pane`],
     /// which needs exactly this set, from exactly this moment, to tell
     /// which pane the split actually made.
     fn pane_to_split(&self, tab_id: &str) -> Result<(SplitTarget, HashSet<String>)> {
@@ -865,15 +895,7 @@ impl Herdr {
             .find(|p| p.tab_id.as_deref() == Some(tab_id))
             .with_context(|| format!("tab `{tab_id}` has no panes to split"))?;
         let layout: PaneLayout = self.call(&["pane", "layout", "--pane", &any.pane_id])?;
-        let agents: AgentList = self.call(&["agent", "list"])?;
-        let agent_panes: HashSet<String> = agents
-            .agents
-            .into_iter()
-            .filter(|raw| raw.agent.is_some())
-            .map(|raw| raw.pane_id)
-            .collect();
-        let target =
-            choose_split(layout.layout, &agent_panes).context("this tab has no panes to split")?;
+        let target = choose_split(layout.layout).context("this tab has no panes to split")?;
         Ok((target, before))
     }
 
@@ -909,30 +931,13 @@ impl Herdr {
         })
     }
 
-    /// A tab of `workspace`, opened on `cwd` and labelled `label`.
-    ///
-    /// Unlike [`Mux::open_tab`] this closes no root tab: it is for a workspace
-    /// that already holds a checkout, which never has a bare shell of this
-    /// process's making standing in it.
-    fn tab_on(&self, workspace: &str, cwd: &Path, label: &str) -> Result<Workspace> {
-        let path = cwd.display().to_string();
-        let created: TabCreated = self.call(&[
-            "tab",
-            "create",
-            "--workspace",
-            workspace,
-            "--cwd",
-            &path,
-            "--label",
-            label,
-            "--no-focus",
-        ])?;
-        Ok(Workspace {
-            workspace_id: workspace.to_string(),
-            pane_id: created.root_pane.pane_id,
-            tab_id: Some(created.tab.tab_id),
-            checkout_path: cwd.to_path_buf(),
-        })
+    /// The tab a workspace already has, if it has one — found, never opened:
+    /// [`Herdr::create_pane`] splits a fresh pane into what this answers
+    /// instead of `tab create`-ing a second tab beside it, which is the
+    /// anchor tab this task exists to stop leaving behind. See [`tab_in`].
+    fn existing_tab(&self, workspace: &str) -> Result<Option<String>> {
+        let tabs: TabList = self.call(&["tab", "list", "--workspace", workspace])?;
+        Ok(tab_in(tabs))
     }
 
     /// Is there still an agent session in this pane?
@@ -1004,52 +1009,41 @@ impl Herdr {
     }
 }
 
-/// The fewest rows a split-off half may be left with. Below this a pane is
-/// too short to read comfortably, so the split goes `right` instead.
-///
-/// A fixed constant and not a `dispatch.*` setting: herdr's rects are in
-/// terminal cells, and this is a property of what a person can read, not of
-/// a project's preference.
-const MIN_ROWS_AFTER_SPLIT: i64 = 20;
-
 /// The pane in a tab's layout to split, and the side to halve it along.
 ///
 /// Its own function so the rule can be read against a captured `pane layout`
 /// payload — the shape of that payload is the whole of what went wrong here
 /// once already.
 ///
-/// `agent_panes` is the set of pane ids `agent list` says hold a live agent.
-/// The target is the biggest pane outside that set — an idle root shell, say,
-/// or a command step's pane, which runs a shell script and so never appears
-/// in it — falling back to the biggest pane overall once every pane holds an
-/// agent, so a split still has somewhere to go.
-fn choose_split(layout: RawLayout, agent_panes: &HashSet<String>) -> Option<SplitTarget> {
-    // `max_by_key` returns the *last* of several equally maximum elements,
-    // which is exactly "ties to the newest" as long as `pane layout` lists
-    // panes in the order they were made — the same order a fresh split is
-    // appended in.
-    let agentless: Vec<RawPaneRect> = layout
-        .panes
-        .iter()
-        .filter(|p| !agent_panes.contains(&p.pane_id))
-        .cloned()
-        .collect();
-    let chosen = agentless
-        .into_iter()
-        .max_by_key(|p| p.rect.width * p.rect.height)
-        .or_else(|| {
-            layout
-                .panes
-                .into_iter()
-                .max_by_key(|p| p.rect.width * p.rect.height)
-        })?;
-    // A terminal cell is roughly twice as tall as it is wide, so the choice
-    // is made on rows alone rather than by comparing width against height:
-    // stack panes top/bottom for as long as each half still has room to
-    // read, and only then start giving up columns.
-    let direction = match chosen.rect.height / 2 >= MIN_ROWS_AFTER_SPLIT {
-        true => "down",
-        false => "right",
+/// The target is the smallest pane in the layout by area, ties breaking
+/// toward the pane listed last — same as a fresh split is appended, so a tie
+/// prefers the newest pane. Halving the smallest pane along its longer side,
+/// over and over, is what grows a tab into the Fibonacci spiral a person
+/// expects: one pane cuts side by side, the pane that leaves cuts top and
+/// bottom, and so on. No floor is needed underneath it — a pane can never be
+/// cut along the side it is already short on, so halving the longer side is
+/// itself the floor.
+fn choose_split(layout: RawLayout) -> Option<SplitTarget> {
+    // Not `min_by_key`: it returns the *first* of several equally minimum
+    // elements, which would tie-break to the earliest pane and break states
+    // 2 and 4. Folded by hand instead, keeping the running minimum only on a
+    // strict `<` — an equal-area pane always replaces it, so the last of
+    // several equally small panes wins, matching `pane layout`'s own append
+    // order.
+    let chosen =
+        layout
+            .panes
+            .into_iter()
+            .fold(None::<RawPaneRect>, |smallest, p| match &smallest {
+                Some(s) if s.rect.width * s.rect.height < p.rect.width * p.rect.height => smallest,
+                _ => Some(p),
+            })?;
+    // A terminal cell is roughly twice as tall as it is wide, so height is
+    // counted double before the two are compared — an exact tie, both sides
+    // equally square, resolves to `down`.
+    let direction = match chosen.rect.width > chosen.rect.height * 2 {
+        true => "right",
+        false => "down",
     };
     Some(SplitTarget {
         pane_id: chosen.pane_id,
@@ -1074,6 +1068,16 @@ fn find_tab_id(tabs: TabList, label: &str) -> Option<String> {
         .into_iter()
         .find(|t| t.label.as_deref() == Some(label))
         .map(|t| t.tab_id)
+}
+
+/// The tab of a `tab list` reply that a workspace already has, if it has one
+/// — the first one herdr names, since a workspace under
+/// [`MuxMode::Split`] is never opened with more than one until a stray anchor
+/// (one left by a session predating this fix, or by a crash) puts a second
+/// beside it for the sweep to find later. Its own function, like
+/// [`find_tab_id`], so it can be read against a captured `tab list` payload.
+fn tab_in(tabs: TabList) -> Option<String> {
+    tabs.tabs.into_iter().next().map(|t| t.tab_id)
 }
 
 /// Every pane `pane list` says sits in `tab_id`, right now — the account
@@ -1440,6 +1444,42 @@ impl Mux for Herdr {
         Ok(find_tab_id(tabs, label))
     }
 
+    fn tabs_for_sweep(&self) -> Result<Vec<SweepTab>> {
+        let workspaces: WorkspaceList = self.call(&["workspace", "list"])?;
+        let panes: PaneList = self.call(&["pane", "list"])?;
+        let agents: AgentList = self.call(&["agent", "list"])?;
+        let agent_panes: HashSet<&str> = agents
+            .agents
+            .iter()
+            .filter(|raw| raw.agent.is_some())
+            .map(|raw| raw.pane_id.as_str())
+            .collect();
+
+        let mut out = Vec::new();
+        for workspace in &workspaces.workspaces {
+            // Bound to nothing this run ever opened, which is never the
+            // sweep's to touch — condition one, "sits in a spoolway-owned
+            // workspace".
+            let Some(worktree) = &workspace.worktree else {
+                continue;
+            };
+            let tabs: TabList =
+                self.call(&["tab", "list", "--workspace", &workspace.workspace_id])?;
+            for tab in tabs.tabs {
+                let pane_ids = pane_ids_in_tab(&panes, &tab.tab_id);
+                let holds_agent = pane_ids.iter().any(|p| agent_panes.contains(p.as_str()));
+                out.push(SweepTab {
+                    workspace_id: workspace.workspace_id.clone(),
+                    tab_id: tab.tab_id,
+                    checkout_path: worktree.checkout_path.clone(),
+                    holds_agent,
+                    pane_ids,
+                });
+            }
+        }
+        Ok(out)
+    }
+
     fn task_owns_workspace(&self) -> bool {
         // Under `split` every task cuts a workspace of its own; under
         // `grouped` every task is a pane in the one tab its project shares.
@@ -1551,13 +1591,28 @@ impl Mux for Herdr {
     fn create_pane(&self, cwd: &Path, label: &str) -> Result<Workspace> {
         let path = cwd.display().to_string();
 
-        // A tab in the workspace that already holds this checkout, so a closeout
+        // The workspace that already holds this checkout, so a closeout
         // appears under the plan it belongs to rather than as a stray workspace
         // beside it. Found by checkout path, never by focus: `--current` would
         // resolve to whatever pane the dispatcher sits in, or to someone else's
         // when the dispatcher is not in one at all.
+        //
+        // A pane is split into the tab that workspace already has, never
+        // `tab create`'d a second one: that used to be exactly how the anchor
+        // tab this task exists to stop leaving behind got there — the lane
+        // landed in the new tab and the workspace's original tab was left
+        // standing at an idle shell.
         if let Some(workspace) = self.workspace_holding(cwd)? {
-            return self.tab_on(&workspace, cwd, label);
+            let tab_id = self.existing_tab(&workspace)?.with_context(|| {
+                format!("workspace `{workspace}` has no tab to split a pane in")
+            })?;
+            let pane_id = self.split_pane(&tab_id, cwd)?;
+            return Ok(Workspace {
+                workspace_id: workspace,
+                pane_id,
+                tab_id: Some(tab_id),
+                checkout_path: cwd.to_path_buf(),
+            });
         }
 
         // Nobody has this checkout open: it needs a home of its own, and how
@@ -2287,7 +2342,7 @@ mod tests {
     /// expects them flat parses nothing at all — which is how a tab that
     /// exists came to be reported as one this multiplexer had never heard of.
     #[test]
-    fn the_biggest_pane_is_read_out_of_a_real_layout_payload() {
+    fn the_smallest_pane_is_read_out_of_a_real_layout_payload() {
         let payload = r#"{
           "layout": {
             "area": {"height": 50, "width": 173, "x": 36, "y": 1},
@@ -2308,16 +2363,13 @@ mod tests {
           "type": "pane_layout"
         }"#;
         let layout: PaneLayout = serde_json::from_str(payload).expect("a live pane layout parses");
-        let chosen = choose_split(layout.layout, &HashSet::new())
-            .expect("a tab with panes has one to split");
-        // 84 × 50 = 4,200 beats both 89 × 25 = 2,225 halves. Halving the
-        // chosen pane along rows leaves 25 on each side, at or above the
-        // 20-row floor, so it is halved top/bottom rather than left/right —
-        // not "wider than tall" the way comparing width against height
-        // directly used to read it, since a terminal cell is roughly twice
-        // as tall as it is wide.
-        assert_eq!(chosen.pane_id, "w5S:p1C");
-        assert_eq!(chosen.direction, "down");
+        let chosen = choose_split(layout.layout).expect("a tab with panes has one to split");
+        // 89×25 = 2,225 ties between `w5S:p19` and `w5S:p1E`, both smaller
+        // than `w5S:p1C`'s 84×50 = 4,200 — the tie breaks toward the pane
+        // listed last, `w5S:p1E`. Its width (89) beats its height counted
+        // double (50), so it halves left/right rather than top/bottom.
+        assert_eq!(chosen.pane_id, "w5S:p1E");
+        assert_eq!(chosen.direction, "right");
     }
 
     /// A row `agent list` carries while it is settling a launch, and while
@@ -2607,69 +2659,84 @@ mod tests {
         std::fs::remove_dir_all(&base).ok();
     }
 
-    /// A full-screen tab's first split: one pane, 173x50, halves to two
-    /// 173x25 rows since 25 still clears the floor. This is the mockup's
-    /// first drawing.
+    /// The mockup's four states, worked against a 200×50 tab, walked in
+    /// order: state 1 is the tab's first split, and each later state's
+    /// layout is what the previous state's split would have produced. Both
+    /// ties (states 2 and 4) are exercised here, because a tie resolving to
+    /// `right` instead of `down` is exactly what stops the spiral forming.
     #[test]
-    fn a_full_tab_splits_down_on_its_first_split() {
+    fn state_1_a_single_pane_wider_than_tall_splits_right() {
         let layout: RawLayout = serde_json::from_str(
-            r#"{"panes": [{"pane_id": "w6A:p1", "rect": {"height": 50, "width": 173}}]}"#,
+            r#"{"panes": [{"pane_id": "w6A:p1", "rect": {"height": 50, "width": 200}}]}"#,
         )
         .expect("a layout with one pane parses");
-        let chosen = choose_split(layout, &HashSet::new()).expect("one pane is one to split");
-        assert_eq!(chosen.pane_id, "w6A:p1");
-        assert_eq!(chosen.direction, "down");
-    }
-
-    /// A pane already only 25 rows tall halves to 12 on each side, below the
-    /// floor, so the split falls back to `right` instead of shrinking it
-    /// further. The mockup's second split, against the idle shell pane.
-    #[test]
-    fn a_pane_too_short_to_halve_again_splits_right() {
-        let layout: RawLayout = serde_json::from_str(
-            r#"{"panes": [{"pane_id": "w6A:p1", "rect": {"height": 25, "width": 86}}]}"#,
-        )
-        .expect("a layout with one pane parses");
-        let chosen = choose_split(layout, &HashSet::new()).expect("one pane is one to split");
+        let chosen = choose_split(layout).expect("one pane is one to split");
         assert_eq!(chosen.pane_id, "w6A:p1");
         assert_eq!(chosen.direction, "right");
     }
 
-    /// The idle shell is smaller than the lane pane but is the only one with
-    /// no agent in it, so it is the one that gives up its space rather than
-    /// the running lane.
     #[test]
-    fn the_agentless_pane_is_chosen_over_a_bigger_one_holding_an_agent() {
+    fn state_2_two_equal_panes_tie_toward_the_last_and_split_down() {
         let layout: RawLayout = serde_json::from_str(
             r#"{"panes": [
-              {"pane_id": "w6A:shell", "rect": {"height": 25, "width": 86}},
-              {"pane_id": "w6A:lane",  "rect": {"height": 25, "width": 173}}
+              {"pane_id": "w6A:p1", "rect": {"height": 50, "width": 100}},
+              {"pane_id": "w6A:p2", "rect": {"height": 50, "width": 100}}
             ]}"#,
         )
         .expect("a layout with two panes parses");
-        let agent_panes: HashSet<String> = ["w6A:lane".to_string()].into_iter().collect();
-        let chosen = choose_split(layout, &agent_panes).expect("an agentless pane is available");
-        assert_eq!(chosen.pane_id, "w6A:shell");
+        let chosen = choose_split(layout).expect("a tied pair still has a last one to pick");
+        assert_eq!(chosen.pane_id, "w6A:p2");
+        assert_eq!(chosen.direction, "down");
     }
 
-    /// Every pane holds an agent, so there is no agentless pane to prefer —
-    /// the choice falls back to the biggest pane overall, same as before the
-    /// agent-aware rule existed.
     #[test]
-    fn the_biggest_pane_is_chosen_when_every_pane_holds_an_agent() {
+    fn state_3_the_smaller_tied_pane_wider_than_tall_splits_right() {
         let layout: RawLayout = serde_json::from_str(
             r#"{"panes": [
-              {"pane_id": "w6A:small", "rect": {"height": 25, "width": 86}},
-              {"pane_id": "w6A:big",   "rect": {"height": 50, "width": 173}}
+              {"pane_id": "w6A:p1", "rect": {"height": 50, "width": 100}},
+              {"pane_id": "w6A:p2", "rect": {"height": 25, "width": 100}},
+              {"pane_id": "w6A:p3", "rect": {"height": 25, "width": 100}}
+            ]}"#,
+        )
+        .expect("a layout with three panes parses");
+        let chosen = choose_split(layout).expect("the smallest pane is chosen");
+        assert_eq!(chosen.pane_id, "w6A:p3");
+        assert_eq!(chosen.direction, "right");
+    }
+
+    #[test]
+    fn state_4_two_small_tied_panes_tie_toward_the_last_and_split_down() {
+        let layout: RawLayout = serde_json::from_str(
+            r#"{"panes": [
+              {"pane_id": "w6A:p1", "rect": {"height": 50, "width": 100}},
+              {"pane_id": "w6A:p2", "rect": {"height": 25, "width": 100}},
+              {"pane_id": "w6A:p3", "rect": {"height": 25, "width": 50}},
+              {"pane_id": "w6A:p4", "rect": {"height": 25, "width": 50}}
+            ]}"#,
+        )
+        .expect("a layout with four panes parses");
+        let chosen = choose_split(layout).expect("the smallest pane is chosen");
+        assert_eq!(chosen.pane_id, "w6A:p4");
+        assert_eq!(chosen.direction, "down");
+    }
+
+    /// The pane that would have been skipped as "holding an agent" under the
+    /// old rule is now chosen anyway, because it is the smallest — proving
+    /// the agentless preference is gone rather than merely reordered. This
+    /// is exactly the case a task returning to its own pane between steps
+    /// depends on: that pane must not be spared just for reading as free.
+    #[test]
+    fn a_pane_that_would_hold_an_agent_is_chosen_when_it_is_smallest() {
+        let layout: RawLayout = serde_json::from_str(
+            r#"{"panes": [
+              {"pane_id": "w6A:shell", "rect": {"height": 50, "width": 100}},
+              {"pane_id": "w6A:lane",  "rect": {"height": 25, "width": 50}}
             ]}"#,
         )
         .expect("a layout with two panes parses");
-        let agent_panes: HashSet<String> = ["w6A:small".to_string(), "w6A:big".to_string()]
-            .into_iter()
-            .collect();
-        let chosen = choose_split(layout, &agent_panes)
-            .expect("every pane holding an agent still leaves one to split");
-        assert_eq!(chosen.pane_id, "w6A:big");
+        let chosen = choose_split(layout).expect("the smallest pane is chosen");
+        assert_eq!(chosen.pane_id, "w6A:lane");
+        assert_eq!(chosen.direction, "down");
     }
 
     /// The other half of the same drift: `pane layout` is addressed by pane,
@@ -2721,6 +2788,25 @@ mod tests {
         )
         .unwrap();
         assert_eq!(find_tab_id(tabs, "spoolway"), None);
+    }
+
+    /// The ordinary case: a workspace opened with exactly one tab, which
+    /// `create_pane` must reuse rather than open a second one beside.
+    #[test]
+    fn a_workspace_with_one_tab_reuses_it() {
+        let tabs: TabList = serde_json::from_str(
+            r#"{"tabs": [{"tab_id": "w9:t1", "label": "spoolway/demo", "workspace_id": "w9"}]}"#,
+        )
+        .expect("a live tab list parses");
+        assert_eq!(tab_in(tabs), Some("w9:t1".to_string()));
+    }
+
+    /// A workspace with no tab at all — herdr has never heard of it, or its
+    /// tabs were closed out from under it — has none to split a pane into.
+    #[test]
+    fn a_workspace_with_no_tab_has_none_to_split_into() {
+        let tabs: TabList = serde_json::from_str(r#"{"tabs": []}"#).unwrap();
+        assert_eq!(tab_in(tabs), None);
     }
 
     /// herdr refuses an agent name holding anything but a lowercase letter

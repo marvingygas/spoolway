@@ -1228,8 +1228,8 @@ else
     ok "headless: true never opened a pane at all"
   fi
 
-  # A failing, paned command leaves its pane standing rather than closing it —
-  # the one thing a person needs the pane to look at.
+  # A failing, paned command closes its pane the moment the task leaves the
+  # step for `blocked` — nothing is left standing on the chance of a retry.
   cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
   add_command_step default flaky "echo flaky-pane-marker; exit 3" review ""
   works "a pipeline with a failing paned step checks out" "$SPOOLWAY" pipeline check
@@ -1243,9 +1243,9 @@ else
   else bad "a failing paned command still routes on its exit code (at \`$(stage_of panedfail)\`)"; fi
   if tmux -S "$SOCK" list-panes -a -F '#{pane_title}' 2>/dev/null \
       | grep -qF "panedfail · flaky"; then
-    ok "and its pane stands rather than closing behind a failure"
+    bad "and its pane closes behind the failure rather than standing"
   else
-    bad "and its pane stands rather than closing behind a failure"
+    ok "and its pane closes behind the failure rather than standing"
   fi
 
   tmux -S "$SOCK" kill-server 2>/dev/null || true

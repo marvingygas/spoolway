@@ -493,10 +493,12 @@ impl Runs {
     /// four steps ago is still going, and the step that started it is not where
     /// the task is now.
     ///
-    /// A `.pane` file answers here too, not only a `.pid` — a failing paned
-    /// run's own `forget()` already dropped its pid the moment its exit code
-    /// was routed on, but the pane it left standing is still this task's to
-    /// take at cleanup, and it has no other file to be found by.
+    /// A `.pane` file answers here too, not only a `.pid` — a paned run a
+    /// step's own `timeout:` stopped already dropped its pid the moment
+    /// `stop()` cleared it, but the pane that run left standing, for the
+    /// `Fresh` arm to replace on a later arrival, is still this task's to
+    /// take at cleanup if that arrival never comes, and it has no other file
+    /// to be found by.
     pub fn keys_for_task(&self, task: &str) -> Vec<String> {
         // A key is `<task> · <step>` — see `Runs::key` — so it is this task's
         // if it starts with its id and the separator, never by a bare prefix
@@ -854,10 +856,11 @@ mod tests {
         assert_eq!(f.runs.pane("demo · build"), None);
     }
 
-    /// A failing paned run's own `forget()` clears its pid the moment its
-    /// exit code is routed on, but the pane it left standing is still this
-    /// task's to take at cleanup — so `keys_for_task` has to find it by the
-    /// `.pane` file alone, with no `.pid` beside it any more.
+    /// A run a step's own `timeout:` stopped has its pid cleared straight
+    /// away, but the pane it left standing for the `Fresh` arm to replace is
+    /// still this task's to take at cleanup if that arrival never comes — so
+    /// `keys_for_task` has to find it by the `.pane` file alone, with no
+    /// `.pid` beside it any more.
     #[test]
     fn keys_for_task_finds_a_run_whose_pane_outlived_its_pid() {
         let f = Fixture::new("pane-only-key");

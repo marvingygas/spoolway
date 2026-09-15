@@ -258,9 +258,9 @@ A build, a test suite, a formatter or a deploy script is a command step.
 | `timeout` | routes to `on_fail` | kills the run, nothing routes |
 
 A command step runs in its own pane under the herdr and tmux backends. `headless: true` runs
-it with no pane. A passed pane closes on its own. A failed pane stays open until the task
-reaches the step again or is cleaned up. Under `backend = "headless"` no command step has a
-pane.
+it with no pane. A pane closes the moment its exit code is judged, on a pass and on a failure
+alike. Only a timed-out run's pane stands, until the task reaches the step again or is cleaned
+up. Under `backend = "headless"` no command step has a pane.
 
 ### `last:` — a step the chain runs once
 

@@ -22,7 +22,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::AgentProfile;
 use crate::graph::Graph;
-use crate::mux::{Lane, LaneSpec, LaneStatus, Mux, Vacated, lane_name, parse_lane_name, tab_label};
+use crate::mux::{
+    Lane, LaneSpec, LaneStatus, Mux, SweepTab, Vacated, lane_name, parse_lane_name, tab_label,
+};
 use crate::pipeline::{Pipeline, Pipelines, Step, StepKind};
 use crate::repo::Repo;
 use crate::task::Task;
@@ -723,6 +725,20 @@ impl<'a> Dispatcher<'a> {
 
         let mine = our_checkouts(self.repo, &tasks);
 
+        // The anchor tabs a held workspace's create_pane used to leave
+        // standing — see [`Dispatcher::sweep_anchor_tabs`] — swept before
+        // `ensure_workspace` can reach `Herdr::create_pane` for any task this
+        // pass, so a stray anchor is gone before a fresh pane is ever split
+        // into a tab. This is *not* ordered ahead of `self.mux.list_lanes()`
+        // above, whose snapshot `owned` and `free_finished_lanes` reason from
+        // below: closing a tab here can leave that snapshot naming a pane in
+        // a tab that no longer exists, which is why `sweep_anchor_tabs` never
+        // closes a workspace's only tab — see its own doc. A dry run makes no
+        // changes and so closes nothing.
+        if !self.dry_run {
+            self.sweep_anchor_tabs(&tasks, &mine, &mut report);
+        }
+
         // Only sessions we named, in a directory that is ours, are ours.
         // Anything else in this multiplexer belongs to a person or to another
         // project, and is never counted, prompted, or torn down.
@@ -801,6 +817,64 @@ impl<'a> Dispatcher<'a> {
         // the lane records it built on disk — see [`Dispatcher::pass`].
 
         Ok(report)
+    }
+
+    /// Close every tab left standing empty by a held workspace's
+    /// `create_pane` — the anchor this task exists to stop leaving behind, and
+    /// to clear out where an earlier session, or a crash, already left one.
+    ///
+    /// Deliberately narrow: a tab closes only when it sits in a
+    /// spoolway-owned workspace, holds no agent, holds no pane a command run
+    /// has recorded against it, and is not the only tab its workspace has —
+    /// see [`tabs_to_sweep`] for the four conditions themselves. Looks at
+    /// whole tabs and never at panes, so a task running several commands at
+    /// once in split panes of its one tab is untouched.
+    ///
+    /// This can legitimately close the tab a live task's lane was sitting
+    /// in: if a workspace still carries a pre-existing anchor and the task's
+    /// own agent has since exited, both tabs are agent-free and
+    /// command-pane-free by the next pass, and both are swept. That is
+    /// within the four conditions as the task specifies them, and it heals
+    /// itself — `ensure_workspace`'s `workspace_alive` check finds the
+    /// recorded tab gone on the very next pass and reopens one.
+    fn sweep_anchor_tabs(&self, tasks: &[Task], mine: &HashSet<PathBuf>, report: &mut Report) {
+        let tabs = match self.mux.tabs_for_sweep() {
+            Ok(tabs) => tabs,
+            Err(err) => {
+                report
+                    .problems
+                    .push(format!("could not list tabs for the anchor sweep: {err:#}"));
+                return;
+            }
+        };
+        if tabs.is_empty() {
+            return;
+        }
+
+        // Every pane a command run still has recorded against it, across
+        // every task this pass knows about — condition three. Read the same
+        // way [`Dispatcher::clean_up`] reads a task's own runs, just over all
+        // of them rather than one.
+        let runs = crate::command_step::Runs::new(&self.repo.commands_dir());
+        let mut recorded_panes: HashSet<String> = HashSet::new();
+        for task in tasks {
+            for key in runs.keys_for_task(task.id()) {
+                if let Some(pane) = runs.pane(&key) {
+                    recorded_panes.insert(pane);
+                }
+            }
+        }
+
+        for tab_id in tabs_to_sweep(&tabs, mine, &recorded_panes) {
+            match self.mux.close_tab(&tab_id) {
+                Ok(()) => report
+                    .actions
+                    .push(format!("closed anchor tab {tab_id}, left standing empty")),
+                Err(err) => report
+                    .problems
+                    .push(format!("could not close anchor tab {tab_id}: {err:#}")),
+            }
+        }
     }
 
     /// Walk every task once, deciding what its stage means for it this pass.
@@ -3408,13 +3482,15 @@ impl<'a> Dispatcher<'a> {
                 // step runs the command again instead of routing on the code the
                 // last arrival left behind.
                 runs.forget(&key)?;
-                // A passing command's pane has nothing left to show — closed
-                // here, the same instant the step itself is judged done. A
-                // failing one is left standing: see the `Fresh` arm below,
-                // which is what replaces it on the next arrival.
-                if code == 0
-                    && let Some(pane) = runs.pane(&key)
-                {
+                // A command's pane has nothing left to show the instant its
+                // exit code is judged, pass or fail alike — closed here rather
+                // than left standing for whatever later arrival happens to
+                // land on this step next, which might be a long wait behind
+                // `blocked` or might never come at all. The `Fresh` arm below
+                // still replaces a pane it finds recorded, for a run the
+                // `Running` arm's own timeout stopped without touching its
+                // pane.
+                if let Some(pane) = runs.pane(&key) {
                     let _ = self.mux.close_pane(&pane);
                     runs.forget_pane(&key);
                 }
@@ -3512,11 +3588,12 @@ impl<'a> Dispatcher<'a> {
                         task.path.display().to_string(),
                     ),
                 ]);
-                // A pane a previous, failing arrival at this step left
-                // standing — see the `Exited` arm above — is replaced rather
-                // than piled onto, whether or not this arrival still wants
-                // one: a step edited to `headless: true` after a failure must
-                // not leave that old pane standing forever either.
+                // A pane an earlier arrival left standing — a run the
+                // `Running` arm's own timeout stopped without touching its
+                // pane, most often — is replaced rather than piled onto,
+                // whether or not this arrival still wants one: a step edited
+                // to `headless: true` after that must not leave the old pane
+                // standing forever either.
                 if let Some(old_pane) = runs.pane(&key) {
                     let _ = self.mux.close_pane(&old_pane);
                     runs.forget_pane(&key);
@@ -3684,8 +3761,11 @@ impl<'a> Dispatcher<'a> {
     /// outstayed its step's `timeout:`, stopped here because nothing else
     /// would; and a finished run whose step declared `on_fail`, which is
     /// routed on here because nowhere else asks. A step with no `on_fail`
-    /// keeps behaving exactly as it always has — its exit code is left
-    /// unread, the same as a run still going or one that passed.
+    /// keeps routing exactly as it always has — its exit code is left unread
+    /// for that purpose, the same as a run still going or one that passed —
+    /// but a paned run's pane still closes the moment that code is read, the
+    /// same as any other command's: nothing else will ever come back to this
+    /// step's own pane once its background run is over.
     ///
     /// Answers the run key it moved the task on, which happens for at most
     /// one run per call: rerouting changes what step counts as "the one it
@@ -3732,10 +3812,23 @@ impl<'a> Dispatcher<'a> {
                         runs.log_path(&key).display()
                     ));
                 }
-                // A zero exit is a pass for a step the task already walked
-                // away from — nothing to route on — so it is left exactly as
-                // unread as a step with no `on_fail` leaves every code.
-                crate::command_step::RunState::Exited(code) if code != 0 => {
+                crate::command_step::RunState::Exited(code) => {
+                    // A background run's pane has nothing left to show the
+                    // moment its exit code is read here — whether or not the
+                    // step declares `on_fail`, and whether or not the code
+                    // is zero, since this is the only place a background
+                    // run's code is ever read at all.
+                    if let Some(pane) = runs.pane(&key) {
+                        let _ = self.mux.close_pane(&pane);
+                        runs.forget_pane(&key);
+                    }
+                    // A zero exit is a pass for a step the task already walked
+                    // away from — nothing to route on — so the code itself is
+                    // left exactly as unread as a step with no `on_fail`
+                    // leaves every code.
+                    if code == 0 {
+                        continue;
+                    }
                     let Some(destination) = step.on_fail.clone() else {
                         continue;
                     };
@@ -5098,6 +5191,38 @@ pub fn owns_cwd(mine: &HashSet<PathBuf>, cwd: &std::path::Path) -> bool {
             .unwrap_or(false)
 }
 
+/// Which of [`Mux::tabs_for_sweep`]'s tabs to close: the anchors
+/// [`Herdr::create_pane`] used to leave standing, and the only ones this
+/// sweep is narrow enough to ever touch.
+///
+/// Its own function, apart from [`Dispatcher::sweep_anchor_tabs`], so each of
+/// the task's four conditions — spoolway-owned workspace, no agent, no
+/// recorded command pane, not the workspace's only tab — has a test that
+/// drives it failing on its own, against synthetic tabs rather than a live
+/// multiplexer.
+fn tabs_to_sweep(
+    tabs: &[SweepTab],
+    mine: &HashSet<PathBuf>,
+    recorded_panes: &HashSet<String>,
+) -> Vec<String> {
+    let mut tabs_per_workspace: HashMap<&str, usize> = HashMap::new();
+    for tab in tabs {
+        *tabs_per_workspace
+            .entry(tab.workspace_id.as_str())
+            .or_insert(0) += 1;
+    }
+
+    tabs.iter()
+        .filter(|tab| {
+            owns_cwd(mine, &tab.checkout_path)
+                && !tab.holds_agent
+                && tab.pane_ids.is_disjoint(recorded_panes)
+                && tabs_per_workspace.get(tab.workspace_id.as_str()).copied() != Some(1)
+        })
+        .map(|tab| tab.tab_id.clone())
+        .collect()
+}
+
 /// Whether `task` cannot move without a person: parked on `paused`, or on an
 /// unstaffed `blocked`. The one question [`Dispatcher::sweep_on_stop`] and
 /// [`Dispatcher::free_finished_lanes`] both need answered the same way, so a
@@ -5330,6 +5455,9 @@ mod tests {
         /// [`LaneStatus`] its screen reads. Every other lane gets nothing to
         /// say here, the same as `Herdr` today.
         busy_children: RefCell<HashSet<String>>,
+        /// What `tabs_for_sweep` answers with — empty by default, the same as
+        /// every backend but `Herdr` answers for real.
+        sweep_tabs: Vec<SweepTab>,
     }
 
     impl FakeMux {
@@ -5352,7 +5480,14 @@ mod tests {
                 unbound_workspace: false,
                 run_commands_in_pane: false,
                 busy_children: RefCell::new(HashSet::new()),
+                sweep_tabs: Vec::new(),
             }
+        }
+        /// What the anchor sweep finds when it asks this backend for its
+        /// tabs — see [`Mux::tabs_for_sweep`].
+        fn with_sweep_tabs(mut self, tabs: Vec<SweepTab>) -> FakeMux {
+            self.sweep_tabs = tabs;
+            self
         }
         /// Mark `name` as still holding a process it started, from now until
         /// the test says otherwise.
@@ -5572,6 +5707,9 @@ mod tests {
                 anyhow::bail!("cannot close the last tab in a workspace");
             }
             Ok(())
+        }
+        fn tabs_for_sweep(&self) -> Result<Vec<SweepTab>> {
+            Ok(self.sweep_tabs.clone())
         }
         fn remove_workspace(&self, id: &str) -> Result<()> {
             self.log(format!("remove_workspace {id}"));
@@ -7661,6 +7799,156 @@ mod tests {
         // resolved spelling in the set and the symlink spelling as the cwd.
         let only_resolved: HashSet<PathBuf> = std::iter::once(resolved).collect();
         assert!(owns_cwd(&only_resolved, &link));
+    }
+
+    /// A tab meeting all four of the sweep's conditions, so tests below can
+    /// flip exactly one and watch the tab survive.
+    fn sweepable_tab(workspace_id: &str, tab_id: &str, checkout: &Path) -> SweepTab {
+        SweepTab {
+            workspace_id: workspace_id.to_string(),
+            tab_id: tab_id.to_string(),
+            checkout_path: checkout.to_path_buf(),
+            holds_agent: false,
+            pane_ids: std::iter::once(format!("{tab_id}:p1")).collect(),
+        }
+    }
+
+    /// The ordinary case this task exists for: an anchor tab standing empty
+    /// beside the one tab a task's lane actually uses — the anchor is swept,
+    /// the lane's own tab is spared.
+    #[test]
+    fn an_anchor_beside_a_tabs_own_lane_is_swept() {
+        let checkout = PathBuf::from("/repo/worktrees/demo");
+        let mine: HashSet<PathBuf> = std::iter::once(checkout.clone()).collect();
+        let mut lanes_tab = sweepable_tab("w1", "w1:t1", &checkout);
+        lanes_tab.holds_agent = true;
+        let anchor = sweepable_tab("w1", "w1:t2", &checkout);
+        let tabs = vec![lanes_tab, anchor];
+
+        assert_eq!(
+            tabs_to_sweep(&tabs, &mine, &HashSet::new()),
+            vec!["w1:t2".to_string()],
+            "the empty anchor is swept, the tab holding the lane's agent is spared"
+        );
+    }
+
+    /// Condition one: a tab bound to a checkout that is not ours — someone
+    /// else's project, or no checkout at all — is never this sweep's to
+    /// close, however idle it looks.
+    #[test]
+    fn a_tab_outside_a_spoolway_owned_workspace_survives() {
+        let checkout = PathBuf::from("/repo/worktrees/demo");
+        let mine: HashSet<PathBuf> = HashSet::new();
+        let tabs = vec![sweepable_tab("w1", "w1:t1", &checkout)];
+
+        assert!(tabs_to_sweep(&tabs, &mine, &HashSet::new()).is_empty());
+    }
+
+    /// Condition two: a tab still holding an agent is a lane's home, not an
+    /// anchor, whatever else about it looks swept.
+    #[test]
+    fn a_tab_holding_an_agent_survives() {
+        let checkout = PathBuf::from("/repo/worktrees/demo");
+        let mine: HashSet<PathBuf> = std::iter::once(checkout.clone()).collect();
+        let mut tab = sweepable_tab("w1", "w1:t1", &checkout);
+        tab.holds_agent = true;
+        let tabs = vec![tab, sweepable_tab("w1", "w1:t2", &checkout)];
+
+        assert_eq!(
+            tabs_to_sweep(&tabs, &mine, &HashSet::new()),
+            vec!["w1:t2".to_string()],
+            "only the tab actually holding the agent is spared"
+        );
+    }
+
+    /// Condition three: a tab holding a pane a command run has recorded
+    /// against it is not an anchor — a task running a background command in
+    /// a second pane of its own tab must never be swept out from under it.
+    #[test]
+    fn a_tab_holding_a_recorded_command_pane_survives() {
+        let checkout = PathBuf::from("/repo/worktrees/demo");
+        let mine: HashSet<PathBuf> = std::iter::once(checkout.clone()).collect();
+        let tab = sweepable_tab("w1", "w1:t1", &checkout);
+        let recorded: HashSet<String> = tab.pane_ids.iter().cloned().collect();
+        let tabs = vec![tab, sweepable_tab("w1", "w1:t2", &checkout)];
+
+        assert_eq!(
+            tabs_to_sweep(&tabs, &mine, &recorded),
+            vec!["w1:t2".to_string()],
+            "only the tab holding no recorded pane is swept"
+        );
+    }
+
+    /// Condition four, and the guard this sweep can never cross: a
+    /// workspace's only tab survives even when it meets every other
+    /// condition, since closing it would leave the workspace with nowhere for
+    /// its task to run.
+    #[test]
+    fn a_workspaces_only_tab_is_never_swept() {
+        let checkout = PathBuf::from("/repo/worktrees/demo");
+        let mine: HashSet<PathBuf> = std::iter::once(checkout.clone()).collect();
+        let tabs = vec![sweepable_tab("w1", "w1:t1", &checkout)];
+
+        assert!(
+            tabs_to_sweep(&tabs, &mine, &HashSet::new()).is_empty(),
+            "a workspace with one tab keeps it, however idle it looks"
+        );
+    }
+
+    /// `tabs_to_sweep`'s own tests above hand it a synthetic `recorded_panes`
+    /// set, which proves the policy honours the set but nothing about where
+    /// the set comes from. `Dispatcher::sweep_anchor_tabs` is the seam that
+    /// actually reads it out of a run's `.pane` file — via
+    /// `Runs::keys_for_task` and `Runs::pane`, over every task the pass
+    /// knows about — and that seam gets its own test here: a real `.pane`
+    /// file, written with `Runs::record_pane` the way a command step's pane
+    /// split does, must spare the tab it names.
+    #[test]
+    fn sweep_anchor_tabs_spares_a_tab_holding_a_pane_a_run_actually_recorded() {
+        let repo = fixture("sweep-anchor-tabs");
+        // Not `add_task_with_worktree`: that helper is `#[cfg(unix)]`, because
+        // its other callers run a real command process, and this test is built
+        // for every target the crate checks against, Windows included.
+        let checkout = repo.root.join("wt-demo");
+        std::fs::create_dir_all(&checkout).unwrap();
+        add_task_with(&repo, "demo", "implement", |front| {
+            front.worktree_path = Some(checkout.clone());
+        });
+
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("implement", "demo");
+        runs.record_pane(&key, "w1:t1:p9").unwrap();
+
+        let anchor = SweepTab {
+            workspace_id: "w1".into(),
+            tab_id: "w1:t2".into(),
+            checkout_path: checkout.clone(),
+            holds_agent: false,
+            pane_ids: std::iter::once("w1:t2:p1".to_string()).collect(),
+        };
+        let holding_the_recorded_pane = SweepTab {
+            workspace_id: "w1".into(),
+            tab_id: "w1:t1".into(),
+            checkout_path: checkout,
+            holds_agent: false,
+            pane_ids: std::iter::once("w1:t1:p9".to_string()).collect(),
+        };
+
+        let mux = FakeMux::new(vec![]).with_sweep_tabs(vec![anchor, holding_the_recorded_pane]);
+        let pipelines = Pipelines::builtin();
+        let dispatcher = Dispatcher::new(&repo, &pipelines, &mux, false);
+        let tasks = repo.tasks().unwrap();
+        let mine = our_checkouts(&repo, &tasks);
+        let mut report = Report::default();
+
+        dispatcher.sweep_anchor_tabs(&tasks, &mine, &mut report);
+
+        assert_eq!(
+            mux.did("close_tab"),
+            ["close_tab w1:t2"],
+            "the tab holding the recorded pane survives; the anchor beside it is closed: {:?}",
+            mux.calls()
+        );
     }
 
     /// A corrupt `lanes.json` is kept as a `.bad` copy rather than silently
@@ -13400,11 +13688,12 @@ mod tests {
         );
     }
 
-    /// A failing command's pane stands rather than closing, and the next
-    /// arrival at the step replaces it instead of piling a second one on.
+    /// A failing command's pane closes the instant the task leaves the step,
+    /// the same as a passing one — not left standing on the chance the step
+    /// is retried later.
     #[cfg(unix)]
     #[test]
-    fn a_failing_paned_commands_pane_stands_and_is_replaced_on_retry() {
+    fn a_failing_paned_commands_pane_closes_on_departure() {
         let repo = fixture("command-pane-fail");
         let path = add_task_with_worktree(&repo, "demo", "implement");
         let mux = FakeMux::new(vec![]).offering_panes();
@@ -13417,18 +13706,21 @@ mod tests {
         let key = crate::command_step::Runs::key("implement", "demo");
         let runs = crate::command_step::Runs::new(&repo.commands_dir());
         assert!(
-            runs.pane(&key).is_some(),
-            "a failing command's pane must stand until the step is retried"
+            runs.pane(&key).is_none(),
+            "a failing command's pane record must be cleared the moment the task leaves"
         );
         assert!(
-            mux.did("close_pane").is_empty(),
-            "nothing should have closed it yet: {:?}",
+            mux.did("close_pane")
+                .iter()
+                .any(|call| call.contains("w1:t1.s1")),
+            "a failing command's pane closes behind it, same as a passing one: {:?}",
             mux.calls()
         );
 
         // Sent back to `implement` by hand, the way a person clearing
-        // `blocked` would — the retry is what proves the old pane is
-        // replaced rather than left to accumulate.
+        // `blocked` would — the retry proves a fresh arrival still gets a
+        // pane of its own, with nothing left over from the last one to
+        // replace.
         let mut reloaded = reload(&path);
         reloaded.set_stage("implement", None);
         reloaded.save().unwrap();
@@ -13439,10 +13731,8 @@ mod tests {
             .unwrap();
 
         assert!(
-            mux.did("close_pane")
-                .iter()
-                .any(|call| call.contains("w1:t1.s1")),
-            "the old pane is closed before a new one is split: {:?}",
+            mux.did("close_pane").is_empty(),
+            "there was nothing left standing to close on this arrival: {:?}",
             mux.calls()
         );
         assert!(
@@ -13985,6 +14275,64 @@ mod tests {
             runs.state(&key),
             crate::command_step::RunState::Exited(0),
             "a zero exit is left exactly as unread as a step with no on_fail leaves it"
+        );
+    }
+
+    /// The pane a background run landed in is nobody's to close but
+    /// `reap_stale_runs` — the step that started it walked away the moment it
+    /// started, and this is the only place left that ever reads its exit
+    /// code. Closed here whether or not the step declares `on_fail`, and
+    /// whether or not the code is zero: the run is over either way, and the
+    /// tab has no more live work in that pane to show.
+    #[cfg(unix)]
+    #[test]
+    fn a_background_commands_pane_closes_at_reap() {
+        let repo = fixture("command-background-pane");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]).offering_panes();
+        // No `on_fail`: proves the pane closes even though nothing routes on
+        // this exit code at all.
+        let pipelines = pipelines_running("exit 0", true);
+
+        Dispatcher::new(&repo, &pipelines, &mux, false)
+            .pass()
+            .unwrap();
+        let mut task = reload(&path);
+        assert_eq!(task.stage(), "review");
+
+        let key = crate::command_step::Runs::key("implement", "demo");
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        for _ in 0..50 {
+            if runs.state(&key) != crate::command_step::RunState::Running {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Exited(0));
+        assert!(
+            runs.pane(&key).is_some(),
+            "the background run must have landed in a pane of its own"
+        );
+
+        let name = pipelines.default.clone();
+        let pipeline = pipelines.pipelines.get(&name).unwrap();
+        let mut report = Report::default();
+        Dispatcher::new(&repo, &pipelines, &mux, false).reap_stale_runs(
+            &mut task,
+            pipeline,
+            &mut report,
+        );
+
+        assert!(
+            runs.pane(&key).is_none(),
+            "the pane record must be cleared once the exit code is read"
+        );
+        assert!(
+            mux.did("close_pane")
+                .iter()
+                .any(|call| call.contains("w1:t1.s1")),
+            "the pane itself must be closed at reap: {:?}",
+            mux.calls()
         );
     }
 

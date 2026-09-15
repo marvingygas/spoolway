@@ -165,8 +165,9 @@ case "$DOMAIN $VERB" in
   "agent list")
     # No agent is ever started through this double, and nothing here needs
     # one: a command step's pane runs a shell script, which herdr itself
-    # reports as agentless. An empty list is the honest answer, and it is also
-    # what makes every pane a valid split target in `choose_split`.
+    # reports as agentless. An empty list is the honest answer — `choose_split`
+    # no longer asks this at all, having moved to picking by geometry alone,
+    # but other callers (idle detection, `agent verify`) still do.
     echo '{"result":{"agents":[]}}'
     ;;
 

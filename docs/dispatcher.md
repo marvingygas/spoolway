@@ -303,6 +303,11 @@ Under `grouped`, the project's tab closes when its last task is archived. The sh
 is only ever closed by hand. Under `split`, each task's workspace is bound to its worktree with
 `herdr worktree open`.
 
+A task gets one tab, whichever step it is on. Every pane after the first splits inside that same
+tab. Each split halves the smallest pane in the tab along its longer side, so a tab grows as a
+spiral. A tab left holding nothing is closed on the next pass, unless it is its workspace's only
+tab.
+
 ### tmux
 
 The run lives in a background tmux server. Attach to look, detach to walk away.
