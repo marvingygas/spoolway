@@ -18,19 +18,30 @@ use crate::repo::Repo;
 /// How long a line survives before [`open`] drops it.
 const WINDOW_DAYS: i64 = 30;
 
-/// Where one project's problems accumulate: `~/.spoolway/logs/<basename of
-/// the repo root>.log`.
+/// Where one project's problems accumulate: `~/.spoolway/logs/<home's own
+/// directory name>.log`.
 ///
 /// Flat, and one file per project — unlike [`crate::mux::project_home`],
 /// which nests a project's queue and archive under its own directory, this
 /// sits beside every other project's log rather than inside any one of
 /// them, since a problem worth keeping after a project's own home is wiped
 /// by hand is exactly the kind this file is for.
+///
+/// Named off `repo.home`'s own basename (`<label>-<id>`), not
+/// `repo.root`'s — the label is frozen at a checkout's first stamp and the
+/// id never changes under an ordinary rename, so a renamed checkout keeps
+/// writing to the one log file it always has, rather than starting a
+/// second one under its new basename. See the `binding-record` task.
 pub fn path(repo: &Repo) -> PathBuf {
+    let name = repo
+        .home
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| crate::mux::project_label(&repo.root));
     crate::mux::home()
         .join(".spoolway")
         .join("logs")
-        .join(format!("{}.log", crate::mux::project_label(&repo.root)))
+        .join(format!("{name}.log"))
 }
 
 /// Trims a project's log to the last thirty days. Called once, at the start
@@ -108,6 +119,35 @@ fn trim(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
+    use crate::repo::Repo;
+
+    /// A renamed checkout keeps writing to the one log file it always had —
+    /// `repo.home`'s own basename is frozen at the checkout's first stamp
+    /// and does not change with an ordinary rename, unlike `repo.root`'s.
+    /// See the `binding-record` task's problem-log criterion.
+    #[test]
+    fn a_renamed_checkout_keeps_the_same_log_file() {
+        let home = crate::scratch::root("problem-log-home-k7f2q9");
+        let before = Repo {
+            root: crate::scratch::root("problem-log-before"),
+            checkout: crate::scratch::root("problem-log-before"),
+            config: Config::default(),
+            home: home.clone(),
+        };
+        let after = Repo {
+            root: crate::scratch::root("problem-log-after-renamed"),
+            checkout: crate::scratch::root("problem-log-after-renamed"),
+            config: Config::default(),
+            home,
+        };
+
+        assert_eq!(
+            path(&before),
+            path(&after),
+            "the log path must follow the home, not the checkout's own basename"
+        );
+    }
 
     /// A file spanning both sides of the thirty-day window: two lines older
     /// than it, one right at the edge, one well inside it, and one whose

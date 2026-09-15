@@ -160,7 +160,7 @@ pub fn live_headless_lane(repo: &Repo) -> (Box<dyn crate::mux::Mux>, String) {
         .status()
         .unwrap();
 
-    let mux = crate::mux::backend(repo);
+    let mux = crate::mux::backend(repo).unwrap();
     let pane = mux.create_pane(&repo.root, "login").unwrap();
     let name = crate::mux::lane_name("implement", "login");
     mux.start_lane(&crate::mux::LaneSpec {

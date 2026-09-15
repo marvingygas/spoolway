@@ -56,9 +56,9 @@ const ACK_FILE: &str = "override-ack";
 /// unit tests below `Pipelines::load` and `Config::load` — resolves to
 /// itself instead; the directory this then names is simply never on disk,
 /// which reads exactly like a project that has overridden nothing.
-pub(crate) fn dir_for(root: &Path) -> PathBuf {
+pub(crate) fn dir_for(root: &Path) -> Result<PathBuf> {
     let main = crate::repo::main_checkout(root).unwrap_or_else(|| root.to_path_buf());
-    crate::mux::project_home(&main).join(crate::config::OVERRIDES_DIR)
+    Ok(crate::mux::project_home(&main)?.join(crate::config::OVERRIDES_DIR))
 }
 
 /// The shape `overrides/pipelines/<name>.yml` is allowed to take: top-level
@@ -663,7 +663,7 @@ pub(crate) fn promote_pipeline_patch(
 /// Returns the promoted keys and their new values, for
 /// `commands::override_promote` to print.
 pub(crate) fn promote_config_patch(root: &Path) -> Result<Vec<(String, String)>> {
-    let overrides = dir_for(root);
+    let overrides = dir_for(root)?;
     let path = config_patch_path(&overrides);
     let raw =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
@@ -1032,7 +1032,7 @@ mod tests {
             "[dispatch]\n# chosen for this project\ndefault_pipeline = \"default\"\n",
         )
         .unwrap();
-        let overrides = dir_for(&root);
+        let overrides = dir_for(&root).unwrap();
         std::fs::create_dir_all(&overrides).unwrap();
         std::fs::write(
             config_patch_path(&overrides),

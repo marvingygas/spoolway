@@ -98,7 +98,22 @@ pub fn prompt_override(repo: &Repo, name: &str) -> Result<()> {
 /// `spoolway config override`: open (creating if absent) `overrides/
 /// config.toml` — the layer's own copy, never the tracked file `config
 /// edit` opens.
-pub fn config_override(repo: &Repo) -> Result<()> {
+///
+/// `home_error` is `Repo::discover_lenient`'s own report of a real failure
+/// resolving `repo`'s stamped home. `repo.overrides_dir()` is nothing but
+/// `repo.home` joined onto a constant, and `repo.home` here is only the
+/// basename-keyed placeholder a failed resolution falls back to — writing
+/// into it, as `write_atomic` below would, is writing into the wrong
+/// project's home, so this refuses before doing anything else rather than
+/// silently guess.
+pub fn config_override(repo: &Repo, home_error: Option<&anyhow::Error>) -> Result<()> {
+    if let Some(err) = home_error {
+        return Err(anyhow::anyhow!(
+            "{err:#} — {}'s stamped home could not be resolved, so `config override` has \
+             nowhere real to write; run `spoolway doctor` to see why",
+            repo.root.display()
+        ));
+    }
     if let Some(note) = repo.checkout_note()? {
         note.print(false)?;
     }
@@ -454,7 +469,7 @@ mod tests {
         .unwrap();
 
         let result = crate::platform::test_home::with_home(&fake_home, || {
-            let home = crate::mux::project_home(&root);
+            let home = crate::mux::project_home(&root).unwrap();
             let mut config = Config::default();
             config.dispatch.default_pipeline = "demo".to_string();
             let repo = Repo {
@@ -469,6 +484,29 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&fake_home).ok();
         result
+    }
+
+    /// A stamped home that could not be resolved must refuse `config
+    /// override` outright, before it ever opens an editor or writes
+    /// anything — `repo.overrides_dir()` is only `repo.home` joined onto a
+    /// constant, and `repo.home` here is nothing but the basename-keyed
+    /// placeholder a failed resolution falls back to; writing into it would
+    /// create `overrides/config.toml` for the wrong project.
+    #[test]
+    fn config_override_refuses_when_the_home_could_not_be_resolved() {
+        with_repo("home-unavailable", |repo| {
+            let home_error = anyhow::anyhow!("permission denied reading spoolway-id");
+            let err = config_override(repo, Some(&home_error))
+                .expect_err("a broken home must refuse, not write through the placeholder");
+            assert!(
+                format!("{err:#}").contains("permission denied reading spoolway-id"),
+                "{err:#}"
+            );
+            assert!(
+                !repo.overrides_dir().exists(),
+                "nothing may be created under the unresolved placeholder home"
+            );
+        });
     }
 
     /// The acceptance shape: the merge rule, what a patch may carry, the

@@ -552,20 +552,20 @@ pub trait Mux {
 /// The one place a concrete backend is named. Everything downstream — the
 /// dispatcher, `doctor` — works through [`Mux`], which is what
 /// makes `backend = "headless"` a config edit rather than a code path.
-pub fn backend(repo: &crate::repo::Repo) -> Box<dyn Mux> {
+pub fn backend(repo: &crate::repo::Repo) -> Result<Box<dyn Mux>> {
     let root = &repo.root;
     let config = &repo.config;
-    match config.dispatch.backend {
+    Ok(match config.dispatch.backend {
         crate::config::Backend::Herdr => {
-            Box::new(Herdr::new(root, &repo.checkout, &config.dispatch))
+            Box::new(Herdr::new(root, &repo.checkout, &config.dispatch)?)
         }
         crate::config::Backend::Headless => Box::new(crate::headless::Headless::new(
             root,
             &config.dispatch,
             repo.headless_dir(),
-        )),
-        crate::config::Backend::Tmux => Box::new(crate::tmux::Tmux::new(root, &config.dispatch)),
-    }
+        )?),
+        crate::config::Backend::Tmux => Box::new(crate::tmux::Tmux::new(root, &config.dispatch)?),
+    })
 }
 
 /// How long a prompt is given to actually start a turn before spoolway assumes
@@ -684,14 +684,14 @@ impl Herdr {
     /// is [`crate::repo::Repo::checkout`] — the checkout the dispatcher was
     /// actually started in — and becomes [`Herdr::anchor`]; see its doc for
     /// why the two are kept apart rather than one collapsing into the other.
-    pub fn new(cwd: &Path, checkout: &Path, config: &DispatchConfig) -> Herdr {
-        Herdr {
+    pub fn new(cwd: &Path, checkout: &Path, config: &DispatchConfig) -> Result<Herdr> {
+        Ok(Herdr {
             cwd: cwd.to_path_buf(),
             anchor: checkout.to_path_buf(),
             mode: config.herdr_mode,
-            worktree_root: worktree_root(cwd, config),
+            worktree_root: worktree_root(cwd, config)?,
             root_tab: RefCell::new(None),
-        }
+        })
     }
 
     fn call<T: for<'de> Deserialize<'de>>(&self, args: &[&str]) -> Result<T> {
@@ -988,7 +988,7 @@ impl Herdr {
         key: &str,
         env: &BTreeMap<String, String>,
     ) -> Result<String> {
-        let dir = project_home(&self.cwd).join(dir_name);
+        let dir = project_home(&self.cwd)?.join(dir_name);
         std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
         let sh = crate::platform::Shell::CURRENT;
         let path = dir.join(format!("{key}.{}", sh.source_extension()));
@@ -1954,25 +1954,92 @@ pub fn state_root() -> PathBuf {
     home().join(".spoolway")
 }
 
-/// A project's own directory name, which is what its tab in the shared
-/// dispatch workspace is labelled, what names its rows under
-/// [`MuxMode::Split`], and what [`project_home`] resolves under `~/.spoolway/`.
+/// A checkout's current basename — what its tab in the shared dispatch
+/// workspace is labelled, and what names its rows under [`MuxMode::Split`].
+///
+/// Not what [`project_home`] resolves under `~/.spoolway/` once a project has
+/// been stamped: that keeps the basename frozen at the moment of stamping
+/// (see [`crate::repo::project_identity`]), which is exactly what lets a
+/// later rename leave this function's own answer stale without disturbing
+/// the project's home. This is only `project_home`'s fallback — for a
+/// directory with no git repository behind it at all, or one that has never
+/// been stamped — never for a project that has actually been stamped, and
+/// never reached at all on a real resolution error, which `project_home`
+/// propagates instead of falling back on.
 pub fn project_label(root: &Path) -> String {
     root.file_name()
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_else(|| "project".to_string())
 }
 
-/// Where a project's own runtime state lives: `~/.spoolway/<basename>/`.
+/// Where a project's own runtime state lives: `~/.spoolway/<label>-<id>/`,
+/// `<label>` and `<id>` both read out of `root`'s own common git directory
+/// via [`crate::repo::project_identity`] — the same directory for every
+/// branch, subdirectory and linked worktree of one clone, so all four
+/// resolve here identically, and never shared between two clones of the
+/// same repository.
 ///
 /// The one directory a project's queue, archive, plans, lane bookkeeping and
 /// dispatched worktrees all sit under — see [`crate::repo::Repo::home`] for
 /// the rest of it, and [`worktree_root`] for the one piece that lives here
-/// too but does not go through `Repo`. Two checkouts sharing a basename share
-/// this directory, which is exactly the clash `spoolway init` refuses —
-/// nothing here resolves that; it only names where the pointer file lives.
-pub fn project_home(root: &Path) -> PathBuf {
-    state_root().join(project_label(root))
+/// too but does not go through `Repo`.
+///
+/// `<label>` is the checkout's basename at the moment it was first stamped,
+/// frozen into the checkout's own `.git` alongside the id — never recomputed
+/// from the checkout's current basename, which is what makes a rename or
+/// move resolve to the home it already has rather than a fresh one named
+/// after wherever it now lives.
+///
+/// Falls back to the basename alone, the whole of the old rule, whenever
+/// [`crate::repo::project_identity`] answers `None` — `root` has no git
+/// repository behind it at all (a bare fixture directory, most of the unit
+/// tests below [`crate::overrides::dir_for`] and
+/// [`crate::pipeline::Pipelines::load`]), or it does but nothing has stamped
+/// it yet, which is every project that predates this stamp and has not been
+/// migrated onto one (`migrate-legacy-home`, not this task) — or a checkout
+/// `crate::repo::bind` has not been asked about yet either, straight after
+/// a fresh `git clone` and before any spoolway command has run in it at
+/// all. `project_home` itself never stamps anything — the same call
+/// [`crate::repo::stamped_id`] `spoolway init` always used — but it is no
+/// longer `init`'s alone: `bind` reaches for it too, the moment an
+/// ordinary command finds a checkout with no stamp and nothing recording
+/// it (`binding-record`'s own acceptance criterion 7), so this fallback is
+/// read far more often than it is ever actually the final answer — every
+/// caller through `Repo::discover` sees `bind`'s settled home instead,
+/// never this one.
+///
+/// A real failure resolving the stamp — a permissions problem, a corrupt
+/// repository, git itself misbehaving — is `Err`, propagated rather than
+/// papered over with the basename fallback: a writer downstream of this
+/// (cutting a worktree, writing a lane's environment file) silently using
+/// the wrong directory on a resolution failure is a worse outcome than the
+/// command refusing to run at all.
+pub fn project_home(root: &Path) -> Result<PathBuf> {
+    match crate::repo::project_identity(root)? {
+        Some((_checkout, label, id)) => Ok(state_root().join(format!("{label}-{id}"))),
+        None => Ok(state_root().join(project_label(root))),
+    }
+}
+
+/// [`project_home`], tolerant of a real resolution failure — the one caller
+/// allowed to be: [`crate::repo::Repo::discover_lenient`], which exists so
+/// a command reaching for a `Repo` leniently (`doctor`, `config edit`,
+/// `config override`, `agent verify`, the update-check notice) can still
+/// get one back rather than dying before it has the chance to say why.
+///
+/// Falls back to the same basename-keyed path an unstamped project already
+/// resolves to, paired with the error that caused it — never silently, the
+/// way an ordinary caller reading `project_home`'s own ok-or-bail would be.
+/// The fallback path itself is not safe to write into or read state from —
+/// it names no real project — so every caller past `discover_lenient` is
+/// expected to check the error and refuse (`config override`) or skip
+/// whatever would touch it (`doctor`'s home-backed checks), using the
+/// fallback only so `Repo.home` has some `PathBuf` to hold.
+pub(crate) fn project_home_lenient(root: &Path) -> (PathBuf, Option<anyhow::Error>) {
+    match project_home(root) {
+        Ok(home) => (home, None),
+        Err(err) => (state_root().join(project_label(root)), Some(err)),
+    }
 }
 
 /// Where dispatched checkouts are cut, for both backends and every layout.
@@ -1995,12 +2062,12 @@ pub fn project_home(root: &Path) -> PathBuf {
 /// and a person both read by the branch, and the same name whichever
 /// multiplexer cut it. A tracker slug on the branch rides into that directory
 /// name for free.
-pub fn worktree_root(root: &Path, config: &DispatchConfig) -> PathBuf {
+pub fn worktree_root(root: &Path, config: &DispatchConfig) -> Result<PathBuf> {
     let configured = config.worktree_root.trim();
     if !configured.is_empty() {
-        return PathBuf::from(shellexpand_home(configured));
+        return Ok(PathBuf::from(shellexpand_home(configured)));
     }
-    project_home(root).join("worktrees")
+    Ok(project_home(root)?.join("worktrees"))
 }
 
 /// Where `~` and the default worktree root resolve to.
@@ -2397,14 +2464,14 @@ mod tests {
         );
 
         let config = crate::config::DispatchConfig::default();
-        let ordinary = Herdr::new(&work, &work, &config);
+        let ordinary = Herdr::new(&work, &work, &config).unwrap();
         assert_eq!(
             ordinary.anchor.canonicalize().unwrap(),
             work.canonicalize().unwrap(),
             "the main checkout anchors to itself"
         );
 
-        let from_worktree = Herdr::new(&work, &wt, &config);
+        let from_worktree = Herdr::new(&work, &wt, &config).unwrap();
         assert_eq!(
             from_worktree.anchor.canonicalize().unwrap(),
             wt.canonicalize().unwrap(),
@@ -2459,7 +2526,7 @@ mod tests {
         );
 
         let config = crate::config::DispatchConfig::default();
-        let dispatcher = Herdr::new(&work, &release, &config);
+        let dispatcher = Herdr::new(&work, &release, &config).unwrap();
         let task_checkout = release.join(".spoolway-worktrees/task-refresh-tokens");
         let argv = worktree_open_argv(
             &dispatcher.anchor.display().to_string(),
@@ -2499,7 +2566,7 @@ mod tests {
         // this stands in for `~` rather than actually writing there.
         crate::platform::test_home::with_home(&base, || {
             let config = crate::config::DispatchConfig::default();
-            let herdr = Herdr::new(&base, &base, &config);
+            let herdr = Herdr::new(&base, &base, &config).unwrap();
             let sh = crate::platform::Shell::CURRENT;
             let env = BTreeMap::from([
                 ("SPOOLWAY_TASK".to_string(), "demo".to_string()),
@@ -2513,6 +2580,7 @@ mod tests {
             // Named with the dialect's own extension, not a plain `.env` —
             // PowerShell refuses to dot-source anything else.
             let path = project_home(&base)
+                .unwrap()
                 .join("system-prompts")
                 .join(format!("demo · implement.{}", sh.source_extension()));
             assert_eq!(
@@ -2805,12 +2873,14 @@ mod tests {
     #[test]
     fn every_task_worktree_lands_under_the_projects_own_home() {
         let root = home().join("dev").join("spoolway");
-        let path = worktree_root(&root, &DispatchConfig::default()).join("session-key");
+        let path = worktree_root(&root, &DispatchConfig::default())
+            .unwrap()
+            .join("session-key");
         assert!(
             path.ends_with(Path::new("worktrees/session-key")),
             "{path:?}"
         );
-        assert!(path.starts_with(project_home(&root)), "{path:?}");
+        assert!(path.starts_with(project_home(&root).unwrap()), "{path:?}");
         assert!(!path.starts_with(home().join(".herdr")), "{path:?}");
     }
 
@@ -2826,6 +2896,259 @@ mod tests {
             "task-proj-12-add-endpoint"
         );
         assert_eq!(branch_slug("plan/a/b"), "plan-a-b");
+    }
+
+    /// A real git repo with one commit, for the [`project_home`] tests
+    /// below — real git throughout, since the stamp this resolves against
+    /// lives in a real `.git`, not a fixture that only pretends to have one.
+    fn git_fixture(name: &str) -> PathBuf {
+        let work = crate::scratch::root(&format!("mux-test-project-home-{name}"));
+        let _ = std::fs::remove_dir_all(&work);
+        std::fs::create_dir_all(&work).unwrap();
+        crate::scratch::git_init(&work, &["-q", "-b", "main"]);
+        std::fs::write(work.join("README"), "hi\n").unwrap();
+        crate::repo::run(&work, "git", &["add", "-A"]).unwrap();
+        crate::repo::run(&work, "git", &["commit", "-q", "-m", "root"]).unwrap();
+        work
+    }
+
+    /// The one new fact `project_home` resolves off of: the id stamped into
+    /// the checkout's own common git directory, not just its basename.
+    #[test]
+    fn project_home_is_keyed_on_the_stamped_id() {
+        let work = git_fixture("keyed");
+        let scratch_home = crate::scratch::root("mux-test-project-home-keyed-home");
+        crate::platform::test_home::with_home(&scratch_home, || {
+            let (id, _minted) = crate::repo::stamped_id(&work)
+                .unwrap()
+                .expect("a real git repo stamps an id");
+            let home = project_home(&work).unwrap();
+            assert_eq!(
+                home,
+                state_root().join(format!("{}-{id}", project_label(&work)))
+            );
+        });
+    }
+
+    /// The same home resolves from a directory nested below the checkout's
+    /// own top: `git rev-parse --git-common-dir` answers the same thing from
+    /// any subdirectory of the repository, and nothing here should behave
+    /// differently.
+    #[test]
+    fn project_home_resolves_the_same_from_a_nested_subdirectory() {
+        let work = git_fixture("nested");
+        let nested = work.join("src").join("deep");
+        std::fs::create_dir_all(&nested).unwrap();
+        crate::repo::stamped_id(&work).unwrap();
+        let scratch_home = crate::scratch::root("mux-test-project-home-nested-home");
+        crate::platform::test_home::with_home(&scratch_home, || {
+            assert_eq!(project_home(&work).unwrap(), project_home(&nested).unwrap());
+        });
+    }
+
+    /// The same home resolves from a branch that carries no `.spoolway/` at
+    /// all: the stamp lives in the common git directory, which is not
+    /// branch-specific, so a branch with none of the tracked control plane
+    /// checked out must still answer the same home as the branch that does.
+    #[test]
+    fn project_home_resolves_the_same_from_a_branch_with_no_state_dir() {
+        let work = git_fixture("branchless");
+        crate::repo::stamped_id(&work).unwrap();
+
+        // A real `.spoolway/`, tracked and committed on `main` — otherwise
+        // this test proves nothing: a `bare` branch that never had one
+        // either would pass even if `project_home` were, wrongly, coupled
+        // to the tracked control plane rather than to the common git
+        // directory alone.
+        std::fs::create_dir_all(work.join(".spoolway")).unwrap();
+        std::fs::write(work.join(".spoolway").join("config.toml"), "").unwrap();
+        crate::repo::run(&work, "git", &["add", "-A"]).unwrap();
+        crate::repo::run(&work, "git", &["commit", "-q", "-m", "add .spoolway"]).unwrap();
+
+        let scratch_home = crate::scratch::root("mux-test-project-home-branchless-home");
+        crate::platform::test_home::with_home(&scratch_home, || {
+            let on_main = project_home(&work).unwrap();
+            assert!(work.join(".spoolway").exists());
+
+            crate::repo::run(&work, "git", &["checkout", "-q", "-b", "bare"]).unwrap();
+            crate::repo::run(&work, "git", &["rm", "-q", "-r", ".spoolway"]).unwrap();
+            crate::repo::run(&work, "git", &["commit", "-q", "-m", "drop .spoolway"]).unwrap();
+            assert!(!work.join(".spoolway").exists());
+
+            assert_eq!(project_home(&work).unwrap(), on_main);
+        });
+    }
+
+    /// The same home resolves from inside a linked worktree: its
+    /// `--git-common-dir` answers the main checkout's `.git`, the one
+    /// directory the stamp actually lives in.
+    #[test]
+    fn project_home_resolves_the_same_from_a_linked_worktree() {
+        let work = git_fixture("linked");
+        let wt = crate::scratch::root("mux-test-project-home-linked-wt");
+        let _ = std::fs::remove_dir_all(&wt);
+        crate::repo::run(
+            &work,
+            "git",
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "task/a",
+                wt.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        crate::repo::stamped_id(&work).unwrap();
+        let scratch_home = crate::scratch::root("mux-test-project-home-linked-home");
+        crate::platform::test_home::with_home(&scratch_home, || {
+            assert_eq!(project_home(&work).unwrap(), project_home(&wt).unwrap());
+        });
+        crate::repo::run(
+            &work,
+            "git",
+            &["worktree", "remove", "--force", wt.to_str().unwrap()],
+        )
+        .unwrap();
+    }
+
+    /// A stamped checkout that is renamed or moved keeps the home it had
+    /// before: the id and the label it was minted alongside both live in the
+    /// checkout's own `.git`, so a rename resolves to the same home even
+    /// when nothing has ever created `~/.spoolway/<label>-<id>/` on disk —
+    /// there is no directory listing this depends on finding.
+    #[test]
+    fn a_renamed_or_moved_checkout_resolves_to_the_home_it_had_before() {
+        let work = git_fixture("rename-before");
+        crate::repo::stamped_id(&work).unwrap();
+        let scratch_home = crate::scratch::root("mux-test-project-home-rename-home");
+        crate::platform::test_home::with_home(&scratch_home, || {
+            let home_before = project_home(&work).unwrap();
+            assert!(
+                !home_before.exists(),
+                "nothing has created this project's home yet"
+            );
+
+            let renamed = crate::scratch::root("mux-test-project-home-renamed-checkout");
+            let _ = std::fs::remove_dir_all(&renamed);
+            std::fs::rename(&work, &renamed).unwrap();
+
+            let home_after = project_home(&renamed).unwrap();
+            assert_eq!(
+                home_after, home_before,
+                "a rename must not orphan the project's existing queue and archive, \
+                 even before either directory exists on disk"
+            );
+        });
+    }
+
+    /// Two clones of one repository — same basename, different `.git`
+    /// directories — resolve to two different homes, never to one shared
+    /// queue. A real `git clone` of one origin, not two independently
+    /// `git init`ed directories that only happen to share a basename.
+    #[test]
+    fn two_clones_of_one_repository_get_two_different_homes() {
+        let base = crate::scratch::root("mux-test-project-home-two-clones");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let origin = base.join("origin.git");
+        std::fs::create_dir_all(&origin).unwrap();
+        crate::scratch::git_init(&origin, &["--bare", "-b", "main"]);
+        let seed = base.join("seed");
+        std::fs::create_dir_all(&seed).unwrap();
+        crate::scratch::git_init(&seed, &["-b", "main"]);
+        std::fs::write(seed.join("README"), "hi\n").unwrap();
+        crate::repo::run(&seed, "git", &["add", "-A"]).unwrap();
+        crate::repo::run(&seed, "git", &["commit", "-q", "-m", "root"]).unwrap();
+        crate::repo::run(
+            &seed,
+            "git",
+            &["push", "-q", origin.to_str().unwrap(), "main"],
+        )
+        .unwrap();
+
+        let a = base.join("work-a").join("api");
+        let b = base.join("work-b").join("api");
+        for clone in [&a, &b] {
+            std::fs::create_dir_all(clone.parent().unwrap()).unwrap();
+            crate::repo::run(
+                &base,
+                "git",
+                &[
+                    "clone",
+                    "-q",
+                    origin.to_str().unwrap(),
+                    clone.to_str().unwrap(),
+                ],
+            )
+            .unwrap();
+            // Stands in for `spoolway init`, run separately in each clone —
+            // a plain `git clone` carries no `spoolway-id` of its own.
+            crate::repo::stamped_id(clone).unwrap();
+        }
+        let scratch_home = crate::scratch::root("mux-test-project-home-two-clones-home");
+        crate::platform::test_home::with_home(&scratch_home, || {
+            assert_ne!(
+                project_home(&a).unwrap(),
+                project_home(&b).unwrap(),
+                "two clones of the same origin, both named `api`, must not share one home"
+            );
+        });
+    }
+
+    /// A directory with no git repository behind it at all still resolves to
+    /// somewhere — the basename-keyed home this always gave — since a bare
+    /// fixture used by other tests, and any project not yet migrated onto a
+    /// stamp, must not start failing merely by asking for their home.
+    #[test]
+    fn project_home_falls_back_to_the_basename_alone_with_no_git_repository() {
+        let base = crate::scratch::root("mux-test-project-home-no-git");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let scratch_home = crate::scratch::root("mux-test-project-home-no-git-home");
+        crate::platform::test_home::with_home(&scratch_home, || {
+            assert_eq!(
+                project_home(&base).unwrap(),
+                state_root().join(project_label(&base))
+            );
+        });
+    }
+
+    /// A real failure resolving the stamp — here, a stamp file that exists
+    /// but cannot be read — must be refused rather than silently resolved
+    /// to a basename-keyed home: a writer downstream of this
+    /// (`Herdr::hand_environment`, a lane's worktree root) landing in the
+    /// wrong directory on a resolution failure is worse than the command
+    /// refusing to run at all.
+    #[cfg(unix)]
+    #[test]
+    fn project_home_refuses_rather_than_falls_back_on_a_real_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let work = git_fixture("home-read-failure");
+        // A real stamp, established directly rather than through
+        // `stamped_id` — `project_home` never writes one itself, so the
+        // only way its read can fail here is a file that is already there
+        // and already unreadable.
+        let id_path = work.join(".git").join("spoolway-id");
+        std::fs::write(&id_path, "abc123").unwrap();
+        std::fs::set_permissions(&id_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let scratch_home = crate::scratch::root("mux-test-project-home-read-failure-home");
+        let result = crate::platform::test_home::with_home(&scratch_home, || project_home(&work));
+
+        // Restore before asserting, so a failed assertion still leaves this
+        // test's own directory cleanup able to remove it.
+        std::fs::set_permissions(&id_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        // Root runs (some CI sandboxes) ignore file permissions outright, so
+        // this assertion only holds when the restriction actually bit.
+        if unsafe { libc::geteuid() } != 0 {
+            assert!(
+                result.is_err(),
+                "an unreadable stamp must not resolve to a basename-keyed home: {result:?}"
+            );
+        }
     }
 
     /// A backend that overrides nothing has no gesture to try, so
@@ -3005,10 +3328,10 @@ mod tests {
         let root = Path::new("/repo");
 
         config.herdr_mode = MuxMode::Grouped;
-        assert!(!Herdr::new(root, root, &config).task_owns_workspace());
+        assert!(!Herdr::new(root, root, &config).unwrap().task_owns_workspace());
 
         config.herdr_mode = MuxMode::Split;
-        assert!(Herdr::new(root, root, &config).task_owns_workspace());
+        assert!(Herdr::new(root, root, &config).unwrap().task_owns_workspace());
     }
 
     /// `MuxMode::Grouped`'s own per-task route is `project_tab`, in
@@ -3035,7 +3358,7 @@ mod tests {
         let mut config = DispatchConfig::default();
         config.herdr_mode = MuxMode::Grouped;
         let checkout = Path::new("/checkouts/release");
-        let grouped = Herdr::new(Path::new("/repo"), checkout, &config);
+        let grouped = Herdr::new(Path::new("/repo"), checkout, &config).unwrap();
         assert_eq!(
             grouped.anchor, checkout,
             "mode never changes what the anchor resolves to"
@@ -3078,7 +3401,8 @@ mod tests {
             checkout,
             config,
             home: root.join(".home"),
-        });
+        })
+        .unwrap();
 
         assert!(
             mux.is_available(),

@@ -543,7 +543,7 @@ impl Board {
             return Ok(());
         };
         let command = editor_command(&task.path);
-        let mux = crate::mux::backend(repo);
+        let mux = crate::mux::backend(repo)?;
         let _ = mux.open_command(&repo.root, &format!("{id} · edit"), &command);
         Ok(())
     }
@@ -579,7 +579,7 @@ impl Board {
     /// just the half of it a command step's kill would have covered.
     fn begin_pause_all(&mut self, repo: &Repo, pipelines: &Pipelines) -> Result<()> {
         let tasks = repo.tasks()?;
-        let mux = crate::mux::backend(repo);
+        let mux = crate::mux::backend(repo)?;
         let lanes = mux.list_lanes().unwrap_or_default();
         let aborts = live_aborts(repo, &tasks, pipelines, &lanes);
         if aborts.is_empty() {
@@ -619,7 +619,7 @@ impl Board {
         {
             return Ok(());
         }
-        let mux = crate::mux::backend(repo);
+        let mux = crate::mux::backend(repo)?;
         let lanes = mux.list_lanes().unwrap_or_default();
         let aborts: Vec<Abort> = live_aborts(repo, &tasks, pipelines, &lanes)
             .into_iter()
@@ -652,7 +652,7 @@ impl Board {
             // whatever else in the run had nothing live to abort, which is
             // exactly the count its own body already promised.
             Key::Enter => {
-                let mux = crate::mux::backend(repo);
+                let mux = crate::mux::backend(repo)?;
                 let runs = crate::command_step::Runs::new(&repo.commands_dir());
                 for abort in &aborts {
                     match abort.kind {
@@ -1383,7 +1383,7 @@ pub fn rows(repo: &Repo, pipelines: &Pipelines) -> Result<Vec<Row>> {
     let tasks = repo.tasks()?;
     let graph = Graph::build_for_run(&tasks, pipelines, &repo.archive_dir(), repo.unattended());
     let waiting = crate::dispatch::lanes_awaiting_a_person(repo);
-    let mux = crate::mux::backend(repo);
+    let mux = crate::mux::backend(repo)?;
     let lanes = mux.list_lanes().unwrap_or_default();
     let ledger = crate::usage::read_cached(repo);
     // A plain snapshot, not the live board: it holds no memory of a task's
@@ -1414,7 +1414,7 @@ fn render(
     let (tasks, load_problems) = repo.tasks_and_problems()?;
     let graph = Graph::build_for_run(&tasks, pipelines, &repo.archive_dir(), repo.unattended());
     let waiting = crate::dispatch::lanes_awaiting_a_person(repo);
-    let mux = crate::mux::backend(repo);
+    let mux = crate::mux::backend(repo)?;
     // Read once and passed down: this is a call out to the multiplexer, and the
     // board makes it about once a second already.
     let lanes = mux.list_lanes().unwrap_or_default();

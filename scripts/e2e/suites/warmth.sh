@@ -99,17 +99,23 @@ ln -sf "$SPOOLWAY" "$LIVE/bin/spoolway"
 # This is the one suite whose `spoolway init` claims `proj` under the *real*
 # `~/.spoolway` — every other suite gets a scratch `$HOME` from `new_repo` —
 # and the fixture it registers is a mktemp tree that is gone by the next run,
-# with the previous run's own archive still sitting behind the registration.
-# `--take-over` is `configure_project`'s way of claiming it anyway rather
-# than refusing: a `proj` whose root is still a live directory is somebody
-# else's and stays a loud collision either way.
+# with the previous run's own home still sitting behind wherever it landed.
+# `--take-over` is passed on for compatibility only: it is accepted and does
+# nothing now (see `src/commands/init.rs`, near `--take-over`) — the
+# basename collision it used to resolve cannot happen once a home is keyed
+# by id instead of by name, per the `binding-record` task.
 new_repo "$LIVE/proj"
-# `--take-over` reclaims the *registration*; the previous run's project home
-# — its archive above all — is still there behind it, and `queue add` refuses
-# an id the archive already holds. Every task this suite mints is named below
-# (`warm`, `thaw`, `chill`, `stuck`), so the stale home is this suite's own
-# leavings and nothing else's: sweep it before init writes the fresh one.
-rm -rf "$SPOOLWAY_PROJECT_HOME"
+# What actually keeps this run clean is the sweep below, not `--take-over`.
+# Every task this suite mints is named below (`warm`, `thaw`, `chill`,
+# `stuck`), so a stale `proj-*` home is this suite's own leavings and
+# nothing else's: remove it before init writes the fresh one.
+#
+# A home is `<label>-<id>` now, and every run's `$LIVE` is a fresh `mktemp`
+# checkout, so it mints a fresh id every time — there is no one path left to
+# name here, only every home a `proj` label has ever answered to.
+# `SPOOLWAY_PROJECT_HOME` (still the pre-init, id-less guess at this point)
+# is no help either; glob the real family instead.
+rm -rf "$HOME"/.spoolway/proj-*
 configure_project plan/live "$LIVE/worktrees" --take-over
 publish plan/live
 

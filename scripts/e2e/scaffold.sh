@@ -98,7 +98,22 @@ FORGE="$DIR-forge"
 # backends' worktree locations, always: a teardown has to work without being
 # told which one made the mess, and `--clean` is routinely run in a shell
 # that never saw the `--headless` that built it.
-PROJECT_HOME="$HOME/.spoolway/$(basename "$DIR")"
+#
+# A home is `<label>-<id>` now, `<id>` read out of `$DIR/.git/spoolway-id` —
+# read here, before anything below can delete `$DIR` and the stamp with it.
+# A `$DIR` that was never `init`ed (the very first run) has no stamp yet;
+# `project_home`'s own pre-stamp fallback is the bare label, so this falls
+# back the same way.
+project_home() {
+  local id
+  if [ -f "$DIR/.git/spoolway-id" ] && id=$(cat "$DIR/.git/spoolway-id" 2>/dev/null) \
+     && [ -n "$id" ]; then
+    printf '%s\n' "$HOME/.spoolway/$(basename "$DIR")-$id"
+  else
+    printf '%s\n' "$HOME/.spoolway/$(basename "$DIR")"
+  fi
+}
+PROJECT_HOME=$(project_home)
 WORKTREES="$HOME/.herdr/worktrees/$(basename "$DIR")"
 WORKTREES_HEADLESS="$PROJECT_HOME/worktrees"
 
@@ -351,6 +366,10 @@ say "spoolway init"
 # and with no terminal to ask it takes claude — which is what this scaffold
 # wanted anyway and used to ask for on its own line.
 spoolway init >/dev/null
+# `init` just stamped a fresh id if `$DIR` had none — re-derive `$PROJECT_HOME`
+# and everything under it now that the id is certain to exist.
+PROJECT_HOME=$(project_home)
+WORKTREES_HEADLESS="$PROJECT_HOME/worktrees"
 # This observed runtime deliberately remains a Pi project. Fresh init no
 # longer invents that profile, so add the existing-project shape explicitly.
 cat >> .spoolway/config.toml <<'PROFILE'

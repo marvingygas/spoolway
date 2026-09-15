@@ -637,6 +637,12 @@ Scaffold `.spoolway/` in a repository: config, pipelines, prompts, templates, ho
 skills. At a terminal it asks for the agent, the tracker and the project key. With no terminal
 it takes the defaults.
 
+`init` also binds this checkout to its home under `~/.spoolway/`. The binding is two files that
+must agree: an id stamped into the checkout's `.git`, and a `project.toml` in the home holding
+that id and the checkout's path. A fresh clone binds itself on whatever command it runs first.
+`--adopt` and `--new-id` write a binding over one that already exists. See [Runtime
+state](configuration.md#runtime-state).
+
 ```
 spoolway init
 spoolway init --provider codex --tracker github --project-key owner/repo
@@ -648,7 +654,9 @@ spoolway init --provider codex --tracker github --project-key owner/repo
 | `--tracker <github\|jira\|none>` | `none` | The tracker `[issue_tracking]` names |
 | `--project-key <KEY>` | | Where tickets open: `owner/repo` on github, a project key on jira |
 | `--force` | | Overwrite existing config, pipeline and prompt files |
-| `--take-over` | | Claim a project name whose registered checkout is gone while its archive or queue still exists |
+| `--adopt <NAME>` | | Bind this checkout to the home already at `~/.spoolway/<NAME>/` and stamp it with that home's id. `NAME` is the home's directory name, such as `api-8w4r2c`. Prints what that home already holds |
+| `--new-id` | | Mint this checkout a fresh id and bind it to the fresh home that id keys |
+| `--take-over` | | Accepted and ignored |
 
 Run again in a project that already has a config, it installs skills and changes nothing else.
 Every hook script is written whatever the tracker answer. See [Installation and

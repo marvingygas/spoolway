@@ -1936,7 +1936,7 @@ mod tests {
         .unwrap();
 
         let result = crate::platform::test_home::with_home(&fake_home, || {
-            let home = crate::mux::project_home(&root);
+            let home = crate::mux::project_home(&root).unwrap();
             let mut config = Config::default();
             config.dispatch.default_pipeline = pipeline.to_string();
             let repo = Repo {

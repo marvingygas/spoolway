@@ -639,13 +639,29 @@ pub struct InitArgs {
     #[arg(long)]
     pub force: bool,
 
-    /// Claim this project's name even though the machine's record of it
-    /// still holds an archive or queued tasks, when the checkout that name
-    /// was registered to no longer exists. Refused without this flag —
-    /// nothing here is deleted, but a state that old is not yours to walk
-    /// into by accident.
+    /// Accepted for compatibility; does nothing. A project's home used to
+    /// be claimed by basename, and this forced a claim through when the
+    /// checkout that basename belonged to was gone but its state was not
+    /// empty. A home keyed by id instead settles that same case on its own
+    /// — see acceptance criterion 2 of the `binding-record` task — so there
+    /// is nothing left for this flag to force.
     #[arg(long)]
     pub take_over: bool,
+
+    /// Bind this checkout to the home already at `~/.spoolway/<NAME>/`,
+    /// even though the checkout's own stamp or that home's own record
+    /// currently disagrees with it — `NAME` is the home's own directory
+    /// name, `<label>-<id>` (for example `api-8w4r2c`), not the bare id
+    /// alone. One of the only two ways (with `--new-id`) to write a
+    /// binding over one that already exists.
+    #[arg(long, value_name = "NAME", conflicts_with = "new_id")]
+    pub adopt: Option<String>,
+
+    /// Mint this checkout a fresh id — and bind it to the fresh home that
+    /// id keys — even though it may already carry one. The other of the
+    /// only two ways to write a binding over one that already exists.
+    #[arg(long)]
+    pub new_id: bool,
 
     /// The coding agent you plan in, whose convention the skills are installed
     /// under. Asked at a terminal; `claude` when there is nobody to ask.

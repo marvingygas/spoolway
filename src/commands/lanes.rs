@@ -235,7 +235,7 @@ pub fn answer(repo: &Repo, pipelines: &Pipelines, mux: &dyn Mux, args: &AnswerAr
 /// This says what a lane wrote, the way looking at a pane costs nothing.
 /// Headless it is the only way to watch a lane at all.
 pub fn logs(repo: &Repo, pipelines: &Pipelines, args: &LogsArgs, json: bool) -> Result<()> {
-    let mux = crate::mux::backend(repo);
+    let mux = crate::mux::backend(repo)?;
 
     let Some(lane) = args.lane.clone() else {
         let lanes = mux.list_lanes()?;
@@ -363,7 +363,8 @@ mod tests {
         let repo = fixture("lane-m-in-lane");
         let pipelines = Pipelines::builtin();
         let headless =
-            crate::headless::Headless::new(&repo.root, &repo.config.dispatch, repo.headless_dir());
+            crate::headless::Headless::new(&repo.root, &repo.config.dispatch, repo.headless_dir())
+                .unwrap();
 
         let err = lane_cmd(
             &repo,

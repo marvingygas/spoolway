@@ -146,7 +146,7 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // of them, so the slate is clean again.
     crate::lock::Restarts::clear(&repo.restarts_file())?;
 
-    let mux = crate::mux::backend(repo);
+    let mux = crate::mux::backend(repo)?;
     if !mux.is_available() {
         bail!("{}", mux.unavailable());
     }

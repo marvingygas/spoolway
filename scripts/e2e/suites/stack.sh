@@ -23,6 +23,7 @@ source "$HERE/../fixture.sh"
 LIVE=${WORK:-$(mktemp -d)}
 new_repo "$LIVE/proj" main
 must "spoolway init" "$SPOOLWAY" init
+project_home_after_init
 must "the spoolway commit" git add -A
 must "the spoolway commit" git commit -qm "spoolway"
 

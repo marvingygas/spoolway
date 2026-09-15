@@ -126,12 +126,12 @@ struct Record {
 impl Headless {
     /// `lane_dir` is where lane records and logs live —
     /// [`crate::repo::Repo::headless_dir`] for every real caller.
-    pub fn new(root: &Path, config: &DispatchConfig, lane_dir: PathBuf) -> Headless {
-        Headless {
+    pub fn new(root: &Path, config: &DispatchConfig, lane_dir: PathBuf) -> Result<Headless> {
+        Ok(Headless {
             root: root.to_path_buf(),
-            worktree_root: worktree_root(root, config),
+            worktree_root: worktree_root(root, config)?,
             lanes_dir: lane_dir,
-        }
+        })
     }
 
     fn lane_dir(&self) -> PathBuf {
@@ -711,6 +711,43 @@ pub fn alive(pid: u32) -> bool {
     crate::lock::is_running(pid)
 }
 
+/// Whether a lane recorded under `lane_dir` — [`crate::repo::Repo::headless_dir`]
+/// for every real caller — is still working from inside `home`, mirroring
+/// exactly what [`Headless::status`] itself trusts to call a lane
+/// [`LaneStatus::Working`]: not merely a record on disk, and not a pid this
+/// same run already wrote an exit code for, but a process [`alive`] still
+/// finds running. Built standalone, off `lane_dir` alone, rather than a
+/// whole [`Headless`] — its `root` and `worktree_root` play no part in this
+/// answer, and the one caller outside this module,
+/// [`crate::repo::migrate_legacy_home`], is asking about a 0.2 home nothing
+/// has bound a fresh [`Repo`](crate::repo::Repo) to yet.
+///
+/// A legacy home's own worktrees are never live enough to block a move
+/// merely by existing — `git worktree repair` is what carries the merely
+/// idle ones across (`migrate-legacy-home` acceptance criterion 3) — only
+/// one a lane is actually still working in blocks it at all (acceptance
+/// criterion 2), independently of whether the dispatcher that started that
+/// lane is itself still running: a headless lane survives its own
+/// dispatcher's death by design (see `disaster.sh`'s own kill cases), so
+/// asking only [`crate::lock::Lock::holder`] would miss exactly the lane
+/// this exists to catch.
+pub(crate) fn lane_working_under(lane_dir: &Path, home: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(lane_dir) else {
+        return false;
+    };
+    let run_files = crate::runfiles::RunFiles::new(lane_dir.to_path_buf());
+    entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .filter_map(|raw| serde_json::from_str::<Record>(&raw).ok())
+        .any(|record| {
+            record.cwd.starts_with(home)
+                && !run_files.exit_path(&record.name).exists()
+                && run_files.read_pid(&record.name).is_some_and(alive)
+        })
+}
+
 /// The id a workspace is addressed by afterwards.
 ///
 /// It carries the checkout path rather than pointing at a table holding one:
@@ -1047,6 +1084,68 @@ mod tests {
     use super::*;
     use crate::mux::home;
 
+    /// A lane record shaped exactly as `Headless` itself writes one, at
+    /// `dir/<name>.json`, naming this test's own pid — indisputably alive
+    /// for as long as the test runs, the same property `lock::tests` leans
+    /// on for `Lock::holder`.
+    fn write_lane_record(dir: &Path, name: &str, cwd: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{name}.json")),
+            format!(
+                r#"{{"name":"{name}","kind":"worktree","pane_id":"p","workspace_id":"w",
+                     "tab_id":"t","cwd":"{}","args":[],"env":{{}},"path_prefix":null,"turns":1}}"#,
+                cwd.display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join(format!("{name}.pid")),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+    }
+
+    /// The property `crate::repo::migrate_legacy_home` leans on: a lane
+    /// still working — a live pid, no exit file yet — inside a worktree
+    /// under `home` is found, and one that has since finished is not.
+    #[test]
+    fn lane_working_under_finds_a_live_lane_and_stops_once_it_exits() {
+        let dir = crate::scratch::root("lane-working-under");
+        let _ = std::fs::remove_dir_all(&dir);
+        let lane_dir = dir.join("headless");
+        let home = dir.join("home");
+        let worktree = home.join("worktrees").join("task-a");
+        std::fs::create_dir_all(&worktree).unwrap();
+        write_lane_record(&lane_dir, "lane", &worktree);
+
+        assert!(
+            lane_working_under(&lane_dir, &home),
+            "a live pid with no exit file is still working"
+        );
+
+        std::fs::write(lane_dir.join("lane.exit"), "0").unwrap();
+        assert!(
+            !lane_working_under(&lane_dir, &home),
+            "an exit file means the turn is over, whatever its pid says"
+        );
+    }
+
+    /// A lane recorded whose own `cwd` sits outside `home` entirely never
+    /// blocks a move of that home, however alive its pid is.
+    #[test]
+    fn lane_working_under_ignores_a_lane_outside_the_given_home() {
+        let dir = crate::scratch::root("lane-working-under-elsewhere");
+        let _ = std::fs::remove_dir_all(&dir);
+        let lane_dir = dir.join("headless");
+        let home = dir.join("home");
+        let elsewhere = dir.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        write_lane_record(&lane_dir, "lane", &elsewhere);
+
+        assert!(!lane_working_under(&lane_dir, &home));
+    }
+
     /// A backend rooted in a scratch directory, plus a `bin/` on the lane's
     /// PATH holding a stand-in for the agent.
     ///
@@ -1081,7 +1180,7 @@ mod tests {
             config.worktree_root = root.join("worktrees").display().to_string();
 
             Fixture {
-                mux: Headless::new(&root, &config, root.join(LANE_DIR)),
+                mux: Headless::new(&root, &config, root.join(LANE_DIR)).unwrap(),
                 root,
                 bin,
             }
@@ -1607,7 +1706,7 @@ mod tests {
     #[test]
     fn worktrees_are_cut_outside_the_project() {
         let root = Path::new("/home/x/dev/myproject");
-        let default = worktree_root(root, &DispatchConfig::default());
+        let default = worktree_root(root, &DispatchConfig::default()).unwrap();
         assert!(
             !default.starts_with(root),
             "worktrees landed inside the checkout: {}",
@@ -1621,7 +1720,10 @@ mod tests {
 
         let mut config = DispatchConfig::default();
         config.worktree_root = "~/elsewhere".into();
-        assert_eq!(worktree_root(root, &config), home().join("elsewhere"));
+        assert_eq!(
+            worktree_root(root, &config).unwrap(),
+            home().join("elsewhere")
+        );
     }
 
     /// A workspace id carries its checkout so nothing has to keep a table of

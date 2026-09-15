@@ -25,6 +25,7 @@ source "$HERE/../agents.sh"
 new_repo "${WORK:-$(mktemp -d)}/proj"
 
 works "init scaffolds .spoolway" "$SPOOLWAY" init
+project_home_after_init
 agent_models
 # Pin the backend. Every start below is meant to be answered by the restart
 # guard, the dispatch lock, the empty queue or the missing git identity — and

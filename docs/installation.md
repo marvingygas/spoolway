@@ -86,7 +86,7 @@ flowchart LR
 | `.spoolway/templates/task-log.md` | The headings spoolway appends to a task file. |
 | `.spoolway/templates/tracking/` | The `epic.md` and `ticket.md` bodies a tracker hook renders. |
 | `.spoolway/hooks/` | `github.sh` and `jira.sh`. On native Windows, `github.ps1` and `jira.ps1`. See [`[issue_tracking]`](configuration.md#issue_tracking--a-hook-fired-on-four-task-events). |
-| `~/.spoolway/<project>/project.toml` | Claims the project's name. |
+| `~/.spoolway/<label>-<id>/project.toml` | Records the id and the checkout this home belongs to. |
 | The provider's skills directory | The five pipeline skills. See [The pipeline skills](#the-pipeline-skills). |
 
 Existing files are kept. `--force` overwrites them.
@@ -95,13 +95,67 @@ Running `init` again in a set-up project installs skills and changes nothing els
 settings later, use `spoolway config set`.
 
 Everything spoolway writes while it runs lives outside the checkout, at
-`~/.spoolway/<basename of the checkout>/`: the queue, the archive, plans, lane records and the
-usage ledger. A second checkout with the same name is refused. If the old checkout is gone but
-its state is still there, `init --take-over` claims the name and keeps that state. Delete the
-directory to forget every task, plan and lane. See [Runtime state](configuration.md#runtime-state).
+`~/.spoolway/<label>-<id>/`: the queue, the archive, plans, lane records and the usage ledger.
+The `<id>` is a short id stamped into the project's `.git` directory, which every branch and
+worktree of one clone shares. The `<label>` is a cleaned-up form of the checkout's name.
+
+The home records that id and this checkout's path in the `project.toml` listed above. Every
+command checks the two against each other. A checkout nothing has recorded stamps itself and
+writes the record on its first command, so a fresh clone works without running `init`. Where the
+two disagree, the command refuses and names both files by absolute path.
+
+`init --adopt <name>` binds this checkout to the home already at `~/.spoolway/<name>/`.
+`init --new-id` mints a fresh id and a fresh home. These two flags are the only way to write a
+binding over one that already exists.
+
+Delete the directory to forget every task, plan and lane. The next command refuses, because the
+checkout still carries a stamp no home holds. Run `spoolway init --new-id` to start clean. See
+[Runtime state](configuration.md#runtime-state).
 
 `init` does not write to `.gitignore`. `spoolway update` removes the marked block an older
 version wrote there.
+
+### Upgrading from 0.2
+
+Under 0.2 a project's home was filed under the checkout's plain name, at
+`~/.spoolway/<name>/`, with no id involved. The first command you run after upgrading moves
+that home onto the id-keyed path for you, once, and prints the two paths and what came
+across:
+
+```
+  moved  ~/.spoolway/api/  ->  ~/.spoolway/api-k7f2q9/
+         queue 2 . archive 37 . ledger . worktrees 1
+```
+
+The queue, the archive, the ledger and any dispatched worktrees all move with it. Nothing is
+deleted, and no later command moves anything again.
+
+The move is refused while work is live — while a dispatcher is running over that home, or
+while a process is still working in one of its worktrees. The refusal names the old path and
+leaves it exactly where it is, so it is safe to hit:
+
+```
+spoolway: ~/.spoolway/api/ cannot move while work is live
+  dispatcher running   pid 48120
+  the old home is untouched at ~/.spoolway/api/
+  run this again once the dispatch finishes
+```
+
+Run the same command again once the dispatch has finished and it moves.
+
+**If you renamed the checkout's folder before upgrading, spoolway cannot find its old home.**
+That home records the path the checkout used to have, nothing on disk links it to the new
+one, and spoolway will not guess — so the checkout binds itself a fresh, empty home instead,
+and your old queue is left untouched under its old name. Recover it by naming it yourself:
+
+```
+spoolway init --adopt api
+```
+
+That carries the old home onto this checkout the same way the automatic move would, with the
+same refusal while work is live. Run `ls ~/.spoolway/` to see the name it is still filed
+under. If you would rather start clean and leave the old home alone, `spoolway init --new-id`
+mints a fresh one.
 
 ### The pipeline skills
 
@@ -147,7 +201,8 @@ spoolway doctor
 Problems set a non-zero exit code. Notes do not. The `spoolway-doctor` skill reads both.
 
 `doctor` still runs when the config or a pipeline file does not parse. It reports the parse
-error with its line and runs every check that does not need that file. Flags are in the
+error with its line and runs every check that does not need that file. It does the same when the
+project's stamped home cannot be resolved, reporting that as one failed check. Flags are in the
 [CLI reference](cli-reference.md).
 
 ## Keeping a project current

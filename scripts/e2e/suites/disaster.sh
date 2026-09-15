@@ -390,6 +390,10 @@ must "problem-log queues" "$SPOOLWAY" queue add --from "$LIVE/problem-log.md"
 # in `src/dispatch.rs`.
 sed -i 's/^stage: .*/stage: not-a-real-step/' "$SPOOLWAY_PROJECT_HOME/queue/problem-log.md"
 
+# `problem_log::path` keys this off `$SPOOLWAY_PROJECT_HOME`'s own basename
+# now — `<label>-<id>`, not the checkout's plain basename — so it survives
+# a rename the same way the home itself does; see `src/problem_log.rs` and
+# the `binding-record` task.
 PROJECT_LOG="$HOME/.spoolway/logs/$(basename "$SPOOLWAY_PROJECT_HOME").log"
 rm -f "$PROJECT_LOG"
 # However many lines the shared dispatch log already carries — only what
@@ -600,5 +604,156 @@ fi
 : > "$CTL/transcript"
 sweep
 forget evallive
+
+# ---------------- a home deleted by hand refuses, naming both files
+# `binding-record`'s own Goal names three ways the checkout's stamp and its
+# home's record can stop agreeing, and says each one "stops with an error
+# naming both files instead of quietly starting an empty queue" — this is
+# the first of the three, held against a real dispatcher-adjacent command
+# the way every other hand-broken state in this suite is, rather than as a
+# unit test against a bare fixture `$HOME` (the seven states themselves
+# already are — see `src/repo.rs`'s `bind_criterion_*` tests). A separate,
+# freshly configured project, so deleting its home cannot disturb any case
+# still to come.
+new_repo "$LIVE/broken"
+configure_project plan/broken
+BROKEN_STAMP="$PWD/.git/spoolway-id"
+BROKEN_HOME="$SPOOLWAY_PROJECT_HOME"
+[ -d "$BROKEN_HOME" ] || {
+  printf '  \033[31mSETUP\033[0m the broken-binding case: %s does not exist yet\n' "$BROKEN_HOME" >&2
+  exit 2
+}
+rm -rf "$BROKEN_HOME"
+if OUT=$("$SPOOLWAY" queue list 2>&1); then
+  bad "a home deleted by hand is refused (it was accepted)"
+  printf '%s\n' "$OUT" | sed 's/^/        /'
+elif grep -qF "$BROKEN_STAMP" <<<"$OUT" && grep -qF "$BROKEN_HOME/project.toml" <<<"$OUT"; then
+  ok "a home deleted by hand is refused, naming both the stamp and the record"
+else
+  bad "a home deleted by hand is refused, naming both the stamp and the record"
+  printf '%s\n' "$OUT" | sed 's/^/        /'
+fi
+
+# ---------------- a 0.2 home is migrated onto its clone's id, once
+# `migrate-legacy-home`: everybody upgrading from 0.2 has a home filed under
+# their checkout's basename, with a `project.toml` naming only a `root` — no
+# id, since the stamp this project keys a home on now did not exist yet. A
+# real dispatcher and a real headless lane are started first, normally,
+# against a freshly initialised project — then the checkout's own stamp and
+# its home directory are torn down into that exact 0.2 shape *out from
+# under* both, still running. Neither the dispatcher process nor the lane's
+# own shell cares that its files moved to a different path partway through;
+# what changes is only what a separate `spoolway queue list` call, run
+# afterwards, finds when it goes looking for a live holder there — which is
+# the whole point: this is a real, live dispatcher and a real, live lane,
+# not a pid standing in for one.
+#
+# The two liveness signals are proven apart, not just together: a live
+# dispatcher's own lock is checked first inside `migrate_legacy_home`, so
+# leaving both live at once would only ever prove the dispatcher's half —
+# the refusal text would say so either way, and a passing check that never
+# actually exercised the lane side would be silent about it. So the
+# dispatcher is stopped first, on its own, and the still-running lane is
+# proven to keep blocking the move by itself before it too is torn down. A
+# separate project again, for the same reason `broken` above is one.
+new_repo "$LIVE/legacy" plan/legacy
+configure_project plan/legacy
+LEGACY_ID_HOME="$SPOOLWAY_PROJECT_HOME"
+LEGACY_HOME="$HOME/.spoolway/$(basename "$PWD")"
+[ -d "$LEGACY_ID_HOME" ] || {
+  printf '  \033[31mSETUP\033[0m the legacy-home case: %s does not exist yet\n' "$LEGACY_ID_HOME" >&2
+  exit 2
+}
+
+dispatcher_start
+queue_hang legacyhang
+LEGACY_LANE_PID=$(lane_pid "legacyhang · implement" 20)
+LEGACY_WT=$(worktree_of legacyhang)
+if [ -z "$LEGACY_LANE_PID" ] || [ -z "$LEGACY_WT" ]; then
+  bad "a legacy home refuses to move while a real dispatcher is live (the lane never started)"
+else
+  # What a 0.2 checkout actually looked like: no stamp of its own, and its
+  # state filed under the plain basename rather than an id-keyed one.
+  rm -f .git/spoolway-id .git/spoolway-label
+  mv "$LEGACY_ID_HOME" "$LEGACY_HOME"
+  printf 'root = "%s"\n' "$PWD" > "$LEGACY_HOME/project.toml"
+  # `worktree_path:` names a location under the just-moved directory's old
+  # name — repointed at the same inode's new path, the same rename every
+  # worktree under a real legacy home would carry. The lane process's own
+  # `/proc/<pid>/cwd` needs no such repointing: the kernel already resolves
+  # it to wherever the directory holding it now lives.
+  NEW_WT="$LEGACY_HOME/${LEGACY_WT#"$LEGACY_ID_HOME"/}"
+
+  # Phase one: dispatcher and lane both still alive. `Lock::holder` is
+  # checked before any worktree, so this proves the dispatcher's own half
+  # of the refusal specifically.
+  if OUT=$("$SPOOLWAY" queue list 2>&1); then
+    bad "a legacy home refuses to move while a real dispatcher is live (it was accepted)"
+    printf '%s\n' "$OUT" | sed 's/^/        /'
+  elif grep -qF "cannot move while work is live" <<<"$OUT" \
+       && grep -qF "dispatcher running" <<<"$OUT" \
+       && grep -qF "$LEGACY_HOME" <<<"$OUT" \
+       && [ -f "$LEGACY_HOME/project.toml" ] \
+       && [ ! -e "$LEGACY_ID_HOME" ]; then
+    ok "a legacy home refuses to move while a real dispatcher is live, untouched"
+  else
+    bad "a legacy home refuses to move while a real dispatcher is live, untouched"
+    printf '%s\n' "$OUT" | sed 's/^/        /'
+  fi
+
+  # Phase two: the dispatcher stops, and the lane it started keeps running
+  # regardless — the same survival every other kill in this suite counts
+  # on. With no dispatcher lock left to answer for it, the move now refuses
+  # (or does not) on the lane alone.
+  dispatcher_stop
+  if OUT=$("$SPOOLWAY" queue list 2>&1); then
+    bad "a legacy home refuses to move while its lane alone is still live (it was accepted)"
+    printf '%s\n' "$OUT" | sed 's/^/        /'
+  elif grep -qF "cannot move while work is live" <<<"$OUT" \
+       && grep -qF "checked out" <<<"$OUT" \
+       && ! grep -qF "dispatcher running" <<<"$OUT" \
+       && [ -f "$LEGACY_HOME/project.toml" ] \
+       && [ ! -e "$LEGACY_ID_HOME" ]; then
+    ok "a legacy home refuses to move while its lane alone is still live, untouched"
+  else
+    bad "a legacy home refuses to move while its lane alone is still live, untouched"
+    printf '%s\n' "$OUT" | sed 's/^/        /'
+  fi
+
+  # End the lane itself — its whole process group, not just the recorded
+  # wrapper pid: `setsid` gives it one of its own on purpose (the same
+  # separation every other lane this suite kills a dispatcher around
+  # relies on), and the stand-in agent can be a child of that wrapper
+  # rather than the same pid, left running — and so still holding a live
+  # `/proc/<pid>/cwd` under the worktree — by a plain single-pid kill.
+  kill -9 -- "-$LEGACY_LANE_PID" 2>/dev/null
+  poll_while 10 kill -0 -- "-$LEGACY_LANE_PID"
+  git worktree remove --force "$NEW_WT" 2>/dev/null
+  git branch -D task/legacyhang 2>/dev/null
+
+  MIGRATED_HOME=""
+  if OUT=$("$SPOOLWAY" queue list 2>&1); then
+    # `LEGACY_ID_HOME` named the home before this checkout's own rollback
+    # and is stale now — the move mints this checkout a fresh id, same as
+    # any other first resolution, so the migrated home is a different
+    # directory than the one this case tore down by hand above.
+    MIGRATED_HOME=$(find "$HOME/.spoolway" -maxdepth 1 -type d \
+                      -name "$(basename "$PWD")-*" | head -1)
+    if [ ! -e "$LEGACY_HOME" ] \
+       && [ -n "$MIGRATED_HOME" ] \
+       && [ -f "$MIGRATED_HOME/project.toml" ] \
+       && [ -f "$MIGRATED_HOME/queue/legacyhang.md" ]; then
+      ok "the same command moves the legacy home, queue and all, once the dispatcher and lane have stopped"
+    else
+      bad "the same command moves the legacy home, queue and all, once the dispatcher and lane have stopped"
+      printf '        legacy home gone: %s, migrated home: %s\n' \
+        "$([ ! -e "$LEGACY_HOME" ] && echo yes || echo no)" "${MIGRATED_HOME:-none}"
+    fi
+  else
+    bad "the same command moves the legacy home, queue and all, once the dispatcher and lane have stopped"
+    printf '%s\n' "$OUT" | sed 's/^/        /'
+  fi
+  [ -n "$MIGRATED_HOME" ] && rm -f "$MIGRATED_HOME/queue/legacyhang.md" 2>/dev/null
+fi
 
 finish

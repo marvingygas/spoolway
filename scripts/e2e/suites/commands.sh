@@ -832,7 +832,10 @@ else
   bad "the reason lands on the task's own Status Log exactly once (found $STATUS_HITS)"
 fi
 
-PROBLEM_LOG="$HOME/.spoolway/logs/$(basename "$LIVE/proj").log"
+# `problem_log::path` keys this off `$SPOOLWAY_PROJECT_HOME`'s own
+# basename (`<label>-<id>`) now, not the checkout's plain basename — see
+# `src/problem_log.rs` and the `binding-record` task.
+PROBLEM_LOG="$HOME/.spoolway/logs/$(basename "$SPOOLWAY_PROJECT_HOME").log"
 PROBLEM_HITS=$(grep -c "$REASON" "$PROBLEM_LOG" 2>/dev/null || echo 0)
 if [ "$PROBLEM_HITS" -eq 1 ]; then
   ok "and once in the project's problem log — not once per one of the three attempts"

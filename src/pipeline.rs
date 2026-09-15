@@ -1857,7 +1857,7 @@ impl Pipelines {
     /// check`, the status screen, none of which is the one place that
     /// should have to know a second source exists.
     pub fn load(root: &Path, config: &crate::config::Config) -> Result<Pipelines> {
-        let overrides = crate::overrides::dir_for(root);
+        let overrides = crate::overrides::dir_for(root)?;
         Pipelines::load_impl(root, config, Some(&overrides))
     }
 
@@ -3336,7 +3336,7 @@ mod tests {
     #[test]
     fn an_override_sets_one_key_and_leaves_the_rest_tracked() {
         with_override_fixture("set-one-key", |root| {
-            let overrides = crate::overrides::dir_for(root);
+            let overrides = crate::overrides::dir_for(root).unwrap();
             std::fs::create_dir_all(overrides.join("pipelines")).unwrap();
             std::fs::write(
                 overrides.join("pipelines").join("impl.yml"),
@@ -3369,7 +3369,7 @@ mod tests {
     #[test]
     fn an_override_naming_an_unknown_step_is_refused_by_name() {
         with_override_fixture("unknown-step", |root| {
-            let overrides = crate::overrides::dir_for(root);
+            let overrides = crate::overrides::dir_for(root).unwrap();
             std::fs::create_dir_all(overrides.join("pipelines")).unwrap();
             std::fs::write(
                 overrides.join("pipelines").join("impl.yml"),
@@ -3391,7 +3391,7 @@ mod tests {
     #[test]
     fn an_override_setting_a_step_id_is_refused() {
         with_override_fixture("sets-id", |root| {
-            let overrides = crate::overrides::dir_for(root);
+            let overrides = crate::overrides::dir_for(root).unwrap();
             std::fs::create_dir_all(overrides.join("pipelines")).unwrap();
             std::fs::write(
                 overrides.join("pipelines").join("impl.yml"),
@@ -3415,7 +3415,7 @@ mod tests {
     #[test]
     fn a_patch_that_breaks_the_graph_is_refused_at_load() {
         with_override_fixture("breaks-graph", |root| {
-            let overrides = crate::overrides::dir_for(root);
+            let overrides = crate::overrides::dir_for(root).unwrap();
             std::fs::create_dir_all(overrides.join("pipelines")).unwrap();
             std::fs::write(
                 overrides.join("pipelines").join("impl.yml"),
@@ -3454,7 +3454,7 @@ mod tests {
     #[test]
     fn load_tracked_ignores_a_patch_on_disk() {
         with_override_fixture("load-tracked", |root| {
-            let overrides = crate::overrides::dir_for(root);
+            let overrides = crate::overrides::dir_for(root).unwrap();
             std::fs::create_dir_all(overrides.join("pipelines")).unwrap();
             std::fs::write(
                 overrides.join("pipelines").join("impl.yml"),

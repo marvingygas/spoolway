@@ -224,6 +224,7 @@ pub fn doctor(
     repo: &Repo,
     pipelines: Result<Pipelines>,
     config_error: Option<anyhow::Error>,
+    home_error: Option<anyhow::Error>,
     verbose: bool,
     json: bool,
     no_live: bool,
@@ -231,9 +232,28 @@ pub fn doctor(
     if let Some(note) = repo.checkout_note()? {
         note.print(json)?;
     }
+
+    // A stamped home that could not be resolved at all takes a distinct
+    // path, before anything below gets the chance to touch it: `repo.home`
+    // here is nothing but the basename-keyed placeholder
+    // `crate::mux::project_home_lenient` falls back to when it cannot give
+    // a real answer, and every check past this point either reads it
+    // directly (`repo.tasks()`, `repo.archive_dir()`, `repo.lock_file()`
+    // all create their directory on demand) or reads it indirectly through
+    // `Config::load`/`Pipelines::load`, which both resolve the overrides
+    // layer through the exact call that just failed. Running any of them
+    // would recreate the silent wrong-directory write id-keying this
+    // project's home exists to prevent, or misreport this one failure as a
+    // config or pipeline problem it is not.
+    if let Some(err) = home_error {
+        return doctor_home_unavailable(repo, config_error, err, verbose, json);
+    }
+
     let config = match Config::load(&repo.checkout) {
         Ok(config) => config,
-        Err(err) => return doctor_unconfigured(repo, pipelines, err, verbose, json),
+        Err(err) => {
+            return doctor_unconfigured(repo, pipelines, err, verbose, json);
+        }
     };
 
     // Built once and shared by every check below that asks the multiplexer
@@ -257,7 +277,7 @@ pub fn doctor(
             report.record_all(issue_tracking_checks(repo, &config.issue_tracking));
             report.record_all(retired_key_notes(&repo.checkout));
             report.record_all(override_layer_note(repo));
-            report.record(mux_check(mux.as_ref()));
+            report.record(mux_finding(&mux));
             doctor_update(repo, &mut report);
             report.record(match crate::lock::Lock::holder(&repo.lock_file())? {
                 Some(pid) => Finding::Note(format!("a dispatcher is running (pid {pid})")),
@@ -285,8 +305,13 @@ pub fn doctor(
         pipelines,
         &config.issue_tracking,
     ));
-    report.record(mux_check(mux.as_ref()));
-    report.record(live_check(mux.as_ref(), no_live));
+    report.record(mux_finding(&mux));
+    match &mux {
+        Ok(m) => report.record(live_check(m.as_ref(), no_live)),
+        Err(_) => report.record(Finding::NoteVerbose(
+            "no live pane check: the backend could not be resolved".into(),
+        )),
+    }
     report.record(Finding::Check(
         "git identity".into(),
         crate::commands::dispatch::check_git_identity(repo, pipelines, &config),
@@ -297,7 +322,10 @@ pub fn doctor(
     ));
     report.record(Finding::Check(
         "backend and checkout".into(),
-        crate::commands::dispatch::check_backend_checkout(repo, mux.as_ref()),
+        match &mux {
+            Ok(m) => crate::commands::dispatch::check_backend_checkout(repo, m.as_ref()),
+            Err(err) => Err(anyhow::anyhow!("{err:#}")),
+        },
     ));
     report.record_all(agent_checks(pipelines, &config));
     report.record_all(model_health_checks(pipelines, &config));
@@ -315,6 +343,78 @@ pub fn doctor(
     });
 
     finish(&report, verbose, json)
+}
+
+/// `doctor` when `Repo::discover_lenient`'s own resolution of this
+/// project's stamped home failed outright — a permissions problem, a
+/// corrupt repository.
+///
+/// Nothing below this reads `repo.home`, directly or otherwise:
+/// `repo.tasks()`, `repo.archive_dir()` and `repo.lock_file()` all create
+/// their directory the moment they are asked, and `Config::load`/
+/// `Pipelines::load` both resolve the overrides layer through
+/// `crate::mux::project_home` — the very call that just failed, which would
+/// report this project's own perfectly good tracked files as broken.
+/// [`home_unavailable_findings`] reads the tracked files alone, through
+/// `Config::load_tracked`/`Pipelines::load_tracked`, which need no home at
+/// all.
+fn doctor_home_unavailable(
+    repo: &Repo,
+    config_error: Option<anyhow::Error>,
+    home_error: anyhow::Error,
+    verbose: bool,
+    json: bool,
+) -> Result<()> {
+    let mut report = Report::default();
+    report.record_all(home_unavailable_findings(repo, config_error, &home_error));
+    report.note(format!(
+        "every check that reads this project's own runtime state — the queue, the archive, \
+         the dispatcher's lock, whether a lane can even be started — is skipped until its \
+         stamped home resolves: {home_error:#}"
+    ));
+    finish(&report, verbose, json)
+}
+
+/// The findings [`doctor_home_unavailable`] reports, pulled out on its own
+/// so a test can read them without capturing stdout.
+fn home_unavailable_findings(
+    repo: &Repo,
+    config_error: Option<anyhow::Error>,
+    home_error: &anyhow::Error,
+) -> Vec<Finding> {
+    let mut findings = vec![registration_check(repo, Some(home_error))];
+    if let Some(err) = config_error {
+        findings.push(Finding::Check(
+            "the project's own config parses".into(),
+            Err(err.context(Config::path_in(&repo.root).display().to_string())),
+        ));
+    }
+    match Config::load_tracked(&repo.checkout) {
+        Ok(config) => {
+            findings.push(Finding::Check(
+                "config parses".into(),
+                Ok(Some(format!(
+                    "{} — this checkout's own copy, no overrides layer (its home did not \
+                     resolve)",
+                    Config::path_in(&repo.checkout).display()
+                ))),
+            ));
+            findings.extend(issue_tracking_checks(repo, &config.issue_tracking));
+            findings.push(Finding::Check(
+                "pipelines are valid".into(),
+                Pipelines::load_tracked(&repo.checkout, &config)
+                    .map_err(|e| anyhow::anyhow!("{e:#}"))
+                    .and_then(|pipelines| {
+                        pipelines
+                            .validate()
+                            .map(|()| Some(format!("{:?}", pipelines.names())))
+                    }),
+            ));
+        }
+        Err(err) => findings.push(Finding::Check("config parses".into(), Err(err))),
+    }
+    findings.extend(retired_key_notes(&repo.checkout));
+    findings
 }
 
 /// `doctor` on a checkout whose own `config.toml` does not parse — `err` is
@@ -336,7 +436,9 @@ fn doctor_unconfigured(
 ) -> Result<()> {
     let mut report = Report::default();
 
-    report.record(registration_check(repo));
+    // `home_error` is never `Some` by the time this runs — see
+    // `doctor_home_unavailable`.
+    report.record(registration_check(repo, None));
     report.check("config parses", Err(err));
     report.check(
         "pipelines are valid",
@@ -364,22 +466,32 @@ fn doctor_unconfigured(
     finish(&report, verbose, json)
 }
 
-/// Whether `init` ever claimed this project's `~/.spoolway/<name>/`. Every
-/// other command refuses to run without it — see `Repo::discover` — and
-/// `doctor` is the one that comes through `discover_lenient` instead, so it
-/// is the one place the fact is reported rather than fatal.
-fn registration_check(repo: &Repo) -> Finding {
+/// Whether this checkout's stamp and its home's own record of it agree.
+/// Every other command refuses to run when they do not — see
+/// `Repo::discover` and `crate::repo::bind` — and `doctor` is the one that
+/// comes through `discover_lenient` instead, so it is the one place the
+/// fact is reported rather than fatal.
+///
+/// `home_error` is `Repo::discover_lenient`'s own `bind_lenient` report — the
+/// binding [`crate::repo::bind`] found or could not settle, already naming
+/// both files and the command that resolves it. `doctor` has nothing to add
+/// to that message, only to carry it here as its own finding rather than
+/// the fatal refusal every other command gives it. A settled binding is
+/// reported by both facts it settled — the id and the root
+/// [`crate::repo::binding_at`] reads back off `project.toml` — not merely
+/// that a directory called `repo.home` happens to exist, which is all the
+/// old pointer-file report ever said.
+fn registration_check(repo: &Repo, home_error: Option<&anyhow::Error>) -> Finding {
     Finding::Check(
-        "registered under ~/.spoolway".into(),
-        if crate::commands::registered(&repo.home) {
-            Ok(Some(repo.home.display().to_string()))
-        } else {
-            Err(anyhow::anyhow!(
-                "{} does not exist, so every command but `doctor` refuses this project — run \
-                 `spoolway init` in {} first",
-                repo.home.join(crate::commands::PROJECT_FILE).display(),
-                repo.root.display()
-            ))
+        "bound to its home".into(),
+        match home_error {
+            Some(err) => Err(anyhow::anyhow!("{err:#}")),
+            None => Ok(Some(match crate::repo::binding_at(&repo.home) {
+                Some((id, root)) => {
+                    format!("{} — id {id}, root {}", repo.home.display(), root.display())
+                }
+                None => repo.home.display().to_string(),
+            })),
         },
     )
 }
@@ -394,7 +506,10 @@ fn config_checks(
     config_error: Option<anyhow::Error>,
     config: &Config,
 ) -> Vec<Finding> {
-    let mut findings = vec![registration_check(repo)];
+    // `home_error` is never `Some` by the time `config_checks` runs: `doctor`
+    // takes a distinct path the moment it has one, before `Config::load` (or
+    // any other home-backed call) — see `doctor_home_unavailable`.
+    let mut findings = vec![registration_check(repo, None)];
     findings.push(Finding::Check(
         "config parses".into(),
         Ok(Some(format!(
@@ -758,6 +873,21 @@ fn mux_check(mux: &dyn Mux) -> Finding {
             Err(anyhow::anyhow!("{}", mux.unavailable()))
         },
     )
+}
+
+/// [`mux_check`], tolerant of `backend()` itself failing to resolve this
+/// project's stamped home — the same "lanes can be started" row a person
+/// reads either way, failed for that reason instead of the backend's own
+/// unavailability. `doctor` is the one command that must never bail out on
+/// this rather than say so as a row.
+fn mux_finding(mux: &Result<Box<dyn Mux>>) -> Finding {
+    match mux {
+        Ok(mux) => mux_check(mux.as_ref()),
+        Err(err) => Finding::Check(
+            "lanes can be started".into(),
+            Err(anyhow::anyhow!("{err:#}")),
+        ),
+    }
 }
 
 /// Open a throwaway pane on a scratch directory, run a trivial command in
@@ -2190,6 +2320,7 @@ mod tests {
             &crate::config::DispatchConfig::default(),
             root.clone(),
         )
+        .unwrap()
     }
 
     /// `--no-live` skips the row outright, without asking the backend
@@ -2260,10 +2391,13 @@ mod tests {
         assert!(notes[0].starts_with("2 file(s) here are behind this spoolway"));
     }
 
-    /// The registration every other command dies without is a finding here.
+    /// A settled binding is an `Ok` check naming the home it settled on —
+    /// and, when that home actually carries a record, the id and root the
+    /// stamp and `project.toml` agreed on, not only that a directory by
+    /// that name exists.
     #[test]
-    fn an_unregistered_project_is_a_failed_check_naming_init() {
-        let root = crate::scratch::root("doctor-unregistered");
+    fn a_bound_project_is_an_ok_check_naming_its_home() {
+        let root = crate::scratch::root("doctor-bound");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let repo = Repo {
@@ -2273,25 +2407,201 @@ mod tests {
             home: root.join(".home"),
         };
 
-        let Finding::Check(label, outcome) = registration_check(&repo) else {
+        // No record yet — the plain home path is all there is to say.
+        let Finding::Check(label, outcome) = registration_check(&repo, None) else {
             panic!("registration is a check, not a note");
         };
-        assert_eq!(label, "registered under ~/.spoolway");
-        let err = outcome.expect_err("nothing claimed this home");
-        assert!(
-            format!("{err:#}").contains("run `spoolway init`"),
-            "{err:#}"
-        );
+        assert_eq!(label, "bound to its home");
+        assert_eq!(outcome.unwrap(), Some(repo.home.display().to_string()));
 
+        // A home that actually carries a binding reports what it settled
+        // on, not only that the directory exists.
         std::fs::create_dir_all(&repo.home).unwrap();
         std::fs::write(
-            repo.home.join(crate::commands::PROJECT_FILE),
-            "root = \"/x\"\n",
+            repo.home.join("project.toml"),
+            format!(
+                "id = \"a1b2c3\"\nroot = \"{}\"\n",
+                root.display().to_string().replace('\\', "\\\\")
+            ),
         )
         .unwrap();
-        let Finding::Check(_, outcome) = registration_check(&repo) else {
+        let Finding::Check(_, outcome) = registration_check(&repo, None) else {
             panic!("registration is a check, not a note");
         };
-        assert!(outcome.is_ok());
+        let note = outcome.unwrap().unwrap();
+        assert!(note.contains("id a1b2c3"), "{note}");
+        assert!(note.contains(&root.display().to_string()), "{note}");
+    }
+
+    /// Whatever `bind` could not settle — every one of the seven states the
+    /// `binding-record` task defines, surfaced here as `Repo::discover_lenient`'s
+    /// own `home_error` — is a failed check carrying `bind`'s own message,
+    /// not a fact this rederives from `repo.home` on its own.
+    #[test]
+    fn an_unsettled_binding_is_a_failed_check_naming_binds_own_error() {
+        let root = crate::scratch::root("doctor-unbound");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let repo = Repo {
+            checkout: root.clone(),
+            root: root.clone(),
+            config: Config::default(),
+            home: root.join(".home"),
+        };
+        let home_error = anyhow::anyhow!("no home holds the id abc123");
+
+        let Finding::Check(label, outcome) = registration_check(&repo, Some(&home_error)) else {
+            panic!("registration is a check, not a note");
+        };
+        assert_eq!(label, "bound to its home");
+        let err = outcome.expect_err("bind could not settle this checkout's binding");
+        assert!(
+            format!("{err:#}").contains("no home holds the id abc123"),
+            "{err:#}"
+        );
+    }
+
+    /// `doctor` on a project whose home could not be resolved must never
+    /// touch `repo.home`: `Repo::home()` (which every one of
+    /// `repo.tasks()`/`repo.archive_dir()`/`repo.lock_file()` goes through)
+    /// creates its directory the instant it is asked, and `repo.home` here
+    /// is nothing but the basename-keyed placeholder a failed resolution
+    /// falls back to — creating it would recreate exactly the unsafe,
+    /// wrong-directory write id-keying this project's home exists to
+    /// prevent.
+    #[test]
+    fn a_home_resolution_failure_creates_nothing_under_the_placeholder_home() {
+        let root = crate::scratch::root("doctor-home-unavailable-fs");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let home = root.join(".home");
+        assert!(!home.exists());
+        let repo = Repo {
+            checkout: root.clone(),
+            root: root.clone(),
+            config: Config::default(),
+            home,
+        };
+        let home_error = anyhow::anyhow!("permission denied reading spoolway-id");
+
+        // Every result but success is fine here: a real failure resolving
+        // the home is always at least one failed check.
+        let _ = doctor(
+            &repo,
+            Ok(Pipelines::builtin()),
+            None,
+            Some(home_error),
+            false,
+            false,
+            true,
+        );
+
+        assert!(
+            !repo.home.exists(),
+            "doctor must never create the placeholder home it cannot resolve"
+        );
+    }
+
+    /// A broken home must not cascade into a false config/pipeline failure:
+    /// `Config::load`/`Pipelines::load` both resolve the overrides layer
+    /// through `crate::mux::project_home`, the exact call that just failed,
+    /// so reaching for them again here would report this project's own
+    /// perfectly good tracked files as broken. The tracked-only loaders
+    /// read the one thing still answerable without a home.
+    #[test]
+    fn a_home_resolution_failure_does_not_cascade_into_config_or_pipeline_failures() {
+        let root = crate::scratch::root("doctor-home-unavailable-cascade");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let repo = Repo {
+            checkout: root.clone(),
+            root: root.clone(),
+            config: Config::default(),
+            home: root.join(".home"),
+        };
+        let home_error = anyhow::anyhow!("permission denied reading spoolway-id");
+
+        let findings = home_unavailable_findings(&repo, None, &home_error);
+        let find = |label: &str| {
+            findings
+                .iter()
+                .find_map(|f| match f {
+                    Finding::Check(l, outcome) if l == label => Some(outcome),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("no {label:?} check in {findings:?}"))
+        };
+        assert!(
+            find("bound to its home").is_err(),
+            "the real failure is reported"
+        );
+        assert!(
+            find("config parses").is_ok(),
+            "a checkout with no config.toml still loads its (default) tracked config: {:?}",
+            find("config parses")
+        );
+        assert!(
+            find("pipelines are valid").is_ok(),
+            "a checkout with no pipelines/ still loads the built-ins: {:?}",
+            find("pipelines are valid")
+        );
+    }
+
+    /// The same claim as
+    /// [`a_home_resolution_failure_does_not_cascade_into_config_or_pipeline_failures`],
+    /// but against `Repo::discover_lenient`'s own tuple rather than a
+    /// synthetic `None` `config_error` — the cascade this guards against
+    /// was `discover_lenient`'s `Config::load` failing for the same reason
+    /// `project_home` just did, which a hand-built `None` can never
+    /// reproduce.
+    #[cfg(unix)]
+    #[test]
+    fn a_real_home_resolution_failure_does_not_cascade_into_a_config_finding() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = crate::scratch::root("doctor-home-unavailable-real-cascade");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        crate::scratch::git_init(&root, &["-q", "-b", "main"]);
+        // The tracked control plane `Repo::root`'s ancestor walk insists on
+        // — real, well-formed, and exactly what proves this run's failure
+        // is the stamped home alone, not this file too.
+        let state = root.join(crate::config::STATE_DIR);
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(state.join("config.toml"), "").unwrap();
+        crate::repo::stamped_id(&root).unwrap();
+        let id_file = root.join(".git").join("spoolway-id");
+        let mut perms = std::fs::metadata(&id_file).unwrap().permissions();
+        perms.set_mode(0o000);
+        std::fs::set_permissions(&id_file, perms.clone()).unwrap();
+
+        let lenient = Repo::discover_lenient(&root);
+
+        perms.set_mode(0o644);
+        std::fs::set_permissions(&id_file, perms).unwrap();
+
+        let (repo, config_error, home_error) =
+            lenient.expect("a home resolution failure is a finding, not a fatal error");
+        let home_error = home_error.expect("the real read failure is handed back");
+
+        let findings = home_unavailable_findings(&repo, config_error, &home_error);
+        let has = |label: &str| {
+            findings
+                .iter()
+                .any(|f| matches!(f, Finding::Check(l, _) if l == label))
+        };
+        assert!(
+            !has("the project's own config parses"),
+            "a broken home alone must not also read as a broken config: {findings:?}"
+        );
+        let Some(Finding::Check(_, outcome)) = findings
+            .iter()
+            .find(|f| matches!(f, Finding::Check(l, _) if l == "config parses"))
+        else {
+            panic!("no 'config parses' check in {findings:?}");
+        };
+        assert!(
+            outcome.is_ok(),
+            "the tracked config itself is perfectly fine: {outcome:?}"
+        );
     }
 }

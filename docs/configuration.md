@@ -33,7 +33,28 @@ a linked worktree the command refuses and prints the `-C` form to run instead.
 
 The checkout holds the tracked files: `config.toml`, `.spoolway/pipelines/` and
 `.spoolway/prompts/`. Everything spoolway writes while it runs lives at
-`~/.spoolway/<project>/`, where `<project>` is the checkout's directory name.
+`~/.spoolway/<label>-<id>/`. The `<id>` is a short id stamped into the project's `.git`
+directory, which every branch and worktree of one clone shares. The `<label>` is a cleaned-up
+form of the checkout's name.
+
+The binding is two files that must agree: the stamp at `.git/spoolway-id`, and the record at
+`~/.spoolway/<label>-<id>/project.toml`. Every command checks them before it does anything else.
+
+| Case | What happens |
+|---|---|
+| The home already records this checkout | The command runs. |
+| The checkout has no stamp and no home records it | It stamps itself and writes the record. A fresh clone needs no `init` first. |
+| The record names a checkout that is gone, or one without the id | The record is rewritten to name this checkout. One line says so. |
+| Anything else | The command refuses, naming both files by absolute path. |
+
+Two commands write a binding over one that already exists, and nothing else does. `spoolway init
+--adopt <name>` binds this checkout to the home already at `~/.spoolway/<name>/` and stamps it
+with that home's id. `spoolway init --new-id` mints a fresh id and binds the checkout to the
+fresh home that id keys.
+
+The shared dispatch workspace sits at `~/.spoolway/.dispatcher/`. A project home always ends in
+`-<id>`, so the two can never collide. See [One home for every run, in every
+project](dispatcher.md#one-home-for-every-run-in-every-project).
 
 | Directory | Holds | Swept by `retention_days` |
 |---|---|---|
@@ -41,11 +62,13 @@ The checkout holds the tracked files: `config.toml`, `.spoolway/pipelines/` and
 | `archive/`, `scratch/`, `headless/`, `commands/`, `tracking/`, `system-prompts/` | What finished runs left behind | Yes |
 | `project.toml`, `lanes.json`, `usage.jsonl`, `dispatch.pid`, `jobs.toml`, `jobs.state.json` | Project records | No |
 
-`spoolway init` registers the name in `project.toml`. A second checkout with the same name is
-refused. When the registered checkout is gone, `spoolway init --take-over` claims the name and
-keeps its archive and queue. The name `.dispatcher` is reserved.
+Every directory inside a home is created the first time something resolves it. `overrides/` is
+the exception. It is never created for you, because its absence is how the patch layer is
+turned off. See [The overrides layer](#the-overrides-layer).
 
-Delete `~/.spoolway/<project>/` to forget every task, plan and lane. The checkout is untouched.
+Delete `~/.spoolway/<label>-<id>/` to forget every task, plan and lane. The checkout is
+untouched. The next command in that checkout refuses, because the checkout still carries a stamp
+no home holds. Run `spoolway init --new-id` to start clean.
 
 ## The overrides layer
 

@@ -149,7 +149,7 @@ fn run() -> Result<()> {
         // other command below dies on the parse error; `doctor` reports it and
         // checks what it can without it.
         Command::Doctor(args) => {
-            let (repo, config_error) = Repo::discover_lenient(&cwd)?;
+            let (repo, config_error, home_error) = Repo::discover_lenient(&cwd)?;
             // Loaded here rather than with `?`: a pipeline file that does not
             // parse is exactly what `doctor` exists to name, so the load
             // failure is handed in as a finding, the same way `config_error`
@@ -163,6 +163,7 @@ fn run() -> Result<()> {
                 &repo,
                 pipelines,
                 config_error,
+                home_error,
                 args.verbose,
                 cli.json,
                 args.no_live,
@@ -179,7 +180,7 @@ fn run() -> Result<()> {
         // the command.
         Command::Agent(AgentCommand::List) => commands::agent_list(cli.json),
         Command::Agent(AgentCommand::Verify(args)) => {
-            let project = Repo::discover_lenient(&cwd).ok().and_then(|(repo, _)| {
+            let project = Repo::discover_lenient(&cwd).ok().and_then(|(repo, _, _)| {
                 let pipelines = Pipelines::load(&repo.checkout, &repo.config).ok()?;
                 Some((repo, pipelines))
             });
@@ -227,15 +228,15 @@ fn run() -> Result<()> {
         // Lenient on purpose: a config that no longer parses is exactly when
         // you want to open it.
         Command::Config(ConfigCommand::Edit) => {
-            let (repo, _) = Repo::discover_lenient(&cwd)?;
+            let (repo, _, _) = Repo::discover_lenient(&cwd)?;
             commands::config_edit(&repo.checkout)
         }
         // Lenient for the same reason `config edit` is: an overrides/
         // config.toml that no longer parses is exactly when you want it
         // open.
         Command::Config(ConfigCommand::Override) => {
-            let (repo, _) = Repo::discover_lenient(&cwd)?;
-            commands::config_override(&repo)
+            let (repo, _, home_error) = Repo::discover_lenient(&cwd)?;
+            commands::config_override(&repo, home_error.as_ref())
         }
         command => {
             let repo = Repo::discover(&cwd)?;
@@ -307,7 +308,7 @@ fn run() -> Result<()> {
                 // lane from a running command step, and a multiplexer to
                 // stop either with.
                 Command::Eval(args) if args.discard.is_some() => {
-                    let mux = mux::backend(&repo);
+                    let mux = mux::backend(&repo)?;
                     let trial = args.discard.clone().expect("checked by the guard");
                     teardown::discard_trial(
                         &repo,
@@ -331,7 +332,7 @@ fn run() -> Result<()> {
                     commands::resume(&repo, routing(&graph)?, args, in_lane)
                 }
                 Command::Lane(args) => {
-                    let mux = mux::backend(&repo);
+                    let mux = mux::backend(&repo)?;
                     let in_lane = std::env::var(commands::TASK_ENV).is_ok();
                     commands::lane_cmd(
                         &repo,
@@ -405,7 +406,7 @@ fn run() -> Result<()> {
                     commands::pipeline_contract(&repo, &read)
                 }
                 Command::Pipeline(PipelineCommand::Gen(args)) => {
-                    let mux = mux::backend(&repo);
+                    let mux = mux::backend(&repo)?;
                     commands::pipeline_gen(&repo, mux.as_ref(), args)
                 }
                 Command::Pipeline(PipelineCommand::Override(args)) => {
@@ -510,7 +511,7 @@ fn notify(cli: &Cli, cwd: &std::path::Path) {
     }
 
     let enabled = Repo::discover_lenient(cwd)
-        .map(|(repo, _)| repo.config.housekeeping.update_check)
+        .map(|(repo, _, _)| repo.config.housekeeping.update_check)
         .unwrap_or(true);
 
     release::notify(release::Audience {

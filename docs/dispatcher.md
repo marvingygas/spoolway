@@ -293,8 +293,9 @@ pane for its whole life. See [Vacating a pane](#vacating-a-pane). A lane is name
 ### One home for every run, in every project
 
 `spoolway-dispatcher` is one workspace (herdr) or session (tmux) shared by every project on the
-machine. It opens on `~/.spoolway/.dispatcher/`, which is not a repository. The board itself
-stays in the pane you ran `spoolway dispatch` in.
+machine. It opens on `~/.spoolway/.dispatcher/`, which is not a repository. Every project's home
+is named `<label>-<id>`, so no project can take the name `.dispatcher`. The board itself stays
+in the pane you ran `spoolway dispatch` in.
 
 ### herdr
 
