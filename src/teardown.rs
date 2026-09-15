@@ -82,9 +82,11 @@ impl<'a> Dispatcher<'a> {
         // A background command was left running on purpose, and the worktree
         // about to be removed is where it is running. Stopped before that
         // happens, or it spends the rest of its life writing into a directory
-        // that no longer exists. A pane a failing run left standing goes with
-        // it too — the task is leaving for good, so there is no later arrival
-        // left to replace it.
+        // that no longer exists. A pane it landed in goes with it too, the
+        // same as a pane a step's own `timeout:` stopped without touching —
+        // `stop()` clears a run's pid and exit code but never its `.pane`
+        // record, so that pane is still standing here with nothing left to
+        // replace it, the task being gone for good.
         let runs = crate::command_step::Runs::new(&self.repo.commands_dir());
         for key in runs.keys_for_task(task.id()) {
             if let Some(pane) = runs.pane(&key) {

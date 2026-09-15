@@ -507,8 +507,10 @@ no pane at all:
 A pane changes only where the output is shown. The exit code still comes from the wrapper's
 own `EXIT` trap, the log still holds everything the pane shows, and `background:` combines
 with either choice — the two are independent. A pane that finishes a passing run closes on
-its own; one that fails or times out stands until the task next reaches that step or is
-cleaned up, so a stuck pane is something to look at rather than something to hunt for. Under
+its own, and so does one that fails — its pane closes the moment its exit code is judged, whether
+it runs in the foreground or in the background. Only a run that times out still stands, until
+the task next reaches that step or is cleaned up, so a stuck pane there is something to look
+at rather than something to hunt for. Under
 `backend = "headless"`, which offers no pane at all, a command step runs detached regardless
 of `headless:`.
 

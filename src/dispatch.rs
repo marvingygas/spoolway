@@ -3336,13 +3336,15 @@ impl<'a> Dispatcher<'a> {
                 // step runs the command again instead of routing on the code the
                 // last arrival left behind.
                 runs.forget(&key);
-                // A passing command's pane has nothing left to show — closed
-                // here, the same instant the step itself is judged done. A
-                // failing one is left standing: see the `Fresh` arm below,
-                // which is what replaces it on the next arrival.
-                if code == 0
-                    && let Some(pane) = runs.pane(&key)
-                {
+                // A command's pane has nothing left to show the instant its
+                // exit code is judged, pass or fail alike — closed here rather
+                // than left standing for whatever later arrival happens to
+                // land on this step next, which might be a long wait behind
+                // `blocked` or might never come at all. The `Fresh` arm below
+                // still replaces a pane it finds recorded, for a run the
+                // `Running` arm's own timeout stopped without touching its
+                // pane.
+                if let Some(pane) = runs.pane(&key) {
                     let _ = self.mux.close_pane(&pane);
                     runs.forget_pane(&key);
                 }
@@ -3440,11 +3442,12 @@ impl<'a> Dispatcher<'a> {
                         task.path.display().to_string(),
                     ),
                 ]);
-                // A pane a previous, failing arrival at this step left
-                // standing — see the `Exited` arm above — is replaced rather
-                // than piled onto, whether or not this arrival still wants
-                // one: a step edited to `headless: true` after a failure must
-                // not leave that old pane standing forever either.
+                // A pane an earlier arrival left standing — a run the
+                // `Running` arm's own timeout stopped without touching its
+                // pane, most often — is replaced rather than piled onto,
+                // whether or not this arrival still wants one: a step edited
+                // to `headless: true` after that must not leave the old pane
+                // standing forever either.
                 if let Some(old_pane) = runs.pane(&key) {
                     let _ = self.mux.close_pane(&old_pane);
                     runs.forget_pane(&key);
@@ -3600,8 +3603,11 @@ impl<'a> Dispatcher<'a> {
     /// outstayed its step's `timeout:`, stopped here because nothing else
     /// would; and a finished run whose step declared `on_fail`, which is
     /// routed on here because nowhere else asks. A step with no `on_fail`
-    /// keeps behaving exactly as it always has — its exit code is left
-    /// unread, the same as a run still going or one that passed.
+    /// keeps routing exactly as it always has — its exit code is left unread
+    /// for that purpose, the same as a run still going or one that passed —
+    /// but a paned run's pane still closes the moment that code is read, the
+    /// same as any other command's: nothing else will ever come back to this
+    /// step's own pane once its background run is over.
     ///
     /// Answers whether it moved the task, which happens for at most one run
     /// per call: rerouting changes what step counts as "the one it is sitting
@@ -3639,10 +3645,23 @@ impl<'a> Dispatcher<'a> {
                         runs.log_path(&key).display()
                     ));
                 }
-                // A zero exit is a pass for a step the task already walked
-                // away from — nothing to route on — so it is left exactly as
-                // unread as a step with no `on_fail` leaves every code.
-                crate::command_step::RunState::Exited(code) if code != 0 => {
+                crate::command_step::RunState::Exited(code) => {
+                    // A background run's pane has nothing left to show the
+                    // moment its exit code is read here — whether or not the
+                    // step declares `on_fail`, and whether or not the code
+                    // is zero, since this is the only place a background
+                    // run's code is ever read at all.
+                    if let Some(pane) = runs.pane(&key) {
+                        let _ = self.mux.close_pane(&pane);
+                        runs.forget_pane(&key);
+                    }
+                    // A zero exit is a pass for a step the task already walked
+                    // away from — nothing to route on — so the code itself is
+                    // left exactly as unread as a step with no `on_fail`
+                    // leaves every code.
+                    if code == 0 {
+                        continue;
+                    }
                     let Some(destination) = step.on_fail.clone() else {
                         continue;
                     };
@@ -12729,11 +12748,12 @@ mod tests {
         );
     }
 
-    /// A failing command's pane stands rather than closing, and the next
-    /// arrival at the step replaces it instead of piling a second one on.
+    /// A failing command's pane closes the instant the task leaves the step,
+    /// the same as a passing one — not left standing on the chance the step
+    /// is retried later.
     #[cfg(unix)]
     #[test]
-    fn a_failing_paned_commands_pane_stands_and_is_replaced_on_retry() {
+    fn a_failing_paned_commands_pane_closes_on_departure() {
         let repo = fixture("command-pane-fail");
         let path = add_task_with_worktree(&repo, "demo", "implement");
         let mux = FakeMux::new(vec![]).offering_panes();
@@ -12746,18 +12766,21 @@ mod tests {
         let key = crate::command_step::Runs::key("implement", "demo");
         let runs = crate::command_step::Runs::new(&repo.commands_dir());
         assert!(
-            runs.pane(&key).is_some(),
-            "a failing command's pane must stand until the step is retried"
+            runs.pane(&key).is_none(),
+            "a failing command's pane record must be cleared the moment the task leaves"
         );
         assert!(
-            mux.did("close_pane").is_empty(),
-            "nothing should have closed it yet: {:?}",
+            mux.did("close_pane")
+                .iter()
+                .any(|call| call.contains("w1:t1.s1")),
+            "a failing command's pane closes behind it, same as a passing one: {:?}",
             mux.calls()
         );
 
         // Sent back to `implement` by hand, the way a person clearing
-        // `blocked` would — the retry is what proves the old pane is
-        // replaced rather than left to accumulate.
+        // `blocked` would — the retry proves a fresh arrival still gets a
+        // pane of its own, with nothing left over from the last one to
+        // replace.
         let mut reloaded = reload(&path);
         reloaded.set_stage("implement", None);
         reloaded.save().unwrap();
@@ -12768,10 +12791,8 @@ mod tests {
             .unwrap();
 
         assert!(
-            mux.did("close_pane")
-                .iter()
-                .any(|call| call.contains("w1:t1.s1")),
-            "the old pane is closed before a new one is split: {:?}",
+            mux.did("close_pane").is_empty(),
+            "there was nothing left standing to close on this arrival: {:?}",
             mux.calls()
         );
         assert!(
@@ -13306,6 +13327,64 @@ mod tests {
             runs.state(&key),
             crate::command_step::RunState::Exited(0),
             "a zero exit is left exactly as unread as a step with no on_fail leaves it"
+        );
+    }
+
+    /// The pane a background run landed in is nobody's to close but
+    /// `reap_stale_runs` — the step that started it walked away the moment it
+    /// started, and this is the only place left that ever reads its exit
+    /// code. Closed here whether or not the step declares `on_fail`, and
+    /// whether or not the code is zero: the run is over either way, and the
+    /// tab has no more live work in that pane to show.
+    #[cfg(unix)]
+    #[test]
+    fn a_background_commands_pane_closes_at_reap() {
+        let repo = fixture("command-background-pane");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]).offering_panes();
+        // No `on_fail`: proves the pane closes even though nothing routes on
+        // this exit code at all.
+        let pipelines = pipelines_running("exit 0", true);
+
+        Dispatcher::new(&repo, &pipelines, &mux, false)
+            .pass()
+            .unwrap();
+        let mut task = reload(&path);
+        assert_eq!(task.stage(), "review");
+
+        let key = crate::command_step::Runs::key("implement", "demo");
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        for _ in 0..50 {
+            if runs.state(&key) != crate::command_step::RunState::Running {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Exited(0));
+        assert!(
+            runs.pane(&key).is_some(),
+            "the background run must have landed in a pane of its own"
+        );
+
+        let name = pipelines.default.clone();
+        let pipeline = pipelines.pipelines.get(&name).unwrap();
+        let mut report = Report::default();
+        Dispatcher::new(&repo, &pipelines, &mux, false).reap_stale_runs(
+            &mut task,
+            pipeline,
+            &mut report,
+        );
+
+        assert!(
+            runs.pane(&key).is_none(),
+            "the pane record must be cleared once the exit code is read"
+        );
+        assert!(
+            mux.did("close_pane")
+                .iter()
+                .any(|call| call.contains("w1:t1.s1")),
+            "the pane itself must be closed at reap: {:?}",
+            mux.calls()
         );
     }
 
