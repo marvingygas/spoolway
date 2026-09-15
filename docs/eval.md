@@ -54,22 +54,60 @@ is a real tty in raw mode or a pipe, ending the moment either runs out — and s
 reader with it through `src/screen.rs`. It never starts a dispatcher: this reads a ledger, it
 does not queue work.
 
-`tab` cycles three views, named in the top border along with every filter currently applied:
+`tab` cycles five views, named in the top border along with every filter currently applied:
 
 | View | What it shows |
 |---|---|
 | `pipelines` | The same block-per-pipeline table the printing path draws |
 | `steps` | Per pipeline, one row per step, aggregated over the whole window and the current filters |
 | `runs` | One row per run, newest first |
+| `dirs` | One row per watched directory, aggregated over its own sessions |
+| `sessions` | One row per session outside the lanes, newest first |
 `↑↓` moves a cursor over the rows.
 
-`f` opens a filter panel of four rows: `pipeline`, `step`, `since`, `until`. `scope` and
-`limit` are not among them — the screen only ever opens bare, so both hold the default it
-opened with (this project, ten versions per block) for as long as it is up. `--project`,
-`--all` and `--limit` are what move either, and typing any of them takes the printing path
-instead of the screen; `limit` is not even named on the top border, for the same reason —
-nothing on screen can move it. `pipeline` and `step` change with `←`/`→`, cycling `all` and
-then each name the ledger actually has.
+`dirs` and `sessions` read the ledger's directory lines — see
+[Directory spend](cost.md#directory-spend) — the sessions a watched directory banked outside
+the dispatcher entirely. `pipelines`, `steps` and `runs` never show one, and `dirs`/`sessions`
+never show a lane: the two populations are kept strictly apart, the same way the ledger itself
+keeps them disjoint. `SESSIONS`, on `dirs`, counts distinct session ids rather than ledger
+lines, so a session the sweep banked across several passes is still one row's worth of count.
+Choosing a `skill` filter (below) keeps every session whose transcript contains that skill's
+own `<command-name>` marker and drops the rest — a whole session at a time, never a stretch
+inside one, since a marker says where a skill started and never where it ended.
+
+```
+┌─ eval · dirs ──────────────────────────────────────────────── proj · 2026-09-01 → now ─┐
+│ DIR                 SESSIONS  USD/SESSION  CTX PEAK  TIME/SESSION                      │
+│>spoolway                  15         0.70       82%           24m                      │
+│ notes                      5         0.18       31%            6m                      │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+  ↑↓ move   tab view   f filters   e export   r refresh   q quit
+```
+
+```
+┌─ eval · sessions · skill /spoolway-plan ───────────────────── proj · 2026-09-01 → now ─┐
+│ WHEN           DIR         MODEL                USD  CTX PEAK       TIME               │
+│>09-15 11:15    spoolway    claude-opus-5       5.30       91%     1h 04m               │
+│ 09-14 16:02    spoolway    claude-opus-5       3.10       68%    42m 18s               │
+│ 09-12 09:40    spoolway    claude-sonnet-5     0.88       24%    11m 05s               │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+  ↑↓ move   tab view   f filters   e export   r refresh   q quit
+```
+
+On `dirs` and `sessions`, a chosen `dir` or `skill` filter joins the view's own name in the
+top border's left segment (`eval · sessions · skill /spoolway-plan`) rather than the right,
+which stays scope and window only, same as every other view.
+
+`f` opens a filter panel of four rows. On `pipelines`, `steps` and `runs` these are
+`pipeline`, `step`, `since`, `until`; on `dirs` and `sessions`, `dir` and `skill` take the
+first two rows in their place. `scope` and `limit` are not among them — the screen only ever
+opens bare, so both hold the default it opened with (this project, ten versions per block) for
+as long as it is up. `--project`, `--all` and `--limit` are what move either, and typing any
+of them takes the printing path instead of the screen; `limit` is not even named on the top
+border, for the same reason — nothing on screen can move it. `pipeline` and `step` change with
+`←`/`→`, cycling `all` and then each name the ledger actually has; `dir` and `skill` do the
+same, cycling `all` and then each directory the ledger holds and each skill the watched
+transcripts actually contain a `<command-name>` marker for.
 
 `since` and `until` are set from a calendar rather than typed: `enter` on either opens a month
 grid over the row, in place of applying. `←`/`→` moves the grid's own cursor by a day, `↑`/`↓`
@@ -101,12 +139,12 @@ leaves the table exactly as it was.
 
 `e` writes the rows on screen, in whichever view they are in, to
 `.spoolway/evals/eval-<view>-YYYY-MM-DD-HHMMSS.csv`. The `<view>` part is the name of the
-view the rows came from — `pipelines`, `steps`, `runs`. The stamp runs to the
-second, and a `-2`, `-3` and so on is appended when a file of that name is already there, so
-two exports in the same second and tabbing between views to export each both keep every file.
-The pipelines view uses the same header `--csv` writes. The other three build a header from
-the same column names, since none of them has a flag-form export of its own. A panel names
-the path it wrote and how many rows. `.spoolway/evals/` is a person's own export rather than the project's setup, but
+view the rows came from — `pipelines`, `steps`, `runs`, `dirs`, `sessions`. The stamp runs to
+the second, and a `-2`, `-3` and so on is appended when a file of that name is already there,
+so two exports in the same second and tabbing between views to export each both keep every
+file. The pipelines view uses the same header `--csv` writes. The other four build a header
+from the same column names, since none of them has a flag-form export of its own. A panel
+names the path it wrote and how many rows. `.spoolway/evals/` is a person's own export rather than the project's setup, but
 spoolway writes no `.gitignore` rules of its own any more — the runtime state that needed them
 left the checkout for `~/.spoolway/<project>/`, `usage.jsonl` included — so keeping the
 exports out of git is the project's own line to write.

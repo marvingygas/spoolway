@@ -135,10 +135,13 @@ one line per session under `dir`, set to the most specific watched root the sess
 transcript `cwd` sat under.
 
 A directory line carries no `task`, `step`, `pipeline`, `agent`, `outcome`, `run` or `version`
-— nothing here describes work spoolway dispatched, because it didn't. `spoolway eval` and
-`spoolway spend` skip it exactly like a historical interactive line: both are lines
-`is_lane()` returns false for, so the table above shows lanes only, unchanged. Reading it back
-still requires `--json`, over the raw ledger.
+— nothing here describes work spoolway dispatched, because it didn't. `spoolway spend` skips
+it exactly like a historical interactive line: it is a line `is_lane()` returns false for, so
+the table above shows lanes only, unchanged. `spoolway eval`'s own `pipelines`, `steps` and
+`runs` views skip it the same way; its `dirs` and `sessions` views read directory lines
+exclusively — see [The screen](eval.md#the-screen) — one row per watched directory and one row
+per session, the only place this population is shown rather than swept. Reading it back
+outside those two views still requires `--json`, over the raw ledger.
 
 A session already banked as a lane is never banked again under `dir`, even if its own `cwd`
 happens to sit under a watched root — a lane's worktree is cut outside every checkout in the

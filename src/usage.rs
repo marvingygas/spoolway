@@ -21,7 +21,7 @@
 //! nothing a crash mid-pass can corrupt; it also means the record outlives the
 //! task file, which `cleanup` archives.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -2527,6 +2527,85 @@ fn bank_dir_session(
     Some(entry)
 }
 
+/// The first and last `timestamp` a session's transcript records, read
+/// straight off the raw file rather than through [`harvest`] or
+/// [`last_turn`]: neither keeps the *span* of a conversation, only its size,
+/// and a directory session banks no `wall_s` of its own the way a lane's
+/// teardown does — see [`bank_dir_session`]. Every kind this walk can reach
+/// writes a top-level `timestamp` on every record, session-meta lines
+/// included, so one pass over the file with no per-kind parsing answers both
+/// ends at once.
+///
+/// Deliberately the provider's own clock, not this machine's — unlike
+/// [`last_written`]'s mtime, which exists to catch a *stalled* transcript
+/// against a clock the provider cannot be trusted for. There is no stall
+/// question here, only "how long did this conversation run", which is a
+/// question about the provider's own clock.
+pub fn session_span(
+    kind: &str,
+    session: &str,
+) -> Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)> {
+    session_span_at(&session_file(kind, session)?)
+}
+
+fn session_span_at(
+    path: &Path,
+) -> Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let mut first = None;
+    let mut last = None;
+    for line in raw.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(ts) = value.get("timestamp").and_then(|t| t.as_str()) else {
+            continue;
+        };
+        let Ok(at) = chrono::DateTime::parse_from_rfc3339(ts) else {
+            continue;
+        };
+        let at = at.with_timezone(&chrono::Utc);
+        if first.is_none() {
+            first = Some(at);
+        }
+        last = Some(at);
+    }
+    Some((first?, last?))
+}
+
+/// Every `<command-name>` a session's transcript holds, verbatim and without
+/// its surrounding `<command-args>` — a `<command-name>` marks where a skill
+/// started and never where it ended (see the task's own context for why that
+/// rules out apportioning inside one), so this only ever answers "did this
+/// session run that skill at all", which [`crate::eval`]'s own skill filter is
+/// the one thing that asks.
+///
+/// A plain substring scan rather than a parse of the surrounding JSON: the
+/// marker is written as literal text inside a `content` string, and
+/// `serde_json` does not escape `<`/`>`, so the raw bytes of the file already
+/// hold the marker exactly as this reads it.
+pub fn skill_markers(kind: &str, session: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let Some(path) = session_file(kind, session) else {
+        return out;
+    };
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return out;
+    };
+    const OPEN: &str = "<command-name>";
+    const CLOSE: &str = "</command-name>";
+    let mut rest = raw.as_str();
+    while let Some(start) = rest.find(OPEN) {
+        rest = &rest[start + OPEN.len()..];
+        let Some(end) = rest.find(CLOSE) else {
+            break;
+        };
+        out.insert(rest[..end].to_string());
+        rest = &rest[end + CLOSE.len()..];
+    }
+    out
+}
+
 /// Read one project's ledger, tagging every entry with the project's name.
 pub fn read_project(root: &Path) -> Vec<Entry> {
     let name = registry::name_of(root);
@@ -3898,10 +3977,10 @@ mod tests {
     // ------------------------------------------------------------ skills
 
     /// A transcript in the shape Claude Code writes: a slash command as a
-    /// user record, then the assistant turns it spent. The command markers
-    /// are no longer read for anything — [`read_transcript`] only totals —
-    /// but the settled-lane tests below still use this to build a transcript
-    /// with more than one turn in it.
+    /// user record, then the assistant turns it spent. [`read_transcript`]
+    /// still only totals — the markers are [`skill_markers`]'s own reading of
+    /// this same shape — but the settled-lane tests below also use this to
+    /// build a transcript with more than one turn in it.
     fn transcript(records: &[(&str, u64)]) -> String {
         let mut out = String::new();
         for (n, (marker, output)) in records.iter().enumerate() {
@@ -4912,5 +4991,63 @@ mod tests {
             .map(|e| e.session)
             .collect();
         assert_eq!(sessions.len(), writers, "every writer's line must survive");
+    }
+
+    /// Every `<command-name>` a transcript holds comes back, deduplicated and
+    /// stripped of its surrounding `<command-args>` — what `spoolway eval`'s
+    /// own `skill` filter cycles over.
+    #[test]
+    fn skill_markers_reads_every_command_name_a_transcript_holds() {
+        let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let session = "0198e2c0-8888-4000-8000-00000000d008";
+        let lines = format!(
+            "{}\n{}\n{}\n",
+            serde_json::json!({"type":"user","timestamp":"2026-08-04T06:14:15.000Z","message":{"role":"user","content":"<command-name>/spoolway-plan</command-name>\n<command-args></command-args>"}}),
+            serde_json::json!({"type":"assistant","timestamp":"2026-08-04T06:14:20.000Z","message":{"model":"claude-opus-5","usage":{"input_tokens":2,"output_tokens":10}}}),
+            serde_json::json!({"type":"user","timestamp":"2026-08-04T06:20:00.000Z","message":{"role":"user","content":"<command-name>/spoolway-tasks</command-name>\n<command-args></command-args>"}}),
+        );
+        let home = claude_home_with("skills", session, &lines);
+        let markers =
+            crate::platform::test_home::with_home(&home, || skill_markers("claude", session));
+        assert_eq!(
+            markers,
+            BTreeSet::from(["/spoolway-plan".to_string(), "/spoolway-tasks".to_string()])
+        );
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A session with no transcript at all holds no markers — absence, not a
+    /// panic on a lookup that failed.
+    #[test]
+    fn skill_markers_is_empty_for_a_session_with_no_transcript() {
+        let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let home = crate::scratch::root("skill-markers-missing");
+        std::fs::create_dir_all(&home).unwrap();
+        let markers =
+            crate::platform::test_home::with_home(&home, || skill_markers("claude", "no-such"));
+        assert!(markers.is_empty());
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A session's own span is its transcript's first and last `timestamp` —
+    /// not the machine's clock, and not `wall_s`, which a directory session
+    /// never banks. What `spoolway eval`'s `sessions` view reads its `WHEN`
+    /// and `TIME` columns from.
+    #[test]
+    fn session_span_reads_the_first_and_last_timestamp() {
+        let _ambient = AMBIENT_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let session = "0198e2c0-9999-4000-8000-00000000d009";
+        let lines = format!(
+            "{}\n{}\n",
+            serde_json::json!({"type":"user","timestamp":"2026-08-04T06:14:15.000Z","message":{"role":"user","content":"hi"}}),
+            serde_json::json!({"type":"assistant","timestamp":"2026-08-04T07:18:15.000Z","message":{"model":"claude-opus-5","usage":{"input_tokens":2,"output_tokens":10}}}),
+        );
+        let home = claude_home_with("span", session, &lines);
+        let (first, last) =
+            crate::platform::test_home::with_home(&home, || session_span("claude", session))
+                .expect("a span");
+        assert_eq!(first.format("%H:%M:%S").to_string(), "06:14:15");
+        assert_eq!((last - first).num_seconds(), 64 * 60, "1h 04m apart");
+        std::fs::remove_dir_all(&home).ok();
     }
 }
