@@ -242,6 +242,14 @@ pub const REFERENCE: &[Reference] = &[
                     0 disables the note.",
     },
     Reference {
+        key: "watch.dirs",
+        values: "<path>, ...",
+        default: "(empty)",
+        sentence: "Directories whose own sessions are counted beside the lanes. The \
+                    project root is always watched; these are extra. Absolute, or \
+                    ~-relative.",
+    },
+    Reference {
         key: "stack.summary.agent",
         values: "<profile>",
         default: "(blank)",

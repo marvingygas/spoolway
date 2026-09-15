@@ -24,13 +24,16 @@ spoolway config set models.claude-opus-5.input 5.0
 
 The file is the interface: a reference table on top names every key, its possible values,
 its default and one sentence about it, and points at this document for the rest. There is no
-comment above any individual key any more — one table, once, replaced a paragraph repeated
-above every key it explained. `config set` edits the file as a document rather than rewriting
-it from the parsed struct — one key changes, and every other byte, the table and blank lines
-included, is copied through unread; migrating the file whole is `spoolway update`'s job, never
-a side effect of setting a value. `config set` refuses a key that is not already in the file.
-Two things are allowed to grow on first write instead. `[models]` is one: a price or a window
-for a model spoolway never named cannot already be there. `agents.<profile>.concurrency` is the
+comment above any individual key any more, bar one — one table, once, replaced a paragraph
+repeated above every key it explained, and only
+[`watch.dirs`](#watch--directories-whose-own-sessions-count-as-this-projects-spend) keeps a note
+of its own, because a bare `dirs = []` says nothing about how an entry is written. `config set`
+edits the file as a document rather than rewriting it from the parsed struct — one key changes,
+and every other byte, the table and blank lines included, is copied through unread; migrating
+the file whole is `spoolway update`'s job, never a side effect of setting a value. `config set`
+refuses a key that is not already in the file. Two things are allowed to grow on first write
+instead. `[models]` is one: a price or a window for a model spoolway never named cannot
+already be there. `agents.<profile>.concurrency` is the
 other, because it is *omitted* wherever a profile asserts no cap — a `0` there would read as a
 number somebody chose rather than as a question nobody answered. The profile itself still has
 to exist, so a misspelt profile name is refused exactly as before.
@@ -345,6 +348,41 @@ whatever numbers they already have, and this key never reaches back to change th
 There is no `prompt` key here. The `spoolway-pipeline` skill is the whole brief for this
 session, deliberately — a second file layered on top would only be one more place the
 instructions could disagree with each other.
+
+## `[watch]` — directories whose own sessions count as this project's spend
+
+```toml
+[watch]
+# Directories whose own sessions are counted beside the lanes. The project
+# root is always watched; these are extra. Absolute, or ~-relative.
+dirs = ["~/notes"]
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `dirs` | `[]` | Directories, beside the project root, whose own agent sessions count as this project's spend. Each entry is absolute, `~`-relative, or relative to the repo root |
+
+`usage.jsonl` holds one line per settled lane and nothing else, so the sessions a person runs
+by hand — in the base checkout, to plan work and cut its tasks — are spend this project pays
+for and never sees. This list is the first half of closing that: which directories to read.
+Nothing reads a transcript from it yet.
+
+The project root is always in the resolved set, and never has to be named; naming it anyway
+changes nothing, since the set is deduplicated after every entry is resolved. An entry is
+resolved three ways — `~/notes` expands against the home directory, `/srv/scratch` is taken as
+it stands, and `notes` resolves against the repo root — and is then canonicalised. An entry
+naming nothing that exists, or naming a file rather than a directory, is dropped quietly rather
+than failing the config load: a list is written once and a directory outlives it, so a path that
+has since moved should not stop every command in the project.
+
+An absent `[watch]` table means the project root alone, which is what a config written before
+this key existed gets. The list round-trips through `spoolway config set watch.dirs
+~/notes,docs` and `spoolway config get watch.dirs` — comma-separated, the same way every other
+list-valued key is set — and `spoolway update` keeps whatever a project has put there.
+
+This is the one key in the file that still carries a comment of its own above it, written on
+every render: a bare `dirs = []` gives no hint that an entry may be `~`-relative, or that the
+project root need not be named.
 
 ## `[agents.*]` — who runs a step
 
