@@ -556,7 +556,9 @@ pub fn backend(repo: &crate::repo::Repo) -> Box<dyn Mux> {
     let root = &repo.root;
     let config = &repo.config;
     match config.dispatch.backend {
-        crate::config::Backend::Herdr => Box::new(Herdr::new(root, &config.dispatch)),
+        crate::config::Backend::Herdr => {
+            Box::new(Herdr::new(root, &repo.checkout, &config.dispatch))
+        }
         crate::config::Backend::Headless => Box::new(crate::headless::Headless::new(
             root,
             &config.dispatch,
@@ -608,24 +610,37 @@ pub struct Herdr {
     /// `MuxMode::Split` task is cut from: the project root.
     pub cwd: PathBuf,
 
-    /// The main checkout of the repository `cwd` belongs to — a third value,
-    /// never [`crate::repo::Repo::root`] or [`crate::repo::Repo::checkout`]
-    /// under a new name. Equal to `cwd` in the ordinary case; only differs
-    /// when this project's `.spoolway/` sits inside a linked worktree, where
-    /// `Repo::root`'s own ancestor search finds the worktree itself rather
-    /// than the main checkout. Given to herdr as the `--cwd` of every
-    /// `worktree open` — see [`Herdr::open_worktree_workspace`] — because
-    /// that is the one thing herdr resolves the repository a row nests under
-    /// from.
+    /// The checkout a task's own workspace is anchored to — given to herdr as
+    /// the `--cwd` of every `worktree open`, see
+    /// [`Herdr::open_worktree_workspace`]. herdr resolves the repository a
+    /// row nests under from `--cwd` and reports that resolution back as the
+    /// workspace's `repo_root`, so this is the one value that decides which
+    /// project's group a task's row files under in the sidebar.
     ///
+    /// [`crate::repo::Repo::checkout`] as `Herdr::new` was handed it — the
+    /// checkout the dispatcher actually ran in — never resolved to
+    /// [`crate::repo::main_checkout`] the way it used to be here. That
+    /// resolution was the bug: a dispatcher started inside a linked worktree
+    /// (one release branch checked out beside another, both carrying their
+    /// own `.spoolway/`) filed every task's workspace under whichever
+    /// checkout `main_checkout` found instead of the one it was actually
+    /// started in.
+    ///
+    /// Not every checkout is one herdr will actually take as `--cwd`, though.
     /// Verified against a live herdr 0.8.2: `worktree open --cwd <a linked
     /// worktree's own path> --path <checkout>` answers
     /// `{"error":{"code":"linked_worktree_source","message":"New and open
     /// worktree actions start from the repo parent workspace."}}` — the same
     /// refusal whether the linked worktree is named directly with `--cwd` or
     /// indirectly through `--workspace <ID>` of a workspace already holding
-    /// one. This is the one claim about herdr this doc used to make without
-    /// having run it; it held.
+    /// one. Under `MuxMode::Split`, where a refusal has nowhere to fall back
+    /// to, that case is refused before this checkout is ever opened, at
+    /// [`crate::commands::dispatch::check_backend_checkout`] — called after
+    /// a `Herdr` already exists, but before any of its methods run. Under
+    /// `MuxMode::Grouped` this field is not read through `worktree open` at
+    /// all in the ordinary per-task route, so nothing there needs the same
+    /// guard — see that function's own doc for the full split between the
+    /// two.
     ///
     /// `--workspace <ID>` itself turned out not to do what its name suggests.
     /// It never opens a tab inside the named workspace and never rebinds it:
@@ -640,7 +655,7 @@ pub struct Herdr {
     /// line refuses both together. So there is no reply shape in which
     /// `--workspace` changes which workspace a checkout lands in; spoolway
     /// never passes it, and passing it would not do anything spoolway wants.
-    project_root: PathBuf,
+    anchor: PathBuf,
 
     /// How this run is laid out — see [`MuxMode`], which is the one thing
     /// deciding whether a task cuts a workspace of its own or shares its
@@ -664,10 +679,15 @@ pub struct Herdr {
 }
 
 impl Herdr {
-    pub fn new(cwd: &Path, config: &DispatchConfig) -> Herdr {
+    /// `cwd` is the project root: where `herdr` is invoked from, and where
+    /// [`worktree_root`] cuts a `MuxMode::Split` task's checkouts. `checkout`
+    /// is [`crate::repo::Repo::checkout`] — the checkout the dispatcher was
+    /// actually started in — and becomes [`Herdr::anchor`]; see its doc for
+    /// why the two are kept apart rather than one collapsing into the other.
+    pub fn new(cwd: &Path, checkout: &Path, config: &DispatchConfig) -> Herdr {
         Herdr {
             cwd: cwd.to_path_buf(),
-            project_root: crate::repo::main_checkout(cwd).unwrap_or_else(|| cwd.to_path_buf()),
+            anchor: checkout.to_path_buf(),
             mode: config.herdr_mode,
             worktree_root: worktree_root(cwd, config),
             root_tab: RefCell::new(None),
@@ -861,10 +881,11 @@ impl Herdr {
     /// it was cut from.
     ///
     /// `worktree open`, never `workspace create`: herdr resolves the
-    /// repository a row nests under from `--cwd`, so `--cwd` is the project
-    /// root and `--path` is the checkout. That is what puts the row under the
-    /// project's own row in the sidebar instead of flat beside it, and what
-    /// leaves `worktree remove` something to remove later.
+    /// repository a row nests under from `--cwd`, so `--cwd` is the dispatch
+    /// checkout ([`Herdr::anchor`]) and `--path` is the checkout just cut or
+    /// reopened. That is what puts the row under the project's own row in
+    /// the sidebar instead of flat beside it, and what leaves `worktree
+    /// remove` something to remove later.
     ///
     /// Shared by the first cut ([`Mux::create_workspace`]) and the heal path
     /// ([`Mux::reopen_owned_pane`]), because a checkout that is reopened after
@@ -872,10 +893,11 @@ impl Herdr {
     /// time.
     fn open_worktree_workspace(&self, checkout: &Path, label: &str) -> Result<Workspace> {
         let path = checkout.display().to_string();
-        // The main checkout, not `self.cwd` outright: see [`Herdr::project_root`]'s
-        // own doc for the one case they differ, which is exactly the case
-        // this call exists to get right.
-        let root = self.project_root.display().to_string();
+        // The checkout the dispatcher actually ran in, not `self.cwd`
+        // outright: see [`Herdr::anchor`]'s own doc for why the two are
+        // kept apart, which is exactly the case this call exists to get
+        // right.
+        let root = self.anchor.display().to_string();
         let argv = worktree_open_argv(&root, &path, label);
         let args: Vec<&str> = argv.iter().map(String::as_str).collect();
         let created: WorkspaceCreated = self.call(&args)?;
@@ -1505,10 +1527,11 @@ impl Mux for Herdr {
         //
         // The workspace is opened with `worktree open`, not `workspace
         // create`: herdr resolves the repository a checkout nests under from
-        // `--cwd`, so `--cwd` is the project root and `--path` is the
-        // checkout just cut. That is what makes the row land under the
-        // project's own row instead of sitting flat in the sidebar, and what
-        // makes `worktree remove` later find something to remove.
+        // `--cwd`, so `--cwd` is the dispatch checkout (`Herdr::anchor`) and
+        // `--path` is the checkout just cut. That is what makes the row land
+        // under the project's own row instead of sitting flat in the
+        // sidebar, and what makes `worktree remove` later find something to
+        // remove.
         let checkout = self.cut_task_worktree(branch, base)?;
         self.open_worktree_workspace(&checkout, label)
     }
@@ -1999,9 +2022,10 @@ fn shellexpand_home(path: &str) -> String {
 }
 
 /// The argv of the `herdr worktree open` call that binds a task's checkout to
-/// its project. `root` is the project's own directory — never the checkout —
-/// because herdr resolves the repository a row nests under from `--cwd`, and
-/// `path` is the checkout that call binds.
+/// its project. `root` is the dispatch checkout — [`Herdr::anchor`], never
+/// the task's own checkout — because herdr resolves the repository a row
+/// nests under from `--cwd`, and `path` is the task's checkout that call
+/// binds under it.
 ///
 /// Pulled out on its own so the shape of the call is checkable without a real
 /// herdr to send it to.
@@ -2336,15 +2360,17 @@ mod tests {
         assert!(confirm_split(&before, &after, "w8:p5").is_err());
     }
 
-    /// The bug the task's own context names: a project whose `.spoolway/`
-    /// sits inside a linked worktree finds that worktree, not the main
-    /// checkout, when [`crate::repo::Repo::root`]'s own ancestor search runs
-    /// — and handing that straight to herdr's `worktree open --cwd` gets
-    /// refused with `linked_worktree_source`. `Herdr::new` has to resolve
-    /// past it on its own; real git, since this is exactly the case a
-    /// hand-rolled `.git`-ancestor walk gets wrong.
+    /// `Herdr::new` used to resolve its anchor through
+    /// [`crate::repo::main_checkout`] itself, which is exactly the bug this
+    /// task exists for: a dispatcher started inside a linked worktree got
+    /// every task's workspace filed under the main checkout beside it
+    /// instead. The anchor is now whatever checkout it is handed, passed
+    /// straight through — main checkout or linked worktree alike, since
+    /// telling the two apart and refusing one of them (under `MuxMode::Split`
+    /// only) is [`crate::commands::dispatch::check_backend_checkout`]'s job,
+    /// run before this checkout is ever opened, not `Herdr::new`'s.
     #[test]
-    fn herdr_resolves_its_project_root_to_the_main_checkout() {
+    fn herdr_anchors_a_task_workspace_to_whatever_checkout_it_was_given() {
         let base = crate::scratch::root("mux-test-project-root");
         let _ = std::fs::remove_dir_all(&base);
         let work = base.join("work");
@@ -2371,23 +2397,89 @@ mod tests {
         );
 
         let config = crate::config::DispatchConfig::default();
-        let ordinary = Herdr::new(&work, &config);
+        let ordinary = Herdr::new(&work, &work, &config);
         assert_eq!(
-            ordinary.project_root.canonicalize().unwrap(),
+            ordinary.anchor.canonicalize().unwrap(),
             work.canonicalize().unwrap(),
-            "the main checkout resolves to itself"
+            "the main checkout anchors to itself"
         );
 
-        let from_worktree = Herdr::new(&wt, &config);
+        let from_worktree = Herdr::new(&work, &wt, &config);
         assert_eq!(
-            from_worktree.project_root.canonicalize().unwrap(),
-            work.canonicalize().unwrap(),
-            "a linked worktree resolves to the main checkout, not itself"
+            from_worktree.anchor.canonicalize().unwrap(),
+            wt.canonicalize().unwrap(),
+            "a linked worktree anchors to itself, not the main checkout beside it"
         );
 
         git(
             &work,
             &["worktree", "remove", "--force", wt.to_str().unwrap()],
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// The bug this task exists for: a dispatcher started in a linked
+    /// worktree of its own project — one release branch checked out beside
+    /// another, both carrying `.spoolway/` — is meant to anchor every task's
+    /// workspace to the checkout it was actually started in, per
+    /// [`crate::repo::checkout_of`], not to whichever checkout
+    /// `main_checkout` finds. `worktree_open_argv`'s `--cwd` is the field
+    /// that carries that anchor into herdr's own `repo_root`; this checks
+    /// the value the dispatcher would hand it is the checkout dispatch ran
+    /// in, not the main checkout beside it.
+    #[test]
+    fn a_dispatch_started_in_a_linked_worktree_anchors_a_tasks_workspace_to_that_checkout() {
+        let base = crate::scratch::root("mux-test-dispatch-anchor");
+        let _ = std::fs::remove_dir_all(&base);
+        let work = base.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let git = |dir: &Path, args: &[&str]| crate::repo::run(dir, "git", args).unwrap();
+        git(&work, &["init", "-q", "-b", "main"]);
+        git(&work, &["config", "user.email", "t@example.com"]);
+        git(&work, &["config", "user.name", "t"]);
+        std::fs::write(work.join("README"), "hi\n").unwrap();
+        git(&work, &["add", "-A"]);
+        git(&work, &["commit", "-q", "-m", "root"]);
+
+        // The dispatch checkout: a linked worktree on a release branch,
+        // sibling to `work` on disk — exactly what `checkout_of` hands back
+        // for a dispatcher started here, and exactly what a team running one
+        // worktree per release branch actually runs `spoolway dispatch` in.
+        let release = base.join("release");
+        git(
+            &work,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "release/3",
+                release.to_str().unwrap(),
+            ],
+        );
+
+        let config = crate::config::DispatchConfig::default();
+        let dispatcher = Herdr::new(&work, &release, &config);
+        let task_checkout = release.join(".spoolway-worktrees/task-refresh-tokens");
+        let argv = worktree_open_argv(
+            &dispatcher.anchor.display().to_string(),
+            &task_checkout.display().to_string(),
+            "refresh-tokens",
+        );
+        let cwd_index = argv.iter().position(|a| a == "--cwd").unwrap() + 1;
+        assert_eq!(
+            Path::new(&argv[cwd_index]).canonicalize().unwrap(),
+            release.canonicalize().unwrap(),
+            "a task's workspace should be anchored to the checkout the dispatcher was \
+             started in ({}), not to the main checkout beside it ({}) — got --cwd {:?}",
+            release.display(),
+            work.display(),
+            argv[cwd_index]
+        );
+
+        git(
+            &work,
+            &["worktree", "remove", "--force", release.to_str().unwrap()],
         );
         std::fs::remove_dir_all(&base).ok();
     }
@@ -2407,7 +2499,7 @@ mod tests {
         // this stands in for `~` rather than actually writing there.
         crate::platform::test_home::with_home(&base, || {
             let config = crate::config::DispatchConfig::default();
-            let herdr = Herdr::new(&base, &config);
+            let herdr = Herdr::new(&base, &base, &config);
             let sh = crate::platform::Shell::CURRENT;
             let env = BTreeMap::from([
                 ("SPOOLWAY_TASK".to_string(), "demo".to_string()),
@@ -2878,8 +2970,9 @@ mod tests {
     }
 
     /// The call that binds a task's checkout to its project: `--cwd` is the
-    /// project root, never the checkout, because that is what herdr resolves
-    /// the repository from — and `--path` is the checkout itself.
+    /// dispatch checkout, never the task's own, because that is what herdr
+    /// resolves the repository from — and `--path` is the task's checkout
+    /// itself.
     #[test]
     fn worktree_open_binds_the_checkout_under_the_project_root() {
         assert_eq!(
@@ -2912,9 +3005,87 @@ mod tests {
         let root = Path::new("/repo");
 
         config.herdr_mode = MuxMode::Grouped;
-        assert!(!Herdr::new(root, &config).task_owns_workspace());
+        assert!(!Herdr::new(root, root, &config).task_owns_workspace());
 
         config.herdr_mode = MuxMode::Split;
-        assert!(Herdr::new(root, &config).task_owns_workspace());
+        assert!(Herdr::new(root, root, &config).task_owns_workspace());
+    }
+
+    /// `MuxMode::Grouped`'s own per-task route is `project_tab`, in
+    /// `src/dispatch.rs`: every branch of `start_one`'s dispatch match —
+    /// borrowed, freshly cut, or a healed stale pane — takes the
+    /// `task_owns_workspace == false` arm into `project_tab`
+    /// unconditionally. `Mux::dispatch_workspace` opens the run's one shared
+    /// workspace on `dispatch_home()`, never a checkout, and `Mux::open_tab`
+    /// opens a task's own tab on its checkout with a plain `tab create
+    /// --cwd`; neither reads `Herdr::anchor` or calls
+    /// `open_worktree_workspace` at all, so `grouped`'s ordinary dispatch
+    /// loop never reaches it — there is no fallback to reason about because
+    /// there is nothing to fall back from. Nothing here shells out to a
+    /// real herdr, which is why this is a unit test at all — see the
+    /// module's other `self.call(...)` methods, none of which are. What
+    /// this task's actual non-goal rests on is
+    /// `check_backend_checkout`'s own tests, in `src/commands/dispatch.rs`
+    /// — `backend_checkout_refuses_herdr_on_a_dispatcher_started_in_a_linked_worktree`
+    /// for `split`, whose `Mux::create_workspace` has no such route to fall
+    /// back to, and its `_under_grouped_mode` counterpart proving `grouped`
+    /// is not refused the same checkout at all.
+    #[test]
+    fn a_grouped_herdrs_anchor_is_still_whatever_checkout_it_was_given() {
+        let mut config = DispatchConfig::default();
+        config.herdr_mode = MuxMode::Grouped;
+        let checkout = Path::new("/checkouts/release");
+        let grouped = Herdr::new(Path::new("/repo"), checkout, &config);
+        assert_eq!(
+            grouped.anchor, checkout,
+            "mode never changes what the anchor resolves to"
+        );
+        assert!(!grouped.task_owns_workspace());
+    }
+
+    /// The tmux backend never reads [`crate::repo::Repo::checkout`] at all —
+    /// `Tmux::new`'s own signature only ever took the one path `backend`
+    /// still hands it as `cwd`, `repo.root`, so there is no argument
+    /// position left for `repo.checkout` to reach.
+    ///
+    /// Proved by making the two actually distinguishable rather than by
+    /// comparing answers that would agree either way: `repo.root` is a real
+    /// directory and `repo.checkout` is one that was never created.
+    /// `Mux::is_available`'s `tmux -V` runs with `Command::current_dir` set
+    /// to whichever path `Tmux` was built from — see `Tmux::command` in
+    /// `src/tmux.rs` — and a `current_dir` that does not exist fails the
+    /// spawn itself, before `tmux` ever runs, independent of whether tmux is
+    /// even installed. So `is_available` answering `true` here is only
+    /// possible if `backend` built this `Tmux` from `repo.root`; had it
+    /// leaked `repo.checkout` in the way this task's `Herdr` fix newly
+    /// reads, this would answer `false` instead. `tmux -V` itself never
+    /// touches a session or a socket, so this stays clear of a real tmux
+    /// server the way `src/tmux.rs`'s own `Fixture` is careful to.
+    #[test]
+    fn tmux_backend_selection_reads_the_root_never_the_checkout() {
+        let root = crate::scratch::root("mux-test-tmux-unaffected");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // Never created: a checkout `Tmux` has no business reading at all,
+        // and the one thing that makes this test able to tell the two
+        // paths apart rather than merely asserting they agree.
+        let checkout = root.join("never-created");
+
+        let mut config = crate::config::Config::default();
+        config.dispatch.backend = crate::config::Backend::Tmux;
+        let mux = backend(&crate::repo::Repo {
+            root: root.clone(),
+            checkout,
+            config,
+            home: root.join(".home"),
+        });
+
+        assert!(
+            mux.is_available(),
+            "a real, existing root must be what `tmux -V` runs against — this only fails if \
+             `backend` handed `Tmux::new` the checkout instead"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
     }
 }
