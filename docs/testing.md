@@ -62,7 +62,7 @@ with a `// covers:` line.
 |---|---|---|
 | `smoke` | flow | A person, by hand |
 | `pr` | flow, commands, stacking, stack, conflicts, forge, disaster, lock, trials, routines, jobs, jobs-screen, board-pause, restart, overrides | The `suite` step of the pipelines, on the last task of a chain |
-| `nightly` | the same as `pr` | Daily CI and the release workflow |
+| `nightly` | the `pr` suites plus `upgrade` | Daily CI and the release workflow |
 | `cloud` | warmth | Nothing automatic. Runs only with `SPOOLWAY_E2E_CLOUD=1`. |
 | `live` | live | Nothing automatic. Runs only with `SPOOLWAY_E2E_CODEX_MODEL=<model>`. |
 
@@ -85,6 +85,7 @@ with a `// covers:` line.
 | `board-pause` | The board's confirm panels: `p`, `P`, `U` over a live lane |
 | `restart` | The dispatcher's restart guard and its exit codes |
 | `overrides` | The override commands: fork a setting out of the checkout, list it, promote it back |
+| `upgrade` | Whether this binary still reads what an older release wrote. A `.spoolway/` tree scaffolded by an old tag's own binary, under `scripts/e2e/fixtures/`, goes through a real `spoolway update`. A value set under a retired table lands at its current home, and hand-written prose comes back byte for byte |
 | `warmth` | `cloud` tier. Real `claude-haiku-4-5` lanes, to check session reuse against a real transcript. |
 | `live` | `live` tier. The real `codex` binary through `agent verify codex --live`. |
 

@@ -1,0 +1,133 @@
+# Full reference: docs/pipelines.md
+
+# >>> spoolway >>>
+# Top level
+#   description       <prose>            What this pipeline is for, in a few sentences.
+#                                        Read to choose between pipelines.
+#   task_template     <name>             Task skeleton tasks queued here are written from.
+#                                        Absent: this pipeline's name, then `default`.
+#   steps             <list> <required>  The flow. The first step is the entry, and
+#                                        later steps outrank earlier ones for a slot.
+#
+# Steps
+#   id                <name> <required>  Written to the task's `stage:`.
+#   description       <one line>         Shown by `spoolway pipeline show`.
+#   agent             <profile>          Profile from config.toml. Makes an agent step.
+#   run               <command>          Shell line in the worktree. Makes a command step.
+#   end               true               Makes a terminal step: the task stops here.
+#                     false <default>    Not an ending.
+#   prompt            <name>             Prompt this step runs.
+#                                        Absent: the step id.
+#   model             <name>             Model this step runs. Required on an agent step.
+#   effort            <string>           Passed to the agent kind's effort flag.
+#                                        Absent: no flag is sent.
+#   skills            <a, b, c>          Skills invoked at the top of this step's
+#                                        opening prompt. Comma separated, leading
+#                                        slash optional, names only.
+#                                        Absent: none.
+#   session           true               Resumes this prompt's earlier conversation.
+#                     false <default>    Opens a fresh conversation every visit.
+#   slot              true <default>     Consumes one of the profile's slots.
+#                     false              Runs without taking one. A model's own
+#                                        `slots` and `exclusive` apply either way.
+#   gate              true               Holds the pass on `paused` for a person.
+#                     false <default>    The pass is acted on at once.
+#   on_pass           <step id>          Where a pass goes.
+#                     done               The task finishes.
+#                                        Absent: the task stays put.
+#   on_fail           <step id>          Where a failure goes.
+#                     blocked <default>  The task parks for a person.
+#   loop              <n>                Laps allowed, per arriving step.
+#                     <step>: <n>        The same limit, one arriving step at a time.
+#                                        Absent: unbounded.
+#   on_loop_max       <step id>          Where a spent loop sends the task.
+#                     on_pass <default>  It carries on, findings and all.
+#   timeout           <duration>         How long a command step may run, e.g. `90s`.
+#                                        Absent: 30m.
+#   background        true               The task moves on; `on_fail` is refused.
+#                     false <default>    The task waits for the command.
+#   headless          true               The command runs detached, with no pane.
+#                     false <default>    It runs in a pane of its own.
+#   last              true               Only the last task of a chain runs this
+#                                        command; the rest walk past to `on_pass`.
+#                     false <default>    Every task runs it.
+#   cleanup           true               Removes the worktree, branch and task file.
+#                     false <default>    Leaves them.
+# <<< spoolway <<<
+
+description: >-
+  Reproduce the bug first with a failing test, fix it, then run the same
+  reproduction again to prove it is gone. For a defect with a known symptom
+  and a way to trigger it, never for new work.
+
+steps:
+  - id: reproduce
+    description: >-
+      Write a repro for the bug — a failing test, or a script — and run it.
+      Pass when the repro fails for the reason the task describes: the bug is
+      captured. A bug that will not reproduce is a question for a person, not
+      a failure to loop on.
+    agent: pi
+    prompt: reproducer
+    model: your-local-model
+    session: true
+    on_pass: fix
+
+  - id: fix
+    description: Make the repro pass without breaking anything else.
+    agent: pi
+    prompt: implementer
+    model: your-local-model
+    session: true
+    on_pass: review
+
+  - id: review
+    description: >-
+      Check the diff against the task and project standards. The fix should be
+      no larger than the bug: flag a rewrite where a repair would do.
+    agent: claude
+    prompt: reviewer
+    model: claude-opus-5
+    effort: high
+    session: true
+    loop:
+      fix: 2
+    on_pass: reproduce-again
+    on_fail: fix
+
+  - id: reproduce-again
+    description: >-
+      Run the repro from the reproduce step again, same prompt and same work.
+      Pass when it passes: the bug is gone. Fail when it still reproduces.
+    agent: pi
+    prompt: reproducer
+    model: your-local-model
+    session: true
+    loop:
+      review: 2
+    on_pass: document
+    on_fail: fix
+
+  - id: document
+    description: Bring the domain documents in line with what this fix changed.
+    agent: pi
+    prompt: archivist
+    model: your-local-model
+    on_pass: handover
+    on_fail: blocked
+
+  - id: handover
+    description: >-
+      Commit, squash, push and open this fix's pull request with git and
+      `gh` — no model, no rebase. Nothing is merged here; a person lands it.
+    run: spoolway stack
+    headless: true
+    on_pass: checks
+    on_fail: blocked
+
+  - id: checks
+    description: Wait for the pull request's checks, and fail if they are red.
+    run: gh pr checks --watch --fail-fast
+    timeout: 45m
+    on_pass: done
+    on_fail: blocked
