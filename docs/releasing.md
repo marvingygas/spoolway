@@ -1,34 +1,47 @@
 # Releasing spoolway
 
-This is the repository's release runbook. The saved task in
-`.spoolway/routines/release-spoolway/release-spoolway.md` selects the `release` pipeline:
-preflight gathers evidence, notes drafts the release record for human approval, and publish
-prepares, verifies and ships it. All instructions and references live in this repository.
+A release is a `v*` tag. The `release` pipeline cuts it. Queue the routine, approve the
+release notes at the gate, and the pipeline does the rest.
 
-## The two commits
+```mermaid
+flowchart LR
+  A[preflight] --> B[notes] -->|gate: you approve| C[publish]
+  C --> D[release commit on main] --> E[rehearsal run] --> F[tag] --> G[npm + GitHub release]
+```
 
-Record the full SHA of the clean `main` commit reviewed by preflight. Human approval covers
-that source commit, the chosen version and the exact changelog section. The publisher then
-makes one release commit containing only the approved changes to `Cargo.toml`, `Cargo.lock`
-and `CHANGELOG.md`. Record its full SHA separately. That release commit is what the rehearsal
-must verify and the `v<version>` tag must identify. New product changes require new preflight
-and approval; they cannot be included under the old approval.
+| Step | What it does |
+|---|---|
+| `preflight` | Checks `main` is clean and green. Lists every change since the last tag. Proposes the version. |
+| `notes` | Writes one changelog section. Stops at a gate until you approve it. |
+| `publish` | Commits the version bump and the section, rehearses the workflow, tags, and checks what npm and GitHub received. |
 
-Daily CI is useful evidence about its own `headSha`, but cannot approve a later release
-commit. Both the release rehearsal and tag workflow call `.github/workflows/verify.yml`
-with the `nightly` tier and tests enabled. This runs Linux formatting, Clippy, all Cargo test
-targets, the release build, end-to-end tests, the pipeline contract, dependency advisories and
-real Windows tests. It never uses daily CI's decision to skip an unchanged commit. Every
-checkout in verification and release uses the caller's immutable SHA.
+## Cutting a release
 
-## Preflight and approval
+1. Open `spoolway queue`, press `r`, and queue `release-spoolway`.
+2. When the task pauses at `notes`, read the section and approve it or send it back.
+3. Wait for `done`. The task reports the tag, the workflow runs, the registry versions and the
+   result of a real install.
 
-Work from the source checkout named by the task, not its disposable worktree. Confirm the
-branch is `main`, the tree is clean, and `git pull --ff-only origin main` succeeds. Check the
-queue and open pull requests: no other task may still land work during this release. The
-release task's own dispatcher is expected and does not need to be stopped.
+The routine is `.spoolway/routines/release-spoolway/release-spoolway.md`. The prompts are
+`.spoolway/prompts/release-*/PROMPT.md`. The workflow is `.github/workflows/release.yml`.
 
-Run the local gate in order and record the results:
+## What ships
+
+- Six platform binaries, packed into six npm platform packages plus the `spoolway` wrapper.
+- A GitHub release with six archives and `SHA256SUMS`.
+- The changelog section, as the release body and inside every binary (`spoolway whats-new`).
+
+`Cargo.toml` is the only version source. `CHANGELOG.md` holds one section per version and its
+contract is written at the top of the file.
+
+## Version rule
+
+While the major version is `0`: a change in user-facing shape bumps minor. Fixes and internal
+changes alone bump patch.
+
+## Commands the pipeline runs
+
+Local gate, in this order:
 
 ```sh
 cargo fmt --check
@@ -40,109 +53,45 @@ cargo build --release --locked
 ./target/release/spoolway pipeline check
 ```
 
-Inspect recent CI runs with `gh run list --workflow ci.yml`. Record each relevant run's id,
-`headSha`, conclusion and actual job conclusions. A green daily run whose test jobs were
-skipped is not a fresh full test run. Missing or older hosted evidence does not replace or
-excuse the local gate; the release workflow will verify the new release commit independently.
-A known unresolved failure on the candidate must be investigated before proceeding.
+Release commit. Only `Cargo.toml`, `Cargo.lock` and `CHANGELOG.md` change, with subject
+`chore(release): v<version>`:
 
-Read every commit and merged pull request since the latest reachable `v*` tag; archived tasks
-are supplementary evidence only. For major zero, bump minor for
-changed user-facing shape (new behavior, changed defaults, renamed or removed interfaces),
-and patch for fixes or internal changes alone. Confirm manifest and lock versions agree.
+```sh
+cargo check --offline                              # refreshes the lock entry
+cargo test --locked release_notes::tests
+cargo build --release --locked && ./target/release/spoolway whats-new
+git push origin main
+```
 
-Draft one section according to the contract at the top of `CHANGELOG.md`, in the task's scratch
-`release-notes.md`. Have the person approve its full text, version and source SHA. Do not edit
-older sections. The approved section becomes the committed changelog, embedded notes and GitHub
-release body; the publisher never writes a separate release body.
-
-## Prepare the release commit
-
-Fetch again and verify clean local and remote `main` still identify the approved source SHA.
-Insert the approved section byte-for-byte and change only the package version in `Cargo.toml`.
-Run `cargo check --offline` to refresh the root package's lock entry. Inspect `Cargo.lock` and
-refuse unrelated dependency changes. Never edit generated npm versions by hand.
-
-Run `cargo test --locked release_notes::tests` and confirm the intended tests actually ran.
-Build with `cargo build --release --locked`, then run `./target/release/spoolway whats-new`
-without `--since` and compare the new version and section with the approved record. A mismatch
-blocks the release. Commit only the three release files with subject `chore(release): v<version>`
-and push `main`. Record `git rev-parse HEAD` as the release SHA and prove its parent is the
-approved source SHA and its diff contains only those approved release edits.
-
-## Rehearse and tag
-
-Dispatch the release workflow on `main`, with publication disabled:
+Rehearsal, on the release commit, with publication off:
 
 ```sh
 gh workflow run release.yml --ref main -f publish=false
-```
-
-Find the newly dispatched run, record its id, and inspect it:
-
-```sh
 gh run list --workflow release.yml --event workflow_dispatch --branch main --commit <release-sha>
 gh run view <run-id> --json event,headSha,status,conclusion,jobs
 gh run watch <run-id>
 ```
 
-Check `headSha` against the recorded release SHA before accepting any result. A branch name
-is not proof of which commit ran. After waiting, inspect the actual job conclusions again:
-`verify / test`, `verify / audit`, `verify / test-windows`, `matrix`, `notes`, all six `build`
-jobs, and `publish` (which only packs in this mode) must succeed. Missing, failed, cancelled
-or skipped required jobs are not a pass. The `assets` job is intentionally skipped in a
-rehearsal; neither npm publication nor GitHub release creation is permitted with `publish=false`.
-Confirm the extracted release-body artifact matches the approved notes, all seven packages
-were packed, and package assembly reports the expected repository, hashes and sizes.
-
-Fetch once more. Local `main`, `origin/main` and the rehearsal's `headSha` must all equal the
-recorded release SHA, and the tree must be clean. If main moved, use the cleanup below and
-return to preflight. Otherwise create the tag with the SHA explicitly supplied:
+Tag, only after the rehearsal is green on that exact SHA:
 
 ```sh
 git tag v<version> <release-sha>
 git push origin refs/tags/v<version>
 ```
 
-The human approval authorizes this tag only after these checks pass. A tag push runs the full
-verification again before platform builds and publication; it does not trust a previous run
-or a mutable branch. The npm and GitHub publishing jobs depend on the verification result.
+Verify:
 
-## Verify publication
+```sh
+npm view <package>@<version> version               # each name in npm/targets.json, plus spoolway
+gh release view v<version> --json body --jq .body   # must equal the approved section
+cd "$(mktemp -d)" && npm install spoolway@<version> && ./node_modules/.bin/spoolway --version
+```
 
-Record the tag workflow run id and prove its `headSha` and the tag's commit equal the release
-SHA. Inspect every required job conclusion, including `assets`. Verify all six platform package
-names from `npm/targets.json` plus the `spoolway` wrapper report the approved version through
-`npm view <package>@<version> version`. Confirm the GitHub release contains six platform archives
-and `SHA256SUMS`.
+## When it fails
 
-Read the release body using `gh release view v<version> --json body --jq .body` and compare it
-with the approved scratch file using a real diff. Normalize CRLF to LF on both sides; ignore
-no other differences. In a fresh directory made with `mktemp -d`, install `spoolway@<version>`,
-run `./node_modules/.bin/spoolway --version`, and verify the wrapper selected exactly one
-platform package. Remove only that recorded temporary directory afterwards.
-
-Report source SHA, release SHA, version, tag, both workflow run ids and job results, registry
-versions, assets, release-body comparison and installation result.
-
-## When a release cannot continue
-
-A failing rehearsal leaves an untagged candidate, not permission to publish. Diagnose the
-specific failure. An infrastructure retry may reuse the same commit; a code or workflow fix
-changes the release SHA and needs a new rehearsal. Product changes also need renewed approval.
-Never accept an older green run after the candidate changes.
-
-If main moves before the release commit is pushed, remove only this attempt's unpushed release
-commit and restore the three release files to the new main. Preserve other work and block if
-cleanup would overwrite it. After the release commit was pushed but before tagging, revert
-that commit through ordinary history on current main; do not force-push. Verify the abandoned
-version and section are gone. In both cases invalidate the approved scratch notes and recorded
-rehearsal, then return to preflight. A cleanup conflict is a block with the exact state recorded.
-
-After partial publication, inspect the registry before retrying. Published npm versions are
-immutable; the workflow skips packages already present and publishes the wrapper after the
-platform packages. An unchanged workflow can be retried with `gh run rerun <run-id> --failed`.
-A rerun uses its original commit, so it cannot pick up a workflow fix. If a failed partial
-release requires moving a tag for such a fix, record the old and new SHAs and reason, rehearse
-the corrected commit with publication disabled, and follow the publisher prompt's recovery
-rules. Never move a successful release tag, erase assets, or hand-edit the release body.
+- A red rehearsal leaves an untagged candidate. Fix the cause, then rehearse again. A product
+  change needs a new preflight and a new approval.
+- If `main` moves before the tag, the publisher removes or reverts its release commit and the
+  task goes back to `preflight`.
+- A partial publish is retried with `gh run rerun <run-id> --failed`. Published npm versions
+  are never replaced. A successful release tag is never moved.

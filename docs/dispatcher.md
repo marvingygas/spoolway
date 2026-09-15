@@ -5,1329 +5,328 @@ covers: ["src/dispatch.rs", "src/mux.rs", "src/tmux.rs", "src/headless.rs", "src
 
 # The dispatcher
 
-The dispatcher is the loop that moves tasks through their pipelines. It is the only part of
-spoolway that decides anything at runtime — and it decides everything by lookup, with no
-model involved.
+The dispatcher moves tasks through their pipelines. It uses no model. Every decision is a
+lookup in a task file or in the list of live lanes.
 
 ## Running it
 
 ```
 spoolway dispatch                 # runs until the queue is empty
-spoolway dispatch --dry-run       # report what one pass would do, and do none of it
+spoolway dispatch --dry-run       # print what one pass would do, and do nothing
 spoolway dispatch --interval 5m   # override the configured interval between passes
-spoolway dispatch --force         # start anyway, past the restart guard
+spoolway dispatch --force         # start past the restart guard
+spoolway dispatch --plain         # print the board once as a plain table, for scripts
 ```
 
-Run it in its own pane so it outlives the session that started it.
+One dispatcher serves the whole project. Every pass re-reads the queue, so a task queued
+while it runs is picked up on the next pass. A second `spoolway dispatch` on the same project
+draws the same board in read-only mode, headed `watching dispatcher`.
 
-**One dispatcher serves the project**, whichever worktree it was started in. Starting a
-second one is not the way to get newly queued work moving: each pass re-reads the queue, so
-a task queued from another group's worktree while it runs is picked up on the next pass
-without a restart. Running `spoolway dispatch` while one already holds the lock draws the
-same read-only board described below, headed `watching dispatcher` instead of `dispatcher
-running`, with that other process's pid rather than its own. `ctrl-c` ends the watcher and
-nothing else — it never takes the lock, starts a lane, or touches a task file. `spoolway
-dispatch --plain` in that situation prints the plain table once and exits, for scripts.
+| Exit code | Meaning |
+|---|---|
+| 0 | The run dispatched and stopped on its own. |
+| 3 | The queue was empty and no job is enabled. |
+| 4 | Another dispatcher holds the lock. |
+| 5 | The restart guard refused the start. |
+| 1 | Any other error. |
 
 ### When it stops
 
-It stops when the queue is empty — which is to say when every task has reached a terminal
-step and been archived, including anything queued while it was running.
+The run stops when the queue is empty. A `paused` or `blocked` task keeps the run alive,
+because it is waiting on a person. While any job is enabled, the run also stays up on an empty
+queue and prints when the next job fires. See [Jobs](jobs.md).
 
-A blocked or paused task stays in the queue, and so does the dispatcher: those are waiting on
-a person, not finished. With nothing queued at all it says so rather than looping over an
-empty queue.
-
-An enabled job is the one exception. While any job is enabled, the run stays resident on an
-empty queue — on the pass that drains the last task, and on a cold start with nothing
-queued, where it no longer exits 3. It prints why it is staying and when the next job fires,
-then loops on into the wait so it is alive when that window comes round. `ctrl-c` still stops
-it, banking each still-running lane's spend and forgiving its launch counter on the way out —
-see [Sweeping on stop](#sweeping-on-stop). See [Jobs](jobs.md).
-
-### Sweeping on stop
-
-Both ways a dispatcher ends — the queue emptying, or a `Ctrl-C` — come through the same
-settle before the process exits, and it tears nothing down. Every worktree, workspace, pane
-and tab the run holds is left exactly where it stood, under every backend and layout: a stop
-never closes a tab, removes a checkout, or ends a lane.
-
-Two things still happen, because they are not the checkout's to carry and nothing else banks
-them for this turn. Each still-running lane's spend is banked in the usage ledger, because an
-interrupted lane spent as many tokens as one that finished and they would otherwise leave the
-accounting entirely. And its launch counter is forgiven, because the launch it counted is the
-one still running: without this a task whose lane survives the stop is `blocked` the moment
-the next run starts, on a launch that never actually failed. The lane's ledger record is read
-rather than removed, since the lane it tracks is left running and the next dispatcher needs
-the same bookkeeping.
-
-A task parked in front of a person — `paused`, or `blocked` with nobody staffed to answer it —
-is skipped outright: nothing about it is running, so there is nothing here to bank or forgive.
+`ctrl-c` stops the run the same way. A stop tears nothing down. Every worktree, pane, tab and
+lane stays where it is, and the next run picks it back up. Before it exits, the run banks each
+still-running lane's spend in the usage ledger and forgives that lane's launch counter, so the
+next run does not treat a lane that survived the stop as a failed launch. A second `ctrl-c`
+kills the process at once.
 
 ### Restarting into a repo that cannot run
 
-A supervisor, a shell loop, or a person holding a key can restart `spoolway dispatch` forever
-against a repo it cannot run in. Four starts in a row that could not run at all, inside a
-30-second window, get the fifth refused, naming the count, the last reason and the way past
-it:
-
-```
-$ spoolway dispatch
-spoolway: refusing to start: 4 starts in a row could not run at all, the last
-because a dispatcher is already running for this repo (pid 2688669). Fix the
-reason above, or run `spoolway dispatch --force` to start anyway.
-```
-
-The count lives in `dispatch.restarts`, beside `dispatch.pid` under the project's own home
-directory. Only a start that could not run at all counts towards it — today, that is a start
-finding another dispatcher already holding the lock. An empty queue is never counted: a repo
-with nothing to do is not a storm, and restarting into one forever is a caller's own choice to
-make. A start that actually runs clears the count, and so does `--force`, which starts the run
-anyway and lets the next restart storm on this repo begin its own count from zero. The window
-is judged from the most recent refusal rather than the first one in the run, so a caller
-restarting every few seconds, forever, cannot outrun it by aging the window out from under
-itself. A counter file that is missing, short or otherwise corrupt reads as no storm standing,
-rather than refusing every start that follows it.
-
-The guard rate-limits a storm rather than stopping it outright: once four refusals stand, the
-count is never added to again until a fifth start actually arrives, so the refusal itself lapses
-roughly 30 seconds after the fourth and a caller that keeps retrying gets another four starts
-before the next refusal.
-
-`spoolway dispatch` exits 0 on a run that dispatched and stopped on its own, 3 on an empty
-queue with no job enabled, 4 when another dispatcher already holds the lock, 5 when the
-restart guard refuses a start, and 1 on any other error — see [`spoolway
-dispatch`](cli-reference.md#spoolway-dispatch). With a job enabled the run stays resident
-instead of exiting 3.
+Four starts in a row that find another dispatcher holding the lock, inside 30 seconds, get the
+fifth refused with exit code 5. A start that runs clears the count, and so does `--force`.
 
 ## What a pass does
 
-Every pass reconciles the pipeline from two sources of truth and nothing else: **each task
-file's stage**, and **the live lane list**. It remembers nothing between passes, which is
-what makes it safe to interrupt at any point.
+A pass reads two things: each task file's stage, and the list of live lanes. It remembers
+nothing between passes, so it is safe to interrupt at any point.
 
-Before either of the steps below, a pass fires any cron job whose expression matches the
-current local minute, so the routine it queues is dispatched by this same pass. A dry run
-fires nothing. The dispatcher only ever fires jobs; it never writes one. The `spoolway jobs`
-screen is the only writer. See [Jobs](jobs.md).
+```mermaid
+flowchart TD
+  A[Fire any cron job due this minute] --> B[Reconcile every task]
+  B --> B1[A lane settled: read its report, move the stage]
+  B --> B2[A queued task whose dependencies are done: mark it ready]
+  B --> B3[A silent lane: remind or escalate]
+  B1 & B2 & B3 --> C[Sort the ready tasks]
+  C --> D[Start lanes while slots are free]
+  D --> E[Fire issue-tracking hooks for tasks that arrived at queued, blocked, paused or done]
+  E --> F[Draw the board, wait one interval]
+  F --> A
+```
 
-In outline, a pass:
+A model's `slots` caps lanes on that model, and a profile's `concurrency` caps lanes on that
+profile. A model marked `exclusive` never runs beside a different exclusive model. See
+[`[models."<glob>"]`](configuration.md#modelsglob--what-a-model-costs-and-how-big-its-window-is).
 
-1. Reconciles every task: a lane that has settled, a task whose stage moved, a command step's
-   question, a queued task whose dependencies have all finished.
-2. Starts lanes for whatever is ready, up to each candidate's cap — a resolved model's own
-   `slots` when it has any, its profile's `concurrency` otherwise (see
-   [`[models."<glob>"]`](configuration.md#modelsglob--what-a-model-costs-and-how-big-its-window-is))
-   — and refuses a candidate whose model is `exclusive` while a live lane runs a different
-   `exclusive` model.
-
-A model's `slots` and its `exclusive` are counted for every step naming that model, including
-one carrying `slot: false`: that key buys a step out of its *profile's* `concurrency`, which is
-a number about a harness, and not out of a number about a machine. Every live lane is counted,
-whatever the multiplexer says it is doing this second — a lane spends its first seconds `idle`,
-before its agent has taken a turn, and it is holding the model's weights the whole time.
-
-A pass fires a project's `[issue_tracking]` hook, if one is configured, on a task's arrival at
-`queued`, `blocked`, `paused` or `done` — the four states reserved in `src/pipeline.rs`, which
-is why no pipeline's own `run:` step can put work on any of them. See
-[`[issue_tracking]`](configuration.md#issue_tracking--a-hook-fired-on-four-task-events) for the
-table, the environment a hook runs with, and what `on_fail = "pause"` holds. That table blank
-is what "no issue tracking" means: a blank `hook` runs nothing here, and a pass behaves exactly
-as it does with the table absent.
-
-A pass is safe to run beside a lane. A lane's `spoolway report` writes the same task file the
-pass is working from, out of another process. Both sides take a short per-task lock around
-their own read and write, so the two cannot interleave. If a report lands after the pass has
-already read that task, the pass drops its now-stale write of that one file. The next pass
-redoes the bookkeeping against what the lane actually wrote.
-
-A queue file that will not parse does not stop a pass. The bad file is skipped, every other
-task runs as normal, and the file is named twice: once in `~/.spoolway/logs/<project>.log`,
-and again in amber under the board's table, so a person sees which file to fix.
-
-Step one re-examines a task's stage right away whenever it moves it without starting a lane —
-a step named in the task's own `skip:` (see [Trials](planning.md#trials), the one thing that
-writes it) falls through to `on_pass` on the spot rather than waiting for the next pass. That
-can chain:
-`skip: [document, handover]` walks both in the one pass that first reaches the tail, bounded by
-the pipeline's own step count so a fall-through cycle in a pipeline's wiring cannot spin the
-pass forever. Nothing in a pipeline file can make a step fall through: every step a pipeline
-lists runs for every task on it.
-
-There used to be a step before those two, fast-forwarding each base branch the queue names so
-a task would not be cut from a base missing its own dependency. It is gone with the model that
-needed it: a task with a `depends_on` is cut straight from its first dependency's branch, not
-from `base:`, so there is no base branch left to fall behind. A task with no dependency is
-still cut from `base:` exactly as before. Either way `base:` keeps recording the branch the
-group lands in, and there is no rebase left for `handover` to run.
-
-A group whose branch has diverged holds back its own dependents and nobody else's.
+A task with a `depends_on` is cut from its first dependency's branch. A task without one is cut
+from `base:`. A task file that does not parse is skipped and named under the board.
 
 ## What runs next
 
-When more work is ready than there are slots, three rules decide, in order:
+When more tasks are ready than there are free slots, the pass sorts them:
 
-1. **What is nearly done, first.** Fewer steps left in the pipeline outranks more, so a task
-   one step from handover finishes before a fresh one starts — whatever pipeline either is on.
-   Steps left rather than the step's raw index, because pipelines in this project are not all
-   the same length, and a task's step 7 on a 17-step pipeline is not a task's step 7 on a
-   7-step one.
-2. **The group with least left to do, first.** A group is only ready to land once every one of
-   its tasks has a green pull request, so spreading effort across groups finishes none of them.
-3. **Whatever unblocks the most, first.** Within a group, the task other tasks are waiting on.
+1. Fewest steps left on its pipeline first.
+2. Then the group with the least work left.
+3. Then the task the most other tasks wait on.
 
-Rule one comes from the order of steps in the pipeline file, and from nothing else.
-
-**The group gate runs first, ahead of all three rules**, and only under `dispatch.priority =
-"group"` — the shipped default. It ranks a candidate behind one from a still-open group,
-rather than dropping it from the pass, whenever its own group has never run and some other
-group that has already produced work is still able to move: a pull request only lands once
-every task of its group has landed, so opening a second one while the first can still finish
-spreads effort across two groups instead of landing either. A group counts as already running
-the moment any one of its tasks has left `queued` — or, once a chain's earlier tasks have all
-been archived and only its last one is still queued, the moment that task's `depends_on`
-names one of them.
-
-Because the gate only ranks, a slot never idles for it: a candidate from a never-run group
-loses ties against one from a group still landing, but it stays in the pass and takes the
-slot the moment no open group has ready work of its own to offer instead. A task with no
-`group:` is exempt from the gate altogether, in both directions: it has no siblings holding
-up a pull request, so there is nothing for the gate to hold it back for, and it never counts
-as an "open group" a candidate elsewhere is ranked behind either.
-
-Under `dispatch.priority = "any"` the gate never runs at all: every ready candidate is sorted
-and started exactly as the three rules above decide, whichever groups they belong to.
+With `dispatch.priority = "group"`, the default, a task from a group that has not started yet
+ranks behind every task from a group that is already running. It still takes a slot when no
+running group has ready work. With `dispatch.priority = "any"` only the three rules apply.
 
 ## What a lane is sent
 
-A lane gets two things when it starts: a system prompt, composed per launch and written to
-`<lane>.md` under the project's own home (`~/.spoolway/<project>/system-prompts/`), and one
-message typed into its pane.
-
-The system prompt carries everything spoolway knows that a prompt cannot — the framing, the
-prompt itself, this pass's policy — and ends with the report contract: the exact `spoolway
-report` invocations, what `--handoff` does, and that the pipeline decides what happens next.
-It is what a model reads as *the rules* rather than as *a request*, so this is where the
-contract has to hold even when a project has replaced every shipped prompt with its own.
-`spoolway prompt contract` prints it in full, for a sample task or a real one.
-
-The typed message is two paragraphs and nothing else: the task file's path, with the
-instruction to read only that file first, and a one-line pointer back to the system prompt for
-how the turn ends. It used to carry the whole report contract itself; that moved into the
-system prompt, and what is left is only what a lane must act on before anything else this
-turn.
+A lane starts with a system prompt and one typed message. The system prompt holds the step's
+prompt file and the report contract: the exact `spoolway report` calls and what they do. It is
+written to `~/.spoolway/<project>/system-prompts/<lane>.md`. The typed message is the task
+file's path. `spoolway prompt contract` prints the system prompt for a sample task.
 
 ## Reading the state
 
-A dispatch run watches itself. A pass takes seconds and the loop waits its configured
-`interval` between them — ten seconds by default — and it spends that time drawing the board
-in the terminal it was started in.
+The dispatcher draws the board in the terminal it runs in and runs a pass every
+`dispatch.interval` (10 seconds by default).
 
-```
-spoolway dispatch
-```
+<img src="screenshots/dispatch.png" alt="the dispatcher board">
 
-```
-dispatcher running · pid 48213 · up 6m 49s
+Rows are grouped by `group:`. A `▌<group>` line opens each block, and a total line closes it.
+When the group has an issue behind it, the group name is a link to that issue. A `∥` after a
+task id marks `parallel: true`.
 
-   TASK       PIPELINE   STEP           STATE              CTX   OUT    COST      TIME   NEXT
+### Columns
 
- ▌auth
- ▸ login      default    deploy         ● paused             —   18k   $2.14    4m 00s   look at pane `login · deploy` — [r] resumes it
-   profile    bugfix     queued         ● unreachable        —     —       —         —   unreachable — login is blocked
-   signup     default    done           ● done               —     —       —         —
-                                                                 49k   $2.14   31m 02s
+| Column | What it shows |
+|---|---|
+| TASK | The task id. |
+| PIPELINE | The pipeline the task runs on. |
+| STEP | The current step. `(2/2)` is the loop counter: laps taken over the budget. |
+| STATE | One of the states below. |
+| CTX | How full the lane's context window is, as a percentage of the model's `context_window`. |
+| OUT | Output tokens this step has produced. |
+| COST | What this step has cost. |
+| TIME | How long the lane has been on this step. |
+| NEXT | For a running task, the step it goes to on pass. For a queued task, what it waits on. For a paused task, the pane to look at. |
 
- ▌dispatcher-ui
-   billing    ui         review (2/2)   ● running          48%   31k   $0.86   14m 08s   → handover
-   sessions   default    queued         ○ queued             —     —       —         —   waiting on: login
-                                                                 31k   $0.86   14m 08s
+`spoolway spend task` gives the task's whole bill.
 
-RECENT
-09:41  billing      review    ✓ pass   2/6
-09:38  login        deploy    ✓ pass   4/4
+### States
 
-──────────────────────────────────────────
-cloud   slots 1/5
-local   slots 0/2
-
-[↑↓] row   [o] open   [r/R] resume / all   [p/P] pause / all   [u/U] unqueue / all
-```
-
-`spoolway dispatch` run while another process already holds the lock draws this same board,
-reading fresh from the task files and from `Mux::list_lanes` exactly as the driving board
-does, but with the header replaced: `watching dispatcher · pid 48213 · up 6m 49s` names the
-lock's actual holder, never the watcher's own pid. If that process dies while the watcher is
-still open, the very next redraw drops to `no dispatcher is running` — with whatever lanes
-it left running still on the board, which is what makes an abandoned run visible.
-
-A band line opens each group's block, at the row's own left margin and outdented past the
-cursor gutter so it reads as a heading: `▌<group>`, the group's name and nothing else. Where
-the group has an issue behind it, that name is also a link to it: the board wraps the name — the
-`▌` and the dim styling stay outside — in an OSC 8 terminal hyperlink pointing at the issue URL
-any one of the group's tasks carries, so clicking it opens the issue in your browser. The link
-is written only where the board paints colour, so the colourless renderings — `dispatch
---plain` and `spoolway queue list` — carry the band's old bytes unchanged, as does a group
-with no issue behind it. A task
-queued outside any group falls into `no group` — sorted last, fixed
-rather than alphabetical — whose block gets no band and no closing total line, since there is
-no group name for either to carry. Inside a group, rows sort by run order: a done row sorts
-last, then the rest order by how deep each task sits in the run, then by how many steps are
-left on the row's own pipeline, then by how many other tasks it is holding up (most first),
-then by task id — a task's state no longer moves its row. Whatever waits on you keeps its
-amber marking, but not a place at the top. The `RECENT` ticker stays one list for the whole
-board: it is a record of the run, not of any one group, and it carries task movements only —
-nothing a pass went wrong on ever reaches it. Whatever a pass hit instead is appended to
-`~/.spoolway/logs/<project>.log`, one line per problem, with the whole error chain intact and
-no rewording. Each line is an RFC 3339 local timestamp, two spaces, then the message. Opening
-the log at the start of a run trims it to the last thirty days — every line whose own
-timestamp is older than that is dropped, and everything else is left byte for byte, including
-a line whose timestamp cannot be parsed. A task declared `parallel: true` carries `∥` after
-its id in the TASK
-column — the same mark `queue conflicts` reasons an overlap from — so a reader sees which
-tasks of a group are meant to run beside each other rather than in sequence.
-
-Between TASK and STEP, PIPELINE names the pipeline the task actually resolves to — the
-project's configured default for a task with no `pipeline:` of its own, dimmed the same way on
-every row rather than only where it disagrees with the default, since the dim is what separates
-the column from its plain-text neighbours. `spoolway queue list` carries it too, undimmed, since
-this is the one column that is not one of the spend figures `--plain` leaves out.
-
-A driving board — not a watching one, and not a `--plain` run — carries a cursor, marked `▸`
-in a two-column gutter of its own between the row's left margin and its TASK cell. That
-gutter is drawn on every row, cursor or none, and on the header and each group's total line
-too, so no column ever moves when the cursor does. `↑` and `↓` move the cursor row by row,
-wrapping at either end, and it tracks a task by id rather than by row position: a row that
-moves because the board resorted does not strand the cursor on a different task. The board's
-keys split by case: lowercase acts on the row the cursor sits on, uppercase acts on the whole
-run. `r` resumes the cursor's row, through the same `spoolway resume` the command line runs,
-on a paused or blocked row whose every dependency is already satisfied and whose own lane is
-not still mid-turn; on any other row it does nothing. A paused row's NEXT column says so
-directly, ending `[r] resumes it` rather than naming the command — and, where the key is not
-live, naming `spoolway resume <task>` instead; a blocked one does not carry the hint in its
-NEXT text at all, so its resumability is only ever the key-hint line's to say.
-
-`o` opens the cursor's queued task file in an editor — `$VISUAL`, else `$EDITOR`, else the
-platform's own default, `vi` everywhere but native Windows, where it is `notepad` — in a pane
-the multiplexer opens for it, labelled `<task> · edit`. It never blocks: the editor runs in its
-own pane, and the board keeps redrawing and the dispatcher's pass loop keeps running while it
-is open. Headless has no pane to open one in and refuses the same way
-`open_tab` already does; the refusal is swallowed silently, and nothing about the run or the
-board changes. The key-hint line under the footer,
-`[↑↓] row   [o] open   [r/R] resume / all   [p/P] pause / all   [u/U] unqueue / all`, draws on
-every frame of a driving board, whether or not any row can use any of it this frame.
-
-`p` and `P` both park unconditionally: `p` parks the cursor's own task, `P` parks every eligible
-task in the run. Neither touches anything until it has first opened a confirm panel, and a panel
-is opened only when pausing would cut something short for that scope. For `p` that is the
-cursor's own task being on an agent turn mid-turn or on a command step whose run is in flight;
-for `P`, anything live anywhere in the queue. With nothing live for that scope — a queued row, a
-row parked on a quota clock, a row sitting on a real step between two lanes — the key just parks
-with no panel at all, and a `paused` or `blocked` row is a no-op whichever key you press, both
-already stopped and already waiting on a person rather than a state to park over again.
-
-When a panel is due `p` opens it titled with the task's id, naming the one step pausing would
-abort — its step, its kind, and how long it has been running, off the same clock the board's TIME
-column reads:
-
-```
-┌─ pause login ──────────────────────────┐
-│  Pausing aborts the step it is on:     │
-│                                        │
-│  deploy    agent    4m 20s             │
-│                                        │
-│  The turn is interrupted, not killed.  │
-│  Resuming picks the session back up.   │
-│                                        │
-│  [enter] pause it   [esc] cancel       │
-└────────────────────────────────────────┘
+```mermaid
+stateDiagram-v2
+  [*] --> queued
+  queued --> running: dependencies done, slot free
+  queued --> unreachable: a dependency is blocked
+  unreachable --> queued: that dependency is resumed
+  running --> running: step passes or fails, next step starts
+  running --> paused: gate, permission prompt, or p on the board
+  running --> blocked: a step reports a block or a budget runs out
+  paused --> running: spoolway resume
+  blocked --> running: spoolway resume
+  running --> done: last step passes
+  done --> [*]
 ```
 
-The body's last two lines say what pausing does to whatever it names. An agent turn is interrupted,
-not killed: under a multiplexer the interrupt is a keystroke, Escape, sent the way `enter` sends a
-prompt, which leaves the session itself intact for a later resume to pick back up; headless has no
-keyboard to reach a running turn with, so there the lane's process is stopped outright, the same as
-`stop_lane`. A command step is the opposite — its run is killed, and runs again in full when you
-resume — and its panel carries the same two lines in place of the ones above.
+| State | Meaning |
+|---|---|
+| `queued` | Waiting for its dependencies and a free slot. |
+| `running` | A lane is working the current step, or the next lane is about to start. |
+| `paused` | Waiting for you: a gate, a permission prompt in its pane, or a park from `p`. |
+| `blocked` | A step reported a block, a launch failed, or a loop budget ran out. Read `## Blocker` in the task file. |
+| `unreachable` | A task it depends on is blocked. |
+| `done` | Finished and archived. The row stays, dimmed, until the whole group is done. |
 
-`P` opens the same kind of panel over the whole run, titled `pause all`, listing every abort it
-would cut short — one line each, task and step, kind, and elapsed time — and closing with how many
-further tasks park with nothing interrupted:
+`RECENT` lists the last task moves. Errors from a pass go to `~/.spoolway/logs/<project>.log`.
 
-```
-┌─ pause all ─────────────────────────────┐
-│  Pausing aborts 2 running steps:        │
-│                                         │
-│  login · deploy      agent      4m 20s  │
-│  gate-board · test   command    4m 12s  │
-│                                         │
-│  3 more tasks pause with nothing        │
-│  interrupted.                           │
-│                                         │
-│  [enter] pause the run   [esc] cancel   │
-└─────────────────────────────────────────┘
-```
+### Keys
 
-`enter` on either panel carries the pause out: every named abort, an agent turn interrupted through
-`Mux::interrupt_lane` or a command run stopped through `Runs::stop`, and the task behind each
-parked on `paused`; `P`'s panel then parks the rest of the run that had nothing live to abort.
-`esc` leaves the task, every lane and every run exactly as they were. Any key other than `enter`
-or `esc` is ignored and leaves the panel open.
+Lowercase acts on the row under the `▸` cursor. Uppercase acts on the whole run.
 
-`R` resumes every paused task whose own resume key is live, through the same `spoolway resume`
-a single row's `r` runs. If any paused task carries `paused_at` — a
-genuine gate, rather than a plain park `p` or an interrupt left behind — `R` opens a panel first,
-naming those tasks, and only resumes anything once you confirm with `enter` again; `esc` leaves every
-paused task exactly where it is.
+| Key | What it does |
+|---|---|
+| `↑` `↓` | Move the cursor. |
+| `o` | Open the task file in `$VISUAL`, else `$EDITOR`, in a new pane. |
+| `r` | Resume a paused or blocked row whose dependencies are done. Same as `spoolway resume <task>`. |
+| `R` | Resume every paused task. Asks first if any of them is at a real gate. |
+| `p` | Pause the row. Asks first if it would interrupt a running agent turn or command. |
+| `P` | Pause every task in the run. Asks first, listing what it would interrupt. |
+| `u` | Take a `queued` task out of the queue and write its document back to `~/.spoolway/<project>/pending/`. Asks first. |
+| `U` | Do the same for every task that has not started. Asks first. |
+| `ctrl-c` | Stop the run. |
 
-`u` and `U` take a task off the queue and back to pending — `~/.spoolway/<project>/pending/`, the
-directory `spoolway queue add --from` reads a document back out of — for a task nothing has run
-for yet: sitting on `queued` itself, with no worktree cut and no lane ever started. Neither
-reaches a task that is running, paused or blocked, since undoing any of those would mean tearing
-down a checkout, which is outside what either key does. Both always open a confirm panel first,
-since writing a document back to pending is not free to undo either — the queue has no memory of
-where it came from, so a document unqueued in error has to be sent again by hand.
+Pausing an agent turn sends Escape to the pane, so a resume picks the session back up. Pausing
+a command step kills the run, and the command runs again in full on resume.
 
-`u` acts on the cursor's own row, naming the task and the path its document lands at:
+### Footer
+
+One line per agent profile: `<profile>   slots <live>/<cap>`. A model with its own `slots` gets
+its own line. A line `issue_tracking: N hook failures — see tracking/` appears while any hook
+has failed. Then the job ledger lists every enabled job with its next firing:
 
 ```
-┌─ unqueue chain-refusals ─────────────────────────┐
-│  Nothing has run for it yet.                     │
-│                                                  │
-│  The document goes back to:                      │
-│  ~/.spoolway/spoolway/pending/chain-refusals.md  │
-│                                                  │
-│  `spoolway queue` is what sends it again.        │
-│                                                  │
-│  [enter] unqueue it   [esc] cancel               │
-└──────────────────────────────────────────────────┘
-```
-
-It also refuses a task that a still-queued task names in its own `depends_on`: carrying it back
-to pending alone would leave that dependent waiting on a dependency the queue no longer shows.
-
-`U` does the same for every task that has not started, naming the count and every id it covers,
-one per line the same way `R`'s own panel lists its gated tasks — so the panel's width tracks the
-longest id rather than growing with how many there are:
-
-```
-┌─ unqueue all ────────────────────────────────────┐
-│  2 tasks have not started:                       │
-│                                                  │
-│  chain-refusals                                  │
-│  month-instant                                   │
-│                                                  │
-│  Each goes back to pending. Running, paused and  │
-│  blocked tasks stay where they are.              │
-│                                                  │
-│  [enter] unqueue them   [esc] cancel             │
-└──────────────────────────────────────────────────┘
-```
-
-`U` carries no `depends_on` refusal of its own: whatever depends on a task in that set has not
-started either, so it is in the set too, and both go back to pending together with nothing left
-stranded. Either key drops every field `spoolway` writes on a task's way through the queue —
-`stage`, `run`, `attempts`, `base_commit`, `cut_from` — from the document it writes, so `spoolway
-queue add --from` accepts it again exactly as it would a document that had never been queued at
-all.
-
-Each group's block is closed by a total line: that group's whole OUT, COST and TIME — every
-task, every step, every round it has run — aligned under the same columns the rows use. It
-carries no label at all, only blank space up to the first figure; the sums under their own
-columns are enough to say what the line is. A finished task stays on the board as
-a dimmed `● done` row under its group for as long as that group still has something in the
-queue; once the last of a group's tasks has archived, the whole block — its band, rows and
-total — leaves the board rather than lingering as a stack of nothing but history.
-
-A frame is drawn by clearing the pane and printing over it, so it has to fit the pane it is
-drawn in: a frame one line too tall scrolls, and what scrolls off the top stays in the
-scrollback, leaving a fresh lockup behind the board on every pass. So the frame is measured
-against the pane, and the ticker is what gives — it shows as many of its newest arrival lines as
-the rows left over allow, down to none at all on a pane with no room for one, and each line is
-cut to the pane's width rather than wrapped. A line for a task arriving somewhere new names
-the step that reported, not the one it arrived at: a move that lands on that step's own
-`on_pass` route draws `✓ pass` in green, one landing on its `on_fail` route draws `✗ fail` in
-red, and a task arriving at `paused` or `blocked` draws `● paused` or `● blocked` — the same
-word and colour the table's STATE column uses — naming the step recorded in `paused_at`, or
-`parked_from` when no gate was passed, or `blocked_from`. Those two words are the *stage* a
-task arrived at; a running task whose lane the multiplexer reports `blocked` draws `● paused`
-in the table's STATE column without arriving anywhere, so it never earns a ticker line — the
-ticker is a log of moves, and a lane going to a permission prompt is not one. A move that
-matches none of those routes draws dim, with the step named and no
-verdict word. After the verdict comes a position, the named step's own place in its pipeline's
-walk over how many steps that walk still has left, or `—` where the task's pipeline cannot be
-read. Only the verdict token itself carries colour; the rest of the line, including the step
-name and the position, stays dim. The id, step and verdict columns are padded to the widest
-value among the rows about to be drawn, so a burst of several tasks moving at once lines up
-the way the table's own columns do, and the finished line is cut to the pane's width, ending in
-`…` rather than wrapping. A task moving twice while its line is still in the window earns one
-row rather than two: the earlier arrival is dropped and the later one takes its place at the
-bottom of the block. A task entering the queue, and one archiving, earn no line at all — both
-already show as a row change on the table above, not as something a lane reported. A pane too
-short even for an empty ticker loses
-the bottom of the frame instead: what the run is doing outranks what it has spent. None of
-this applies to a board that is not drawn to a terminal, which has no bottom to fall off and
-keeps every line. One blank row opens every frame, above the lockup, so its top line has a
-margin to sit in rather than landing flush against the pane's own edge.
-
-A row on a real step with no live lane reading it is `queued` — the word for a task that has
-genuinely not started a lane yet. The one exception is the ordinary gap between a handoff and
-its new lane: the instant a lane's turn ends, `spoolway report` writes the task's next stage,
-and the dispatcher's next pass takes a whole `interval` before it starts a lane there. A task
-caught in that gap still reads `running`, so the board does not flash `queued` on the word
-reserved for a task that has truly not started. The board only knows a handoff just happened by keeping, per row, a memory of its stage across
-the frames it draws — the same kind of per-frame memory it keeps for the RECENT ticker — and it
-stamps an arrival time the moment that stage changes, which is what lets it tell a handoff that
-just landed from a task that has run out of workers to pick it up. It holds that reading for
-two `dispatch.interval`s after the stage last changed, with no lane up for it, before falling
-back to `queued` if no lane has started by then. A task still on the pipeline's own reserved
-`queued` stage, never having started a step, has no such memory to consult and reads `queued`
-at once.
-
-The lockup mark turns while at least one row is running, and holds still the moment none is.
-Which of its two hand-drawn frames a draw picks is a function of the wall clock alone — the
-elapsed seconds taken modulo two — rather than a count of how many times the
-board has redrawn, so the dispatcher's own board and a second `watching` process reading the
-same instant always agree on which frame to show. `spoolway init`'s one-shot banner, and every
-board not drawn to a terminal, always draw the mark's first frame.
-
-Below the table's natural width something has to give before the terminal wraps a row onto
-two, which would scroll the same way a frame too tall does. TASK clips toward a
-fourteen-character floor first, ending in `…` where it did; only once it is at that floor does
-a column go — NEXT, then PIPELINE, then TIME, COST, OUT, CTX, right to left across the row —
-stopping the moment the row fits. Losing PIPELINE is what brings back the wider gap TASK and
-STEP carried before the column existed, so a board too narrow to show it reads exactly as one
-that never gained it. The header and each group's band and total line shed exactly what the
-rows shed, so the block stays aligned. None of this reaches `spoolway queue list`, which
-prints the same table unclipped at every width — it is piped into `grep` too often for an
-ellipsis to be safe there.
-
-The NEXT column answers what happens to that task next. For one that is moving that is the
-step it goes to when this one passes — one step, not the whole chain, which is a fact about
-the pipeline rather than about the run and is one `spoolway pipeline show` away. A row on
-`blocked` reads the same way, `→` and the step a pass out of it would actually carry the task
-to — the same answer `cleared_block_target` gives, and nothing else: the reason it blocked is
-not repeated here, since the row's own `● blocked` state already says that much. For one that
-is stuck on `queued` it is the dependency it is waiting on, or `waiting for a worker slot to
-free up` where no dependency holds it at all, and a lane holding a question in its pane names
-the pane.
-
-The STEP column carries its own counter, `<step> (N/M)`, wherever the step the task is on
-declares a `loop:` budget for the route it arrived by — from the first arrival, with no
-floor. `N` is the laps this task has taken from the step it arrived here from, `M` that
-route's own budget, the same pair `apply_loop_budget` compares before it lets another one
-through. A step with no declared budget for that route shows a bare step id.
-
-`deploy` there is a project's own gated step — no step of any shipped pipeline declares
-`gate:`, because a pull request is already the checkpoint. A task that has passed one reads
-`● paused`, with `→` and the step passing the gate would carry it to in the NEXT column, and
-— on a driving board where every dependency is satisfied and no lane of the task's own is
-mid-turn — ` — [r] resumes it` after it, naming the key rather than the command.
-
-A task still on a live step reads `● paused` too, for the other reason a pane is worth a
-look: its lane is sitting on a permission prompt. The multiplexer reports that state itself —
-herdr calls it `blocked`, off a named rule such as `bash_permission_prompt`, and it means a
-modal is on screen waiting for a keystroke — so the dispatcher marks the lane on the very pass
-that sees it, with none of the quiet wait a merely-settled lane sits through below. NEXT names
-the pane in the same ``look at pane `<lane>``` — [r] resumes it`` form the gated row uses;
-answer the prompt and the next pass sees the lane `working` and takes the mark off, and the row
-goes back to reading as the running step it is.
-
-CTX is how full the conversation a live lane is holding has got, as a percentage of that
-step's model context window — the same reading `session_reuse_ctx` forks a fresh session
-on, so a row approaching that number is a row about to lose its session. A profile whose
-`agents.<profile>.session_blocked_ctx` is set watches this same reading on every pass, and
-stops a lane whose row crosses it — see [`[agents.*]`](configuration.md#agents--who-runs-a-step).
-OUT is what the
-step has produced and COST is what it spent producing it: both read off the live lane's own
-transcript while there is one, and off the ledger once there is not, where every round of
-that step is summed. TIME is how long the row's own lane has been open at the step it is on:
-`now - launched_at` while it is live, and the ledger's summed `wall_s` at that step once it
-is not.
-
-All four are about the step the row is on, and none of them about the task. A task's whole
-bill is a different question and `spoolway spend task` answers it; on the row it would
-mean a fresh session opened at a late step reporting the spend of every session before it,
-next to a CTX and an OUT that are only ever about the new one. A step still running is
-priced from the transcript it is writing, less whatever the ledger has already banked for
-that session — so a lane resumed on its predecessor's session shows what *it* has spent, and
-the figure on the board is the one the ledger records when the step settles.
-
-Any of the four reads as `—` wherever there is no honest answer: no live lane, a model
-whose window nothing resolves, a model nothing prices — a local worker's whole answer — or a
-step nothing has been spent at yet. The transcript behind them is re-read at most every ten
-seconds and only when it has changed, so a figure can be that stale — invisible against a
-one-second redraw, and much cheaper than reading a megabyte of conversation per frame.
-
-The footer shows one line per agent profile that carries a cap, its name and `slots <live>/<cap>`.
-A cap is either the profile's own `concurrency`, or a model the profile runs that carries
-`slots` of its own — resolved from whichever of the profile's live lanes or a queued task's
-pipeline steps names it. A profile whose model has `slots` of its own shows up the moment a
-task routes onto a pipeline that names it, with nothing running on it at all. Where the model
-a profile runs has `slots` of its own — from a lane it has live or from a step a queued task's
-pipeline runs for it — the figure counts against the model's own cap instead of the profile's
-`concurrency` — a smaller local model swapped in shrinks that line on its own, with nobody
-touching `[agents.pi]`.
-
-A profile that names more than one pooled model draws one line per model, each reading
-`slots <live>/<cap>` with that model's own name printed after the figures, each figure counted
-against that model's own cap. A profile whose steps name two pooled models prints its name on
-the first line and leaves the name column blank on the rest. Two model names that
-match the same `[models."<glob>"]` entry collapse to one line, since they are the same pool.
-A profile that names no pooled model keeps the single line it always drew, with no model name
-after the figures. What a run has spent lives on the board itself now, in each group's
-own total line, rather than summed once across every group at the foot of the frame.
-
-One more line joins the footer whenever an `[issue_tracking]` hook has failed:
-`issue_tracking: N hook failures — see tracking/`, counting every failing task-and-event pair
-whose task is still in the queue, whether `on_fail` is `"ignore"` or `"pause"`. A pair whose
-task has been archived does not count, so a stale failure stops showing once the task is
-gone. A failed `fetch` run is keyed on an issue reference rather than a task and always
-counts. The line is absent entirely while nothing has failed.
-
-The slot figures count only the lanes spoolway itself started. A session a person started by
-hand — a local worker or a cloud model, from this project or any other — sits outside them:
-the card those figures describe is one a person can also load from another terminal, and no
-hand-started session, however it is billed, is one of the lanes they count.
-
-The job ledger sits below the whole slots block, after a blank line, on every board whether
-the queue is empty or busy. It names every enabled job, one row each, ordered by their next
-firing:
-
-```
-codex   slots 0/1
-pi      slots 0/2
-
 jobs    2 active
         ○ nightly-audit       Sat 12 Sep 03:00   (in 6h 48m)
         ○ release-readiness   Mon 14 Sep 08:00   (in 2d 12h)
 ```
 
-The header reads `jobs    N active`, bold and column-aligned under the slot names above it;
-`N` is the number of enabled jobs. Each row reads `○ <name>  <local date and time>  (in <countdown>)`,
-the countdown until its next firing. A job whose schedule parses but never comes round stays
-on the ledger rather than dropped, with `will never fire — run spoolway doctor` in place of
-its countdown. A board with no enabled job draws the ledger nowhere at all, and it is absent
-under `--plain` and in a pipe, where no board is drawn.
-
-The header says whose process this is and how long it has been going, and nothing about
-when the next pass is due: `up` moves on every redraw, which is all a board needs to show it
-is alive, and a pass is not something a person watching can bring forward. Every frame is
-re-read from the task files and the lane list — the board is a renderer, never a
-participant, and a `--plain` run takes exactly the same decisions in the same order.
-
-The two rows a frame cannot afford to reparse from scratch — every task ever archived, for a
-finished row still on the board, and the whole usage ledger, for what a run has spent — are
-cached instead, keyed off the archive directory's mtime and an append offset into the ledger.
-A frame that finds neither changed hands back the same shared history rather than rebuilding
-it, so a board left open over a large archive and a large ledger pays to parse them again only
-when a task finishes or a lane banks a line, not once a second regardless.
-
-The board draws on the main screen rather than the alternate one: a *second* `ctrl-c` kills
-the process without unwinding, and the last frame simply stays where it is with the shell
-prompt under it. The first `ctrl-c` is caught — it is the board's only control — and unwinds
-through the same stop that an empty queue reaches, settling what the run was still holding —
-banking each still-running lane's spend and forgiving its launch counter — before the process
-exits.
-
-While the board is up it holds the terminal: the terminal's own cursor is hidden, and on Unix
-stdin is put in raw-enough mode — no echo, no line buffering, `ctrl-c` deliberately still able
-to raise `SIGINT` — so a keystroke is neither echoed under the footer nor held for a line that
-outlives the run in the shell it returns to. On a driving board a keystroke read this way is
-what moves the board's own `▸` cursor and fires the resume key; on a watching board or a
-`--plain` run stdin is never read at all. Both ways a run ends reach the same restore, because
-it hangs off the board going out of scope rather than off either exit path: the terminal is
-drained of whatever was typed and handed back, cursor and all. Native Windows gets the cursor
-back and nothing else — there is no termios there to take, and no key is read for anything on
-that platform, so `ctrl-c` stays its only control.
-
-From another terminal, while a run is going, `spoolway queue list` says where every task is
-sitting and `spoolway lane <lane>` says what one is doing.
+`spoolway queue list` prints the same table from another terminal, and `spoolway lane <lane>`
+shows what one lane is doing.
 
 ## Gates: when the pipeline waits for you
 
-A step declares `gate: true` to say a person approves its work before the task goes any
-further. Spoolway holds that pass by itself — nothing the lane does or reports changes where
-it parks. **The lane is told a person will read its pane**, though: it leaves anything
-viewable running instead of tearing it down, and writes a short account for them. The task
-lands on `paused`, its pane is kept open for you to read, and it waits.
+A step with `gate: true` stops the task on `paused` after the step reports. The pane stays open
+for you to read.
 
 ```
 spoolway resume deploy-login                            # let it past
 spoolway resume deploy-login --reject -m "not tonight"  # send it back round
 ```
 
-`paused` is its own state, beside `blocked` rather than inside it, because the two ask you
-for opposite things: a block is *I could not finish*, and a pause is *I finished, and you
-wanted to see it first*. A paused task's dependents wait quietly rather than being reported
-as stranded, and it is not counted against its profile's concurrency.
+A paused task holds no slot. You can type into its pane. When that turn ends, the dispatcher
+commits the worktree with a `## Status Log` line saying a person drove the round.
 
-A staffed `blocked` step borrows this same shape for the one thing it cannot answer itself:
-`spoolway report --pause` (or a `--fail` or `--block`, read the same way — see
-[Escalation](#escalation)) parks the task on `paused`, `paused_at` naming the step it originally
-blocked on rather than `blocked` itself. `spoolway resume` on it reaches the destination a pass
-from `blocked` would have — carrying the task past that step, not back onto it.
+Three other things put a task on `paused`:
 
-The board's own `p` and `P` keys (see [Reading the state](#reading-the-state)) park a task on
-`paused` too, `parked_from` naming the step it was on rather than one it gated on —
-a plain park, with no `paused_at` and no `blocked_from`, telling it apart from both a genuine
-gate and a real block. A task that is still on `queued` when it is parked is the one case that
-leaves no `parked_from` at all: `queued` is not a step any pipeline declares, so a breadcrumb
-naming it would never be spent, and `spoolway resume` falls through to the pipeline's entry step
-for it instead. `R` and a row's own `r` both read that difference: only a task carrying
-`paused_at` is confirmed past with a named panel before it resumes. Resuming a park is not a lap
-either — the task never left the step, so putting it back banks nothing and repeats none of a
-block's own bookkeeping; see `parked_from` in [the frontmatter field table](tasks.md).
+| Cause | How the task file records it |
+|---|---|
+| `p` or `P` on the board | `parked_from: <step>` |
+| Escape typed by hand into a lane's pane | `parked_from: <step>`, written on the next pass |
+| A staffed `blocked` lane reports `--pause`, `--fail` or `--block` | `paused_at: <the step it blocked on>` |
 
-A person is not only ever pressing `p` on the board to get this: typing Escape by hand,
-straight into a lane's own pane, ends the turn the same way but does not by itself write
-anything to the task file. The pass that next sees that lane settled reads its transcript for
-the same aborted-turn shape [the agent kind's own marker
-tells apart](agents.md#telling-an-interrupted-turn-from-a-finished-one), and if it finds one,
-parks the task there and then — `parked_from` naming the step, written the same way the
-board's own park is — rather than waiting on the reminder loop below to nudge it awake again.
-Caught within the one pass that first sees the lane settled, never after.
-
-Resuming either kind of park sends nothing extra if the lane it left is already busy again —
-a person who typed straight into the pane after the Escape is mid-turn on their own, and the
-resume only clears `parked_from` and hands the step back rather than typing a prompt on top of
-what they just asked for. An idle lane still gets the ordinary resumed-park briefing, telling
-it a person stopped its turn by hand and has since put it back, with nothing to clear and
-nothing changed while it was stopped.
-
-**A paused task's pane survives a stop, the same way a blocked one's does.** Stopping the
-dispatcher never tears down the worktree or the pane of a task parked in front of a person —
-`paused` unconditionally, and `blocked` wherever nobody is staffed to answer it — because
-that pane is the only record of what a person's own turn in it produced.
-
-During a run, whether the pane a paused task lands on is kept open at all comes down to the
-backend: only one that keeps a resident session worth looking at holds it, so under
-`headless`, which has no pane, the checkout is freed rather than held for nobody to read.
-
-**Typing into a held pane is itself committed.** Once a lane is held for you to read, the
-dispatcher watches its pane go busy and then idle again — that transition is a person's own
-round finishing — and commits the worktree at that moment, with a `## Status Log` line saying
-a person drove the round. Nothing is ever sent to the pane to prompt this: the dispatcher only
-watches and commits, and the task stays on `paused` until you run `spoolway resume`.
-
-**It used to ask the lane instead**, in a paragraph of the opening prompt telling it to print
-its question and end its turn. That paragraph was the entire enforcement — spoolway's own
-half was passive: it exempted the lane from the reminder loop and let it hold its slot. Over
-three plan runs against a small local model, three gated steps, not one held: each lane read
-the instruction, decided the work was fine, reported a pass and the task moved on. A
-checkpoint a model can talk itself out of is not one. Held outside the session there is
-nothing to talk to.
+`spoolway resume` on any of these puts the task back on its step. A paused task's pane survives
+a stop of the dispatcher.
 
 ## A lane that settles without reporting
 
-Any lane may end its turn without reporting an outcome. There is no way to look at a settled
-session and tell a forgotten `spoolway report` from a lane genuinely stuck on a question — that
-judgement stays outside the pipeline — so rather than guess, the dispatcher answers the
-ambiguity the same way every time: the pass after the one that first sees the lane settled, it
-is sent the report contract again, through the same `Mux::prompt` a person's own words go
-through with `spoolway lane -m`. A lane that forgot acts on it; a lane waiting on a person is
-told something that costs it nothing.
+A lane can end its turn without calling `spoolway report`. Then:
 
-One case is not ambiguous at all, and is read before any of this runs: a lane whose transcript
-ends in a person's own Escape (see [Gates](#gates-when-the-pipeline-waits-for-you)) is parked
-on the spot, and never reaches the reminder or the escalation below. A settled lane with no
-such record in its transcript takes exactly the road that follows.
+1. The next pass sends the report contract into the pane again.
+2. Each later pass where the transcript has grown sends another reminder, up to three.
+3. A lane whose transcript has not grown since the last reminder is blocked, with the last of
+   what the pane said in the task's `## Blocker`. `spoolway resume` restarts the step on the
+   same session.
+4. A fourth due reminder blocks the task instead.
 
-It is reminded again on every later pass whose transcript carries something new since the last
-reminder, and never on a pass where it does not — one comparison, capped at three reminders. A
-lane genuinely mid-answer deserves patience, but not an unbounded amount of it purely because
-its replies count as progress: a fourth due reminder is escalated in its place, naming the lane
-and the pane you would have to go look at. The count lives on the lane record beside the
-timestamp of its last reminder and needs no clearing — it dies with the record.
+A lane that still holds a process it started, such as a long build, is excused from reminders
+until `dispatch.lane_child_ceiling` (one hour by default), then escalated.
 
-A lane can also go quiet on its transcript while a process it started is still running — a
-long build, a server a turn forgot to stop — and a backend able to say so, through
-`Mux::lane_process_alive`, excuses it from the reminder for exactly that reason rather than
-guessing from the screen. That excuse has its own ceiling, `dispatch.lane_child_ceiling` (an
-hour by default): past it, the lane is escalated for holding the process open rather than
-reminded again, and the transcript signal above never even gets asked. A backend with no way
-to answer the question keeps today's behaviour exactly, transcript alone.
-
-One exit bounds the loop besides the count, and it is counted too, not timed. A lane that goes
-fully quiet *after* a reminder — nothing further in its transcript — is the dead session no
-reminder can reach: due for another reminder is one comparison, whether the transcript has
-written since the last one, and a lane that has not is paused on that very pass rather than
-given a clock to wait out. There the task carries the reason and the last of what the pane said,
-its session is closed and its worker slot goes back, and `spoolway resume` resumes it at the
-step it never reported from, as the session it was — see
-[When a task needs a person](tasks.md#when-a-task-needs-a-person) for what is continued and what
-starts fresh.
-
-None of this runs at all for a lane that *did* report — a report always moves the stage, so the
-pass that would otherwise find a settled lane here finds the task already moved on instead.
-`blocked` used to be the one exception: a `--fail` or a `--block` from there landed back on
-`blocked` itself, so the stage never moved and a lane that reported looked, by that proxy,
-exactly like one that never did. It no longer is — see [Escalation](#escalation) — but the
-dispatcher still reads the answer rather than inferring it from movement, since a report and a
-reminder can race on the same pass regardless: `spoolway report` stamps `last_report` with the
-moment it banked, and a lane that reported after its own `started_at` has its round ended there —
-its pane freed and its usage banked — without ever reaching the reminder above.
-
-There is no exception for a gated step. There used to be — a gated lane was *expected* to end
-its turn on a question, so it was left alone with no clock on it at all — and that exemption
-went with the question: a gated lane reports like any other, and a settled one that did not is
-the same fault it is anywhere else, reminded and, failing that, escalated the same way.
-
-**This is the only mechanism**, in the sense that matters: nothing wired per agent kind, and
-nothing that reads a transcript to guess at intent. The system prompt asks for the report in as
-many words — see [What a lane is sent](#what-a-lane-is-sent) — that is prevention, and a good
-model needs nothing else. Reminding is what happens once that fails; escalating is what happens
-when it keeps failing with nobody left running to answer.
-
-There used to be a second: a per-kind hook asked, as a turn ended, whether the lane had
-reported, and pushed back once if it had not. It is gone. A reminder wired per agent kind is a
-pipeline that behaves differently depending on who staffed a step, and the pi half of it
-never fired for a headless lane at all — it loaded, it passed `spoolway doctor`, and it did
-nothing. `Mux::prompt` is what stands in its place instead: implemented once, on every backend,
-so a headless lane is reminded by reopening its pinned session and a resident one by typing into
-the pane it never left — the same call either way, identical for every agent kind.
-
-Either way you are told once that a pane is worth a look — the board's `paused` state, the
-same state a gated task on the `paused` stage gets — and NEXT names the pane to look at, in the
-same ``look at pane `<lane>``` — [r] resumes it`` form a gate's resume carries. The task
-remains on its live pipeline step; the two differ only in route, not in key: the pane-held row
-points at the pane, the gate-held row points at the resume route.
-
-The same mark, and the same row, is what a `blocked` lane earns — but it earns it without any
-of the ladder above. Everything on this page so far is about a lane that *settled*: the
-dispatcher cannot see why, so it waits out `dispatch.lane_quiet`, reminds, and escalates,
-because silence is only ever an inference. A lane the multiplexer calls `blocked` is not an
-inference at all — it is an observation of a modal on screen — so the pass marks it on the
-spot, with no quiet wait and no reminder, and then leaves it alone. It is still alive: it
-holds its pane, its session and its worker slot, it still forgives the launch counter the way
-a working lane does, and nothing is sent to it, because typing the report contract on top of a
-prompt a person is about to answer is the one thing a live lane must never get.
-
-So the dispatcher's per-lane branch reads four ways, not two. `working`: withdraw the mark, if
-there is one, and carry on. `blocked`: mark it immediately and name the pane — the case this
-section just described. `done` or `idle`: settled, and the reminder and escalation ladder above
-is what happens next. Anything the backend declines to label — `unknown` — is left entirely
-alone and asked again on the next pass, since a multiplexer that will not answer is not the
-same as one answering no.
-
-Once, and not for the rest of the lane's life: the mark comes off the moment the lane is seen
-working again. Whether you answered the question or the lane was only quiet long enough between
-turns to look settled, a lane mid-turn is holding nothing anybody can reply to, and the row
-reads as the running step it is. Settle again on the same step and the mark comes back, because
-that is a second question and worth being told about.
-
-A lane that ended its turn *waiting* on something — a backgrounded watch, a scheduled
-wakeup — is this same case and not a third one. Nothing under spoolway resumes a settled
-session beyond the reminder above, so the pane it left is the pane a lane holding a question
-leaves, and the board says `paused` and names a pane with no question in it. That is
-prevention's job too: the framing every lane is sent says in as many words that nothing brings
-it back to a turn, and that nothing watches how long any one call takes any more — long waits
-are polled through, awake, inside the turn, because there is no clock left to sit through them
-instead.
+A lane whose multiplexer reports it `blocked` is on a permission prompt. It is marked `paused`
+at once, with the pane named in NEXT, and nothing is sent to it. Answer the prompt and the mark
+comes off on the next pass.
 
 ## A step that carries its own session
 
-A step can declare `session:` in the pipeline file to ask for its prompt's own conversation
-back, rather than a fresh one, whenever that prompt has already been on this task:
-
 ```yaml
 - id: implement
-  session: true       # look for an earlier session by this prompt on this task
+  session: true       # reuse the newest session this prompt held on this task
 - id: document
-  session: false       # the default — every visit opens fresh
+  session: false      # the default: every visit opens fresh
 ```
 
-`session:` is a plain switch now: the step says only *whether* to look. *How far* a found
-session may be carried is split across two facts, neither of which is the step's own:
-`agents.<profile>.session_reuse_ctx` bounds how large it may be, a fact about the agent
-profile running the step (see [`[agents.*]`](configuration.md#agents--who-runs-a-step)); and
-`models.<glob>.session_reuse_idle` bounds how long it may have sat, a fact about the model
-itself (see [`[models."<glob>"]`](configuration.md#modelsglob--what-a-model-costs-and-how-big-its-window-is)).
-A pipeline shared between two machines never has to name either bound.
+The step carries the session on if two bounds hold:
 
-This is a different question from the one-shot resume a blocked task gets back into (see
-[When a task needs a person](tasks.md#when-a-task-needs-a-person)): that names one exact
-session because a person is putting a specific lane back where it stopped, and only ever
-applies to the step a task is already blocked on. `session:` is standing — it is checked on
-every ordinary start of the step, is never cleared, and looks for whichever session its
-prompt most recently held on this task rather than a particular lane. The two never
-compete: a task coming back from `blocked` takes the one-shot resume, and `session:` is only
-tried when that is not what is happening.
+| Bound | Setting | Checked against |
+|---|---|---|
+| Size | `agents.<profile>.session_reuse_ctx`, a percentage | The input, cache-read and cache-write tokens of the session's last turn, over the model's `context_window`. |
+| Age | `models.<glob>.session_reuse_idle` | The session store's modification time. |
 
-The lookup goes by prompt rather than by step, because that is the case this exists for. A
-project that splits one prompt's work across two steps — an `implement` and a `repair`, say —
-wants the second to find the conversation the first left behind rather than open a cold one on
-the same task. Concretely: the newest entry in the usage ledger for this task whose own step
-resolves, in this pipeline, to the same prompt this step runs.
-
-The shipped pipeline no longer needs that split. A failed review goes back to `implement`
-itself, which carries `session: true`, so the lookup finds that step's own earlier
-conversation — the simplest case of the same rule.
-
-Size is checked on every carried session — there is no unbounded form left, `true` only says
-to look, never skips the arithmetic. It is not that ledger entry's own token count, which is
-a running sum across every turn the session has ever spent and only ever grows, so it says
-what the session has cost rather than how large it now is. What matters is the conversation's
-size *right now*: the input, cache-read and cache-write tokens of its last assistant turn,
-read straight from the transcript, weighed against the model's `context_window` from
-`[models]` (see [Cost accounting](cost.md#pricing)) against `session_reuse_ctx`'s percentage.
-
-Age is checked after size, and only on a session that size has already cleared. It comes from
-the session's own store — `touched_at`, the same mtime the reminder loop already reads —
-weighed against the model's `session_reuse_idle`, never queried from the provider. See [Cache
-warmth is a model's fact](agents.md#cache-warmth-is-a-models-fact). Unset, or a store that
-cannot be read, and the age check refuses nothing — there is no per-profile override left, only
-the model's own horizon.
-
-Four ways this falls through to a fresh session and the full opening prompt instead, and the
-board's `RECENT` ticker says which:
-
-- no earlier session by this prompt on this task can be found, or one was found but its
-  transcript could not be read to size it
-- one was found and read, but its last turn is already past `session_reuse_ctx`
-- the model's `context_window` is not set, so there is nothing to measure the session
-  against — this is checked before the transcript is ever read, so it is not that the
-  session was measured and found small
-- one was found, under size, but its store has sat past the model's `session_reuse_idle`
-
-A lane resumed this way is prompted differently from an unblocked one: nobody has been and
-gone, so there is nothing to say about a person — only that this is the prompt's next visit,
-that the work its last visit asked for or left has been done, and that what changed since is
-in the task file's `## Status Log`, same as it always is for a resumed lane.
-
-A step that sets no `session:`, or sets `session: false`, is unaffected by any of this — it
-opens fresh every time, as every step always has. `pipeline check` refuses anything else a
-step's `session:` might name — a percentage, in particular, is refused rather than migrated,
-naming `agents.<profile>.session_reuse_ctx` as where that bound lives now.
+Otherwise the step opens a fresh session, and `RECENT` says why. The lookup goes by prompt,
+so two steps running the same prompt share one conversation. A blocked task's resume is
+separate from this. See [When a task needs a person](tasks.md#when-a-task-needs-a-person).
 
 ## Restarts, laps and escalation
 
-Three different limits, and they bound three different things:
-
-| Setting | Bounds | Zeroed by |
+| Limit | What it bounds | Reset by |
 |---|---|---|
-| The launch guard | How many times a lane may be **launched** at the step a task is on | Every transition |
-| The launch-failure ceiling | How many times a step's launch may fail to even start, in a row, before the task routes like a step that ran and failed — to that step's `on_fail`, defaulting to `blocked` | A launch that starts, arriving at the step again, or re-queueing the document |
-| A step's `loop` | How many times a task may **arrive** at that step **from a given step** before escalating — a lap of the loop | A resume, for the loops the step it resumes at can spend. Binds the same in an [unattended run](pipelines.md#unattended-runs): every pipeline stages `blocked`, so an exit that resolves there spends the budget exactly as an attended run's would. `blocked` itself never spends this: see [Escalation](#escalation) — a report from `blocked` always moves the task off it, so it never arrives there from itself |
-| The reminder loop | How many times a settled lane's **transcript** may go unwritten since its last reminder before it is blocked | Anything the lane writes to its transcript |
-| The live-child ceiling | How long a lane may be excused the reminder loop for holding open a process it started before it is escalated anyway | The process exiting, or a backend with no way to check it in the first place |
+| Launch guard | A lane that dies at launch and leaves no session blocks the task. In an unattended run it is retried on a doubling delay, capped at one hour. | A pass that sees the lane; every stage transition; a dispatcher stop. |
+| Launch-failure ceiling | A launch that cannot start at all, such as a refused tab or an unconfigured model, is retried twice. The third failure in a row routes the task to the step's `on_fail`, or `blocked`. | A launch that starts; arriving at the step again; re-queueing the document. |
+| A step's `loop:` | How many times a task may arrive at the step from a given step. | `spoolway resume`, for the loops out of the step it resumes at. |
+| Reminder loop | Three reminders to a silent lane. | Anything the lane writes to its transcript. |
+| Live-child ceiling | How long a lane may hold a child process before it is escalated. | The process exiting. |
 
-A round is a lap, not a conversation. On a step with `session: true` the loop may be
-re-prompted as often as it needs, and that used to matter to the count — only a cold start
-spent the budget, so the same three visits could cost wildly different tokens depending on
-which ones happened to open fresh, and only the lower reading could be written down in
-advance and mean the same thing every run. Now every arrival counts the same: what still
-bounds a conversation's size is `session_reuse_ctx`, entirely separate from this.
-
-A task records `prompts` and `rounds`, both per route, keyed `from->to`. `prompts` is every
-lane launched, retries included, and is what the usage ledger reads — banked at launch,
-because a retried lane is a second prompt and was paid for like one. `rounds` is banked on
-arrival instead, once per transition, by the same call that writes the `## Status Log` line
-for it — a relaunch after a lane died before saying anything is a second prompt on the same
-lap, not a second lap, so it costs `prompts` and leaves `rounds` alone. `rounds` is the only
-one a loop budget is spent from, and the one the board's own `(N/M)` counter reads.
-
-When a budget runs out the task carries on to that step's `on_loop_max` if it names one,
-or to its own `on_pass` otherwise, and a `## Status Log` line says so, naming the round
-count. A loop whose output nobody else will ever read can say `on_loop_max: blocked` instead,
-to stop rather than carry on.
-
-The launch guard catches a lane that dies at launch. Such a lane leaves no session behind, so
-the task looks unstarted again on the next pass — without a budget it would be re-spawned
-forever. It is **not** a retry budget for work that went badly: a lane that ends its turn keeps its
-pane. The counter is forgiven the moment a pass can see the lane the launch produced, so a
-person stopping the dispatcher mid-task no longer blocks that task on the next run — the
-launch is forgiven on the stop itself, see [`Dispatcher::sweep_on_stop`](#sweeping-on-stop).
-Never a number
-anybody tuned in practice, so it is a constant now — `dispatch::MAX_LAUNCHES`, one launch
-before a person — rather than the old `dispatch.max_launches` setting, which still parses in
-a config that has it and is dropped on the next save. In an [unattended
-run](pipelines.md#unattended-runs) there is no person to hand it to, so it becomes a backoff
-instead: the task keeps its place and is retried on a doubling delay, capped at an hour.
-
-A launch that never even got going is a different failure still, and gets its own limit. A lane that dies at launch leaves no session behind (the guard above); a launch that fails to start leaves nothing at all — the multiplexer refused the tab, the model was unconfigured, the pane could not be split. This is not work that went badly, and unlike the guard above it is not forgiven on sight: a launch that cannot start will not start again next pass either, so letting it retry forever parks nothing and logs nothing. The step's launch is counted, per step, and on the third consecutive failure the task is routed by that step's `on_fail` — `blocked` if it names none — exactly as a step that ran and reported failure is, with `blocked_from` set to the step it could not start, and the reason written once to the task's `## Status Log` and once to the project's problem log. Below the third it is retried, and the count is cleared the moment a launch of that step actually starts, on arrival at the step again so a later visit counts from zero rather than inheriting a spent count, and on re-queueing the document so a re-queued task carries no ceiling into its next run. In an unattended run it routes the same way: the ceiling is a ceiling, not a backoff.
-
-A dispatcher killed between launching a lane and finishing that pass gets one extra pass of
-grace before the guard above applies. `lanes.json` is written back when a pass returns, its
-error paths included, but a process killed outright never reaches that write, so that crash
-loses the record the launch itself just wrote, and the restarted dispatcher's first
-pass would otherwise read the silence as a genuinely dead launch and hand the task to a person
-over a failure that never happened. Instead, the first pass that finds a launch with no
-`lanes.json` record of its own — gated on the task actually having a `launched_at`, so this
-never fires for a task that reached the guard some other way — marks the lane seen and tries
-again rather than escalating. That mark is itself written to `lanes.json`, so it survives past
-this one pass: the very next pass, whenever it lands, reads the lane as one this dispatcher has
-already watched, and escalates normally if it is still gone. The grace is one pass, not a
-window of time — a restart minutes or hours later gets exactly the same one chance a restart a
-second later would.
-
-A `lanes.json` that will not parse is not discarded. The pass starts from no lane records, but
-it first copies the bad file aside as `lanes.json.bad` and writes a line to the problem log
-saying so, rather than silently overwriting a hand edit or a disk error with an empty file.
-
-A park never ends the run. The dispatcher keeps passing and reports the park each time; closing
-it is a person's call.
-
-
-Resuming a task hands it its full attempt budget back, since every transition zeroes the
-count.
-
-It hands back loop budgets too, but only the ones it is about to need: the bounded routes
-out of the step it resumes at. A task that ran out of review-and-fix laps resumes at `review`
-with that loop's `rounds` back at zero — without it, resuming buys one attempt and the next
-failure hits the same wall, which is not resuming. Loops elsewhere in the pipeline keep what
-they have spent: saying carry on to a stuck review says nothing about the rebase loop at the
-other end. `prompts` is never handed back — it is the record of what this task has cost, not
-a licence. `resume` prints each budget it returns.
+When a loop budget runs out, the task goes to the step's `on_loop_max`, or to its `on_pass`
+when there is none.
 
 ## Escalation
 
-An escalation parks the task in the built-in `blocked` state. Attended, it tells you and waits
-for `spoolway resume`. In an [unattended run](pipelines.md#unattended-runs) there is nobody to
-tell, so a lane is started on `blocked` instead — every pipeline stages it, declared or
-materialised from `[unattended]`'s `blocked_*` keys — and that lane's pass carries the task on
-under `unattended.skip_blocked_lane`. That covers every road to `blocked`, not only a lane's
-own `--block`: a `fail` with nowhere left to route, a silent lane, a dead launch, a step whose
-launch never got going after its retries, a live lane stopped for reading over its profile's
-`session_blocked_ctx` ceiling. They are ways of writing
-down one fact —
-this task is not moving without help — and which of them it was is not something anybody
-remembers when the notification arrives.
+An escalation puts the task on `blocked`. In an attended run the board marks the row amber and
+names the pane in NEXT, and the task waits for `spoolway resume`. In an
+[unattended run](pipelines.md#unattended-runs) a lane starts on the `blocked` step instead, using
+the `[unattended]` `blocked_*` settings, and `unattended.skip_blocked_lane` decides whether the
+task continues past the step it blocked on.
 
-**None of those roads lead from `blocked` back to `blocked`.** A staffed `blocked` step's own
-lane answers with `--pass` when it cleared the way, and `--pause` when it genuinely cannot — and
-`--fail` or `--block`, the old habit, are read as `--pause` would be rather than sent round again.
-A `--pause` (or a `--fail` or `--block` reported from `blocked`) parks the task on `paused`,
-naming the step it originally blocked on, rather than on `blocked` itself — the same is true of
-this section's own escalation, when it is a `blocked` lane itself that died, went silent, or
-never launched: it too lands on `paused`, not `blocked`. `spoolway resume` on a task paused this
-way reaches exactly the destination a pass from `blocked` would have.
+A staffed `blocked` lane answers with `--pass` when it cleared the way, or `--pause` when it
+cannot. A `--fail` or `--block` from it is read as `--pause`. All three put the task on
+`paused`, and `spoolway resume` then carries it to the step a pass out of `blocked` would.
 
-A spent `loop` is not one of those roads. It takes the step's exit — `on_loop_max` if it
-names one, `on_pass` otherwise — a destination the pipeline named rather than a request for a
-person, and an unattended run follows it exactly as an attended one does. An exit that
-resolves to `blocked` is no exception: every pipeline stages `blocked`, so the budget binds
-there exactly as it would in an attended run, because `blocked` is a lane now, not a person.
-
-**A task that reaches `blocked` keeps its pane — unless a lane is about to start there.** The
-lane that stopped is over — its slot is given back and what it spent is booked — but the pane
-it ran in is left open and focused, because the session as it stood when it stopped is the
-only real account of what went wrong, and it is not in the task file. It is closed on the pass
-after the task is unblocked, just before the step it stopped on is started again. An
-unattended run keeps no pane for this: a fresh lane is about to start on the staffed `blocked`
-step (see [Staffing `blocked`](pipelines.md#staffing-blocked) in pipelines.md), so something
-is about to be working on the task, not waiting to be read.
-
-When a task needs a person — an escalation, or a gated step waiting for an answer — the
-board says so: the row is marked amber, once rather than once per pass, with the pane to
-go and look at named in its NEXT column. The mark does not move the row — a group's rows
-still sort by run order, not by whether they need a person.
-`spoolway queue list` gives the same reading from another terminal, or with no run going.
+A blocked task keeps its pane open until it is resumed.
 
 ## Backends: where a lane lives
 
 ```toml
 [dispatch]
 backend = "herdr"     # or "tmux", or "headless"
+herdr_mode = "split"  # or "grouped"
+tmux_mode = "grouped" # or "split"
 ```
 
-### Under a multiplexer
+| Backend | Mode | Where a lane runs |
+|---|---|---|
+| `herdr` | `grouped` | One tab per project in the shared `spoolway-dispatcher` workspace. One pane per running task. |
+| `herdr` | `split` | One herdr workspace per task, nested under the project's row as `spoolway/<task>`. |
+| `tmux` | `grouped` | One window per project in the shared `spoolway-dispatcher` session. One pane per running task. |
+| `tmux` | `split` | One tmux session per task, named `spoolway/<task>`. |
+| `headless` | | No panes. Each turn is a detached process that logs to a file. |
 
-Every lane is a real pane you can watch, attach to and take over. Under `grouped`, a task's
-lane is a pane split off its **project's** tab in the shared `spoolway-dispatcher` group;
-under `split`, each task gets a row of its own — a workspace (herdr) or session (tmux) — and
-the lane is a pane split off that. Either way, the pane belongs to the task rather than to
-one of its steps: a step that finishes is talked out of its pane and the step after it starts
-in the same one, so a task holds one lane pane for its whole life and its `pane_id` does not
-change as it moves. A kind with no way to leave a pane keeps the older lifecycle — its pane
-closes with it, and the next step splits a fresh one. See [Vacating a pane](#vacating-a-pane).
-
-**A restarted multiplexer heals itself on the next pass.** A worktree can outlive the server
-fronting it — a reboot, `tmux kill-server`, herdr restarted — even though every workspace and
-tab id it ever handed out does not. Before reusing a task's recorded `workspace_id` and
-`tab_id`, the dispatcher checks them against the multiplexer that is actually running; if
-either has gone, it clears all four recorded fields and opens a fresh pane on the same
-worktree, exactly as it already did when the worktree's own directory had gone missing. The
-worktree, its branch and whether it was borrowed are never touched — only the multiplexer ids
-move. Headless answers this check `true` unconditionally, since its workspace id is derived
-from the checkout path itself and has nothing separate to lose track of.
+Under a multiplexer every lane is a real pane you can watch and type into. A task holds one
+pane for its whole life. See [Vacating a pane](#vacating-a-pane). A lane is named
+`<task> · <step>`. Sessions you start by hand are never touched.
 
 ### One home for every run, in every project
 
-`spoolway-dispatcher` is a single workspace (herdr) or session (tmux), fixed and shared by
-every project that dispatches on this machine — not named after any one of them, so two
-projects dispatching at once share this one row in the sidebar rather than opening one each.
-It holds no checkout of its own, opened instead on `~/.spoolway/.dispatcher/`, which is
-not a repository — that absence of a checkout is the other half of how it is found again: a
-workspace opened anywhere inside a repository comes back bound to it, and this directory binds
-to nothing. Named with a leading dot so it sorts apart from every project's own directory
-beside it, and so no checkout can claim the name for itself — `spoolway init` refuses it.
+`spoolway-dispatcher` is one workspace (herdr) or session (tmux) shared by every project on the
+machine. It opens on `~/.spoolway/.dispatcher/`, which is not a repository. The board itself
+stays in the pane you ran `spoolway dispatch` in.
 
-`herdr_mode` and `tmux_mode` both take the same two answers: `grouped` and `split`. (The
-herdr-era spellings `workspace` and `worktrees` still parse and mean the same thing; so does
-the singular `worktree`.)
+### herdr
 
-### `herdr_mode = "grouped"` — one tab per project
-
-```toml
-[dispatch]
-herdr_mode = "grouped"
-```
-
-The shared workspace holds one tab per project, labelled with the project's directory name,
-holding every lane that project currently has going — whatever group each task belongs to.
-Reading down the sidebar is reading which projects are dispatching right now, not which groups:
-
-```
-▾ spoolway-dispatcher
-    spoolway          every lane of this project, any group
-    otherapp          that project's lanes, dispatching at the same time
-```
-
-`spoolway dispatch` never moves or relaunches itself to draw this: the board stays in the pane
-you typed the command into, under `grouped` exactly as it already did under `split`. The shared
-workspace is opened purely to hold lanes — found or opened the first time a project dispatches,
-never joined by the dispatcher's own pane.
-
-**A project's tab holds one pane per running task of that project — nothing else.** The first
-task through opens the tab itself, on its own worktree rather than the bare project root, and
-runs straight in the pane that opens with it: there is no separate placeholder pane sitting idle
-in the project root the way there used to be. Every task after that splits its own pane off one
-already in the tab, because herdr has no rebalance command and always splitting the newest pane
-degenerates into slivers as the tab grows.
-
-Two rules pick the split. The pane cut is the biggest one holding no agent, so a split takes its
-space from an idle shell rather than from a running lane; when every pane holds an agent, the
-biggest pane overall is cut instead. The direction is `down` while both halves would keep at
-least twenty rows, and `right` below that — a terminal cell is about twice as tall as it is
-wide, so comparing a rect's columns against its rows directly reads a full-screen tab as wider
-than tall and lays every pane out as a narrow column.
-
-tmux needs none of that arithmetic: `select-layout tiled` retiles the whole window after every
-split.
-
-The tab is named for the project's own directory, and found again by that name alone — there is
-no pane or directory left to check it against. Nor is one needed: a project's directory name is
-already unique on this machine, since `spoolway init` refuses a second checkout that claims a
-basename another one already has, so two same-named projects sharing this workspace cannot
-happen to begin with.
-
-Spoolway cuts a task's worktree itself, with `git worktree add`, under
-`~/.spoolway/<project>/worktrees/` by default — because the shared workspace holds no
-checkout for herdr to cut against. That is what keeps the sidebar clean:
-herdr never hears about the checkout, so there is no row for it, and `git worktree list` is
-where you find one an interrupted run left behind.
-
-A step ending closes its own pane, never the tab — the tab is the project's, shared by every
-task of it still running, and outlives any one of them. **A project's tab closes with the
-project**: when its last task is archived. **A stop never closes it** — a stop tears nothing
-down, so the tab and everything standing in it is left exactly where it stood, and the next
-run picks the queue back up from there. Never the shared workspace: another project's lanes
-may still be live in it, so only you close that row, by hand.
-
-### `herdr_mode = "split"` — a row per task
-
-```toml
-[dispatch]
-herdr_mode = "split"
-```
-
-No tab in the shared workspace at all, and the dispatcher stays where you started it. Each
-task gets its own herdr workspace, cut with git and bound to the result with `herdr worktree
-open` — never `workspace create`, which leaves a row with nothing for herdr to nest it under.
-Bound, the row sits nested under the project's own row, prefixed `spoolway/` rather than named
-after the task alone, so the group already naming the repository and the prefix naming the
-row's owner is enough to tell your own checkouts apart from the run's. The label is fixed at
-creation and never relabelled as the task moves through its steps; what says which step a lane
-is on now is the lane's own pane.
-
-Pick this when a row per task is what you want to look at, and `grouped` when you would
-rather the run were one thing.
-
-**Stopping tears nothing down.** Every lane the run holds keeps its pane and its worktree,
-under both `split` and `grouped`: a stop never closes a tab, workspace, pane or worktree, and
-never removes a checkout. The task stays exactly on the step it was mid-way through, its
-checkout stays where it was cut, and its lane — agent and any `background: true` command
-alike — is left running, whatever backend it runs under. Nothing here is for the next run to
-resume *into*; it is already sitting in it.
-
-Two things still happen on the way out, because they are not the checkout's to carry and
-nothing else ever banks them for this turn: each still-running lane's spend is banked, and its
-launch counter is forgiven, so the next run picks the same lane back up rather than starting a
-second one over the same worktree, or treating a launch that never failed as a failure. See
-[`Dispatcher::sweep_on_stop`](#sweeping-on-stop).
-
-Those tasks stay in the queue rather than being archived: they were interrupted, not
-finished. **Their branches stay too.** The worktree is the thing the run was holding; the
-commits on the branch are what the agent got done before you stopped it, and there is nowhere
-else they exist. The next run finds the branch, cuts a fresh worktree on it, and resumes the
-step on top of that work rather than starting it again from base.
-
-`Ctrl-C` is caught to make this happen; a second one kills the run outright, and so does
-anything that stops the process without asking.
-
-Only sessions spoolway named are spoolway's. A lane is named `<task> · <step>` and matched on
-that name — the same string the pane shows, `spoolway lane` lists, and `spoolway lane -m`
-takes, with no fallback to an older spelling — which is absent for anything started by hand, so
-your own agent windows in the same session are never counted, prompted, or torn down.
-
-**Submitting a prompt can land it typed but unsent.** Observed against Claude Code: the text
-appears in the pane's input box, no turn begins, and the task would otherwise sit on its step
-until somebody looked. herdr tells the two cases apart on its own, so spoolway acts on what it
-reports rather than re-deriving it from the lane's status: a stalled submission comes back
-with `agent_prompt_stalled` in herdr's own error envelope, and a plain `timeout` at the same
-bound means the same thing, because the timeout spoolway passes sits exactly on herdr's own
-stall threshold. Only a reported stall gets a single `Enter` sent to the pane — a lane that
-answered normally, or failed for any other reason, is left alone — and that Enter is
-re-verified with a bounded `herdr agent wait` rather than a single immediate status read. A
-stall that survives the Enter is reported as a failure rather than papered over.
+Under `grouped`, the project's tab closes when its last task is archived. The shared workspace
+is only ever closed by hand. Under `split`, each task's workspace is bound to its worktree with
+`herdr worktree open`.
 
 ### tmux
 
-```toml
-[dispatch]
-backend = "tmux"
-tmux_mode = "grouped"    # or "split"
-```
+The run lives in a background tmux server. Attach to look, detach to walk away.
 
-The same layouts, spoken tmux: a tmux **session** stands where a herdr workspace does, a
-**window** where a tab does, and a pane is a pane. Every lane is a real pane here too —
-attach to watch or take over, detach and the run keeps going. tmux's ids are used
-throughout, so renaming or rearranging things by hand confuses nothing.
+| Keys | What they do |
+|---|---|
+| `tmux attach -t spoolway-dispatcher` | Attach to the shared session. |
+| `Ctrl-b d` | Detach. Everything keeps running. |
+| `Ctrl-b w` | Every session and window as a tree. |
+| `Ctrl-b n` / `Ctrl-b p` | Next / previous window. `Ctrl-b 1..9` jumps by number. |
+| `Ctrl-b ↑` / `Ctrl-b ↓` | Move between panes. `Ctrl-b z` zooms one. |
+| `Ctrl-b [` | Scroll back. `q` leaves. |
 
-No tmux knowledge is assumed. The run lives in a background tmux server whether or not you
-are looking; you attach to look and detach to walk away. Everything is the prefix key —
-press `Ctrl-b`, release, then one key — and spoolway turns the mouse on for the sessions it
-creates, so clicking a window in the status bar, clicking into a pane, and wheel-scrolling
-all work:
-
-```
-tmux attach -t spoolway-dispatcher    attach — the same name for every project
-Ctrl-b  d       detach — everything keeps running
-Ctrl-b  w       every session and window as a tree: the "sidebar" key
-Ctrl-b  n / p   next / previous window;  Ctrl-b 1..9 jumps by number
-Ctrl-b  ↑ / ↓   move between panes;  Ctrl-b z zooms one fullscreen
-Ctrl-b  [       scroll back (q to leave)
-```
-
-**`tmux_mode = "grouped"`** is one session, `spoolway-dispatcher`, shared by every project
-dispatching on the machine. Each project gets one window of its own — found or opened the
-first time it dispatches, its own invocation moved into it exactly as it always has been under
-tmux — carrying one pane per running task, nothing else. `tmux ls` shows the one shared
-session; `Ctrl-b w` walks its windows, one per project:
-
-```
-$ tmux ls
-spoolway-dispatcher:  2 windows  (created Thu Aug 14 09:12)
-
-┌───────────────────────────── [1] spoolway ──────────────────────────────┐
-│ ● add-auth · implement                 │ ● port-docs · plan             │
-│   editing src/auth.rs…                 │   drafting the task list…      │
-│   ✻ Working… (esc to interrupt)        │   ✻ Working… (esc to interrupt)│
-├────────────────────────────────────────┼────────────────────────────────┤
-│ ● fix-flaky · review                   │                                │
-│   paused — look at pane                │                                │
-└────────────────────────────────────────┴────────────────────────────────┘
-```
-
-A step ending closes only its own pane; the window survives it and every task after it, and
-closes only when the project's dispatcher stops — never the shared session, which another
-project's lanes may still be live in.
-
-**`tmux_mode = "split"`** is a session per task instead, named `spoolway/<task>` and fixed —
-never relabelled as the task moves through its steps — with the dispatcher left in the
-terminal you started it in:
-
-```
-$ tmux ls
-spoolway/add-auth:  1 windows  (created Thu Aug 14 09:12)
-spoolway/fix-flaky: 1 windows  (created Thu Aug 14 09:14)
-
-┌────────────────────────── spoolway/add-auth ──────────────────────────┐
-│ ╭───────────────────────────────────────────────────────────────────╮ │
-│ │ ● claude — add-auth · implement                                   │ │
-│ │   I'll add the auth middleware next. Editing src/auth.rs…         │ │
-│ │   ✻ Working… (esc to interrupt)                                   │ │
-│ ╰───────────────────────────────────────────────────────────────────╯ │
-├───────────────────────────────────────────────────────────────────────┤
-│ [0] add-auth · implement*                                             │
-└───────────────────────────────────────────────────────────────────────┘
-```
-
-Pick `split` when a row per task is what you want `tmux ls` to show, and `grouped` — the
-default — when the run should be one shared session rather than a row per task. Teardown
-follows the layout: under `grouped` a task's own checkout is removed with git directly — there
-is no window or session of the task's own to close — and under `split` the task's whole
-session goes, taking the worktree with it. A task parked in front of a person — paused, or
-blocked with nobody staffed to answer it — is spared either way, its pane held and focused
-for you to read.
-
-Two things tmux has no opinion on, so spoolway carries them itself:
-
-- **Which panes are spoolway's.** Lanes are stamped onto their panes (tmux "user options"),
-  along with the project they belong to — so your own tmux sessions on the same server are
-  never counted, prompted, or closed, and two projects dispatching at once stay out of each
-  other's lanes. The same stamps are how `spoolway lane` and `spoolway lane -m` in a fresh
-  terminal find the lanes the dispatcher started.
-- **Whether a lane is mid-turn.** herdr's agent layer answers that directly; tmux is read
-  the way you would read it — a pane whose screen is still changing is working, one that
-  has sat unchanged for a dozen seconds has settled and is promptable again. The reminder
-  loop never depends on this: silence is measured on the agent's own transcript, and tmux
-  has no cheaper way to tell whether a lane still holds a process of its own open, so
-  `Mux::lane_process_alive` answers `None` here exactly as it does on herdr, which cannot
-  check either: an agent's own tool calls never take the pane's foreground process group, so
-  there is nothing in herdr's process table for the method to key on.
-
-Prompts go in as one bracketed paste followed by Enter, so a multi-line prompt cannot
-self-submit halfway — and, as under herdr, a submission that visibly fails to start a turn
-gets exactly one more Enter before being reported rather than papered over.
+Under `grouped`, a project's window closes when its dispatcher stops. Under `split`, a task's
+session goes when the task is cleaned up. A paused or blocked task keeps its pane either way.
 
 ### Vacating a pane
 
-`Mux::vacate_lane` is a weaker ending than `Mux::stop_lane`: it asks the session in a pane to
-leave, rather than destroying the pane to end it. It is what lets a task's steps share a single
-pane instead of each splitting a new one and closing it again, and the dispatcher calls it
-wherever it used to close a finished lane's pane.
+When a step finishes, the dispatcher asks its session to leave the pane, so the next step can
+start in the same pane. Only herdr can send that request, and only `claude` has a quit gesture.
+See [Leaving a pane without closing it](agents.md#leaving-a-pane-without-closing-it). tmux and
+headless close the pane instead.
 
-A step is not started while an earlier step of the same task still has a live lane, because
-that lane still holds the task's pane — a lane reports mid-turn and keeps talking, so the pass
-that reads the moved stage still sees it working. The wait is bounded by `HANDOVER_WAIT` in
-`src/dispatch.rs`, two minutes, and is a constant rather than a config key. Past it the next
-step starts anyway: it splits a pane of its own first, and the lane that would not let go is
-closed after — never the other way round, since a pane closed with nothing beside it can take
-its tab with it.
-
-A step that reports back onto itself — `blocked` reporting `--block` again, most often — hands
-its pane forward the same way, but across a pass boundary rather than within one: the task is
-not a candidate on the pass that ends the round, so there is nobody in that pass to hand the
-pane to. The dispatcher writes the pane down on the lane's own record instead, and the pass
-that starts that step's name again picks it up from there.
-
-What a person watching the pane sees during any handover is it going blank. Claude Code runs
-in the alternate screen buffer, so leaving a pane loses its transcript the same way closing it
-would — nothing is captured to carry the conversation across, only the pane itself.
-
-Which kinds have anything to send is `Adapter.quit` — see [Leaving a pane without
-closing it](agents.md#leaving-a-pane-without-closing-it) in agents.md — and only `claude`
-carries a gesture today. A backend that can send it types the line at the pane, submits it,
-and then watches for the agent to actually go rather than assuming a submitted line worked: up
-to ten seconds, polled every quarter second, before giving up. A pane reported empty that is
-not is the one failure this is written to avoid, since the next step's `agent start` would type
-straight into whatever conversation is still sitting there.
-
-The call reports which of three things happened, because "the pane did not come back to a
-shell" covers two situations a caller has to tell apart and handle differently: the session
-left and the pane is standing empty at its shell; no gesture was tried, so the session was
-ended the only other way there is and the pane went with it — exactly today's behaviour; or the
-gesture was sent and the agent was still there when the ten seconds ran out, in which case the
-pane is left exactly as found, agent and all, for the caller to close only after splitting
-whatever replaces it.
-
-herdr is the only backend that can send a gesture at all, by typing the kind's `quit` line into
-the pane and watching `herdr agent list` for the session to drop off it. tmux cannot,
-structurally: a tmux lane's pane *is* the agent's own process, so once it respawns the pane
-that way there is no shell underneath left to hand back. Headless has no pane in the first
-place. Both fall back to closing the pane, exactly as `stop_lane` already does.
+The next step waits up to two minutes for the earlier lane to leave. After that it splits its
+own pane and the old one is closed. The pane goes blank during the handover.
 
 ### Headless
 
@@ -1336,37 +335,10 @@ place. Both fall back to closing the pane, exactly as `stop_lane` already does.
 backend = "headless"
 ```
 
-The same pipeline with no multiplexer, no tmux and no panes. Each turn is its own detached
-process, its output goes to a log, and the conversation is carried across turns by the
-session id the profile already pins — the same one that makes cost accounting possible.
-
-**Every scheduling decision is identical.** A pass still reconciles from the task file's
-stage and the live lane list; the dispatcher still uses no model. What changes is only where
-a lane lives, and therefore what a person can do with one.
-
-Three things fall out of a turn being a process rather than a resident session:
-
-- **Status gets simpler, not harder.** Running is `working`, exited is `done`. There is no
-  blocked state: a headless run cannot stop and ask, it just ends — which the dispatcher
-  already reads as "settled with an unchanged stage" and reminds by reopening the lane's own
-  pinned session, exactly as it does under a multiplexer; see [A lane that settles without
-  reporting](#a-lane-that-settles-without-reporting).
-- **A gate stops costing a worker slot.** There is no session to protect, so an approval
-  sitting unread overnight holds nothing.
-- **Taking over changes shape.** There is no pane to attach to; see below.
-
-What you lose is *live* observation — watching a lane think. That is the honest price.
-The board still narrates the run — it is drawn by the dispatcher itself, so it is there
-headless exactly as it is under a multiplexer — and a lane's transcript is `spoolway lane`.
-
-Only kinds spoolway has established headless flags for can run this way — `pi`, `claude`
-and `codex` today. A kind without them is refused at lane start rather than
-launched with a guessed flag.
-
-Worktrees are cut at the configured worktree root
-(`~/.spoolway/<project>/worktrees` by default), deliberately outside the checkout: under
-`.spoolway/` every task's checkout would sit beside the prompts every lane already reads,
-and a lane building there could rewrite any other task's checkout by name.
+Every scheduling decision is the same. Each turn is a detached process that logs to a file,
+and a reminder reopens the lane's pinned session. `spoolway lane <lane>` reads the log, which
+outlives the lane, and `spoolway lane <lane> --attach` reopens the session in your terminal.
+Both work over SSH. Only `pi`, `claude` and `codex` can run headless.
 
 ## Looking into a lane
 
@@ -1374,114 +346,38 @@ and a lane building there could rewrite any other task's checkout by name.
 spoolway lane                       # the lanes there are
 spoolway lane "login · implement"   # that lane's output
 spoolway lane "login · implement" -n 500
+spoolway lane "login · implement" --attach   # headless: reopen the session in your terminal
 ```
 
-A lane name holds a space, so quote it — an unquoted `login · implement` reaches the
-shell as three words, not one argument.
-
-This is the model-free answer to "what is it up to", the way looking at a pane costs
-nothing. Under a multiplexer it reads the lane's pane. Headless it reads the lane's log —
-which **outlives the lane**, so a task that went wrong can still be looked into after it has
-finished.
-
-To intervene by hand headless, `spoolway lane <lane> --attach` reopens the lane's own session in
-your terminal, whole conversation included — it works over plain SSH, which attaching to
-somebody's multiplexer does not.
+Quote the lane name. It holds a space.
 
 ## Where work happens on disk
 
-Each task gets a git worktree cut from its base branch, or from its first dependency's branch
-when it has a `depends_on` — unless somebody already has the task's branch checked out, in
-which case the lane borrows that checkout and cleanup leaves it alone; see [Whose
-worktree](pipelines.md#whose-worktree).
+Each task gets a git worktree at `dispatch.worktree_root`, which is
+`~/.spoolway/<project>/worktrees/task-<id>` by default. If somebody already has the task's
+branch checked out, the lane borrows that checkout and cleanup leaves it alone. See
+[Whose worktree](pipelines.md#whose-worktree).
 
-**One root, every backend, every layout**: `worktree_root`, which is
-`~/.spoolway/<project>/worktrees` unless you name another — nested under the project's own
-home, beside its queue and archive, so a worktree cut here never registers as a workspace of
-its own the way one cut at a repository's root did. The directory inside it is the branch
-flattened to one component — `task-<id>`, or `task-<slug>-<id>` when a tracker slug prefixed
-the branch — for every backend now. One entry per task is what makes "everything the run is
-holding" something you can list, and the branch is what `git worktree list` shows and so what
-a person looking for it reads.
+When a task reaches `done`:
 
-Deliberately *not* under `~/.herdr/`, which it used to be. That is herdr's directory, and
-these are checkouts herdr never hears about until it is pointed at one. A worktree you cut by
-hand still lives where herdr files it, `~/.herdr/worktrees/<repo>/<branch>`.
-
-A task worktree carries a `.spoolway/` of its own, because the config, the pipeline and the
-prompts are tracked. The queue is not, deliberately. That is why every command resolves the
-project through git's common directory rather than by walking up for a `.spoolway/`
-directory: the latter would find the worktree and an empty queue.
-
-Worktrees and branches are removed, and the task file archived, when a task reaches the
-reserved `done` stage — unless the checkout was borrowed, in which case it and its branch
-were somebody else's before the task started and are still theirs after it. The
-task file records which it was, as `borrowed:`, because afterwards the two look identical to
-git.
-
-Cleanup commits whatever the worktree still holds before it removes anything, the same
-`wip(<task>): <step>` backstop `spoolway report` runs. If that commit cannot be made — a git
-command fails, or `dispatch.auto_commit` is off and the lane left work behind — the task is
-held at `blocked` instead of archived, with a `## Status Log` line saying why, so a person
-sees the worktree before it is gone. Residue a lane deliberately left is not this: it is
-named in the log, and cleanup proceeds.
-
-A finished task's own branch is kept alive past that cleanup for a reason that is not that the
-work is done: while anything still queued names it in `depends_on` — that branch is what the
-dependent's worktree gets cut from — and while some remote still lacks a commit of its own, the
-branch being asked directly whether every commit on it has reached a remote rather than trusting
-`git`'s own "merged" check, which a squash-merge would lie about. A branch kept for the second
-reason is named on the run's problem list, `"<id>: kept branch <branch> — it has commits no
-remote has"`, so the last thing that used to happen to a finished task — deleting the only copy
-of its work — no longer does. Either way the next cleanup to run frees it once the reason is
-gone: a depended-on branch once the last dependent has been cut, an unpushed one once it is
-pushed and nothing still needs it.
-
-Archiving a task also reclaims the run files and session state named for it. Its hook run
-files under `tracking/` and its command-step run files under `commands/` are deleted, matched
-on the `<task> · ` filename prefix so another task's files are left alone. The per-session
-agent home each of its lanes was given is removed too — both the lanes just banked by this
-cleanup and any older lane record still held for the task. All of this runs only after the
-task file has moved into `archive/`, past the point where cleanup can still turn back and
-hold the task at `blocked`, so a held task keeps its scratch tree, its run files and its
-session homes for `spoolway resume`.
+1. Leftover work is committed as `wip(<task>): <step>`. If that fails, the task is held on
+   `blocked`.
+2. The worktree is removed, unless it was borrowed.
+3. The branch is deleted, unless a queued task still depends on it or it has commits no remote
+   has.
+4. The task file moves to `archive/`, and its run files and session homes are deleted.
 
 ### Trial arms
 
-A trial is a whole group forked under one freshly minted trial id — `p` on a group in the
-queue screen, one arm per source task, all sharing the same `group:` and one `trial:` id new on
-every launch (see [Trials](planning.md#trials)). An arm is a disposable copy of somebody else's
-task, and the trial boundary treats it that way from the moment it is dispatched until it is
-torn down.
+A trial forks a group into one arm per task under one `trial:` id. See
+[Trials](planning.md#trials). An arm is a disposable copy:
 
-Dispatch closes two things a trial arm must never do on its own. Its `queued` and `done` events
-never fire the project's `[issue_tracking]` hook: the reserved-stage hook handler drops a trial
-arm before it calls out, so an arm opens no pull request and posts no issue however its steps are
-ticked. And `spoolway stack` — the one built-in publishing boundary spoolway owns outright — is a
-no-op for a trial arm, returning before it ever reads a worktree, diffs a branch or spends a
-`gh` call, so there is no dependent branch to hand a real task's own `handover` a diff against
-and nothing for a custom pipeline command to be told to skip. The trial's own comparison is
-already banked in the usage ledger by the time an arm runs, which is why neither needs the pull
-request.
+- Its `queued` and `done` events never fire the `[issue_tracking]` hook.
+- `spoolway stack` is a no-op for it, so it opens no pull request.
+- Its branch is deleted at cleanup whether or not a remote has it.
 
-A trial arm's branch is spent without ordinary care. An ordinary task's unpushed branch is kept
-past cleanup — it is the only copy of its work, and the last thing that used to happen to a
-finished task was deleting that copy — but a trial arm's comparison is already in the ledger, so
-an unpushed branch is exactly the debris the boundary exists to remove and is deleted whether or
-not any remote ever saw it. The same exemption applies when the branch would otherwise be held:
-a still-queued dependent that names it in `depends_on` is, inside a trial, a sibling arm being
-torn down in the same breath, so the reason to keep it is gone before the call returns.
-
-A trial is cleaned up in two ways, and both leave exactly the same two things standing: the
-source group the trial forked, which is never touched, and the usage rows every arm banked, which
-are what the trial was run to produce. Everything else is removed.
-
-Settlement is the automatic one. Once every arm of a trial has reached `done`, the last one to
-settle removes every arm's archive document rather than leaving them to `retain.rs`'s own
-`retention.days` to age out; each arm's own cleanup has already reclaimed its worktree, branch,
-pane, scratch directory, session and run files, so the archive copy was the only thing left
-standing for a trial. The completion report names what survived and what was thrown away, and
-ends by pointing back at the evidence a settled trial deliberately keeps:
+When the last arm reaches `done`, every arm's copy is removed. The source group and the usage
+rows stay:
 
 ```
 trial t9f3a settled
@@ -1494,14 +390,5 @@ trial t9f3a settled
   read      spoolway eval --runs --trial t9f3a
 ```
 
-An explicit discard is the other. `spoolway eval --discard <id>` throws a whole trial away while
-its arms are still in flight, so a person who has seen enough does not have to wait for the last
-one to settle. It reaches every arm's document wherever it sits — pending, queue or archive — and
-tears down each arm's worktree, local branch (pushed or not), pane, scratch directory, session
-home and command run files, banking the arm's spend before the session it was spent in is
-reclaimed. A trial with nothing running needs no flag: the arms are idle, and the documents are a
-copy of documents that still exist. An arm on a live agent lane or a running command step is
-mid-turn, though, and killing it throws away whatever that turn was doing, so the plain form
-refuses and names the arms responsible; `--force` says the caller already knows what it is
-choosing, the same trade `spoolway queue pause --force` makes. A discard reaches further than
-settlement does, and still never touches the source group the trial forked.
+`spoolway eval --discard <id>` removes a trial before it settles. It refuses while an arm is
+mid-turn unless you pass `--force`.

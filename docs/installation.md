@@ -5,8 +5,7 @@ covers: ["src/install.rs", "src/update.rs", "src/release.rs", "src/release_notes
 
 # Installation and setup
 
-Installing spoolway, scaffolding a project, checking that it would actually run, and keeping
-it current as spoolway changes.
+How to install spoolway, set up a project, check that it runs, and keep it up to date.
 
 ## Installing
 
@@ -14,162 +13,121 @@ it current as spoolway changes.
 npm install -g spoolway
 ```
 
-The npm package is a thin wrapper around a prebuilt binary — there is nothing to compile and
-no Node program running underneath. Prebuilt targets:
+The npm package is a small wrapper around a prebuilt binary. Nothing is compiled and no Node
+program runs underneath.
 
-| Platform | Architectures |
-|---|---|
-| Linux | x64, arm64, and a musl build of x64 |
-| macOS | Apple Silicon, Intel |
-| Windows | x64 (experimental — see below) |
+| Platform | Package | Status |
+|---|---|---|
+| Linux x64 | `@spoolway/linux-x64` | Supported |
+| Linux x64 (musl) | `@spoolway/linux-x64-musl` | Supported |
+| Linux arm64 | `@spoolway/linux-arm64` | Supported |
+| macOS Apple Silicon | `@spoolway/darwin-arm64` | Supported |
+| macOS Intel | `@spoolway/darwin-x64` | Supported |
+| Windows x64 | `@spoolway/win32-x64` | Experimental, see [Windows](#windows) |
 
-From source instead:
+From source, in a clone of this repository:
 
 ```
 cargo install --path .
 ```
 
-Or by hand: every release attaches one archive per target — `spoolway-<triple>.tar.gz`, a
-`.zip` for Windows — with a `SHA256SUMS` beside them. Unpack it and put the binary on your
-`PATH`; it is the same executable npm would have installed, and it depends on nothing else.
+By hand: every GitHub release has one archive per platform and a `SHA256SUMS` file. Unpack the
+archive and put the binary on your `PATH`.
 
 ## What spoolway needs
 
 | Requirement | What it means |
 |---|---|
-| **A multiplexer** | herdr or tmux, unless you run the headless backend, which needs no multiplexer at all. It runs on any Unix host and detaches its lanes with the `setsid` syscall, so no `setsid` binary is needed on `PATH` |
-| **Agent binaries** | `pi` for local lanes, `claude` for the review step — or whatever your own configuration points at |
-| **git** | And `gh`, if your pipeline opens pull requests |
+| A multiplexer | `herdr` or `tmux`. The `headless` backend needs none. |
+| Agent binaries | `claude`, `codex` or `pi`, whichever your pipeline steps name. |
+| `git` | Always. Plus `gh` if your pipeline opens pull requests. |
 
-None of these is checked at install time. `spoolway doctor` checks all of them against the
-pipeline you have actually configured, which is the useful version of the question.
+Nothing is checked at install time. `spoolway doctor` checks all of it against your configured
+pipeline.
 
 ## Scaffolding a project
 
-Run the initialiser inside a git repository:
+Run this inside a git repository:
 
 ```
 spoolway init
 ```
 
-At a terminal it asks three things before it writes anything — the coding agent you plan in,
-the issue tracker to name in `[issue_tracking]` and the project its tickets file into. Fixed
-choices use an arrow-key selector; move with ↑/↓ and accept with Enter or Space. Each has a
-flag (`--provider`, `--tracker`, `--project-key`), and giving it means the question is not
-asked. Run without a terminal — a script, CI, a pipe — nothing is asked and the defaults are
-taken: claude and no tracker. Every agent step's model and effort stay blank for you to fill
-in.
+At a terminal it asks three questions. Each one has a flag, and a given flag skips its question.
+Without a terminal, the defaults apply: `claude` and no tracker.
 
-On a fresh success, `init` prints that the skills were installed and the project was initialized,
-plus one sentence telling you to set model and effort on every agent step in
-`.spoolway/pipelines/*.yml` before dispatching, and any actionable warning. Running it again to
-add another provider's skills omits the project message (and the sentence). The narrower
-`spoolway install <provider>` command uses the same concise skills message.
+| Question | Flag | Default |
+|---|---|---|
+| The coding agent you plan in | `--provider claude\|codex` | `claude` |
+| The issue tracker | `--tracker github\|jira\|none` | `none` |
+| The tracker's project | `--project-key <KEY>` | none |
 
-`--provider` settles the fresh project's one agent identity: a fresh scaffold keeps exactly
-that one profile, points `pipeline_gen.pipeline_agent` and `unattended.blocked_agent` at it,
-and specializes every bundled pipeline's agent steps to it. Model and effort are left blank on
-every step, because spoolway cannot choose either for you. A pipeline can still name a step
-onto any other profile of any other kind — add or change profiles with `spoolway config set`
-afterwards; see [Agents and models](agents.md).
+`--provider` becomes the project's one agent profile. Every pipeline step runs on it. Model
+and effort are left blank on every step, and you fill them in before dispatching.
 
-It creates, in one pass:
+```mermaid
+flowchart LR
+  I[spoolway init] --> C[.spoolway/config.toml]
+  I --> P[.spoolway/pipelines/*.yml]
+  I --> R[.spoolway/prompts/&lt;name&gt;/PROMPT.md]
+  I --> T[.spoolway/templates/]
+  I --> H[.spoolway/hooks/]
+  I --> S[provider skills directory]
+  I --> N[~/.spoolway/&lt;project&gt;/project.toml]
+```
 
 | Path | What it is |
 |---|---|
-| `.spoolway/config.toml` | Every setting, with its defaults and its explanatory comments |
-| `.spoolway/pipelines/` | The sample workflow's two pipelines, documented inline. A template — extend them, or replace them outright |
-| `.spoolway/prompts/<name>/PROMPT.md` | The six prompts that staff the sample workflow, as Markdown. Yours from this moment; no update touches them |
-| `.spoolway/prompts/archivist/assets/` | The document skeletons the archivist fills — one per domain, one per project. Yours too |
-| `.spoolway/templates/tasks/` | One task skeleton per shipped pipeline |
-| `.spoolway/templates/task-log.md` | What belongs under each heading spoolway appends to a task file. Yours from this moment; no update touches it |
-| `.spoolway/templates/tracking/` | The `epic.md` and `ticket.md` bodies a tracker hook renders for a new issue |
-| `.spoolway/hooks/` | The tracker hook scripts — `github.sh`/`jira.sh` on Unix, `github.ps1`/`jira.ps1` on a native Windows install — written whichever tracker you answered, or none at all. See [`[issue_tracking]`](configuration.md#issue_tracking--a-hook-fired-on-four-task-events) |
-| `~/.spoolway/<project>/project.toml` | The pointer that claims this project's name — see below |
-| The provider's skills directory | The five pipeline skills, in the convention of whichever provider you chose. See [the pipeline skills](#the-pipeline-skills) below |
+| `.spoolway/config.toml` | Every setting, with defaults and comments. |
+| `.spoolway/pipelines/` | The two sample pipelines. Edit or replace them. |
+| `.spoolway/prompts/<name>/PROMPT.md` | The six sample prompts. Updates never touch them. |
+| `.spoolway/prompts/archivist/assets/` | The document skeletons the archivist fills. |
+| `.spoolway/templates/tasks/` | One task skeleton per shipped pipeline. |
+| `.spoolway/templates/task-log.md` | The headings spoolway appends to a task file. |
+| `.spoolway/templates/tracking/` | The `epic.md` and `ticket.md` bodies a tracker hook renders. |
+| `.spoolway/hooks/` | `github.sh` and `jira.sh`. On native Windows, `github.ps1` and `jira.ps1`. See [`[issue_tracking]`](configuration.md#issue_tracking--a-hook-fired-on-four-task-events). |
+| `~/.spoolway/<project>/project.toml` | Claims the project's name. |
+| The provider's skills directory | The five pipeline skills. See [The pipeline skills](#the-pipeline-skills). |
 
-An existing file is kept rather than overwritten. `--force` overwrites.
+Existing files are kept. `--force` overwrites them.
 
-Run `init` again in a project that already has a config and it installs skills and changes
-nothing else — which is how you add a second provider. `--tracker` and `--project-key` are
-reported as not applied rather than quietly dropped: rewriting a config a project has been
-running on is not what a second `init` is for. `spoolway config set` is, and `--force` takes
-the shipped config back.
+Running `init` again in a set-up project installs skills and changes nothing else. To change
+settings later, use `spoolway config set`.
 
-**Everything spoolway writes while it runs — the queue, the archive, plans, lane
-bookkeeping, the usage ledger — lives outside the checkout, at
-`~/.spoolway/<basename of the checkout>/`.** `init` claims that name by writing the pointer
-file above; running `init` again in a different checkout that would claim the same name is
-refused, naming both. Where the checkout a name was registered to is gone but its archive or
-queue is still there, `init --take-over` claims the name and keeps that state rather than
-deleting it — refused without the flag, because state that old is not one to walk into by
-accident. Delete the whole directory to forget every task, plan and lane a
-project has ever run — nothing under it is tracked, and nothing in the checkout points back
-at it besides the name. See [Runtime state](configuration.md#runtime-state).
+Everything spoolway writes while it runs lives outside the checkout, at
+`~/.spoolway/<basename of the checkout>/`: the queue, the archive, plans, lane records and the
+usage ledger. A second checkout with the same name is refused. If the old checkout is gone but
+its state is still there, `init --take-over` claims the name and keeps that state. Delete the
+directory to forget every task, plan and lane. See [Runtime state](configuration.md#runtime-state).
 
-`init` never writes to your `.gitignore` any more — runtime state moved out of the checkout,
-so there is nothing left for a rule to keep out of git. A project set up before the move has
-a marked block in its `.gitignore`, between `# >>> spoolway >>>` and `# <<< spoolway <<<`;
-`spoolway update` takes it back out, once, and writes no rules of its own in its place.
+`init` does not write to `.gitignore`. `spoolway update` removes the marked block an older
+version wrote there.
 
 ### The pipeline skills
 
-`init` installs these — you only run the command below to add a second provider, or to take
-newer skills without touching anything else:
+`init` installs the skills. Run this to add another provider or to take newer skills:
 
 ```
 spoolway install codex
 ```
 
-This writes five skills for a coding agent, so that planning, reshaping the flow and
-diagnosing a project are procedures the agent already knows rather than things you explain
-each time:
-
 | Skill | What it does |
 |---|---|
-| `spoolway-plan` | Turns one goal into a reviewable plan page, then — once you approve it — cuts the task breakdown into the project's pending directory as one document per task. Queues nothing; `spoolway queue`, the screen, does that |
-| `spoolway-tasks` | The task-cutting procedure `spoolway-plan`'s own step 7 invokes: settle the pipeline, decompose against the window its implementing step runs on, offer the shape, write and prove the documents. A second skill that cuts a breakdown calls it too, rather than carrying its own copy |
-| `spoolway-config` | Changes anything in the control plane — the pipelines in `.spoolway/pipelines/*.yml`, the prompts their steps run, `config.toml`, the task and lane templates, and the issue-tracking hooks — as a temporary override that leaves the checkout clean, or as an edit to the tracked file |
-| `spoolway-doctor` | Runs every read-only check, collects the findings into one report, and changes nothing until you pick |
-| `spoolway-calibrate` | Reads lane-written task records and step-level evaluation and spend data, compares them with the prompts and pipelines that produced them, and applies the control-plane improvements the person chooses |
+| `spoolway-plan` | Turns one goal into a plan page. After you approve it, it cuts the tasks into the pending directory. |
+| `spoolway-tasks` | Cuts an agreed shape into task documents: pipeline, size, ids, globs, dependency order. |
+| `spoolway-config` | Changes pipelines, prompts, `config.toml`, templates and hooks, as an override or as an edit. |
+| `spoolway-doctor` | Runs every read-only check and reports the findings. |
+| `spoolway-calibrate` | Compares archived tasks, step-level evaluation results and spend data against the prompts and pipelines that produced them, then applies the changes you pick. |
 
-Three of these are human-invoked only — none of them fires on its own. `spoolway-tasks` and
-`spoolway-config` are the exceptions: they carry no `disable-model-invocation`, because both
-have to stay reachable from inside another procedure, not only from a person's own prompt —
-`spoolway pipeline gen` is what reaches `spoolway-config`. Each lands as
-`<provider's directory>/<name>/SKILL.md`: one directory per skill, which is the layout all
-three providers discover. None brings any file beside it — `spoolway-config` (renamed and
-widened from `spoolway-pipeline`) ships no format of its own at all: every contract it routes
-to — `pipeline`, `prompt`, `config`, `override`, `template` and `hook` — is printed by the
-binary itself, so the skill fetches each at runtime rather than carrying a copy that can drift
-from what actually loads.
-
-**One of these skills says almost nothing in the session.** `spoolway-plan` produces a page
-and then prints one line: the absolute path to it. Everything it worked out is on the page,
-where it can be read, revised and reread — and anything still undecided is marked in violet,
-so a document with none of it on it is one with nothing left to decide. `spoolway-config`
-writes no page at all: a pipeline is a short YAML file, a prompt is prose, and a value change
-is an override command — all read faster in the files and the printed contracts themselves
-than in any description of them.
-
-**Three providers, one set of skills.** The content is shared; a provider decides only where
-the directory goes, because all three converged on the same layout:
+Each skill is one directory holding a `SKILL.md`. All three providers read that layout.
 
 | Provider | Skills go in |
 |---|---|
 | `claude` | `.claude/skills/` |
 | `codex` | `.agents/skills/` |
-| `pi` | `.pi/skills/` — loaded only once the project is trusted, so answer pi's trust prompt or start it with `--approve` |
+| `pi` | `.pi/skills/`. pi loads them once the project is trusted, so answer its trust prompt or start it with `--approve`. |
 
-Which one you plan in is a separate question from what your lanes run. `--provider` is the
-agent you plan in, and for a fresh project it also becomes that project's one agent profile —
-see [`spoolway init`](#scaffolding-a-project). A pipeline can still run a step on another
-profile of another kind you add later with `spoolway config set`.
-
-`gemini` is not on the list. It has no adapter row either — nothing about it has been
-settled against the binary, and a guessed row is worse than no row.
-
-Start a fresh agent session after installing, so it picks the skills up.
+Start a fresh agent session after installing so it picks the skills up.
 
 ### Checking the setup
 
@@ -177,160 +135,98 @@ Start a fresh agent session after installing, so it picks the skills up.
 spoolway doctor
 ```
 
-`doctor` answers one question: would this pipeline actually run on this machine, right now?
-It checks, among other things:
+`doctor` checks that the configured pipeline would run on this machine:
 
-- the config parses, and the pipelines validate against it
-- the task dependency graph can be traversed
+- the config parses and the pipelines validate against it
+- the task dependency graph has no cycle
 - you are on a real branch, not a detached HEAD
-- each base branch the queue names is publishable, and whether a remote exists at all
-- each configured agent binary is on `PATH`, has a model set, and accepts the permission
-  mode you asked for
-- every prompt named by a step exists, and reads clean against the step that runs it
+- each base branch the queue names can be pushed
+- each agent binary is on `PATH`, has a model set, and accepts the configured permission mode
+- every prompt a step names exists and passes its checks
 
-Findings come in two weights. **Problems** set a non-zero exit code. **Notes** do not, because
-half of them are a project's settled choice — but the other half is a lane running with no
-prompt, a profile naming a kind that cannot be launched, or a step whose model no `[models]`
-entry prices.
-The `spoolway-doctor` skill exists to read the notes, since they go unread when the only
-thing anyone looks at is the failure count.
+Problems set a non-zero exit code. Notes do not. The `spoolway-doctor` skill reads both.
 
-`doctor` is also the one command that still runs when the config file does not parse. Every
-other command dies on that error, including the one you would reach for to find it; `doctor`
-reports the error with the line it is on, and still runs the checks that read no settings.
-
-A pipeline file that does not parse is handled the same way. `doctor` and `spoolway pipeline
-check` report the load failure as one failed check and run everything that does not need the
-pipeline graph, rather than exiting before they can tell you which file is broken.
+`doctor` still runs when the config or a pipeline file does not parse. It reports the parse
+error with its line and runs every check that does not need that file. Flags are in the
+[CLI reference](cli-reference.md).
 
 ## Keeping a project current
 
-spoolway writes files into your repository, and a few of them carry something a machine
-reads that has to agree with the binary. The update command takes what a newer spoolway
-writes without touching what you wrote:
-
 ```
-spoolway update --dry-run     # what it would change, and nothing else
-spoolway update               # take it
+spoolway update --dry-run     # print what would change
+spoolway update               # apply it
 ```
 
-It is also what takes the newer spoolway. When a release is out and npm is what installed
-this binary, `update` runs `npm install -g spoolway@<version> --ignore-scripts` first and
-then hands over to the binary it just installed, so the files written are that release's own.
-At a terminal, a successful handover finishes by showing the old and new versions, a compact
-digest of what changed, every migration that applies, and links to the full notes. A one-release
-update includes three to five highlights; a jump across releases lists the versions instead and
-points to `spoolway whats-new --since <old-version>` for the full history. That
-digest is deliberately absent from dry runs, file-only updates, unmanaged or dispatcher-blocked
-upgrades, and non-terminal output.
+If npm installed this binary and a newer release is out, `update` first runs
+`npm install -g spoolway@<version> --ignore-scripts` and then hands over to the new binary. At
+a terminal it then prints the old and new versions, the highlights, every migration that
+applies, and links to the full notes.
 
-The same history is compiled into the binary and needs neither a checkout nor a network call:
+The release notes are compiled into the binary:
 
 ```
-spoolway whats-new                 # this installed release in full
-spoolway whats-new --since 0.1.0   # every later embedded release, oldest first
+spoolway whats-new                 # this release
+spoolway whats-new --since 0.1.0   # every later release, oldest first
 ```
 
-The second form refuses anything other than an `X.Y.Z` version and says explicitly when no
-embedded release follows it. The source record and its format contract live in
-[`CHANGELOG.md`](../CHANGELOG.md); every binary version must have a valid section there.
-Two things stop the install and neither stops the files:
+The source is [`CHANGELOG.md`](../CHANGELOG.md). Its contract is written at the top of the
+file.
+
+Two things stop the binary update. Neither stops the file updates.
 
 | What stops it | What happens |
 |---|---|
-| **npm did not install this binary** | `cargo install`, an unpacked archive, a Nix store path. You are told which release is out and upgrade it however you installed it — spoolway will not guess |
-| **a dispatcher is running** | Replacing the executable underneath a live run kills it mid-pass, so the binary is left alone until the run ends |
+| npm did not install this binary | You are told which release is out. Upgrade the way you installed. |
+| A dispatcher is running | The binary is left alone until the run ends. |
 
-You are told a release is out by one line, on stderr, before whatever you actually typed:
+A newer release is announced by one line on stderr before the command's own output:
 
 ```
 Update available: 0.2.0. Run "spoolway update"
 ```
 
-It is for a person and nobody else — nothing is printed inside a lane, under `--json`, or when
-output is not a terminal. The check reads a cached answer and never waits on the network: an
-answer older than a day is refreshed by a background process for the *next* command, so no
-command is ever slower for it. Turn it off for a project with `update.check = false`, or for
-one machine with `SPOOLWAY_SKIP_VERSION_CHECK=1`.
+The line is not printed inside a lane, under `--json`, or when output is not a terminal. Turn
+it off with `housekeeping.update_check = false` in the config, or with
+`SPOOLWAY_SKIP_VERSION_CHECK=1` for one machine.
 
-What it does, file by file:
+What `update` replaces, file by file:
 
 | File | What is replaced |
 |---|---|
-| Pipeline file | Only the key reference in its header, between `# >>> spoolway >>>` and `# <<< spoolway <<<`. Your title line, your steps and your comments are copied through unread — and a pipeline file without the markers is left completely alone |
-| `.gitignore` | Only its own marked block, if a project set up before runtime state moved out of the checkout still has one — taken back out, once, and nothing written in its place |
-| **Prompt** | **Nothing. Ever.** |
-| **Document skeleton** | **Nothing. Ever.** |
-| **Task skeleton** | **Nothing. Ever.** |
+| `config.toml` | The comments and the settings reference. Your values stay. |
+| Pipeline file | Only the key reference between `# >>> spoolway >>>` and `# <<< spoolway <<<`. A file without the markers is left alone. |
+| `.gitignore` | Only the old marked block, removed once. |
+| Skills | Every installed provider's skills. |
+| Prompts | Nothing. |
+| Document skeletons | Nothing. |
+| Task skeletons | Nothing. |
 
-Plan pages are not in this table at all: `init` never places a plan skeleton in your project,
-so there is nothing here for `update` to bring forward.
-
-It never merges anything. A block you have edited by hand stops the update on that file
-rather than being overwritten. `spoolway update --replace <path>` gives those edits up
-deliberately, saving what was there beside it first. The report says only which files were
-written, so a file it declined to touch is named by `spoolway doctor` rather than there.
-
-A pipeline's key reference is the one block that does not ask. It is not a shape you filled
-in, it is a table of what *this binary* understands — every line in it is a claim about the
-program — so an edit inside the markers is a claim that has stopped being true, and it is
-rewritten every time, edits and all. That is `config.toml`'s bargain, one fence at a time:
-see [Pipelines](pipelines.md#per-step-keys).
-
-**Prompts and task skeletons are outside this entirely.** Both are prose you own outright,
-with nothing generated inside them to keep current: how a lane finishes comes from the
-system prompt the dispatcher composes at lane start, and a task's frontmatter is serialised
-from a struct in the binary on every save. So an upgrade cannot disturb a word you wrote in
-either, and changing what a task records is a spoolway release rather than a migration in
-your repository.
-
-The trade is that a sharper default in a later release does not reach you on its own.
-`spoolway pipeline check` is what tells you when your prose has fallen behind the CLI — it
-validates every `spoolway` command and flag in a prompt against the real command tree.
-
-For any file, `spoolway update --replace <path>` writes the shipped one over yours, saving
-what was there beside it first. That is also how to take an updated default prompt or
-skeleton on purpose. Paths are named one at a time: losing a file you asked for is a
-decision, losing eleven you forgot about is an accident.
-
-`spoolway doctor` reports when any of this is outstanding.
-
-Separately, `spoolway pipeline contract` prints the pipeline format itself, including an
-annotated blank pipeline — the starting point for one of your own, read straight off the
-struct and the validation that enforces it rather than kept in sync by hand.
+`update` never merges. A marked block you edited by hand stops the update on that file.
+`spoolway update --replace <path>` writes the shipped file over yours and saves your version
+beside it as `.bak`. That is also how to take a newer default prompt or skeleton on purpose.
+`spoolway doctor` reports files that are behind. `spoolway pipeline check` reports a prompt
+that names a command or flag this binary does not have.
 
 ## Platform notes
 
-Nothing on any platform confines a lane. There was a Landlock layer on Linux once, and it is
-gone — see [what confines a profile](agents.md#what-confines-a-profile) — so what is left
-below is genuinely everything the platforms differ on.
-
 ### Linux
 
-The reference platform: the headless backend runs on any Unix host, detaching a turn
-with the `setsid` syscall and reading a lane's liveness out of `/proc`.
+The reference platform. All three backends run here.
 
 ### macOS
 
-The headless backend runs here too — it detaches a turn with the same `setsid` syscall, and reads a lane's liveness through a lock file rather than `/proc`, which macOS does not have. Everything else is the same.
+The same as Linux. The headless backend reads a lane's liveness from a lock file.
 
 ### Windows
 
-**Experimental.** It builds, the test suite runs on Windows, and lanes start — but it has had
-far less real use than the Linux build.
+Experimental. It builds, the tests run, and lanes start, but it has had far less use than the
+Linux build.
 
-- **Panes run PowerShell.** spoolway types a lane's environment at the pane's prompt, which is
-  the only channel the multiplexer offers, so it emits PowerShell rather than POSIX syntax.
-  Pointing the multiplexer's default shell at `cmd.exe` or Git Bash breaks that, and the
-  symptom is a lane that starts with none of its environment set.
-- **`spoolway init` writes the PowerShell hook pair**, `github.ps1` and `jira.ps1`, in place
-  of the `.sh` pair a Unix install gets. See [`[issue_tracking]`](configuration.md#issue_tracking--a-hook-fired-on-four-task-events).
-- **No headless backend.** This platform has no `setsid`-equivalent syscall to detach a turn with, so a lane cannot outlive the dispatcher the way it does on Unix. Run lanes through a multiplexer here, or under WSL for the Linux build.
-- **Command steps run all the same.** A `run:` line is emitted as PowerShell rather than `sh`,
-  a step spawns detached through a process group and a job object in place of `setsid`, and its
-  liveness is read the same way a lock file's owner is, rather than out of `/proc` — none of
-  which needs the headless backend above, so `handover` and `checks` cross the shipped pipeline
-  here too.
+| Difference | What it means |
+|---|---|
+| Panes run PowerShell | spoolway types a lane's environment at the pane's prompt in PowerShell syntax. A multiplexer whose default shell is `cmd.exe` or Git Bash starts lanes with no environment. |
+| Hooks are `.ps1` | `init` writes `github.ps1` and `jira.ps1`. |
+| No headless backend | Run lanes through a multiplexer, or use WSL for the Linux build. |
+| Command steps run | A `run:` line runs as PowerShell. `handover` and `checks` work. |
 
-Everything else is the same binary and the same commands. Running under WSL gets you the
-Linux build, and is the better option if the headless backend matters to you.
+Under WSL you get the Linux build, including the headless backend.
