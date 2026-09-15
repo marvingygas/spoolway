@@ -1057,12 +1057,15 @@ in the project root the way there used to be. Every task after that splits its o
 already in the tab, because herdr has no rebalance command and always splitting the newest pane
 degenerates into slivers as the tab grows.
 
-Two rules pick the split. The pane cut is the biggest one holding no agent, so a split takes its
-space from an idle shell rather than from a running lane; when every pane holds an agent, the
-biggest pane overall is cut instead. The direction is `down` while both halves would keep at
-least twenty rows, and `right` below that — a terminal cell is about twice as tall as it is
-wide, so comparing a rect's columns against its rows directly reads a full-screen tab as wider
-than tall and lays every pane out as a narrow column.
+The pane cut is the smallest one in the tab by area, ties breaking toward the pane listed last —
+same as a fresh split is appended, so a tie prefers the newest pane. Halving the smallest pane
+along its longer side, over and over, is what grows a tab into the Fibonacci spiral a person
+expects: one pane cuts side by side, the pane that leaves cuts top and bottom, and so on. The
+direction is `right` when the chosen pane is wider than tall and `down` otherwise — a terminal
+cell is about twice as tall as it is wide, so height is counted double before the two are
+compared, and an exact tie resolves to `down`. No floor is needed underneath any of this: a pane
+can never be cut along the side it is already short on, so halving the longer side is itself the
+floor.
 
 tmux needs none of that arithmetic: `select-layout tiled` retiles the whole window after every
 split.

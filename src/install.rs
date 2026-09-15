@@ -312,7 +312,10 @@ mod tests {
             let skills = root.join(parent).join(dir);
             let expected = vec![
                 skills.join("spoolway-plan").join("SKILL.md"),
-                skills.join("spoolway-plan").join("assets").join("template.html"),
+                skills
+                    .join("spoolway-plan")
+                    .join("assets")
+                    .join("template.html"),
                 skills.join("spoolway-plan").join("assets").join("page.md"),
                 skills.join("spoolway-tasks").join("SKILL.md"),
                 skills.join("spoolway-pipeline").join("SKILL.md"),
@@ -449,7 +452,10 @@ mod tests {
             }
             if skill.skill_md.contains("assets/template.html") {
                 assert!(
-                    skill.assets.iter().any(|(file, _)| *file == "template.html"),
+                    skill
+                        .assets
+                        .iter()
+                        .any(|(file, _)| *file == "template.html"),
                     "{} tells the agent to copy assets/template.html but ships no such file",
                     skill.name
                 );
