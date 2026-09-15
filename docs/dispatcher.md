@@ -1105,6 +1105,19 @@ row's owner is enough to tell your own checkouts apart from the run's. The label
 creation and never relabelled as the task moves through its steps; what says which step a lane
 is on now is the lane's own pane.
 
+**A task gets exactly one tab, whichever step it is on.** The first lane starts directly in the
+tab `herdr worktree open` bound the workspace with; every pane after that splits inside that
+same tab. When a checkout's workspace is already open — a person left it looking at it, or an
+earlier run stopped without tearing anything down — a fresh pane is split into the tab that
+workspace already has rather than a second one opened beside it.
+
+A tab left standing anchored to nothing is swept, once a pass, whenever all four of these hold:
+it belongs to a spoolway-owned workspace, it holds no agent, it holds no pane recorded against a
+command run, and it is not the only tab its workspace has. The last condition is what keeps the
+sweep from ever taking a workspace's one live tab; the one before it is read from the same
+`.pane` file a command step's own cleanup reads. It runs once per pass, ahead of that pass
+splitting any new pane, and only under herdr — a session left standing under tmux is not swept.
+
 Pick this when a row per task is what you want to look at, and `grouped` when you would
 rather the run were one thing.
 

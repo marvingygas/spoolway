@@ -117,6 +117,27 @@ pub struct Workspace {
     pub checkout_path: PathBuf,
 }
 
+/// One tab [`Mux::tabs_for_sweep`] found, with the four facts
+/// [`crate::dispatch::sweep_anchor_tabs`] judges against its own conditions.
+/// Raw material for that policy, not a verdict — see [`Mux::tabs_for_sweep`]'s
+/// own doc for why the split sits there.
+#[derive(Debug, Clone)]
+pub struct SweepTab {
+    pub workspace_id: String,
+    pub tab_id: String,
+    /// The workspace's own worktree. [`Mux::tabs_for_sweep`] never answers
+    /// with a tab at all for a workspace bound to no checkout — see its own
+    /// doc — so there is no absent case here to represent: condition one,
+    /// "sits in a spoolway-owned workspace", is `owns_cwd` against this path
+    /// alone, in [`crate::dispatch::tabs_to_sweep`].
+    pub checkout_path: PathBuf,
+    /// Does any pane in this tab still hold a live agent session?
+    pub holds_agent: bool,
+    /// Every pane this tab currently has, checked against a run's `.pane`
+    /// file — see condition three, "holds no recorded command pane".
+    pub pane_ids: HashSet<String>,
+}
+
 /// How to start one agent in one pane.
 #[derive(Debug, Clone)]
 pub struct LaneSpec<'a> {
@@ -279,6 +300,20 @@ pub trait Mux {
     /// `None` from a backend with no tabs, and whenever nothing matches.
     fn find_tab(&self, _workspace_id: &str, _label: &str) -> Result<Option<String>> {
         Ok(None)
+    }
+
+    /// Every tab this backend currently has open on a checkout of ours,
+    /// with just enough about each to judge
+    /// [`crate::dispatch::sweep_anchor_tabs`]'s four conditions — never a
+    /// judgement of its own, since deciding which of these to close is
+    /// policy the dispatcher owns, not a backend.
+    ///
+    /// `Ok(vec![])` from a backend with no tabs to sweep: headless has none
+    /// at all, and tmux is not reached by this sweep — it shares
+    /// [`Herdr::create_pane`]'s old bug under its own `task_window`, but
+    /// that is a task of its own.
+    fn tabs_for_sweep(&self) -> Result<Vec<SweepTab>> {
+        Ok(Vec::new())
     }
 
     /// Move the dispatcher's own pane into the run's workspace, so the board
@@ -833,30 +868,13 @@ impl Herdr {
         })
     }
 
-    /// A tab of `workspace`, opened on `cwd` and labelled `label`.
-    ///
-    /// Unlike [`Mux::open_tab`] this closes no root tab: it is for a workspace
-    /// that already holds a checkout, which never has a bare shell of this
-    /// process's making standing in it.
-    fn tab_on(&self, workspace: &str, cwd: &Path, label: &str) -> Result<Workspace> {
-        let path = cwd.display().to_string();
-        let created: TabCreated = self.call(&[
-            "tab",
-            "create",
-            "--workspace",
-            workspace,
-            "--cwd",
-            &path,
-            "--label",
-            label,
-            "--no-focus",
-        ])?;
-        Ok(Workspace {
-            workspace_id: workspace.to_string(),
-            pane_id: created.root_pane.pane_id,
-            tab_id: Some(created.tab.tab_id),
-            checkout_path: cwd.to_path_buf(),
-        })
+    /// The tab a workspace already has, if it has one — found, never opened:
+    /// [`Herdr::create_pane`] splits a fresh pane into what this answers
+    /// instead of `tab create`-ing a second tab beside it, which is the
+    /// anchor tab this task exists to stop leaving behind. See [`tab_in`].
+    fn existing_tab(&self, workspace: &str) -> Result<Option<String>> {
+        let tabs: TabList = self.call(&["tab", "list", "--workspace", workspace])?;
+        Ok(tab_in(tabs))
     }
 
     /// Is there still an agent session in this pane?
@@ -987,6 +1005,16 @@ fn find_tab_id(tabs: TabList, label: &str) -> Option<String> {
         .into_iter()
         .find(|t| t.label.as_deref() == Some(label))
         .map(|t| t.tab_id)
+}
+
+/// The tab of a `tab list` reply that a workspace already has, if it has one
+/// — the first one herdr names, since a workspace under
+/// [`MuxMode::Split`] is never opened with more than one until a stray anchor
+/// (one left by a session predating this fix, or by a crash) puts a second
+/// beside it for the sweep to find later. Its own function, like
+/// [`find_tab_id`], so it can be read against a captured `tab list` payload.
+fn tab_in(tabs: TabList) -> Option<String> {
+    tabs.tabs.into_iter().next().map(|t| t.tab_id)
 }
 
 /// Every pane `pane list` says sits in `tab_id`, right now — the account
@@ -1339,6 +1367,42 @@ impl Mux for Herdr {
         Ok(find_tab_id(tabs, label))
     }
 
+    fn tabs_for_sweep(&self) -> Result<Vec<SweepTab>> {
+        let workspaces: WorkspaceList = self.call(&["workspace", "list"])?;
+        let panes: PaneList = self.call(&["pane", "list"])?;
+        let agents: AgentList = self.call(&["agent", "list"])?;
+        let agent_panes: HashSet<&str> = agents
+            .agents
+            .iter()
+            .filter(|raw| raw.agent.is_some())
+            .map(|raw| raw.pane_id.as_str())
+            .collect();
+
+        let mut out = Vec::new();
+        for workspace in &workspaces.workspaces {
+            // Bound to nothing this run ever opened, which is never the
+            // sweep's to touch — condition one, "sits in a spoolway-owned
+            // workspace".
+            let Some(worktree) = &workspace.worktree else {
+                continue;
+            };
+            let tabs: TabList =
+                self.call(&["tab", "list", "--workspace", &workspace.workspace_id])?;
+            for tab in tabs.tabs {
+                let pane_ids = pane_ids_in_tab(&panes, &tab.tab_id);
+                let holds_agent = pane_ids.iter().any(|p| agent_panes.contains(p.as_str()));
+                out.push(SweepTab {
+                    workspace_id: workspace.workspace_id.clone(),
+                    tab_id: tab.tab_id,
+                    checkout_path: worktree.checkout_path.clone(),
+                    holds_agent,
+                    pane_ids,
+                });
+            }
+        }
+        Ok(out)
+    }
+
     fn task_owns_workspace(&self) -> bool {
         // Under `split` every task cuts a workspace of its own; under
         // `grouped` every task is a pane in the one tab its project shares.
@@ -1438,13 +1502,28 @@ impl Mux for Herdr {
     fn create_pane(&self, cwd: &Path, label: &str) -> Result<Workspace> {
         let path = cwd.display().to_string();
 
-        // A tab in the workspace that already holds this checkout, so a closeout
+        // The workspace that already holds this checkout, so a closeout
         // appears under the plan it belongs to rather than as a stray workspace
         // beside it. Found by checkout path, never by focus: `--current` would
         // resolve to whatever pane the dispatcher sits in, or to someone else's
         // when the dispatcher is not in one at all.
+        //
+        // A pane is split into the tab that workspace already has, never
+        // `tab create`'d a second one: that used to be exactly how the anchor
+        // tab this task exists to stop leaving behind got there — the lane
+        // landed in the new tab and the workspace's original tab was left
+        // standing at an idle shell.
         if let Some(workspace) = self.workspace_holding(cwd)? {
-            return self.tab_on(&workspace, cwd, label);
+            let tab_id = self.existing_tab(&workspace)?.with_context(|| {
+                format!("workspace `{workspace}` has no tab to split a pane in")
+            })?;
+            let pane_id = self.split_pane(&tab_id, cwd)?;
+            return Ok(Workspace {
+                workspace_id: workspace,
+                pane_id,
+                tab_id: Some(tab_id),
+                checkout_path: cwd.to_path_buf(),
+            });
         }
 
         // Nobody has this checkout open: it needs a home of its own, and how
@@ -2423,6 +2502,25 @@ mod tests {
         )
         .unwrap();
         assert_eq!(find_tab_id(tabs, "spoolway"), None);
+    }
+
+    /// The ordinary case: a workspace opened with exactly one tab, which
+    /// `create_pane` must reuse rather than open a second one beside.
+    #[test]
+    fn a_workspace_with_one_tab_reuses_it() {
+        let tabs: TabList = serde_json::from_str(
+            r#"{"tabs": [{"tab_id": "w9:t1", "label": "spoolway/demo", "workspace_id": "w9"}]}"#,
+        )
+        .expect("a live tab list parses");
+        assert_eq!(tab_in(tabs), Some("w9:t1".to_string()));
+    }
+
+    /// A workspace with no tab at all — herdr has never heard of it, or its
+    /// tabs were closed out from under it — has none to split a pane into.
+    #[test]
+    fn a_workspace_with_no_tab_has_none_to_split_into() {
+        let tabs: TabList = serde_json::from_str(r#"{"tabs": []}"#).unwrap();
+        assert_eq!(tab_in(tabs), None);
     }
 
     /// herdr refuses an agent name holding anything but a lowercase letter
