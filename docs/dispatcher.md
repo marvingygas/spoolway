@@ -863,12 +863,13 @@ naming `agents.<profile>.session_reuse_ctx` as where that bound lives now.
 
 ## Restarts, laps and escalation
 
-Three different limits, and they bound three different things:
+Several different limits, and they bound several different things:
 
 | Setting | Bounds | Zeroed by |
 |---|---|---|
 | The launch guard | How many times a lane may be **launched** at the step a task is on | Every transition |
 | The launch-failure ceiling | How many times a step's launch may fail to even start, in a row, before the task routes like a step that ran and failed — to that step's `on_fail`, defaulting to `blocked` | A launch that starts, arriving at the step again, or re-queueing the document |
+| The pane-busy wait | How long a step's pane may keep refusing `agent start` as merely busy — not yet at its shell prompt — before the wait itself routes like the launch-failure ceiling does | A launch that starts, or the wait running out |
 | A step's `loop` | How many times a task may **arrive** at that step **from a given step** before escalating — a lap of the loop | A resume, for the loops the step it resumes at can spend. Binds the same in an [unattended run](pipelines.md#unattended-runs): every pipeline stages `blocked`, so an exit that resolves there spends the budget exactly as an attended run's would. `blocked` itself never spends this: see [Escalation](#escalation) — a report from `blocked` always moves the task off it, so it never arrives there from itself |
 | The reminder loop | How many times a settled lane's **transcript** may go unwritten since its last reminder before it is blocked | Anything the lane writes to its transcript |
 | The live-child ceiling | How long a lane may be excused the reminder loop for holding open a process it started before it is escalated anyway | The process exiting, or a backend with no way to check it in the first place |
@@ -907,6 +908,24 @@ run](pipelines.md#unattended-runs) there is no person to hand it to, so it becom
 instead: the task keeps its place and is retried on a doubling delay, capped at an hour.
 
 A launch that never even got going is a different failure still, and gets its own limit. A lane that dies at launch leaves no session behind (the guard above); a launch that fails to start leaves nothing at all — the multiplexer refused the tab, the model was unconfigured, the pane could not be split. This is not work that went badly, and unlike the guard above it is not forgiven on sight: a launch that cannot start will not start again next pass either, so letting it retry forever parks nothing and logs nothing. The step's launch is counted, per step, and on the third consecutive failure the task is routed by that step's `on_fail` — `blocked` if it names none — exactly as a step that ran and reported failure is, with `blocked_from` set to the step it could not start, and the reason written once to the task's `## Status Log` and once to the project's problem log. Below the third it is retried, and the count is cleared the moment a launch of that step actually starts, on arrival at the step again so a later visit counts from zero rather than inheriting a spent count, and on re-queueing the document so a re-queued task carries no ceiling into its next run. In an unattended run it routes the same way: the ceiling is a ceiling, not a backoff.
+
+A launch herdr refuses with `agent_pane_busy` is neither of those: the pane it was asked to
+start in simply has not yet reached an interactive shell prompt, still busy with the
+environment `start_lane` typed into it a moment earlier. Under a multiplexer this race is
+mostly closed before it can happen — herdr's own `start_lane` polls the pane's foreground
+process until it settles back to a shell, up to the same ten seconds `vacate_lane` already
+waits on, before asking `agent start` for it — but a pane that still has not settled by then
+is left for `agent start` to answer for. That refusal costs the task a pass, never one of the
+launch-failure ceiling's three strikes: three panes caught by the same momentary race are not
+three broken launches. The first such refusal for a step is stamped with the time it happened;
+each later pass that finds the pane still busy reports one line naming the pane and how long it
+has been waited on, measured from that first stamp rather than reset every pass. Past ten
+minutes of nothing else, the wait is no longer "momentary" and resolves exactly as the
+launch-failure ceiling does — that step's `on_fail`, `blocked` if it names none — with the
+reason written once to the task's `## Status Log` and once to the project's problem log, and
+the stamp forgiven along with the routing it caused. The stamp is also cleared the moment a
+launch of the step actually starts, and on arrival at the step again or on re-queueing the
+document, the same way the launch-failure count is.
 
 A dispatcher killed between launching a lane and finishing that pass gets one extra pass of
 grace before the guard above applies. `lanes.json` is written back when a pass returns, its

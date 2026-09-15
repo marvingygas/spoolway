@@ -66,6 +66,26 @@ const MAX_LAUNCHES: u32 = 1;
 /// rule out a one-off blip without leaving a broken tab retried forever.
 const MAX_LAUNCH_FAILURES: u32 = 3;
 
+/// How long a step tolerates its pane refusing `agent start` with
+/// `agent_pane_busy` — [`crate::mux::PaneBusy`] — before treating the wait as
+/// [`MAX_LAUNCH_FAILURES`]'s own ceiling does: routed to `step.on_fail`, or
+/// `blocked` when it names none.
+///
+/// Measured from the *first* such refusal — see [`Task::stamp_launch_busy`]
+/// — not the most recent, so a pane busy for nine straight minutes still
+/// resolves at ten rather than being given another ten from whichever pass
+/// last happened to look.
+///
+/// A fixed constant and not a `dispatch.*` setting, on the same grounds
+/// [`MAX_LAUNCH_FAILURES`] is one.
+const LAUNCH_BUSY_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// `secs` as minutes:seconds, the way a person reads a countdown — the
+/// pass's own "busy 0:10 of 10:00" line, and nothing else here needs finer.
+fn mmss(secs: u64) -> String {
+    format!("{}:{:02}", secs / 60, secs % 60)
+}
+
 /// How many times [`Dispatcher::check_unreported`] reminds a settled lane
 /// before giving up and escalating instead of sending a fourth.
 ///
@@ -2782,6 +2802,58 @@ impl<'a> Dispatcher<'a> {
         Some(destination)
     }
 
+    /// A launch refused because its pane is still busy — [`crate::mux::
+    /// PaneBusy`] — never spends one of [`MAX_LAUNCH_FAILURES`]'s strikes:
+    /// the refusal is transient by construction (see [`crate::mux::Herdr::
+    /// start_lane`]'s own poll ahead of `agent start`). `start_one`'s own
+    /// take-back closes the pane and splits a fresh one on every attempt,
+    /// exactly as it does for any other launch failure — see its own doc
+    /// comment — so three of these in a row are three different panes
+    /// caught by the same race, not the same pane refusing three times over;
+    /// either way, not three broken launches.
+    ///
+    /// Stamps [`Task::stamp_launch_busy`] on the first refusal only and
+    /// reports one waiting line naming the pane and the elapsed time, below
+    /// [`LAUNCH_BUSY_TIMEOUT`]. Past it, the stamp is forgiven and the step
+    /// resolves its destination exactly as [`Dispatcher::note_launch_failure`]
+    /// resolves the ceiling's — `step.on_fail`, or `blocked` when it names
+    /// none — because a pane that has not settled in ten minutes is not
+    /// "momentarily" busy any more.
+    fn note_pane_busy(
+        &self,
+        task: &mut Task,
+        step: &Step,
+        pane_id: &str,
+        report: &mut Report,
+    ) -> Option<String> {
+        let now = now_secs();
+        let since = task.stamp_launch_busy(&step.id, now);
+        let elapsed = (now - since).max(0) as u64;
+        let bound = LAUNCH_BUSY_TIMEOUT.as_secs();
+        if elapsed < bound {
+            report.actions.push(format!(
+                "{}: waiting for pane `{pane_id}` to reach its prompt (busy {} of {})",
+                task.id(),
+                mmss(elapsed),
+                mmss(bound),
+            ));
+            return None;
+        }
+        task.clear_launch_busy(&step.id);
+        let reason = format!(
+            "`{}` could not be started: pane `{pane_id}` never reached its prompt after {}",
+            step.id,
+            mmss(bound)
+        );
+        task.append_to_section("## Status Log", &format!("- {reason}\n"));
+        crate::problem_log::append(self.repo, &reason);
+        Some(
+            step.on_fail
+                .clone()
+                .unwrap_or_else(|| crate::pipeline::BLOCKED.to_string()),
+        )
+    }
+
     /// Start as many lanes as each candidate's cap allows — a resolved
     /// model's own `slots` when it has any, its profile's `concurrency`
     /// otherwise — and refuse a candidate whose model is `exclusive` while a
@@ -3169,12 +3241,15 @@ impl<'a> Dispatcher<'a> {
             match outcome {
                 Ok(started) => {
                     // The launch actually started, so whatever this step's
-                    // last few could-not-start attempts counted is over. Its
-                    // own persist already ran, inside `start_one`, so
+                    // last few could-not-start attempts counted is over — a
+                    // busy-pane wait included, see [`Task::launch_busy_since`].
+                    // Its own persist already ran, inside `start_one`, so
                     // clearing here needs one of its own — but only when
                     // there is a count to clear, the same way every other
                     // pass-that-changed-nothing here skips its write.
-                    if task.clear_launch_failures(&step.id) {
+                    let cleared_failures = task.clear_launch_failures(&step.id);
+                    let cleared_busy = task.clear_launch_busy(&step.id);
+                    if cleared_failures || cleared_busy {
                         self.persist(task)?;
                     }
                     let name = started.name;
@@ -3212,15 +3287,21 @@ impl<'a> Dispatcher<'a> {
                 }
                 Err(err) => {
                     // A launch that never got going at all — see
-                    // [`Dispatcher::note_launch_failure`]. Below the ceiling
-                    // the task stays a candidate for the next pass; at it,
-                    // `run_command`'s `Fresh` arm has an outer `StepKind::
-                    // Command` match to fall through to for this — an agent
-                    // lane's start has none, so `blocked_from` and the stage
-                    // move are this arm's own to make.
-                    if let Some(destination) =
-                        self.note_launch_failure(task, &step, "start", &err, report)
-                    {
+                    // [`Dispatcher::note_launch_failure`] — unless the pane it
+                    // was asked to start in was merely busy for a moment, see
+                    // [`Dispatcher::note_pane_busy`]: that refusal is
+                    // transient by construction and costs the task a pass,
+                    // never one of `note_launch_failure`'s three strikes.
+                    // Below either ceiling the task stays a candidate for the
+                    // next pass; at it, `run_command`'s `Fresh` arm has an
+                    // outer `StepKind::Command` match to fall through to for
+                    // this — an agent lane's start has none, so `blocked_from`
+                    // and the stage move are this arm's own to make.
+                    let destination = match err.downcast_ref::<crate::mux::PaneBusy>() {
+                        Some(busy) => self.note_pane_busy(task, &step, &busy.pane_id, report),
+                        None => self.note_launch_failure(task, &step, "start", &err, report),
+                    };
+                    if let Some(destination) = destination {
                         // Final as computed — nothing downstream of this arm
                         // redirects it further, unlike a command step's own
                         // destination, which still has `apply_loop_budget`
@@ -5158,6 +5239,11 @@ mod tests {
         /// Make `agent start` refuse, the way a multiplexer does when the
         /// agent binary is missing.
         refuse_start: bool,
+        /// Make `agent start` refuse the way herdr does when the pane it was
+        /// asked to start in has not yet reached its shell prompt — transient,
+        /// and carrying [`crate::mux::PaneBusy`] rather than an ordinary
+        /// failure.
+        refuse_start_pane_busy: bool,
         /// Make the briefing refuse to land, the way a real backend does when
         /// a freshly started session never begins its turn — the lane is up,
         /// and `Mux::prompt` still comes back an error.
@@ -5221,6 +5307,7 @@ mod tests {
                 last_tab: None,
                 splits: RefCell::new(0),
                 refuse_start: false,
+                refuse_start_pane_busy: false,
                 refuse_prompt: false,
                 resident: true,
                 workspace: Some("wD".into()),
@@ -5282,6 +5369,13 @@ mod tests {
         }
         fn refusing_to_start(mut self) -> FakeMux {
             self.refuse_start = true;
+            self
+        }
+        /// A backend whose `agent start` always answers the way herdr does
+        /// when the pane it was handed has not yet reached its shell prompt —
+        /// `agent_pane_busy`, transient by construction.
+        fn refusing_to_start_with_a_busy_pane(mut self) -> FakeMux {
+            self.refuse_start_pane_busy = true;
             self
         }
         /// A backend that starts a lane and then will not carry its briefing
@@ -5529,6 +5623,15 @@ mod tests {
             self.log(format!("env {} {}", spec.name, names.join(" ")));
             if self.refuse_start {
                 anyhow::bail!("agent_start_failed");
+            }
+            if self.refuse_start_pane_busy {
+                return Err(anyhow::Error::new(crate::mux::PaneBusy {
+                    pane_id: spec.pane_id.to_string(),
+                })
+                .context(format!(
+                    "herdr agent start {} --pane {}: agent target pane {} is not an available shell",
+                    spec.name, spec.pane_id, spec.pane_id
+                )));
             }
             Ok(())
         }
@@ -6013,6 +6116,7 @@ mod tests {
             prompts: Default::default(),
             rounds: Default::default(),
             launch_failures: Default::default(),
+            launch_busy_since: Default::default(),
             arrived_from: None,
             extra: Default::default(),
         };
@@ -7763,6 +7867,133 @@ mod tests {
         assert_eq!(
             problem_log_hits, 1,
             "and once in the project's problem log, not once per pass: {logged}"
+        );
+    }
+
+    /// The bug `pane-busy-retry` exists for: a pane that is momentarily busy —
+    /// still running what `start_lane` itself typed into it a moment earlier —
+    /// answers `agent_pane_busy`, and that refusal is transient by
+    /// construction: the same step starts normally on a later pass. It must
+    /// cost the task a pass, never one of the three strikes
+    /// `ceiling_on_launch_failures_parks_an_agent_step` spends on a launch
+    /// that is actually broken — three passes in a row of nothing but
+    /// `agent_pane_busy` must still leave the task on its own step, with no
+    /// `launch_failures` recorded against it at all.
+    #[test]
+    fn a_momentarily_busy_pane_costs_a_pass_not_a_strike() {
+        let repo = fixture("pane-busy-retry");
+        let path = add_task(&repo, "demo", "queued");
+        let mux = FakeMux::new(vec![]).refusing_to_start_with_a_busy_pane();
+
+        for attempt in 1..=3 {
+            let report = run_pass(&repo, &mux);
+            let task = reload(&path);
+            assert_eq!(
+                task.stage(),
+                "queued",
+                "attempt {attempt}: a pane that is only ever momentarily busy \
+                 never leaves the step"
+            );
+            assert_eq!(
+                task.front.launch_failures.get("implement"),
+                None,
+                "attempt {attempt}: a busy-pane refusal is not one of the \
+                 three strikes"
+            );
+            assert!(
+                report.problems.is_empty(),
+                "attempt {attempt}: waiting on a busy pane is never a problem: {:?}",
+                report.problems
+            );
+            // The one waiting line the mockup draws, and the fourth
+            // acceptance criterion names outright — naming the pane and the
+            // elapsed time, not just silence on `report.problems`. The pane
+            // id itself is not pinned here: `start_one`'s own take-back
+            // closes it and splits a fresh one on every attempt, so it
+            // differs pass to pass — see `note_pane_busy`'s own doc comment.
+            //
+            // The elapsed field is not pinned to a value either: it is wall
+            // clock (`now_secs() - since`), and this loop's three passes each
+            // do real fixture, git and task-file work, so a pass landing on
+            // the far side of a second boundary is `0:01`, not `0:00` — a
+            // flake this test itself set off once in 25 runs on an idle
+            // machine. Checked as a shape instead — `M:SS` with a two-digit,
+            // zero-padded seconds field, which is what actually pins
+            // `mmss`'s formatting.
+            let waiting = report
+                .actions
+                .iter()
+                .find(|a| a.starts_with("demo: waiting for pane "))
+                .unwrap_or_else(|| {
+                    panic!("attempt {attempt}: no waiting line: {:?}", report.actions)
+                });
+            assert!(
+                waiting.contains("to reach its prompt (busy ") && waiting.ends_with(" of 10:00)"),
+                "attempt {attempt}: {waiting}"
+            );
+            let elapsed = waiting
+                .rsplit("(busy ")
+                .next()
+                .and_then(|s| s.split(" of").next())
+                .unwrap_or_else(|| panic!("attempt {attempt}: no elapsed field: {waiting}"));
+            let (minutes, seconds) = elapsed
+                .split_once(':')
+                .unwrap_or_else(|| panic!("attempt {attempt}: elapsed not M:SS: {elapsed}"));
+            assert!(
+                minutes.parse::<u64>().is_ok(),
+                "attempt {attempt}: {elapsed}"
+            );
+            assert!(
+                seconds.len() == 2 && seconds.parse::<u64>().is_ok_and(|s| s < 60),
+                "attempt {attempt}: seconds must be two digits, zero-padded: {elapsed}"
+            );
+        }
+    }
+
+    /// Past [`LAUNCH_BUSY_TIMEOUT`], a pane that has never once settled is
+    /// not "momentarily" busy any more — this resolves the step's
+    /// destination exactly as [`MAX_LAUNCH_FAILURES`]'s own ceiling does,
+    /// measured from the *first* refusal rather than reset every pass.
+    #[test]
+    fn ten_minutes_of_nothing_but_a_busy_pane_resolves_like_the_ceiling() {
+        let repo = fixture("pane-busy-timeout");
+        let path = add_task_with(&repo, "demo", "queued", |front| {
+            front
+                .launch_busy_since
+                .insert("implement".to_string(), now_secs() - 601);
+        });
+        let mux = FakeMux::new(vec![]).refusing_to_start_with_a_busy_pane();
+
+        let report = run_pass(&repo, &mux);
+        let task = reload(&path);
+
+        assert_eq!(task.stage(), "blocked", "the ten-minute bound is spent");
+        assert_eq!(task.front.blocked_from.as_deref(), Some("implement"));
+        assert!(
+            !task.front.launch_busy_since.contains_key("implement"),
+            "the stamp is forgiven along with the routing it caused"
+        );
+        assert_eq!(
+            task.front.launch_failures.get("implement"),
+            None,
+            "still never one of the three strikes"
+        );
+        assert!(
+            report
+                .actions
+                .iter()
+                .any(|a| a.contains("could not be started — moving to `blocked`")),
+            "{:?}",
+            report.actions
+        );
+        // Names the step, the same way `note_launch_failure`'s own ceiling
+        // reason does — a bare pane id in the project's problem log has
+        // nothing to route a person to.
+        assert!(
+            task.body
+                .contains("`implement` could not be started: pane `"),
+            "{}",
+            task.body
         );
     }
 

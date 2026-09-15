@@ -581,6 +581,34 @@ const VACATE_TIMEOUT: Duration = Duration::from_secs(10);
 /// promptly and long enough not to spin on the socket.
 const VACATE_POLL: Duration = Duration::from_millis(250);
 
+/// Marks an [`Mux::start_lane`] `Err` as herdr's `agent_pane_busy` refusal — the
+/// pane it was asked to start in has not yet reached an interactive shell
+/// prompt. Transient by construction: the pane is busy with what `start_lane`
+/// itself just typed into it, and the same start succeeds on a later attempt.
+///
+/// The dispatcher asks for this by downcasting the `anyhow::Error`, rather than
+/// the `Mux` trait growing a second return type for the one caller that needs
+/// to tell a busy pane apart from every other way a launch can fail. Carries
+/// the pane id itself, rather than leaving the dispatcher to dig it back out
+/// of the error text, because the pass's own waiting line — "waiting for pane
+/// `<id>` to reach its prompt" — needs to name it.
+#[derive(Debug)]
+pub struct PaneBusy {
+    pub pane_id: String,
+}
+
+impl std::fmt::Display for PaneBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "pane {} is not yet at an interactive shell prompt",
+            self.pane_id
+        )
+    }
+}
+
+impl std::error::Error for PaneBusy {}
+
 /// The herdr backend. Shells out to the `herdr` CLI, which speaks to its server
 /// over a socket and answers in JSON.
 #[derive(Debug, Clone)]
@@ -704,6 +732,72 @@ impl Herdr {
             output.status,
             stderr.trim()
         ))
+    }
+
+    /// Wait for `pane_id`'s foreground process group to become its own shell
+    /// again, bounded by [`VACATE_TIMEOUT`] and polled at [`VACATE_POLL`] —
+    /// the same constants [`Mux::vacate_lane`] already waits on, since both
+    /// are waiting for exactly the same thing: a pane settling back to its
+    /// prompt.
+    ///
+    /// Called between handing the pane its environment and `agent start`, to
+    /// close the race [`Herdr::start_lane`]'s own doc comment describes: the
+    /// shell is still busy sourcing what was just typed into it when `agent
+    /// start` asks herdr for an "existing pane at an interactive shell
+    /// prompt", and herdr answers `agent_pane_busy`.
+    ///
+    /// Never refuses on its own account — a pane that has not settled by the
+    /// bound, or a `pane process-info` call that itself errors, is left for
+    /// `agent start` to answer for, with [`PaneBusy`] as the caller's own
+    /// backstop for exactly that expiry.
+    fn wait_for_pane_shell(&self, pane_id: &str) {
+        let deadline = Instant::now() + VACATE_TIMEOUT;
+        loop {
+            let ready = self
+                .call::<ProcessInfo>(&["pane", "process-info", "--pane", pane_id])
+                .is_ok_and(|info| info.foreground.is_shell);
+            if ready || Instant::now() >= deadline {
+                return;
+            }
+            std::thread::sleep(VACATE_POLL);
+        }
+    }
+
+    /// Run herdr's `agent start`, telling its `agent_pane_busy` refusal apart
+    /// from every other way it can fail.
+    ///
+    /// Like [`Herdr::call_watching_for_stall`], this bypasses `repo::run` to
+    /// read herdr's own JSON error envelope off stderr, rather than the
+    /// formatted message `run` would already have thrown the `code` field
+    /// away to produce — but unlike that caller, `agent_pane_busy` is the
+    /// only code this asks about; every other code, and every failure
+    /// carrying no envelope at all, comes back exactly as fatal as
+    /// [`Herdr::call_ignoring_result`] would have left it, with the same
+    /// message `run` itself would have formatted.
+    fn start_agent(&self, args: &[&str], pane_id: &str) -> Result<()> {
+        let output = std::process::Command::new("herdr")
+            .args(args)
+            .current_dir(&self.cwd)
+            .output()
+            .with_context(|| format!("running `herdr {}`", args.join(" ")))?;
+        if output.status.success() {
+            return Ok(());
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let err = anyhow!(
+            "`herdr {}` failed ({}): {}",
+            args.join(" "),
+            output.status,
+            stderr.trim()
+        );
+        match is_pane_busy_envelope(&stderr) {
+            true => Err(anyhow::Error::new(PaneBusy {
+                pane_id: pane_id.to_string(),
+            })
+            .context(err)),
+            false => Err(err),
+        }
     }
 
     /// The shared dispatch workspace, if this multiplexer already has one.
@@ -1065,6 +1159,18 @@ fn confirm_split(
     Ok(confirmed)
 }
 
+/// Whether a herdr error envelope on stderr names the `agent_pane_busy` code
+/// — [`Herdr::start_agent`]'s own read, pulled into its own function, like
+/// [`choose_split`] and [`confirm_split`] beside it, so it can be checked
+/// against a captured envelope directly rather than only through a live
+/// herdr process.
+fn is_pane_busy_envelope(stderr: &str) -> bool {
+    serde_json::from_str::<Envelope<serde_json::Value>>(stderr)
+        .ok()
+        .and_then(|envelope| envelope.error)
+        .is_some_and(|error| error.code.as_deref() == Some("agent_pane_busy"))
+}
+
 /// Which pane [`Herdr::split_pane`] should split, and along which side.
 struct SplitTarget {
     pane_id: String,
@@ -1147,6 +1253,20 @@ enum PromptOutcome {
     Started,
     Stalled,
     Failed(anyhow::Error),
+}
+
+/// What `herdr pane process-info` answers about a pane's foreground job —
+/// [`Herdr::wait_for_pane_shell`]'s own payload.
+#[derive(Debug, Deserialize)]
+struct ProcessInfo {
+    foreground: ForegroundProcess,
+}
+
+#[derive(Debug, Deserialize)]
+struct ForegroundProcess {
+    /// Whether the process group in the foreground right now is the pane's
+    /// own shell, rather than something still running in it.
+    is_shell: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1610,6 +1730,15 @@ impl Mux for Herdr {
             self.call_ignoring_result(&["pane", "run", spec.pane_id, &source])?;
         }
 
+        // The environment just typed above is still being sourced for a
+        // moment after `pane run` returns — nothing waits for the pane's
+        // shell to actually read it before this point. `agent start` below
+        // asks herdr for "an existing pane at an interactive shell prompt",
+        // and a pane still busy with that sourcing answers `agent_pane_busy`
+        // even though nothing is actually wrong. This closes that race,
+        // rather than leaving it to `PaneBusy` below on every occurrence.
+        self.wait_for_pane_shell(spec.pane_id);
+
         let handle = to_agent_name(spec.name);
         let mut args: Vec<&str> = vec![
             "agent",
@@ -1631,7 +1760,7 @@ impl Mux for Herdr {
             "--",
         ];
         args.extend(spec.args.iter().map(String::as_str));
-        self.call_ignoring_result(&args)?;
+        self.start_agent(&args, spec.pane_id)?;
 
         // The label is cosmetic — `list_lanes` finds a lane by the session name
         // `agent start` was given above, never by what the pane is called.
@@ -2208,6 +2337,53 @@ mod tests {
         .collect();
 
         assert!(confirm_split(&before, &after, "w8:p5").is_err());
+    }
+
+    /// `herdr pane process-info` answers a pane still running what
+    /// `start_lane` typed into it: not yet its own shell in the foreground.
+    /// [`Herdr::wait_for_pane_shell`] keeps polling on this, rather than
+    /// treating it as settled.
+    #[test]
+    fn process_info_reads_a_busy_foreground_as_not_yet_a_shell() {
+        let info: ProcessInfo = serde_json::from_str(r#"{"foreground": {"is_shell": false}}"#)
+            .expect("a live process-info payload parses");
+        assert!(!info.foreground.is_shell);
+    }
+
+    /// The pane has settled back to its own shell — what
+    /// [`Herdr::wait_for_pane_shell`] is polling for before letting `agent
+    /// start` in.
+    #[test]
+    fn process_info_reads_a_settled_pane_as_its_own_shell() {
+        let info: ProcessInfo = serde_json::from_str(r#"{"foreground": {"is_shell": true}}"#)
+            .expect("a live process-info payload parses");
+        assert!(info.foreground.is_shell);
+    }
+
+    /// The exact envelope shape herdr answers `agent start` with when the
+    /// pane it was given has not reached an interactive shell prompt — the
+    /// task's own "observed" line, captured on stderr.
+    #[test]
+    fn agent_pane_busy_is_read_off_a_real_error_envelope() {
+        let stderr = r#"{"error":{"code":"agent_pane_busy","message":"agent target pane wV:p6 is not an available shell"}}"#;
+        assert!(is_pane_busy_envelope(stderr));
+    }
+
+    /// Every other code herdr can answer stays exactly as fatal as it is
+    /// today — see the task's own non-goals — so this must read as false for
+    /// anything but the one code it names.
+    #[test]
+    fn an_unrelated_error_code_is_not_read_as_pane_busy() {
+        let stderr = r#"{"error":{"code":"agent_start_failed","message":"no such agent binary"}}"#;
+        assert!(!is_pane_busy_envelope(stderr));
+    }
+
+    /// A failure with no envelope at all — herdr never wrote JSON to stderr,
+    /// or wrote something else entirely — is not pane-busy either. Only a
+    /// decodable envelope naming the code counts.
+    #[test]
+    fn stderr_with_no_envelope_is_not_read_as_pane_busy() {
+        assert!(!is_pane_busy_envelope("not json at all"));
     }
 
     /// The bug the task's own context names: a project whose `.spoolway/`
