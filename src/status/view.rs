@@ -245,7 +245,7 @@ impl Verdict {
 pub(super) fn pause_confirm_panel(aborts: &[Abort], scope: &PauseScope) -> Vec<String> {
     match scope {
         PauseScope::Cursor(id) => cursor_pause_panel(id, &aborts[0]),
-        PauseScope::All(further) => all_pause_panel(aborts, *further),
+        PauseScope::All => all_pause_panel(aborts),
     }
 }
 
@@ -253,7 +253,10 @@ pub(super) fn pause_confirm_panel(aborts: &[Abort], scope: &PauseScope) -> Vec<S
 /// rather than repeating the task id the title already carries, and closes
 /// with the two lines that distinguish an interrupted turn from a killed
 /// run — the one thing a person answering `enter` needs to know before they
-/// do.
+/// do. The key line splits in two rather than one, `[enter]` on its own row
+/// and `[s]`/`[esc]` on the next, so the schedule this panel adds reads as a
+/// third, unhurried answer rather than one more word crowded onto the first
+/// line — see the mockup in `docs/dispatcher.md`.
 fn cursor_pause_panel(id: &str, abort: &Abort) -> Vec<String> {
     let time = abort
         .elapsed
@@ -275,20 +278,20 @@ fn cursor_pause_panel(id: &str, abort: &Abort) -> Vec<String> {
             body.push("when you resume.".to_string());
         }
     }
-    crate::screen::panel(
-        &format!("pause {id}"),
-        &body,
-        "[enter] pause it   [esc] cancel",
-    )
+    body.push(String::new());
+    body.push("[enter] pause it".to_string());
+    body.push("[s] schedule   [esc] cancel".to_string());
+    crate::screen::boxed(&format!("pause {id}"), &body)
 }
 
 /// `P`'s own panel: one line per abort, columns lined up on the widest task
 /// · step label and the widest kind word so `agent` and `command` read as a
 /// column rather than a run-on phrase — the same reason [`GUTTER`] separates
-/// every other column on the board — closed with the count of tasks that
-/// pause with nothing interrupted, which is the only thing left to say about
-/// the rest of the run.
-fn all_pause_panel(aborts: &[Abort], further: usize) -> Vec<String> {
+/// every other column on the board. The aborts and the key line are the
+/// whole panel: what `enter` and `s` do to the rest of the run — parking it
+/// outright either way, since neither has a step in flight to wait out — is
+/// unchanged and not worth a line of its own here any more.
+fn all_pause_panel(aborts: &[Abort]) -> Vec<String> {
     let mut body = vec![
         format!(
             "Pausing aborts {} running step{}:",
@@ -319,15 +322,9 @@ fn all_pause_panel(aborts: &[Abort], further: usize) -> Vec<String> {
         ));
     }
     body.push(String::new());
-    // Written out both ways rather than pluralised with a suffix: the verb
-    // has to agree with the noun, and "1 more task pause" is what a suffix
-    // on the noun alone leaves behind.
-    body.push(match further {
-        1 => "1 more task pauses with nothing".to_string(),
-        n => format!("{n} more tasks pause with nothing"),
-    });
-    body.push("interrupted.".to_string());
-    crate::screen::panel("pause all", &body, "[enter] pause the run   [esc] cancel")
+    body.push("[enter] pause the run".to_string());
+    body.push("[s] schedule   [esc] cancel".to_string());
+    crate::screen::boxed("pause all", &body)
 }
 
 pub(super) fn resume_confirm_panel(gated: &[String]) -> Vec<String> {

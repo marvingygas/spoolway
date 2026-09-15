@@ -216,7 +216,8 @@ on, and its own title — on the right. A task's `touches` globs are not shown: 
 widest thing on the pane, and nobody picks what to queue by glob.
 
 `space` selects a group, whose documents go to the queue as one chain, and `g` sets or clears a
-`gate_at` on the highlighted task, picked from that document's own pipeline. `o` opens the
+`gate_at` on the highlighted task, picked from that document's own pipeline — spent the moment
+it fires, so it holds the task once and not again on a later pass through the same step. `o` opens the
 highlighted document in an editor — `$VISUAL`, else `$EDITOR`, else the platform's own default
 — in a pane the multiplexer opens for it, the same resolution the board's own `o` uses, and `f`
 opens a filter box that narrows the group list to what you type: `enter` keeps the filter, `esc`

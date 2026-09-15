@@ -254,6 +254,9 @@ local   slots 0/2
 [↑↓] row   [o] open   [r/R] resume / all   [p/P] pause / all   [u/U] unqueue / all
 ```
 
+A pause panel, once open, answers `s` too — it schedules the pause instead of carrying it
+out.
+
 `spoolway dispatch` run while another process already holds the lock draws this same board,
 reading fresh from the task files and from `Mux::list_lanes` exactly as the driving board
 does, but with the header replaced: `watching dispatcher · pid 48213 · up 6m 49s` names the
@@ -339,7 +342,8 @@ column reads:
 │  The turn is interrupted, not killed.  │
 │  Resuming picks the session back up.   │
 │                                        │
-│  [enter] pause it   [esc] cancel       │
+│  [enter] pause it                      │
+│  [s] schedule   [esc] cancel           │
 └────────────────────────────────────────┘
 ```
 
@@ -351,8 +355,9 @@ keyboard to reach a running turn with, so there the lane's process is stopped ou
 resume — and its panel carries the same two lines in place of the ones above.
 
 `P` opens the same kind of panel over the whole run, titled `pause all`, listing every abort it
-would cut short — one line each, task and step, kind, and elapsed time — and closing with how many
-further tasks park with nothing interrupted:
+would cut short — one line each, task and step, kind, and elapsed time. The aborts and the key
+line are the whole panel; what `enter` and `s` do to the rest of the run — parking it outright
+either way, since neither has a step in flight to wait out — is unchanged and not named here:
 
 ```
 ┌─ pause all ─────────────────────────────┐
@@ -361,18 +366,21 @@ further tasks park with nothing interrupted:
 │  login · deploy      agent      4m 20s  │
 │  gate-board · test   command    4m 12s  │
 │                                         │
-│  3 more tasks pause with nothing        │
-│  interrupted.                           │
-│                                         │
-│  [enter] pause the run   [esc] cancel   │
+│  [enter] pause the run                  │
+│  [s] schedule   [esc] cancel            │
 └─────────────────────────────────────────┘
 ```
 
 `enter` on either panel carries the pause out: every named abort, an agent turn interrupted through
 `Mux::interrupt_lane` or a command run stopped through `Runs::stop`, and the task behind each
-parked on `paused`; `P`'s panel then parks the rest of the run that had nothing live to abort.
-`esc` leaves the task, every lane and every run exactly as they were. Any key other than `enter`
-or `esc` is ignored and leaves the panel open.
+parked on `paused`; `P`'s panel then parks the rest of the run that had nothing live to abort,
+whether or not the panel named it. `s` on either panel carries no abort out at all: it leaves every
+named lane and run running, and writes `gate_at` set to the step the panel named onto each task the
+panel named instead, so the task parks on `paused` by itself the moment that step passes rather than
+being cut short now; `P`'s panel still parks the rest of the run — the tasks with nothing live to
+abort — immediately, exactly as `enter` does, since there is no step in flight to wait out for those.
+Pressing `s` again on a row that already has a scheduled pause clears its `gate_at` instead of
+writing a new one. `esc` leaves the task, every lane and every run exactly as they were.
 
 `R` resumes every paused task whose own resume key is live, through the same `spoolway resume`
 a single row's `r` runs. If any paused task carries `paused_at` — a
@@ -507,7 +515,9 @@ to — the same answer `cleared_block_target` gives, and nothing else: the reaso
 not repeated here, since the row's own `● blocked` state already says that much. For one that
 is stuck on `queued` it is the dependency it is waiting on, or `waiting for a worker slot to
 free up` where no dependency holds it at all, and a lane holding a question in its pane names
-the pane.
+the pane. A running task with a scheduled pause — `gate_at` written by the board's `s` or by
+hand into the task document — reads `→ paused after <step>` instead of the step its pipeline
+would carry it to next, naming the step it is already on rather than the one after it.
 
 The STEP column carries its own counter, `<step> (N/M)`, wherever the step the task is on
 declares a `loop:` budget for the route it arrived by — from the first arrival, with no

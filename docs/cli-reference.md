@@ -113,7 +113,9 @@ on the same group where it still exists.
 
 `g` opens the highlighted task's pipeline and sets or clears a `gate_at` on the step picked, in
 a panel drawn over the layout — in memory only, never written back to the document. `enter`
-validates the selection and writes it, with nothing drawn in between. A validation failure — a
+validates the selection and writes it, with nothing drawn in between. Like any `gate_at`,
+however it was written, it is spent the moment it fires — the task pauses once, and a later
+pass through the same step is not gated again unless something writes a fresh one. A validation failure — a
 reserved key, an unknown `depends_on`, a cycle among the selection — is shown and leaves the
 pending directory untouched. The screen no longer checks the selection for overlapping `touches`
 globs itself: an overlap across two groups merges on two separate branches and is never one a

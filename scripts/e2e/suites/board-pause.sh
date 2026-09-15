@@ -183,7 +183,8 @@ press p
 draws "\`p\` over a live lane opens a panel naming the task" "pause mid-turn"
 draws "the panel names the step and calls it an agent turn" "implement    agent"
 draws "and says the turn is only interrupted" "The turn is interrupted, not killed."
-draws "answered with enter or esc, and nothing else" "[enter] pause it   [esc] cancel"
+draws "and offers enter on its own line" "[enter] pause it"
+draws "with schedule and cancel on the line under it" "[s] schedule   [esc] cancel"
 stage_stays "the task file is untouched while the panel is open" mid-turn implement
 if kill -0 "$LANE_PID" 2>/dev/null; then ok "and the lane is still running"
 else bad "and the lane is still running"; fi
@@ -199,6 +200,28 @@ stops_drawing "esc closes the panel" "pause mid-turn"
 stage_stays "and leaves the task where it was" mid-turn implement
 if kill -0 "$LANE_PID" 2>/dev/null; then ok "and leaves the lane running"
 else bad "and leaves the lane running"; fi
+
+# `s` leaves the turn running and writes a schedule instead of an interrupt —
+# the NEXT column carries it, and the task's own file gains `gate_at`.
+press p
+sleep 2
+press s
+stops_drawing "\`s\` closes the panel without aborting anything" "pause mid-turn"
+stage_stays "the task stays right where it was" mid-turn implement
+has "and gains a schedule naming its own step" "gate_at: implement" \
+  "$SPOOLWAY_PROJECT_HOME/queue/mid-turn.md"
+draws "and the NEXT column says where it is headed" "paused after implement"
+if kill -0 "$LANE_PID" 2>/dev/null; then ok "and the lane is still running"
+else bad "and the lane is still running"; fi
+
+# Pressing `s` again, over a fresh panel on the same still-live step, clears
+# the schedule it just wrote.
+press p
+sleep 2
+press s
+stops_drawing "pressing \`s\` again closes the panel too" "pause mid-turn"
+lacks "and clears the schedule it named" "gate_at:" \
+  "$SPOOLWAY_PROJECT_HOME/queue/mid-turn.md"
 
 press p
 sleep 2
@@ -219,8 +242,8 @@ else bad "a second lane is mid-turn"; fi
 press P
 draws "\`P\` opens one panel for the run" "Pausing aborts 1 running step:"
 draws "naming the task and step it aborts" "busy · implement"
-draws "and counting what pauses behind it" "1 more task pauses with nothing"
-draws "answered with enter or esc, and nothing else" "[enter] pause the run   [esc] cancel"
+draws "and offers enter on its own line" "[enter] pause the run"
+draws "with schedule and cancel on the line under it" "[s] schedule   [esc] cancel"
 stage_stays "no task file is written while the panel is open" busy implement
 stage_stays "not even the idle one" behind queued
 
@@ -230,11 +253,27 @@ stage_stays "and leaves the live task where it was" busy implement
 if kill -0 "$BUSY_PID" 2>/dev/null; then ok "and leaves its lane running"
 else bad "and leaves its lane running"; fi
 
+# `s` on the run-wide panel schedules the one task with something live and
+# parks the rest of the run at once — there is no step in flight to wait out
+# for those.
+press P
+sleep 2
+press s
+stops_drawing "\`s\` closes the run-wide panel without aborting anything" "Pausing aborts"
+stage_stays "the live task keeps running" busy implement
+has "and gains a schedule naming its own step" "gate_at: implement" \
+  "$SPOOLWAY_PROJECT_HOME/queue/busy.md"
+stage_reaches "the idle task parks at once, exactly as enter would" behind paused 25
+if kill -0 "$BUSY_PID" 2>/dev/null; then ok "and the live lane is still running"
+else bad "and the live lane is still running"; fi
+
+# What a scheduled pause does once the step it names actually passes is
+# `commands::report`'s own road, covered there — this suite owns the
+# keypress alone, so the rest of the run is parked outright the ordinary way.
 press P
 sleep 2
 press $'\r'
 stage_reaches "enter parks the task that was live" busy paused 25
-stage_reaches "and the one that had nothing to interrupt" behind paused 25
 
 # ------------------------------------------ `P` with nothing live at all
 # Nothing is running now, so there is nothing to confirm: the keypress parks

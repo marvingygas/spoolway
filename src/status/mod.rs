@@ -466,7 +466,9 @@ impl Board {
     /// confirms whatever it opened and `esc` cancels it, on every panel the
     /// board draws, and the letter that opened the panel no longer answers
     /// it once it is — a `q` typed there, or any other key neither mode
-    /// recognises, is ignored, the same as it is while browsing.
+    /// recognises, is ignored, the same as it is while browsing. A pause
+    /// panel answers one key further: `s` leaves every named abort running
+    /// and schedules its task's `gate_at` on the step it is on instead.
     ///
     /// Reads the queue fresh rather than trusting the last frame drawn: a key
     /// can land in the gap between two redraws, and moving the cursor — or
@@ -571,9 +573,8 @@ impl Board {
 
     /// `P`: park every task in the run, opening [`BoardMode::ConfirmPause`]
     /// first — scoped to the whole run, and naming every live agent turn and
-    /// command run it would abort, plus a count of the tasks that would park
-    /// with nothing interrupted — whenever anything is live anywhere in the
-    /// queue. Nothing is touched until that panel is answered: unlike the
+    /// command run it would abort — whenever anything is live anywhere in
+    /// the queue. Nothing is touched until that panel is answered: unlike the
     /// old shape, an agent lane is no longer interrupted ahead of the panel,
     /// since `esc` has to be able to leave the *whole* keypress undone, not
     /// just the half of it a command step's kill would have covered.
@@ -586,15 +587,9 @@ impl Board {
             park_every_pausable(tasks)?;
             return Ok(());
         }
-        // How many more tasks this keypress would park without cutting
-        // anything short — the count the panel names beside the list of
-        // aborts, so the whole of what `P` is about to do is on screen
-        // before it happens. Every task `park_every_pausable` would reach
-        // less the ones already named as an abort.
-        let further = pausable_tasks(&tasks).count() - aborts.len();
         self.mode = BoardMode::ConfirmPause {
             aborts,
-            scope: PauseScope::All(further),
+            scope: PauseScope::All,
         };
         Ok(())
     }
@@ -650,8 +645,8 @@ impl Board {
             // agent turn interrupted through `Mux::interrupt_lane`, a
             // command run stopped through `Runs::stop` — and park every task
             // that named abort belongs to. `P`'s panel then goes on to park
-            // whatever else in the run had nothing live to abort, which is
-            // exactly the count its own body already promised.
+            // whatever else in the run had nothing live to abort, whether or
+            // not the panel named it.
             Key::Enter => {
                 let mux = crate::mux::backend(repo);
                 let runs = crate::command_step::Runs::new(&repo.commands_dir());
@@ -673,12 +668,40 @@ impl Board {
                     park(&mut task, "paused from the board", false);
                     task.save()?;
                 }
-                if matches!(scope, PauseScope::All(_)) {
+                if matches!(scope, PauseScope::All) {
                     // Read fresh rather than trusting the queue as it stood
                     // when the panel opened: the same reason every other
                     // confirm panel here re-reads at answer time, and the
                     // loop above may itself have just moved some of these
                     // tasks off their own step and onto `paused`.
+                    let rest: Vec<crate::task::Task> = repo
+                        .tasks()?
+                        .into_iter()
+                        .filter(|t| !aborts.iter().any(|a| a.task == t.id()))
+                        .collect();
+                    park_every_pausable(rest)?;
+                }
+            }
+            // `s`: leave every named abort running and write `gate_at` onto
+            // its task instead — the step passing, whenever that is, is what
+            // parks it, through the same road `commands::report` already
+            // reads for a pipeline's own `gate: true`. Toggled per task
+            // rather than only ever set, so pressing `s` again on a row that
+            // already carries a schedule for the step it is on clears it —
+            // the mockup's "pressing `s` again... clears it". `P`'s panel
+            // still parks every task with nothing live to wait out, exactly
+            // as `enter` does: there is no step in flight to schedule for
+            // those.
+            Key::Char('s') => {
+                for abort in &aborts {
+                    let mut task = repo.task(&abort.task)?;
+                    task.front.gate_at = match task.front.gate_at.as_deref() {
+                        Some(step) if step == abort.step => None,
+                        _ => Some(abort.step.clone()),
+                    };
+                    task.save()?;
+                }
+                if matches!(scope, PauseScope::All) {
                     let rest: Vec<crate::task::Task> = repo
                         .tasks()?
                         .into_iter()
@@ -873,9 +896,12 @@ enum BoardMode {
     /// `p` or `P` found an agent turn or a command run live for its scope:
     /// what pausing would abort, named, and nothing acted on yet. `[enter]`
     /// carries the pause out — every named abort, plus, for `P`, every other
-    /// task in the run that has nothing live to abort — and `[esc]` leaves
-    /// the task, every lane and every run exactly as they were. `scope` says
-    /// whether this is `P`'s whole-run panel or `p`'s, narrowed to one task.
+    /// task in the run that has nothing live to abort — `[s]` leaves every
+    /// named abort running and schedules its task's `gate_at` for the step
+    /// it is on instead, still parking the rest of `P`'s run outright, and
+    /// `[esc]` leaves the task, every lane and every run exactly as they
+    /// were. `scope` says whether this is `P`'s whole-run panel or `p`'s,
+    /// narrowed to one task.
     ConfirmPause {
         aborts: Vec<Abort>,
         scope: PauseScope,
@@ -911,13 +937,11 @@ impl BoardMode {
 }
 
 /// Who a [`BoardMode::ConfirmPause`] panel is about — the whole run for `P`,
-/// carrying how many further tasks would park with nothing interrupted, or
-/// one task for `p`. Decides which of `view`'s two panel builders draws the
-/// panel — `all_pause_panel`'s multi-line list against `cursor_pause_panel`'s
-/// single step — and, for `All`, the "N more tasks pause with nothing
-/// interrupted" line the run-wide one closes with.
+/// or one task for `p`. Decides which of `view`'s two panel builders draws
+/// the panel — `all_pause_panel`'s multi-line list against
+/// `cursor_pause_panel`'s single step.
 enum PauseScope {
-    All(usize),
+    All,
     Cursor(String),
 }
 
@@ -1013,18 +1037,10 @@ fn live_aborts(
 
 /// Whether `task` is one `P` would park — everything but a `paused` or
 /// `blocked` row, both already stopped and already waiting on a person
-/// rather than a state to park. The one predicate [`pausable_tasks`] and
-/// [`park_every_pausable`] both read, so the count the panel names and the
-/// set `enter` actually parks can never drift apart from each other.
+/// rather than a state to park. The one predicate [`park_every_pausable`]
+/// reads.
 fn is_pausable(task: &crate::task::Task) -> bool {
     task.stage() != crate::pipeline::PAUSED && task.stage() != crate::pipeline::BLOCKED
-}
-
-/// Every task `P` would park — see [`is_pausable`]. The set
-/// [`Board::begin_pause_all`] counts against `live_aborts`'s own length for
-/// the panel's "N more tasks" line.
-fn pausable_tasks(tasks: &[crate::task::Task]) -> impl Iterator<Item = &crate::task::Task> {
-    tasks.iter().filter(|t| is_pausable(t))
 }
 
 /// Park every task [`is_pausable`] selects, straight onto `paused` with no
@@ -2043,7 +2059,16 @@ fn build_rows(
                 // `## Blocker` here. There is no question: a gated lane works
                 // and reports like any other, and the waiting happens after it,
                 // on `paused`, which has a row of its own above.
-                let next = if step.id == crate::pipeline::BLOCKED {
+                //
+                // A `gate_at` naming the step this task is on right now is
+                // `s`'s own schedule, still live: the step it names is where
+                // it is headed regardless of what the pipeline's own
+                // `on_pass` would otherwise carry it to, since
+                // `commands::report` is about to park it there the moment
+                // this pass out of it settles.
+                let next = if task.front.gate_at.as_deref() == Some(step.id.as_str()) {
+                    format!("→ paused after {}", step.id)
+                } else if step.id == crate::pipeline::BLOCKED {
                     // `blocked` names no `on_pass` of its own, and its
                     // resumability is a person's question, not a lane's — a
                     // staffed lane working it right now reads the same
@@ -4440,6 +4465,136 @@ mod tests {
         assert_eq!(repo.task("login").unwrap().stage(), "implement");
     }
 
+    /// `s` on `p`'s own panel leaves the live turn running and writes
+    /// `gate_at` naming the step instead of interrupting anything: the board
+    /// answers back to `Browsing`, the task's stage never moves off
+    /// `implement`, and the lane the panel named is still there afterwards.
+    #[test]
+    #[cfg(unix)]
+    fn pressing_s_on_the_pause_panel_schedules_a_gate_and_leaves_the_lane_running() {
+        let mut repo = fixture("schedule-pause-cursor");
+        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], Some("implement"));
+
+        let (mux, name) = live_headless_lane(&repo);
+
+        let mut board = Board::for_test();
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Down)
+            .unwrap();
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Char('p'))
+            .unwrap();
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Char('s'))
+            .unwrap();
+
+        assert!(matches!(board.mode, BoardMode::Browsing));
+        let task = repo.task("login").unwrap();
+        assert_eq!(task.stage(), "implement");
+        assert_eq!(task.front.gate_at.as_deref(), Some("implement"));
+        assert_eq!(task.front.parked_from, None);
+        assert!(mux.list_lanes().unwrap().iter().any(|l| l.name == name));
+    }
+
+    /// Pressing `s` a second time, on a fresh panel over the same still-live
+    /// step, clears the schedule it wrote rather than writing it again —
+    /// the mockup's "pressing `s` again... clears it".
+    #[test]
+    #[cfg(unix)]
+    fn pressing_s_again_clears_a_scheduled_pause() {
+        let mut repo = fixture("schedule-pause-toggle");
+        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], Some("implement"));
+        let (_mux, _name) = live_headless_lane(&repo);
+
+        let mut board = Board::for_test();
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Down)
+            .unwrap();
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Char('p'))
+            .unwrap();
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Char('s'))
+            .unwrap();
+        assert_eq!(
+            repo.task("login").unwrap().front.gate_at.as_deref(),
+            Some("implement")
+        );
+
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Char('p'))
+            .unwrap();
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Char('s'))
+            .unwrap();
+        assert_eq!(repo.task("login").unwrap().front.gate_at, None);
+    }
+
+    /// `s` on `P`'s panel schedules every task it named an abort for and
+    /// parks the rest of the run at once, exactly as `enter` would — there
+    /// is no step in flight to wait out for those.
+    #[test]
+    fn pressing_s_on_shift_p_schedules_the_live_task_and_parks_the_rest() {
+        let repo = fixture("schedule-pause-all");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], Some("checks"));
+        add(&repo, "idle", &[], Some("implement"));
+
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("checks", "login");
+        runs.start(&key, "sleep 30", &repo.root, &BTreeMap::new())
+            .unwrap();
+
+        let mut board = Board::for_test();
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Char('P'))
+            .unwrap();
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Char('s'))
+            .unwrap();
+
+        assert!(matches!(board.mode, BoardMode::Browsing));
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Running);
+        let login = repo.task("login").unwrap();
+        assert_eq!(login.stage(), "checks");
+        assert_eq!(login.front.gate_at.as_deref(), Some("checks"));
+        assert_eq!(repo.task("idle").unwrap().stage(), crate::pipeline::PAUSED);
+
+        runs.stop(&key);
+    }
+
+    /// The NEXT column names a scheduled pause rather than the pipeline's
+    /// own route once `gate_at` matches the step a running task sits on.
+    #[test]
+    fn the_next_column_names_a_scheduled_pause() {
+        let repo = fixture("schedule-pause-next-column");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], Some("implement"));
+        let mut task = repo.task("login").unwrap();
+        task.front.gate_at = Some("implement".into());
+        task.save().unwrap();
+
+        let tasks = repo.tasks().unwrap();
+        let graph = Graph::build(&tasks, &pipelines, &repo.archive_dir());
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &BTreeSet::new(),
+            &[],
+            &[],
+            None,
+        )
+        .unwrap();
+        let row = rows.iter().find(|r| r.id == "login").unwrap();
+        assert_eq!(row.next, "→ paused after implement");
+    }
+
     /// `o` on a headless run has no pane to open an editor in — headless
     /// refuses it the way `open_tab` already does — so the key is a no-op:
     /// best-effort, like every other key here, and the task file it would
@@ -4609,12 +4764,12 @@ mod tests {
         );
     }
 
-    /// `P` with one thing live and one thing not: the panel names the one
-    /// abort and counts the other task as pausing with nothing interrupted,
-    /// and answering `enter` parks both — the live one through its own
-    /// abort, the idle one straight onto `paused`.
+    /// `P` with one thing live and one thing not: the panel names only the
+    /// one abort — no count of the rest of the run any more — and answering
+    /// `enter` parks both, the live one through its own abort, the idle one
+    /// straight onto `paused`.
     #[test]
-    fn pressing_shift_p_with_one_live_and_one_idle_task_counts_and_parks_both() {
+    fn pressing_shift_p_with_one_live_and_one_idle_task_parks_both() {
         let repo = fixture("pause-all-mixed");
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("checks"));
@@ -4631,12 +4786,11 @@ mod tests {
             .unwrap();
         let frame = strip(&board.frame(&repo, &pipelines, Phase::Waiting).unwrap());
         assert!(frame.contains("login · checks"), "{frame}");
-        // The singular reads as a sentence: one task *pauses*, several
-        // tasks *pause*.
-        assert!(frame.contains("1 more task pauses with nothing"), "{frame}");
+        assert!(!frame.contains("more task"), "{frame}");
+        assert!(!frame.contains("nothing"), "{frame}");
 
-        // A stray key neither `enter` nor `esc` leaves the panel open and
-        // nothing acted on.
+        // A stray key neither `enter`, `s` nor `esc` leaves the panel open
+        // and nothing acted on.
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Char('x'))
             .unwrap();

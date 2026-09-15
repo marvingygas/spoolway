@@ -33,7 +33,7 @@ can change with a spoolway release without a single file in your repository havi
 | `touches` | you | Globs this task is expected to modify. Drives conflict detection and review effort |
 | `depends_on` | you | Task ids that must finish before this one may start |
 | `parallel` | you | Marks the *absent* `depends_on` between this task and another `parallel: true` task of the same group as deliberate rather than forgotten. It does not excuse a `touches` overlap: an overlap between two declared-parallel tasks is read as a mistake in the group — see [Declaring a fan on purpose](#declaring-a-fan-on-purpose). Read only by `queue conflicts`, `queue list`, and the two planning skills — nothing that schedules or bases a task looks at it |
-| `gate_at` | you, optionally | Pauses the task on `paused` once this step passes, on the same terms a step's own `gate: true` does — see [Paused is the other one, and it is not a block](#paused-is-the-other-one-and-it-is-not-a-block). Lets a document hold work for a person without giving the task a pipeline of its own |
+| `gate_at` | you, optionally | Pauses the task on `paused` once this step passes, landing on the same pause a step's own `gate: true` does — see [Paused is the other one, and it is not a block](#paused-is-the-other-one-and-it-is-not-a-block). Lets a document hold work for a person without giving the task a pipeline of its own. Spent the moment it fires, unlike a step's `gate: true`: a later pass through the same step is not gated again unless something writes a fresh `gate_at` |
 | `borrowed` | the dispatcher | Whether the task's checkout was already there rather than cut for it. Cleanup reads it to know the checkout and branch are not its to remove |
 | `base` | the dispatcher | The branch the group lands in, recorded at queue time from the checkout `queue add` ran in — the base of the *foot* of the stack's pull request. `spoolway stack` opens every other task's pull request against `cut_from` instead |
 | `branch` | the dispatcher | The branch for this task: `task/<id>`, or `task/<slug>-<id>` when `issue_tracking.key_in_names` had `queue add` prefix it with a tracker slug. spoolway derives it and a document may not set it to either shape by hand — see [What a document may set](#what-a-document-may-set) |
@@ -483,9 +483,13 @@ rather than moving on. Nothing went wrong: the step did its work and reported a 
 gate says you decide whether it goes further.
 
 A task's own `gate_at: <step>` does the same thing, for one task rather than every task on a
-pipeline — set in the document, by whoever wrote it, so holding one task for a person costs a
+pipeline — set in the document, by whoever wrote it (the board's `s` on a pause panel, the
+queue screen's `g`, or a line typed by hand), so holding one task for a person costs a
 frontmatter key rather than a pipeline of its own. Both land on `paused` the same way, and
-`resume` reads it back the same way whichever one fired.
+`resume` reads it back the same way whichever one fired. They are not spent the same way,
+though: a step's `gate: true` fires every time the task passes that step, but `gate_at` is
+cleared the moment it fires, so a later pass through the same step is not gated again unless
+something writes a fresh one.
 
 ```
 spoolway resume <task>

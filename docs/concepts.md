@@ -204,8 +204,11 @@ account. The task lands on `paused` and waits for `spoolway resume`, which sends
 `spoolway resume --reject`, which sends it back round by the step's `on_fail` route — or onto
 `blocked` when the step declares none; `spoolway pipeline check` warns about a gate shaped that
 way. A step declares `gate: true` and that is the whole of it — or a single task's document
-names a step in its `gate_at:`, which holds that one task on the same terms without giving it a
-pipeline of its own.
+names a step in its `gate_at:`, which lands that one task on the same pause without giving it a
+pipeline of its own. `gate_at` is spent the moment it fires, unlike a step's own `gate: true`:
+a later pass through the same step is not gated again unless something writes a fresh
+`gate_at`, whether that is a line typed by hand or the board's `s` scheduling a pause on the
+step a running task is on.
 
 A gate holds in every run, unattended included. An unattended run skips the checks that exist
 only to catch a lane going wrong with nobody there to escalate to — a `blocked` step resumes
