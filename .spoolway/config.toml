@@ -27,6 +27,7 @@
 # housekeeping.calibrate_window         <duration>             14d                                                     How far back `spoolway-calibrate` reads: archived tasks finished inside the window, and the ledger entries beside them.
 # housekeeping.retention_days           <days>                 30                                                      How long system-prompts/, commands/, tracking/, headless/, scratch/ and archive/ keep an entry before it is deleted; 0 keeps everything forever. queue/, pending/, worktrees/ and plans/ are never swept.
 # housekeeping.price_max_age_days       <days>                 30                                                      How old the active shared price table may be before `spoolway doctor` says so; 0 disables the note.
+# watch.dirs                            <path>, ...            (empty)                                                 Directories whose own sessions are counted beside the lanes. The project root is always watched; these are extra. Absolute, or ~-relative.
 # agents.<profile>.kind                 <agent kind>           one per shipped profile                                 Which agent binary this profile launches.
 # agents.<profile>.concurrency          <n>                    unset — omitted means no cap                            Most lanes of this profile running at once; 0 is unlimited. A cap on the harness — a local model's own count is `models.<glob>.slots`.
 # agents.<profile>.session_reuse_ctx    0, 1..=100             0                                                       How large a carried session may be, as a percentage of the model's context window, before a fresh one opens instead; 0 is off.
@@ -78,6 +79,11 @@ update_check = true
 calibrate_window = "14d"
 retention_days = 30
 price_max_age_days = 30
+
+[watch]
+# Directories whose own sessions are counted beside the lanes. The project
+# root is always watched; these are extra. Absolute, or ~-relative.
+dirs = []
 
 [agents.claude]
 kind = "claude"

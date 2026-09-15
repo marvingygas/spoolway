@@ -83,12 +83,22 @@ in prose about functions and line edits.
   record with nothing to say it costs was not a decision.
 - **The mockup section carries headings and figures, nothing else** — a two-or-three-word `h3`
   per step over the figure that shows it; a figure needing a sentence to land is not drawn yet.
+- **Draw in the medium the thing actually lives in.** Work out what the person builds on
+  before drawing anything: a screen belongs in that product's own chrome, a command in a
+  terminal, a document as the document, an endpoint as the call and its answer. A terminal
+  panel for something that never reaches a terminal is the wrong drawing, however true its
+  contents. A product screen goes in `.frame.raw`, drawn as that product — its own layout,
+  chrome and colours, not a generic box with the right words in it.
 - **A mockup starts from the thing's own captured output** — a screenshot, a real command's
   real output — never redrawn from memory. A panel may quote a command that runs today, never
   one that doesn't. **Writing or running anything to produce a panel's contents is refused** —
   a scratch script, a prototype, a measurement is implementation, and this session does not do
   that. Something that does not run yet has no output to capture, so its bar names the bound it
   was drawn to hold — and the task that builds it carries proving that bound as a criterion.
+
+**Write in plain English.** One thing per sentence, in the shortest words that carry it.
+No story, no build-up, no buzzwords, and no reaching verbs — "reads", "writes", "moves", never
+"orchestrates", "leverages", "unlocks". A caption a tired reader gets on one pass.
 
 Catch the paragraph that defends a decision instead of stating it ("this matters because…") in
 your own draft, and draw the mechanism rather than narrating it. Verbosity's home is the task

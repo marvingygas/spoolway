@@ -45,10 +45,10 @@ own is a page a reader has to re-learn. The two lockups are inlined as data URIs
 slots either — leave the `<img>` tags exactly as they are.
 
 **Optional: `--ui-brand` and `--ui-ground`**, when the page carries a `.frame.raw` screen —
-the other product's own brand colour and page ground, declared in the same `:root` block. They
-default to a Salesforce blue on a light grey and are the only two colours a raw figure needs
-named; everything else it paints inline. They are deliberately outside the theme, because a
-screenshot of somebody else's UI does not have a dark mode.
+the other product's own brand colour and page ground, declared in the same `:root` block. Take
+both from that product's real chrome; they are the only two colours a raw figure needs named,
+and everything else it paints inline. They sit outside the theme deliberately, because a
+screenshot of somebody else's UI has no dark mode.
 
 **Optional: one hue per part**, `--l-<part>: #......;`, when a plan has a natural set of parts
 and the colour should mean the same thing in every drawing it appears in. Declare each one in the
