@@ -616,8 +616,30 @@ pub struct Herdr {
     /// than the main checkout. Given to herdr as the `--cwd` of every
     /// `worktree open` — see [`Herdr::open_worktree_workspace`] — because
     /// that is the one thing herdr resolves the repository a row nests under
-    /// from, and it refuses a `--cwd` that is itself a linked worktree with
-    /// `linked_worktree_source`.
+    /// from.
+    ///
+    /// Verified against a live herdr 0.8.2: `worktree open --cwd <a linked
+    /// worktree's own path> --path <checkout>` answers
+    /// `{"error":{"code":"linked_worktree_source","message":"New and open
+    /// worktree actions start from the repo parent workspace."}}` — the same
+    /// refusal whether the linked worktree is named directly with `--cwd` or
+    /// indirectly through `--workspace <ID>` of a workspace already holding
+    /// one. This is the one claim about herdr this doc used to make without
+    /// having run it; it held.
+    ///
+    /// `--workspace <ID>` itself turned out not to do what its name suggests.
+    /// It never opens a tab inside the named workspace and never rebinds it:
+    /// `worktree open --workspace <ID>` only reads `<ID>` to find *a* repo
+    /// root to resolve `--path` against, exactly as `--cwd` would, and then
+    /// throws that workspace away. If `--path` is already open somewhere,
+    /// the reply is the workspace that already holds it (`already_open:
+    /// true`), never `<ID>`; if it is not open anywhere yet, the reply is a
+    /// brand-new workspace, again never `<ID>`. An `<ID>` that does not name
+    /// an existing workspace still refuses, with `workspace_not_found`, and
+    /// `--workspace` and `--cwd` are mutually exclusive — herdr's own usage
+    /// line refuses both together. So there is no reply shape in which
+    /// `--workspace` changes which workspace a checkout lands in; spoolway
+    /// never passes it, and passing it would not do anything spoolway wants.
     project_root: PathBuf,
 
     /// How this run is laid out — see [`MuxMode`], which is the one thing
