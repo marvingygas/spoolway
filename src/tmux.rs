@@ -1202,6 +1202,32 @@ mod tests {
             .is_ok_and(|output| output.status.success())
     }
 
+    /// What a pane's script actually wrote to its marker file, waited for.
+    ///
+    /// The wait is on the file's *content*, not on the file: the scripts
+    /// below end in `| tee <marker>` and `tee` creates the marker when it
+    /// opens it, before a byte of the script's output has reached it. A read
+    /// landing in that window sees an empty file, and the assertion then
+    /// reports a wrong value for what was only an early read — which is how
+    /// `run_in_pane_hands_a_named_value_over_an_inherited_one` failed a
+    /// release rehearsal with `left: ""`, `right: "named"` and passed on the
+    /// retry, against code that was never wrong.
+    fn marker_says(marker: &Path) -> String {
+        let started = std::time::Instant::now();
+        loop {
+            let said = std::fs::read_to_string(marker).unwrap_or_default();
+            if !said.trim().is_empty() {
+                return said.trim().to_string();
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "nothing reached {}: the script never ran, or wrote an empty value",
+                marker.display()
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     /// A backend against a private tmux server on a scratch socket, plus a
     /// `bin/` on the lane's PATH holding a stand-in agent and a real git
     /// repository to cut worktrees from.
@@ -1758,21 +1784,7 @@ done"#,
             .unwrap()
             .expect("tmux always has a pane to offer");
 
-        let started = std::time::Instant::now();
-        loop {
-            if marker.exists() {
-                break;
-            }
-            assert!(
-                started.elapsed() < Duration::from_secs(10),
-                "the script never ran"
-            );
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        assert_eq!(
-            std::fs::read_to_string(&marker).unwrap().trim(),
-            "hello-from-the-pane"
-        );
+        assert_eq!(marker_says(&marker), "hello-from-the-pane");
 
         let title = f
             .mux
@@ -1816,18 +1828,7 @@ done"#,
             .run_in_pane(&tab, &f.repo, "demo · env", &script, &env)
             .unwrap();
 
-        let started = std::time::Instant::now();
-        loop {
-            if marker.exists() {
-                break;
-            }
-            assert!(
-                started.elapsed() < Duration::from_secs(10),
-                "the script never ran"
-            );
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        assert_eq!(std::fs::read_to_string(&marker).unwrap().trim(), "named");
+        assert_eq!(marker_says(&marker), "named");
     }
 
     /// Renames are cosmetic and must never fail a pass.

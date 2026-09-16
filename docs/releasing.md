@@ -97,6 +97,27 @@ gh release view v<version> --json body --jq .body   # must equal the approved se
 cd "$(mktemp -d)" && npm install spoolway@<version> && ./node_modules/.bin/spoolway --version
 ```
 
+## The fixture the nightly suite asks for
+
+`scripts/e2e/suites/upgrade.sh` runs a project a *past* release actually wrote through the
+new binary, from `scripts/e2e/fixtures/<version>/.spoolway/` — a tree scaffolded by that
+version's own binary, at that version's own tag. It cannot be produced before the tag, so the
+suite exempts the version `Cargo.toml` names and asks for every older `CHANGELOG.md` section.
+A release is therefore never blocked by its own missing fixture, and the next bump turns the
+exemption into a failing check.
+
+Scaffold the released version's fixture once the tag is out — before the next bump, which is
+when the suite starts asking:
+
+```sh
+npx spoolway@<version> init                        # in a scratch git repo
+npx spoolway@<version> config set housekeeping.retention_days 45
+```
+
+Copy that `.spoolway/` to `scripts/e2e/fixtures/<version>/`, hand-add one line of prose below
+the pipeline file's generated key block, and commit it. The suite's own header says what each
+part is for.
+
 ## When it fails
 
 - A red rehearsal leaves an untagged candidate. Fix the cause, then rehearse again. A product
