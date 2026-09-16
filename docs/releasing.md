@@ -1,19 +1,29 @@
 # Releasing spoolway
 
 A release is a `v*` tag. The `release` pipeline cuts it. Queue the routine, approve the
-release notes at the gate, and the pipeline does the rest.
+release notes at the gate, and the pipeline does the rest — including repairing `main`
+itself if the readiness suite comes back red.
 
 ```mermaid
 flowchart LR
-  A[preflight] --> B[notes] -->|gate: you approve| C[publish]
+  R[ready] -->|red| X[fix] --> R
+  R -->|green| A[preflight] --> B[notes] -->|gate: you approve| C[publish] --> V[released]
   C --> D[release commit on main] --> E[rehearsal run] --> F[tag] --> G[npm + GitHub release]
 ```
 
 | Step | What it does |
 |---|---|
+| `ready` | Runs the whole local gate and a fresh nightly CI run on the candidate. Verifies only — it never edits. |
+| `fix` | Repairs whatever `ready` found, in one pull request, and merges it to `main` itself. Product code included. |
 | `preflight` | Checks `main` is clean and green. Lists every change since the last tag. Proposes the version. |
 | `notes` | Writes one changelog section. Stops at a gate until you approve it. |
 | `publish` | Commits the version bump and the section, rehearses the workflow, tags, and checks what npm and GitHub received. |
+| `released` | `scripts/release-verify.sh`. Proves the tag, the seven packages, the archives and the published body exist. A command step, so nothing can be credited with it — see below. |
+
+`released` is not ceremony. `publish` is an agent step, and under
+`unattended.skip_blocked_lane` a cleared block on an agent step carries the task one step
+*past* it — so a release could reach `done` with nothing published. A command step is
+never carried past, so `released` is what makes `done` mean released.
 
 ## Cutting a release
 

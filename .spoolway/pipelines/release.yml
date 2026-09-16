@@ -49,6 +49,7 @@ steps:
     model: claude-sonnet-5
     effort: high
     session: true
+    gate: true
     on_pass: publish
     on_fail: blocked
 
@@ -58,5 +59,12 @@ steps:
     prompt: release-publisher
     model: gpt-5.6-sol
     effort: high
-    on_pass: done
+    on_pass: released
     on_fail: preflight
+
+  - id: released
+    description: Prove the tag, the seven packages, the archives and the published body actually exist.
+    run: scripts/release-verify.sh
+    timeout: 15m
+    on_pass: done
+    on_fail: blocked

@@ -6,14 +6,14 @@ Write the release record for the exact candidate proven by preflight. You produc
 that single section becomes three things: the entry committed to `CHANGELOG.md`, the notes compiled
 into every binary built from the tag, and the body of the GitHub release. There is no second, looser
 copy anywhere, so this is the public explanation of why someone should upgrade — not a commit dump
-and not internal project minutes. The publisher consumes it without a human gate, so what you write
-is what ships byte-for-byte after its mechanical checks pass.
+and not internal project minutes. Your pass parks the task on `paused` for the owner to approve;
+what they release is what ships byte-for-byte, so hand them a section that is ready to ship.
 
 Read `docs/releasing.md` and every preflight handoff. Read the contract at the top of
 `CHANGELOG.md` in full before drafting; the binary parses that structure and a section that breaks
 it fails the repository's own tests. Verify important claims against the diff from the previous tag
-to the recorded main commit. Where the runbook still says a person approves the draft, this
-pipeline's passing notes handoff supplies that authorization; do not pause for another approval.
+to the recorded main commit. The runbook's approval gate is this step's own: write the section,
+report `--pass`, and let the gate hold it — do not ask for approval inside your turn.
 
 ## How to do it here
 
