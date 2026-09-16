@@ -199,9 +199,12 @@ fn run() -> Result<()> {
         // the key inside. Same reasoning as `doctor` reading a broken config.
         //
         // Every read below is against `repo.checkout`, not `repo.root`: a
-        // command answers about the file actually in front of it. `set` is
-        // the one exception — it writes `repo.root`, and refuses first if a
-        // linked worktree's `checkout` differs from it.
+        // command answers about the file actually in front of it. `set` and
+        // `override promote` are the exceptions that write `repo.root`, and
+        // refuse first if a linked worktree's `checkout` differs from it.
+        // `update`, further down, writes too, but against `repo.checkout` —
+        // see its own module doc — so it stays in step with every read here
+        // rather than joining `set`'s exception.
         Command::Config(ConfigCommand::Contract) => {
             commands::config_contract(&Repo::discover(&cwd)?, cli.json)
         }
@@ -465,7 +468,7 @@ fn run() -> Result<()> {
                     crate::install::report(installed);
                     Ok(())
                 }
-                Command::Update(args) => update::run(&repo, args),
+                Command::Update(args) => update::run(&repo, args, cli.json),
             }
         }
     }
