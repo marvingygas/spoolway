@@ -854,11 +854,62 @@ mod tests {
     /// `npm_program()`'s own Windows/Unix split, and nothing to race against
     /// another test's own use of the same ambient variables — the class of
     /// problem a stubbed lookup exists to avoid.
+    /// A version this binary can never be, whatever it is bumped to: its own
+    /// major component plus one.
+    ///
+    /// A stub that hands [`decide_upgrade`] a literal "newer" version is
+    /// coupled to the crate's own version number and goes off the moment the
+    /// crate reaches it. `upgrade_asks_npm_rather_than_trusting_a_cache_that_
+    /// has_not_caught_up` hardcoded `"0.3.0"`, which was newer than
+    /// [`current`] right up until the release commit that bumped
+    /// `Cargo.toml` to 0.3.0 — at which point [`is_newer`] correctly
+    /// answered false, `decide_upgrade` correctly answered
+    /// [`Upgrade::Current`], and the test failed on the very release it was
+    /// meant to be clearing the way for. No gate before that bump could see
+    /// it, because every one of them ran at 0.2.0 where the literal was
+    /// genuinely newer.
+    ///
+    /// Deriving it keeps the same test meaning "npm answered with something
+    /// newer" at every future version instead of at one.
+    fn newer_than_current() -> String {
+        // The same core `is_newer` compares on: any pre-release or build
+        // suffix dropped, then plain numeric components.
+        let core = current().trim_start_matches('v');
+        let core = core.split(['-', '+']).next().unwrap_or(core);
+        let mut parts: Vec<u64> = core
+            .split('.')
+            .map(|part| {
+                part.parse()
+                    .expect("the crate's own version is numeric components")
+            })
+            .collect();
+        parts[0] += 1;
+        parts
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<_>>()
+            .join(".")
+    }
+
+    /// The property the helper exists for, asserted rather than assumed — if
+    /// this ever stops holding, every stub built on it is quietly testing
+    /// nothing.
+    #[test]
+    fn the_stub_version_is_newer_than_this_binarys_own() {
+        assert!(
+            is_newer(&newer_than_current(), current()),
+            "{} must be newer than {}",
+            newer_than_current(),
+            current()
+        );
+    }
+
     #[test]
     fn upgrade_asks_npm_rather_than_trusting_a_cache_that_has_not_caught_up() {
+        let answered = newer_than_current();
         let result = decide_upgrade(
             Path::new("/does/not/exist/lock"),
-            || Some("0.3.0".to_string()),
+            || Some(newer_than_current()),
             || panic!("the cache must not be consulted once npm has answered"),
         );
 
@@ -866,7 +917,7 @@ mod tests {
         // is `Unmanaged` rather than `Installed` either way — the point is
         // which version it names: npm's live answer, not a cache that has
         // not caught up.
-        assert_eq!(result, Upgrade::Unmanaged("0.3.0".to_string()));
+        assert_eq!(result, Upgrade::Unmanaged(answered));
     }
 
     /// The other half of the same decision: a lookup that fails — offline, no
