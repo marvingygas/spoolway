@@ -2175,6 +2175,19 @@ mod tests {
         run(dir, "git", args).unwrap_or_else(|e| panic!("git {args:?} in {dir:?}: {e:#}"))
     }
 
+    /// One separator, for the assertions that read a path back out of git's
+    /// own output.
+    ///
+    /// git prints a Windows path its own way — `C:/Users/runneradmin/…` —
+    /// while `Path::display` spells the same directory with backslashes, so
+    /// a substring test between the two compares the separator rather than
+    /// the directory and misses every time. Only the `git worktree list`
+    /// assertions need this: everywhere else the text under test is a
+    /// spoolway message built with `display()` on both sides.
+    fn slashed(text: impl AsRef<str>) -> String {
+        text.as_ref().replace('\\', "/")
+    }
+
     /// A scratch `$HOME`, canonicalized the way `Repo::root` canonicalizes
     /// the path it walks up from, so a `.spoolway` planted under it compares
     /// equal to what discovery sees.
@@ -3201,7 +3214,8 @@ mod tests {
             legacy
         });
         assert!(
-            git(&work, &["worktree", "list"]).contains(&legacy.display().to_string()),
+            slashed(git(&work, &["worktree", "list"]))
+                .contains(&slashed(legacy.display().to_string())),
             "the fixture's own worktree is recorded under the legacy home to begin with"
         );
 
@@ -3215,14 +3229,16 @@ mod tests {
         );
         let listed = git(&work, &["worktree", "list"]);
         assert!(
-            listed.contains(&new_worktree.display().to_string()),
+            slashed(&listed).contains(&slashed(new_worktree.display().to_string())),
             "the main checkout resolves the worktree at its new path; got:\n{listed}"
         );
         // The legacy *home* path is a prefix of the migrated one (the id
         // is simply appended to it), so the old worktree's own full path
         // is what distinguishes a stale record from a repaired one.
         assert!(
-            !listed.contains(&legacy.join("worktrees").join("lane").display().to_string()),
+            !slashed(&listed).contains(&slashed(
+                legacy.join("worktrees").join("lane").display().to_string()
+            )),
             "and no longer names the old one; got:\n{listed}"
         );
     }

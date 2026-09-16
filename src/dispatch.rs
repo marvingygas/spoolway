@@ -12963,7 +12963,11 @@ mod tests {
             cut.display()
         );
         assert!(
-            cut.starts_with(std::env::temp_dir()),
+            // `crate::scratch::temp_root` rather than `std::env::temp_dir`:
+            // a scratch path is built on the resolved spelling, and on
+            // Windows the raw one is the 8.3 short form, which no resolved
+            // path starts with.
+            cut.starts_with(crate::scratch::temp_root()),
             "a fixture's worktree root belongs under the temporary directory, not {}",
             cut.display()
         );

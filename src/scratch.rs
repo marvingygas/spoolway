@@ -62,7 +62,12 @@ pub(crate) fn root(name: &str) -> PathBuf {
 /// The system temporary directory, in spoolway's one path spelling — see
 /// [`root`]. Resolved once: it cannot change under a running process, and
 /// `root` is called thousands of times over a suite.
-fn temp_root() -> PathBuf {
+///
+/// Reach for this rather than `std::env::temp_dir()` in any test that
+/// compares a scratch path against the temporary directory holding it: the
+/// two spellings do not compare equal on Windows, which is the whole reason
+/// this exists.
+pub(crate) fn temp_root() -> PathBuf {
     use std::sync::OnceLock;
     static TEMP: OnceLock<PathBuf> = OnceLock::new();
     TEMP.get_or_init(|| {
