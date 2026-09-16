@@ -17,6 +17,43 @@ the following contract so the binary can parse and replay them:
 The highlights, migrations, and release URL are public copy. Keep internal task
 bookkeeping out of them and describe user-visible outcomes.
 
+## 0.3.0
+
+### Highlights
+- A project's home is now found by an id stamped into the checkout's own git directory instead of by the checkout's folder name, so renaming or moving a checkout no longer starts an empty queue, and two clones of the same repository each get a home of their own instead of silently sharing one. (#106, #108, #118)
+- `spoolway eval` gains `dirs` and `sessions` views showing what work done outside the lanes — a person running `claude` or `pi` by hand in a watched directory — cost, filterable by directory and skill and exportable like every other view; which directories count is set in the project's new `[watch]` config table. (#112, #115, #120)
+- An open pause panel's new `s` key schedules the pause instead of carrying it out: the running step is left to finish and the task lands on `paused` by itself the moment it passes, so stopping the queue no longer throws away a turn that is nearly done. (#110)
+- Panes now split in the Fibonacci spiral a person expects, and a dispatched task keeps exactly one tab — its workspace's own — instead of leaving empty anchor tabs behind from an earlier run. (#111, #117)
+
+### Breaking changes and migration
+- A project's state home under `~/.spoolway/` is now named `<checkout>-<id>` instead of plain `<checkout>`. The first command run after upgrading moves an existing 0.2 home onto its id-keyed path automatically — queue, archive, ledger and dispatched worktrees included — and prints what moved, e.g. `moved ~/.spoolway/api/ -> ~/.spoolway/api-k7f2q9/`; nothing is deleted and the move runs once. The move is refused, safely and repeatably, while a dispatcher is running over that home or a worktree under it is still checked out. If you renamed the checkout's folder before upgrading, spoolway cannot find the old home by itself and binds a fresh, empty one instead — recover the old queue with `spoolway init --adopt <old-name>` (`ls ~/.spoolway/` shows the name it is still filed under). (#106, #108, #118)
+
+### Cost and eval
+- Directories named in a project's new `.spoolway/config.toml` `[watch]` table (`dirs = [...]`, or `spoolway config set watch.dirs ~/notes,docs`) have their own `claude`/`pi` sessions banked into `usage.jsonl` alongside dispatched lanes, caught up on every `spoolway eval` and `spoolway spend` read. (#112, #115)
+- `spoolway eval`'s new `dirs` and `sessions` tabs show that spend by directory and by session, with `dir` and `skill` filters and the same CSV export (`e`) as every other view. (#120)
+
+### Queueing
+- Pausing a task from a running step's panel now offers a third answer, `s`, that waits for the step to finish before parking the task on `paused`, rather than interrupting it mid-turn. (#110)
+
+### Panes
+- A tab's panes now split in a Fibonacci spiral — first side by side, then the right pane top and bottom, then the bottom-right side by side again — and stay in that order as panes close, with no repair needed. (#111)
+- A dispatched task now keeps exactly one tab, the one its workspace opened with; tabs left standing empty from an earlier run are swept. (#117)
+- A command step's pane now closes as soon as its outcome is known — on success when the exit code is read, and on failure once the task leaves that step for good — rather than only when the run happened to succeed. (#113)
+
+### Reliability
+- A pane herdr reports as momentarily busy no longer counts against a step's three launch-failure strikes; the task stays on the step and starts on the dispatcher's next pass instead of parking at `blocked` with nothing in the lane to explain why. (#119)
+- `spoolway update` relied on a background version cache and could report "no new version" and install nothing on a machine whose cache had not caught up; it now asks npm directly, with a bounded wait so an unreachable registry degrades to the cached answer instead of hanging. (#100, #101)
+- A dispatcher started in a linked worktree filed every task's herdr workspace under the repository's main checkout instead of the checkout it was actually dispatched from; workspaces now anchor to the dispatching checkout. (#122)
+- On Windows, two spellings of the same temp directory — the 8.3 short form and the verbatim `\\?\` form — compared unequal to each other, so a fresh clone's own checkout could be misread as belonging to a different one; every path spoolway compares or hands to git now resolves through one spelling. (#124)
+- `tmux list-sessions` failing with "server exited unexpectedly" — one of three ways tmux reports that its server is gone — was read as a hard error instead of "no server," which could abort a dispatcher pass or a pane heal right after the last spoolway pane closed; all three are now read the same way. (#125)
+
+### Upgrading
+- Install or update with `npm install -g spoolway@0.3.0`, or run it without installing via `npx spoolway@0.3.0`.
+- The `spoolway` wrapper package selects one of six platform packages at install time: linux-x64-gnu, linux-arm64-gnu, linux-x64-musl, darwin-arm64, darwin-x64 and win32-x64.
+- After upgrading, run `spoolway whats-new` to read this record back from the installed binary; expect the one-time home migration described above on your first command in each project.
+
+Release: https://github.com/marvingygas/spoolway/releases/tag/v0.3.0
+
 ## 0.2.0
 
 ### Highlights
