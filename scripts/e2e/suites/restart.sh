@@ -22,7 +22,8 @@ source "$HERE/../fixture.sh"
 # shellcheck source=../agents.sh
 source "$HERE/../agents.sh"
 
-new_repo "${WORK:-$(mktemp -d)}/proj"
+WORK=${WORK:-$(mktemp -d)}
+new_repo "$WORK/proj"
 
 works "init scaffolds .spoolway" "$SPOOLWAY" init
 project_home_after_init
@@ -84,6 +85,71 @@ for n in 1 2 3 4 5 6; do
   exit_code "an empty queue never counts against the guard (start $n)" 3 \
     "$SPOOLWAY" dispatch --plain
 done
+
+# ------------------------------- state that already exists: a workspace on the checkout
+# The anchor sweep runs before anything else on every non-dry pass, so state
+# already sitting in the multiplexer when this dispatch starts is exactly
+# what it meets first. Against `herdr-stub.sh` rather than headless, because
+# headless has no tabs to sweep at all: its double's workspace table is a
+# TSV with one line per workspace, so a row bound to the project root — a
+# person's own herdr workspace on the checkout, not any task's worktree —
+# can stand there before the first pass. Two agent-free tabs on it must both
+# survive the whole run, the one the dispatcher itself would be running in
+# among them. A one-step command pipeline gives the run something to
+# actually dispatch — an empty queue never reaches `pass` at all, let alone
+# its sweep — and settles in one pass, so this needs no resident dispatcher.
+# See `src/dispatch.rs`'s `sweep_anchor_tabs` and the bug this task tracks.
+HSTATE="$WORK/herdr-stub"
+HERDRBIN="$WORK/herdr-bin"
+mkdir -p "$HSTATE" "$HERDRBIN"
+install -m 755 "$HERE/../herdr-stub.sh" "$HERDRBIN/herdr"
+export HERDR_STUB_STATE="$HSTATE"
+PATH_BEFORE_HERDR_STUB="$PATH"
+PATH="$HERDRBIN:$PATH"; export PATH
+must "the herdr backend" "$SPOOLWAY" config set dispatch.backend herdr
+must "herdr gives each task a workspace" "$SPOOLWAY" config set dispatch.herdr_mode split
+
+cat > .spoolway/pipelines/selfsweep.yml <<'YML'
+description: One command step that passes at once, so a run against the herdr double reaches an ordinary end in a single pass.
+
+steps:
+  - id: only
+    description: Passes immediately; nothing about what it does is the point.
+    run: 'true'
+    on_pass: done
+    on_fail: blocked
+YML
+works "the one-step pipeline checks out" "$SPOOLWAY" pipeline check
+
+PROJECT_ROOT=$(pwd -P)
+printf 'w-self\tself\t%s\n' "$PROJECT_ROOT" >>"$HSTATE/workspaces"
+printf 'w-self:t1\tw-self\twork\n' >>"$HSTATE/tabs"
+printf 'w-self:t2\tw-self\tdispatch\n' >>"$HSTATE/tabs"
+
+SELFSWEEP_BODY="$WORK/selfsweep-body.md"
+task_body "$SELFSWEEP_BODY"
+task_doc selfsweep.md selfsweep "$SELFSWEEP_BODY" "group: demo" \
+  "pipeline: selfsweep" "touches: [notes/selfsweep.md]"
+must "a task queues behind the planted workspace" "$SPOOLWAY" queue add --from selfsweep.md
+
+exit_code "the run settles once its one step passes, with a workspace on the checkout already present" 0 \
+  "$SPOOLWAY" dispatch --plain --interval 1
+
+# The planted rows by name, not the table's line count: the dispatcher's own
+# tab (`spoolway/selfsweep`) lands in the same table once the run starts, so
+# a count alone would still read 2 if the sweep took exactly one of the two
+# planted tabs and left the dispatcher's own behind.
+if [ "$(grep -c '^w-self:' "$HSTATE/tabs")" -eq 2 ]; then
+  ok "neither of the project checkout's own tabs was swept along the way"
+else
+  bad "neither of the project checkout's own tabs was swept along the way: $(cat "$HSTATE/tabs")"
+fi
+
+"$HERDRBIN/herdr" shutdown state >/dev/null 2>&1 || true
+unset HERDR_STUB_STATE
+PATH="$PATH_BEFORE_HERDR_STUB"; export PATH
+rm -f .spoolway/pipelines/selfsweep.yml
+must "back to headless again" "$SPOOLWAY" config set dispatch.backend headless
 
 # --------------------------------------------- refused before the lock: git identity
 # A start that would actually try to run something and cannot — no git
