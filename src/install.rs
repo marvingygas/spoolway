@@ -113,7 +113,7 @@ const SKILLS: &[Skill] = &[
     // Reshaping the flow itself — the graph, and the prompts its agent steps
     // run — and, since it was renamed and widened from `spoolway-pipeline`,
     // routing over every other corner of the control plane: `config.toml`,
-    // the override layer, the task/lane/task-log templates, and the
+    // the override layer, the task and lane templates, and the
     // issue-tracking hooks. One skill rather than several, because a step and
     // the value that runs it (a model, an effort, a timeout, a concurrency)
     // are the same territory at different sizes. It carries no

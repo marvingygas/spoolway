@@ -48,7 +48,6 @@ mod skeleton;
 mod spend;
 mod status;
 mod task;
-mod task_log;
 mod task_template;
 mod teardown;
 mod tmux;
@@ -328,8 +327,8 @@ fn run() -> Result<()> {
                 }
                 Command::Stack(args) => commands::stack(&repo, args),
                 Command::Resume(args) => {
-                    let in_lane = std::env::var(commands::TASK_ENV).is_ok();
-                    commands::resume(&repo, routing(&graph)?, args, in_lane)
+                    let from_step = std::env::var(dispatch::ENV_STEP).ok();
+                    commands::resume(&repo, routing(&graph)?, args, from_step.as_deref())
                 }
                 Command::Lane(args) => {
                     let mux = mux::backend(&repo)?;

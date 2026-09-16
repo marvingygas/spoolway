@@ -409,12 +409,6 @@ impl Repo {
         self.checkout.join(crate::config::LANE_PROMPTS_TEMPLATE)
     }
 
-    /// Where a project describes what belongs under each heading spoolway
-    /// appends to a task file — see [`crate::task_log`].
-    pub fn task_log_path(&self) -> PathBuf {
-        self.checkout.join(crate::config::TASK_LOG_TEMPLATE)
-    }
-
     /// Every task's lane state, across every dispatcher this machine has run
     /// for this project.
     pub fn lanes_file(&self) -> PathBuf {

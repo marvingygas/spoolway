@@ -203,7 +203,7 @@ pub enum Command {
     #[command(subcommand)]
     Override(OverrideCommand),
 
-    /// Print or validate the task, lane-prompt, task-log and PR shapes.
+    /// Print or validate the task, lane-prompt and PR shapes.
     #[command(subcommand)]
     Template(TemplateCommand),
 
@@ -1293,13 +1293,12 @@ pub enum PromptCommand {
 }
 
 /// Printing the shapes that are prose, not a pipeline: a task's own body, a
-/// lane's seven typed messages, the task-log headings, and the pull request
-/// body.
+/// lane's seven typed messages, and the pull request body.
 #[derive(Debug, Subcommand)]
 pub enum TemplateCommand {
-    /// Print the task, lane-prompt, task-log and PR shapes: where each
-    /// project file lives, what a project may leave out, and every
-    /// placeholder substituted into it.
+    /// Print the task, lane-prompt and PR shapes: where each project file
+    /// lives, what a project may leave out, and every placeholder
+    /// substituted into it.
     Contract,
 }
 

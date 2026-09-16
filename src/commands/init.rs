@@ -497,14 +497,6 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
         assets::LANE_PROMPTS.as_bytes(),
         false,
     )?;
-    // What belongs under each heading spoolway appends to a task file. One
-    // file, not one per pipeline — the three headings are fixed and every
-    // task shares them.
-    place(
-        root.join(crate::config::TASK_LOG_TEMPLATE),
-        assets::TASK_LOG.as_bytes(),
-        false,
-    )?;
     // No plan skeleton here any more. spoolway-plan carries its own, under the
     // skill's own `assets/`, and writes a self-contained page with it — there
     // is nothing left for `init` to place in the project.

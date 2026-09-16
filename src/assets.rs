@@ -214,13 +214,6 @@ pub const PULL_REQUEST_TEMPLATE: &str = include_str!("../assets/pull-request.md"
 /// bargain every other file in this module keeps.
 pub const LANE_PROMPTS: &str = include_str!("../assets/lane-prompts.md");
 
-/// What belongs under each heading spoolway appends to a task file — see
-/// [`crate::task_log`]. Written whole by `init`, left alone by an ordinary
-/// `spoolway update`, and brought back to this text only by `spoolway
-/// update --replace .spoolway/templates/task-log.md`, the same bargain
-/// every other file in this module keeps.
-pub const TASK_LOG: &str = include_str!("../assets/task-log.md");
-
 /// The markers around spoolway's rules in the project's `.gitignore`.
 ///
 /// A project already has a `.gitignore`, or wants one at its root — so the rules

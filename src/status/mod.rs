@@ -1130,7 +1130,7 @@ pub(crate) fn resume_task(repo: &Repo, pipelines: &Pipelines, id: &str) -> Resul
             reject: false,
             message: None,
         },
-        false,
+        None,
     )?;
     Ok(())
 }

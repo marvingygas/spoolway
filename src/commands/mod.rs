@@ -27,20 +27,27 @@ pub const TASK_ENV: &str = "SPOOLWAY_TASK";
 /// Refuse a command that is a person's to answer, when it is run from inside
 /// a lane's own environment.
 ///
-/// `in_lane` is read once, at the CLI boundary in `main.rs`, from whether
-/// `TASK_ENV` is set — the same discipline `report`'s own `started_for`
-/// argument follows, and for the same reason: the environment is process-wide
-/// and a command is not, so reading it here instead would let any other
-/// spoolway in the same process decide this for a caller that never asked —
-/// which under `cargo test` means every fixture that queues a task, since the
-/// suite itself often runs inside a real lane's own environment.
+/// `in_lane` is read once, at the CLI boundary in `main.rs` — the same
+/// discipline `report`'s own `started_for` argument follows, and for the
+/// same reason: the environment is process-wide and a command is not, so
+/// reading it here instead would let any other spoolway in the same process
+/// decide this for a caller that never asked — which under `cargo test`
+/// means every fixture that queues a task, since the suite itself often runs
+/// inside a real lane's own environment.
 ///
-/// `TASK_ENV` is what tells a lane's terminal from a person's: the dispatcher
-/// sets it on every lane it starts, agent or command step alike, and nothing
-/// else does. A person typing into their own shell never carries it — the one
-/// way they end up with it set is typing inside a lane's own pane, which is
-/// exactly the case this exists to catch: `spoolway resume` run from there
-/// would let a lane answer its own gate, with nobody outside it ever asked.
+/// `queue`, `lane` and `jobs` read it from whether `TASK_ENV` is set, which
+/// is what tells a lane's terminal from a person's: the dispatcher sets it on
+/// every lane it starts, agent or command step alike, and nothing else does.
+/// A person typing into their own shell never carries it — the one way they
+/// end up with it set is typing inside a lane's own pane, which is exactly
+/// the case this exists to catch.
+///
+/// `resume` reads `ENV_STEP` (`SPOOLWAY_STEP`) instead, and calls this only
+/// when that step is not `blocked` — a lane on `blocked` may resume another
+/// stopped task, bounded the ways `commands::report::resume` itself enforces,
+/// so it is the one caller this function does not see at all on that one
+/// step. Everywhere else, `spoolway resume` run from a lane would let it
+/// answer its own gate, with nobody outside it ever asked.
 ///
 /// `what` names the verb this refusal is about, so the message reads as a
 /// sentence: `"a gate is answered"`, `"a lane is answered"`, `"the queue is

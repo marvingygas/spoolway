@@ -11,30 +11,17 @@ Read {task_file} before anything else.
 
 ## resume
 
-You blocked, and a person has unblocked you. Same session, continued: do not
-start over, and do not re-read what you are still holding. The last `##
-Status Log` entry in {task_file} is what they did — decide whether it clears
-what stopped you and carry on. If your work was already done, say so and
-`--pass`. If the same thing is still in the way, `--block` again and say so
-rather than working around it.
+This lane was blocked and a person has cleared it. Same session: do not
+start over. The last `## Status Log` entry in {task_file} is what they did.
+Decide whether it clears what stopped you, then carry on.
 
 ## resume-unattended
 
-You blocked, and nobody is coming — this run is unattended, so it has sent
-you straight back. Same session, continued: do not start over, and do not
-re-read what you are still holding. Nothing changed while you waited. What
-stopped you is the last `## Blocker` entry in {task_file}, exactly as you
-left it, and clearing it is yours:
-
-1. Reproduce it. Believe what you see over what you remember.
-2. Clear the smallest thing in the way.
-3. Run what failed and see it not fail. Then carry on with your step.
-
-Write down what you tried under `## Blocker` before you finish, whatever the
-outcome. If your work was already done, say so and `--pass`. If what is in
-the way needs a decision that is not yours — spending money, changing what
-the code is supposed to do, touching something outside this task — `--block`
-again with what you found and what you tried.
+This lane was blocked and an unblocker lane has since run on this task. Same
+session: do not start over. The last `## Status Log` entry in {task_file} is
+what it did, and `## Blocker` is what it tried. Decide whether that clears
+what stopped you, then carry on. If it does not, `--block` again with what
+you found.
 
 ## carry
 
@@ -45,10 +32,9 @@ Status Log` of {task_file}.
 
 ## park
 
-A person stopped your turn with a keypress — not anything you reported — and
-has put you back. Nothing was blocked and nothing changed: no work of yours
-was undone, nothing was added to the task, nothing new is in your way. Same
-session, continued: pick up where the interrupt cut you off.
+A person stopped this lane's turn with a keypress and has put it back.
+Nothing was blocked and nothing changed. Same session: pick up where the
+interrupt cut you off.
 
 ## reminder
 

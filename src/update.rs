@@ -659,10 +659,6 @@ fn shipped_for(repo: &Repo, path: &Path) -> Option<String> {
         return Some(crate::assets::LANE_PROMPTS.to_string());
     }
 
-    if *path == repo.task_log_path() {
-        return Some(crate::assets::TASK_LOG.to_string());
-    }
-
     // The ignore rules are deliberately not here. They are a block in a file the
     // project owns the rest of, so there is no whole-file version of it to write:
     // `ignores` above refreshes the block, on every run, and that is the only way
@@ -1233,32 +1229,6 @@ mod tests {
         );
     }
 
-    /// `task-log.md` is prose a project owns outright, the same rule
-    /// `lane-prompts.md` above already keeps — so an ordinary update must
-    /// not read it, rewrite it, or say a word about it.
-    #[test]
-    fn task_log_is_never_touched_by_an_update() {
-        let repo = fixture("task-log-untouched");
-        let path = repo.task_log_path();
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, "## Status Log\n\nkeep me\n").unwrap();
-
-        run(&repo, &args()).unwrap();
-        let outcomes = scan(&repo, &args()).unwrap();
-
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            "## Status Log\n\nkeep me\n"
-        );
-        assert!(
-            !outcome_lines(&outcomes)
-                .iter()
-                .any(|line| line.contains("task-log")),
-            "{:?}",
-            outcome_lines(&outcomes)
-        );
-    }
-
     /// `templates` has nothing to iterate now that the plan skeleton is
     /// gone — `crate::skeleton::skeletons()` ships empty — so a run over it
     /// reports nothing and fails nothing, whatever is on disk.
@@ -1443,7 +1413,6 @@ mod tests {
             (prompts.join("reviewer.md"), "## "),
             (repo.task_templates_dir().join("default.md"), "## Goal"),
             (repo.lane_prompts_path(), "## opening"),
-            (repo.task_log_path(), "## Status Log"),
         ] {
             let shipped = shipped_for(&repo, &path)
                 .unwrap_or_else(|| panic!("nothing shipped for {}", path.display()));
