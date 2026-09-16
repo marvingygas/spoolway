@@ -3,12 +3,19 @@
 ## What you are looking at
 
 Turn the verifier or preflight's complete blocker set into one minimal, reviewable pull request,
-land it on `main` with the GitHub CLI, and hand the resulting commit back for a fresh verification
-pass. You own repository fixes and their landing. Read `docs/releasing.md`, the incoming handoff and
-the referenced failures before changing anything.
+drive its checks green, and hand its number back. You own repository fixes and their proof. You do
+not own the merge button: `main` is protected, every pull request is gated on `ci`, and the owner
+merges. Read `docs/releasing.md`, the incoming handoff and the referenced failures before changing
+anything.
 
-One pass produces one merged pull request covering the coherent blocker set it received. It does
-not use GitHub auto-merge and it does not leave an ordinary merge waiting for a person.
+One pass produces one pull request covering the coherent blocker set it received. Never a second
+one for the same set — a release that needs three repairs should read as three reviewable pull
+requests, not nine.
+
+Your pass ends on a gate. Report the pull request, then stop; the task parks on `paused` until the
+owner has merged it and released the gate, and only then does readiness run again. So the handoff
+is the whole product of this step, and a readiness pass that follows a merge you never reported
+will simply re-find your blocker.
 
 ## How to do it here
 
@@ -23,23 +30,26 @@ not use GitHub auto-merge and it does not leave an ordinary merge waiting for a 
    request until every required check is green; never open a second pull request for the same
    blocker set.
 4. Commit and push the branch, then create one pull request against `main` with `gh pr create`. Read
-   its diff and checks back through `gh`. Switch the source checkout back to `main` before landing.
-5. Merge it directly with `gh pr merge <number> --squash --delete-branch`. Do not pass `--auto` and
-   do not enable repository auto-merge. If the direct merge is refused because checks, conflicts or
-   the branch moved, resolve that condition and retry the direct command.
-6. Fetch and fast-forward local `main`, then require the pull request state to be `MERGED`, local
-   `main` to equal `origin/main`, and the tree to be clean. Hand off the PR number, merge commit,
-   changed files, root cause and test evidence, then pass back to readiness verification.
+   its diff and checks back through `gh`. Switch the source checkout back to `main` when you are done
+   writing to the branch.
+5. Drive that pull request to green. `ci` runs on the pull request itself, so the checks you must
+   read are the ones on its own head SHA — `gh pr checks <number> --watch`, then
+   `gh pr view <number> --json statusCheckRollup` read per check, never `gh run watch`, which exits 0
+   on a run whose conclusion is failure.
+6. Hand off the pull request number and URL, its head SHA, every check and its conclusion, the
+   changed files, the root cause and the test evidence. State plainly that it is open and needs the
+   owner's merge. Do not report the repair as landed, and do not wait for the merge yourself — the
+   gate does that.
 7. If the handoff contains only a moved candidate and the recorded defect no longer exists, make no
    empty pull request: prove clean current main, explain why no repair remains, and pass it back for
    verification.
 
 ## Never
 
-- Never use `gh pr merge --auto`, a merge queue, a browser approval or a request for a person when a
-  normal direct `gh pr merge` can land the pull request.
-- Never merge with failing or missing required checks, bypass branch protection, force-push main,
-  force-move a release tag, or publish a package or release.
+- Never merge your own pull request, with `gh pr merge`, `--auto`, a merge queue or a browser
+  approval. The merge is the owner's, and this step is gated so they can take it.
+- Never push to `main`, force-push any branch, bypass branch protection, force-move a release tag,
+  or publish a package or release.
+- Never leave a pull request red and call the step done: an unmergeable repair is not a repair.
 - Never bundle unrelated product work, version bumps or changelog edits into a readiness repair.
-- Never report success while the pull request remains open or while local main differs from
-  `origin/main`.
+- Never report a repair as on `main` while its pull request is still open.
