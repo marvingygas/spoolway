@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::platform::PathExt;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use toml_edit::{DocumentMut, Item};
@@ -1926,7 +1927,7 @@ impl Config {
         let mut roots = Vec::new();
 
         let mut push = |path: &Path| {
-            let Ok(canon) = path.canonicalize() else {
+            let Ok(canon) = path.canonical() else {
                 return;
             };
             if canon.is_dir() && !roots.contains(&canon) {
@@ -2304,7 +2305,7 @@ mod tests {
 
         let roots = config.watch_roots(&root);
 
-        assert_eq!(roots, vec![root.canonicalize().unwrap()]);
+        assert_eq!(roots, vec![root.canonical().unwrap()]);
     }
 
     /// Every named form resolves: `~`-relative against the home directory,
@@ -2333,7 +2334,7 @@ mod tests {
 
         let expected: Vec<_> = [&root, &home.join("notes"), &root.join("logs"), &absolute]
             .into_iter()
-            .map(|p| p.canonicalize().unwrap())
+            .map(|p| p.canonical().unwrap())
             .collect();
         assert_eq!(roots.len(), expected.len(), "{roots:?}");
         for path in &expected {

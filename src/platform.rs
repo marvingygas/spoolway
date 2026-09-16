@@ -938,3 +938,165 @@ pub(crate) mod test_home {
         }
     }
 }
+
+/// One spelling for every absolute path spoolway records, compares, or hands
+/// to another program.
+///
+/// Windows spells the same directory at least three ways, and the three do
+/// not compare equal as strings:
+///
+/// - the 8.3 short form, `C:\Users\RUNNER~1\AppData\Local\Temp` — what
+///   `std::env::temp_dir()` answers with on a GitHub `windows-latest` runner,
+///   and what any path built by joining onto it inherits;
+/// - the plain long form, `C:\Users\runneradmin\AppData\Local\Temp` — what
+///   git prints, and what git will accept back;
+/// - the verbatim form, `\\?\C:\Users\runneradmin\AppData\Local\Temp` — what
+///   `Path::canonicalize` answers with, whose leading `\\?\` is a distinct
+///   path component rather than decoration.
+///
+/// Half of spoolway resolved a path and half did not, so the same directory
+/// arrived under two spellings and every string comparison between them
+/// missed: a checkout compared against its own recorded `root` read as a
+/// different checkout, and a scratch worktree read as outside the scratch
+/// directory containing it. Worse, handing the verbatim form *back* to git
+/// fails outright — `git worktree add \\?\C:\…` dies with "could not create
+/// leading directories … Invalid argument" — so resolving alone was not
+/// enough either.
+///
+/// [`PathExt::canonical`] resolves and then strips the verbatim prefix, which
+/// lands every path in the plain long form: the one spelling that compares
+/// equal to itself and that git accepts. Unix has one spelling already, so
+/// there this is exactly `canonicalize`.
+///
+/// The prefix is what lifts Windows' 260-character path limit, so stripping
+/// it gives that limit back. That is the right trade here — every path this
+/// applies to is a checkout, a home, or a worktree, all of them short, and
+/// all of them passed to git, which rejects the verbatim form regardless.
+pub trait PathExt {
+    /// [`Path::canonicalize`], in the one spelling described on [`PathExt`].
+    fn canonical(&self) -> std::io::Result<PathBuf>;
+
+    /// [`PathExt::canonical`], falling back to the path as given when it
+    /// cannot be resolved — a path that does not exist yet, or one whose
+    /// checkout is already gone. The fallback is still stripped, so a
+    /// resolved path and an unresolvable one stay comparable.
+    fn comparable(&self) -> PathBuf;
+}
+
+impl PathExt for Path {
+    fn canonical(&self) -> std::io::Result<PathBuf> {
+        Ok(plain(self.canonicalize()?))
+    }
+
+    fn comparable(&self) -> PathBuf {
+        self.canonical()
+            .unwrap_or_else(|_| plain(self.to_path_buf()))
+    }
+}
+
+impl PathExt for PathBuf {
+    fn canonical(&self) -> std::io::Result<PathBuf> {
+        self.as_path().canonical()
+    }
+
+    fn comparable(&self) -> PathBuf {
+        self.as_path().comparable()
+    }
+}
+
+/// Drop Windows' verbatim `\\?\` prefix, leaving the plain long form.
+///
+/// Compiled on every platform and decided at run time, per this module's own
+/// rule: a `#[cfg(windows)]` body is never built on Linux CI, which is how
+/// path handling shipped wrong in the first place. On Unix no path begins
+/// with this prefix, so this is the identity.
+///
+/// The UNC spelling is its own case: `\\?\UNC\server\share` is the verbatim
+/// form of `\\server\share`, so dropping the whole `\\?\UNC` would name a
+/// relative path, and dropping only `\\?\` would name a directory called
+/// `UNC` on no host at all. Both are wrong; the share prefix is restored.
+fn plain(path: PathBuf) -> PathBuf {
+    let Some(text) = path.to_str() else {
+        // Not valid UTF-8, so it cannot carry the ASCII prefix either.
+        return path;
+    };
+    let Some(rest) = text.strip_prefix(r"\\?\") else {
+        return path;
+    };
+    match rest.strip_prefix(r"UNC\") {
+        Some(share) => PathBuf::from(format!(r"\\{share}")),
+        None => PathBuf::from(rest),
+    }
+}
+
+#[cfg(test)]
+mod path_spelling_tests {
+    use super::*;
+
+    /// The prefix is decoration on a drive path and nothing else has to
+    /// change. This is the spelling `canonicalize` hands back on Windows and
+    /// that git refuses, so it is the one this has to strip.
+    #[test]
+    fn a_verbatim_drive_path_loses_its_prefix() {
+        assert_eq!(
+            plain(PathBuf::from(
+                r"\\?\C:\Users\runneradmin\AppData\Local\Temp"
+            )),
+            PathBuf::from(r"C:\Users\runneradmin\AppData\Local\Temp")
+        );
+    }
+
+    /// `\\?\UNC\server\share` is the verbatim spelling of `\\server\share`.
+    /// Dropping the whole `\\?\UNC` would leave a relative path and dropping
+    /// only `\\?\` would name a local directory called `UNC`, so neither of
+    /// the two obvious strips is right and the share prefix is put back.
+    #[test]
+    fn a_verbatim_unc_path_becomes_the_share_it_names() {
+        assert_eq!(
+            plain(PathBuf::from(r"\\?\UNC\server\share\project")),
+            PathBuf::from(r"\\server\share\project")
+        );
+    }
+
+    /// Every other path is returned exactly as it came, on either platform —
+    /// a plain Windows path, an already-stripped UNC path, and a Unix path
+    /// that happens to contain the same characters somewhere other than the
+    /// front.
+    #[test]
+    fn nothing_else_is_rewritten() {
+        for path in [
+            r"C:\Users\runneradmin",
+            r"\\server\share",
+            "/home/runner/work/spoolway",
+            "relative/path",
+        ] {
+            assert_eq!(plain(PathBuf::from(path)), PathBuf::from(path), "{path}");
+        }
+    }
+
+    /// The property every comparison in spoolway leans on: whatever spelling
+    /// a path arrives in, resolving it twice lands in the same place. Without
+    /// it a path recorded by one call and compared by another misses.
+    #[test]
+    fn resolving_is_idempotent() {
+        let dir = crate::scratch::root("path-spelling-idempotent");
+        std::fs::create_dir_all(&dir).unwrap();
+        let once = dir.canonical().unwrap();
+        let twice = once.canonical().unwrap();
+        assert_eq!(once, twice);
+        // And a scratch root is already in that spelling, which is what
+        // keeps a fixture's own paths comparable to what discovery resolves.
+        assert_eq!(dir, once);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A path that cannot be resolved — it is not there any more, or never
+    /// was — still comes back comparable rather than propagating a failure,
+    /// because the callers that use it are comparing, not opening.
+    #[test]
+    fn an_unresolvable_path_falls_back_to_itself() {
+        let gone = crate::scratch::root("path-spelling-gone").join("never-created");
+        assert!(gone.canonical().is_err());
+        assert_eq!(gone.comparable(), gone);
+    }
+}

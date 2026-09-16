@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
+use crate::platform::PathExt;
 use crate::task::{self, Task};
 
 /// A repo with spoolway state in it: the root directory, its loaded config,
@@ -47,7 +48,7 @@ impl Repo {
     /// the main checkout, which is the project.
     pub fn discover(start: &Path) -> Result<Repo> {
         let start = start
-            .canonicalize()
+            .canonical()
             .with_context(|| format!("resolving {}", start.display()))?;
         let main = main_checkout(&start);
         let root = Repo::root(&start, main.as_deref())?;
@@ -100,7 +101,7 @@ impl Repo {
         start: &Path,
     ) -> Result<(Repo, Option<anyhow::Error>, Option<anyhow::Error>)> {
         let start = start
-            .canonicalize()
+            .canonical()
             .with_context(|| format!("resolving {}", start.display()))?;
         let main = main_checkout(&start);
         let root = Repo::root(&start, main.as_deref())?;
@@ -730,7 +731,7 @@ fn common_git_dir(dir: &Path) -> Result<Option<PathBuf>> {
     // `\\?\C:\…`, whose prefix component is a different thing — and with
     // that mismatch every main checkout read as a linked worktree.
     let canonical = common
-        .canonicalize()
+        .canonical()
         .with_context(|| format!("resolving the git directory for {}", dir.display()))?;
     Ok(Some(canonical))
 }
@@ -2125,7 +2126,7 @@ pub fn branch_at(dir: &Path) -> Result<String> {
 /// since then no ancestor can equal it either way.
 fn global_state_root() -> PathBuf {
     let dir = crate::mux::state_root();
-    dir.canonicalize().unwrap_or(dir)
+    dir.canonical().unwrap_or(dir)
 }
 
 /// The branch `dir` has out, for an error message only: `branch_at` refuses
@@ -2143,7 +2144,7 @@ fn git_toplevel(dir: &Path) -> Result<PathBuf> {
     // The same spelling rule as `main_checkout`: git's answer, in the form
     // `canonicalize` would give, so paths derived from either compare equal.
     let top = PathBuf::from(out.trim());
-    top.canonicalize()
+    top.canonical()
         .with_context(|| format!("resolving {}", top.display()))
 }
 
@@ -2181,7 +2182,7 @@ mod tests {
         let home = crate::scratch::root(&format!("repo-test-home-{name}"));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).unwrap();
-        home.canonicalize().unwrap()
+        home.canonical().unwrap()
     }
 
     /// `Repo::discover`, under a scratch home of its own — never the real
@@ -2288,13 +2289,13 @@ mod tests {
 
         let repo = discover_registered_as(&work, &wt).unwrap();
         assert_eq!(
-            repo.root.canonicalize().unwrap(),
-            work.canonicalize().unwrap(),
+            repo.root.canonical().unwrap(),
+            work.canonical().unwrap(),
             "a lane running in its worktree must resolve to the project"
         );
         assert_eq!(
-            repo.checkout.canonicalize().unwrap(),
-            wt.canonicalize().unwrap(),
+            repo.checkout.canonical().unwrap(),
+            wt.canonical().unwrap(),
             "but the tracked control plane is read from the worktree's own \
              checkout, not the main one's"
         );
@@ -2340,8 +2341,8 @@ mod tests {
         // git's `runneradmin` — and the two name one directory but compare
         // unequal.
         assert_eq!(
-            main_dir.canonicalize().unwrap(),
-            work.join(".git").canonicalize().unwrap()
+            main_dir.canonical().unwrap(),
+            work.join(".git").canonical().unwrap()
         );
         assert_eq!(
             linked_dir, main_dir,
@@ -2397,10 +2398,7 @@ mod tests {
             .checkout_note()
             .unwrap()
             .expect("checkout and root differ, so there is a note");
-        assert_eq!(
-            note.path.canonicalize().unwrap(),
-            wt.canonicalize().unwrap()
-        );
+        assert_eq!(note.path.canonical().unwrap(), wt.canonical().unwrap());
         assert_eq!(note.branch, "task/note");
 
         git(
@@ -2423,14 +2421,11 @@ mod tests {
         let (_origin, work) = fixture("plain");
         let repo = discover_registered(&work).unwrap();
         assert_eq!(
-            repo.checkout.canonicalize().unwrap(),
-            repo.root.canonicalize().unwrap(),
+            repo.checkout.canonical().unwrap(),
+            repo.root.canonical().unwrap(),
             "in the main checkout, checkout and root are the same directory"
         );
-        assert_eq!(
-            repo.root.canonicalize().unwrap(),
-            work.canonicalize().unwrap()
-        );
+        assert_eq!(repo.root.canonical().unwrap(), work.canonical().unwrap());
     }
 
     /// What lets `doctor` run on the project someone is trying to fix.
@@ -2451,10 +2446,7 @@ mod tests {
 
         let (repo, err, home_error) = lenient.unwrap();
         assert!(home_error.is_none(), "the home itself resolved fine here");
-        assert_eq!(
-            repo.root.canonicalize().unwrap(),
-            work.canonicalize().unwrap()
-        );
+        assert_eq!(repo.root.canonical().unwrap(), work.canonical().unwrap());
         let err = err.expect("the parse error is handed back, not swallowed");
         assert!(
             format!("{err:#}").contains("config.toml"),
@@ -2526,9 +2518,9 @@ mod tests {
             repo.worktree_for("plan/y")
                 .unwrap()
                 .unwrap()
-                .canonicalize()
+                .canonical()
                 .unwrap(),
-            plan_y.canonicalize().unwrap(),
+            plan_y.canonical().unwrap(),
         );
         assert!(
             repo.worktree_for("plan/nobody-has-this").unwrap().is_none(),
@@ -2602,8 +2594,8 @@ mod tests {
 
         let repo = discover_registered(&sub).unwrap();
         assert_eq!(
-            repo.root.canonicalize().unwrap(),
-            sub.canonicalize().unwrap(),
+            repo.root.canonical().unwrap(),
+            sub.canonical().unwrap(),
             "root is found via the .spoolway ancestor search here, not through git"
         );
         assert_eq!(
@@ -2750,10 +2742,7 @@ mod tests {
 
         let repo = crate::platform::test_home::with_home(&home, || Repo::discover(&work))
             .expect("a project with no home yet binds itself and proceeds");
-        assert_eq!(
-            repo.root.canonicalize().unwrap(),
-            work.canonicalize().unwrap()
-        );
+        assert_eq!(repo.root.canonical().unwrap(), work.canonical().unwrap());
         assert!(
             repo.home.join(crate::repo::BINDING_FILE).is_file(),
             "the fresh binding is on disk"
@@ -2817,7 +2806,7 @@ mod tests {
                 &bound_home,
                 &Binding {
                     id: "zzzzzz".to_string(),
-                    root: work.canonicalize().unwrap(),
+                    root: work.canonical().unwrap(),
                 },
             )
             .unwrap();
@@ -2857,7 +2846,7 @@ mod tests {
             let binding: Binding =
                 toml::from_str(&std::fs::read_to_string(bound_home.join(BINDING_FILE)).unwrap())
                     .unwrap();
-            assert_eq!(binding.root, after.canonicalize().unwrap());
+            assert_eq!(binding.root, after.canonical().unwrap());
         });
     }
 
@@ -2894,7 +2883,7 @@ mod tests {
                 &home_dir,
                 &Binding {
                     id: "bbbbbb".to_string(),
-                    root: old_checkout.canonicalize().unwrap(),
+                    root: old_checkout.canonical().unwrap(),
                 },
             )
             .unwrap();
@@ -2904,7 +2893,7 @@ mod tests {
             let binding: Binding =
                 toml::from_str(&std::fs::read_to_string(home_dir.join(BINDING_FILE)).unwrap())
                     .unwrap();
-            assert_eq!(binding.root, new_checkout.canonicalize().unwrap());
+            assert_eq!(binding.root, new_checkout.canonical().unwrap());
             assert_eq!(binding.id, "bbbbbb");
         });
     }
@@ -2986,7 +2975,7 @@ mod tests {
         let binding: Binding =
             toml::from_str(&std::fs::read_to_string(bound_home.join(BINDING_FILE)).unwrap())
                 .unwrap();
-        assert_eq!(binding.root, original.canonicalize().unwrap());
+        assert_eq!(binding.root, original.canonical().unwrap());
     }
 
     /// Criterion 4: a valid stamp, but no home recording it at all — the
@@ -3089,7 +3078,7 @@ mod tests {
         std::fs::write(
             home.join(BINDING_FILE),
             toml::to_string(&LegacyPointer {
-                root: work.canonicalize().unwrap(),
+                root: work.canonical().unwrap(),
             })
             .unwrap(),
         )
@@ -3163,7 +3152,7 @@ mod tests {
         );
         let binding: Binding =
             toml::from_str(&std::fs::read_to_string(moved.join(BINDING_FILE)).unwrap()).unwrap();
-        assert_eq!(binding.root, work.canonicalize().unwrap());
+        assert_eq!(binding.root, work.canonical().unwrap());
         assert!(
             work.join(".git").join("spoolway-id").is_file(),
             "the checkout is stamped as part of the migration"
@@ -3793,7 +3782,7 @@ mod tests {
         stamped_id(&work).unwrap(); // stands in for `spoolway init`
 
         let (checkout, label, id) = project_identity(&work).unwrap().unwrap();
-        assert_eq!(checkout, work.canonicalize().unwrap());
+        assert_eq!(checkout, work.canonical().unwrap());
         assert_eq!(label, crate::mux::project_label(&work));
 
         // Renamed with nothing under `~/.spoolway/` ever created for it.

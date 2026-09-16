@@ -2768,6 +2768,7 @@ pub fn project_has_ledger(root: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::PathExt;
 
     /// Test-only: [`last_turn`]'s size reading, taken off an already-located
     /// transcript rather than a session lookup.
@@ -4165,7 +4166,7 @@ mod tests {
             let listed = registry::list();
             assert_eq!(
                 listed,
-                vec![after.canonicalize().unwrap()],
+                vec![after.canonical().unwrap()],
                 "the rename must replace the old entry, not sit beside it: {listed:?}"
             );
         });
@@ -4838,7 +4839,7 @@ mod tests {
     fn dir_fixture(name: &str) -> (Repo, PathBuf) {
         let (mut repo, _) = fixture(name);
         std::fs::create_dir_all(&repo.root).unwrap();
-        repo.root = repo.root.canonicalize().unwrap();
+        repo.root = repo.root.canonical().unwrap();
         let root = repo.root.clone();
         (repo, root)
     }

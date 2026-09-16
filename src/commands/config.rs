@@ -211,6 +211,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use crate::platform::PathExt;
 
     /// `config contract` renders from [`crate::confkv::reference_table`]
     /// verbatim rather than a second copy of it — the criterion is that the
@@ -299,7 +300,7 @@ mod tests {
         // scratch home of its own — never under the real `~/.spoolway/`.
         let home = base.join("home");
         std::fs::create_dir_all(&home).unwrap();
-        let home = home.canonicalize().unwrap();
+        let home = home.canonical().unwrap();
         let repo =
             crate::platform::test_home::with_home(&home, || crate::repo::Repo::discover(&wt))
                 .unwrap();
