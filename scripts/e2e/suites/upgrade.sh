@@ -49,8 +49,35 @@ FIXTURES="$HERE/../fixtures"
 # A released version with no fixture is a version this suite has quietly
 # stopped answering for. Caught here, by name, rather than by the suite going
 # on to say nothing about it.
+#
+# Every version but one, and only while that one has nothing to check: the
+# version `Cargo.toml` names. A fixture is a `.spoolway/` tree that version's
+# own `spoolway init` scaffolded *at that version's own tag* (see this file's
+# header), and the release commit writes the bump and the changelog section
+# *before* the tag is pushed — so demanding that version's fixture is
+# demanding something that cannot exist yet. That is what reddened 0.3.0's
+# rehearsal: a release failing its own gate by construction, over nothing
+# wrong with the release. Every earlier section is still asked for, and the
+# moment the exempt version's fixture does land it is asked for too, so
+# scaffolding one straight after the tag needs no change here.
+#
+# The exemption is read off `Cargo.toml` rather than off the newest heading,
+# and never off `git tag`: CI checks out a single commit without tags, so a
+# tag-keyed question would answer "nothing needed" for every version at once
+# and retire the check altogether.
+#
+# Deferred, not dropped — the next bump moves `Cargo.toml` past this version
+# and turns the note below into a failing check. `docs/releasing.md` carries
+# scaffolding the fixture as the release's own closing step so that lands
+# first.
+RELEASING=$(awk -F'"' '/^version = /{print $2; exit}' "$REPO/Cargo.toml")
 while read -r version; do
   [ -n "$version" ] || continue
+  if [ "$version" = "$RELEASING" ] && [ ! -d "$FIXTURES/$version/.spoolway" ]; then
+    printf '  \033[33mnote\033[0m  %s\n' \
+      "scripts/e2e/fixtures/$version/ is not asked for while Cargo.toml still names $version — scaffold it from the v$version tag; the next bump makes it a check"
+    continue
+  fi
   works "scripts/e2e/fixtures/$version/ was scaffolded for the $version release" \
     test -d "$FIXTURES/$version/.spoolway"
 done < <(grep -oE '^## [0-9]+\.[0-9]+\.[0-9]+$' "$REPO/CHANGELOG.md" | awk '{print $2}')
