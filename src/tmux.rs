@@ -190,7 +190,7 @@ impl Tmux {
             return Ok(Some(String::from_utf8_lossy(&output.stdout).into_owned()));
         }
         let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("no server running") || stderr.contains("error connecting to") {
+        if means_no_server(&stderr) {
             return Ok(None);
         }
         bail!(
@@ -501,6 +501,40 @@ struct OwnPane {
     window_id: String,
     session_id: String,
     window_panes: u32,
+}
+
+/// Whether a failed tmux command failed only because there is no server to
+/// talk to — see [`Tmux::tmux_if_server`], which turns that into `None` and
+/// lets every real error surface.
+///
+/// tmux has three ways of saying it, and reading only the first two is what
+/// made `a_healed_owned_pane_is_still_removable` fail about one run in four
+/// and, in production, aborted a dispatcher pass whenever somebody had just
+/// closed their last spoolway pane. A client that connects while the server
+/// is still shutting down — which is exactly what happens when closing the
+/// last session and listing immediately after — is told `server exited
+/// unexpectedly` instead of `no server running`, and which of the two you
+/// get is a coin flip. Measured on tmux 3.6, no spoolway involved: create a
+/// session on a private socket, kill it, list immediately — 19 of 60
+/// attempts answered `server exited unexpectedly` and the other 41 answered
+/// `no server running`.
+///
+/// The fourth message tmux has in this family, `server version is too old
+/// for client`, is deliberately absent: a version mismatch is a real
+/// misconfiguration that must keep failing loudly rather than being read as
+/// an empty list of lanes.
+fn means_no_server(stderr: &str) -> bool {
+    const NO_SERVER: [&str; 3] = [
+        // `no server running on %s` — the ordinary case, nothing started yet.
+        "no server running",
+        // `error connecting to %s (%s)` — a stale socket, or one that cannot
+        // be reached.
+        "error connecting to",
+        // The server was alive when the client connected and gone before it
+        // answered: its last session had just closed.
+        "server exited unexpectedly",
+    ];
+    NO_SERVER.iter().any(|needle| stderr.contains(needle))
 }
 
 impl Mux for Tmux {
@@ -1130,6 +1164,37 @@ mod tests {
     /// Is there a tmux to test against? Every test that talks to a server
     /// starts by asking, and quietly passes where there is none — the same
     /// posture the e2e suite takes toward multiplexers in CI.
+    /// Every way tmux says "there is no server" reads as no server, and the
+    /// one message in that family that is a real error still does not.
+    ///
+    /// The classifier rather than the race: the defect this covers surfaced
+    /// as `a_healed_owned_pane_is_still_removable` failing about one run in
+    /// four, and a test that closed a session and listed immediately would
+    /// reproduce it on the same coin flip — green most of the time and no
+    /// evidence of anything when it passed. These are the exact strings
+    /// tmux 3.6 carries, read out of the binary, with the format
+    /// placeholders filled the way tmux fills them.
+    #[test]
+    fn every_way_tmux_says_there_is_no_server_reads_as_no_server() {
+        for stderr in [
+            "no server running on /tmp/tmux-1000/default",
+            "error connecting to /tmp/tmux-1000/default (No such file or directory)",
+            "server exited unexpectedly",
+        ] {
+            assert!(means_no_server(stderr), "{stderr}");
+        }
+    }
+
+    /// A version mismatch is a real misconfiguration, not an empty list of
+    /// lanes. Reading it as "no server" would have a dispatcher pass quietly
+    /// report no work in progress against a server full of it.
+    #[test]
+    fn a_server_too_old_to_talk_to_is_a_real_error() {
+        assert!(!means_no_server("server version is too old for client"));
+        assert!(!means_no_server("can't find pane: %3"));
+        assert!(!means_no_server(""));
+    }
+
     fn tmux_available() -> bool {
         std::process::Command::new("tmux")
             .arg("-V")
