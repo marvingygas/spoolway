@@ -844,12 +844,14 @@ impl<'a> Dispatcher<'a> {
     /// `create_pane` — the anchor this task exists to stop leaving behind, and
     /// to clear out where an earlier session, or a crash, already left one.
     ///
-    /// Deliberately narrow: a tab closes only when it sits in a
-    /// spoolway-owned workspace, holds no agent, holds no pane a command run
-    /// has recorded against it, and is not the only tab its workspace has —
-    /// see [`tabs_to_sweep`] for the four conditions themselves. Looks at
-    /// whole tabs and never at panes, so a task running several commands at
-    /// once in split panes of its one tab is untouched.
+    /// Deliberately narrow: a tab closes only when it sits in a workspace
+    /// opened on a task's own worktree — never the project checkout itself,
+    /// even though `mine` also answers `owns_cwd` for that — holds no agent,
+    /// holds no pane a command run has recorded against it, and is not the
+    /// only tab its workspace has — see [`tabs_to_sweep`] for the four
+    /// conditions themselves. Looks at whole tabs and never at panes, so a
+    /// task running several commands at once in split panes of its one tab
+    /// is untouched.
     ///
     /// This can legitimately close the tab a live task's lane was sitting
     /// in: if a workspace still carries a pre-existing anchor and the task's
@@ -886,7 +888,23 @@ impl<'a> Dispatcher<'a> {
             }
         }
 
-        for tab_id in tabs_to_sweep(&tabs, mine, &recorded_panes) {
+        // Narrower than `mine`: a workspace opened on the project checkout
+        // itself is never a sweep candidate, only one opened on a task's own
+        // worktree is — see [`our_checkouts`]'s doc for why `mine` seeds
+        // itself with `repo.root` too, and this task's own bug report for
+        // what happens if the sweep is run against `mine` unfiltered: a
+        // person's own herdr workspace on the checkout reports a
+        // `checkout_path` equal to `repo.root`, satisfies condition one, and
+        // loses its tabs on the very next pass — the dispatcher's own tab
+        // among them.
+        let mut project_checkout = HashSet::new();
+        if let Ok(canon) = self.repo.root.canonical() {
+            project_checkout.insert(canon);
+        }
+        project_checkout.insert(self.repo.root.clone());
+        let worktrees: HashSet<PathBuf> = mine.difference(&project_checkout).cloned().collect();
+
+        for tab_id in tabs_to_sweep(&tabs, &worktrees, &recorded_panes) {
             match self.mux.close_tab(&tab_id) {
                 Ok(()) => report
                     .actions
@@ -8054,6 +8072,51 @@ mod tests {
             mux.did("close_tab"),
             ["close_tab w1:t2"],
             "the tab holding the recorded pane survives; the anchor beside it is closed: {:?}",
+            mux.calls()
+        );
+    }
+
+    /// A herdr workspace opened on the project checkout itself — not on any
+    /// task's worktree — satisfies `owns_cwd` today because `our_checkouts`
+    /// seeds `repo.root` alongside every task worktree, and a pane running
+    /// `spoolway dispatch` carries no herdr agent row, so its tab meets
+    /// condition two as well. Two such tabs, neither holding an agent, must
+    /// both survive the sweep — including the tab the dispatcher itself is
+    /// running in — because this workspace was never opened on a task's
+    /// worktree at all. See the bug this task tracks.
+    #[test]
+    fn a_workspace_on_the_project_checkout_is_never_swept() {
+        let repo = fixture("sweep-own-tabs");
+
+        let work = SweepTab {
+            workspace_id: "w1".into(),
+            tab_id: "w1:t1".into(),
+            checkout_path: repo.root.clone(),
+            holds_agent: false,
+            pane_ids: std::iter::once("w1:t1:p1".to_string()).collect(),
+        };
+        let dispatch = SweepTab {
+            workspace_id: "w1".into(),
+            tab_id: "w1:t2".into(),
+            checkout_path: repo.root.clone(),
+            holds_agent: false,
+            pane_ids: std::iter::once("w1:t2:p1".to_string()).collect(),
+        };
+
+        let mux = FakeMux::new(vec![]).with_sweep_tabs(vec![work, dispatch]);
+        let pipelines = Pipelines::builtin();
+        let dispatcher = Dispatcher::new(&repo, &pipelines, &mux, false);
+        let tasks = repo.tasks().unwrap();
+        let mine = our_checkouts(&repo, &tasks);
+        let mut report = Report::default();
+
+        dispatcher.sweep_anchor_tabs(&tasks, &mine, &mut report);
+
+        assert_eq!(
+            mux.did("close_tab"),
+            Vec::<String>::new(),
+            "a workspace bound to the project checkout is never a sweep candidate, \
+             whatever its tab count: {:?}",
             mux.calls()
         );
     }
