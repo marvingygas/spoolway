@@ -4054,9 +4054,26 @@ mod tests {
     /// really over the whole read-modify-write the env var gates.
     static REGISTRY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// [`REGISTRY_ENV_LOCK`], taken whether or not a previous holder
+    /// panicked while holding it.
+    ///
+    /// `lock().unwrap()` propagates a `PoisonError`, so one failing test
+    /// below took the other two down with it and reported three failures
+    /// for one defect — which is how a single Windows path bug read as
+    /// three unrelated ones. The lock guards nothing a panic can leave
+    /// half-written: it serialises `XDG_STATE_HOME`, which every holder
+    /// sets for itself on the way in, so the next test is entitled to the
+    /// lock regardless and poison here carries no information worth
+    /// failing on.
+    fn registry_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        REGISTRY_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn the_registry_keeps_one_entry_per_project_and_forgets_deleted_ones() {
-        let _guard = REGISTRY_ENV_LOCK.lock().unwrap();
+        let _guard = registry_env_lock();
         let home = crate::scratch::root("registry-test");
         std::fs::remove_dir_all(&home).ok();
         std::fs::create_dir_all(&home).unwrap();
@@ -4094,7 +4111,7 @@ mod tests {
     /// moment the schema changed underneath it.
     #[test]
     fn an_old_schema_registry_still_reads_back() {
-        let _guard = REGISTRY_ENV_LOCK.lock().unwrap();
+        let _guard = registry_env_lock();
         let home = crate::scratch::root("registry-old-schema");
         std::fs::remove_dir_all(&home).ok();
         std::fs::create_dir_all(&home).unwrap();
@@ -4128,7 +4145,7 @@ mod tests {
     /// `binding-record` task.
     #[test]
     fn a_renamed_checkout_replaces_its_old_entry_rather_than_duplicating() {
-        let _guard = REGISTRY_ENV_LOCK.lock().unwrap();
+        let _guard = registry_env_lock();
         let scratch_home = crate::scratch::root("registry-rename-home");
         std::fs::remove_dir_all(&scratch_home).ok();
         std::fs::create_dir_all(&scratch_home).unwrap();

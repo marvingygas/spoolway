@@ -3290,8 +3290,11 @@ mod tests {
             lane_dir.join("task-a.json"),
             format!(
                 r#"{{"name":"task-a","kind":"worktree","pane_id":"p","workspace_id":"w",
-                     "tab_id":"t","cwd":"{}","args":[],"env":{{}},"path_prefix":null,"turns":1}}"#,
-                lane_wt.display()
+                     "tab_id":"t","cwd":{},"args":[],"env":{{}},"path_prefix":null,"turns":1}}"#,
+                // Serialised, not dropped between quotes — see the same
+                // fixture in `crate::headless`'s own tests for why a raw
+                // Windows path cannot go inside a JSON string literal.
+                serde_json::to_string(&lane_wt.display().to_string()).unwrap()
             ),
         )
         .unwrap();
