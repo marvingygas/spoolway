@@ -1094,8 +1094,17 @@ mod tests {
             dir.join(format!("{name}.json")),
             format!(
                 r#"{{"name":"{name}","kind":"worktree","pane_id":"p","workspace_id":"w",
-                     "tab_id":"t","cwd":"{}","args":[],"env":{{}},"path_prefix":null,"turns":1}}"#,
-                cwd.display()
+                     "tab_id":"t","cwd":{},"args":[],"env":{{}},"path_prefix":null,"turns":1}}"#,
+                // Serialised rather than dropped between quotes: a Windows
+                // path is full of backslashes, and inside a JSON string each
+                // one opens an escape. `…\home\worktrees\task-a` carries
+                // `\h` and `\w`, which are invalid escapes, and `\t`,
+                // which is a valid one for a tab — so the record either
+                // failed to parse or parsed into a path naming nothing, and
+                // the lane it describes was never found. This emits the
+                // quotes itself, which is why the format string no longer
+                // does.
+                serde_json::to_string(&cwd.display().to_string()).unwrap()
             ),
         )
         .unwrap();

@@ -43,10 +43,38 @@ static SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// A path under the system temporary directory that belongs to this call
 /// alone. Nothing is created here; the caller does that, as it did before.
+///
+/// The temporary directory is resolved through [`crate::platform::PathExt`]
+/// before anything is joined onto it, so that every path a fixture builds is
+/// already in the one spelling spoolway compares and records paths in.
+/// Without that, a GitHub `windows-latest` runner's `temp_dir()` answers with
+/// the 8.3 short form — `C:\Users\RUNNER~1\AppData\Local\Temp` — every
+/// fixture path inherits it, and each one then compares unequal to the same
+/// directory as resolved by anything under test. `temp_dir()` is resolved
+/// rather than the joined path because the joined path does not exist yet;
+/// its parent always does.
 pub(crate) fn root(name: &str) -> PathBuf {
     reclaim_finished_runs();
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!("spoolway-{name}-{}-{seq}", std::process::id()))
+    temp_root().join(format!("spoolway-{name}-{}-{seq}", std::process::id()))
+}
+
+/// The system temporary directory, in spoolway's one path spelling — see
+/// [`root`]. Resolved once: it cannot change under a running process, and
+/// `root` is called thousands of times over a suite.
+///
+/// Reach for this rather than `std::env::temp_dir()` in any test that
+/// compares a scratch path against the temporary directory holding it: the
+/// two spellings do not compare equal on Windows, which is the whole reason
+/// this exists.
+pub(crate) fn temp_root() -> PathBuf {
+    use std::sync::OnceLock;
+    static TEMP: OnceLock<PathBuf> = OnceLock::new();
+    TEMP.get_or_init(|| {
+        use crate::platform::PathExt;
+        std::env::temp_dir().comparable()
+    })
+    .clone()
 }
 
 /// Set a path's modification time, file or directory, on either platform.
@@ -126,7 +154,7 @@ fn sweep_now() {
 /// Delete at most `limit` finished runs' directories. Returns how many went,
 /// which is what lets a test see the ceiling hold.
 fn sweep_up_to(limit: usize) -> usize {
-    sweep_dir(&std::env::temp_dir(), limit)
+    sweep_dir(&temp_root(), limit)
 }
 
 /// The sweep over one named directory.

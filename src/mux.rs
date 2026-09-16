@@ -2465,6 +2465,7 @@ fn from_agent_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::PathExt;
 
     /// Captured from `herdr pane layout --pane w5S:p19` against herdr as it
     /// ships: the rects live under `layout.panes[].rect`, and a reader that
@@ -2694,15 +2695,15 @@ mod tests {
         let config = crate::config::DispatchConfig::default();
         let ordinary = Herdr::new(&work, &work, &config).unwrap();
         assert_eq!(
-            ordinary.anchor.canonicalize().unwrap(),
-            work.canonicalize().unwrap(),
+            ordinary.anchor.canonical().unwrap(),
+            work.canonical().unwrap(),
             "the main checkout anchors to itself"
         );
 
         let from_worktree = Herdr::new(&work, &wt, &config).unwrap();
         assert_eq!(
-            from_worktree.anchor.canonicalize().unwrap(),
-            wt.canonicalize().unwrap(),
+            from_worktree.anchor.canonical().unwrap(),
+            wt.canonical().unwrap(),
             "a linked worktree anchors to itself, not the main checkout beside it"
         );
 
@@ -2763,8 +2764,8 @@ mod tests {
         );
         let cwd_index = argv.iter().position(|a| a == "--cwd").unwrap() + 1;
         assert_eq!(
-            Path::new(&argv[cwd_index]).canonicalize().unwrap(),
-            release.canonicalize().unwrap(),
+            Path::new(&argv[cwd_index]).canonical().unwrap(),
+            release.canonical().unwrap(),
             "a task's workspace should be anchored to the checkout the dispatcher was \
              started in ({}), not to the main checkout beside it ({}) — got --cwd {:?}",
             release.display(),
@@ -3654,8 +3655,24 @@ mod tests {
     /// reads, this would answer `false` instead. `tmux -V` itself never
     /// touches a session or a socket, so this stays clear of a real tmux
     /// server the way `src/tmux.rs`'s own `Fixture` is careful to.
+    ///
+    /// That mechanism needs a tmux to spawn: where the binary is missing —
+    /// every `windows-latest` runner — the spawn fails for its own reason,
+    /// `is_available` answers `false` whichever path `backend` passed, and
+    /// the assertion below cannot tell the two apart rather than failing on
+    /// a real defect. So this skips there, the same guard the eighteen
+    /// tests in `src/tmux.rs` that drive a real pane already use. The
+    /// property is about `backend`'s argument order and does not vary by
+    /// platform, so proving it wherever tmux is installed proves it.
     #[test]
     fn tmux_backend_selection_reads_the_root_never_the_checkout() {
+        let tmux_installed = std::process::Command::new("tmux")
+            .arg("-V")
+            .output()
+            .is_ok_and(|output| output.status.success());
+        if !tmux_installed {
+            return;
+        }
         let root = crate::scratch::root("mux-test-tmux-unaffected");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();

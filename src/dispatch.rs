@@ -26,6 +26,7 @@ use crate::mux::{
     Lane, LaneSpec, LaneStatus, Mux, SweepTab, Vacated, lane_name, parse_lane_name, tab_label,
 };
 use crate::pipeline::{Pipeline, Pipelines, Step, StepKind};
+use crate::platform::PathExt;
 use crate::repo::Repo;
 use crate::task::Task;
 
@@ -5250,7 +5251,7 @@ pub fn our_checkouts(repo: &Repo, tasks: &[Task]) -> HashSet<PathBuf> {
         // (herdr, or tmux's `pane_current_path`) hands back the same
         // directory under a different name, and [`owns_cwd`] checks against
         // whichever this set happens to hold.
-        if let Ok(canon) = std::fs::canonicalize(&path) {
+        if let Ok(canon) = path.canonical() {
             out.insert(canon);
         }
         out.insert(path);
@@ -5268,7 +5269,8 @@ pub fn our_checkouts(repo: &Repo, tasks: &[Task]) -> HashSet<PathBuf> {
 /// every lane and escalated every task. See review finding 38.
 pub fn owns_cwd(mine: &HashSet<PathBuf>, cwd: &std::path::Path) -> bool {
     mine.contains(cwd)
-        || std::fs::canonicalize(cwd)
+        || cwd
+            .canonical()
             .map(|canon| mine.contains(&canon))
             .unwrap_or(false)
 }
@@ -7878,7 +7880,7 @@ mod tests {
         let link = base.join("linked-worktree");
         let _ = std::fs::remove_file(&link);
         std::os::unix::fs::symlink(&real, &link).unwrap();
-        let resolved = std::fs::canonicalize(&link).unwrap();
+        let resolved = link.canonical().unwrap();
         assert_ne!(
             link, resolved,
             "the symlink and its target spell differently"
@@ -12453,7 +12455,7 @@ mod tests {
     /// backslashes and the 8.3 one. Both name the same directory, which is the
     /// claim being made, so comparing the strings tested the spelling instead.
     fn same_dir(path: &Path) -> PathBuf {
-        std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+        path.comparable()
     }
 
     #[test]
@@ -12961,7 +12963,11 @@ mod tests {
             cut.display()
         );
         assert!(
-            cut.starts_with(std::env::temp_dir()),
+            // `crate::scratch::temp_root` rather than `std::env::temp_dir`:
+            // a scratch path is built on the resolved spelling, and on
+            // Windows the raw one is the 8.3 short form, which no resolved
+            // path starts with.
+            cut.starts_with(crate::scratch::temp_root()),
             "a fixture's worktree root belongs under the temporary directory, not {}",
             cut.display()
         );
@@ -13746,7 +13752,7 @@ mod tests {
         let where_it_ran = std::fs::read_to_string(worktree.join("where-it-ran.txt")).unwrap();
         assert_eq!(
             where_it_ran.trim(),
-            worktree.canonicalize().unwrap().display().to_string(),
+            worktree.canonical().unwrap().display().to_string(),
             "the command ran outside the task's worktree"
         );
         // No lane, no slot, no model: the step started a process and nothing

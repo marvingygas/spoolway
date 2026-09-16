@@ -31,12 +31,13 @@
 //! moving it along a pipeline — reconciling stage against pipeline is
 //! `dispatch`'s job, and undoing what a checkout holds is this module's.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result};
 
 use crate::dispatch::{Dispatcher, LaneRecord, Report, measure_patch, now_secs, save_lane_records};
 use crate::mux::{Lane, lane_name};
+use crate::platform::PathExt;
 use crate::task::Task;
 
 impl<'a> Dispatcher<'a> {
@@ -602,20 +603,14 @@ impl<'a> Dispatcher<'a> {
         // git to let go of it first — no `worktree remove`, so no `branch
         // -D` either, and the branch this function exists to clean up is
         // left behind, exactly the litter its own doc comment describes.
-        // One spelling for both sides of the `starts_with` below. On Windows
-        // `canonicalize` answers in verbatim form — `\\?\C:\…` — while the
-        // fallback for a path that no longer exists keeps its raw spelling,
-        // so a gone worktree under a live scratch directory compares a bare
-        // drive path against a prefixed one and never matches. Stripping the
-        // prefix from whichever side grew it puts both in the raw form.
-        fn comparable(path: &Path) -> PathBuf {
-            let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-            match canonical.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
-                Some(raw) => PathBuf::from(raw),
-                None => canonical,
-            }
-        }
-        let canonical_scratch = comparable(&scratch);
+        // One spelling for both sides of the `starts_with` below, through
+        // the same [`crate::platform::PathExt`] every other comparison in
+        // spoolway goes through: on Windows `canonicalize` alone answers in
+        // verbatim form — `\\?\C:\…` — while the fallback for a path that
+        // no longer exists keeps its raw spelling, so a gone worktree under
+        // a live scratch directory compares a bare drive path against a
+        // prefixed one and never matches.
+        let canonical_scratch = scratch.comparable();
 
         let listing = self
             .repo
@@ -638,7 +633,7 @@ impl<'a> Dispatcher<'a> {
                 // `canonical_scratch` above already falls back for `scratch`
                 // itself.
                 let inside = path
-                    .map(|p| comparable(Path::new(p)).starts_with(&canonical_scratch))
+                    .map(|p| Path::new(p).comparable().starts_with(&canonical_scratch))
                     .unwrap_or(false);
                 if !inside {
                     continue;
