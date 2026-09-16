@@ -21,6 +21,14 @@
 //! a project wrote in any of them, and `spoolway pipeline check` is what
 //! catches a command name that has fallen behind the CLI.
 //!
+//! Everything below writes `repo.checkout`, never `repo.root`: the control
+//! plane this command refreshes is tracked, so a lane running in a linked
+//! worktree has its own branch's copies, and an update taken there has to
+//! land on that branch — where it is reviewed and merged — rather than on
+//! whatever the main checkout happens to have out. `config set` and
+//! `override promote` keep the opposite rule and refuse outright in a linked
+//! worktree; this command does not.
+//!
 //! A prompt's assets are the document skeletons, and they were a page template
 //! until they moved under the archivist. That move was the whole point: a
 //! skeleton spoolway keeps current is one a project cannot restructure, and
@@ -105,7 +113,7 @@ const KEPT: &str =
 /// above it are what an update *would* take, and nothing was touched.
 const DRY_RUN: &str = "Dry run: nothing was written. Run without --dry-run to take it.";
 
-pub fn run(repo: &Repo, args: &UpdateArgs) -> Result<()> {
+pub fn run(repo: &Repo, args: &UpdateArgs, json: bool) -> Result<()> {
     use std::io::IsTerminal;
 
     if !args.replace.is_empty() {
@@ -125,6 +133,14 @@ pub fn run(repo: &Repo, args: &UpdateArgs) -> Result<()> {
             std::process::exit(status.code().unwrap_or(1));
         }
         return Ok(());
+    }
+
+    // Printed here, not above install(): this project's own files are what
+    // the note is about, and it would be noise ahead of an npm check that has
+    // nothing to do with which checkout gets written.
+    if let Some(note) = repo.checkout_note()? {
+        note.print(json)?;
+        println!();
     }
 
     // Deduped, because one file can be written for several reasons at once —
@@ -259,10 +275,15 @@ where
 /// child inherits a working directory, not a discovery. A `spoolway -C /elsewhere
 /// update` that handed over without it would upgrade the binary and then update
 /// whichever project the terminal happened to be sitting in.
+///
+/// `repo.checkout`, not `repo.root`: this command writes the checkout it was
+/// run in (see the module doc), and a `-C <worktree> update` that relaunched
+/// against `root` would hand the newly installed binary back to the main
+/// checkout, undoing the redirect the flag asked for.
 fn relaunch(repo: &Repo) -> Vec<String> {
     vec![
         "-C".to_string(),
-        repo.root.display().to_string(),
+        repo.checkout.display().to_string(),
         "update".to_string(),
     ]
 }
@@ -297,8 +318,8 @@ pub fn scan(repo: &Repo, args: &UpdateArgs) -> Result<Vec<Outcome>> {
 fn ignores(repo: &Repo, args: &UpdateArgs, outcomes: &mut Vec<Outcome>) -> Result<()> {
     use crate::gitignore::Removed;
 
-    let shown = crate::platform::relative(&repo.root, &crate::gitignore::file(&repo.root));
-    match crate::gitignore::remove(&repo.root, args.dry_run)? {
+    let shown = crate::platform::relative(&repo.checkout, &crate::gitignore::file(&repo.checkout));
+    match crate::gitignore::remove(&repo.checkout, args.dry_run)? {
         Removed::Gone => outcomes.push(Outcome::wrote(&shown, "spoolway's old block removed")),
         Removed::Absent => {}
         Removed::Unterminated => outcomes.push(Outcome::blocked(
@@ -334,14 +355,20 @@ fn ignores(repo: &Repo, args: &UpdateArgs, outcomes: &mut Vec<Outcome>) -> Resul
 /// file: the right rewrite, performed at the wrong moment, while somebody was
 /// changing an interval. See [`crate::confdoc`].
 fn config(repo: &Repo, args: &UpdateArgs, outcomes: &mut Vec<Outcome>) -> Result<()> {
-    let path = crate::config::Config::path_in(&repo.root);
-    let shown = crate::platform::relative(&repo.root, &path);
+    let path = crate::config::Config::path_in(&repo.checkout);
+    let shown = crate::platform::relative(&repo.checkout, &path);
 
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            // The shipped default, not `repo.config`: `repo.config` is
+            // `Config::load(&repo.root)` (see `Repo::discover`), and once
+            // `checkout` and `root` can diverge that is a different branch's
+            // values, not this one's — the same reason `templates` below
+            // seeds a missing skeleton from `skeleton.shipped` rather than
+            // from anything read out of the main checkout.
             if !args.dry_run {
-                repo.config.save(&repo.root)?;
+                crate::config::Config::default().save(&repo.checkout)?;
             }
             outcomes.push(Outcome::wrote(&shown, MISSING));
             return Ok(());
@@ -355,11 +382,13 @@ fn config(repo: &Repo, args: &UpdateArgs, outcomes: &mut Vec<Outcome>) -> Result
         }
     };
 
-    // Read from the file rather than taken from `repo`, so that what is written
-    // back is what this document says. The two are the same config in every
-    // real run; making that an assumption is how a rewrite ends up sourced from
-    // something other than the file it replaces.
-    let current = match crate::config::Config::load(&repo.root) {
+    // Read from the file rather than taken from `repo`, so that what is
+    // written back is what this document says. Not the same config as
+    // `repo.config`: that is `Config::load(&repo.root)`, and in a linked
+    // worktree — the run this command now exists for — `root` and
+    // `checkout` can hold two different files. `current` is always the
+    // checkout's own, so a rewrite is sourced from the file it replaces.
+    let current = match crate::config::Config::load(&repo.checkout) {
         Ok(config) => config,
         Err(err) => {
             outcomes.push(Outcome::blocked(&shown, format!("{err:#}")));
@@ -447,8 +476,8 @@ fn config(repo: &Repo, args: &UpdateArgs, outcomes: &mut Vec<Outcome>) -> Result
 /// current and the styling around it is never read. See [`crate::skeleton`].
 fn templates(repo: &Repo, args: &UpdateArgs, outcomes: &mut Vec<Outcome>) -> Result<()> {
     for skeleton in crate::skeleton::skeletons() {
-        let path = repo.root.join(skeleton.path);
-        let shown = crate::platform::relative(&repo.root, &path);
+        let path = repo.checkout.join(skeleton.path);
+        let shown = crate::platform::relative(&repo.checkout, &path);
 
         let on_disk = match std::fs::read_to_string(&path) {
             Ok(text) => text,
@@ -533,9 +562,9 @@ fn replace(repo: &Repo, args: &UpdateArgs) -> Result<()> {
     for name in &args.replace {
         let path = match std::path::Path::new(name).is_absolute() {
             true => PathBuf::from(name),
-            false => repo.root.join(name),
+            false => repo.checkout.join(name),
         };
-        let shown = crate::platform::relative(&repo.root, &path);
+        let shown = crate::platform::relative(&repo.checkout, &path);
 
         // A flat `<name>.md` whose directory-shaped `<name>/PROMPT.md` exists is
         // a file this project no longer reads — `prompt::path_for` prefers the
@@ -548,7 +577,7 @@ fn replace(repo: &Repo, args: &UpdateArgs) -> Result<()> {
             if nested.is_file() {
                 println!(
                     "  ! {shown}: this project keeps its prompts as `<name>/PROMPT.md` — replace {} instead",
-                    crate::platform::relative(&repo.root, &nested)
+                    crate::platform::relative(&repo.checkout, &nested)
                 );
                 failed += 1;
                 continue;
@@ -583,7 +612,7 @@ fn replace(repo: &Repo, args: &UpdateArgs) -> Result<()> {
             write_atomic(&backup, &on_disk)?;
             println!(
                 "  ! your version is saved to {}",
-                crate::platform::relative(&repo.root, &backup)
+                crate::platform::relative(&repo.checkout, &backup)
             );
         }
         write_atomic(&path, &shipped)?;
@@ -669,7 +698,7 @@ fn shipped_for(repo: &Repo, path: &Path) -> Option<String> {
     // back to ours.
 
     for skeleton in crate::skeleton::skeletons() {
-        if *path == repo.root.join(skeleton.path) {
+        if *path == repo.checkout.join(skeleton.path) {
             return Some(skeleton.shipped.to_string());
         }
     }
@@ -700,9 +729,9 @@ fn shipped_for(repo: &Repo, path: &Path) -> Option<String> {
 /// above it, are left in place unless the move emptied them.
 fn skills(repo: &Repo, args: &UpdateArgs, outcomes: &mut Vec<Outcome>) -> Result<()> {
     for provider in <crate::cli::Provider as clap::ValueEnum>::value_variants() {
-        let planned = provider.plan(&repo.root);
-        let dir = provider.skills_dir(&repo.root);
-        let old_codex_root = repo.root.join(".codex").join("skills");
+        let planned = provider.plan(&repo.checkout);
+        let dir = provider.skills_dir(&repo.checkout);
+        let old_codex_root = repo.checkout.join(".codex").join("skills");
         let migrate_codex = *provider == crate::cli::Provider::Codex
             && planned.iter().any(|file| {
                 let relative = file
@@ -721,7 +750,7 @@ fn skills(repo: &Repo, args: &UpdateArgs, outcomes: &mut Vec<Outcome>) -> Result
         }
 
         for planned in planned {
-            let shown = crate::platform::relative(&repo.root, &planned.path);
+            let shown = crate::platform::relative(&repo.checkout, &planned.path);
             let detail = match std::fs::read_to_string(&planned.path) {
                 Ok(on_disk) if on_disk == planned.contents => {
                     outcomes.push(Outcome::Kept);
@@ -738,7 +767,7 @@ fn skills(repo: &Repo, args: &UpdateArgs, outcomes: &mut Vec<Outcome>) -> Result
 
         if migrate_codex {
             let mut names: Vec<String> = provider
-                .plan(&repo.root)
+                .plan(&repo.checkout)
                 .iter()
                 .filter_map(|file| {
                     file.path
@@ -757,7 +786,7 @@ fn skills(repo: &Repo, args: &UpdateArgs, outcomes: &mut Vec<Outcome>) -> Result
                 if !stale.is_dir() {
                     continue;
                 }
-                let shown = crate::platform::relative(&repo.root, &stale);
+                let shown = crate::platform::relative(&repo.checkout, &stale);
                 if !args.dry_run {
                     std::fs::remove_dir_all(&stale)
                         .with_context(|| format!("removing {}", stale.display()))?;
@@ -766,7 +795,7 @@ fn skills(repo: &Repo, args: &UpdateArgs, outcomes: &mut Vec<Outcome>) -> Result
                     &shown,
                     format!(
                         "moved to {}, which is where Codex reads skills from now",
-                        crate::platform::relative(&repo.root, &dir)
+                        crate::platform::relative(&repo.checkout, &dir)
                     ),
                 ));
             }
@@ -775,7 +804,7 @@ fn skills(repo: &Repo, args: &UpdateArgs, outcomes: &mut Vec<Outcome>) -> Result
             // anything, so a project's own files there are never at risk.
             if !args.dry_run {
                 let _ = std::fs::remove_dir(&old_codex_root);
-                let _ = std::fs::remove_dir(repo.root.join(".codex"));
+                let _ = std::fs::remove_dir(repo.checkout.join(".codex"));
             }
         }
     }
@@ -795,13 +824,13 @@ fn skills(repo: &Repo, args: &UpdateArgs, outcomes: &mut Vec<Outcome>) -> Result
 /// this project once shipped and no longer does.
 fn retired_skills(repo: &Repo, args: &UpdateArgs, outcomes: &mut Vec<Outcome>) -> Result<()> {
     for provider in <crate::cli::Provider as clap::ValueEnum>::value_variants() {
-        let dir = provider.skills_dir(&repo.root);
+        let dir = provider.skills_dir(&repo.checkout);
         for name in crate::install::RETIRED_SKILLS {
             let stale = dir.join(name);
             if !stale.is_dir() {
                 continue;
             }
-            let shown = crate::platform::relative(&repo.root, &stale);
+            let shown = crate::platform::relative(&repo.checkout, &stale);
             if !args.dry_run {
                 std::fs::remove_dir_all(&stale)
                     .with_context(|| format!("removing {}", stale.display()))?;
@@ -1037,6 +1066,36 @@ mod tests {
         assert!(status.success());
     }
 
+    /// `-C <worktree> update` has to still target that worktree after the
+    /// handover — the bug's own second paragraph. `every_upgrade_outcome_has_
+    /// one_explicit_update_path` above only compares `relaunch(&repo)` against
+    /// itself, which cannot catch a wrong path since `fixture()` also sets
+    /// `checkout == root`; this asserts the literal argument list against a
+    /// fixture where the two differ.
+    #[test]
+    fn relaunch_targets_the_checkout_not_the_root() {
+        let root = crate::scratch::root("update-relaunch-checkout-vs-root");
+        let _ = std::fs::remove_dir_all(&root);
+        let checkout = root.join("checkout");
+        std::fs::create_dir_all(&checkout).unwrap();
+        let home = root.join(".home");
+        let repo = Repo {
+            checkout: checkout.clone(),
+            root: root.clone(),
+            config: Config::default(),
+            home,
+        };
+
+        assert_eq!(
+            relaunch(&repo),
+            vec![
+                "-C".to_string(),
+                checkout.display().to_string(),
+                "update".to_string(),
+            ]
+        );
+    }
+
     fn outcome_lines(outcomes: &[Outcome]) -> Vec<String> {
         outcomes
             .iter()
@@ -1174,6 +1233,144 @@ mod tests {
         assert!(!outcomes.is_empty());
     }
 
+    /// Run from a linked worktree, `update` writes the checkout it was run
+    /// in, not the main checkout's root — the whole point of the fix this
+    /// bug describes. `config` is the sharpest case: it joins `repo.root`
+    /// directly (src/update.rs:337) instead of going through
+    /// `Config::path_in(&repo.checkout)` the way every other tracked-control-
+    /// plane accessor already does.
+    #[test]
+    fn config_is_written_to_the_checkout_not_the_root_when_they_differ() {
+        let root = crate::scratch::root("update-config-checkout-vs-root");
+        let _ = std::fs::remove_dir_all(&root);
+        let checkout = root.join("checkout");
+        std::fs::create_dir_all(&checkout).unwrap();
+        let home = root.join(".home");
+        let repo = Repo {
+            checkout: checkout.clone(),
+            root: root.clone(),
+            config: Config::default(),
+            home,
+        };
+
+        let mut outcomes = Vec::new();
+        config(&repo, &args(), &mut outcomes).unwrap();
+
+        assert!(
+            crate::config::Config::path_in(&checkout).exists(),
+            "config.toml should land under the checkout the command was run in"
+        );
+        assert!(
+            !crate::config::Config::path_in(&root).exists(),
+            "config.toml must not be written under repo.root when it differs from checkout"
+        );
+    }
+
+    /// The rest of `scan()` — `ignores`, `skills` and `retired_skills` — has the
+    /// same bug `config` does: each joined `repo.root` directly instead of
+    /// `repo.checkout`. One fixture exercises all four at once, plus
+    /// `replace`, which is not part of `scan()` but has the sharpest form of
+    /// the bug (src/update.rs:531-556 in the task's own account) since it
+    /// matched a `repo.root`-built path against a `repo.checkout`-based
+    /// accessor. Every assertion is positive — the checkout's own file
+    /// actually changed — not just "nothing landed under root": a function
+    /// that silently does nothing under a missing/uninstalled root would
+    /// pass a root-only check without ever having read `checkout` at all.
+    #[test]
+    fn scan_and_replace_write_the_checkout_not_the_root_when_they_differ() {
+        let root = crate::scratch::root("update-scan-checkout-vs-root");
+        let _ = std::fs::remove_dir_all(&root);
+        let checkout = root.join("checkout");
+        std::fs::create_dir_all(checkout.join(crate::config::TASK_TEMPLATES_DIR)).unwrap();
+        let home = root.join(".home");
+        let repo = Repo {
+            checkout: checkout.clone(),
+            root: root.clone(),
+            config: Config::default(),
+            home,
+        };
+
+        // `ignores`: spoolway's marked block, still in the checkout's
+        // `.gitignore`.
+        let gitignore = crate::gitignore::file(&checkout);
+        std::fs::write(
+            &gitignore,
+            format!(
+                "{}\n/.spoolway/\n{}\n",
+                crate::assets::IGNORE_BEGIN,
+                crate::assets::IGNORE_END
+            ),
+        )
+        .unwrap();
+
+        // `skills`: an already-installed, stale claude skill to refresh.
+        let claude_dir = crate::cli::Provider::Claude.skills_dir(&checkout);
+        let first = crate::cli::Provider::Claude
+            .plan(&checkout)
+            .into_iter()
+            .next()
+            .unwrap();
+        std::fs::create_dir_all(first.path.parent().unwrap()).unwrap();
+        std::fs::write(&first.path, "stale, from an older release\n").unwrap();
+
+        // `retired_skills`: a directory this binary no longer ships.
+        let retired = claude_dir.join(crate::install::RETIRED_SKILLS[0]);
+        std::fs::create_dir_all(&retired).unwrap();
+
+        // `replace`: a task template this project no longer keeps, named
+        // relative to the checkout — the join at src/update.rs:557 this test
+        // exists to cover is never reached from an absolute path.
+        let template = repo.task_templates_dir().join("bugfix.md");
+        std::fs::write(&template, "not what we ship\n").unwrap();
+        let template_relative = template
+            .strip_prefix(&checkout)
+            .unwrap()
+            .display()
+            .to_string();
+
+        scan(&repo, &args()).unwrap();
+        replace(
+            &repo,
+            &UpdateArgs {
+                replace: vec![template_relative],
+                ..args()
+            },
+        )
+        .unwrap();
+
+        assert!(
+            !std::fs::read_to_string(crate::gitignore::file(&checkout))
+                .unwrap()
+                .contains(crate::assets::IGNORE_BEGIN),
+            "ignores must remove spoolway's block from the checkout's own .gitignore"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&first.path).unwrap(),
+            first.contents,
+            "skills must refresh the checkout's own stale skill file"
+        );
+        assert!(
+            !retired.is_dir(),
+            "retired_skills must remove the checkout's own copy of a retired skill"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&template).unwrap(),
+            crate::assets::task_template("bugfix").unwrap(),
+            "replace must rewrite the checkout's own copy"
+        );
+
+        assert!(
+            !crate::gitignore::file(&root).exists(),
+            "the .gitignore rewrite must not touch repo.root"
+        );
+        for provider in <crate::cli::Provider as clap::ValueEnum>::value_variants() {
+            assert!(
+                !provider.skills_dir(&root).exists(),
+                "no provider's skills directory should exist under repo.root"
+            );
+        }
+    }
+
     /// A task skeleton is the project's outright, so an update must not read it,
     /// rewrite it, or have an opinion about it — whatever is in it, and whether
     /// or not it looks anything like the one we ship.
@@ -1185,7 +1382,7 @@ mod tests {
         std::fs::write(&mine, "## Mine\n\nkeep me\n").unwrap();
         std::fs::write(&theirs, "## What to build\n\nAnything.\n").unwrap();
 
-        run(&repo, &args()).unwrap();
+        run(&repo, &args(), false).unwrap();
         let outcomes = scan(&repo, &args()).unwrap();
 
         assert_eq!(
@@ -1217,7 +1414,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "## opening\n\nkeep me\n").unwrap();
 
-        run(&repo, &args()).unwrap();
+        run(&repo, &args(), false).unwrap();
         let outcomes = scan(&repo, &args()).unwrap();
 
         assert_eq!(
@@ -1243,7 +1440,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "## Status Log\n\nkeep me\n").unwrap();
 
-        run(&repo, &args()).unwrap();
+        run(&repo, &args(), false).unwrap();
         let outcomes = scan(&repo, &args()).unwrap();
 
         assert_eq!(
