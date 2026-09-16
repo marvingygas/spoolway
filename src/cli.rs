@@ -1004,12 +1004,39 @@ pub enum QueueCommand {
     /// off of — exactly `spoolway resume <id>` with no other flags.
     Resume { task: String },
 
-    /// Take a task out of the queue, carrying its document back to the
-    /// pending directory the way the board's `u` does — for a task on
-    /// `queued`, `paused` or `blocked` with no lane running and no worktree
-    /// cut. Anything with work in flight is refused, naming what to stop
-    /// first; nothing is killed or removed on a script's say-so.
-    Remove { task: String },
+    /// What the board's `u`/`U` keys do to a row, from a script: carry a
+    /// not-started task's document back to the pending directory, stripped
+    /// of every reserved key, so `queue add --from` takes it again
+    /// unchanged.
+    ///
+    /// A task that has started is refused, naming its stage and both routes
+    /// onward, unless `--force` says to interrupt any live lane, record its
+    /// uncommitted work and tear the checkout down first — the same care
+    /// `Dispatcher::tear_down_checkout` always takes, all or nothing.
+    Unqueue(QueueUnqueueArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct QueueUnqueueArgs {
+    /// Task id to unqueue. Omitted only with `--all`.
+    pub task: Option<String>,
+
+    /// Every not-started task, the way the board's `U` does — with no
+    /// per-task dependency check, since anything depending on the set has
+    /// not started either and is in the set too. Refused together with
+    /// `--force`, in either flag order: that pair would tear down every
+    /// checkout in the queue in one line.
+    #[arg(long)]
+    pub all: bool,
+
+    /// Interrupt any live agent lane, record uncommitted work through
+    /// `auto_commit`, and tear the checkout down through
+    /// `Dispatcher::tear_down_checkout` before unqueuing a task that has
+    /// started. Refused while a dispatcher holds the run lock, naming its
+    /// pid. A no-op flag on a task still on `queued` — the bare command
+    /// already unqueues it, with no checkout to tear down.
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Debug, Args)]

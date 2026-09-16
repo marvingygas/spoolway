@@ -175,7 +175,7 @@ step.
 | `spoolway queue conflicts` | Reports overlapping `touches` with no order between them. |
 | `spoolway queue pause <task>` | Stops the task's lane and parks it on `paused`. |
 | `spoolway queue resume <task>` | Same as `r` on the board. |
-| `spoolway queue remove <task>` | Moves a task with no work in flight back to the pending directory. |
+| `spoolway queue unqueue <task>` | Moves a not-started task back to the pending directory. `--all` and `--force` reach the rest. |
 
 A task file that does not parse is skipped. The board names it in amber.
 

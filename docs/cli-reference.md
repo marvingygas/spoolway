@@ -118,10 +118,28 @@ spoolway queue pause <task> [--force]
 
 Resume one task. Same as `spoolway resume <task>` with no other flags.
 
-### `spoolway queue remove <task>`
+### `spoolway queue unqueue <task>`
 
-Move a task out of the queue and back into the pending directory. Works on `queued`, `paused`
-or `blocked` tasks with no lane running and no worktree cut. Anything else is refused.
+Carry a not-started task's document back to the pending directory, with every reserved key
+stripped. `spoolway queue add --from` takes the result again unchanged. Same as the board's
+`u` key.
+
+```
+spoolway queue unqueue <task>
+spoolway queue unqueue --all
+spoolway queue unqueue <task> --force
+```
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--all` | | Every not-started task, the way the board's `U` does. Refused together with `--force` |
+| `--force` | | Interrupt any live lane, record uncommitted work, tear the checkout down, then unqueue a task that has started. No-op on a task still `queued` |
+
+A task that has started is refused, naming its stage, its checkout when it has one, and both
+routes onward: `spoolway queue pause <task>` to stop it in place, or `--force` to tear the
+checkout down and unqueue it anyway. A task another queued sibling names in `depends_on` is
+refused too, naming that sibling. A document already sitting in pending under the same id
+refuses the move and leaves the queue file in place.
 
 ### `spoolway group list`
 

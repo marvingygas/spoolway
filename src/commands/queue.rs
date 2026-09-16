@@ -239,75 +239,269 @@ fn queue_add_dry_run(
     Ok(())
 }
 
-/// `spoolway queue remove <id>`: take a task that has not started — or was
-/// parked before it ever got a worktree — out of the queue, carrying its
-/// document back to the pending directory the same way the board's `u` does,
-/// so `queue add --from` can take it again once it is fixed.
-///
-/// Refused outright for anything with work in flight: a live lane, a running
-/// command step, or a worktree — that last one being the fact that survives
-/// a lane going quiet, so a task on `paused` or `blocked` with a checkout
-/// cut for it is refused too. Nothing here stops a lane or removes a
-/// worktree on a script's say-so; the error names the commands that do.
-pub fn queue_remove(repo: &Repo, pipelines: &Pipelines, id: &str) -> Result<()> {
-    // The same per-task lock the dispatcher and the board's `u` take, so the
-    // rename cannot land in the middle of one of their read-modify-writes.
-    let _task_lock = crate::lock::TaskLock::acquire(&repo.task_lock_file(id));
+/// `spoolway queue unqueue <id>` / `--all`: the command form of the board's
+/// `u`/`U` keys — carry a not-started task's document back to the pending
+/// directory, with every reserved key stripped, so `queue add --from` takes
+/// it again unchanged. The move itself is [`crate::status::unqueue_task`]
+/// (or, for `--all`, one call of it per not-started task) — this only adds
+/// the arguments a script needs that a keypress does not: a named refusal
+/// for everything the board's key silently declines, and `--force`, which a
+/// panel with nobody behind it has no way to offer at all.
+pub fn queue_unqueue(repo: &Repo, pipelines: &Pipelines, args: &QueueUnqueueArgs) -> Result<()> {
+    if args.all && args.force {
+        bail!(
+            "`--all --force` would tear down every checkout still in the queue in one line — \
+             name one task at a time with `--force`, or drop it to unqueue only what has not \
+             started"
+        );
+    }
 
+    if args.all {
+        return queue_unqueue_all(repo);
+    }
+
+    let id = args
+        .task
+        .as_deref()
+        .context("a task id is required, unless `--all` is given")?;
+    queue_unqueue_one(repo, pipelines, id, args.force)
+}
+
+/// `--all`: every not-started task, the way the board's `U` does — no
+/// per-task [`crate::status::depended_on_by_queued`] check, since anything
+/// depending on the set has not started either and is carried back in the
+/// same batch. Stops at the first one [`unqueue_or_bail`] cannot carry,
+/// leaving every task after it exactly where it was — the same all-or-
+/// nothing promise a single `--force` unqueue makes, read over the whole
+/// batch rather than one checkout.
+fn queue_unqueue_all(repo: &Repo) -> Result<()> {
+    let ids: Vec<String> = repo
+        .tasks()?
+        .iter()
+        .filter(|t| crate::status::not_started(t))
+        .map(|t| t.id().to_string())
+        .collect();
+    if ids.is_empty() {
+        println!("nothing to unqueue — no task has not started");
+        return Ok(());
+    }
+    for id in &ids {
+        unqueue_or_bail(repo, id)?;
+    }
+    Ok(())
+}
+
+/// One task, named on the command line: [`crate::status::not_started`]
+/// carries it straight through [`unqueue_or_bail`], refusing a sibling
+/// still queued that names it in `depends_on` exactly as the board's bare
+/// `u` does. Anything further along is refused unless `force` says to tear
+/// its checkout down first — see [`queue_unqueue_forced`].
+fn queue_unqueue_one(repo: &Repo, pipelines: &Pipelines, id: &str, force: bool) -> Result<()> {
     let tasks = repo.tasks()?;
-    let idx = tasks.iter().position(|t| t.id() == id).with_context(|| {
+    let task = tasks.iter().find(|t| t.id() == id).with_context(|| {
         format!("no queued task `{id}` — `spoolway queue list` names the ones there are")
     })?;
-    let task = &tasks[idx];
-    let stage = task.stage();
+
+    if crate::status::not_started(task) {
+        if let Some(sibling) = crate::status::depended_on_by_queued(&tasks, id) {
+            bail!(
+                "`{}` depends on `{id}` and has not started either — unqueuing `{id}` alone \
+                 would leave it waiting on a dependency the queue no longer shows. Unqueue \
+                 `{}` first, or pass `--all` to carry both back together.",
+                sibling.id(),
+                sibling.id(),
+            );
+        }
+        return unqueue_or_bail(repo, id);
+    }
+
+    let stage = task.stage().to_string();
+    let checkout = task.front.worktree_path.clone();
+
+    if !force {
+        let mut message = format!(
+            "`{id}` is on `{stage}`, not `{}`\n",
+            crate::pipeline::QUEUED
+        );
+        if let Some(path) = &checkout {
+            message += &format!(
+                "\n  It has a checkout at {}, and unqueuing it\n  would leave that standing.\n",
+                path.display()
+            );
+        }
+        message += &format!(
+            "\n  To stop it where it is, keeping the checkout:\n      spoolway queue pause {id}\n\
+             \n  To tear the checkout down and unqueue it anyway:\n      spoolway queue unqueue {id} --force\n\
+             \nNothing was changed."
+        );
+        bail!(message);
+    }
+
+    queue_unqueue_forced(repo, pipelines, id, &stage, checkout.as_deref())
+}
+
+/// Write `id`'s document into pending through
+/// [`crate::status::unqueue_task`] — the same call the board's bare `u`/`U`
+/// make — then check the queue file is actually gone: that function is
+/// silent about a newer draft already sitting in pending, right for a
+/// keypress with a board to keep drawing but wrong for a script that named
+/// a task by hand and needs to know its unqueue did not happen.
+fn unqueue_or_bail(repo: &Repo, id: &str) -> Result<()> {
+    crate::status::unqueue_task(repo, id)?;
+    if repo.queue_dir().join(format!("{id}.md")).exists() {
+        bail!(
+            "did not unqueue `{id}`: a newer draft is already at {} — move that draft aside, \
+             then run this again.",
+            repo.pending_dir().join(format!("{id}.md")).display()
+        );
+    }
+    println!(
+        "unqueued `{id}` → {}",
+        repo.pending_dir().join(format!("{id}.md")).display()
+    );
+    Ok(())
+}
+
+/// `--force` on a task that has started: interrupt any live agent lane and
+/// running command step, record uncommitted work through
+/// [`crate::commands::auto_commit`], tear the checkout down through
+/// [`crate::dispatch::Dispatcher::tear_down_checkout`] and only then carry
+/// the document to pending — all or nothing, so a teardown this stops
+/// partway through leaves the task queued and its document untouched.
+///
+/// Refused while a live dispatcher holds the run lock: it re-reads the
+/// queue every pass, and a checkout this tears down out from under it is
+/// the same corruption the lock exists to prevent. Checked first, before a
+/// multiplexer backend or a [`crate::dispatch::Dispatcher`] is built at
+/// all — see this task's own acceptance criteria on a task still `queued`,
+/// which never reaches this function to begin with.
+fn queue_unqueue_forced(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    id: &str,
+    stage: &str,
+    checkout: Option<&std::path::Path>,
+) -> Result<()> {
+    if let Some(pid) = crate::lock::Lock::holder(&repo.lock_file())? {
+        bail!(
+            "a dispatcher is already running for this repo (pid {pid}) — it re-reads the \
+             queue every pass and could be mid-turn on `{id}` right now. Stop it first, then \
+             run this again."
+        );
+    }
+
+    // The same per-task lock `unqueue_task` itself takes, held across the
+    // whole teardown rather than just the final move: nothing else may
+    // read or write this task's file while its checkout is coming down.
+    let _task_lock = crate::lock::TaskLock::acquire(&repo.task_lock_file(id));
+
+    // Checked before anything is torn down, not just before the final
+    // write: a checkout this brings down for a move that was always going
+    // to be refused is not "all or nothing", it is losing the checkout for
+    // nothing. `carry_to_pending` re-checks this at the end regardless — a
+    // draft that lands in the gap between here and there is the one race
+    // this cannot close.
+    let pending_dest = repo.pending_dir().join(format!("{id}.md"));
+    if pending_dest.exists() {
+        bail!(
+            "did not unqueue `{id}`: a newer draft is already at {} — move that draft aside, \
+             then run this again. Nothing was torn down.",
+            pending_dest.display()
+        );
+    }
+
+    let tasks = repo.tasks()?;
+    let idx = tasks
+        .iter()
+        .position(|t| t.id() == id)
+        .with_context(|| format!("no queued task `{id}` — it left the queue while this ran"))?;
 
     let mux = crate::mux::backend(repo)?;
     let lanes = mux.list_lanes().unwrap_or_default();
     if crate::status::live_agent_lane_tasks(repo, &tasks, pipelines, &lanes).contains(&idx) {
-        bail!(
-            "`{id}` has a lane running at `{stage}` — stop it with `spoolway queue pause {id}` \
-             first, then run this again."
-        );
+        let name = crate::mux::lane_name(stage, id);
+        // Best-effort, the same as the board's own `p`: a lane that has
+        // already gone quiet on its own has nothing left to interrupt.
+        let _ = mux.interrupt_lane(&name);
+        println!("interrupted lane {stage}/{id}");
     }
-    if let Some(run) = crate::status::running_command_steps(repo, &tasks, pipelines)
+    let runs = crate::command_step::Runs::new(&repo.commands_dir());
+    for run in crate::status::running_command_steps(repo, &tasks, pipelines)
         .into_iter()
-        .find(|run| run.task == id)
+        .filter(|run| run.task == id)
     {
-        bail!(
-            "`{id}` is running a command step (`{}`) — stop it with `spoolway queue pause {id} \
-             --force` first, then run this again.",
-            run.step
-        );
-    }
-    if let Some(path) = &task.front.worktree_path {
-        bail!(
-            "`{id}` has a worktree at {} — its work is in flight there. Stop any lane with \
-             `spoolway queue pause {id}`, remove the worktree with `git worktree remove {}`, \
-             then run this again.",
-            path.display(),
-            path.display()
-        );
-    }
-    if !matches!(
-        stage,
-        crate::pipeline::QUEUED | crate::pipeline::PAUSED | crate::pipeline::BLOCKED
-    ) {
-        bail!(
-            "`{id}` is at `{stage}`, which is a step in progress — only a task on `queued`, \
-             `paused` or `blocked` can be removed. Pause it with `spoolway queue pause {id}` \
-             first, then run this again."
-        );
+        runs.stop(&crate::command_step::Runs::key(&run.step, &run.task));
     }
 
-    match crate::status::carry_to_pending(repo, task)? {
+    let mut task = repo.task(id)?;
+
+    // Committed before the worktree comes down — `tear_down_checkout` does
+    // not call this itself, unlike `Dispatcher::clean_up`'s own road to it,
+    // because a trial arm's `discard_arm` shares the same teardown and
+    // means to throw its work away. This caller means the opposite.
+    if let Some(worktree) = checkout {
+        let outcome = auto_commit(repo, worktree, "", id, stage);
+        let note = outcome.note().unwrap_or_default().to_string();
+        if !note.is_empty() {
+            println!("{note}");
+        }
+        if outcome.is_unrecorded() {
+            bail!(
+                "`{id}`'s worktree at {} has work `auto_commit` could not record ({note}) — \
+                 nothing was torn down or unqueued. Commit or discard it by hand, then run \
+                 this again.",
+                worktree.display()
+            );
+        }
+    }
+
+    let mux_ref = mux.as_ref();
+    let mut dispatcher = crate::dispatch::Dispatcher::new(repo, pipelines, mux_ref, false);
+    let mut report = crate::dispatch::Report::default();
+    let borrowed = task.front.borrowed;
+    dispatcher.tear_down_checkout(&mut task, &mut report);
+    // `tear_down_checkout` reports neither success nor failure — every
+    // removal inside it is `let _ = …`, and a borrowed checkout is spared
+    // on purpose (see this task's own non-goals) — so what actually
+    // happened is read back off the filesystem rather than assumed from
+    // having called the function at all.
+    if let Some(path) = checkout {
+        if path.exists() {
+            let why = if borrowed {
+                "it is borrowed, not spoolway's own"
+            } else {
+                "tear_down_checkout could not remove it"
+            };
+            println!("kept worktree {} — {why}", path.display());
+        } else {
+            println!("removed worktree {}", path.display());
+        }
+    }
+    for problem in &report.problems {
+        eprintln!("{problem}");
+    }
+
+    // `tear_down_checkout` gives back the workspace and the worktree but
+    // never clears the fields recording them — its own two callers either
+    // archive the document right after (`clean_up`) or delete it outright
+    // (`discard_arm`), so a stale path in memory never reaches disk there.
+    // This caller carries the document on to pending instead, and every one
+    // of these has `skip_serializing_if = "Option::is_none"`, so clearing
+    // them here is what keeps a torn-down checkout's path from riding along
+    // into the copy `queue add --from` would hand straight back out.
+    task.front.worktree_path = None;
+    task.front.workspace_id = None;
+    task.front.pane_id = None;
+    task.front.tab_id = None;
+
+    match crate::status::carry_to_pending(repo, &task)? {
         Some(dest) => {
-            println!("removed `{id}` from the queue");
-            println!("  {}", dest.display());
+            println!("unqueued `{id}` → {}", dest.display());
             Ok(())
         }
         None => bail!(
-            "did not remove `{id}`: a newer draft is already at {} — move that draft aside, \
-             then run this again.",
+            "the checkout is torn down, but did not unqueue `{id}`: a newer draft is already \
+             at {} — move that draft aside, then run this again.",
             repo.pending_dir().join(format!("{id}.md")).display()
         ),
     }
@@ -9782,16 +9976,40 @@ body\n";
         }
     }
 
-    /// `queue remove` on a task that has not started: the document goes
+    fn unqueue_args(task: &str) -> QueueUnqueueArgs {
+        QueueUnqueueArgs {
+            task: Some(task.to_string()),
+            all: false,
+            force: false,
+        }
+    }
+
+    fn unqueue_all_args(force: bool) -> QueueUnqueueArgs {
+        QueueUnqueueArgs {
+            task: None,
+            all: true,
+            force,
+        }
+    }
+
+    fn unqueue_forced_args(task: &str) -> QueueUnqueueArgs {
+        QueueUnqueueArgs {
+            task: Some(task.to_string()),
+            all: false,
+            force: true,
+        }
+    }
+
+    /// `queue unqueue` on a task that has not started: the document goes
     /// back to pending with the stamped keys dropped — the board's own
     /// unqueue, from a script — and the queue file is gone.
     #[test]
-    fn queue_remove_carries_a_queued_task_back_to_pending() {
-        let repo = fixture("queue-remove");
+    fn queue_unqueue_carries_a_queued_task_back_to_pending() {
+        let repo = fixture("queue-unqueue");
         add(&repo, "login", &[]);
         assert!(repo.queue_dir().join("login.md").exists());
 
-        queue_remove(&repo, &Pipelines::builtin(), "login").unwrap();
+        queue_unqueue(&repo, &Pipelines::builtin(), &unqueue_args("login")).unwrap();
 
         assert!(
             !repo.queue_dir().join("login.md").exists(),
@@ -9819,69 +10037,172 @@ body\n";
         assert!(repo.queue_dir().join("login.md").exists());
     }
 
-    /// A task on `paused` with no worktree — parked before anything was
-    /// cut for it — is removable; the same task with a worktree is work in
-    /// flight, and the refusal names what to do about it.
+    /// `--all` carries every not-started task back at once, with no
+    /// dependency check between them — the board's own `U`, from a script.
     #[test]
-    fn queue_remove_refuses_a_task_with_a_worktree_or_a_running_step() {
-        let repo = fixture("queue-remove-refusal");
+    fn queue_unqueue_all_carries_every_not_started_task() {
+        let repo = fixture("queue-unqueue-all");
+        add(&repo, "base", &[]);
+        add(&repo, "dependent", &["base"]);
+
+        queue_unqueue(&repo, &Pipelines::builtin(), &unqueue_all_args(false)).unwrap();
+
+        assert!(!repo.queue_dir().join("base.md").exists());
+        assert!(!repo.queue_dir().join("dependent.md").exists());
+        assert!(repo.pending_dir().join("base.md").exists());
+        assert!(repo.pending_dir().join("dependent.md").exists());
+    }
+
+    /// `--all --force` is refused outright, in either flag order — tearing
+    /// down every checkout in the queue in one line is not a command a
+    /// script should be able to reach by accident.
+    #[test]
+    fn queue_unqueue_all_force_is_refused() {
+        let repo = fixture("queue-unqueue-all-force");
+        add(&repo, "login", &[]);
+
+        let err = queue_unqueue(&repo, &Pipelines::builtin(), &unqueue_all_args(true)).unwrap_err();
+        assert!(format!("{err:#}").contains("--all --force"));
+        assert!(repo.queue_dir().join("login.md").exists());
+    }
+
+    /// A task on `queued` names a sibling that depends on it in the
+    /// refusal, exactly as the board's bare `u` declines to open its panel
+    /// at all — and a task the queue does not have names itself.
+    #[test]
+    fn queue_unqueue_refuses_a_queued_dependency_and_an_unknown_id() {
+        let repo = fixture("queue-unqueue-refusal");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "base", &[]);
+        add(&repo, "dependent", &["base"]);
+
+        let err = queue_unqueue(&repo, &pipelines, &unqueue_args("base")).unwrap_err();
+        let said = format!("{err:#}");
+        assert!(
+            said.contains("dependent") && said.contains("--all"),
+            "{said}"
+        );
+        assert!(repo.queue_dir().join("base.md").exists());
+
+        let err = queue_unqueue(&repo, &pipelines, &unqueue_args("nope")).unwrap_err();
+        assert!(format!("{err:#}").contains("no queued task"), "{err:#}");
+    }
+
+    /// A task that has started is refused without `--force`, naming its
+    /// stage, its checkout, and both routes onward — and nothing on disk
+    /// moves. The same task with `--force` tears the checkout down and
+    /// unqueues it, leaving no checkout field behind on the document that
+    /// reaches pending.
+    #[test]
+    fn queue_unqueue_refuses_a_started_task_without_force_and_tears_down_with_it() {
+        let repo = fixture("queue-unqueue-started");
         let pipelines = Pipelines::builtin();
         add(&repo, "solo", &[]);
 
-        // A worktree: refused, naming the pause and the worktree removal.
+        // No workspace recorded, no real worktree cut: `tear_down_checkout`
+        // treats an already-gone checkout as a fine outcome rather than an
+        // error, and this test's own job is only the road around it — that
+        // the reserved fields are cleared before the document reaches
+        // pending — not the removal itself, which `teardown.rs`'s own
+        // callers already cover.
+        let worktree = repo.root.join("wt-solo");
+
         let mut task = queued(&repo, "solo");
-        task.front.stage = crate::pipeline::PAUSED.to_string();
-        task.front.worktree_path = Some(repo.root.join("wt-solo"));
+        task.front.stage = "implement".to_string();
+        task.front.worktree_path = Some(worktree.clone());
         task.save().unwrap();
-        let err = queue_remove(&repo, &pipelines, "solo").unwrap_err();
+
+        let err = queue_unqueue(&repo, &pipelines, &unqueue_args("solo")).unwrap_err();
         let said = format!("{err:#}");
         assert!(
-            said.contains("has a worktree")
+            said.contains("is on `implement`, not `queued`")
+                && said.contains(&worktree.display().to_string())
                 && said.contains("spoolway queue pause solo")
-                && said.contains("git worktree remove"),
+                && said.contains("spoolway queue unqueue solo --force"),
             "{said}"
         );
         assert!(
             repo.queue_dir().join("solo.md").exists(),
-            "a refused remove must leave the queue file where it is"
+            "a refused unqueue must leave the queue file where it is"
         );
 
-        // A running command step, no worktree: refused, naming `--force`.
-        let mut task = queued(&repo, "solo");
-        task.front.worktree_path = None;
-        task.set_stage_unbanked("checks", "test setup");
-        task.save().unwrap();
-        let runs = crate::command_step::Runs::new(&repo.commands_dir());
-        let key = crate::command_step::Runs::key("checks", "solo");
-        let sleep = if cfg!(windows) {
-            "Start-Sleep -Seconds 20"
-        } else {
-            "sleep 20"
-        };
-        runs.start(&key, sleep, &repo.checkout, &BTreeMap::new())
-            .unwrap();
-        let err = queue_remove(&repo, &pipelines, "solo").unwrap_err();
-        assert!(
-            format!("{err:#}").contains("spoolway queue pause solo --force"),
-            "{err:#}"
-        );
-        runs.stop(&key);
-
-        // A step in progress with nothing running: still not one of the
-        // three removable states.
-        let err = queue_remove(&repo, &pipelines, "solo").unwrap_err();
-        assert!(format!("{err:#}").contains("is at `checks`"), "{err:#}");
-
-        // Paused with no worktree and nothing running: removable.
-        let mut task = queued(&repo, "solo");
-        task.front.stage = crate::pipeline::PAUSED.to_string();
-        task.save().unwrap();
-        queue_remove(&repo, &pipelines, "solo").unwrap();
+        queue_unqueue(&repo, &pipelines, &unqueue_forced_args("solo")).unwrap();
         assert!(!repo.queue_dir().join("solo.md").exists());
-        assert!(repo.pending_dir().join("solo.md").exists());
+        let pending = repo.pending_dir().join("solo.md");
+        let text = std::fs::read_to_string(&pending).unwrap();
+        for key in ["worktree_path", "workspace_id", "pane_id", "tab_id"] {
+            assert!(
+                !text.contains(&format!("\n{key}:")),
+                "`{key}:` must be stripped: {text}"
+            );
+        }
+    }
 
-        let err = queue_remove(&repo, &pipelines, "solo").unwrap_err();
-        assert!(format!("{err:#}").contains("no queued task"), "{err:#}");
+    /// A newer draft already sitting in pending under the same id refuses
+    /// the bare road, leaving the queue file exactly where it was —
+    /// `unqueue_or_bail`'s own reason for existing over bare
+    /// `status::unqueue_task`, which is silent about this.
+    #[test]
+    fn queue_unqueue_refuses_a_task_already_drafted_in_pending() {
+        let repo = fixture("queue-unqueue-pending-conflict");
+        add(&repo, "login", &[]);
+        std::fs::create_dir_all(repo.pending_dir()).unwrap();
+        std::fs::write(
+            repo.pending_dir().join("login.md"),
+            document("login", "group: demo\n", BODY),
+        )
+        .unwrap();
+
+        let err = queue_unqueue(&repo, &Pipelines::builtin(), &unqueue_args("login")).unwrap_err();
+        let said = format!("{err:#}");
+        assert!(
+            said.contains("did not unqueue")
+                && said.contains(&repo.pending_dir().join("login.md").display().to_string()),
+            "{said}"
+        );
+        assert!(
+            repo.queue_dir().join("login.md").exists(),
+            "a refused unqueue must leave the queue file where it is"
+        );
+    }
+
+    /// The same conflict, with `--force` on a task that has started: caught
+    /// before anything is torn down, so the checkout is left standing and
+    /// the queue file untouched — "all or nothing" over the whole move, not
+    /// just the final write.
+    #[test]
+    fn queue_unqueue_force_refuses_a_task_already_drafted_in_pending_before_tearing_down() {
+        let repo = fixture("queue-unqueue-force-pending-conflict");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "solo", &[]);
+        let worktree = repo.root.join("wt-solo");
+        let mut task = queued(&repo, "solo");
+        task.front.stage = "implement".to_string();
+        task.front.worktree_path = Some(worktree.clone());
+        task.save().unwrap();
+
+        std::fs::create_dir_all(repo.pending_dir()).unwrap();
+        std::fs::write(
+            repo.pending_dir().join("solo.md"),
+            document("solo", "group: demo\n", BODY),
+        )
+        .unwrap();
+
+        let err = queue_unqueue(&repo, &pipelines, &unqueue_forced_args("solo")).unwrap_err();
+        let said = format!("{err:#}");
+        assert!(
+            said.contains("did not unqueue") && said.contains("Nothing was torn down"),
+            "{said}"
+        );
+        assert!(
+            repo.queue_dir().join("solo.md").exists(),
+            "a refused forced unqueue must leave the queue file where it is"
+        );
+        let text = std::fs::read_to_string(repo.queue_dir().join("solo.md")).unwrap();
+        assert!(
+            text.contains(&worktree.display().to_string()),
+            "the checkout must still be recorded: nothing was torn down: {text}"
+        );
     }
 
     /// `--dry-run` validates the batch and says where everything would go,

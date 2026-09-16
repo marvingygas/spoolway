@@ -787,7 +787,7 @@ impl Board {
         let Some(task) = tasks.iter().find(|t| t.id() == id) else {
             return Ok(());
         };
-        if !not_started(task) || depended_on_by_queued(&tasks, &id) {
+        if !not_started(task) || depended_on_by_queued(&tasks, &id).is_some() {
             return Ok(());
         }
         self.mode = BoardMode::ConfirmUnqueue {
@@ -1140,24 +1140,32 @@ pub(crate) fn resume_task(repo: &Repo, pipelines: &Pipelines, id: &str) -> Resul
 /// the one state `u`/`U` may act on: unqueuing anything further along would
 /// mean tearing down a checkout, which is outside what either key reaches —
 /// see this task's own non-goals.
-fn not_started(task: &crate::task::Task) -> bool {
+pub(crate) fn not_started(task: &crate::task::Task) -> bool {
     task.stage() == crate::pipeline::QUEUED
 }
 
-/// Whether some other task that has not started itself names `id` in its own
-/// `depends_on` — the one thing `u` refuses that `U` does not, since carrying
-/// `id` back to pending alone would leave that dependent waiting on a
-/// dependency the queue no longer shows it.
+/// The other not-started task that names `id` in its own `depends_on`, if
+/// there is one — the one thing `u` refuses that `U` does not, since
+/// carrying `id` back to pending alone would leave that dependent waiting on
+/// a dependency the queue no longer shows it.
 ///
 /// Only a task that has not started can be waiting on `id` at all: `queued`
 /// is the one step a dependency check gates, so nothing past it depends on a
 /// task still active in the queue — see [`crate::graph::Graph::ready`]. The
 /// check is still made explicit here, rather than assumed, so a caller never
 /// has to trust that invariant to read this correctly.
-fn depended_on_by_queued(tasks: &[crate::task::Task], id: &str) -> bool {
+///
+/// `pub(crate)`: `spoolway queue unqueue` reads this too, for the same
+/// refusal a bare `u` gives — see `commands::queue::queue_unqueue_one`. It
+/// returns the dependent itself rather than a bare bool because the command
+/// names it in its message; the board only needs to know one exists.
+pub(crate) fn depended_on_by_queued<'a>(
+    tasks: &'a [crate::task::Task],
+    id: &str,
+) -> Option<&'a crate::task::Task> {
     tasks
         .iter()
-        .any(|t| t.id() != id && not_started(t) && t.front.depends_on.iter().any(|d| d == id))
+        .find(|t| t.id() != id && not_started(t) && t.front.depends_on.iter().any(|d| d == id))
 }
 
 /// Move one task's document from the queue back to pending, dropping every
@@ -1179,7 +1187,15 @@ fn depended_on_by_queued(tasks: &[crate::task::Task], id: &str) -> bool {
 /// ago, or one a second process moved on since the panel opened, is left
 /// exactly where it is rather than risk carrying an archived document back
 /// to pending.
-fn unqueue_task(repo: &Repo, id: &str) -> Result<()> {
+///
+/// `pub(crate)`: `spoolway queue unqueue` is the third caller, for a task on
+/// `queued` with no `--force` — the same body a keypress and the command
+/// share, exactly as [`resume_task`] is for `r`/`R` and `queue resume`. A
+/// task that has already started is a different road: `queue unqueue
+/// --force` goes around this function's own `not_started` gate and calls
+/// [`carry_to_pending`] directly, once its own teardown has cleared the
+/// checkout — see `commands::queue::queue_unqueue`.
+pub(crate) fn unqueue_task(repo: &Repo, id: &str) -> Result<()> {
     // The same per-task lock the dispatcher and `spoolway report` take, so
     // this rename cannot land in the middle of one of their read-modify-
     // writes. See [`crate::lock::TaskLock`] and review finding 49.
@@ -1202,11 +1218,12 @@ fn unqueue_task(repo: &Repo, id: &str) -> Result<()> {
     Ok(())
 }
 
-/// The move itself, shared with `spoolway queue remove`: `task`'s document
+/// The move itself, shared with `spoolway queue unqueue`: `task`'s document
 /// written to pending with every reserved key dropped, then its queue file
-/// removed. The caller decides whether `task` may go — the board's `u` only
-/// carries a task that has not started, `queue remove` also one parked
-/// before it got a worktree — and holds the task's lock while it does.
+/// removed. The caller decides whether `task` may go — the board's `u` and
+/// [`unqueue_task`] only carry a task that has not started, `queue unqueue
+/// --force` one whose checkout it has just torn down — and holds the task's
+/// lock while it does.
 ///
 /// `None` when a document already sits in `pending/` under this id: that is
 /// a newer draft — a producer re-ran over work already submitted — and
