@@ -28,6 +28,12 @@ read one at its own step 1 — run `spoolway issue show <ref>` first, and decomp
 title, body, labels and comments together: a correction or a scope cut often lives in a
 comment, not the body.
 
+When this is invoked directly against a plan page — its path, not through **spoolway-plan**'s
+own session, which already holds the shape it argued — read only the page's machine copy of
+itself, never the markup around it: `sed -n '/id="plan"/,/<\/script>/p' <path>`. Where a page
+predates that block and the command comes back empty, say so to the caller and fall back to
+reading the file whole.
+
 1. **Gather, before anything is sized.** One command, and nothing is opened past it:
    `spoolway task contract` — the project's default pipeline, its own `sizing` guidance, and
    per pipeline its `description:`, `id_budget`, `gate_at` steps, `last_of_chain`, and
