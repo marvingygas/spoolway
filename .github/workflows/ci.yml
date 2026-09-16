@@ -1,6 +1,6 @@
 name: ci
 
-# Daily integration checks on main; pushes, pull requests and stacks start no run.
+# Pull requests run the `pr` tier; `main` gets the full nightly tier once a day.
 # Local pipeline gates still validate each task and the top of each chain.
 # Successful scheduled checks are reused only for the same commit. Advisories
 # refresh every day even when source is unchanged; manual runs always run all jobs.
@@ -8,6 +8,13 @@ name: ci
 # short-lived because storage has its own allowance.
 
 on:
+  # Per-push checks were dropped once (672cc51) and per-PR checks went with them.
+  # What followed is the reason they are back: four pull requests merged on
+  # 2026-09-15 with `test` and `test-windows` both red, main stayed broken, and
+  # the release pipeline was the first thing that refused to carry on — which is
+  # an expensive place to learn it. A pull request is the cheapest gate there is.
+  pull_request:
+    branches: [main]
   schedule:
     # 03:17 UTC: 05:17 Berlin in summer, 04:17 in winter.
     - cron: "17 3 * * *"
@@ -19,9 +26,14 @@ on:
         options: [smoke, pr, nightly]
         default: nightly
 
+# A pull request supersedes its own earlier run. A dispatch never cancels
+# another: the release pipeline dispatches this workflow against `main` once per
+# readiness pass, and under one shared `ci-main` group the second dispatch
+# cancelled the first — which a readiness step reads as a failed gate on a
+# candidate that was never actually tested.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -61,5 +73,134 @@ jobs:
     if: ${{ !cancelled() }}
     uses: ./.github/workflows/verify.yml
     with:
-      tier: ${{ inputs.tier || 'nightly' }}
+      # A pull request pays for the `pr` tier; `main` and any explicit dispatch
+      # get the full nightly one. scripts/e2e/run.sh's own header calls `pr`
+      # "what every push and every pull request runs" — this is that.
+      tier: ${{ inputs.tier || (github.event_name == 'pull_request' && 'pr' || 'nightly') }}
       run-tests: ${{ needs.changes.outputs.test != 'false' }}
+
+  # Every gate before a release runs at the version the repo already has, so a
+  # check that is false only *while* a version is being cut passes every day and
+  # fails exactly once — during the release, after the bump, with a release
+  # commit already written. Two shipped that way and both cost a reverted
+  # candidate: a unit test in src/release.rs stubbed npm's answer with a literal
+  # "0.3.0" and went red the moment Cargo.toml reached it (#126), and the e2e
+  # upgrade suite demanded a fixture for the very version being released, which
+  # cannot exist before its own tag (#128).
+  #
+  # This is the release the repo never has to cut. It bumps Cargo.toml to the
+  # next minor, writes a contract-shaped changelog stub, and runs the checks that
+  # read a version. It commits nothing, tags nothing, pushes nothing and
+  # publishes nothing — the runner is thrown away with the edits still in it.
+  #
+  # Not on pull requests: it is a full suite of its own and the thing it protects
+  # is a release, which is scheduled, not merged. It runs daily, and — because
+  # the release pipeline's `ready` step dispatches this workflow — on every
+  # readiness pass, which is the catch that matters. A failure here means the
+  # next release would have gone red, days before anybody schedules it.
+  dress-rehearsal:
+    needs: changes
+    if: ${{ github.event_name != 'pull_request' && needs.changes.outputs.test != 'false' }}
+    timeout-minutes: 45
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Fetched against the real lock, before the bump makes it stale, so the
+      # `cargo check --offline` below can refresh the lock entry without network.
+      - name: fetch dependencies at the committed lock
+        run: cargo fetch --locked
+
+      # Only a minor bump will do: the major-zero policy in docs/releasing.md
+      # makes it the next real release, and it is guaranteed to be a version with
+      # no changelog section and no e2e fixture — which is exactly the state a
+      # release candidate is in, and exactly the state these checks get wrong.
+      - name: bump to the next unreleased version
+        id: bump
+        run: |
+          current="$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml)"
+          next="$(python3 -c 'import sys; a,b,_=sys.argv[1].split("."); print(f"{a}.{int(b)+1}.0")' "$current")"
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          echo "next=$next" >> "$GITHUB_OUTPUT"
+          echo "Rehearsing $current -> $next" >> "$GITHUB_STEP_SUMMARY"
+
+          # The package version is the first `version = ` line, which is the same
+          # thing scripts/e2e/suites/upgrade.sh reads.
+          sed -i "0,/^version = \".*\"/s//version = \"$next\"/" Cargo.toml
+          test "$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml)" = "$next"
+
+          python3 - "$next" <<'PY'
+          import pathlib, sys
+          version = sys.argv[1]
+          path = pathlib.Path("CHANGELOG.md")
+          lines = path.read_text().splitlines(keepends=True)
+          first = next(n for n, line in enumerate(lines) if line.startswith("## "))
+          stub = [
+              f"## {version}\n", "\n",
+              "### Highlights\n",
+              "- A dress-rehearsal stub. It is never committed and never released.\n",
+              "- It exists so the version-coupled checks have a version to read.\n",
+              "- The runner that wrote it is thrown away with it.\n",
+              "\n",
+              f"Release: https://github.com/marvingygas/spoolway/releases/tag/v{version}\n",
+              "\n",
+          ]
+          path.write_text("".join(lines[:first] + stub + lines[first:]))
+          PY
+
+      # What the release commit itself runs (docs/releasing.md), for the same
+      # reason: it is the one command that rewrites the lock's own entry.
+      - name: refresh the lock entry
+        run: cargo check --offline
+
+      # Nothing outside the three files a release commit is allowed to touch may
+      # have moved. If this trips, the bump above is wrong, not the repo.
+      - name: only a release commit's own files changed
+        run: |
+          changed="$(git diff --name-only | sort | tr '\n' ' ')"
+          expected="CHANGELOG.md Cargo.lock Cargo.toml "
+          if [ "$changed" != "$expected" ]; then
+            echo "dress rehearsal touched [$changed], expected [$expected]" >&2
+            exit 1
+          fi
+
+      # The class #126 was in: a unit test that reads the crate's own version and
+      # is only true below some literal.
+      - name: the locked suite, at the bumped version
+        run: cargo test --locked
+
+      # Debug rather than `--release`: `whats-new` and the e2e suites assert
+      # behaviour, not optimisation, and the release build is the single most
+      # expensive thing this job could add to a daily run for no extra signal.
+      - name: the changelog stub parses and replays
+        run: |
+          cargo build --locked
+          ./target/debug/spoolway whats-new | tee /tmp/whats-new.txt
+          grep -qF "${{ steps.bump.outputs.next }}" /tmp/whats-new.txt
+
+      # The class #128 was in: a suite that asks something of every released
+      # version and cannot be satisfied for the one being released. It also asks
+      # for a fixture for every *older* version, so this is what catches a
+      # released version whose fixture was never scaffolded — the closing step of
+      # docs/releasing.md, which is easy to finish a release without doing.
+      - name: the upgrade suite, at the bumped version
+        env:
+          KEEP: 1
+        run: |
+          SPOOLWAY="$PWD/target/debug/spoolway" \
+            scripts/e2e/run.sh --suite upgrade
+
+      - name: keep the wreckage
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dress-rehearsal-scratch
+          path: /tmp/tmp.*
+          retention-days: 3
+          if-no-files-found: ignore

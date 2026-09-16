@@ -20,12 +20,18 @@ steps:
     on_pass: preflight
     on_fail: fix
 
+  # Gated, because this step no longer merges. `main` is protected and every pull
+  # request is gated on `ci`, so the repair lands when the owner merges it — and
+  # an ungated pass would hand a readiness run the same `main` it just failed on,
+  # which re-finds the identical blocker and spends a lap of the loop doing it.
+  # The pause is where the merge happens.
   - id: fix
-    description: Repair every readiness blocker in one pull request, merge it directly with gh, and return the new main for verification.
+    description: Repair every readiness blocker in one pull request and hand its number to the owner to merge.
     agent: codex
     prompt: release-fixer
     model: gpt-5.6-sol
     effort: high
+    gate: true
     on_pass: ready
     on_fail: blocked
 
