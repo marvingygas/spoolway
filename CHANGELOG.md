@@ -17,6 +17,32 @@ the following contract so the binary can parse and replay them:
 The highlights, migrations, and release URL are public copy. Keep internal task
 bookkeeping out of them and describe user-visible outcomes.
 
+## 0.3.0
+
+### Highlights
+- Spend now reaches outside the dispatcher: naming a directory in `[watch] dirs` (`spoolway config set watch.dirs ~/notes`) banks its own agent sessions — planning, skill runs, anything run by hand — as the project's own spend, alongside the lanes rather than invisible to them. (#112, #115)
+- `spoolway eval` gains two ledger views for that directory spend, `dirs` (one row per watched directory) and `sessions` (one row per session outside the lanes), reachable with `tab` beside `pipelines`, `steps` and `runs`. (#120)
+- `spoolway spend` can now group by `project` and `month` and take `--all`/`--project`, so a monthly bill or a cross-project split no longer needs external scripting. (#115)
+- A pause on the board can wait for the step it would interrupt: `s` on a pause panel schedules the pause instead of cutting the running step short. (#110)
+- `spoolway update` now asks npm for the actual latest version when it runs, on a short bounded lookup, instead of trusting a cache that has not caught up yet; it still falls back to that cache if npm cannot be reached in time. (#100, #101)
+
+### Breaking changes and migration
+- A project's own state directory has moved from `~/.spoolway/<checkout name>/` to an id-keyed `~/.spoolway/<label>-<id>/`, where `<id>` is stamped once into the project's `.git` directory and shared by every branch and worktree of that clone. The first `spoolway` command run against an already-initialised project after upgrading migrates its existing `~/.spoolway/<name>/` home onto the new location automatically; nothing manual is needed for a project claimed for the first time on this version. The move refuses to run while a dispatcher still holds the old home's lock, or while one of its worktrees is checked out and in use, to avoid moving the ground out from under live work — let the run finish or stop it, then run any `spoolway` command once to complete the migration. (#106, #108, #118)
+
+### Reliability
+- A pane that reported busy for a moment — a Windows quirk under load — could park a task that was never actually stuck; a busy pane is now retried instead of treated as a dead end. (#119)
+- Windows resolves the same directory three different ways — an 8.3 short form, git's own long form, and `canonicalize`'s verbatim `\\?\` form — and half of spoolway compared paths without normalising first, so a checkout could read as a different checkout from its own recorded root, or a scratch worktree as outside the scratch directory holding it. Every path spoolway compares or hands to git now goes through one spelling. (#124)
+- A tmux client connecting while the last session's server is still shutting down hears `server exited unexpectedly`, not `no server running`; spoolway recognised only the latter and could surface a shutting-down server as a real error. Both messages, and every other way tmux reports no server, now read the same. (#125)
+- A workspace now reuses the tab it already has instead of opening a new one, and leftover anchor tabs from earlier runs are swept up rather than left behind. (#117)
+- A command step's pane now closes once the command is over, wherever the task has gone since — it no longer lingers if the task moved on to a different step or lane in the meantime. (#113)
+
+### Upgrading
+- Install or update with `npm install -g spoolway@0.3.0`, or run it without installing via `npx spoolway@0.3.0`.
+- The `spoolway` wrapper package selects one of six platform packages at install time: linux-x64-gnu, linux-arm64-gnu, linux-x64-musl, darwin-arm64, darwin-x64 and win32-x64.
+- After upgrading, run `spoolway whats-new` to read this record back from the installed binary.
+
+Release: https://github.com/marvingygas/spoolway/releases/tag/v0.3.0
+
 ## 0.2.0
 
 ### Highlights
