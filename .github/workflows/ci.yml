@@ -1,6 +1,6 @@
 name: ci
 
-# Daily integration checks on main; pushes, pull requests and stacks start no run.
+# Pull requests run the `pr` tier; `main` gets the full nightly tier once a day.
 # Local pipeline gates still validate each task and the top of each chain.
 # Successful scheduled checks are reused only for the same commit. Advisories
 # refresh every day even when source is unchanged; manual runs always run all jobs.
@@ -8,6 +8,13 @@ name: ci
 # short-lived because storage has its own allowance.
 
 on:
+  # Per-push checks were dropped once (672cc51) and per-PR checks went with them.
+  # What followed is the reason they are back: four pull requests merged on
+  # 2026-09-15 with `test` and `test-windows` both red, main stayed broken, and
+  # the release pipeline was the first thing that refused to carry on — which is
+  # an expensive place to learn it. A pull request is the cheapest gate there is.
+  pull_request:
+    branches: [main]
   schedule:
     # 03:17 UTC: 05:17 Berlin in summer, 04:17 in winter.
     - cron: "17 3 * * *"
@@ -19,9 +26,14 @@ on:
         options: [smoke, pr, nightly]
         default: nightly
 
+# A pull request supersedes its own earlier run. A dispatch never cancels
+# another: the release pipeline dispatches this workflow against `main` once per
+# readiness pass, and under one shared `ci-main` group the second dispatch
+# cancelled the first — which a readiness step reads as a failed gate on a
+# candidate that was never actually tested.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -61,5 +73,8 @@ jobs:
     if: ${{ !cancelled() }}
     uses: ./.github/workflows/verify.yml
     with:
-      tier: ${{ inputs.tier || 'nightly' }}
+      # A pull request pays for the `pr` tier; `main` and any explicit dispatch
+      # get the full nightly one. scripts/e2e/run.sh's own header calls `pr`
+      # "what every push and every pull request runs" — this is that.
+      tier: ${{ inputs.tier || (github.event_name == 'pull_request' && 'pr' || 'nightly') }}
       run-tests: ${{ needs.changes.outputs.test != 'false' }}
