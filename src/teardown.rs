@@ -134,7 +134,7 @@ impl<'a> Dispatcher<'a> {
             let outcome =
                 crate::commands::auto_commit(self.repo, Path::new(&worktree), "", task.id(), &step);
             if let Some(note) = outcome.note() {
-                task.append_to_section("## Status Log", &format!("- {note}\n"));
+                task.log_status(note);
             }
             if outcome.is_unrecorded() {
                 let back = self
@@ -145,15 +145,12 @@ impl<'a> Dispatcher<'a> {
                     .or_else(|| task.front.last_report.as_ref().map(|r| r.step.clone()))
                     .unwrap_or_else(|| task.stage().to_string());
                 crate::commands::set_blocked_from(task, &back);
-                task.append_to_section(
-                    "## Status Log",
-                    &format!(
-                        "- reached `{}` with work that could not be committed — held at `{}` \
-                         rather than tearing the worktree down\n",
-                        task.stage(),
-                        crate::pipeline::BLOCKED,
-                    ),
-                );
+                task.log_status(&format!(
+                    "reached `{}` with work that could not be committed — held at `{}` \
+                     rather than tearing the worktree down",
+                    task.stage(),
+                    crate::pipeline::BLOCKED,
+                ));
                 task.set_stage(
                     crate::pipeline::BLOCKED,
                     Some("uncommitted work could not be recorded before cleanup"),
