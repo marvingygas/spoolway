@@ -13,8 +13,16 @@ on:
   # 2026-09-15 with `test` and `test-windows` both red, main stayed broken, and
   # the release pipeline was the first thing that refused to carry on — which is
   # an expensive place to learn it. A pull request is the cheapest gate there is.
+  #
+  # Every pull request, not just the ones based on `main`. `branches: [main]`
+  # filters on the *base*, and a stacked task is opened against the branch below
+  # it, so the filter skipped exactly the pull requests a chain is made of. It
+  # dated to the initial commit and predated stacking; it only ever looked
+  # harmless because a task with no `base:` had one invented from whichever
+  # branch the dispatcher had out, which was usually `main`. Requiring an
+  # explicit base makes a `task/*` base the ordinary case, which would have left
+  # most pull requests with no checks at all.
   pull_request:
-    branches: [main]
   schedule:
     # 03:17 UTC: 05:17 Berlin in summer, 04:17 in winter.
     - cron: "17 3 * * *"
