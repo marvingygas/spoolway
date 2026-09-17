@@ -2149,7 +2149,9 @@ mod tests {
     /// resolve, by reading `last_report.step` instead: `blocked`'s own road
     /// files its report from `blocked`, never from the step `paused_at`
     /// names, so `caught_at` reads `None` and `spoolway resume` still reaches
-    /// `cleared_block_target` for it, exactly as it always has.
+    /// `cleared_block_target` for it. The newer hand-back rule passes
+    /// `takes_over: false`, because the failed report did not claim that the
+    /// blocked step's work was done.
     #[test]
     fn resuming_a_pause_raised_from_blocked_itself_still_clears_the_block() {
         clear_lane_env();
@@ -2186,9 +2188,10 @@ mod tests {
         .unwrap();
         assert_eq!(
             queued(&repo, "stuck").stage(),
-            "done",
+            "work",
             "a pause raised from `blocked` itself still reaches cleared_block_target, \
-             not plain `blocked` again"
+             handing the task back to its blocked step rather than treating the failed report \
+             as completed work"
         );
     }
 
