@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 
 use super::*;
+use crate::platform::PathExt;
 use crate::screen::{Key, PollableRead, overlay, pad_to, panel, read_key};
 
 /// Why a task on a wait step has not started yet, worst news first.
@@ -926,6 +927,14 @@ fn queue_add_documents(
         task.save()?;
     }
 
+    // The same rule the queue screen's own `finish_submit` keeps: a document
+    // that reached the queue is not still waiting to go there. Only a source
+    // this project's own pending directory holds is removed — a `--from`
+    // pointing anywhere else, including `<stdin>#N`, is read and left
+    // exactly where it is, since it was never this batch's inbox copy to
+    // begin with.
+    remove_pending_sources(repo, documents);
+
     for task in &tasks {
         println!("queued {} at `{}`", task.id(), crate::pipeline::QUEUED);
         println!("  {}", task.path.display());
@@ -942,6 +951,29 @@ fn queue_add_documents(
     // spend is not banked from any command any more, and this one was never
     // special.
     Ok(())
+}
+
+/// Delete every `--from` source document that lived in this project's own
+/// [`Repo::pending_dir`], now that the whole batch is safely on disk.
+///
+/// `documents` names each source the way [`gather_documents`] read it —
+/// a path exactly as `--from` gave it, or `<stdin>#N` for a stream entry,
+/// which has no file to delete and is simply not a match below. Compared
+/// through [`PathExt::comparable`] rather than by string equality, since a
+/// relative `--from` path and `pending_dir`'s own absolute one otherwise
+/// never look alike even when they name the same file. A file that cannot be
+/// removed — already gone, or a permissions error — is left silently: this
+/// runs after every task in the batch has already been written, so a failure
+/// here is not a reason to call the submission itself anything but a
+/// success.
+fn remove_pending_sources(repo: &Repo, documents: &[(String, String)]) {
+    let pending_dir = repo.pending_dir().comparable();
+    for (name, _) in documents {
+        let path = std::path::Path::new(name).comparable();
+        if path.parent() == Some(pending_dir.as_path()) {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
 }
 
 /// What every path that saves a validated batch runs between
@@ -3038,10 +3070,20 @@ fn selected_groups<'a>(
 
 /// Every document a selection puts in the queue, in group order, each
 /// carrying whatever gate the screen recorded against it.
+///
+/// Only a task still [`TaskState::Pending`] is a document this submission
+/// can write at all — a sibling already read out of `queue/` or `archive/`
+/// carries `stage:` and the rest of [`RESERVED_KEYS`], which
+/// `parse_submission` refuses on sight. A group is offered here only while
+/// it still has a pending task (see [`super::pending::group_state`]), so
+/// that task is never the one filtered away.
 fn selected_documents(groups: &[Group], state: &ScreenState) -> Vec<(TaskKey, String)> {
     let mut documents = Vec::new();
     for group in selected_groups(groups, &state.selected) {
         for task in &group.tasks {
+            if task.state != TaskState::Pending {
+                continue;
+            }
             let key = task_key(task);
             let doc = match state.gates.get(&key) {
                 Some(step) => with_gate(&task.doc, step),
@@ -4345,8 +4387,12 @@ fn after_write(repo: &Repo, msg: String) -> Mode {
 /// failed hook call had already secured, written back so the next `enter`
 /// resumes (see [`open_and_prefix`]).
 ///
-/// Only the selected groups' own documents go. Another group's documents sit
-/// in the same flat directory and are not this submission's to touch, so the
+/// Only the selected groups' own documents go, and only the ones this batch
+/// actually queued: a sibling [`selected_documents`] left out because it was
+/// already [`TaskState::Queued`] or [`TaskState::Done`] keeps its own file —
+/// deleting it would be putting one task back by erasing another one's place
+/// in the queue or the archive. Another group's documents sit in the same
+/// flat directory and are not this submission's to touch either, so the
 /// deletion walks the groups it was handed rather than the directory.
 fn finish_submit(
     repo: &Repo,
@@ -4374,9 +4420,14 @@ fn finish_submit(
     // not a reason to refuse a submission that has already landed: the
     // document is left where it is, and the group it belongs to drops off
     // the pane anyway, because the queue now holds every task it names.
+    let mut left_alone: Vec<(TaskState, String)> = Vec::new();
     for group in selected_groups(groups, selected) {
         for task in &group.tasks {
-            let _ = std::fs::remove_file(&task.path);
+            if task.state == TaskState::Pending {
+                let _ = std::fs::remove_file(&task.path);
+            } else {
+                left_alone.push((task.state, task.id.clone()));
+            }
         }
     }
     groups.retain(|group| !selected.contains(&group_key(group)));
@@ -4396,7 +4447,36 @@ fn finish_submit(
         ));
     }
     msg.push_str(&based_on_note(&pending, base));
+    msg.push_str(&left_alone_note(&left_alone));
     Ok(msg)
+}
+
+/// One line per [`TaskState`] a submission's selected groups still hold once
+/// their pending tasks are the ones actually queued — the line the mockup
+/// draws under `based on`, naming a sibling rather than silently leaving it
+/// out of the report. Empty when every selected task was pending, which is
+/// the ordinary, wholly-fresh group.
+fn left_alone_note(left_alone: &[(TaskState, String)]) -> String {
+    let mut by_state: Vec<(TaskState, Vec<&str>)> = Vec::new();
+    for (state, id) in left_alone {
+        match by_state.iter_mut().find(|(s, _)| *s == *state) {
+            Some((_, ids)) => ids.push(id),
+            None => by_state.push((*state, vec![id])),
+        }
+    }
+    by_state
+        .into_iter()
+        .map(|(state, ids)| {
+            let label = match state {
+                TaskState::Queued => "already in the queue",
+                TaskState::Done => "already archived",
+                TaskState::Pending => {
+                    unreachable!("a pending task is queued, not left alone")
+                }
+            };
+            format!("\n\n{label}, left alone: {}", ids.join(", "))
+        })
+        .collect()
 }
 
 /// Every typed [`crate::task::Frontmatter`] field a document's author may set
@@ -6803,6 +6883,100 @@ mod tests {
             reread[0].state,
             GroupState::Queued,
             "and it reads as already queued"
+        );
+    }
+
+    /// A group whose sibling is already queued must still let its pending
+    /// task through: `selected_documents` puts every task of the group in
+    /// one batch, including the sibling's document read straight out of
+    /// `queue/`, which carries `stage:` — and `parse_submission`'s
+    /// `RESERVED_KEYS` check refuses any document that sets it, so today the
+    /// whole submission is refused rather than just queueing the pending one
+    /// and leaving the queued sibling alone.
+    #[test]
+    fn queueing_a_group_leaves_its_queued_sibling_alone_and_queues_the_pending_task() {
+        let repo = fixture("screen-requeue-group");
+        let beta_path = write_pending(&repo, "beta", &document("beta", "group: one\n", BODY));
+        let alpha_path = repo.queue_dir().join("alpha.md");
+        std::fs::write(
+            &alpha_path,
+            "---\nid: alpha\ntitle: alpha\ngroup: one\nstage: queued\n---\nbody\n",
+        )
+        .unwrap();
+
+        let mut groups = listed(&repo);
+        assert_eq!(groups.len(), 1, "alpha and beta must fold into one group");
+        assert_eq!(groups[0].state, GroupState::Queueable);
+
+        let mut state = ScreenState::new();
+        handle_browse_key(&groups, &mut state, Key::Char(' '));
+
+        let pipelines = Pipelines::builtin();
+        let mode = begin_submission(&repo, &pipelines, "plan/demo", &mut groups, &mut state);
+        assert!(
+            matches!(mode, Mode::Dispatch(_)),
+            "expected beta to queue with alpha left alone, got {mode:?}"
+        );
+
+        assert!(!beta_path.exists(), "beta's pending document must be gone");
+        assert!(
+            alpha_path.exists(),
+            "alpha's queue document must be untouched"
+        );
+        assert!(
+            repo.queue_dir().join("beta.md").exists(),
+            "beta must have landed in the queue"
+        );
+        let Mode::Dispatch(msg) = mode else {
+            unreachable!("checked above");
+        };
+        assert!(
+            msg.contains("already in the queue, left alone: alpha"),
+            "the report must name the sibling left alone, got {msg:?}"
+        );
+    }
+
+    /// The same shape, but the sibling left behind is archived rather than
+    /// queued: `finish_submit` used to walk every task of the selected group
+    /// and unlink its file regardless of state, which for an archived
+    /// sibling was its whole finished record.
+    #[test]
+    fn queueing_a_group_leaves_its_archived_sibling_alone_and_names_it() {
+        let repo = fixture("screen-requeue-group-archived");
+        let beta_path = write_pending(&repo, "beta", &document("beta", "group: one\n", BODY));
+        std::fs::create_dir_all(repo.archive_dir()).unwrap();
+        let alpha_path = repo.archive_dir().join("alpha.md");
+        std::fs::write(
+            &alpha_path,
+            "---\nid: alpha\ntitle: alpha\ngroup: one\nstage: done\n---\nbody\n",
+        )
+        .unwrap();
+
+        let mut groups = listed(&repo);
+        assert_eq!(groups.len(), 1, "alpha and beta must fold into one group");
+        assert_eq!(groups[0].state, GroupState::Queueable);
+
+        let mut state = ScreenState::new();
+        handle_browse_key(&groups, &mut state, Key::Char(' '));
+
+        let pipelines = Pipelines::builtin();
+        let mode = begin_submission(&repo, &pipelines, "plan/demo", &mut groups, &mut state);
+        let Mode::Dispatch(msg) = mode else {
+            panic!("expected beta to queue with alpha left alone, got {mode:?}");
+        };
+
+        assert!(!beta_path.exists(), "beta's pending document must be gone");
+        assert!(
+            alpha_path.exists(),
+            "alpha's archived record must be untouched"
+        );
+        assert!(
+            repo.queue_dir().join("beta.md").exists(),
+            "beta must have landed in the queue"
+        );
+        assert!(
+            msg.contains("already archived, left alone: alpha"),
+            "the report must name the archived sibling left alone, got {msg:?}"
         );
     }
 
@@ -10276,6 +10450,78 @@ body\n";
         args.dry_run = true;
         let err = queue_add(&repo, &Pipelines::builtin(), &args, &repo.root, false).unwrap_err();
         assert!(format!("{err:#}").contains("`group:`"), "{err:#}");
+    }
+
+    /// `queue add --from` a path under this project's own pending directory:
+    /// once the batch is written, the source document is gone from there —
+    /// it reached the queue, so it is not still waiting to go there — and
+    /// unqueueing the same task afterwards is free to write its clean
+    /// document back without tripping the "newer draft" refusal a leftover
+    /// copy would cause.
+    #[test]
+    fn queue_add_from_the_pending_directory_removes_its_own_source() {
+        let repo = fixture("queue-add-from-pending");
+        let text = document("beta", "group: one\n", BODY);
+        let path = write_pending(&repo, "beta", &text);
+
+        queue_add(
+            &repo,
+            &Pipelines::builtin(),
+            &from_args(&[&path.display().to_string()]),
+            &repo.root,
+            false,
+        )
+        .unwrap();
+
+        assert!(
+            repo.queue_dir().join("beta.md").exists(),
+            "beta must have landed in the queue"
+        );
+        assert!(
+            !path.exists(),
+            "the pending source must be gone once the batch is written"
+        );
+
+        // The round trip this leftover used to break: unqueue must be free
+        // to write beta's clean document back, with nothing already sitting
+        // in its way.
+        crate::status::unqueue_task(&repo, "beta").unwrap();
+        assert!(
+            path.exists(),
+            "unqueue must be able to write beta's document back to pending"
+        );
+        assert!(
+            !repo.queue_dir().join("beta.md").exists(),
+            "beta's queue file must be gone once it is unqueued"
+        );
+    }
+
+    /// A `--from` path outside this project's own pending directory is read
+    /// and left exactly where it is — only a document this batch's own inbox
+    /// held is ever removed.
+    #[test]
+    fn queue_add_from_outside_pending_leaves_the_source_alone() {
+        let repo = fixture("queue-add-from-elsewhere");
+        let text = document("login", "group: demo\n", BODY);
+        let path = write_doc(&repo, "login.md", &text);
+
+        queue_add(
+            &repo,
+            &Pipelines::builtin(),
+            &from_args(&[&path]),
+            &repo.root,
+            false,
+        )
+        .unwrap();
+
+        assert!(
+            repo.queue_dir().join("login.md").exists(),
+            "login must have landed in the queue"
+        );
+        assert!(
+            std::path::Path::new(&path).exists(),
+            "a --from source outside the pending directory must be left alone"
+        );
     }
 
     fn collect_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {

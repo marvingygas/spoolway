@@ -441,17 +441,42 @@ works "and the group nobody selected is left exactly where it was" \
 works "which is still not in the queue" \
   test ! -e "$SPOOLWAY_PROJECT_HOME/queue/screen-other.md"
 
+# -------------------------------------------------- taking one back and sending it again
+# `screen-two` carried back out of the queue by hand (it is the dependent of
+# the pair, so nothing still queued waits on it), then the group sent through
+# the screen a second time: `screen-one`, still queued, must be left exactly
+# where it is rather than tripping the `stage:` refusal its own document
+# carries, and the report has to name it rather than silently dropping it.
+must "screen-two carried back out of the queue by hand" \
+  "$SPOOLWAY" queue unqueue screen-two
+works "its document is back in the pending directory" \
+  test -f "$SPOOLWAY_PROJECT_HOME/pending/screen-two.md"
+works "and gone from the queue" \
+  test ! -e "$SPOOLWAY_PROJECT_HOME/queue/screen-two.md"
+
+printf ' \rn' | "$SPOOLWAY" queue >"$LIVE/screen-requeue.out" 2>&1
+
+works "screen-two reaches the queue again" \
+  test -f "$SPOOLWAY_PROJECT_HOME/queue/screen-two.md"
+works "and is gone from pending once more" \
+  test ! -e "$SPOOLWAY_PROJECT_HOME/pending/screen-two.md"
+works "screen-one, already queued, is left exactly where it was" \
+  test -f "$SPOOLWAY_PROJECT_HOME/queue/screen-one.md"
+has "the report names the sibling left alone rather than dropping it" \
+  "already in the queue, left alone: screen-one" "$LIVE/screen-requeue.out"
+
 # The other half of the same directory: `--from` pointed at it queues every
 # `.md` document there, with no screen involved at all.
 must "the group left behind, queued by naming the directory" \
   "$SPOOLWAY" queue add --from "$SPOOLWAY_PROJECT_HOME/pending"
 works "reaches the queue the same way" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/screen-other.md"
-# `queue add --from` is not the screen: it queues a document, it does not own
-# the directory, so nothing is deleted.
-works "and leaves the document where it found it" \
-  test -f "$SPOOLWAY_PROJECT_HOME/pending/screen-other.md"
-rm -f "$SPOOLWAY_PROJECT_HOME/pending/screen-other.md"
+# The source lived in this project's own pending directory, so `queue add
+# --from` clears it once the batch is written — the same "one inbox, whichever
+# door" rule the screen already keeps, so a task queued from the command line
+# is not left sitting in pending as well as in the queue.
+works "and clears the document out of the pending directory" \
+  test ! -e "$SPOOLWAY_PROJECT_HOME/pending/screen-other.md"
 
 # --------------------------------------------- a group with no pending documents
 # Queued straight through `queue add --from`, never through the screen, so its

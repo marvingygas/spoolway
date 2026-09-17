@@ -60,8 +60,10 @@ archive directories. The right pane lists the highlighted group's tasks.
 | `s` | Save the highlighted group into `.spoolway/routines/<name>/` |
 | `q` | Quit |
 
-Queueing deletes the group's documents from the pending directory. A group that fails
-validation is refused and nothing is deleted. See [Queueing a plan](planning.md#queueing-a-plan).
+Queueing deletes the group's pending documents from the pending directory. A sibling task
+already in the queue or the archive is left where it is, and the report names it. A group that
+fails validation is refused and nothing is deleted. See [Queueing a
+plan](planning.md#queueing-a-plan).
 
 ### `spoolway queue add`
 
@@ -78,6 +80,9 @@ spoolway queue add --from <PATH>
 | `--dry-run` | | Validate and print what would happen. Writes nothing and opens no ticket |
 
 With no `--from`, it prints the default pipeline's skeleton document to fill in.
+
+A `--from` path under this project's own pending directory is deleted once the batch is
+written. A `--from` path anywhere else, including `-`, is read and left alone.
 
 With `[issue_tracking]` configured, it opens a ticket per document first. See
 [`open`](configuration.md#open--a-fifth-event-run-by-queue-add-itself).
