@@ -101,7 +101,7 @@ jobs:
   # this job the untagged release commit's own version stopped being exempt and
   # was asked for a fixture no tag existed to scaffold. It cost no candidate,
   # because release.yml calls verify.yml, which has no dress rehearsal; it went
-  # red here instead, every day of 0.4.0's release window (#PRNUM). The
+  # red here instead, every day of 0.4.0's release window (#150). The
   # exemption now reads `origin`'s tags as well, so the bump below no longer
   # changes the answer for any version but the one it invents.
   #
