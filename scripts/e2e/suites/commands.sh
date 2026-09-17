@@ -250,25 +250,23 @@ printf '#!/bin/sh\necho mine\n' > "$HOOK"
 must "update runs over the tracker project" env -C "$INITDIR/github" "$SPOOLWAY" update
 has "the hook this project edited is exactly as it left it" "echo mine" "$HOOK"
 
-# ---------------------------------------------------------------- task-log.md
-# What belongs under each heading spoolway appends to a task file — seeded by
+# ------------------------------------------------------------ lane-prompts.md
+# The per-project override for a lane's seven typed pane messages — seeded by
 # `init`, left alone by `update` once a project has made it its own, and
 # restorable one file at a time.
-TASK_LOG="$INITDIR/unasked/.spoolway/templates/task-log.md"
-works "init seeded task-log.md" test -f "$TASK_LOG"
-has "with all three of spoolway's own headings" "## Status Log" "$TASK_LOG"
-has "and Handoff" "## Handoff" "$TASK_LOG"
-has "and Blocker" "## Blocker" "$TASK_LOG"
+LANE_PROMPTS="$INITDIR/unasked/.spoolway/templates/lane-prompts.md"
+works "init seeded lane-prompts.md" test -f "$LANE_PROMPTS"
+has "with the opening section" "## opening" "$LANE_PROMPTS"
 
-printf '## Status Log\n\nours, not spoolway'"'"'s.\n' > "$TASK_LOG"
+printf '## opening\n\nours, not spoolway'"'"'s.\n' > "$LANE_PROMPTS"
 must "update runs over the unasked project" env -C "$INITDIR/unasked" "$SPOOLWAY" update
-has "task-log.md this project edited is exactly as it left it" \
-  "ours, not spoolway's" "$TASK_LOG"
+has "lane-prompts.md this project edited is exactly as it left it" \
+  "ours, not spoolway's" "$LANE_PROMPTS"
 
 works "--replace restores the shipped file" \
-  env -C "$INITDIR/unasked" "$SPOOLWAY" update --replace .spoolway/templates/task-log.md
-has "back to spoolway's own Status Log wording" \
-  "One line per transition" "$TASK_LOG"
+  env -C "$INITDIR/unasked" "$SPOOLWAY" update --replace .spoolway/templates/lane-prompts.md
+has "back to spoolway's own resume wording" \
+  "This lane was blocked and a person has cleared it" "$LANE_PROMPTS"
 
 # --------------------------------------------------------------- task contract
 # `task contract` never touches `.spoolway/` in either mode — bare, it only

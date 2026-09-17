@@ -58,11 +58,11 @@ Paragraphs sent only when they apply:
 | A person reads this pane after the report. Leave anything viewable running. | the step has `gate:` or the task's `gate_at:` names it |
 | A command step failed into this one, and where its log is. | the previous step is a command step whose `on_fail` is here |
 | The task blocked and nobody is coming. Clear the obstacle. | the lane runs in an [unattended run](pipelines.md#unattended-runs) |
-| `spoolway queue list`, `spoolway queue show` and `spoolway lane`. | the step is `blocked` |
+| `spoolway queue list`, `spoolway queue show`, `spoolway lane` and `spoolway resume`. | the step is `blocked` |
 
 `WHAT YOU HAVE` lists the lane's diff command, log command, scratch path, and what its branch
 sits on. `WHAT YOU WRITE DOWN` lists the task-file headings spoolway appends to: `Status Log`,
-`Handoff`, `Blocker`. Their wording comes from `.spoolway/templates/task-log.md`. See
+`Handoff`, `Blocker`. Their wording is fixed and built into spoolway. See
 [Tasks and the queue](tasks.md#the-body-is-the-projects).
 
 ## What every lane is told about spoolway
@@ -76,7 +76,7 @@ The system prompt opens with the step and the task, then five rules:
 - Commit as you go. Uncommitted work is committed for you when the lane reports.
 
 A `blocked` step gets a different opening and a `READING THE RUN` block naming
-`spoolway queue list`, `spoolway queue show` and `spoolway lane`.
+`spoolway queue list`, `spoolway queue show`, `spoolway lane` and `spoolway resume`.
 
 A report can leave a note for the next step with `--handoff "<text>"`. It is written into the
 task file's `## Handoff` and can be repeated.

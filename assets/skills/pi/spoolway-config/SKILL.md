@@ -24,7 +24,7 @@ decide which layer a change belongs in without saying so.
     spoolway config contract      every setting, its values, its default
     spoolway override contract    what a patch may say, and what it may not
     spoolway override list        what is layered right now, and over what
-    spoolway template contract    the task, lane-prompt, task-log and PR shapes
+    spoolway template contract    the task, lane-prompt and PR shapes
     spoolway hook contract        the environment an issue-tracking hook is handed
     spoolway queue list           what stands on which step — renaming one strands it
 

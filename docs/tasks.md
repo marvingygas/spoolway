@@ -1,6 +1,6 @@
 ---
 domain: tasks
-covers: ["src/task.rs", "src/graph.rs", "src/globs.rs", "src/task_log.rs", "assets/task-log.md"]
+covers: ["src/task.rs", "src/graph.rs", "src/globs.rs"]
 ---
 
 # Tasks and the queue
@@ -127,8 +127,8 @@ Three sections are appended as the task runs. spoolway creates them if they are 
 | `## Handoff` | Any step, with `spoolway report --handoff`. What the next step should know. |
 | `## Blocker` | The dispatcher. Why the task needs a person. |
 
-`.spoolway/templates/task-log.md` tells a lane what to write under each heading. It is sent to
-the lane as the `WHAT YOU WRITE DOWN` block of its system prompt. See
+The wording under each heading is fixed and built into spoolway. It is sent to the lane as
+the `WHAT YOU WRITE DOWN` block of its system prompt. See
 [What a lane is handed](prompts.md#what-a-lane-is-handed).
 
 At lane start the dispatcher also tells the lane which tasks it waited on, with a pointer to

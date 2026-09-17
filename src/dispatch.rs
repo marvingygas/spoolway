@@ -1687,7 +1687,7 @@ impl<'a> Dispatcher<'a> {
     /// written.
     ///
     /// `paused` always is: the whole stage exists to wait for `spoolway
-    /// release` and nothing else ever moves a task off it. `blocked` only
+    /// resume` and nothing else ever moves a task off it. `blocked` only
     /// counts when nobody is coming to look — see
     /// [`Pipeline::blocked_is_staffed`] — because a staffed `blocked` lane is
     /// answered by another lane, not by a person, and settles like any other
@@ -5325,7 +5325,7 @@ fn tabs_to_sweep(
 /// free function rather than a method on [`Dispatcher`] alone.
 ///
 /// `paused` always is: the whole stage exists to wait for `spoolway
-/// release` and nothing else ever moves a task off it. `blocked` only
+/// resume` and nothing else ever moves a task off it. `blocked` only
 /// counts when nobody is coming to look — see
 /// [`crate::pipeline::Pipeline::blocked_is_staffed`] — because a staffed
 /// `blocked` lane is answered by another lane, not by a person, and settles
@@ -10869,7 +10869,7 @@ mod tests {
                 reject: false,
                 message: None,
             },
-            false,
+            None,
         )
         .unwrap();
 
@@ -10939,7 +10939,7 @@ mod tests {
                 reject: false,
                 message: None,
             },
-            false,
+            None,
         )
         .unwrap();
 
@@ -11734,20 +11734,17 @@ mod tests {
 
         assert!(carried.contains("nobody in between"), "{carried}");
         assert!(!carried.contains("unblocked"), "{carried}");
-        assert!(
-            unblocked.contains("a person has unblocked you"),
-            "{unblocked}"
-        );
+        assert!(unblocked.contains("a person has cleared it"), "{unblocked}");
         assert_ne!(carried, unblocked);
     }
 
     /// The one prompt that must never be shared between the two modes.
     ///
-    /// An unattended lane is resumed by the run, not by a person, and nothing
-    /// about its situation has changed while it waited. Told that somebody
-    /// cleared its path it goes looking through the status log for a fix that
-    /// was never made — and the cheapest thing it can then conclude is that
-    /// whatever they did must have worked.
+    /// An unattended lane is resumed by the run, not by a person, and it was
+    /// an unblocker lane, not a person, that did whatever clearing was done.
+    /// Told that a person cleared its path it goes looking through the
+    /// status log for a fix a person never made — and the cheapest thing it
+    /// can then conclude is that whatever they did must have worked.
     #[test]
     fn an_unattended_resume_is_never_told_that_a_person_fixed_anything() {
         let repo = fixture("unattended-prompt");
@@ -11758,9 +11755,7 @@ mod tests {
         let alone = crate::compose::resume_prompt(&repo, &task, pipeline, true);
 
         assert!(!alone.contains("a person has"), "{alone}");
-        assert!(alone.contains("nobody is coming"), "{alone}");
-        // And it carries the job a second, dedicated lane used to be sent to do.
-        assert!(alone.contains("Reproduce it"), "{alone}");
+        assert!(alone.contains("an unblocker lane has since run"), "{alone}");
         assert!(alone.contains("## Blocker"), "{alone}");
         assert_ne!(
             alone,
@@ -11868,7 +11863,7 @@ mod tests {
         assert_eq!(mux.did("start"), ["start demo · implement"]);
         let sent = mux.read("demo · implement", 9999).unwrap();
         assert!(
-            sent.contains("A person stopped your turn with a keypress"),
+            sent.contains("A person stopped this lane's turn with a keypress"),
             "an idle park's resume must still read `park_prompt`: {sent}"
         );
         let task = reload(&path);
@@ -11901,10 +11896,10 @@ mod tests {
         assert_eq!(mux.did("start"), ["start demo · implement"]);
         let sent = mux.read("demo · implement", 9999).unwrap();
         assert!(
-            sent.contains("You went quiet and never reported"),
+            sent.contains("This lane went quiet and never reported"),
             "an escalated park's resume must read `park_prompt(.., true)`: {sent}"
         );
-        assert!(!sent.contains("A person stopped your turn with a keypress"));
+        assert!(!sent.contains("A person stopped this lane's turn with a keypress"));
         let task = reload(&path);
         assert_eq!(task.front.parked_from, None);
         assert!(!task.front.escalated, "spent alongside `parked_from`");
@@ -14936,6 +14931,73 @@ mod tests {
         assert!(!prompt.contains("dispatch.gates"));
     }
 
+    /// Acceptance criterion 4's truth table: the four-part stop reaches a
+    /// gated step and `blocked` — the two roads that can put a pane in front
+    /// of a person — and nothing else.
+    #[test]
+    fn the_four_part_stop_reaches_a_gated_step_and_blocked_and_nothing_else() {
+        let repo = fixture("four-part-stop-truth-table");
+        add_task(&repo, "t", "ask");
+        let task = repo.task("t").unwrap();
+
+        let pipeline = crate::pipeline::Pipeline::parse(
+            "only",
+            "steps:\n\
+             \x20 - id: ask\n    agent: pi\n    gate: true\n    on_pass: deploy\n\
+             \x20 - id: deploy\n    agent: pi\n    on_pass: done\n",
+        )
+        .expect("hand-built pipeline");
+        let gated_step = pipeline.step("ask").unwrap();
+        let plain_step = pipeline.step("deploy").unwrap();
+
+        let marker = "Resume the task on the dispatcher";
+        let gated_policy = crate::compose::policy(&repo, &task, &pipeline, gated_step);
+        let plain_policy = crate::compose::policy(&repo, &task, &pipeline, plain_step);
+        assert!(gated_policy.contains(marker), "gated: {gated_policy}");
+        assert!(!plain_policy.contains(marker), "plain: {plain_policy}");
+
+        let default_pipelines = Pipelines::builtin();
+        let default_pipeline = default_pipelines.get("default").unwrap();
+        let blocked_step = default_pipeline.step(crate::pipeline::BLOCKED).unwrap();
+        let blocked_task = reload(&add_task(&repo, "u", crate::pipeline::BLOCKED));
+        let blocked_policy =
+            crate::compose::policy(&repo, &blocked_task, default_pipeline, blocked_step);
+        assert!(blocked_policy.contains(marker), "blocked: {blocked_policy}");
+    }
+
+    /// Acceptance criterion 5: `blocked`'s own `spoolway resume <task>` line
+    /// is in its toolbox and nowhere else — no other step's system prompt
+    /// should ever mention `READING THE RUN` or offer the command.
+    #[test]
+    fn only_blocked_names_spoolway_resume() {
+        let repo = fixture("only-blocked-names-resume");
+        let pipelines = Pipelines::builtin();
+        let pipeline = pipelines.get("default").unwrap();
+        let blocked_step = pipeline.step(crate::pipeline::BLOCKED).unwrap();
+        let blocked_task = reload(&add_task(&repo, "t", crate::pipeline::BLOCKED));
+        let blocked_prompt = sent(&repo, &blocked_task, pipeline, blocked_step);
+        assert!(
+            blocked_prompt.contains("READING THE RUN"),
+            "{blocked_prompt}"
+        );
+        assert!(
+            blocked_prompt.contains("`spoolway resume <task>`"),
+            "{blocked_prompt}"
+        );
+
+        let implement_step = pipeline.step("implement").unwrap();
+        let implement_task = reload(&add_task(&repo, "u", "implement"));
+        let implement_prompt = sent(&repo, &implement_task, pipeline, implement_step);
+        assert!(
+            !implement_prompt.contains("READING THE RUN"),
+            "{implement_prompt}"
+        );
+        assert!(
+            !implement_prompt.contains("spoolway resume"),
+            "{implement_prompt}"
+        );
+    }
+
     /// The mechanics a prompt used to carry in a generated block are derived
     /// from the step instead, so they are sent exactly where they are true.
     ///
@@ -15145,7 +15207,9 @@ mod tests {
         let prompt =
             crate::compose::system_prompt(&repo, &task, pipeline, step, "[prompt]").unwrap();
         assert!(
-            prompt.trim_end().ends_with("`stage:` yourself."),
+            prompt
+                .trim_end()
+                .ends_with("--handoff \"<what the next step should know>\"   repeatable"),
             "got: {prompt}"
         );
         assert!(prompt.contains("--handoff"), "got: {prompt}");
@@ -15222,36 +15286,8 @@ mod tests {
         };
         assert_eq!(
             column_of("your change", "`git"),
-            column_of("Status Log", "One"),
+            column_of("Status Log", "one"),
             "a row's value should start at the same column in both blocks: {prompt}"
-        );
-    }
-
-    /// The one asymmetry acceptance criterion 1 calls out: a project whose
-    /// `task-log.md` exists but leaves a heading out gets no row for it at
-    /// all — not the built-in, unlike every other resolution chain in this
-    /// codebase.
-    #[test]
-    fn a_heading_an_existing_task_log_omits_gets_no_row() {
-        let repo = fixture("prompt-write-down-omitted-heading");
-        std::fs::create_dir_all(repo.task_log_path().parent().unwrap()).unwrap();
-        std::fs::write(
-            repo.task_log_path(),
-            "## Status Log\n\nOur own words.\n\n## Handoff\n\nOur own words too.\n",
-        )
-        .unwrap();
-        let pipelines = Pipelines::builtin();
-        let pipeline = pipelines.get("default").unwrap();
-        let step = pipeline.step("implement").unwrap();
-        let task = reload(&add_task(&repo, "demo", "implement"));
-
-        let prompt =
-            crate::compose::system_prompt(&repo, &task, pipeline, step, "[prompt]").unwrap();
-        assert!(prompt.contains("Our own words."), "got: {prompt}");
-        assert!(prompt.contains("Our own words too."), "got: {prompt}");
-        assert!(
-            !prompt.contains("Blocker"),
-            "task-log.md names no Blocker section, so no row should appear: {prompt}"
         );
     }
 

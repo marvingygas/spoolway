@@ -518,13 +518,12 @@ and exits non-zero on a refusal.
 
 ### `spoolway template contract`
 
-Print the four prose templates a project owns and where each lives.
+Print the three prose templates a project owns and where each lives.
 
 | Template | File |
 |---|---|
 | Task body | `.spoolway/templates/tasks/<pipeline>.md` |
 | Lane messages | `.spoolway/templates/lane-prompts.md` |
-| Task log headings | `.spoolway/templates/task-log.md` |
 | Pull request title and body | `.spoolway/templates/pull-request.md` |
 
 ### `spoolway hook contract`

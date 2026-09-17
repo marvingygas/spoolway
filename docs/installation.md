@@ -83,7 +83,6 @@ flowchart LR
 | `.spoolway/prompts/<name>/PROMPT.md` | The six sample prompts. Updates never touch them. |
 | `.spoolway/prompts/archivist/assets/` | The document skeletons the archivist fills. |
 | `.spoolway/templates/tasks/` | One task skeleton per shipped pipeline. |
-| `.spoolway/templates/task-log.md` | The headings spoolway appends to a task file. |
 | `.spoolway/templates/tracking/` | The `epic.md` and `ticket.md` bodies a tracker hook renders. |
 | `.spoolway/hooks/` | `github.sh` and `jira.sh`. On native Windows, `github.ps1` and `jira.ps1`. See [`[issue_tracking]`](configuration.md#issue_tracking--a-hook-fired-on-four-task-events). |
 | `~/.spoolway/<label>-<id>/project.toml` | Records the id and the checkout this home belongs to. |

@@ -864,9 +864,39 @@ pub fn resume_at(task: &mut Task, pipeline: &Pipeline, target: &str) -> Vec<Stri
 /// purpose. Anything else resumes the step that stopped it — a real block,
 /// through `back_onto_its_step`'s ordinary road, or a `p` park, through
 /// `unpark` beside it.
-pub fn resume(repo: &Repo, pipelines: &Pipelines, args: &ResumeArgs, in_lane: bool) -> Result<()> {
-    refuse_from_lane("a gate is answered", in_lane)?;
+///
+/// `from_step` is the calling lane's own step, read from `SPOOLWAY_STEP` at
+/// the CLI boundary the same way `report`'s own `started_for` is — `None`
+/// for a person typing at their own shell. A lane on `blocked` is the one
+/// exception to [`refuse_from_lane`]: clearing a block is often a question
+/// about another stopped task, and `blocked` already reads three of them
+/// through [`crate::compose::toolbox`]. Even there, `--reject` and
+/// `--stage` stay refused — rerouting a task or rejecting a gate is a
+/// decision about what the work is for, not about what is in its way — and
+/// a task waiting on a gate (`paused_at`) stays refused whoever asks, so
+/// nothing a person was asked to approve can be approved by a lane.
+pub fn resume(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    args: &ResumeArgs,
+    from_step: Option<&str>,
+) -> Result<()> {
+    let from_blocked = from_step == Some(crate::pipeline::BLOCKED);
+    if !from_blocked {
+        refuse_from_lane("a gate is answered", from_step.is_some())?;
+    } else if args.reject || args.stage.is_some() {
+        bail!(
+            "a lane on `blocked` may resume another stopped task, but never with `--reject` or \
+             `--stage` — those are a person's to decide."
+        );
+    }
     let task = repo.task(&args.task)?;
+    if from_blocked && task.front.paused_at.is_some() {
+        bail!(
+            "task `{}` is waiting on a gate — that is a person's to answer, not a lane's.",
+            args.task
+        );
+    }
 
     // `--reject` only means anything against a gate. Checked against the
     // stage the task is actually on, rather than which body ends up running
@@ -1466,7 +1496,7 @@ mod tests {
                 reject: false,
                 message: None,
             },
-            false,
+            None,
         )
         .unwrap();
         assert_eq!(queued(&repo, "stuck").stage(), "handover");
@@ -2354,8 +2384,9 @@ mod tests {
     }
 
     /// A lane can no longer answer its own gate: `spoolway resume` run with
-    /// `in_lane: true` — what the CLI boundary passes when `TASK_ENV` is set —
-    /// is refused before it ever reads the task, naming why.
+    /// `from_step: Some(...)` — what the CLI boundary passes when
+    /// `SPOOLWAY_STEP` is set — is refused before it ever reads the task,
+    /// naming why, unless that step is `blocked`.
     #[test]
     fn resume_refuses_from_inside_a_lanes_own_environment() {
         clear_lane_env();
@@ -2372,7 +2403,7 @@ mod tests {
                 reject: false,
                 message: None,
             },
-            true,
+            Some("deploy"),
         )
         .expect_err("a lane must not be able to answer its own gate");
         let said = format!("{err:#}");
@@ -2382,6 +2413,81 @@ mod tests {
         // Refused before anything moved.
         let task = queued(&repo, "ship");
         assert_eq!(task.stage(), crate::pipeline::PAUSED);
+    }
+
+    /// The one exception to the refusal above: a lane on `blocked` may put
+    /// another stopped task back on its step, since clearing a block is
+    /// often a question about another task.
+    #[test]
+    fn a_lane_on_blocked_may_resume_another_stopped_task() {
+        clear_lane_env();
+        let repo = fixture("blocked-lane-resumes-sibling");
+        let pipelines = gate_pipelines();
+        add(&repo, "sibling", &[]);
+        let mut task = queued(&repo, "sibling");
+        task.front.blocked_from = Some("build".into());
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        task.save().unwrap();
+
+        resume(
+            &repo,
+            &pipelines,
+            &crate::cli::ResumeArgs {
+                task: "sibling".into(),
+                stage: None,
+                reject: false,
+                message: None,
+            },
+            Some(crate::pipeline::BLOCKED),
+        )
+        .unwrap();
+
+        let task = queued(&repo, "sibling");
+        assert_eq!(task.stage(), "build");
+    }
+
+    /// Bounded even from `blocked`: a task waiting on a gate is a person's to
+    /// answer, and neither `--reject` nor `--stage` are a lane's to hand it.
+    #[test]
+    fn a_lane_on_blocked_may_not_resume_past_a_gate_or_reroute() {
+        clear_lane_env();
+        let repo = fixture("blocked-lane-cannot-cross-a-gate");
+        let pipelines = gate_pipelines();
+        paused_at_deploy(&repo, "ship");
+
+        let gate = resume(
+            &repo,
+            &pipelines,
+            &crate::cli::ResumeArgs {
+                task: "ship".into(),
+                stage: None,
+                reject: false,
+                message: None,
+            },
+            Some(crate::pipeline::BLOCKED),
+        )
+        .expect_err("a lane must not answer a gate on another task's behalf");
+        assert!(format!("{gate:#}").contains("waiting on a gate"));
+
+        add(&repo, "sibling", &[]);
+        let mut task = queued(&repo, "sibling");
+        task.front.blocked_from = Some("build".into());
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        task.save().unwrap();
+
+        let rerouted = resume(
+            &repo,
+            &pipelines,
+            &crate::cli::ResumeArgs {
+                task: "sibling".into(),
+                stage: Some("announce".into()),
+                reject: false,
+                message: None,
+            },
+            Some(crate::pipeline::BLOCKED),
+        )
+        .expect_err("a lane must not reroute another task by hand");
+        assert!(format!("{rerouted:#}").contains("--stage"));
     }
 
     /// The whole of what a gate is: spoolway does not act on a gated step's
@@ -2430,7 +2536,7 @@ mod tests {
                 reject: false,
                 message: Some("looks right".into()),
             },
-            false,
+            None,
         )
         .unwrap();
 
@@ -2489,7 +2595,7 @@ mod tests {
                 reject: false,
                 message: None,
             },
-            false,
+            None,
         )
         .unwrap();
         let task = queued(&repo, "ship");
@@ -2557,7 +2663,7 @@ mod tests {
                 reject: true,
                 message: Some("the migration has not run yet".into()),
             },
-            false,
+            None,
         )
         .unwrap();
 
@@ -2623,7 +2729,7 @@ mod tests {
                 reject: false,
                 message: None,
             },
-            false,
+            None,
         )
         .unwrap();
         let task = queued(&repo, "ship");
@@ -2649,7 +2755,7 @@ mod tests {
                 reject: false,
                 message: None,
             },
-            false,
+            None,
         )
         .unwrap();
         let task = queued(&repo, "ship");
@@ -2677,7 +2783,7 @@ mod tests {
                 reject: true,
                 message: None,
             },
-            false,
+            None,
         )
         .expect_err("--reject should refuse a task that is not paused");
         let said = format!("{err:#}");
@@ -2720,7 +2826,7 @@ mod tests {
                 reject: false,
                 message: None,
             },
-            false,
+            None,
         )
         .unwrap();
 
@@ -2764,7 +2870,7 @@ mod tests {
                 reject: false,
                 message: None,
             },
-            false,
+            None,
         )
         .unwrap();
 
@@ -2801,7 +2907,7 @@ mod tests {
                 reject: false,
                 message: None,
             },
-            false,
+            None,
         )
         .unwrap();
 
@@ -2837,7 +2943,7 @@ mod tests {
                 reject: false,
                 message: None,
             },
-            false,
+            None,
         )
         .unwrap();
 
@@ -2877,7 +2983,7 @@ mod tests {
                 reject: false,
                 message: None,
             },
-            false,
+            None,
         )
         .unwrap();
 
@@ -2931,7 +3037,7 @@ mod tests {
                 reject: false,
                 message: None,
             },
-            false,
+            None,
         )
         .unwrap();
 
@@ -2966,7 +3072,7 @@ mod tests {
                 reject: false,
                 message: None,
             },
-            false,
+            None,
         )
         .unwrap();
 
@@ -3038,7 +3144,7 @@ mod tests {
                 reject: false,
                 message: None,
             },
-            false,
+            None,
         )
         .unwrap();
 

@@ -86,11 +86,7 @@ fn project_section(repo: &Repo, state: &str) -> Option<String> {
 /// [`crate::task::Task::section`] already makes for a task file's own
 /// headings — this file is never nested and never carries a heading spoolway
 /// needs to tell apart from a state's own prose.
-///
-/// `pub(crate)` rather than private: [`crate::task_log`] parses the same
-/// shape of file — one `##` section per heading — and reads this rather than
-/// growing its own copy of a scan this module already got right.
-pub(crate) fn section(text: &str, heading: &str) -> Option<String> {
+fn section(text: &str, heading: &str) -> Option<String> {
     let wanted = format!("## {heading}");
     let mut lines = text.lines();
     lines.by_ref().find(|line| line.trim() == wanted)?;

@@ -56,11 +56,6 @@ pub const PULL_REQUEST_TEMPLATE: &str = ".spoolway/templates/pull-request.md";
 /// the same shape as the pull request template above. See
 /// [`crate::lane_prompts`].
 pub const LANE_PROMPTS_TEMPLATE: &str = ".spoolway/templates/lane-prompts.md";
-/// What belongs under each of the three headings spoolway appends to a task
-/// file, one `##` section per heading — beside the task templates, a single
-/// file rather than one per pipeline, the same shape as the two above. See
-/// [`crate::task_log`].
-pub const TASK_LOG_TEMPLATE: &str = ".spoolway/templates/task-log.md";
 
 /// Runtime state, kept out of the checkout entirely — see
 /// [`crate::repo::Repo::home`]. Bare segment names rather than paths from the

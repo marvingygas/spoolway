@@ -36,13 +36,27 @@ fn column_width() -> usize {
     WHAT_YOU_HAVE_LABELS
         .iter()
         .map(|l| l.len())
-        .chain(crate::task_log::HEADINGS.iter().map(|(h, _)| h.len()))
+        .chain(HEADINGS.iter().map(|(h, _)| h.len()))
         .max()
         .unwrap_or(0)
 }
 
 const WHAT_YOU_HAVE_LABELS: [&str; 4] =
     ["your change", "your commits", "scratch space", "you sit on"];
+
+/// The three headings spoolway appends to a task file, each paired with the
+/// one-line prose `WHAT YOU WRITE DOWN` states it in. Fixed and unconfigurable
+/// — a project that wants a lane told more about what a handoff is for has
+/// its own prompt to say it in, not a second copy of this file's own rules.
+/// Order matters: this is also the order the block lists them in.
+const HEADINGS: &[(&str, &str)] = &[
+    ("Status Log", "one line per transition"),
+    (
+        "Handoff",
+        "what the next step needs and the diff does not show",
+    ),
+    ("Blocker", "what is in the way, and what you tried"),
+];
 
 /// The system prompt a lane is started with: spoolway's framing, the project's
 /// prompt, and this pass's own policy and report contract — composed into
@@ -170,7 +184,7 @@ pub(crate) fn situating(
         task = task.id(),
         pipeline = pipeline.name,
         what_you_have = what_you_have(repo, task)?,
-        what_you_write_down = what_you_write_down(repo),
+        what_you_write_down = what_you_write_down(),
     ))
 }
 
@@ -267,33 +281,26 @@ fn what_you_have(repo: &Repo, task: &Task) -> Result<String> {
 /// included. A fixed number rather than one read off the terminal: the text
 /// this wraps is sent to a model, not printed to a screen, and a model reads
 /// a stable shape on every pass rather than one that reflows with whoever's
-/// window happens to be open. Chosen to keep the built-in wording for all
-/// three headings — the common case, since a project rewriting `task-log.md`
-/// is the exception — inside the word budget `dispatch::tests` holds the
-/// rest of this file to.
-const WRAP_WIDTH: usize = 64;
+/// window happens to be open. 66 is the smallest value that keeps
+/// [`HEADINGS`]' own Handoff line — the longest of the three — on one row.
+const WRAP_WIDTH: usize = 66;
 
-/// The `WHAT YOU WRITE DOWN` block: what belongs under each of the three
-/// headings spoolway appends to a task file, resolved from the project's own
-/// `.spoolway/templates/task-log.md` — see [`crate::task_log`] — or
-/// spoolway's own built-in wording when the project has written no such file
-/// at all.
+/// The `WHAT YOU WRITE DOWN` block: three built-in lines, one per heading
+/// spoolway appends to a task file — see [`HEADINGS`]. Fixed rather than a
+/// project's to rewrite: the contract this file states is spoolway's own,
+/// and a project with more to say about a handoff says it in its own prompt.
 ///
 /// Drawn like [`what_you_have`] — same label column, same wrapped-line
-/// indent — and only for a heading [`crate::task_log::resolve`] actually
-/// answers for: a project whose file exists but leaves one heading out gets
-/// no row for it, which is that module's own rule and not this function's to
-/// second-guess.
-fn what_you_write_down(repo: &Repo) -> String {
+/// indent, though none of the three lines here is long enough to wrap today.
+fn what_you_write_down() -> String {
     let width = column_width();
     let margin = width + 2;
     let avail = WRAP_WIDTH.saturating_sub(margin);
 
-    let rows: Vec<String> = crate::task_log::HEADINGS
+    let rows: Vec<String> = HEADINGS
         .iter()
-        .filter_map(|(heading, builtin)| {
-            let prose = crate::task_log::resolve(repo, heading, builtin)?;
-            let mut wrapped = wrap(&prose, avail).into_iter();
+        .map(|(heading, prose)| {
+            let mut wrapped = wrap(prose, avail).into_iter();
             let first = wrapped.next().unwrap_or_default();
             let mut row = format!(" {heading:width$} {first}");
             for line in wrapped {
@@ -301,14 +308,11 @@ fn what_you_write_down(repo: &Repo) -> String {
                 row.push_str(&" ".repeat(margin));
                 row.push_str(&line);
             }
-            Some(row)
+            row
         })
         .collect();
 
-    match rows.is_empty() {
-        true => String::new(),
-        false => format!("\n\nWHAT YOU WRITE DOWN\n\n{}", rows.join("\n")),
-    }
+    format!("\n\nWHAT YOU WRITE DOWN\n\n{}", rows.join("\n"))
 }
 
 /// Break `text` into lines of at most `width` characters, on word
@@ -316,10 +320,9 @@ fn what_you_write_down(repo: &Repo) -> String {
 /// own line rather than cut mid-word — an overlong line reads better than a
 /// severed one.
 ///
-/// Measured in `chars()`, not bytes: the shipped `task-log.md`'s own Handoff
-/// prose carries an em dash, three bytes for one character, and a
-/// byte-counted line would wrap two columns early the moment a project's own
-/// prose used one too.
+/// Measured in `chars()`, not bytes: [`HEADINGS`]' own Handoff line carries
+/// no multi-byte character today, but a byte count would wrap early the
+/// moment one of these three lines gained one.
 fn wrap(text: &str, width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     let mut line = String::new();
@@ -345,8 +348,9 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 }
 
 /// The `blocked` step's own toolbox: three read-only commands for reading the
-/// run, offered to no other step and placed right after the prompt rather
-/// than inside `THIS PASS` — see [`system_prompt`].
+/// run, plus the one write a `blocked` lane alone may make, offered to no
+/// other step and placed right after the prompt rather than inside `THIS
+/// PASS` — see [`system_prompt`].
 ///
 /// Clearing a block is often a question about another task, or about a lane's
 /// own transcript — and once a prompt may not name a spoolway command, that
@@ -356,11 +360,18 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 /// imagine. `cost`, `eval`, `doctor` and `config get` stay out for the same
 /// reason none of the four reach a lane at all — they answer for a run or an
 /// installation as a whole, which is a person's question, not a lane's.
+///
+/// `spoolway resume` is the exception to the read-only rule above it, bounded
+/// in the two ways `commands::report::resume` itself enforces: never past a
+/// task waiting on a gate, and never with `--reject` or `--stage`, which
+/// reroute or reject rather than clear a block.
 fn toolbox() -> String {
     "READING THE RUN — yours at this step only:\n\n\
      `spoolway queue list` — every task, and where each sits\n\
      `spoolway queue show <task>` — one task's file, goal to `## Status Log`\n\
-     `spoolway lane` — this run's lanes; name one for its transcript"
+     `spoolway lane` — this run's lanes; name one for its transcript\n\
+     `spoolway resume <task>` — put another stopped task back on its step; not\n  \
+     one waiting on a gate, and never with `--reject` or `--stage`"
         .to_string()
 }
 
@@ -376,8 +387,23 @@ fn is_gated(step: &Step, task: &Task) -> bool {
     step.gate || task.front.gate_at.as_deref() == Some(step.id.as_str())
 }
 
+/// The four-part shape a lane that stops for a person ends its turn in — see
+/// [`policy`], the only place this is injected. Fixed wording, not validated:
+/// a lane that writes three parts instead of four gets no complaint, the same
+/// footing as everything else a prompt asks for.
+///
+/// Line four is fixed rather than a `spoolway resume` command line, because
+/// the board is where a person already is — see [`crate::status`]'s own `[r]
+/// resumes it`, which this borrows.
+const FOUR_PART_STOP: &str = "If you `--pause`, end your turn with, in order:\n\n  \
+     what this was about and what changed, for somebody who has forgotten\n  \
+     why it stopped here\n  \
+     what to do about it — one clear next step\n  \
+     \"Resume the task on the dispatcher (r/R).\"";
+
 /// Everything true of *this* pass and no other, as the paragraphs `THIS
-/// PASS` opens with: the gate, a fix pass's findings, a failed command step.
+/// PASS` opens with: the gate, the four-part stop, a fix pass's findings, a
+/// failed command step.
 ///
 /// This is the half that must not be a prompt's to write. Each of these is
 /// either per-project configuration or per-pass state, and a file that stated
@@ -400,8 +426,17 @@ pub(crate) fn policy(repo: &Repo, task: &Task, pipeline: &Pipeline, step: &Step)
             .to_string(),
     };
 
+    // The two roads that reach a person: a gate, and `blocked`, where
+    // `--pause` is the other way out. Every other step routes on without
+    // anybody watching, so the shape a pane ends in is not worth the tokens.
+    let four_part_stop = match is_gated(step, task) || step.id == crate::pipeline::BLOCKED {
+        false => String::new(),
+        true => FOUR_PART_STOP.to_string(),
+    };
+
     let paragraphs: Vec<String> = [
         gate,
+        four_part_stop,
         arrived_by_fail_paragraph(repo, task, pipeline, step),
         failed_command(repo, task, pipeline, step),
     ]
@@ -500,40 +535,37 @@ fn arrived_by_fail_paragraph(repo: &Repo, task: &Task, pipeline: &Pipeline, step
 /// lane's turn, and every flag it takes. Closes `THIS PASS`, after whatever
 /// [`policy`] added — the one thing a model must not have lost track of by
 /// the end of a long turn is the command that ends it.
-pub(crate) fn report_contract(pipeline: &Pipeline, blocked: bool) -> String {
+///
+/// Forms only, and nothing else: no prose choosing a verb for the lane, no
+/// mention of any step or role, no `stage:` warning — those are the
+/// project's own prompt to give or spoolway's policy to enforce, not a
+/// paragraph competing with them for the same attention. `--handoff` stays,
+/// beside the others, because it is the one mechanism by which any step
+/// leaves something for the next — spoolway's to enable, never a project's
+/// to be reminded about.
+///
+/// `pipeline` is unused now that naming it is gone from the wording — kept
+/// on the signature the same way [`resume_prompt`] keeps its own unused
+/// `pipeline`, so a caller never has to remember which of these functions
+/// needs it.
+pub(crate) fn report_contract(_pipeline: &Pipeline, blocked: bool) -> String {
     // `blocked` gets two forms, not three: `commands::report` turns a
     // `--fail` or a `--block` from this step straight into `paused` anyway,
     // so offering them here would teach a lane a shape that no longer exists.
     let forms = match blocked {
         true => {
             "    spoolway report --pass  -m \"<one line on what happened>\"\n    \
-                  spoolway report --pause -m \"<what needs a person, and why>\""
+                  spoolway report --pause -m \"<what needs a person, and why>\"\n    \
+                  --handoff \"<what the next step should know>\"   repeatable"
         }
         false => {
             "    spoolway report --pass  -m \"<one line on what happened>\"\n    \
                   spoolway report --fail  -m \"<one line on what happened>\"\n    \
-                  spoolway report --block -m \"<what is in the way>\""
+                  spoolway report --block -m \"<what is in the way>\"\n    \
+                  --handoff \"<what the next step should know>\"   repeatable"
         }
     };
-    let body = match blocked {
-        true => {
-            "Exactly one, exactly once. Add `--handoff \"<text>\"` for each thing the next \
-             step should know, any outcome; repeatable, appended to the task file's \
-             `## Handoff`. If you cannot clear it yourself, `--pause` with the reason."
-        }
-        false => {
-            "Exactly one, exactly once. `--handoff \"<text>\"` per thing the next step should \
-             know, any outcome; repeatable, appended to the task file. If you cannot tell how \
-             it went, `--block`."
-        }
-    };
-    format!(
-        "Your last action is one `spoolway report` command:\n\n\
-         {forms}\n\n\
-         {body} Pipeline `{pipeline}` routes from here; never edit the task file's `stage:` \
-         yourself.",
-        pipeline = pipeline.name,
-    )
+    format!("Your last action is one `spoolway report` command:\n\n{forms}")
 }
 
 /// The built-in wording for each of the seven typed messages a lane's pane
@@ -543,38 +575,26 @@ pub(crate) fn report_contract(pipeline: &Pipeline, blocked: bool) -> String {
 /// module for the substitution rule and the fallback chain.
 const OPENING: &str = "{skills}\nRead {task_file} before anything else.";
 
-const RESUME: &str = "You blocked, and a person has unblocked you. Same session, continued: do \
-     not start over, and do not re-read what you are still holding. The last `## Status Log` \
-     entry in {task_file} is what they did — decide whether it clears what stopped you and \
-     carry on. If your work was already done, say so and `--pass`. If the same thing is still \
-     in the way, `--block` again and say so rather than working around it.";
+const RESUME: &str = "This lane was blocked and a person has cleared it. Same session: do not \
+     start over. The last `## Status Log` entry in {task_file} is what they did. Decide whether \
+     it clears what stopped you, then carry on.";
 
-const RESUME_UNATTENDED: &str = "You blocked, and nobody is coming — this run is unattended, so it has sent you straight \
-     back. Same session, continued: do not start over, and do not re-read what you are still \
-     holding. Nothing changed while you waited. What stopped you is the last `## Blocker` entry \
-     in {task_file}, exactly as you left it, and clearing it is yours:\n\n\
-     1. Reproduce it. Believe what you see over what you remember.\n\
-     2. Clear the smallest thing in the way.\n\
-     3. Run what failed and see it not fail. Then carry on with your step.\n\n\
-     Write down what you tried under `## Blocker` before you finish, whatever the outcome. If \
-     your work was already done, say so and `--pass`. If what is in the way needs a decision \
-     that is not yours — spending money, changing what the code is supposed to do, touching \
-     something outside this task — `--block` again with what you found and what you tried.";
+const RESUME_UNATTENDED: &str = "This lane was blocked and an unblocker lane has since run on this task. Same session: do \
+     not start over. The last `## Status Log` entry in {task_file} is what it did, and `## \
+     Blocker` is what it tried. Decide whether that clears what stopped you, then carry on. If \
+     it does not, `--block` again with what you found.";
 
 const CARRY: &str = "Same session, continued: your next visit to this task, with nobody in between. What it \
      asked for, or left, has been done. Do not start over, and do not re-read what you are \
      still holding. What changed is in the `## Status Log` of {task_file}.";
 
-const PARK: &str = "A person stopped your turn with a keypress — not anything you reported — and has put you \
-     back. Nothing was blocked and nothing changed: no work of yours was undone, nothing was \
-     added to the task, nothing new is in your way. Same session, continued: pick up where the \
-     interrupt cut you off.";
+const PARK: &str = "A person stopped this lane's turn with a keypress and has put it back. \
+     Nothing was blocked and nothing changed. Same session: pick up where the interrupt cut you \
+     off.";
 
-const PARK_ESCALATED: &str = "You went quiet and never reported, so spoolway reminded you and, when nothing \
-     followed, tore your lane down and put the task back here. Nothing failed a check — this \
-     is not a block — but something was written down while you were gone: the last `## Status \
-     Log` entry in {task_file} says why, and `## Blocker` may carry the last of what your pane \
-     said. Same session, continued: read those, then carry on.";
+const PARK_ESCALATED: &str = "This lane went quiet and never reported, so spoolway tore it down and put the task back \
+     here. Nothing failed a check. The last `## Status Log` entry in {task_file} says why. Same \
+     session: read it, then carry on.";
 
 const REMINDER: &str = "`{step}` ended its turn without reporting. Here is the report contract again:\n\n\
      {report_contract}";
@@ -633,16 +653,12 @@ pub(crate) fn opening_prompt(
 /// while it was stopped, so that is what this says — and the two runs have
 /// opposite answers.
 ///
-/// Attended, somebody has been and gone, and the `## Status Log` says what
-/// they did. Unattended, nobody has: the block was answered by the run
-/// itself, which sent the lane straight back, and the obstacle is exactly
-/// where it was left. Telling an unattended lane that a person has cleared
-/// its path sends it looking through the log for a fix that is not there.
-///
-/// So the unattended half also carries the job a second, dedicated lane used
-/// to be sent to do, said to the one session that does not have to
-/// reconstruct anything to do it: reproduce the obstacle, clear the smallest
-/// thing in the way, prove it is clear.
+/// Attended, a person has been and gone, and the `## Status Log` says what
+/// they did. Unattended, an unblocker lane has — the default staffing for
+/// `blocked` under `unattended.blocked_prompt` — and both `## Status Log`
+/// and `## Blocker` say what it tried. Telling an unattended lane that a
+/// person has cleared its path would send it looking through the log for a
+/// fix a person never made.
 ///
 /// No report form and no `stage:` warning here any more — both are already
 /// in [`system_prompt`], which a resumed lane was also launched with, so
