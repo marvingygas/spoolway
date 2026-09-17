@@ -17,6 +17,27 @@ the following contract so the binary can parse and replay them:
 The highlights, migrations, and release URL are public copy. Keep internal task
 bookkeeping out of them and describe user-visible outcomes.
 
+## 0.4.0
+
+### Highlights
+- `/spoolway-plan` now writes a machine-readable copy of the approved plan into a `<script type="text/markdown" id="plan">` block at the foot of the page, and `/spoolway-tasks` reads that block instead of parsing the rendered page; a plan revision only needs the block rewritten in the same pass as the rest of the page. (#134)
+- `spoolway update` now writes the checkout it is run in (`repo.checkout`) rather than always the project root (`repo.root`), so running it inside a linked worktree updates that worktree's own tracked files, config and `.gitignore` instead of the main checkout's; it prints a `checkout:` line first, the same way `pipeline`, `config` and `doctor` already do. (#132)
+- Status Log entries are now stamped with a readable local `YYYY-MM-DD HH:MM` wall clock instead of a UTC RFC 3339 timestamp, so a task's own history reads the way a person on the board would say it. (#133)
+
+### Breaking changes and migration
+- A `--pass` out of a staffed `blocked` step now carries the task to that step's `on_pass` (or back to itself for a command step) instead of always advancing past it, and a `--pause`, `--fail` or `--block` from that lane now hands the task back to the step it blocked on via `spoolway resume` — before, all three outcomes advanced the task past the blocked step. The `unattended.skip_blocked_lane` config key that used to control this is retired: `spoolway config get unattended.skip_blocked_lane` and `spoolway config set unattended.skip_blocked_lane <value>` now fail with `no config key` instead of resolving it. Delete any `unattended.skip_blocked_lane = ...` line from `.spoolway/config.toml`; a config that still names it loads with a note that the key is no longer read and drops it on the next save. (#147)
+- `spoolway template contract` now lists three template shapes instead of four. `.spoolway/templates/task-log.md` (and the shipped `assets/task-log.md` fallback) is retired — the Status Log/Handoff/Blocker wording a lane is told to write is fixed and built into the binary rather than project-overridable. Delete any project-local `.spoolway/templates/task-log.md`; it is no longer read. (#135)
+
+### Reliability
+- The anchor-tab sweep no longer targets tabs opened on the project checkout itself, only tabs on a task's own worktree, fixing a bug where a person's own workspace on the checkout — or the dispatcher's own tab — could be swept as if it were a stale task tab. (#131)
+
+### Upgrading
+- Install or update with `npm install -g spoolway@0.4.0`, or run it without installing via `npx spoolway@0.4.0`.
+- The `spoolway` wrapper package selects one of six platform packages at install time: linux-x64-gnu, linux-arm64-gnu, linux-x64-musl, darwin-arm64, darwin-x64 and win32-x64.
+- After upgrading, run `spoolway whats-new` to read this record back from the installed binary.
+
+Release: https://github.com/marvingygas/spoolway/releases/tag/v0.4.0
+
 ## 0.3.0
 
 ### Highlights
