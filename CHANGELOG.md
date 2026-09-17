@@ -30,6 +30,7 @@ bookkeeping out of them and describe user-visible outcomes.
 
 ### Reliability
 - A Windows process that lost the race to migrate a project's legacy state directory (the `~/.spoolway/<name>/` → `~/.spoolway/<label>-<id>/` move from 0.3.0) could surface a bare "Access is denied" error out of a migration that had in fact just succeeded beside it — Windows reports a losing racer's rename as `ERROR_ACCESS_DENIED`, not the `ENOENT` spoolway checked for. The race is now read off the outcome (the legacy home gone, the id-keyed home standing as a directory) rather than off one errno, and a rename Windows is refusing over a held handle is retried for up to 500ms before it is treated as a real failure. (#149)
+- The same legacy-home migration had a second, platform-independent race one step further on: a process finishing an interrupted migration could hold a stale parse error over `project.toml` after a competing migration finished upgrading that same record in the window between the two, surfacing a raw `missing field id` out of a migration that had already succeeded. The record is now judged off a fresh read taken at the point of failure, not off the read that produced the now-stale error. (#151)
 - The anchor-tab sweep no longer targets tabs opened on the project checkout itself, only tabs on a task's own worktree, fixing a bug where a person's own workspace on the checkout — or the dispatcher's own tab — could be swept as if it were a stale task tab. (#131)
 
 ### Upgrading
