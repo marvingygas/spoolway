@@ -195,18 +195,6 @@ pub const HOOK_SCRIPTS: &[(&str, &str)] = &[
     ("jira.ps1", include_str!("../assets/hooks/jira.ps1")),
 ];
 
-/// A pull request template — see [`crate::config::PULL_REQUEST_TEMPLATE`]
-/// for where it installs, and why nothing reads it any more.
-///
-/// A top-level asset rather than a prompt's own: the versioner used to keep
-/// a private copy at `assets/prompts/versioner/assets/pull-request.md`, and
-/// this is that file moved up a level and shared, before the versioner
-/// prompt it was shared with was deleted outright. Restorable the way a
-/// prompt or a task skeleton is: written once by `init`, left alone by an
-/// ordinary `spoolway update`, and brought back to this text only by
-/// `spoolway update --replace .spoolway/templates/pull-request.md`.
-pub const PULL_REQUEST_TEMPLATE: &str = include_str!("../assets/pull-request.md");
-
 /// The seven typed messages a lane's pane receives — see
 /// [`crate::lane_prompts`]. Written whole by `init`, left alone by an
 /// ordinary `spoolway update`, and brought back to this text only by

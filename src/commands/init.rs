@@ -481,14 +481,6 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
             true,
         )?;
     }
-    // A pull request template, unread by anything in this binary — see
-    // `crate::config::PULL_REQUEST_TEMPLATE` — but installed and managed
-    // like any other file in this module.
-    place(
-        root.join(crate::config::PULL_REQUEST_TEMPLATE),
-        assets::PULL_REQUEST_TEMPLATE.as_bytes(),
-        false,
-    )?;
     // The seven typed messages a lane's pane receives. One file, not one per
     // pipeline or per state — a project overrides as many `##` sections as
     // it wants and leaves the rest to fall back to spoolway's own words.
