@@ -108,9 +108,11 @@ cd "$(mktemp -d)" && npm install spoolway@<version> && ./node_modules/.bin/spool
 
 `scripts/e2e/suites/upgrade.sh` runs a project a *past* release actually wrote through the
 new binary, from `scripts/e2e/fixtures/<version>/.spoolway/` — a tree scaffolded by that
-version's own binary, at that version's own tag. It cannot be produced before the tag, so the
-suite exempts the version `Cargo.toml` names and asks for every older `CHANGELOG.md` section.
-A release is therefore never blocked by its own missing fixture, and the next bump turns the
+version's own binary, at that version's own tag. It cannot be produced before the tag, so a
+`CHANGELOG.md` section is asked for its fixture only once `origin` carries its `v<version>`
+tag *and* `Cargo.toml` has moved past it. A release is therefore never blocked by its own
+missing fixture — not while it is being cut, and not when the release workflow runs the suite
+again from the tag it has just pushed — and the first bump past a released version turns the
 exemption into a failing check.
 
 Scaffold the released version's fixture once the tag is out — before the next bump, which is

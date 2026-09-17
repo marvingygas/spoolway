@@ -50,32 +50,69 @@ FIXTURES="$HERE/../fixtures"
 # stopped answering for. Caught here, by name, rather than by the suite going
 # on to say nothing about it.
 #
-# Every version but one, and only while that one has nothing to check: the
-# version `Cargo.toml` names. A fixture is a `.spoolway/` tree that version's
-# own `spoolway init` scaffolded *at that version's own tag* (see this file's
-# header), and the release commit writes the bump and the changelog section
-# *before* the tag is pushed — so demanding that version's fixture is
-# demanding something that cannot exist yet. That is what reddened 0.3.0's
-# rehearsal: a release failing its own gate by construction, over nothing
-# wrong with the release. Every earlier section is still asked for, and the
-# moment the exempt version's fixture does land it is asked for too, so
-# scaffolding one straight after the tag needs no change here.
+# A fixture is asked for once two things are true of a `CHANGELOG.md` section's
+# version: `origin` carries its `v<version>` tag, and `Cargo.toml` has moved
+# past it. Either one alone is a check that is false only *while* a version is
+# being cut, which is the family `ci.yml`'s dress-rehearsal job exists to
+# catch:
 #
-# The exemption is read off `Cargo.toml` rather than off the newest heading,
-# and never off `git tag`: CI checks out a single commit without tags, so a
-# tag-keyed question would answer "nothing needed" for every version at once
-# and retire the check altogether.
+#   The tag alone would red the publication itself. A fixture is a
+#   `.spoolway/` tree that version's own `spoolway init` scaffolded *at that
+#   version's own tag* (see this file's header), so it is scaffolded from the
+#   published release — the closing step of `docs/releasing.md` — while the
+#   release workflow runs this suite again from the tag it has just pushed.
+#   Asking there demands something that does not exist yet.
 #
-# Deferred, not dropped — the next bump moves `Cargo.toml` past this version
-# and turns the note below into a failing check. `docs/releasing.md` carries
-# scaffolding the fixture as the release's own closing step so that lands
-# first.
+#   `Cargo.toml` alone — the rule this carried before — exempts only the one
+#   version being cut, which is not the same version in every job that runs
+#   this suite. `ci.yml`'s dress-rehearsal bumps `Cargo.toml` to the next
+#   minor precisely so these checks run at a version the repo does not have,
+#   and inside that job the untagged release commit's own version is no longer
+#   the exempt one, so it was asked for a fixture no tag existed to scaffold.
+#   That reddened main's daily gate for the whole of 0.4.0's release window,
+#   and 0.3.0's rehearsal before it.
+#
+# Together they ask for exactly the versions that are out and moved past, so
+# nothing is retired: a release whose closing fixture was never scaffolded is
+# still caught, now by the next dress-rehearsal rather than by the next real
+# bump. And the moment an exempt version's fixture does land it is checked like
+# any other, so scaffolding one straight after the tag needs no change here.
+#
+# Read off `origin` rather than off `git tag`: CI checks out a single commit
+# without tags, so a local-tag question would answer "nothing needed" for every
+# version at once and retire the check altogether. `ls-remote` asks the same
+# question from a tagless checkout, needs no credentials against a public
+# repository, and fetches nothing. If it cannot be reached at all, this falls
+# back to the `Cargo.toml`-only rule, which asks for *more* fixtures rather
+# than fewer — an unreachable remote must not be a way to be asked nothing.
 RELEASING=$(awk -F'"' '/^version = /{print $2; exit}' "$REPO/Cargo.toml")
+if TAGGED=$(GIT_TERMINAL_PROMPT=0 timeout 60 \
+    git -C "$REPO" ls-remote --tags --refs origin 'refs/tags/v*' 2>/dev/null); then
+  TAGGED=$(awk '{sub(/^refs\/tags\/v/, "", $2); print $2}' <<<"$TAGGED")
+else
+  TAGGED=
+  UNREACHABLE=1
+  printf '  \033[33mnote\033[0m  %s\n' \
+    "origin was not reachable for the tag list — asking for every fixture but $RELEASING's"
+fi
+
+# asked_for <version> — is that version out, and is the repo past it?
+asked_for() {
+  [ "$1" != "$RELEASING" ] || return 1
+  [ -z "${UNREACHABLE:-}" ] || return 0
+  grep -qxF -- "$1" <<<"$TAGGED"
+}
+
 while read -r version; do
   [ -n "$version" ] || continue
-  if [ "$version" = "$RELEASING" ] && [ ! -d "$FIXTURES/$version/.spoolway" ]; then
+  if ! asked_for "$version" && [ ! -d "$FIXTURES/$version/.spoolway" ]; then
+    if [ "$version" = "$RELEASING" ]; then
+      why="Cargo.toml still names $version"
+    else
+      why="origin carries no v$version tag"
+    fi
     printf '  \033[33mnote\033[0m  %s\n' \
-      "scripts/e2e/fixtures/$version/ is not asked for while Cargo.toml still names $version — scaffold it from the v$version tag; the next bump makes it a check"
+      "scripts/e2e/fixtures/$version/ is not asked for while $why — scaffold it from the v$version tag once that tag is out; the first bump past it makes this a check"
     continue
   fi
   works "scripts/e2e/fixtures/$version/ was scaffolded for the $version release" \
