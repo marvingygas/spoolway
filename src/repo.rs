@@ -3698,16 +3698,23 @@ mod tests {
     }
 
     /// A rename that is genuinely stuck rather than raced still reports its
-    /// own error, patience or no patience: the legacy home is still there,
-    /// so nothing has migrated and pretending otherwise would write a
-    /// binding for a home that never moved.
+    /// own error once the patience is spent: the legacy home is still
+    /// standing, so nothing has migrated, and pretending otherwise would
+    /// write a binding for a home that never moved.
+    ///
+    /// A destination directory that already holds content of its own is the
+    /// stuck shape both platforms agree on — `ENOTEMPTY` on Unix, and the
+    /// `ERROR_ACCESS_DENIED` Windows reports for any rename onto a standing
+    /// directory, waited out and then reported. A plain *file* at the
+    /// destination is not that shape: Windows moves a directory straight
+    /// over one, where Unix refuses.
     #[test]
     fn a_rename_that_is_stuck_rather_than_raced_still_fails() {
         let (legacy, home) = rename_pair("stuck");
         std::fs::create_dir_all(&legacy).unwrap();
-        std::fs::write(&home, "not a directory").unwrap();
+        std::fs::create_dir_all(home.join("queue")).unwrap();
 
-        let err = rename_onto_home(&legacy, &home).expect_err("a file is no place for a home");
+        let err = rename_onto_home(&legacy, &home).expect_err("the destination is occupied");
         let said = format!("{err:#}");
         assert!(
             said.contains(&format!("moving {}", legacy.display())),
