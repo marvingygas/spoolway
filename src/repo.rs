@@ -1547,19 +1547,7 @@ fn migrate_legacy_home(root: &Path, legacy: &Path) -> Result<PathBuf> {
         Vec::new()
     };
 
-    let moved = match std::fs::rename(legacy, &home) {
-        Ok(()) => true,
-        // Lost the race to another process migrating the identical home:
-        // `stamped_id`'s own atomic hard-link means every racer agrees on
-        // one `id` (see its own doc), so every racer computes this same
-        // destination too, and whichever got here first already moved it.
-        // Nothing left for this call to do but agree.
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound && home.is_dir() => false,
-        Err(err) => {
-            return Err(err)
-                .with_context(|| format!("moving {} to {}", legacy.display(), home.display()));
-        }
-    };
+    let moved = rename_onto_home(legacy, &home)?;
 
     // Written at `home`, never at `legacy` — the directory the rename above
     // either just moved or (on the losing side of the race just above)
@@ -1628,6 +1616,77 @@ fn migrate_legacy_home(root: &Path, legacy: &Path) -> Result<PathBuf> {
         );
     }
     Ok(home)
+}
+
+/// How long [`rename_onto_home`] keeps retrying a rename Windows is refusing
+/// over an open handle, and how long it pauses between attempts. Long enough
+/// for a loaded runner, and short enough that a rename genuinely stuck — a
+/// destination already standing with content of its own, say — reports its
+/// own error rather than hanging on it.
+const RENAME_PATIENCE: std::time::Duration = std::time::Duration::from_millis(500);
+const RENAME_PAUSE: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Move `legacy` onto `home`, answering whether *this* call is the one that
+/// moved it — `false` meaning another racer got there first and there is
+/// nothing left to do but agree.
+///
+/// The lost race is read off the outcome, never off one errno: every racer
+/// computes the identical destination (`stamped_id`'s own atomic hard-link
+/// means they all agree on one `id`, see its own doc), so a legacy home
+/// gone with `home` standing as a directory *is* that migration, whatever
+/// this particular call's rename happened to report. Keying it on `ENOENT`
+/// alone is what shipped wrong: a losing racer on Windows is told
+/// `ERROR_ACCESS_DENIED`, not that the source is missing, and surfaced a
+/// bare "Access is denied" out of a migration that had in fact just
+/// succeeded beside it.
+///
+/// Windows contention is its own case, separate from a lost race, and the
+/// reason anything waits here: a directory there cannot be renamed while
+/// anything holds a handle inside it, and a racer still reading the legacy
+/// home — or the winner's own rename, mid-flight — is exactly that. Failing
+/// on the first `ERROR_ACCESS_DENIED` would refuse a call whose turn had
+/// simply not come yet, so the rename is retried over a bounded window and
+/// whichever way the contention settles is answered above: this call moves
+/// it, or finds it moved. Unix has no such window — a rename there either
+/// succeeds or has already lost — so nothing waits.
+fn rename_onto_home(legacy: &Path, home: &Path) -> Result<bool> {
+    let mut waited = std::time::Duration::ZERO;
+    loop {
+        let err = match std::fs::rename(legacy, home) {
+            Ok(()) => return Ok(true),
+            Err(err) => err,
+        };
+        if !legacy.exists() && home.is_dir() {
+            return Ok(false);
+        }
+        if !contended(&err, cfg!(windows)) || waited >= RENAME_PATIENCE {
+            return Err(err)
+                .with_context(|| format!("moving {} to {}", legacy.display(), home.display()));
+        }
+        std::thread::sleep(RENAME_PAUSE);
+        waited += RENAME_PAUSE;
+    }
+}
+
+/// Whether `err` is Windows refusing a rename it may well allow a moment
+/// later, rather than a failure worth reporting.
+///
+/// `windows` is passed in rather than read from `cfg!` in here so that a
+/// test can ask for both answers on one platform: this crate's own rule
+/// that a `#[cfg(windows)]` body is never built on Linux CI (see
+/// [`crate::platform`]), applied to a judgement rather than to a path.
+///
+/// `ERROR_ACCESS_DENIED` is the one actually seen — `os error 5`, from
+/// racing migrations on `windows-latest`. `ERROR_SHARING_VIOLATION` is the
+/// same contention under Win32's other spelling for it, named by number
+/// because Rust maps it to no `ErrorKind` of its own. Neither counts off
+/// Windows, where `PermissionDenied` on a rename means what it says and
+/// waiting on it would only delay the error.
+fn contended(err: &std::io::Error, windows: bool) -> bool {
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    windows
+        && (err.kind() == std::io::ErrorKind::PermissionDenied
+            || err.raw_os_error() == Some(ERROR_SHARING_VIOLATION))
 }
 
 /// Overwrite `root`'s own stamp with `id`, whatever it already held —
@@ -3597,6 +3656,94 @@ mod tests {
             1,
             "every racer agrees on the identical moved home"
         );
+    }
+
+    /// The scratch pair [`rename_onto_home`]'s own tests move around: a
+    /// legacy home standing at `legacy`, and the id-keyed destination it is
+    /// headed for, which may or may not exist yet.
+    fn rename_pair(name: &str) -> (PathBuf, PathBuf) {
+        let root = crate::scratch::root(&format!("rename-onto-home-{name}"));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        (root.join("legacy"), root.join("home"))
+    }
+
+    /// The migration this call did itself, reported as its own: the one
+    /// answer that goes on to repair the moved worktrees and print the move.
+    #[test]
+    fn the_racer_that_moves_the_home_is_the_one_told_it_moved() {
+        let (legacy, home) = rename_pair("winner");
+        std::fs::create_dir_all(legacy.join("queue")).unwrap();
+
+        assert!(rename_onto_home(&legacy, &home).unwrap());
+        assert!(home.join("queue").is_dir(), "the home moved with its work");
+        assert!(!legacy.exists(), "and nothing is left at the old path");
+    }
+
+    /// A lost race is read off the outcome — the legacy home gone with the
+    /// id-keyed home standing — and not off the one errno Unix happens to
+    /// report for it. This is the Windows failure in the form every
+    /// platform can run: there the losing racer is told
+    /// `ERROR_ACCESS_DENIED`, not the `ENOENT` this branch used to insist
+    /// on, and the migration beside it had already succeeded either way.
+    #[test]
+    fn a_home_found_already_moved_reports_the_race_lost_not_an_error() {
+        let (legacy, home) = rename_pair("loser");
+        std::fs::create_dir_all(&home).unwrap();
+
+        assert!(
+            !rename_onto_home(&legacy, &home).unwrap(),
+            "somebody else moved it; nothing left to do but agree"
+        );
+    }
+
+    /// A rename that is genuinely stuck rather than raced still reports its
+    /// own error, patience or no patience: the legacy home is still there,
+    /// so nothing has migrated and pretending otherwise would write a
+    /// binding for a home that never moved.
+    #[test]
+    fn a_rename_that_is_stuck_rather_than_raced_still_fails() {
+        let (legacy, home) = rename_pair("stuck");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(&home, "not a directory").unwrap();
+
+        let err = rename_onto_home(&legacy, &home).expect_err("a file is no place for a home");
+        let said = format!("{err:#}");
+        assert!(
+            said.contains(&format!("moving {}", legacy.display())),
+            "the error names what it was moving: {said}"
+        );
+        assert!(legacy.is_dir(), "and leaves the old home where it stands");
+    }
+
+    /// [`contended`] answers for Windows on every platform, so both halves
+    /// of the judgement are checked here rather than only the one this CI
+    /// leg happens to build for.
+    #[test]
+    fn only_windows_reads_a_refused_rename_as_worth_waiting_on() {
+        use std::io::{Error, ErrorKind};
+
+        // `ERROR_ACCESS_DENIED`, which Rust maps to a kind of its own on
+        // Windows, is the refusal the racing migration actually hit.
+        let denied = Error::from(ErrorKind::PermissionDenied);
+        // `ERROR_SHARING_VIOLATION`, which it maps to no kind, so the raw
+        // number is the only way to name it. On Unix 32 is `EPIPE`, which
+        // is precisely why `windows` gates the question at all.
+        let sharing = Error::from_raw_os_error(32);
+        let missing = Error::from(ErrorKind::NotFound);
+
+        assert!(contended(&denied, true));
+        assert!(
+            !contended(&denied, false),
+            "a Unix refusal means what it says"
+        );
+        assert!(contended(&sharing, true), "the other Win32 spelling of it");
+        assert!(!contended(&sharing, false));
+        assert!(
+            !contended(&missing, true),
+            "a missing source is not waiting"
+        );
+        assert!(!contended(&missing, false));
     }
 
     /// A plain recursive copy, `cp -r`'s own behaviour: every file under
