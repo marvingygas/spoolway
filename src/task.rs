@@ -28,7 +28,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use chrono::{DateTime, Utc};
+use chrono::Local;
 use serde::{Deserialize, Serialize};
 
 /// What one lane said on its way out, kept until the dispatcher banks it.
@@ -737,17 +737,13 @@ impl Task {
         self.front.launch_failures.remove(stage);
         self.front.launch_busy_since.remove(stage);
 
-        let stamp: DateTime<Utc> = Utc::now();
         let line = match message {
-            Some(m) if !m.trim().is_empty() => format!(
-                "- {} → `{}`: {}\n",
-                stamp.to_rfc3339(),
-                stage,
-                m.trim().replace('\n', " ")
-            ),
-            _ => format!("- {} → `{}`\n", stamp.to_rfc3339(), stage),
+            Some(m) if !m.trim().is_empty() => {
+                format!("→ `{}`: {}", stage, m.trim().replace('\n', " "))
+            }
+            _ => format!("→ `{stage}`"),
         };
-        self.append_to_section("## Status Log", &line);
+        self.log_status(&line);
     }
 
     /// Move to `stage` and log why, without banking a lap.
@@ -769,14 +765,8 @@ impl Task {
         self.front.launch_failures.remove(stage);
         self.front.launch_busy_since.remove(stage);
 
-        let stamp: DateTime<Utc> = Utc::now();
-        let line = format!(
-            "- {} → `{}`: {}\n",
-            stamp.to_rfc3339(),
-            stage,
-            message.trim().replace('\n', " ")
-        );
-        self.append_to_section("## Status Log", &line);
+        let line = format!("→ `{}`: {}", stage, message.trim().replace('\n', " "));
+        self.log_status(&line);
     }
 
     /// Whether this task's `last_report` was banked after `since` — a lane's
@@ -824,6 +814,20 @@ impl Task {
         let counted = self.front.attempts > 0;
         self.front.attempts = 0;
         counted
+    }
+
+    /// Append `text` to `## Status Log`, stamped with the local wall clock to
+    /// the minute — the one door every status-log writer goes through, so no
+    /// caller can leave a line unstamped by forgetting to.
+    ///
+    /// Nothing in spoolway reads a status-log line back (`Task::section` is
+    /// `#[cfg(test)]`), so the stamp is a display choice: local time reads
+    /// the way a person on the board would say it, the way
+    /// `problem_log.rs` and `eval.rs` already do, rather than the `Utc`
+    /// used for machine-read ledger entries in `usage.rs`.
+    pub fn log_status(&mut self, text: &str) {
+        let stamp = Local::now().format("%Y-%m-%d %H:%M");
+        self.append_to_section("## Status Log", &format!("- {stamp} {text}\n"));
     }
 
     /// Append `text` under `heading`, creating the section if it is absent.
@@ -1150,6 +1154,48 @@ mod tests {
         assert!(log.contains("→ `review`: done"));
         // Exactly one Status Log heading — we appended, not duplicated.
         assert_eq!(task.body.matches("## Status Log").count(), 1);
+    }
+
+    /// Every line the format documents — a transition through `set_stage`
+    /// and a bare note through `log_status` directly — opens with a local
+    /// `YYYY-MM-DD HH:MM ` stamp, not the RFC 3339 timestamp this replaced.
+    #[test]
+    fn log_status_stamps_transitions_and_notes() {
+        fn starts_with_minute_stamp(line: &str) -> bool {
+            let Some(rest) = line.strip_prefix("- ") else {
+                return false;
+            };
+            let bytes = rest.as_bytes();
+            bytes.len() >= 16
+                && bytes[0..4].iter().all(u8::is_ascii_digit)
+                && bytes[4] == b'-'
+                && bytes[5..7].iter().all(u8::is_ascii_digit)
+                && bytes[7] == b'-'
+                && bytes[8..10].iter().all(u8::is_ascii_digit)
+                && bytes[10] == b' '
+                && bytes[11..13].iter().all(u8::is_ascii_digit)
+                && bytes[13] == b':'
+                && bytes[14..16].iter().all(u8::is_ascii_digit)
+                && bytes[16] == b' '
+        }
+
+        let mut task = Task::parse(PathBuf::from("demo.md"), SAMPLE).unwrap();
+        task.set_stage("review", Some("done"));
+        task.log_status("a bare note with no step attached");
+
+        let log = task.section("## Status Log").unwrap();
+        let lines: Vec<&str> = log
+            .lines()
+            .filter(|l| l.contains("done") || l.contains("bare note"))
+            .collect();
+        assert_eq!(lines.len(), 2, "{log:?}");
+        for line in lines {
+            assert!(starts_with_minute_stamp(line), "{line:?}");
+        }
+        assert!(
+            !log.contains("+00:00"),
+            "no RFC 3339 offset should remain: {log:?}"
+        );
     }
 
     /// A park-and-resume round trip through `set_stage_unbanked` banks

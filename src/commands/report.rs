@@ -297,7 +297,7 @@ pub fn report(
     // kind.
     let commit_note = commit_lane_work(repo, &id, &current);
     if let Some(note) = commit_note.as_ref().and_then(AutoCommit::note) {
-        task.append_to_section("## Status Log", &format!("- {note}\n"));
+        task.log_status(note);
     }
 
     // Reaching the reserved `done` stage tears the worktree down on arrival
@@ -318,15 +318,12 @@ pub fn report(
     let held_dirty =
         routes_to_cleanup && commit_note.as_ref().is_some_and(AutoCommit::is_unrecorded);
     if held_dirty {
-        task.append_to_section(
-            "## Status Log",
-            &format!(
-                "- `{current}` reported `{outcome}`, but the worktree holds work that could \
-                 not be committed — holding at `{}` rather than letting `{destination}` tear \
-                 it down\n",
-                crate::pipeline::BLOCKED,
-            ),
-        );
+        task.log_status(&format!(
+            "`{current}` reported `{outcome}`, but the worktree holds work that could \
+             not be committed — holding at `{}` rather than letting `{destination}` tear \
+             it down",
+            crate::pipeline::BLOCKED,
+        ));
         destination = crate::pipeline::BLOCKED.to_string();
         set_blocked_from(&mut task, &current);
     }
@@ -439,7 +436,7 @@ pub fn apply_loop_budget(
             next.id,
             limit.unwrap_or(0)
         );
-        task.append_to_section("## Status Log", &format!("- {note}\n"));
+        task.log_status(&note);
         return exit;
     }
     destination

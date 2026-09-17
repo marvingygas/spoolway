@@ -2110,10 +2110,7 @@ impl<'a> Dispatcher<'a> {
         if let Some(note) =
             crate::commands::auto_commit(self.repo, worktree, &started_at, task_id, step_id).note()
         {
-            task.append_to_section(
-                "## Status Log",
-                &format!("- a person's round in the held pane — {note}\n"),
-            );
+            task.log_status(&format!("a person's round in the held pane — {note}"));
             self.persist(task)?;
             report.actions.push(format!(
                 "{task_id}: committed a person's round in `{}`",
@@ -2859,7 +2856,7 @@ impl<'a> Dispatcher<'a> {
             )
             .note()
             {
-                task.append_to_section("## Status Log", &format!("- {note}\n"));
+                task.log_status(note);
             }
         }
 
@@ -2961,7 +2958,7 @@ impl<'a> Dispatcher<'a> {
                 "`{}` could not be started after {MAX_LAUNCH_FAILURES} attempts: {err:#}",
                 step.id
             );
-            task.append_to_section("## Status Log", &format!("- {reason}\n"));
+            task.log_status(&reason);
             crate::problem_log::append(self.repo, &reason);
         }
         Some(destination)
@@ -3010,7 +3007,7 @@ impl<'a> Dispatcher<'a> {
             step.id,
             mmss(bound)
         );
-        task.append_to_section("## Status Log", &format!("- {reason}\n"));
+        task.log_status(&reason);
         crate::problem_log::append(self.repo, &reason);
         Some(
             step.on_fail
@@ -3611,14 +3608,11 @@ impl<'a> Dispatcher<'a> {
                 // code and that path are what the lane sent in to clear the
                 // block needs to see what actually broke.
                 if code != 0 {
-                    task.append_to_section(
-                        "## Status Log",
-                        &format!(
-                            "- `{}` exited {code} — see {}\n",
-                            step.id,
-                            runs.log_path(&key).display()
-                        ),
-                    );
+                    task.log_status(&format!(
+                        "`{}` exited {code} — see {}",
+                        step.id,
+                        runs.log_path(&key).display()
+                    ));
                 }
                 report.actions.push(format!(
                     "{id}: `{}` exited {code} — {}",
@@ -4996,7 +4990,7 @@ fn start_one(
     // had no answer available afterwards at all. One line per fresh session, in
     // the place somebody auditing a task already looks.
     if let Some(note) = &session_miss {
-        task.append_to_section("## Status Log", &format!("- `{}`: {note}\n", step.id));
+        task.log_status(&format!("`{}`: {note}", step.id));
     }
     persist_task(repo, task, report_seen)?;
 
