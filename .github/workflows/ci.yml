@@ -96,6 +96,15 @@ jobs:
   # upgrade suite demanded a fixture for the very version being released, which
   # cannot exist before its own tag (#128).
   #
+  # A third was this job's own doing. That same upgrade suite exempted the one
+  # version `Cargo.toml` names — and the bump below moves it, so from inside
+  # this job the untagged release commit's own version stopped being exempt and
+  # was asked for a fixture no tag existed to scaffold. It cost no candidate,
+  # because release.yml calls verify.yml, which has no dress rehearsal; it went
+  # red here instead, every day of 0.4.0's release window (#150). The
+  # exemption now reads `origin`'s tags as well, so the bump below no longer
+  # changes the answer for any version but the one it invents.
+  #
   # This is the release the repo never has to cut. It bumps Cargo.toml to the
   # next minor, writes a contract-shaped changelog stub, and runs the checks that
   # read a version. It commits nothing, tags nothing, pushes nothing and
