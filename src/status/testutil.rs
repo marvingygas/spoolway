@@ -152,6 +152,19 @@ pub fn row(id: &str) -> Row {
 /// live. Hands back the backend and the lane's name.
 #[cfg(unix)]
 pub fn live_headless_lane(repo: &Repo) -> (Box<dyn crate::mux::Mux>, String) {
+    live_headless_lane_at(repo, "login", "implement", "implementer")
+}
+
+/// [`live_headless_lane`], but at an arbitrary task id, step and label —
+/// what a test needs to put a live lane behind a `blocked` row, where the
+/// unblocker rather than the implementer is the one staffing the step.
+#[cfg(unix)]
+pub fn live_headless_lane_at(
+    repo: &Repo,
+    id: &str,
+    step: &str,
+    label: &str,
+) -> (Box<dyn crate::mux::Mux>, String) {
     let bin = repo.root.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let script = bin.join("pi");
@@ -162,11 +175,11 @@ pub fn live_headless_lane(repo: &Repo) -> (Box<dyn crate::mux::Mux>, String) {
         .unwrap();
 
     let mux = crate::mux::backend(repo).unwrap();
-    let pane = mux.create_pane(&repo.root, "login").unwrap();
-    let name = crate::mux::lane_name("implement", "login");
+    let pane = mux.create_pane(&repo.root, id).unwrap();
+    let name = crate::mux::lane_name(step, id);
     mux.start_lane(&crate::mux::LaneSpec {
         name: &name,
-        label: "implementer",
+        label,
         kind: "pi",
         pane_id: &pane.pane_id,
         args: &["--session-id".to_string(), "s1".to_string()],

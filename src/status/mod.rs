@@ -597,10 +597,12 @@ impl Board {
     /// `p`: park the cursor's own task, opening [`BoardMode::ConfirmPause`]
     /// first — titled with its id — only when that task's own step has an
     /// agent turn or a command run live right now. A no-op with no cursor, a
-    /// cursor on a row the queue no longer has, or a cursor on a `paused` or
-    /// `blocked` row: both are already stopped and already waiting on a
-    /// person, so parking either again would only overwrite `parked_from`
-    /// with the state it is already stuck in.
+    /// cursor on a row the queue no longer has, or a cursor on a `paused`
+    /// row: that one is already stopped and already waiting on a person, so
+    /// parking it again would only overwrite `parked_from` with the state it
+    /// is already stuck in. A `blocked` row has no such guard — the unblocker
+    /// can be mid-turn on it, and `p` reaches that turn exactly as it does
+    /// any other live step.
     fn begin_pause_cursor(&mut self, repo: &Repo, pipelines: &Pipelines) -> Result<()> {
         let Some(id) = self.cursor.clone() else {
             return Ok(());
@@ -609,9 +611,7 @@ impl Board {
         let Some(i) = tasks.iter().position(|t| t.id() == id) else {
             return Ok(());
         };
-        if tasks[i].stage() == crate::pipeline::PAUSED
-            || tasks[i].stage() == crate::pipeline::BLOCKED
-        {
+        if tasks[i].stage() == crate::pipeline::PAUSED {
             return Ok(());
         }
         let mux = crate::mux::backend(repo)?;
@@ -998,8 +998,10 @@ impl AbortKind {
 /// Every live agent turn and running command step across `tasks`, one
 /// [`Abort`] each — [`live_agent_lane_tasks`] and [`running_command_steps`]
 /// folded into the one shape `p` and `P` both draw a panel from and answer
-/// against. Both of those already skip a `paused` or `blocked` task, so
-/// there is nothing further to filter out here.
+/// against. Both of those already skip a `paused` task — the one state
+/// nothing is ever live on — so there is nothing further to filter out here.
+/// A `blocked` task is not skipped: the unblocker can be mid-turn on it, and
+/// that turn is exactly what `p` and `P` reach.
 fn live_aborts(
     repo: &Repo,
     tasks: &[crate::task::Task],
@@ -1032,12 +1034,13 @@ fn live_aborts(
     out
 }
 
-/// Whether `task` is one `P` would park — everything but a `paused` or
-/// `blocked` row, both already stopped and already waiting on a person
-/// rather than a state to park. The one predicate [`park_every_pausable`]
-/// reads.
+/// Whether `task` is one `P` would park — everything but a `paused` row,
+/// already stopped and already waiting on a person rather than a state to
+/// park. A `blocked` row is pausable like any other: the unblocker may be
+/// mid-turn on it, which is what makes it worth reaching in the first place.
+/// The one predicate [`park_every_pausable`] reads.
 fn is_pausable(task: &crate::task::Task) -> bool {
-    task.stage() != crate::pipeline::PAUSED && task.stage() != crate::pipeline::BLOCKED
+    task.stage() != crate::pipeline::PAUSED
 }
 
 /// Park every task [`is_pausable`] selects, straight onto `paused` with no
@@ -1093,7 +1096,11 @@ pub(crate) fn resume_task(repo: &Repo, pipelines: &Pipelines, id: &str) -> Resul
     // `paused_at` is a gate passed, waiting to be sent on past it;
     // `parked_from` is a person's own interrupt, and `blocked_from` is a
     // real block — all three waiting to be sent back to where they stopped.
-    // Never more than one of the three on a task standing on `paused`.
+    // `parked_from` and `blocked_from` can both be set at once now: `p` on a
+    // `blocked` row writes `parked_from: blocked` beside the `blocked_from`
+    // already there, and `back_onto_its_step` checks `parked_from` first, so
+    // it is the one that decides — see `unpark`, which never touches
+    // `blocked_from` and leaves it to route the task again once cleared.
     //
     // There is no guard on any of that here, because neither the fields nor
     // the stage can refuse anything any more. Two ordinary rows carry none
@@ -1317,7 +1324,7 @@ pub(crate) fn live_agent_lane_tasks(
     let mine = crate::dispatch::our_checkouts(repo, tasks);
     let mut out = Vec::new();
     for (i, task) in tasks.iter().enumerate() {
-        if task.stage() == crate::pipeline::PAUSED || task.stage() == crate::pipeline::BLOCKED {
+        if task.stage() == crate::pipeline::PAUSED {
             continue;
         }
         let Ok(pipeline) = pipelines.for_task(task) else {
@@ -1357,7 +1364,7 @@ pub(crate) fn running_command_steps(
     let runs = crate::command_step::Runs::new(&repo.commands_dir());
     let mut out = Vec::new();
     for task in tasks {
-        if task.stage() == crate::pipeline::PAUSED || task.stage() == crate::pipeline::BLOCKED {
+        if task.stage() == crate::pipeline::PAUSED {
             continue;
         }
         let Ok(pipeline) = pipelines.for_task(task) else {
@@ -4703,11 +4710,10 @@ mod tests {
         }
     }
 
-    /// `p` and `P` are both no-ops on a `paused` row and on a `blocked` row —
-    /// both already stopped and already waiting on a person, not states to
-    /// park over again.
+    /// `p` and `P` are both no-ops on a `paused` row — already stopped and
+    /// already waiting on a person, not a state to park over again.
     #[test]
-    fn pressing_p_or_shift_p_on_a_paused_or_blocked_row_does_nothing() {
+    fn pressing_p_or_shift_p_on_a_paused_row_does_nothing() {
         let repo = fixture("pause-noop-states");
         let pipelines = Pipelines::builtin();
         add(&repo, "already-paused", &[], None);
@@ -4716,26 +4722,17 @@ mod tests {
         paused.set_stage(crate::pipeline::PAUSED, None);
         paused.save().unwrap();
 
-        add(
-            &repo,
-            "already-blocked",
-            &[],
-            Some(crate::pipeline::BLOCKED),
-        );
-
         let mut board = Board::for_test();
-        for id in ["already-paused", "already-blocked"] {
-            let before = std::fs::read_to_string(repo.task(id).unwrap().path).unwrap();
-            board.cursor = Some(id.to_string());
-            board
-                .on_key(&repo, &pipelines, crate::screen::Key::Char('p'))
-                .unwrap();
-            assert!(matches!(board.mode, BoardMode::Browsing), "p on {id}");
-            let after = std::fs::read_to_string(repo.task(id).unwrap().path).unwrap();
-            assert_eq!(before, after, "p on {id}");
-        }
+        let before = std::fs::read_to_string(repo.task("already-paused").unwrap().path).unwrap();
+        board.cursor = Some("already-paused".to_string());
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Char('p'))
+            .unwrap();
+        assert!(matches!(board.mode, BoardMode::Browsing));
+        let after = std::fs::read_to_string(repo.task("already-paused").unwrap().path).unwrap();
+        assert_eq!(before, after);
 
-        // `P` across the run touches neither: both stages survive whole.
+        // `P` across the run leaves it alone too: the stage survives whole.
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Char('P'))
             .unwrap();
@@ -4743,10 +4740,120 @@ mod tests {
             repo.task("already-paused").unwrap().stage(),
             crate::pipeline::PAUSED
         );
+    }
+
+    /// `p` on a `blocked` row with nothing live parks it at once, no panel —
+    /// the same road `queued` and a real step in the gap between two lanes
+    /// already take: a `blocked` row is not a state `p` skips any more, only
+    /// `paused` is. `blocked_from` survives the park untouched, sitting
+    /// beside the fresh `parked_from: blocked` it now carries too.
+    #[test]
+    fn pressing_p_on_a_blocked_row_with_nothing_live_parks_it_at_once() {
+        let repo = fixture("pause-blocked-idle");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "stuck", &[], Some(crate::pipeline::BLOCKED));
+        let mut task = repo.task("stuck").unwrap();
+        task.front.blocked_from = Some("implement".into());
+        task.save().unwrap();
+
+        let mut board = Board::for_test();
+        board.cursor = Some("stuck".to_string());
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Char('p'))
+            .unwrap();
+
+        assert!(matches!(board.mode, BoardMode::Browsing));
+        let task = repo.task("stuck").unwrap();
+        assert_eq!(task.stage(), crate::pipeline::PAUSED);
         assert_eq!(
-            repo.task("already-blocked").unwrap().stage(),
+            task.front.parked_from.as_deref(),
+            Some(crate::pipeline::BLOCKED)
+        );
+        assert_eq!(task.front.blocked_from.as_deref(), Some("implement"));
+    }
+
+    /// `P` widens with `p`: an idle `blocked` row is one more thing `P`
+    /// parks outright, through the same [`is_pausable`] `park_every_pausable`
+    /// reads — not a hole `p`'s own tests leave open on their own, since `p`
+    /// already goes through the same predicate, but the acceptance criterion
+    /// names `P` by itself too.
+    #[test]
+    fn pressing_shift_p_parks_an_idle_blocked_row_too() {
+        let repo = fixture("pause-all-blocked-idle");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "stuck", &[], Some(crate::pipeline::BLOCKED));
+        let mut task = repo.task("stuck").unwrap();
+        task.front.blocked_from = Some("implement".into());
+        task.save().unwrap();
+
+        let mut board = Board::for_test();
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Char('P'))
+            .unwrap();
+
+        assert!(matches!(board.mode, BoardMode::Browsing));
+        let task = repo.task("stuck").unwrap();
+        assert_eq!(task.stage(), crate::pipeline::PAUSED);
+        assert_eq!(
+            task.front.parked_from.as_deref(),
+            Some(crate::pipeline::BLOCKED)
+        );
+        assert_eq!(task.front.blocked_from.as_deref(), Some("implement"));
+    }
+
+    /// `p` on a `blocked` row whose unblocker is mid-turn opens the same
+    /// single-abort panel a live `implement` turn would, and `enter`
+    /// interrupts that lane exactly as it would any other — the reach this
+    /// task adds. `blocked_from` is left standing beside the `parked_from`
+    /// the park writes, and `resume` afterwards carries the session back
+    /// onto `blocked` rather than opening a fresh one.
+    #[test]
+    #[cfg(unix)]
+    fn pressing_p_on_a_blocked_row_with_a_live_unblocker_interrupts_it_and_resumes_onto_blocked() {
+        let mut repo = fixture("pause-blocked-live-lane");
+        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let pipelines = Pipelines::builtin();
+        add(&repo, "stuck", &[], Some(crate::pipeline::BLOCKED));
+        let mut task = repo.task("stuck").unwrap();
+        task.front.blocked_from = Some("implement".into());
+        task.save().unwrap();
+
+        let (mux, name) =
+            live_headless_lane_at(&repo, "stuck", crate::pipeline::BLOCKED, "unblocker");
+
+        let mut board = Board::for_test();
+        board.cursor = Some("stuck".to_string());
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Char('p'))
+            .unwrap();
+        let frame = strip(&board.frame(&repo, &pipelines, Phase::Waiting).unwrap());
+        assert!(frame.contains("pause stuck"), "{frame}");
+        assert_eq!(
+            repo.task("stuck").unwrap().stage(),
             crate::pipeline::BLOCKED
         );
+
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Enter)
+            .unwrap();
+
+        assert!(
+            mux.list_lanes().unwrap().iter().all(|l| l.name != name),
+            "headless has no keyboard, so an interrupt ends the turn"
+        );
+        let task = repo.task("stuck").unwrap();
+        assert_eq!(task.stage(), crate::pipeline::PAUSED);
+        assert_eq!(
+            task.front.parked_from.as_deref(),
+            Some(crate::pipeline::BLOCKED)
+        );
+        assert_eq!(task.front.blocked_from.as_deref(), Some("implement"));
+
+        crate::status::resume_task(&repo, &pipelines, "stuck").unwrap();
+        let task = repo.task("stuck").unwrap();
+        assert_eq!(task.stage(), crate::pipeline::BLOCKED);
+        assert_eq!(task.front.resume.as_deref(), Some(crate::pipeline::BLOCKED));
+        assert_eq!(task.front.blocked_from.as_deref(), Some("implement"));
     }
 
     /// `P` with one thing live and one thing not: the panel names only the

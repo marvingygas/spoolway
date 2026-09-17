@@ -5625,6 +5625,45 @@ mod tests {
         assert_eq!(task.front.parked_from.as_deref(), Some("implement"));
     }
 
+    /// `queue pause` on a `blocked` task with the unblocker mid-turn
+    /// interrupts that lane and parks the task, exactly as it already does
+    /// for any other live step — gained through the same two predicates the
+    /// board's `p` reads, with no edit to `queue_pause` itself. `blocked_from`
+    /// survives untouched beside the fresh `parked_from: blocked`.
+    #[test]
+    #[cfg(unix)]
+    fn queue_pause_interrupts_a_blocked_tasks_live_unblocker() {
+        let mut repo = fixture("queue-pause-blocked");
+        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let pipelines = Pipelines::builtin();
+        add(&repo, "stuck", &[]);
+        let mut task = queued(&repo, "stuck");
+        task.front.blocked_from = Some("implement".into());
+        task.set_stage_unbanked(crate::pipeline::BLOCKED, "test setup");
+        task.save().unwrap();
+
+        let (mux, name) = crate::status::testutil::live_headless_lane_at(
+            &repo,
+            "stuck",
+            crate::pipeline::BLOCKED,
+            "unblocker",
+        );
+
+        queue_pause(&repo, &pipelines, "stuck", false).unwrap();
+
+        assert!(
+            mux.list_lanes().unwrap().iter().all(|l| l.name != name),
+            "headless has no keyboard, so an interrupt ends the turn"
+        );
+        let task = queued(&repo, "stuck");
+        assert_eq!(task.stage(), crate::pipeline::PAUSED);
+        assert_eq!(
+            task.front.parked_from.as_deref(),
+            Some(crate::pipeline::BLOCKED)
+        );
+        assert_eq!(task.front.blocked_from.as_deref(), Some("implement"));
+    }
+
     #[test]
     fn queue_pause_refuses_an_unknown_task() {
         let repo = fixture("queue-pause-unknown");

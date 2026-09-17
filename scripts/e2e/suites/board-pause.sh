@@ -339,5 +339,75 @@ else bad "enter carries out the unqueue"; tail -30 "$BOARD_LOG" | sed 's/^/     
 has "the document lands back in pending" "id: stalled" "$SPOOLWAY_PROJECT_HOME/pending/stalled.md"
 has "and so does the one that never ran" "id: never-run" "$SPOOLWAY_PROJECT_HOME/pending/never-run.md"
 
+# ------------------------------------ `p` reaches a blocked row with a live lane
+#
+# The reach this task adds: the unblocker can be mid-turn on a `blocked` row
+# exactly as an implementer can be mid-turn on `implement`, once the run is
+# unattended, and `p` interrupts that turn the same way. This needs a
+# restart — config is read once at launch, not on every pass — so this task
+# is queued straight into the live queue directory, on `blocked` already,
+# with `blocked_from` set the way a real block leaves it; `routines.sh` and
+# `trials.sh` write straight into the live queue directory with `task_doc`
+# the same way, for a fixture no dispatcher needs to walk there itself. Its
+# group sorts ahead of every other row's `board`, so a single
+# `down` from a freshly restarted board's empty cursor always lands on it,
+# whatever else in this run is still parked.
+#
+# The unblocker is pointed at the `pi` profile rather than the shipped
+# `claude` one: the `hang` ctl mode this suite relies on everywhere else is
+# `pi`'s own protocol (see `scripts/e2e/agents/pi`) — the `claude` stand-in
+# reads the same ctl file for one mode of its own, `decline`, and answers
+# with a real pass for anything else, `hang` included.
+board_stop
+must "unattended, so \`blocked\` is staffed by the unblocker" \
+  "$SPOOLWAY" config set unattended.enabled true
+must "the unblocker's agent, so its own \`hang\` ctl mode is honoured" \
+  "$SPOOLWAY" config set unattended.blocked_agent pi
+echo hang > "$CTL/stuck"
+task_doc "$SPOOLWAY_PROJECT_HOME/queue/stuck.md" stuck "$BODY" \
+  "stage: blocked" "blocked_from: implement" "group: 0-blocked" \
+  "touches: [notes/stuck.md]"
+board_start
+
+STUCK_PID=$(lane_pid "stuck · blocked" 30)
+if [ -n "$STUCK_PID" ]; then ok "the unblocker is really mid-turn on the blocked row"
+else bad "the unblocker is really mid-turn on the blocked row"; fi
+draws "the board draws the staffed blocked row" "stuck"
+
+press $'\x1b[B'
+sleep 2
+press p
+
+draws "\`p\` over the blocked row opens a panel naming the task" "pause stuck"
+draws "the panel names the blocked step and calls it an agent turn" "blocked    agent"
+stage_stays "the task file is untouched while the panel is open" stuck blocked
+
+press $'\r'
+stage_reaches "enter parks the blocked task, interrupting its live unblocker" stuck paused 25
+if poll_while 15 kill -0 "$STUCK_PID"; then ok "and the unblocker's turn is over"
+else bad "and the unblocker's turn is over"; fi
+has "parked_from names the blocked step it was pulled off of" "parked_from: blocked" \
+  "$SPOOLWAY_PROJECT_HOME/queue/stuck.md"
+has "blocked_from survives the park untouched, beside it" "blocked_from: implement" \
+  "$SPOOLWAY_PROJECT_HOME/queue/stuck.md"
+
+# Resuming it puts it back on the step it was parked from — `blocked` — with
+# the same session carried forward, not `resume_target`'s ordinary road. No
+# "freed stale lane" line is expected here: headless's own interrupt above
+# already dropped the lane's record whole rather than leaving it settled (see
+# `pressing_shift_p_opens_a_panel_over_a_live_headless_lane_and_only_enter_interrupts_it`
+# in `src/status/mod.rs`), so there is nothing left for `free_stale_lanes` to
+# find.
+RESUME_OUT=$("$SPOOLWAY" resume stuck 2>&1)
+if [ $? -eq 0 ]; then ok "resuming the parked blocked task"
+else bad "resuming the parked blocked task"; sed 's/^/        /' <<<"$RESUME_OUT"; fi
+if grep -qF "stuck: -> blocked" <<<"$RESUME_OUT"; then
+  ok "it goes back onto \`blocked\`, the step it was parked from"
+else
+  bad "it goes back onto \`blocked\`, the step it was parked from"
+  sed 's/^/        /' <<<"$RESUME_OUT"
+fi
+stage_reaches "the task lands back on \`blocked\`, not \`resume_target\`'s entry" stuck blocked 25
+
 board_stop
 finish
