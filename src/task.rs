@@ -272,11 +272,13 @@ pub struct Frontmatter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,
 
-    /// A step this task pauses after, on the terms a step's own `gate: true`
-    /// already sets — see `spoolway report`, where the pause is decided. Set
-    /// by whoever wrote the task document, so a producer can hold work for a
-    /// person without giving the task a pipeline of its own; a step's own
-    /// `gate: true` still gates every task that reaches it, this or not.
+    /// A step this task pauses after, whatever it reports — see
+    /// `spoolway report`, where the pause is decided. Set by whoever wrote
+    /// the task document, so a producer can hold work for a person without
+    /// giving the task a pipeline of its own; a step's own `gate: true`
+    /// still gates every task that reaches it, this or not, but on
+    /// narrower terms than this field's: it only ever catches a pass, and
+    /// only one whose destination is not already `blocked`.
     ///
     /// The step rather than a plain on-or-off for the same reason `paused_at`
     /// is: "the end" is a guess in a pipeline with more than one step routing

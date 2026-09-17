@@ -41,8 +41,13 @@ source "$HERE/../agents.sh"
 
 LIVE=${WORK:-$(mktemp -d)}
 CTL="$LIVE/ctl"
+SOLUTIONS="$LIVE/solutions"
 
-install_agents "$LIVE/bin" "$CTL"
+# A canned patch that cannot apply, so `implement` reports `--fail` for real
+# rather than the marker-file work every other task here gets — the one thing
+# the schedule-catches-a-fail scenario near the bottom needs, and the reason
+# this suite installs its agents with a solutions directory at all.
+install_agents "$LIVE/bin" "$CTL" "$SOLUTIONS"
 new_repo "$LIVE/proj"
 configure_project plan/board "$LIVE/worktrees"
 
@@ -468,6 +473,34 @@ else
   sed 's/^/        /' <<<"$RESUME_OUT"
 fi
 stage_reaches "the task lands back on \`blocked\`, not \`resume_target\`'s entry" stuck blocked 25
+
+# ------------------------- a schedule catches a failing step, not only a pass
+# `s` above already proved it writes and clears `gate_at`; what a schedule
+# does once the step it names actually fails, rather than passes, is
+# `commands::report`'s own road, not a keypress this suite can watch — so
+# this drives it with a canned patch that cannot apply, the mock's own way of
+# making `implement` report `--fail` for real rather than the marker-file
+# work every other task above got.
+mkdir -p "$SOLUTIONS/pause-fail-catch"
+printf 'not a real patch\n' > "$SOLUTIONS/pause-fail-catch/implement.patch"
+task_doc "$LIVE/pause-fail-catch.md" pause-fail-catch "$BODY" "group: board" \
+  "touches: [notes/pause-fail-catch.md]" "gate_at: implement"
+must "pause-fail-catch queues" "$SPOOLWAY" queue add --from "$LIVE/pause-fail-catch.md"
+
+# `implement`'s own `on_fail` is `blocked` by default, so without the
+# schedule this fail would land there directly. With it, the schedule catches
+# the fail before that ever happens — the task pauses instead.
+stage_reaches "a schedule catches a failing step rather than letting it fall to on_fail" \
+  pause-fail-catch paused 30
+has "and paused_at names the step that actually failed" "paused_at: implement" \
+  "$SPOOLWAY_PROJECT_HOME/queue/pause-fail-catch.md"
+lacks "with the schedule spent, not standing" "gate_at:" \
+  "$SPOOLWAY_PROJECT_HOME/queue/pause-fail-catch.md"
+draws "and the board's NEXT column names what it caught" "implement blocked → blocked" 30
+
+must "resuming it sends the caught fail on to blocked, exactly where it would have landed unheld" \
+  "$SPOOLWAY" resume pause-fail-catch
+stage_reaches "and it lands there" pause-fail-catch blocked 25
 
 board_stop
 finish

@@ -114,7 +114,7 @@ task id marks `parallel: true`.
 | OUT | Output tokens this step has produced. |
 | COST | What this step has cost. |
 | TIME | How long the lane has been on this step. |
-| NEXT | For a running task, the step it goes to on pass. For one with a scheduled pause, `→ paused after <step>`. For a queued task, what it waits on. For a paused task, the pane to look at. |
+| NEXT | For a running task, the step it goes to on pass. For one with a scheduled pause, `→ paused after <step>`. For a queued task, what it waits on. For a paused task, the outcome the pause caught and where a resume sends it, such as `review failed → e2e — [r] resumes it`; a caught pass reads `→ e2e — [r] resumes it`. |
 
 `spoolway spend task` gives the task's whole bill.
 
@@ -167,8 +167,9 @@ Pausing an agent turn sends Escape to the pane, so a resume picks the session ba
 a command step kills the run, and the command runs again in full on resume.
 
 `s` on a pause panel interrupts nothing. It writes a `gate_at` for the step the panel named, so
-each named task pauses itself once that step passes. Under `P`, the tasks with nothing running
-still park at once. Press `s` again on a row that already has a scheduled pause to clear it.
+each named task pauses itself once that step reports, whatever it reports. Under `P`, the tasks
+with nothing running still park at once. Press `s` again on a row that already has a scheduled
+pause to clear it.
 
 ### Footer
 

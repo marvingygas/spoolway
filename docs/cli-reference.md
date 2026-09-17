@@ -342,7 +342,8 @@ spoolway lane "<task> · <step>" --attach
 ### `spoolway resume <task>`
 
 Carry a stopped task on. A `blocked` task resumes the step it stopped on. A `paused` task goes
-on to the gated step's `on_pass`.
+on to the gated step's `on_pass`, unless the gate caught a block or a loop-max, in which case
+it goes to `blocked`.
 
 ```
 spoolway resume <task>

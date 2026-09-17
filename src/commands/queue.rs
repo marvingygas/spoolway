@@ -535,7 +535,7 @@ fn skeleton_document(repo: &Repo, pipelines: &Pipelines) -> Result<String> {
          depends_on: []               # sibling task ids that must finish first\n\
          # base: branch-name          # the branch to cut from and merge into — required, here or with `queue add --base`\n\
          # pipeline: {}               # which pipeline to run on — defaults to this project's default\n\
-         # gate_at: step-id           # pause after that step passes, for a person to `spoolway resume`\n\
+         # gate_at: step-id           # pause after that step reports, for a person to `spoolway resume`\n\
          ---\n{}",
         pipelines.default,
         ends_with_newline(body),
@@ -6179,8 +6179,10 @@ mod tests {
         assert!(rendered.contains("complexity: 3"), "{rendered}");
     }
 
-    /// `gate_at` is a document's to set, on the same terms `step.gate`
-    /// already reads — see `commands::report`.
+    /// `gate_at` is a document's to set, read by `commands::report` the same
+    /// way whoever wrote it by hand or the board's own `s` key would have —
+    /// though unlike `step.gate`, it catches whatever that step reports, not
+    /// only its pass.
     #[test]
     fn gate_at_is_read_from_a_document() {
         let text = document("demo", "group: demo\ngate_at: handover\n", BODY);

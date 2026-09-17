@@ -52,7 +52,7 @@ as JSON.
 | `touches` | you | Globs of the files this task changes. Drives conflict detection and the `document` step. |
 | `depends_on` | you | Task ids that must reach `done` before this one starts. |
 | `parallel` | you | `true` marks a missing `depends_on` to another `parallel: true` task of the same group as chosen on purpose. See [Declaring a fan on purpose](#declaring-a-fan-on-purpose). |
-| `gate_at` | you | A step id. The task pauses after that step passes, once. See [Paused is the other one, and it is not a block](#paused-is-the-other-one-and-it-is-not-a-block). |
+| `gate_at` | you | A step id. The task pauses after that step reports, once, whatever it reports. See [Paused is the other one, and it is not a block](#paused-is-the-other-one-and-it-is-not-a-block). |
 | `base` | you | The branch the group lands in. Required, here or with `spoolway queue add --base`. |
 | `source` | you | Where the task came from: an issue URL, a plan page path, a name. Never parsed. |
 | `plan` | you | The plan page's absolute path, when `source` holds an issue. Never parsed. |
@@ -233,13 +233,19 @@ a fresh session at the step you name.
 
 ### Paused is the other one, and it is not a block
 
-A task that passes a step with [`gate: true`](pipelines.md#gates), or the step named in its
-own `gate_at:`, stops on `paused`. Nothing went wrong. You decide whether it goes on.
+A task that passes a step with [`gate: true`](pipelines.md#gates) stops on `paused`. So does a
+task whose own `gate_at:` names the step it is reporting from, whatever that step reports.
+Nothing went wrong. You decide whether it goes on.
 
 ```
 spoolway resume <task>                                    # on, by the step's on_pass
 spoolway resume <task> --reject -m "the migration has not run yet"   # back, by on_fail
 ```
+
+A `gate_at` that caught a block, or a loop-max bound for `blocked`, sends a plain resume to
+`blocked` instead of `on_pass` — the same place it would have reached unheld. The board's NEXT
+column names the outcome a scheduled pause caught, such as `review failed → e2e`, when it was
+not a plain pass.
 
 `--reject` writes your message into `## Handoff` for the next lane. A gated step with no
 `on_fail` sends a rejected task to `blocked`.

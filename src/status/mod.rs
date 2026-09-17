@@ -680,9 +680,10 @@ impl Board {
                 }
             }
             // `s`: leave every named abort running and write `gate_at` onto
-            // its task instead — the step passing, whenever that is, is what
-            // parks it, through the same road `commands::report` already
-            // reads for a pipeline's own `gate: true`. Toggled per task
+            // its task instead — whatever that step reports, whenever it
+            // reports it, is what parks it now, on its own road through
+            // `commands::report` rather than the pass-only one a pipeline's
+            // own `gate: true` reads. Toggled per task
             // rather than only ever set, so pressing `s` again on a row that
             // already carries a schedule for the step it is on clears it —
             // the mockup's "pressing `s` again... clears it". `P`'s panel
@@ -1925,29 +1926,44 @@ fn blocked_next(task: &crate::task::Task, pipeline: &crate::pipeline::Pipeline) 
 /// guess.
 ///
 /// Two different roads out of `paused`, told apart the same way
-/// `commands::report::resume` tells them apart before choosing between
-/// `past_the_gate` and `back_onto_its_step`. A `paused_at` names a gate that
-/// passed, so resuming carries the task *past* it — to the step's own
-/// `on_pass` — unless `blocked_from` names the same step, which means it
-/// parked here on a `--pause`, `--fail` or `--block` from `blocked` rather
-/// than an ordinary gate: none of those three claim the step's work is done,
-/// so resuming hands the task back to that step instead, through the same
-/// `cleared_block_target` with `takes_over: false` that `past_the_gate`
-/// reads. A `parked_from` with no gate — a person's own keypress, or a lane
-/// `escalate_clock` gave up on — names nothing to pass: `unpark` sends the
-/// task straight back onto that exact step, so this names the step itself
-/// rather than whatever comes after it.
+/// `commands::report::past_the_gate` tells them apart, through
+/// `commands::caught_at`: a pause raised from `blocked` itself resumes to
+/// `cleared_block_target`, a caught block or loop-max (`Caught::Blocked`)
+/// resumes straight to `blocked` — exactly where it would have landed
+/// unheld — and everything else, a plain gated pass or a schedule's caught
+/// fail alike, resumes by the step's own `on_pass`. A `parked_from` with no
+/// gate — a person's own keypress, or a lane `escalate_clock` gave up on —
+/// names nothing to pass: `unpark` sends the task straight back onto that
+/// exact step, so this names the step itself rather than whatever comes
+/// after it.
 fn paused_next(task: &crate::task::Task, pipeline: &crate::pipeline::Pipeline) -> Option<String> {
     if let Some(gated) = task.front.paused_at.as_deref() {
         let step = pipeline.step(gated)?;
-        return Some(if task.front.blocked_from.as_deref() == Some(gated) {
-            crate::commands::cleared_block_target(task, pipeline, false)
-        } else {
-            step.destination(crate::pipeline::Outcome::Pass)
-                .map(str::to_string)?
+        let caught = crate::commands::caught_at(task, gated);
+        return Some(match caught {
+            None if task.front.blocked_from.as_deref() == Some(gated) => {
+                crate::commands::cleared_block_target(task, pipeline, false)
+            }
+            Some(crate::commands::Caught::Blocked) => crate::pipeline::BLOCKED.to_string(),
+            _ => step
+                .destination(crate::pipeline::Outcome::Pass)
+                .map(str::to_string)?,
         });
     }
     task.front.parked_from.clone()
+}
+
+/// The word this pause caught, prefixed onto the arrow the NEXT column draws
+/// in front of [`paused_next`]'s own target — `None` for a plain gated pass,
+/// which reads exactly as it always has, and for a pause raised from
+/// `blocked` itself, which is not a catch of anything to name.
+fn paused_arrow(task: &crate::task::Task) -> Option<String> {
+    let gated = task.front.paused_at.as_deref()?;
+    match crate::commands::caught_at(task, gated)? {
+        crate::commands::Caught::Fail => Some(format!("{gated} failed")),
+        crate::commands::Caught::Blocked => Some(format!("{gated} {}", crate::pipeline::BLOCKED)),
+        crate::commands::Caught::Pass => None,
+    }
 }
 
 /// The rows themselves, from state already read. Split out so the board can
@@ -2101,10 +2117,19 @@ fn build_rows(
             None if task.stage() == crate::pipeline::PAUSED => {
                 let resumable = graph.ready(task.id()) && !lane_busy(lanes, &step_ids, task.id());
                 let target = paused_next(task, pipeline);
+                // The word this pause caught, ahead of the arrow — "review
+                // failed → e2e" rather than a bare "→ e2e" — so a caught
+                // fail or block never reads like the plain pass a gate
+                // always used to mean. `None` for that plain pass leaves the
+                // arrow exactly as it always drew.
+                let arrow = match paused_arrow(task) {
+                    Some(label) => format!("{label} →"),
+                    None => "→".to_string(),
+                };
                 let next = match (target, resumable) {
-                    (Some(step), true) => format!("→ {step} — [r] resumes it"),
+                    (Some(step), true) => format!("{arrow} {step} — [r] resumes it"),
                     (Some(step), false) => {
-                        format!("→ {step} — `spoolway resume {}`", task.id())
+                        format!("{arrow} {step} — `spoolway resume {}`", task.id())
                     }
                     (None, true) => "[r] resumes it".to_string(),
                     (None, false) => format!("`spoolway resume {}`", task.id()),
@@ -2167,7 +2192,8 @@ fn build_rows(
                 // it is headed regardless of what the pipeline's own
                 // `on_pass` would otherwise carry it to, since
                 // `commands::report` is about to park it there the moment
-                // this pass out of it settles.
+                // this step reports at all — whatever it reports, not only a
+                // pass.
                 let next = if task.front.gate_at.as_deref() == Some(step.id.as_str()) {
                     format!("→ paused after {}", step.id)
                 } else if step.id == crate::pipeline::BLOCKED {
@@ -2993,6 +3019,68 @@ mod tests {
         // escalates.
         assert_eq!(row("spinner").next, "→ document");
         assert_eq!(row("spinner").step_loop, Some((2, 2)));
+    }
+
+    /// A paused row that caught something other than a plain pass carries the
+    /// caught outcome ahead of the arrow — `review failed → document` and
+    /// `review blocked → blocked` — so nobody resumes blind; a plain caught
+    /// pass still reads exactly as it always has, with no word in front of
+    /// the arrow at all.
+    #[test]
+    fn a_paused_rows_next_names_what_it_caught_when_it_was_not_a_pass() {
+        let repo = fixture("paused-next-caught");
+        let pipelines = Pipelines::builtin();
+
+        add(&repo, "pause-reach", &[], None);
+        let mut fail = repo.task("pause-reach").unwrap();
+        fail.front.last_report = Some(crate::task::LastReport {
+            step: "review".into(),
+            outcome: "fail".into(),
+            at: 0,
+        });
+        fail.front.paused_at = Some("review".into());
+        fail.set_stage(crate::pipeline::PAUSED, None);
+        fail.save().unwrap();
+
+        add(&repo, "look-holds", &[], None);
+        let mut blocked = repo.task("look-holds").unwrap();
+        blocked.front.last_report = Some(crate::task::LastReport {
+            step: "review".into(),
+            outcome: "block".into(),
+            at: 0,
+        });
+        blocked.front.blocked_from = Some("review".into());
+        blocked.front.paused_at = Some("review".into());
+        blocked.set_stage(crate::pipeline::PAUSED, None);
+        blocked.save().unwrap();
+
+        add(&repo, "sweep-own-tabs", &[], None);
+        let mut passed = repo.task("sweep-own-tabs").unwrap();
+        passed.front.last_report = Some(crate::task::LastReport {
+            step: "implement".into(),
+            outcome: "pass".into(),
+            at: 0,
+        });
+        passed.front.paused_at = Some("implement".into());
+        passed.set_stage(crate::pipeline::PAUSED, None);
+        passed.save().unwrap();
+
+        let rows = rows(&repo, &pipelines).unwrap();
+        let row = |id: &str| rows.iter().find(|r| r.id == id).unwrap();
+
+        assert_eq!(
+            row("pause-reach").next,
+            "review failed → document — [r] resumes it"
+        );
+        assert_eq!(
+            row("look-holds").next,
+            "review blocked → blocked — [r] resumes it"
+        );
+        assert_eq!(
+            row("sweep-own-tabs").next,
+            "→ review — [r] resumes it",
+            "a caught pass reads exactly as an ordinary gate always has"
+        );
     }
 
     /// The mockup `escalate_clock` draws: `parked_from` naming the step a
