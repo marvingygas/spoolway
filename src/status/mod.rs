@@ -493,8 +493,8 @@ impl Board {
             BoardMode::ConfirmResume(gated) => {
                 self.on_key_resume_confirm(repo, pipelines, gated, key)
             }
-            BoardMode::ConfirmUnqueue { id, dir } => {
-                self.on_key_unqueue_confirm(repo, pipelines, id, dir, key)
+            BoardMode::ConfirmUnqueue { chain, dir } => {
+                self.on_key_unqueue_confirm(repo, pipelines, chain, dir, key)
             }
             BoardMode::ConfirmUnqueueAll(ids) => self.on_key_unqueue_all_confirm(repo, ids, key),
         }
@@ -597,10 +597,12 @@ impl Board {
     /// `p`: park the cursor's own task, opening [`BoardMode::ConfirmPause`]
     /// first — titled with its id — only when that task's own step has an
     /// agent turn or a command run live right now. A no-op with no cursor, a
-    /// cursor on a row the queue no longer has, or a cursor on a `paused` or
-    /// `blocked` row: both are already stopped and already waiting on a
-    /// person, so parking either again would only overwrite `parked_from`
-    /// with the state it is already stuck in.
+    /// cursor on a row the queue no longer has, or a cursor on a `paused`
+    /// row: that one is already stopped and already waiting on a person, so
+    /// parking it again would only overwrite `parked_from` with the state it
+    /// is already stuck in. A `blocked` row has no such guard — the unblocker
+    /// can be mid-turn on it, and `p` reaches that turn exactly as it does
+    /// any other live step.
     fn begin_pause_cursor(&mut self, repo: &Repo, pipelines: &Pipelines) -> Result<()> {
         let Some(id) = self.cursor.clone() else {
             return Ok(());
@@ -609,9 +611,7 @@ impl Board {
         let Some(i) = tasks.iter().position(|t| t.id() == id) else {
             return Ok(());
         };
-        if tasks[i].stage() == crate::pipeline::PAUSED
-            || tasks[i].stage() == crate::pipeline::BLOCKED
-        {
+        if tasks[i].stage() == crate::pipeline::PAUSED {
             return Ok(());
         }
         let mux = crate::mux::backend(repo)?;
@@ -774,11 +774,13 @@ impl Board {
         Ok(())
     }
 
-    /// `u`: open [`BoardMode::ConfirmUnqueue`] for the cursor's task — a
-    /// no-op with no cursor, a cursor on a row the queue no longer has, a
-    /// task that has started ([`not_started`] says no), or a task some other
-    /// still-queued task names in its own `depends_on` — unqueuing it would
-    /// strand that dependent on a dependency the board no longer shows it.
+    /// `u`: open [`BoardMode::ConfirmUnqueue`] for the cursor's task and
+    /// everything that reaches it through `depends_on` — a no-op with no
+    /// cursor, a cursor on a row the queue no longer has, or a task that has
+    /// started ([`not_started`] says no). A task some other still-queued
+    /// task names in its own `depends_on` is no longer refused outright: the
+    /// panel lists that dependent alongside it instead — see
+    /// [`unqueue_chain`].
     fn begin_unqueue_cursor(&mut self, repo: &Repo) -> Result<()> {
         let Some(id) = self.cursor.clone() else {
             return Ok(());
@@ -787,11 +789,11 @@ impl Board {
         let Some(task) = tasks.iter().find(|t| t.id() == id) else {
             return Ok(());
         };
-        if !not_started(task) || depended_on_by_queued(&tasks, &id) {
+        if !not_started(task) {
             return Ok(());
         }
         self.mode = BoardMode::ConfirmUnqueue {
-            id,
+            chain: unqueue_chain(&tasks, &id),
             dir: repo.pending_dir(),
         };
         Ok(())
@@ -820,29 +822,32 @@ impl Board {
         &mut self,
         repo: &Repo,
         pipelines: &Pipelines,
-        id: String,
+        chain: Vec<ChainEntry>,
         dir: PathBuf,
         key: crate::screen::Key,
     ) -> Result<()> {
         use crate::screen::Key;
         match key {
             Key::Enter => {
-                // The row this task sits on is about to leave the table, so
-                // asking where `↓` would go has to happen against the rows
-                // as they stand right now — the same list the removed row is
-                // still part of. `shift_cursor` already wraps and already
-                // falls back to the first row, so the only case this adds is
-                // the one it can't see: with nothing else queued, the "next"
-                // row it finds is the one about to vanish, and the cursor
-                // clears instead of pointing at a task the board no longer
-                // shows.
+                // Every row the chain sits on is about to leave the table,
+                // so asking where `↓` would go has to happen against the
+                // rows as they stand right now — the same list every removed
+                // row is still part of. `shift_cursor` already wraps and
+                // already falls back to the first row, so this only adds
+                // what it can't see on its own: a dependent removed in the
+                // same batch is no row to land on either, and with nothing
+                // else queued the walk comes back around to the chain's own
+                // head, at which point the cursor clears instead of pointing
+                // at a task the board no longer shows.
                 let before = rows(repo, pipelines)?;
-                let next = shift_cursor(&before, Some(&id), 1).filter(|next_id| *next_id != id);
-                unqueue_task(repo, &id)?;
+                let next = next_cursor_after_chain(&before, &chain);
+                for entry in &chain {
+                    unqueue_task(repo, &entry.id)?;
+                }
                 self.cursor = next;
             }
             Key::Esc => {}
-            _ => self.mode = BoardMode::ConfirmUnqueue { id, dir },
+            _ => self.mode = BoardMode::ConfirmUnqueue { chain, dir },
         }
         Ok(())
     }
@@ -907,14 +912,18 @@ enum BoardMode {
     /// carrying it past that gate is never the accidental half of a
     /// keypress meant for a plain interrupted one beside it.
     ConfirmResume(Vec<String>),
-    /// `u` found a task that has not started, named along with `dir` — this
-    /// run's own [`Repo::pending_dir`], read once when the panel opened — so
-    /// its panel can show where the document is about to land without a
-    /// second lookup at answer time. `id` still needs a fresh
-    /// [`Repo::task`] to answer with, the same as every confirm panel here:
-    /// the document a moment ago and the document now are not guaranteed to
-    /// be the same file.
-    ConfirmUnqueue { id: String, dir: PathBuf },
+    /// `u` found a task that has not started, named along with every
+    /// unstarted task that reaches it through `depends_on` — see
+    /// [`unqueue_chain`] — and `dir`, this run's own [`Repo::pending_dir`],
+    /// read once when the panel opened, so its panel can show where the
+    /// documents are about to land without a second lookup at answer time.
+    /// `chain` still needs a fresh [`Repo::task`] per id to answer with, the
+    /// same as every confirm panel here: a document a moment ago and the
+    /// document now are not guaranteed to be the same file.
+    ConfirmUnqueue {
+        chain: Vec<ChainEntry>,
+        dir: PathBuf,
+    },
     /// `U`'s own version of the same panel, naming every task it would carry
     /// back to pending rather than just the one under the cursor.
     ConfirmUnqueueAll(Vec<String>),
@@ -927,7 +936,7 @@ impl BoardMode {
             BoardMode::Browsing => None,
             BoardMode::ConfirmPause { aborts, scope } => Some(pause_confirm_panel(aborts, scope)),
             BoardMode::ConfirmResume(gated) => Some(resume_confirm_panel(gated)),
-            BoardMode::ConfirmUnqueue { id, dir } => Some(unqueue_confirm_panel(id, dir)),
+            BoardMode::ConfirmUnqueue { chain, dir } => Some(unqueue_confirm_panel(chain, dir)),
             BoardMode::ConfirmUnqueueAll(ids) => Some(unqueue_all_confirm_panel(ids)),
         }
     }
@@ -998,8 +1007,10 @@ impl AbortKind {
 /// Every live agent turn and running command step across `tasks`, one
 /// [`Abort`] each — [`live_agent_lane_tasks`] and [`running_command_steps`]
 /// folded into the one shape `p` and `P` both draw a panel from and answer
-/// against. Both of those already skip a `paused` or `blocked` task, so
-/// there is nothing further to filter out here.
+/// against. Both of those already skip a `paused` task — the one state
+/// nothing is ever live on — so there is nothing further to filter out here.
+/// A `blocked` task is not skipped: the unblocker can be mid-turn on it, and
+/// that turn is exactly what `p` and `P` reach.
 fn live_aborts(
     repo: &Repo,
     tasks: &[crate::task::Task],
@@ -1032,12 +1043,13 @@ fn live_aborts(
     out
 }
 
-/// Whether `task` is one `P` would park — everything but a `paused` or
-/// `blocked` row, both already stopped and already waiting on a person
-/// rather than a state to park. The one predicate [`park_every_pausable`]
-/// reads.
+/// Whether `task` is one `P` would park — everything but a `paused` row,
+/// already stopped and already waiting on a person rather than a state to
+/// park. A `blocked` row is pausable like any other: the unblocker may be
+/// mid-turn on it, which is what makes it worth reaching in the first place.
+/// The one predicate [`park_every_pausable`] reads.
 fn is_pausable(task: &crate::task::Task) -> bool {
-    task.stage() != crate::pipeline::PAUSED && task.stage() != crate::pipeline::BLOCKED
+    task.stage() != crate::pipeline::PAUSED
 }
 
 /// Park every task [`is_pausable`] selects, straight onto `paused` with no
@@ -1093,7 +1105,11 @@ pub(crate) fn resume_task(repo: &Repo, pipelines: &Pipelines, id: &str) -> Resul
     // `paused_at` is a gate passed, waiting to be sent on past it;
     // `parked_from` is a person's own interrupt, and `blocked_from` is a
     // real block — all three waiting to be sent back to where they stopped.
-    // Never more than one of the three on a task standing on `paused`.
+    // `parked_from` and `blocked_from` can both be set at once now: `p` on a
+    // `blocked` row writes `parked_from: blocked` beside the `blocked_from`
+    // already there, and `back_onto_its_step` checks `parked_from` first, so
+    // it is the one that decides — see `unpark`, which never touches
+    // `blocked_from` and leaves it to route the task again once cleared.
     //
     // There is no guard on any of that here, because neither the fields nor
     // the stage can refuse anything any more. Two ordinary rows carry none
@@ -1140,24 +1156,96 @@ pub(crate) fn resume_task(repo: &Repo, pipelines: &Pipelines, id: &str) -> Resul
 /// the one state `u`/`U` may act on: unqueuing anything further along would
 /// mean tearing down a checkout, which is outside what either key reaches —
 /// see this task's own non-goals.
-fn not_started(task: &crate::task::Task) -> bool {
+pub(crate) fn not_started(task: &crate::task::Task) -> bool {
     task.stage() == crate::pipeline::QUEUED
 }
 
-/// Whether some other task that has not started itself names `id` in its own
-/// `depends_on` — the one thing `u` refuses that `U` does not, since carrying
-/// `id` back to pending alone would leave that dependent waiting on a
-/// dependency the queue no longer shows it.
+/// The other not-started task that names `id` in its own `depends_on`, if
+/// there is one — what `spoolway queue unqueue` still refuses outright,
+/// since it has no panel to list a chain on. The board's own `u` no longer
+/// reads this: it carries `id` and every such dependent back to pending
+/// together instead — see [`unqueue_chain`].
 ///
 /// Only a task that has not started can be waiting on `id` at all: `queued`
 /// is the one step a dependency check gates, so nothing past it depends on a
 /// task still active in the queue — see [`crate::graph::Graph::ready`]. The
 /// check is still made explicit here, rather than assumed, so a caller never
 /// has to trust that invariant to read this correctly.
-fn depended_on_by_queued(tasks: &[crate::task::Task], id: &str) -> bool {
+///
+/// `pub(crate)`: `spoolway queue unqueue` reads this for its own refusal —
+/// see `commands::queue::queue_unqueue_one`. It returns the dependent itself
+/// rather than a bare bool because the command names it in its message.
+pub(crate) fn depended_on_by_queued<'a>(
+    tasks: &'a [crate::task::Task],
+    id: &str,
+) -> Option<&'a crate::task::Task> {
     tasks
         .iter()
-        .any(|t| t.id() != id && not_started(t) && t.front.depends_on.iter().any(|d| d == id))
+        .find(|t| t.id() != id && not_started(t) && t.front.depends_on.iter().any(|d| d == id))
+}
+
+/// One task in a `u`-panel's chain: its id, and — for everything but the
+/// chain's own head — the ids elsewhere in the chain its own `depends_on`
+/// names, for [`view::unqueue_confirm_panel`]'s "(depends on ...)"
+/// annotation. Empty for the head, which by construction depends on nothing
+/// else in its own chain — the chain is exactly what depends on *it*.
+struct ChainEntry {
+    id: String,
+    depends_on: Vec<String>,
+}
+
+/// `id`, then every not-started task that reaches it through `depends_on`,
+/// however many hops away — what `u`'s panel lists and carries back to
+/// pending together. Breadth first, each new level sorted by id, so the
+/// panel reads the way a person would explain the chain: the task under the
+/// cursor, then what leans on it, then what leans on that.
+///
+/// Only a task that has not started can lean on a still-`queued` one at all
+/// — see [`crate::graph::Graph::ready`] — so the walk never has to reason
+/// about a task already running: everything it finds by chasing
+/// `depends_on` backwards is itself fair game for the same carry.
+fn unqueue_chain(tasks: &[crate::task::Task], id: &str) -> Vec<ChainEntry> {
+    let mut ids: Vec<String> = vec![id.to_string()];
+    let mut frontier: Vec<String> = vec![id.to_string()];
+    while !frontier.is_empty() {
+        let mut found: Vec<String> = tasks
+            .iter()
+            .filter(|t| not_started(t) && !ids.contains(&t.id().to_string()))
+            .filter(|t| t.front.depends_on.iter().any(|d| frontier.contains(d)))
+            .map(|t| t.id().to_string())
+            .collect();
+        if found.is_empty() {
+            break;
+        }
+        found.sort();
+        found.dedup();
+        ids.extend(found.iter().cloned());
+        frontier = found;
+    }
+    ids.iter()
+        .map(|entry_id| {
+            let depends_on = if entry_id == id {
+                Vec::new()
+            } else {
+                tasks
+                    .iter()
+                    .find(|t| t.id() == entry_id)
+                    .map(|t| {
+                        t.front
+                            .depends_on
+                            .iter()
+                            .filter(|d| ids.contains(d))
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+            ChainEntry {
+                id: entry_id.clone(),
+                depends_on,
+            }
+        })
+        .collect()
 }
 
 /// Move one task's document from the queue back to pending, dropping every
@@ -1179,7 +1267,15 @@ fn depended_on_by_queued(tasks: &[crate::task::Task], id: &str) -> bool {
 /// ago, or one a second process moved on since the panel opened, is left
 /// exactly where it is rather than risk carrying an archived document back
 /// to pending.
-fn unqueue_task(repo: &Repo, id: &str) -> Result<()> {
+///
+/// `pub(crate)`: `spoolway queue unqueue` is the third caller, for a task on
+/// `queued` with no `--force` — the same body a keypress and the command
+/// share, exactly as [`resume_task`] is for `r`/`R` and `queue resume`. A
+/// task that has already started is a different road: `queue unqueue
+/// --force` goes around this function's own `not_started` gate and calls
+/// [`carry_to_pending`] directly, once its own teardown has cleared the
+/// checkout — see `commands::queue::queue_unqueue`.
+pub(crate) fn unqueue_task(repo: &Repo, id: &str) -> Result<()> {
     // The same per-task lock the dispatcher and `spoolway report` take, so
     // this rename cannot land in the middle of one of their read-modify-
     // writes. See [`crate::lock::TaskLock`] and review finding 49.
@@ -1202,11 +1298,12 @@ fn unqueue_task(repo: &Repo, id: &str) -> Result<()> {
     Ok(())
 }
 
-/// The move itself, shared with `spoolway queue remove`: `task`'s document
+/// The move itself, shared with `spoolway queue unqueue`: `task`'s document
 /// written to pending with every reserved key dropped, then its queue file
-/// removed. The caller decides whether `task` may go — the board's `u` only
-/// carries a task that has not started, `queue remove` also one parked
-/// before it got a worktree — and holds the task's lock while it does.
+/// removed. The caller decides whether `task` may go — the board's `u` and
+/// [`unqueue_task`] only carry a task that has not started, `queue unqueue
+/// --force` one whose checkout it has just torn down — and holds the task's
+/// lock while it does.
 ///
 /// `None` when a document already sits in `pending/` under this id: that is
 /// a newer draft — a producer re-ran over work already submitted — and
@@ -1300,7 +1397,7 @@ pub(crate) fn live_agent_lane_tasks(
     let mine = crate::dispatch::our_checkouts(repo, tasks);
     let mut out = Vec::new();
     for (i, task) in tasks.iter().enumerate() {
-        if task.stage() == crate::pipeline::PAUSED || task.stage() == crate::pipeline::BLOCKED {
+        if task.stage() == crate::pipeline::PAUSED {
             continue;
         }
         let Ok(pipeline) = pipelines.for_task(task) else {
@@ -1340,7 +1437,7 @@ pub(crate) fn running_command_steps(
     let runs = crate::command_step::Runs::new(&repo.commands_dir());
     let mut out = Vec::new();
     for task in tasks {
-        if task.stage() == crate::pipeline::PAUSED || task.stage() == crate::pipeline::BLOCKED {
+        if task.stage() == crate::pipeline::PAUSED {
             continue;
         }
         let Ok(pipeline) = pipelines.for_task(task) else {
@@ -1382,6 +1479,28 @@ fn shift_cursor(rows: &[Row], current: Option<&str>, delta: i32) -> Option<Strin
         None => 0,
     };
     Some(rows[next as usize].id.clone())
+}
+
+/// Where the cursor lands once a `u` chain leaves the table together — the
+/// nearest row `↓` would reach that survives the whole carry, not just the
+/// row directly beneath the chain's head. Walks [`shift_cursor`] forward
+/// until it lands outside `chain`, or wraps back onto the chain's own head,
+/// at which point nothing in the table survives and the cursor clears —
+/// see [`Board::on_key_unqueue_confirm`].
+fn next_cursor_after_chain(rows: &[Row], chain: &[ChainEntry]) -> Option<String> {
+    let head = chain.first()?.id.as_str();
+    let removed: HashSet<&str> = chain.iter().map(|e| e.id.as_str()).collect();
+    let mut cursor = head.to_string();
+    loop {
+        let next = shift_cursor(rows, Some(&cursor), 1)?;
+        if !removed.contains(next.as_str()) {
+            return Some(next);
+        }
+        if next == head {
+            return None;
+        }
+        cursor = next;
+    }
 }
 
 impl Default for Board {
@@ -4707,11 +4826,10 @@ mod tests {
         }
     }
 
-    /// `p` and `P` are both no-ops on a `paused` row and on a `blocked` row —
-    /// both already stopped and already waiting on a person, not states to
-    /// park over again.
+    /// `p` and `P` are both no-ops on a `paused` row — already stopped and
+    /// already waiting on a person, not a state to park over again.
     #[test]
-    fn pressing_p_or_shift_p_on_a_paused_or_blocked_row_does_nothing() {
+    fn pressing_p_or_shift_p_on_a_paused_row_does_nothing() {
         let repo = fixture("pause-noop-states");
         let pipelines = Pipelines::builtin();
         add(&repo, "already-paused", &[], None);
@@ -4720,26 +4838,17 @@ mod tests {
         paused.set_stage(crate::pipeline::PAUSED, None);
         paused.save().unwrap();
 
-        add(
-            &repo,
-            "already-blocked",
-            &[],
-            Some(crate::pipeline::BLOCKED),
-        );
-
         let mut board = Board::for_test();
-        for id in ["already-paused", "already-blocked"] {
-            let before = std::fs::read_to_string(repo.task(id).unwrap().path).unwrap();
-            board.cursor = Some(id.to_string());
-            board
-                .on_key(&repo, &pipelines, crate::screen::Key::Char('p'))
-                .unwrap();
-            assert!(matches!(board.mode, BoardMode::Browsing), "p on {id}");
-            let after = std::fs::read_to_string(repo.task(id).unwrap().path).unwrap();
-            assert_eq!(before, after, "p on {id}");
-        }
+        let before = std::fs::read_to_string(repo.task("already-paused").unwrap().path).unwrap();
+        board.cursor = Some("already-paused".to_string());
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Char('p'))
+            .unwrap();
+        assert!(matches!(board.mode, BoardMode::Browsing));
+        let after = std::fs::read_to_string(repo.task("already-paused").unwrap().path).unwrap();
+        assert_eq!(before, after);
 
-        // `P` across the run touches neither: both stages survive whole.
+        // `P` across the run leaves it alone too: the stage survives whole.
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Char('P'))
             .unwrap();
@@ -4747,10 +4856,120 @@ mod tests {
             repo.task("already-paused").unwrap().stage(),
             crate::pipeline::PAUSED
         );
+    }
+
+    /// `p` on a `blocked` row with nothing live parks it at once, no panel —
+    /// the same road `queued` and a real step in the gap between two lanes
+    /// already take: a `blocked` row is not a state `p` skips any more, only
+    /// `paused` is. `blocked_from` survives the park untouched, sitting
+    /// beside the fresh `parked_from: blocked` it now carries too.
+    #[test]
+    fn pressing_p_on_a_blocked_row_with_nothing_live_parks_it_at_once() {
+        let repo = fixture("pause-blocked-idle");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "stuck", &[], Some(crate::pipeline::BLOCKED));
+        let mut task = repo.task("stuck").unwrap();
+        task.front.blocked_from = Some("implement".into());
+        task.save().unwrap();
+
+        let mut board = Board::for_test();
+        board.cursor = Some("stuck".to_string());
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Char('p'))
+            .unwrap();
+
+        assert!(matches!(board.mode, BoardMode::Browsing));
+        let task = repo.task("stuck").unwrap();
+        assert_eq!(task.stage(), crate::pipeline::PAUSED);
         assert_eq!(
-            repo.task("already-blocked").unwrap().stage(),
+            task.front.parked_from.as_deref(),
+            Some(crate::pipeline::BLOCKED)
+        );
+        assert_eq!(task.front.blocked_from.as_deref(), Some("implement"));
+    }
+
+    /// `P` widens with `p`: an idle `blocked` row is one more thing `P`
+    /// parks outright, through the same [`is_pausable`] `park_every_pausable`
+    /// reads — not a hole `p`'s own tests leave open on their own, since `p`
+    /// already goes through the same predicate, but the acceptance criterion
+    /// names `P` by itself too.
+    #[test]
+    fn pressing_shift_p_parks_an_idle_blocked_row_too() {
+        let repo = fixture("pause-all-blocked-idle");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "stuck", &[], Some(crate::pipeline::BLOCKED));
+        let mut task = repo.task("stuck").unwrap();
+        task.front.blocked_from = Some("implement".into());
+        task.save().unwrap();
+
+        let mut board = Board::for_test();
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Char('P'))
+            .unwrap();
+
+        assert!(matches!(board.mode, BoardMode::Browsing));
+        let task = repo.task("stuck").unwrap();
+        assert_eq!(task.stage(), crate::pipeline::PAUSED);
+        assert_eq!(
+            task.front.parked_from.as_deref(),
+            Some(crate::pipeline::BLOCKED)
+        );
+        assert_eq!(task.front.blocked_from.as_deref(), Some("implement"));
+    }
+
+    /// `p` on a `blocked` row whose unblocker is mid-turn opens the same
+    /// single-abort panel a live `implement` turn would, and `enter`
+    /// interrupts that lane exactly as it would any other — the reach this
+    /// task adds. `blocked_from` is left standing beside the `parked_from`
+    /// the park writes, and `resume` afterwards carries the session back
+    /// onto `blocked` rather than opening a fresh one.
+    #[test]
+    #[cfg(unix)]
+    fn pressing_p_on_a_blocked_row_with_a_live_unblocker_interrupts_it_and_resumes_onto_blocked() {
+        let mut repo = fixture("pause-blocked-live-lane");
+        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let pipelines = Pipelines::builtin();
+        add(&repo, "stuck", &[], Some(crate::pipeline::BLOCKED));
+        let mut task = repo.task("stuck").unwrap();
+        task.front.blocked_from = Some("implement".into());
+        task.save().unwrap();
+
+        let (mux, name) =
+            live_headless_lane_at(&repo, "stuck", crate::pipeline::BLOCKED, "unblocker");
+
+        let mut board = Board::for_test();
+        board.cursor = Some("stuck".to_string());
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Char('p'))
+            .unwrap();
+        let frame = strip(&board.frame(&repo, &pipelines, Phase::Waiting).unwrap());
+        assert!(frame.contains("pause stuck"), "{frame}");
+        assert_eq!(
+            repo.task("stuck").unwrap().stage(),
             crate::pipeline::BLOCKED
         );
+
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Enter)
+            .unwrap();
+
+        assert!(
+            mux.list_lanes().unwrap().iter().all(|l| l.name != name),
+            "headless has no keyboard, so an interrupt ends the turn"
+        );
+        let task = repo.task("stuck").unwrap();
+        assert_eq!(task.stage(), crate::pipeline::PAUSED);
+        assert_eq!(
+            task.front.parked_from.as_deref(),
+            Some(crate::pipeline::BLOCKED)
+        );
+        assert_eq!(task.front.blocked_from.as_deref(), Some("implement"));
+
+        crate::status::resume_task(&repo, &pipelines, "stuck").unwrap();
+        let task = repo.task("stuck").unwrap();
+        assert_eq!(task.stage(), crate::pipeline::BLOCKED);
+        assert_eq!(task.front.resume.as_deref(), Some(crate::pipeline::BLOCKED));
+        assert_eq!(task.front.blocked_from.as_deref(), Some("implement"));
     }
 
     /// `P` with one thing live and one thing not: the panel names only the
@@ -4901,11 +5120,11 @@ mod tests {
         assert_eq!(repo.task("under-way").unwrap().stage(), "implement");
     }
 
-    /// `u` refuses a queued task that a still-queued task depends on —
-    /// unqueuing it would leave the dependent waiting on a dependency the
-    /// board no longer shows.
+    /// `u` on a task a still-queued task depends on opens a panel naming
+    /// both, the dependent marked with what it depends on, and `enter`
+    /// carries both back to pending, leaving neither in the queue.
     #[test]
-    fn pressing_u_on_a_task_a_queued_dependent_names_is_a_no_op() {
+    fn pressing_u_on_a_task_a_queued_dependent_names_carries_both() {
         let repo = fixture("unqueue-depended-on");
         let pipelines = Pipelines::builtin();
         add(&repo, "drop-walk", &[], None);
@@ -4923,8 +5142,71 @@ mod tests {
             .unwrap();
 
         let frame = strip(&board.frame(&repo, &pipelines, Phase::Waiting).unwrap());
-        assert!(!frame.contains("unqueue drop-walk"), "{frame}");
+        assert!(frame.contains("unqueue drop-walk"), "{frame}");
+        assert!(frame.contains("2 documents go back to:"), "{frame}");
+        assert!(frame.contains("drop-walk"), "{frame}");
+        assert!(
+            frame.contains("chain-refusals   (depends on drop-walk)"),
+            "{frame}"
+        );
+        assert!(frame.contains("[enter] unqueue them"), "{frame}");
+        // Still sitting in the queue — nothing moves until the panel is
+        // answered.
         assert_eq!(repo.task("drop-walk").unwrap().stage(), "queued");
+        assert_eq!(repo.task("chain-refusals").unwrap().stage(), "queued");
+
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Enter)
+            .unwrap();
+
+        assert!(repo.pending_dir().join("drop-walk.md").exists());
+        assert!(repo.pending_dir().join("chain-refusals.md").exists());
+        assert!(!repo.queue_dir().join("drop-walk.md").exists());
+        assert!(!repo.queue_dir().join("chain-refusals.md").exists());
+        // Both rows left the table together, so the cursor clears rather
+        // than pointing at either one.
+        assert_eq!(board.cursor, None);
+    }
+
+    /// `u` walks a chain of more than one hop, carrying every unstarted task
+    /// that reaches the cursor's own task through `depends_on` — not just
+    /// its immediate dependent.
+    #[test]
+    fn pressing_u_carries_a_chain_two_hops_deep() {
+        let repo = fixture("unqueue-chain-two-hops");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "alpha", &[], None);
+        add(&repo, "beta", &["alpha"], None);
+        add(&repo, "gamma", &["beta"], None);
+        add(&repo, "unrelated", &[], None);
+
+        let mut board = Board::for_test();
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Down)
+            .unwrap();
+        assert_eq!(board.cursor.as_deref(), Some("alpha"));
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Char('u'))
+            .unwrap();
+
+        let frame = strip(&board.frame(&repo, &pipelines, Phase::Waiting).unwrap());
+        assert!(frame.contains("unqueue alpha"), "{frame}");
+        assert!(frame.contains("3 documents go back to:"), "{frame}");
+        assert!(frame.contains("beta   (depends on alpha)"), "{frame}");
+        assert!(frame.contains("gamma   (depends on beta)"), "{frame}");
+
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Enter)
+            .unwrap();
+
+        assert!(repo.pending_dir().join("alpha.md").exists());
+        assert!(repo.pending_dir().join("beta.md").exists());
+        assert!(repo.pending_dir().join("gamma.md").exists());
+        // `unrelated` names none of them in its own `depends_on`, so the
+        // chain never reaches it — it stays queued and is where the cursor
+        // lands once the three that did leave are gone.
+        assert_eq!(repo.task("unrelated").unwrap().stage(), "queued");
+        assert_eq!(board.cursor.as_deref(), Some("unrelated"));
     }
 
     /// `u` moves the cursor to the row underneath the one it just removed —

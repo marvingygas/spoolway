@@ -185,9 +185,13 @@ pub struct Frontmatter {
     /// The step this task stopped on without failing a check, for `spoolway
     /// resume` to carry it straight back to.
     ///
-    /// `blocked_from`'s counterpart for a stop nothing reported: a real block
-    /// always carries `blocked_from`, and this and that are never both set on
-    /// the same task. Three gestures set it — a person's own keypress (the
+    /// `blocked_from`'s counterpart for a stop nothing reported — but the two
+    /// can both be set at once: parking a `blocked` row (the board's `p`, or
+    /// `spoolway queue pause`) writes `parked_from: blocked` beside whatever
+    /// `blocked_from` the block already carried, and leaves that field alone.
+    /// `back_onto_its_step` in `src/commands/report.rs` checks `parked_from`
+    /// first, so it is the one that decides where a resume goes when both are
+    /// set. Three gestures set it — a person's own keypress (the
     /// board's `p`), a person's own Escape typed into the pane (see
     /// `Dispatcher::park_after_interrupt`), and a lane `Dispatcher::
     /// escalate_clock` gave up on for going quiet — and [`Self::escalated`]

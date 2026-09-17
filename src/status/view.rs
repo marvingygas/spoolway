@@ -343,20 +343,55 @@ pub(super) fn resume_confirm_panel(gated: &[String]) -> Vec<String> {
     crate::screen::panel("resume all", &body, "[enter] resume them   [esc] cancel")
 }
 
-/// [`BoardMode::ConfirmUnqueue`]'s panel.
-pub(super) fn unqueue_confirm_panel(id: &str, dir: &std::path::Path) -> Vec<String> {
-    let body = vec![
-        "Nothing has run for it yet.".to_string(),
+/// [`BoardMode::ConfirmUnqueue`]'s panel — today's single-line panel
+/// unchanged when `chain` names only the cursor's own task, and a list of it
+/// and every unstarted task that reaches it through `depends_on` once there
+/// is more than one, each dependent annotated with what in the chain it
+/// depends on — see this task's own mockup.
+pub(super) fn unqueue_confirm_panel(chain: &[ChainEntry], dir: &std::path::Path) -> Vec<String> {
+    let Some(head) = chain.first() else {
+        return Vec::new();
+    };
+    if chain.len() == 1 {
+        let body = vec![
+            "Nothing has run for it yet.".to_string(),
+            String::new(),
+            "The document goes back to:".to_string(),
+            shorten_home(&dir.join(format!("{}.md", head.id))),
+            String::new(),
+            "`spoolway queue` is what sends it again.".to_string(),
+        ];
+        return crate::screen::panel(
+            &format!("unqueue {}", head.id),
+            &body,
+            "[enter] unqueue it   [esc] cancel",
+        );
+    }
+
+    let mut body = vec![
+        "Nothing has run for these yet.".to_string(),
         String::new(),
-        "The document goes back to:".to_string(),
-        shorten_home(&dir.join(format!("{id}.md"))),
+        format!("{} documents go back to:", chain.len()),
+        format!("{}/", shorten_home(dir)),
         String::new(),
-        "`spoolway queue` is what sends it again.".to_string(),
     ];
+    for entry in chain {
+        if entry.depends_on.is_empty() {
+            body.push(format!("  {}", entry.id));
+        } else {
+            body.push(format!(
+                "  {}{GUTTER}(depends on {})",
+                entry.id,
+                entry.depends_on.join(", ")
+            ));
+        }
+    }
+    body.push(String::new());
+    body.push("`spoolway queue` is what sends them again.".to_string());
     crate::screen::panel(
-        &format!("unqueue {id}"),
+        &format!("unqueue {}", head.id),
         &body,
-        "[enter] unqueue it   [esc] cancel",
+        "[enter] unqueue them   [esc] cancel",
     )
 }
 
@@ -3108,6 +3143,35 @@ mod tests {
         }
         for id in &ids {
             assert!(panel.iter().any(|line| line.contains(id.as_str())), "{id}");
+        }
+    }
+
+    /// `unqueue_confirm_panel`'s chain form is built through `screen::boxed`
+    /// exactly like `unqueue_all_confirm_panel` — sized to its widest line,
+    /// not a fixed 80 columns, and never wider than that in practice since
+    /// every entry gets its own line.
+    #[test]
+    fn the_unqueue_chain_panel_stays_within_eighty_columns_at_five_tasks() {
+        let chain: Vec<ChainEntry> = (1..=5)
+            .map(|n| ChainEntry {
+                id: format!("chain-task-{n}"),
+                depends_on: if n == 1 {
+                    Vec::new()
+                } else {
+                    vec![format!("chain-task-{}", n - 1)]
+                },
+            })
+            .collect();
+        let panel = unqueue_confirm_panel(&chain, std::path::Path::new("/pending"));
+        for line in &panel {
+            assert!(line.chars().count() <= 80, "{line}");
+        }
+        for entry in &chain {
+            assert!(
+                panel.iter().any(|line| line.contains(entry.id.as_str())),
+                "{}",
+                entry.id
+            );
         }
     }
 

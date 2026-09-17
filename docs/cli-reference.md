@@ -60,8 +60,10 @@ archive directories. The right pane lists the highlighted group's tasks.
 | `s` | Save the highlighted group into `.spoolway/routines/<name>/` |
 | `q` | Quit |
 
-Queueing deletes the group's documents from the pending directory. A group that fails
-validation is refused and nothing is deleted. See [Queueing a plan](planning.md#queueing-a-plan).
+Queueing deletes the group's pending documents from the pending directory. A sibling task
+already in the queue or the archive is left where it is, and the report names it. A group that
+fails validation is refused and nothing is deleted. See [Queueing a
+plan](planning.md#queueing-a-plan).
 
 ### `spoolway queue add`
 
@@ -78,6 +80,9 @@ spoolway queue add --from <PATH>
 | `--dry-run` | | Validate and print what would happen. Writes nothing and opens no ticket |
 
 With no `--from`, it prints the default pipeline's skeleton document to fill in.
+
+A `--from` path under this project's own pending directory is deleted once the batch is
+written. A `--from` path anywhere else, including `-`, is read and left alone.
 
 With `[issue_tracking]` configured, it opens a ticket per document first. See
 [`open`](configuration.md#open--a-fifth-event-run-by-queue-add-itself).
@@ -118,10 +123,29 @@ spoolway queue pause <task> [--force]
 
 Resume one task. Same as `spoolway resume <task>` with no other flags.
 
-### `spoolway queue remove <task>`
+### `spoolway queue unqueue <task>`
 
-Move a task out of the queue and back into the pending directory. Works on `queued`, `paused`
-or `blocked` tasks with no lane running and no worktree cut. Anything else is refused.
+Carry a not-started task's document back to the pending directory, with every reserved key
+stripped. `spoolway queue add --from` takes the result again unchanged. The board's `u` key
+carries the same task and every unstarted task that depends on it; this command has no panel
+to list a chain on, so it refuses instead.
+
+```
+spoolway queue unqueue <task>
+spoolway queue unqueue --all
+spoolway queue unqueue <task> --force
+```
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--all` | | Every not-started task, the way the board's `U` does. Refused together with `--force` |
+| `--force` | | Interrupt any live lane, record uncommitted work, tear the checkout down, then unqueue a task that has started. No-op on a task still `queued` |
+
+A task that has started is refused, naming its stage, its checkout when it has one, and both
+routes onward: `spoolway queue pause <task>` to stop it in place, or `--force` to tear the
+checkout down and unqueue it anyway. A task another queued sibling names in `depends_on` is
+refused too, naming that sibling. A document already sitting in pending under the same id
+refuses the move and leaves the queue file in place.
 
 ### `spoolway group list`
 
@@ -144,7 +168,7 @@ Run the pipeline. It draws the live board and keeps running until the queue is e
 | `↑` `↓` | Move the cursor |
 | `r` / `R` | Resume the highlighted paused or blocked task / every paused task |
 | `p` / `P` | Interrupt and park the highlighted task / every live lane |
-| `u` / `U` | Move the highlighted queued task / every unstarted task back to pending |
+| `u` / `U` | Move the highlighted queued task, and every unstarted task that depends on it, back to pending / do the same for every unstarted task in the run |
 | `ctrl-c` | Stop the run |
 
 | Flag | Default | What it does |

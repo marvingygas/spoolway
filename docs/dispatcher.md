@@ -156,10 +156,10 @@ Lowercase acts on the row under the `▸` cursor. Uppercase acts on the whole ru
 | `o` | Open the task file in `$VISUAL`, else `$EDITOR`, in a new pane. |
 | `r` | Resume a paused or blocked row whose dependencies are done. Same as `spoolway resume <task>`. |
 | `R` | Resume every paused task. Asks first if any of them is at a real gate. |
-| `p` | Pause the row. Asks first if it would interrupt a running agent turn or command. |
-| `P` | Pause every task in the run. Asks first, listing what it would interrupt. |
+| `p` | Pause the row, including a `blocked` one. Asks first if it would interrupt a running agent turn or command. |
+| `P` | Pause every task in the run, including any `blocked`. Asks first, listing what it would interrupt. |
 | `s` | On an open pause panel, schedule the pause instead of carrying it out. |
-| `u` | Take a `queued` task out of the queue and write its document back to `~/.spoolway/<project>/pending/`. Asks first. |
+| `u` | Take a `queued` task, and every unstarted task that depends on it, out of the queue and write their documents back to `~/.spoolway/<project>/pending/`. Asks first. |
 | `U` | Do the same for every task that has not started. Asks first. |
 | `ctrl-c` | Stop the run. |
 

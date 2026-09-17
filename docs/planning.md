@@ -93,12 +93,14 @@ directory. The right pane lists the highlighted group's tasks and what each wait
 | `h` | Show hidden groups, such as ones already queued. |
 | `q` | Quit. |
 
-Queueing deletes the group's documents from the pending directory. A group with a validation
-error is refused and nothing is deleted. If a dispatcher already holds the queue, the report
-names its pid and that dispatcher picks the tasks up on its next pass.
+Queueing deletes the group's pending documents from the pending directory. A sibling task
+already in the queue or the archive is left exactly where it is, and the report names it. A
+group with a validation error is refused and nothing is deleted. If a dispatcher already holds
+the queue, the report names its pid and that dispatcher picks the tasks up on its next pass.
 
-`spoolway queue add --from <dir>` queues every document in a directory without the screen. It
-deletes nothing.
+`spoolway queue add --from <dir>` queues every document in a directory without the screen. A
+document under this project's own pending directory is deleted once the batch is written. A
+document anywhere else is left alone.
 
 Two more commands:
 

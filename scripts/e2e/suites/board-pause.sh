@@ -339,5 +339,135 @@ else bad "enter carries out the unqueue"; tail -30 "$BOARD_LOG" | sed 's/^/     
 has "the document lands back in pending" "id: stalled" "$SPOOLWAY_PROJECT_HOME/pending/stalled.md"
 has "and so does the one that never ran" "id: never-run" "$SPOOLWAY_PROJECT_HOME/pending/never-run.md"
 
+# ------------------------------------------- `u` carries a dependent chain
+# The reach this task adds: `u` on a task a still-queued task depends on no
+# longer refuses outright — it lists the whole chain of unstarted tasks that
+# reach it through `depends_on` and carries every one of them back to
+# pending together. Restarted fresh, with its own group sorted ahead of
+# every other row's `board`, so the freshly restarted board's empty cursor
+# always lands somewhere in it first — the same trick the blocked-row
+# section below uses for the same reason.
+#
+# `chain-head` depends on `chain-gate`, a `hang`-mode lane of its own — a
+# dependency cannot cross a group (`queue add` refuses it), so gating
+# `chain-head` on something still paused elsewhere in the run, the way
+# `queue_idle` does for every other idle task here, is not available inside
+# a fresh group of its own. A live lane that never returns is: with nothing
+# to make it `Done`, `chain-head` never becomes ready, and is still
+# genuinely `queued` — not already off running its own pipeline — when `u`
+# is pressed. `chain-gate` sorts above it in the group, so it takes two
+# `down`s rather than one to reach the row `u` is this section's own.
+board_stop
+mkdir -p "$CTL"
+echo hang > "$CTL/chain-gate"
+task_doc "$LIVE/chain-gate.md" chain-gate "$BODY" "group: 0-chain" \
+  "touches: [notes/chain-gate.md]"
+must "chain-gate queues" "$SPOOLWAY" queue add --from "$LIVE/chain-gate.md"
+task_doc "$LIVE/chain-head.md" chain-head "$BODY" "group: 0-chain" \
+  "touches: [notes/chain-head.md]" "depends_on: [chain-gate]"
+must "chain-head queues" "$SPOOLWAY" queue add --from "$LIVE/chain-head.md"
+task_doc "$LIVE/chain-tail.md" chain-tail "$BODY" "group: 0-chain" \
+  "touches: [notes/chain-tail.md]" "depends_on: [chain-head]"
+must "chain-tail queues" "$SPOOLWAY" queue add --from "$LIVE/chain-tail.md"
+board_start
+
+CHAIN_GATE_PID=$(lane_pid "chain-gate · implement" 30)
+if [ -n "$CHAIN_GATE_PID" ]; then ok "the gate lane is really mid-turn"
+else bad "the gate lane is really mid-turn"; fi
+draws "the board draws the chain" "chain-tail"
+
+press $'\x1b[B'
+sleep 2
+press $'\x1b[B'
+sleep 2
+press u
+
+draws "\`u\` on the chain's head opens a panel naming both" "unqueue chain-head"
+draws "the dependent, marked with what it depends on" \
+  "chain-tail   (depends on chain-head)"
+draws "and offers enter for both, esc to cancel" "[enter] unqueue them   [esc] cancel"
+stage_stays "nothing moves while the panel is open" chain-head queued
+stage_stays "not even the dependent" chain-tail queued
+
+press $'\r'
+if poll_until 25 _gone chain-head; then ok "enter carries the head back to pending"
+else bad "enter carries the head back to pending"; tail -30 "$BOARD_LOG" | sed 's/^/        /'; fi
+if poll_until 25 _gone chain-tail; then ok "and carries the dependent along with it"
+else bad "and carries the dependent along with it"; tail -30 "$BOARD_LOG" | sed 's/^/        /'; fi
+has "the head's document lands back in pending" "id: chain-head" \
+  "$SPOOLWAY_PROJECT_HOME/pending/chain-head.md"
+has "and so does the dependent's" "id: chain-tail" \
+  "$SPOOLWAY_PROJECT_HOME/pending/chain-tail.md"
+
+# ------------------------------------ `p` reaches a blocked row with a live lane
+#
+# The reach this task adds: the unblocker can be mid-turn on a `blocked` row
+# exactly as an implementer can be mid-turn on `implement`, once the run is
+# unattended, and `p` interrupts that turn the same way. This needs a
+# restart — config is read once at launch, not on every pass — so this task
+# is queued straight into the live queue directory, on `blocked` already,
+# with `blocked_from` set the way a real block leaves it; `routines.sh` and
+# `trials.sh` write straight into the live queue directory with `task_doc`
+# the same way, for a fixture no dispatcher needs to walk there itself. Its
+# group sorts ahead of every other row's `board`, so a single
+# `down` from a freshly restarted board's empty cursor always lands on it,
+# whatever else in this run is still parked.
+#
+# The unblocker is pointed at the `pi` profile rather than the shipped
+# `claude` one: the `hang` ctl mode this suite relies on everywhere else is
+# `pi`'s own protocol (see `scripts/e2e/agents/pi`) — the `claude` stand-in
+# reads the same ctl file for one mode of its own, `decline`, and answers
+# with a real pass for anything else, `hang` included.
+board_stop
+must "unattended, so \`blocked\` is staffed by the unblocker" \
+  "$SPOOLWAY" config set unattended.enabled true
+must "the unblocker's agent, so its own \`hang\` ctl mode is honoured" \
+  "$SPOOLWAY" config set unattended.blocked_agent pi
+echo hang > "$CTL/stuck"
+task_doc "$SPOOLWAY_PROJECT_HOME/queue/stuck.md" stuck "$BODY" \
+  "stage: blocked" "blocked_from: implement" "group: 0-blocked" \
+  "touches: [notes/stuck.md]"
+board_start
+
+STUCK_PID=$(lane_pid "stuck · blocked" 30)
+if [ -n "$STUCK_PID" ]; then ok "the unblocker is really mid-turn on the blocked row"
+else bad "the unblocker is really mid-turn on the blocked row"; fi
+draws "the board draws the staffed blocked row" "stuck"
+
+press $'\x1b[B'
+sleep 2
+press p
+
+draws "\`p\` over the blocked row opens a panel naming the task" "pause stuck"
+draws "the panel names the blocked step and calls it an agent turn" "blocked    agent"
+stage_stays "the task file is untouched while the panel is open" stuck blocked
+
+press $'\r'
+stage_reaches "enter parks the blocked task, interrupting its live unblocker" stuck paused 25
+if poll_while 15 kill -0 "$STUCK_PID"; then ok "and the unblocker's turn is over"
+else bad "and the unblocker's turn is over"; fi
+has "parked_from names the blocked step it was pulled off of" "parked_from: blocked" \
+  "$SPOOLWAY_PROJECT_HOME/queue/stuck.md"
+has "blocked_from survives the park untouched, beside it" "blocked_from: implement" \
+  "$SPOOLWAY_PROJECT_HOME/queue/stuck.md"
+
+# Resuming it puts it back on the step it was parked from — `blocked` — with
+# the same session carried forward, not `resume_target`'s ordinary road. No
+# "freed stale lane" line is expected here: headless's own interrupt above
+# already dropped the lane's record whole rather than leaving it settled (see
+# `pressing_shift_p_opens_a_panel_over_a_live_headless_lane_and_only_enter_interrupts_it`
+# in `src/status/mod.rs`), so there is nothing left for `free_stale_lanes` to
+# find.
+RESUME_OUT=$("$SPOOLWAY" resume stuck 2>&1)
+if [ $? -eq 0 ]; then ok "resuming the parked blocked task"
+else bad "resuming the parked blocked task"; sed 's/^/        /' <<<"$RESUME_OUT"; fi
+if grep -qF "stuck: -> blocked" <<<"$RESUME_OUT"; then
+  ok "it goes back onto \`blocked\`, the step it was parked from"
+else
+  bad "it goes back onto \`blocked\`, the step it was parked from"
+  sed 's/^/        /' <<<"$RESUME_OUT"
+fi
+stage_reaches "the task lands back on \`blocked\`, not \`resume_target\`'s entry" stuck blocked 25
+
 board_stop
 finish
