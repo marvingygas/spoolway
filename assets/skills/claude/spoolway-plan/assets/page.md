@@ -165,6 +165,19 @@ A figure argues the decision; the prose around it only says what to look at.
 - Source is welcome as supporting material under a figure that has already said what the code is
   for — a `<pre>` inside the same `.mock`, or beside it — never as the first thing in a record.
 
+## The machine copy
+
+The `<script type="text/markdown" id="plan">` block at the foot of the page, above the theme
+script, carries the plan's own words a second time, for a reader that opens the file rather than
+a browser — `spoolway-tasks` reads it by name and learns nothing about the markup around it.
+
+**Fill it last, in one pass once the rest of the page is done** — never mirrored slot by slot as
+each section above it is written; the block is prose written once, not markup kept in step with
+markup. It carries every heading, every paragraph, every mock panel and every decision's
+`forces` and `cost` line, from Intend through Mockup, in the page's own order; a figure that has
+no Markdown form of its own appears as `[figure] ` followed by that figure's `aria-label`. A
+revision rewrites the whole block, the same pass it rewrites the prose and figures it followed.
+
 ## The proof block
 
 Run before you say a word, after every fill and every revision:

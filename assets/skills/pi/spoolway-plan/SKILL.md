@@ -145,12 +145,17 @@ day it changes; a path stays true. Name the file that already holds the ground n
    Fill only Intend, Context, Decisions and Mockup. The page never carries tasks at all — not before
    approval, not after.
 
+   **Last act of the fill: the plan block.** `assets/page.md`'s "The machine copy" section
+   covers it — the `<script type="text/markdown" id="plan">` block at the page's foot, written
+   in one pass once the rest of the page is done, never mirrored slot by slot as you go.
+
 5. **Revising an existing plan is a proposal, not an edit.** Read the file first, then, before
    touching it: **summarise the change**, section by section, two or three lines each, not a
    diff; **ask whatever it raises**, in printed output; and **wait for the person to
    confirm** — "Apply it" or equivalent authorises the edit. `assets/page.md`'s "Revising a
    plan" has the rest: Edits only, the proof block re-run, and what to say when a breakdown has
-   already been cut from the shape being revised. A new plan's first copy skips all of this.
+   already been cut from the shape being revised. Rewrite the plan block too, the same pass, per
+   "The machine copy". A new plan's first copy skips all of this.
 
 6. **Open it, say one line, and ask.** `wslview`, `xdg-open` or `open` — first that exists —
    then the path and nothing else: `Plan is ready: /abs/path/to/page`.
