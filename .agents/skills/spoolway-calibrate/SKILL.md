@@ -15,10 +15,9 @@ or both.
 
 - Read `housekeeping.calibrate_window` and the archived tasks completed in that window under
   `~/.spoolway/<project>/archive/`.
-- Read the project's task-log template to learn which parts of a task file are written by
-  lanes. Do not assume fixed section names. Read those parts of every archived task and follow
-  the sequence of events. Work out why review sent work back, why a session blocked, what an
-  agent misunderstood, and what later cleared it.
+- Read `## Status Log`, `## Handoff` and `## Blocker` — the three fixed sections a lane writes to
+  in every archived task — and follow the sequence of events. Work out why review sent work
+  back, why a session blocked, what an agent misunderstood, and what later cleared it.
 - Read `spoolway eval --since <window>` by step. Check pass rates, block counts, lanes per run,
   context pressure, cost and time. Use `--step` to inspect a troubled step and
   `spoolway eval --runs --since <window>` to connect its figures to task records.
