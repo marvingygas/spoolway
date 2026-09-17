@@ -71,13 +71,17 @@ Queue task documents. This is the only way a task enters the queue. See [Queuein
 task](tasks.md#queueing-a-task).
 
 ```
-spoolway queue add --from <PATH>
+spoolway queue add --from <PATH> --base <BRANCH>
 ```
 
 | Flag | Default | What it does |
 |---|---|---|
 | `--from <PATH>` | | A document to queue: a file, a directory of `*.md` files, or `-` for a `---`-separated stream on stdin. Repeatable. Every document is validated together and written all or none |
+| `--base <BRANCH>` | | The branch the whole submission is cut from and merges into. A document's own `base:` wins over it |
 | `--dry-run` | | Validate and print what would happen. Writes nothing and opens no ticket |
+
+A document that sets neither its own `base:` nor `--base` is refused by name and nothing is
+written.
 
 With no `--from`, it prints the default pipeline's skeleton document to fill in.
 
@@ -534,6 +538,7 @@ spoolway task contract --from ~/.spoolway/<project>/pending/
 | Flag | Default | What it does |
 |---|---|---|
 | `--from <PATH>` | | A document, a directory of `*.md` files, or `-` for stdin. Repeatable. Checked as one set. Writes nothing |
+| `--base <BRANCH>` | | The base to check a document against when it sets none of its own. Same rule as `queue add --base` |
 
 The contract holds the default pipeline, the sizing guidance, the output directory, the
 allowed and refused keys, one sentence per key, each pipeline's id budget and body skeleton,
@@ -790,7 +795,10 @@ over](pipelines.md#spoolway-stack-hands-the-change-over).
 ```mermaid
 flowchart LR
   A[commit what is uncommitted] --> B[squash to one commit named after title:]
-  B --> C[push --force-with-lease]
+  B --> H{base branch on origin?}
+  H -->|yes| C[push --force-with-lease]
+  H -->|no, local only| P[publish the base to origin] --> C
+  H -->|no, cannot be published| R[refuse — nothing pushed]
   C --> D[open or reuse the pull request]
   D --> E[register the GitHub stack]
 ```

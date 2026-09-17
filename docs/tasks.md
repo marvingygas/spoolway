@@ -53,7 +53,7 @@ as JSON.
 | `depends_on` | you | Task ids that must reach `done` before this one starts. |
 | `parallel` | you | `true` marks a missing `depends_on` to another `parallel: true` task of the same group as chosen on purpose. See [Declaring a fan on purpose](#declaring-a-fan-on-purpose). |
 | `gate_at` | you | A step id. The task pauses after that step passes, once. See [Paused is the other one, and it is not a block](#paused-is-the-other-one-and-it-is-not-a-block). |
-| `base` | you | The branch the group lands in. Empty means the branch checked out when you queued the task. |
+| `base` | you | The branch the group lands in. Required, here or with `spoolway queue add --base`. |
 | `source` | you | Where the task came from: an issue URL, a plan page path, a name. Never parsed. |
 | `plan` | you | The plan page's absolute path, when `source` holds an issue. Never parsed. |
 | `epic`, `ticket` | the `open` hook, or you | Tracker references. A document that sets `ticket:` itself skips the hook. See [Issue tracking](configuration.md#open--a-fifth-event-run-by-queue-add-itself). |

@@ -161,9 +161,10 @@ pub(crate) fn longest_agent_step(pipeline: &crate::pipeline::Pipeline) -> &str {
 /// itself, over the task's whole life, and a document that sets one is either
 /// confused about what it owns or is trying to smuggle a task onto a step, a
 /// run or an attempt count that was never earned. `base` is not in this list
-/// — it is not refused, because it is simply not read from a document at
-/// all; the checkout `queue add` runs in answers for it instead, silently
-/// overwriting whatever a document happened to say.
+/// — it is a document's to set, and [`parse_submission`] keeps it when it
+/// does; a submission that sets neither a document's own `base:` nor
+/// `queue add --base` is refused rather than given one, since the branch a
+/// checkout happens to have out is never read as a base any more.
 ///
 /// `branch` is here because a task body is content an agent wrote, and
 /// `spoolway stack` force-pushes a squashed commit onto whatever `branch:`
@@ -187,7 +188,12 @@ pub fn queue_add(
     repo: &Repo,
     pipelines: &Pipelines,
     args: &QueueAddArgs,
-    cwd: &std::path::Path,
+    // No longer read for a base: a document's own `base:` or `--base` is the
+    // whole of where one comes from now, never the branch a checkout
+    // happens to have out. Kept in the signature rather than pulled from
+    // every call site — `main.rs`'s dispatch table and every test in this
+    // module still pass it.
+    _cwd: &std::path::Path,
     in_lane: bool,
 ) -> Result<()> {
     if args.from.is_empty() {
@@ -195,18 +201,13 @@ pub fn queue_add(
     }
     refuse_from_lane("the queue is mutated", in_lane)?;
 
-    // The branch of the checkout this was queued in, not the dispatcher's: a
-    // task belongs to the plan whose worktree it was queued from, and several
-    // plans share one queue and one dispatcher. Decided now rather than when
-    // the worktree is cut, because by then this checkout is long gone from the
-    // picture and the ambient HEAD of some other one would answer instead.
-    let base = crate::repo::branch_at(cwd)?;
+    let base = args.base.as_deref();
 
     let documents = gather_documents(&args.from)?;
     if args.dry_run {
-        return queue_add_dry_run(repo, pipelines, &base, &documents);
+        return queue_add_dry_run(repo, pipelines, base, &documents);
     }
-    queue_add_documents(repo, pipelines, &base, &documents)
+    queue_add_documents(repo, pipelines, base, &documents)
 }
 
 /// `--dry-run`: everything `queue add` decides, said out loud, and nothing
@@ -217,17 +218,16 @@ pub fn queue_add(
 fn queue_add_dry_run(
     repo: &Repo,
     pipelines: &Pipelines,
-    base: &str,
+    base: Option<&str>,
     documents: &[(String, String)],
 ) -> Result<()> {
     let tasks = validate_batch(repo, pipelines, base, documents)?;
     println!("dry run — nothing written");
     println!("  project: {}", repo.root.display());
     println!("  home:    {}", repo.home.display());
-    println!(
-        "  base:    `{base}` (the branch {} has out)",
-        repo.checkout.display()
-    );
+    if let Some(base) = base {
+        println!("  base:    `{base}`");
+    }
     for task in &tasks {
         println!(
             "would queue {} at `{}`\n  {}",
@@ -236,7 +236,7 @@ fn queue_add_dry_run(
             task.path.display()
         );
     }
-    println!("{}", based_on_note(&tasks, base));
+    println!("{}", based_on_note(&tasks, base.unwrap_or("")));
     Ok(())
 }
 
@@ -533,7 +533,7 @@ fn skeleton_document(repo: &Repo, pipelines: &Pipelines) -> Result<String> {
          # source: where this came from — an issue URL, a plan page path, never parsed\n\
          touches: []                  # globs this task expects to modify\n\
          depends_on: []               # sibling task ids that must finish first\n\
-         # base: branch-name          # the branch to cut from and merge into — defaults to the branch this checkout has out\n\
+         # base: branch-name          # the branch to cut from and merge into — required, here or with `queue add --base`\n\
          # pipeline: {}               # which pipeline to run on — defaults to this project's default\n\
          # gate_at: step-id           # pause after that step passes, for a person to `spoolway resume`\n\
          ---\n{}",
@@ -653,7 +653,7 @@ fn read_stdin() -> Result<String> {
 /// overwritten below the same way `queue_add` always constructed these by
 /// hand. Only the [`RESERVED_KEYS`] need a check first, because those are
 /// wrong to accept even long enough to overwrite.
-pub(crate) fn parse_submission(name: &str, raw: &str, base: &str) -> Result<Task> {
+pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Result<Task> {
     let (yaml, body) =
         crate::task::split_fence(raw).with_context(|| format!("{name}: not a task document"))?;
 
@@ -728,13 +728,23 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: &str) -> Result<Task
     front.resume = None;
     front.branch = Some(format!("task/{}", front.id));
     // A document that names its own `base:` keeps it — a task cut for a
-    // branch other than the one the checkout happens to have out — and
-    // `validate_batch` checks that branch is real before anything is
-    // written. Everything else is based on the checkout's branch, as before.
+    // branch other than the one `--base` named for the rest of the
+    // submission — and `validate_batch` checks that branch is real before
+    // anything is written. A document naming neither is refused by name: a
+    // base is chosen, never invented from whichever branch a checkout
+    // happens to have out.
     front.base = Some(
         match front.base.take().filter(|own| !own.trim().is_empty()) {
             Some(own) => own,
-            None => base.to_string(),
+            None => base
+                .filter(|flag| !flag.trim().is_empty())
+                .with_context(|| {
+                    format!(
+                        "`{name}` sets no `base:` and no --base was given.\n\n  Set `base:` in \
+                     the document, or pass --base <branch>.\n\nNothing was queued."
+                    )
+                })?
+                .to_string(),
         },
     );
     front.run = None;
@@ -774,7 +784,7 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: &str) -> Result<Task
 pub(crate) fn validate_batch(
     repo: &Repo,
     pipelines: &Pipelines,
-    base: &str,
+    base: Option<&str>,
     documents: &[(String, String)],
 ) -> Result<Vec<Task>> {
     if documents.is_empty() {
@@ -784,9 +794,18 @@ pub(crate) fn validate_batch(
     let mut tasks = Vec::new();
     for (name, raw) in documents {
         let mut task = parse_submission(name, raw, base)?;
-        if let Some(own) = task.front.base.as_deref().filter(|own| *own != base) {
-            check_document_base(repo, name, own)?;
-        }
+        // Whatever base a task ends up with — a document's own, or the
+        // submission's `--base` — has to be a branch this repository really
+        // has, checked here rather than only when a document's value
+        // happens to differ from the flag: a `--base` is as much an
+        // arbitrary value as a document's own `base:` is, and both reach a
+        // task file the same way.
+        let resolved = task
+            .front
+            .base
+            .as_deref()
+            .expect("parse_submission always resolves a base or refuses the document");
+        check_document_base(repo, name, resolved)?;
 
         let pipeline = match &task.front.pipeline {
             Some(name) => pipelines.get(name)?,
@@ -856,10 +875,14 @@ fn mint_id(repo: &Repo, base_id: &str, taken: &std::collections::BTreeSet<String
     }
 }
 
-/// A `base:` a document set for itself, checked before anything is written:
-/// it has to be a branch this repository actually has, since the worktree
-/// is cut from it and the pull request merges into it, and neither of those
-/// can wait until dispatch to find out it is not there.
+/// The base a task ends up with — a document's own `base:`, or the
+/// submission's `--base` where the document left it out — checked before
+/// anything is written: it has to be a branch this repository actually has,
+/// since the worktree is cut from it and the pull request merges into it,
+/// and neither of those can wait until dispatch to find out it is not
+/// there. Run against every task's resolved base, whichever of the two
+/// chose it — an arbitrary value either way, and both reach the task file
+/// the same way.
 ///
 /// The leading `-` is refused before git sees the value at all: what
 /// reaches `rev-parse` and `check-ref-format` here would otherwise be read
@@ -885,16 +908,18 @@ fn check_document_base(repo: &Repo, name: &str, base: &str) -> Result<()> {
     {
         bail!(
             "{name}: `base: {base}` names a branch this repository does not have locally — \
-             create or fetch it first, or leave `base:` out to use the checkout's branch"
+             create or fetch it first, or name one it already has"
         );
     }
     Ok(())
 }
 
 /// The `based on` line every path that queues a batch prints: one line when
-/// the whole batch shares a base — the ordinary case, the checkout's own
-/// branch — and one line per task when documents named bases of their own,
-/// so what is printed is always the base each task was actually given.
+/// the whole batch shares a base — the ordinary case, everything given the
+/// same `--base` — and one line per task when documents named bases of their
+/// own, so what is printed is always the base each task was actually given.
+/// Every task passed in has already been through [`validate_batch`], which
+/// never leaves `front.base` unset.
 pub(crate) fn based_on_note(tasks: &[Task], base: &str) -> String {
     let bases: Vec<&str> = tasks
         .iter()
@@ -917,7 +942,7 @@ pub(crate) fn based_on_note(tasks: &[Task], base: &str) -> String {
 fn queue_add_documents(
     repo: &Repo,
     pipelines: &Pipelines,
-    base: &str,
+    base: Option<&str>,
     documents: &[(String, String)],
 ) -> Result<()> {
     let mut tasks = validate_batch(repo, pipelines, base, documents)?;
@@ -942,11 +967,10 @@ fn queue_add_documents(
         println!("  {}", task.path.display());
     }
     // Where this batch's worktrees will be cut from and where their pull
-    // requests will merge back to — worth saying, because it usually comes
-    // from the checkout this was run in rather than from anything in a
-    // document, and a document that set its own is the exception worth
-    // seeing.
-    println!("{}", based_on_note(&tasks, base));
+    // requests will merge back to — worth saying, because a document that
+    // set its own base rather than taking `--base` (or the submission's
+    // single shared one) is the exception worth seeing.
+    println!("{}", based_on_note(&tasks, base.unwrap_or("")));
 
     // Nothing is banked here any more. Queueing used to be the one path a
     // planning session's spend had onto the ledger; an interactive session's
@@ -4338,7 +4362,7 @@ fn begin_submission(
     state: &mut ScreenState,
 ) -> Mode {
     let documents = selected_documents(groups, state);
-    let pending = match validate_batch(repo, pipelines, base, &documents) {
+    let pending = match validate_batch(repo, pipelines, Some(base), &documents) {
         Ok(pending) => pending,
         Err(err) => return Mode::Outcome(format!("submission refused: {err:#}")),
     };
@@ -4609,7 +4633,7 @@ fn build_trial_arm(
     skip: &std::collections::BTreeSet<String>,
 ) -> Result<Task> {
     let doc = reset_for_reuse(name, doc)?;
-    let mut arm = parse_submission(name, &doc, base)?;
+    let mut arm = parse_submission(name, &doc, Some(base))?;
     arm.front.id = id.to_string();
     arm.front.branch = Some(format!("task/{id}"));
     arm.front.trial = Some(trial_id.to_string());
@@ -4961,7 +4985,7 @@ pub(crate) fn queue_routine_target(
         *doc = with_frontmatter_field(doc, "pipeline", pipeline);
     }
 
-    let mut tasks = validate_batch(repo, pipelines, base, &documents)?;
+    let mut tasks = validate_batch(repo, pipelines, Some(base), &documents)?;
     // No document to write ids back into — see `open_and_prefix`.
     open_and_prefix(repo, &[], &mut tasks)?;
     // All or none: everything above parsed and validated, so these writes
@@ -5013,7 +5037,7 @@ fn begin_routine_queue(
     if documents.is_empty() {
         return Mode::Browsing;
     }
-    match validate_batch(repo, pipelines, base, &documents) {
+    match validate_batch(repo, pipelines, Some(base), &documents) {
         Ok(mut tasks) => match finish_routine(repo, &mut tasks, base) {
             Ok(msg) => after_write(repo, msg),
             Err(err) => Mode::Outcome(format!("queue refused: {err:#}")),
@@ -5048,7 +5072,7 @@ fn begin_routine_solo(
     doc = with_frontmatter_field(&doc, "depends_on", "[]");
     let documents = vec![(task.path.display().to_string(), doc)];
 
-    match validate_batch(repo, pipelines, base, &documents) {
+    match validate_batch(repo, pipelines, Some(base), &documents) {
         Ok(mut tasks) => match finish_routine(repo, &mut tasks, base) {
             Ok(msg) => after_write(repo, msg),
             Err(err) => Mode::Outcome(format!("queue refused: {err:#}")),
@@ -5178,9 +5202,15 @@ mod tests {
         path.display().to_string()
     }
 
+    /// `--base` set to the fixture's own checkout branch — the ambient value
+    /// every one of these tests relied on before a base had to be chosen —
+    /// so a document under test can still leave `base:` out unless the test
+    /// is about `base:` itself, which passes its own document with `base:`
+    /// set and so overrides this anyway.
     fn from_args(paths: &[&str]) -> QueueAddArgs {
         QueueAddArgs {
             from: paths.iter().map(|p| p.to_string()).collect(),
+            base: Some("plan/demo".to_string()),
             dry_run: false,
         }
     }
@@ -5209,13 +5239,13 @@ mod tests {
         );
     }
 
-    /// A task belongs to the plan whose worktree it was queued from, not to
-    /// whichever branch the main checkout happens to be on. That is what lets
-    /// several plans share one queue and one dispatcher without one plan's work
-    /// being cut from another plan's branch.
+    /// A task's base is what a document's own `base:` or `queue add --base`
+    /// chose, never the branch of whichever checkout this was run in — a
+    /// worktree on an entirely different branch changes nothing about the
+    /// base a submission gets.
     #[test]
-    fn a_task_is_based_on_the_branch_of_the_checkout_it_was_queued_in() {
-        let repo = fixture("base-from-cwd");
+    fn a_task_is_based_on_the_flag_not_the_checkout_it_was_queued_in() {
+        let repo = fixture("base-from-flag-not-cwd");
         let git = |dir: &Path, args: &[&str]| crate::repo::run(dir, "git", args).unwrap();
         git(&repo.root, &["config", "user.email", "t@example.com"]);
         git(&repo.root, &["config", "user.name", "t"]);
@@ -5247,8 +5277,8 @@ mod tests {
 
         assert_eq!(
             queued(&repo, "login").front.base.as_deref(),
-            Some("plan/b"),
-            "the base is the queueing worktree's branch, not the project's"
+            Some("plan/demo"),
+            "the base is `--base`, never the branch of the checkout this ran in"
         );
         // And it arrived in the project's queue all the same: one queue, one
         // dispatcher, whichever worktree the work was queued from.
@@ -5896,6 +5926,7 @@ mod tests {
 
         let args = QueueAddArgs {
             from: vec![],
+            base: None,
             dry_run: false,
         };
         assert!(
@@ -5915,7 +5946,7 @@ mod tests {
             "group: demo\n",
             "Just do the thing. No headings anywhere.",
         );
-        let task = parse_submission("demo.md", &text, "plan/demo").unwrap();
+        let task = parse_submission("demo.md", &text, Some("plan/demo")).unwrap();
 
         assert_eq!(task.body, "Just do the thing. No headings anywhere.\n");
     }
@@ -5926,7 +5957,7 @@ mod tests {
     #[test]
     fn a_document_with_an_empty_body_is_refused() {
         let text = document("demo", "group: demo\n", "   \n\n");
-        let err = parse_submission("demo.md", &text, "plan/demo").unwrap_err();
+        let err = parse_submission("demo.md", &text, Some("plan/demo")).unwrap_err();
         assert!(err.to_string().contains("empty"), "{err:#}");
     }
 
@@ -5937,7 +5968,7 @@ mod tests {
     #[test]
     fn a_document_with_no_title_is_refused() {
         let text = "---\nid: demo\ngroup: demo\n---\n## Goal\n\nDo the thing.\n";
-        let err = parse_submission("mine.md", text, "plan/demo").unwrap_err();
+        let err = parse_submission("mine.md", text, Some("plan/demo")).unwrap_err();
         assert!(err.to_string().contains("`title:`"), "{err:#}");
         assert!(err.to_string().contains("mine.md"), "{err:#}");
     }
@@ -5958,7 +5989,7 @@ mod tests {
             "branch",
         ] {
             let text = document("demo", &format!("group: demo\n{key}: bogus\n"), BODY);
-            let err = parse_submission("mine.md", &text, "plan/demo").unwrap_err();
+            let err = parse_submission("mine.md", &text, Some("plan/demo")).unwrap_err();
             assert!(err.to_string().contains(key), "{key}: {err:#}");
             assert!(err.to_string().contains("mine.md"), "{key}: {err:#}");
         }
@@ -5966,21 +5997,34 @@ mod tests {
 
     /// `base:` is a document's to set, and what it sets is kept — a branch
     /// this repository really has is checked for by `validate_batch`, not
-    /// here. A document that leaves it out, or writes it blank, is based on
-    /// the branch the checkout answered with.
+    /// here. A document that leaves it out, or writes it blank, takes the
+    /// submission's own base instead — the `--base` flag or the checkout's
+    /// branch, whichever `parse_submission` was handed.
     #[test]
-    fn a_document_setting_base_keeps_it_and_one_without_takes_the_checkouts() {
+    fn a_document_setting_base_keeps_it_and_one_without_takes_the_submissions() {
         let text = document("demo", "group: demo\nbase: some/other/branch\n", BODY);
-        let task = parse_submission("mine.md", &text, "plan/live").unwrap();
+        let task = parse_submission("mine.md", &text, Some("plan/live")).unwrap();
         assert_eq!(task.front.base.as_deref(), Some("some/other/branch"));
 
         let blank = document("demo", "group: demo\nbase: \"  \"\n", BODY);
-        let task = parse_submission("mine.md", &blank, "plan/live").unwrap();
+        let task = parse_submission("mine.md", &blank, Some("plan/live")).unwrap();
         assert_eq!(task.front.base.as_deref(), Some("plan/live"));
 
         let plain = document("demo", "group: demo\n", BODY);
-        let task = parse_submission("mine.md", &plain, "plan/live").unwrap();
+        let task = parse_submission("mine.md", &plain, Some("plan/live")).unwrap();
         assert_eq!(task.front.base.as_deref(), Some("plan/live"));
+    }
+
+    /// A document that sets no `base:` of its own, submitted with no
+    /// `--base` either, is refused by name — never based on whichever
+    /// branch a checkout happens to have out.
+    #[test]
+    fn a_document_with_no_base_and_no_flag_is_refused() {
+        let text = document("demo", "group: demo\n", BODY);
+        let err = parse_submission("explicit-task-base.md", &text, None).unwrap_err();
+        assert!(err.to_string().contains("explicit-task-base.md"), "{err:#}");
+        assert!(err.to_string().contains("sets no `base:`"), "{err:#}");
+        assert!(err.to_string().contains("--base"), "{err:#}");
     }
 
     /// The retired quota-and-usage-limit park fields have no struct home any
@@ -5994,7 +6038,7 @@ mod tests {
             "group: demo\nparked_at: 1788793980\nparked_until: 1788801180\nparked_window: five_hour\n",
             BODY,
         );
-        let task = parse_submission("mine.md", &text, "plan/demo").unwrap();
+        let task = parse_submission("mine.md", &text, Some("plan/demo")).unwrap();
         let rendered = task.render().unwrap();
         assert!(!rendered.contains("parked_at"), "{rendered}");
         assert!(!rendered.contains("parked_until"), "{rendered}");
@@ -6017,7 +6061,7 @@ mod tests {
             "group: demo\nlaunch_failures:\n  implement: 3\n",
             BODY,
         );
-        let task = parse_submission("mine.md", &text, "plan/demo").unwrap();
+        let task = parse_submission("mine.md", &text, Some("plan/demo")).unwrap();
         assert!(task.front.launch_failures.is_empty());
     }
 
@@ -6038,7 +6082,7 @@ mod tests {
         let err = validate_batch(
             &repo,
             &Pipelines::builtin(),
-            "plan/demo",
+            Some("plan/demo"),
             &[("mine.md".into(), text)],
         )
         .unwrap_err();
@@ -6058,7 +6102,7 @@ mod tests {
         let err = validate_batch(
             &repo,
             &Pipelines::builtin(),
-            "plan/demo",
+            Some("plan/demo"),
             &[("mine.md".into(), text)],
         )
         .unwrap_err();
@@ -6069,12 +6113,57 @@ mod tests {
         );
     }
 
+    /// `--base` is as arbitrary a value as a document's own `base:` — a
+    /// leading `-` or a branch this repository does not have locally is
+    /// refused whichever of the two named it, not only when a document's
+    /// own value happens to disagree with the flag.
+    #[test]
+    fn a_flags_base_is_checked_the_same_as_a_documents_own() {
+        let repo = fixture("flag-base-checked");
+        let text = document("demo", "group: demo\n", BODY);
+        let err = validate_batch(
+            &repo,
+            &Pipelines::builtin(),
+            Some("no/such/branch"),
+            &[("mine.md".into(), text)],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("does not have locally"), "{err:#}");
+
+        let text = document("demo", "group: demo\n", BODY);
+        let err = validate_batch(
+            &repo,
+            &Pipelines::builtin(),
+            Some("-x"),
+            &[("mine.md".into(), text)],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("would read as a flag"), "{err:#}");
+    }
+
+    /// A document naming its own `base:` is checked even when that value
+    /// happens to equal the submission's `--base` — the two are not allowed
+    /// to shadow each other into skipping the check.
+    #[test]
+    fn a_documents_own_base_is_checked_even_when_it_matches_the_flag() {
+        let repo = fixture("own-base-matches-flag");
+        let text = document("demo", "group: demo\nbase: no/such/branch\n", BODY);
+        let err = validate_batch(
+            &repo,
+            &Pipelines::builtin(),
+            Some("no/such/branch"),
+            &[("mine.md".into(), text)],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("does not have locally"), "{err:#}");
+    }
+
     /// Unrecognised keys are a project's own metadata, not spoolway's
     /// business, and survive a round trip through `Frontmatter`'s `extra`.
     #[test]
     fn unrecognised_keys_survive_through_extra() {
         let text = document("demo", "group: demo\nsize: small\ncomplexity: 3\n", BODY);
-        let task = parse_submission("mine.md", &text, "plan/demo").unwrap();
+        let task = parse_submission("mine.md", &text, Some("plan/demo")).unwrap();
 
         assert_eq!(
             task.front.extra.get("size").and_then(|v| v.as_str()),
@@ -6095,7 +6184,7 @@ mod tests {
     #[test]
     fn gate_at_is_read_from_a_document() {
         let text = document("demo", "group: demo\ngate_at: handover\n", BODY);
-        let task = parse_submission("mine.md", &text, "plan/demo").unwrap();
+        let task = parse_submission("mine.md", &text, Some("plan/demo")).unwrap();
         assert_eq!(task.front.gate_at.as_deref(), Some("handover"));
     }
 
@@ -6109,7 +6198,7 @@ mod tests {
             "group: demo\nsource: https://github.com/x/y/issues/42\n",
             BODY,
         );
-        let task = parse_submission("mine.md", &text, "plan/demo").unwrap();
+        let task = parse_submission("mine.md", &text, Some("plan/demo")).unwrap();
         assert_eq!(
             task.front.source.as_deref(),
             Some("https://github.com/x/y/issues/42")
@@ -10181,11 +10270,12 @@ body\n";
         /// at all.
         #[test]
         fn parse_submission_refuses_the_stamped_document_but_not_its_reset() {
-            let err = parse_submission("board-key-map.md", STAMPED_DOC, "master").unwrap_err();
+            let err =
+                parse_submission("board-key-map.md", STAMPED_DOC, Some("master")).unwrap_err();
             assert!(format!("{err:#}").contains("sets `stage:`"));
 
             let reset = reset_for_reuse("board-key-map.md", STAMPED_DOC).unwrap();
-            let task = parse_submission("board-key-map.md", &reset, "master").unwrap();
+            let task = parse_submission("board-key-map.md", &reset, Some("master")).unwrap();
             assert_eq!(task.id(), "board-key-map");
             assert_eq!(task.stage(), crate::pipeline::QUEUED);
         }
@@ -10543,8 +10633,8 @@ body\n";
 
     /// A document may name the branch it is cut from and merges into. One
     /// that does keeps it — verified against the repository's own branches
-    /// first — and one that does not is based on the checkout's branch, as
-    /// every document always was.
+    /// first — and one that does not takes the submission's own `--base`
+    /// instead.
     #[test]
     fn a_document_naming_its_own_base_is_cut_from_that_branch() {
         let repo = fixture("document-base");
@@ -10577,7 +10667,7 @@ body\n";
         assert_eq!(
             queued(&repo, "plain").front.base.as_deref(),
             Some("plan/demo"),
-            "a document without `base:` is based on the checkout's branch"
+            "a document without `base:` takes the submission's own `--base`"
         );
         assert_eq!(
             based_on_note(&[queued(&repo, "own"), queued(&repo, "plain")], "plan/demo"),

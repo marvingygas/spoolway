@@ -37,6 +37,7 @@ const OPTIONAL_KEYS: &[&str] = &[
     "gate_at",
     "epic",
     "ticket",
+    "base",
 ];
 
 /// The keys spoolway's own dispatcher machinery throws away unconditionally
@@ -53,7 +54,6 @@ const OPTIONAL_KEYS: &[&str] = &[
 /// their retirement, and `RETIRED_PARK_KEYS` (`src/task.rs`) strips it out
 /// of `extra` instead, the same way `Task::parse` drops one already queued.
 const IGNORED_KEYS: &[&str] = &[
-    "base",
     "borrowed",
     "last_report",
     "blocked_from",
@@ -161,6 +161,13 @@ const FIELD_SENTENCES: &[(&str, &str)] = &[
          one — and, the same way, the resume path a failed batch leaves behind: a \
          document that already sets this is reported `kept` at `queue add` and \
          the hook never runs for it.",
+    ),
+    (
+        "base",
+        "The branch this task is cut from and merges back into — must name a \
+         branch the repository already has locally. Leave it unset to take the \
+         submission's own `queue add --base` instead; a submission that sets \
+         neither is refused, naming the document.",
     ),
 ];
 
@@ -404,15 +411,16 @@ pub fn task_contract(
     repo: &Repo,
     pipelines: &Pipelines,
     args: &TaskContractArgs,
-    cwd: &std::path::Path,
+    // No longer read for a base: see `queue_add`'s own `_cwd` for why this
+    // stays in the signature unused rather than pulled from every call site.
+    _cwd: &std::path::Path,
 ) -> Result<()> {
     if args.from.is_empty() {
         return print_contract(repo, pipelines);
     }
 
-    let base = crate::repo::branch_at(cwd)?;
     let documents = super::queue::gather_documents(&args.from)?;
-    let tasks = super::queue::validate_batch(repo, pipelines, &base, &documents)?;
+    let tasks = super::queue::validate_batch(repo, pipelines, args.base.as_deref(), &documents)?;
     print_check_report(&tasks, repo, pipelines)
 }
 
@@ -442,12 +450,14 @@ mod tests {
     fn contract_args(paths: &[&str]) -> TaskContractArgs {
         TaskContractArgs {
             from: paths.iter().map(|p| p.to_string()).collect(),
+            base: Some("plan/demo".to_string()),
         }
     }
 
     fn from_args(paths: &[&str]) -> QueueAddArgs {
         QueueAddArgs {
             from: paths.iter().map(|p| p.to_string()).collect(),
+            base: None,
             dry_run: false,
         }
     }
@@ -672,6 +682,44 @@ mod tests {
         assert!(
             !repo.queue_dir().join("checked.md").exists(),
             "a check must never write the document it validated"
+        );
+    }
+
+    /// `task contract --from` runs `queue add --from`'s own base rule, not
+    /// an ambient one of its own: a document with no `base:` and no
+    /// `--base` is refused here exactly as `queue add` would refuse it,
+    /// rather than checking out clean because this command reads the
+    /// checkout's branch instead.
+    #[test]
+    fn from_refuses_a_document_with_no_base_and_no_flag() {
+        let repo = fixture("check-no-base");
+        let text = document("checked", "group: demo\n", BODY);
+        let path = write_doc(&repo, "checked.md", &text);
+
+        let err = task_contract(
+            &repo,
+            &Pipelines::builtin(),
+            &TaskContractArgs {
+                from: vec![path.clone()],
+                base: None,
+            },
+            &repo.root,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("no `base:`"), "{err:#}");
+
+        assert!(
+            task_contract(
+                &repo,
+                &Pipelines::builtin(),
+                &TaskContractArgs {
+                    from: vec![path],
+                    base: Some("plan/demo".to_string()),
+                },
+                &repo.root,
+            )
+            .is_ok(),
+            "--base covers it exactly as queue add --base would"
         );
     }
 

@@ -12,12 +12,21 @@ pub fn strip(text: &str) -> String {
     strip_ansi(text)
 }
 
-/// A queue on disk, two tasks deep: one at a step, one waiting on it.
+/// A queue on disk, two tasks deep: one at a step, one waiting on it. Real
+/// git, and a seed commit: `check_document_base` looks every task's base up
+/// against the repository's own local branches, `refs/heads/group/demo`
+/// included, and an unborn branch has no ref for that lookup to find.
 pub fn fixture(name: &str) -> Repo {
     let root = crate::scratch::root(&format!("board-{name}"));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     crate::scratch::git_init(&root, &["-b", "group/demo"]);
+    crate::repo::run(
+        &root,
+        "git",
+        &["commit", "-q", "--allow-empty", "-m", "seed"],
+    )
+    .unwrap();
     Repo {
         home: root.join(".home"),
         checkout: root.clone(),
@@ -48,8 +57,11 @@ pub fn add_to(
     let path = repo.root.join(format!(".{id}-doc.md"));
     std::fs::write(&path, doc).unwrap();
 
+    // `--base group/demo` — [`fixture`]'s own checkout branch — so a caller
+    // needs no opinion of its own about a base to get a task queued.
     let args = crate::cli::QueueAddArgs {
         from: vec![path.display().to_string()],
+        base: Some("group/demo".to_string()),
         dry_run: false,
     };
     crate::commands::queue_add(repo, &Pipelines::builtin(), &args, &repo.root, false).unwrap();

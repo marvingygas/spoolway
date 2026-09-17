@@ -290,6 +290,62 @@ else
   git -C "$WORKTREES/hooked" status --porcelain | sed 's/^/        /'
 fi
 
+# --------------------------------- a base that exists locally and nowhere else
+# `task/untracked` is a branch this worktree can see but the remote has never
+# heard of — the shape recorded as `cut_from` when a task is cut from a branch
+# that was never itself published, such as a worktree-cut branch. `remote_ref`
+# hands back the bare local name for it, and nothing publishes that name
+# before `gh pr create` is asked to open a pull request against it — for real
+# `gh`, that fails outright (`Base sha can't be blank … Base ref must be a
+# branch`); this suite's stub is lenient about it, so what is checked directly
+# is whether the base branch actually reached the remote, not whether `gh`
+# objected.
+must "the untracked base's branch, off main" git branch task/untracked main
+must "its worktree" git worktree add -q "$WORKTREES/untracked" task/untracked
+(
+  cd "$WORKTREES/untracked" || exit 1
+  mkdir -p notes
+  echo "# untracked" > notes/untracked.md
+  git add -A
+  git commit -qm "wip(untracked): implement, never pushed"
+)
+
+must "leaf's branch, off task/untracked" git branch task/leaf task/untracked
+must "its worktree" git worktree add -q "$WORKTREES/leaf" task/leaf
+(
+  cd "$WORKTREES/leaf" || exit 1
+  mkdir -p notes
+  echo "# leaf" > notes/leaf.md
+  git add -A
+  git commit -qm "wip(leaf): implement"
+)
+# `untracked` is a bare branch, never queued as a task of its own, so it has
+# no pull request for `register_stack` to stack onto — `leaf` names no
+# `depends_on` here, since this case is about `cut_from` resolving a base to
+# publish, not about the stacking that a real dependency chain exercises
+# elsewhere in this suite.
+queue_task leaf "touches: [notes/leaf.md]" \
+  "base: main" "cut_from: task/untracked" "branch: task/leaf"
+
+leaf_out=$(cd "$WORKTREES/leaf" && "$SPOOLWAY" stack leaf 2>&1)
+leaf_status=$?
+
+if [ "$leaf_status" -eq 0 ] \
+   && git -C "$ORIGIN" show-ref --verify --quiet refs/heads/task/untracked; then
+  ok "a base that exists only locally is published to the remote before the pull request is opened"
+else
+  bad "a base that exists only locally is published to the remote before the pull request is opened"
+  printf '        exit %s: %s\n' "$leaf_status" "$leaf_out"
+fi
+
+leaf_pr=$(grep -l '^head=task/leaf$' "$LIVE/prs"/[0-9]* 2>/dev/null | head -1)
+if [ -n "$leaf_pr" ] && [ "$(sed -n 's/^base=//p' "$leaf_pr")" = task/untracked ]; then
+  ok "its pull request targets that base"
+else
+  bad "its pull request targets that base"
+  [ -n "$leaf_pr" ] && sed 's/^/        /' "$leaf_pr"
+fi
+
 # ------------------------------------------- a task may not name its own branch
 # `branch:` is spoolway's field outright. A task document that sets it to
 # anything spoolway would not have stamped itself — `task/<id>`, or the

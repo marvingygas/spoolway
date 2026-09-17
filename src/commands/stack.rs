@@ -158,6 +158,33 @@ pub fn stack(repo: &Repo, args: &StackArgs) -> Result<()> {
         }
     };
 
+    // `cut_ref` came back from `remote_ref` — inside `resolved_ref` for the
+    // direct case, inside the landed-dependency fall-through otherwise — and
+    // that function hands back the bare branch name exactly when no
+    // `origin/<cut_from>` exists yet. `gh pr create --base` can only name a
+    // ref GitHub already knows about, so a base that has never reached the
+    // remote is published here, before anything else is pushed, and refused
+    // here — before this branch's own force-push below — when it cannot be,
+    // so a failed run leaves no published branch behind.
+    if cut_ref == cut_from {
+        match crate::repo::run(
+            &worktree,
+            "git",
+            &["push", "origin", &format!("{cut_from}:{cut_from}")],
+        ) {
+            Ok(_) => {
+                report_line("base", format!("{cut_from} → origin   (no remote had it)"));
+            }
+            Err(_) => {
+                report_line("base", format!("{cut_from} — cannot be published"));
+                bail!(
+                    "refusing to open a pull request against a base no remote can be given. \
+                     Nothing was pushed."
+                );
+            }
+        }
+    }
+
     // The three-dot diff: what this branch changed since it diverged from
     // its cut point, ignoring anything the cut point picked up afterwards.
     // `cut_ref..HEAD` would report the cut point's own later commits as
@@ -972,6 +999,7 @@ mod tests {
             &Pipelines::builtin(),
             &QueueAddArgs {
                 from: vec![path.display().to_string()],
+                base: Some("plan/demo".to_string()),
                 dry_run: false,
             },
             &repo.root,
