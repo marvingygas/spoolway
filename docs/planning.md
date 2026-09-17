@@ -50,6 +50,10 @@ The binary never reads it. It lives outside the checkout, at
 Every page has four sections in this order: Intend, Context, Decisions and Mockup. The
 template is `assets/skills/claude/spoolway-plan/assets/template.html`.
 
+The page also carries a machine copy of its own words, in a `<script type="text/markdown"
+id="plan">` block at the foot of the page that a browser never shows. `/spoolway-plan` writes
+that block; `/spoolway-tasks` reads it instead of the page around it.
+
 ## Writing a good breakdown
 
 `/spoolway-tasks` applies these rules. They apply whether or not you use the skill.

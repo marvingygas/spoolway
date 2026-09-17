@@ -220,6 +220,10 @@ applies, and links to the full notes.
 not answer in time, `update` says so, uses the last known version and carries on with the
 file work.
 
+The file work lands on the checkout `update` runs in. In a linked worktree that is the
+worktree's own tracked files, and the [`checkout:` line](cli-reference.md#the-checkout-line)
+names it first.
+
 The release notes are compiled into the binary:
 
 ```

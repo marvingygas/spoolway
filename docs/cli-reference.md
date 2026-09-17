@@ -19,8 +19,8 @@ command has a page of its own, it is linked.
 
 ## The `checkout:` line
 
-Commands that read the tracked `.spoolway/` files answer for the checkout they run in. When
-that checkout is a linked worktree, they print one line first naming it:
+Commands that read or write the tracked `.spoolway/` files answer for the checkout they run
+in. When that checkout is a linked worktree, they print one line first naming it:
 
 ```
 checkout: ~/.spoolway/worktrees/checkout-line (task/checkout-line)
@@ -35,7 +35,7 @@ object:
 
 The commands that print it: `pipeline show`, `pipeline check`, `pipeline list`, `pipeline
 override`, `prompt list`, `prompt override`, `config show`, `config list`, `config get`,
-`config path`, `config override` and `doctor`.
+`config path`, `config override`, `doctor` and `update`.
 
 ## Your work
 
@@ -684,6 +684,9 @@ spoolway install codex
 Install the latest release and bring forward the files spoolway writes, without touching what
 you wrote. Prompts and task skeletons are never touched. After an npm self-update at a
 terminal, it prints the release notes.
+
+It writes the checkout it runs in. In a linked worktree that is the worktree's own files, not
+the main checkout's, and the [`checkout:` line](#the-checkout-line) names which one.
 
 ```
 spoolway update --dry-run
