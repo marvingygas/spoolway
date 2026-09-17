@@ -1063,15 +1063,15 @@ fn bind_stamped(root: &Path, id: &str) -> Result<PathBuf> {
             // — most often a migration that renamed a legacy home straight
             // onto this exact `home` and was killed before it could
             // upgrade the record riding along with it, still carrying the
-            // legacy shape: a `root`, no `id`. `read_legacy_pointer` tells
-            // that apart from a record that is genuinely corrupt, and a
-            // stamp already valid here is reason enough to finish the
-            // upgrade on the spot rather than send a person chasing a
-            // parse error over an interrupted move that is otherwise
-            // already done. Anything else that fails to parse is a real
-            // problem, propagated rather than guessed past.
-            match read_legacy_pointer(&home) {
-                Some(pointer_root) if pointer_root == root => {
+            // legacy shape: a `root`, no `id`. A stamp already valid here
+            // is reason enough to finish that upgrade on the spot rather
+            // than send a person chasing a parse error over an interrupted
+            // move that is otherwise already done. What the record turns
+            // out to be is [`reread_record`]'s call, not this error's:
+            // between the read that failed and now, a racing migration may
+            // have finished the very upgrade this arm exists to do.
+            match reread_record(&home, root) {
+                Reread::LegacyUpgrade => {
                     write_binding(
                         &home,
                         &Binding {
@@ -1081,7 +1081,13 @@ fn bind_stamped(root: &Path, id: &str) -> Result<PathBuf> {
                     )?;
                     return Ok(home);
                 }
-                _ => return Err(err),
+                // Somebody else's migration landed while this one was
+                // reading: the error in hand describes a record that no
+                // longer exists, so it is dropped and the whole `Binding`
+                // standing there now goes down the ordinary agreement path
+                // below, exactly as if the first read had seen it.
+                Reread::Superseded(binding) => binding,
+                Reread::Corrupt => return Err(err),
             }
         }
     };
@@ -1368,6 +1374,46 @@ fn read_legacy_pointer(home: &Path) -> Option<PathBuf> {
     let raw = std::fs::read_to_string(home.join(BINDING_FILE)).ok()?;
     let pointer: LegacyPointer = toml::from_str(&raw).ok()?;
     Some(pointer.root)
+}
+
+/// What a `project.toml` that would not parse as a whole [`Binding`] turns
+/// out to be, asked a second time — see [`reread_record`], whose three
+/// answers these are.
+#[derive(Debug)]
+enum Reread {
+    /// The legacy shape, naming this same checkout: a migration that moved
+    /// the home and never got to upgrade the record riding along with it.
+    LegacyUpgrade,
+    /// A whole `Binding` after all. Not what the first read saw, so not a
+    /// record that was ever corrupt — a racing migration finished its own
+    /// upgrade in between.
+    Superseded(Binding),
+    /// Neither shape: genuinely corrupt, and whatever error the first read
+    /// reported for it still stands.
+    Corrupt,
+}
+
+/// A second look at a record that would not parse, with the checkout it was
+/// read for in hand.
+///
+/// The read that failed is not enough to judge on its own. Every racer
+/// resolving an upgraded 0.2 project's home for the first time reads this
+/// same file, and the winner's [`write_binding`] lands between some
+/// loser's own read and the recovery that follows it: that loser is
+/// holding a parse error over a legacy record the winner has already
+/// replaced with a whole `Binding`. Nothing is corrupt and nothing is left
+/// to migrate — so this answers from what the file says *now* rather than
+/// from the superseded error, and [`read_legacy_pointer`] declining a
+/// record that already parses as a `Binding` is read as exactly that,
+/// rather than as "not the legacy shape either, so corrupt".
+fn reread_record(home: &Path, root: &Path) -> Reread {
+    match read_legacy_pointer(home) {
+        Some(pointer_root) if pointer_root == root => Reread::LegacyUpgrade,
+        _ => match read_binding(home) {
+            Ok(Some(binding)) => Reread::Superseded(binding),
+            _ => Reread::Corrupt,
+        },
+    }
 }
 
 /// A legacy home genuinely conflicts with `home` — an id-keyed home already
@@ -3751,6 +3797,97 @@ mod tests {
             "a missing source is not waiting"
         );
         assert!(!contended(&missing, false));
+    }
+
+    /// The scratch pair [`reread_record`]'s own tests work on: a home
+    /// holding the record about to be looked at a second time, and the
+    /// checkout it is being looked at on behalf of. Both are real paths,
+    /// because both halves of that judgement are made off what is on disk.
+    fn record_pair(name: &str) -> (PathBuf, PathBuf) {
+        let root = crate::scratch::root(&format!("reread-record-{name}"));
+        let _ = std::fs::remove_dir_all(&root);
+        let (home, work) = (root.join("home"), root.join("work"));
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&work).unwrap();
+        (home, work)
+    }
+
+    /// Writes the 0.2-era record shape — a `root`, no `id` — straight into
+    /// `home`, the way an interrupted migration leaves it behind.
+    fn legacy_record(home: &Path, root: &Path) {
+        #[derive(Serialize)]
+        struct LegacyPointer {
+            root: PathBuf,
+        }
+        std::fs::write(
+            home.join(BINDING_FILE),
+            toml::to_string(&LegacyPointer {
+                root: root.to_path_buf(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// The Linux half of the racing migration, in the form every platform
+    /// can run: a racer that read the legacy record, failed to parse it,
+    /// and only then asked again — by which time the winner beside it had
+    /// replaced that record with a whole `Binding`. The parse error it is
+    /// still holding describes a file that no longer exists, so the record
+    /// standing there now is the answer, not that error.
+    #[test]
+    fn a_record_a_racing_migration_upgraded_is_read_as_what_it_says_now() {
+        let (home, work) = record_pair("superseded");
+        legacy_record(&home, &work);
+        // The winner lands between the two reads.
+        write_binding(
+            &home,
+            &Binding {
+                id: "beadedbeadedbead".to_string(),
+                root: work.clone(),
+            },
+        )
+        .unwrap();
+
+        match reread_record(&home, &work) {
+            Reread::Superseded(binding) => {
+                assert_eq!(binding.id, "beadedbeadedbead");
+                assert_eq!(binding.root, work);
+            }
+            other => panic!("a finished migration is not an error to report: {other:?}"),
+        }
+    }
+
+    /// The case the arm was written for is untouched: a migration that
+    /// moved the home and was killed before upgrading the record still
+    /// reads as an upgrade to finish, not as a corrupt file.
+    #[test]
+    fn an_interrupted_legacy_upgrade_is_still_read_as_one() {
+        let (home, work) = record_pair("interrupted");
+        legacy_record(&home, &work);
+
+        assert!(matches!(reread_record(&home, &work), Reread::LegacyUpgrade));
+    }
+
+    /// A record that is neither shape keeps the first read's error: nothing
+    /// here guesses past a genuinely corrupt `project.toml`.
+    #[test]
+    fn a_record_that_is_neither_shape_stays_corrupt() {
+        let (home, work) = record_pair("corrupt");
+        std::fs::write(home.join(BINDING_FILE), "id = [not even toml\n").unwrap();
+
+        assert!(matches!(reread_record(&home, &work), Reread::Corrupt));
+    }
+
+    /// A legacy record naming some *other* checkout is not this checkout's
+    /// upgrade to finish, and the second read does not turn it into one —
+    /// it parses as neither shape for this `root`, so the error stands.
+    #[test]
+    fn a_legacy_record_naming_another_checkout_is_not_this_ones_upgrade() {
+        let (home, work) = record_pair("elsewhere");
+        legacy_record(&home, &work.parent().unwrap().join("somebody-else"));
+
+        assert!(matches!(reread_record(&home, &work), Reread::Corrupt));
     }
 
     /// A plain recursive copy, `cp -r`'s own behaviour: every file under
