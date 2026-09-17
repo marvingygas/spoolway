@@ -29,6 +29,7 @@ bookkeeping out of them and describe user-visible outcomes.
 - `spoolway template contract` now lists three template shapes instead of four. `.spoolway/templates/task-log.md` (and the shipped `assets/task-log.md` fallback) is retired — the Status Log/Handoff/Blocker wording a lane is told to write is fixed and built into the binary rather than project-overridable. Delete any project-local `.spoolway/templates/task-log.md`; it is no longer read. (#135)
 
 ### Reliability
+- A Windows process that lost the race to migrate a project's legacy state directory (the `~/.spoolway/<name>/` → `~/.spoolway/<label>-<id>/` move from 0.3.0) could surface a bare "Access is denied" error out of a migration that had in fact just succeeded beside it — Windows reports a losing racer's rename as `ERROR_ACCESS_DENIED`, not the `ENOENT` spoolway checked for. The race is now read off the outcome (the legacy home gone, the id-keyed home standing as a directory) rather than off one errno, and a rename Windows is refusing over a held handle is retried for up to 500ms before it is treated as a real failure. (#149)
 - The anchor-tab sweep no longer targets tabs opened on the project checkout itself, only tabs on a task's own worktree, fixing a bug where a person's own workspace on the checkout — or the dispatcher's own tab — could be swept as if it were a stale task tab. (#131)
 
 ### Upgrading
