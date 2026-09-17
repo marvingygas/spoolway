@@ -340,6 +340,62 @@ else
   diff <(echo "$BEFORE_CHECK") <(echo "$AFTER_CHECK") | sed 's/^/        /'
 fi
 
+# ------------------------------------------------------------ explicit base
+# A task's base is a value somebody chose — a document's own `base:` or a
+# `queue add --base` covering the whole submission — never the branch this
+# checkout happens to have out. A submission naming neither is refused by
+# name, and writes nothing. A project of its own, never dispatched: these
+# tasks would otherwise sit in the shared project's queue for the rest of
+# this suite, competing with everything timing-sensitive that follows.
+BASECHECK="$LIVE/basecheck"
+mkdir -p "$BASECHECK" && (cd "$BASECHECK" && git init -q -b plan/x .)
+must "a git identity for the explicit-base case" \
+  env -C "$BASECHECK" git config user.email t@example.com
+must "a git identity for the explicit-base case" \
+  env -C "$BASECHECK" git config user.name t
+must "a project scaffolded fresh for the explicit-base case" \
+  env -C "$BASECHECK" "$SPOOLWAY" init --provider claude --tracker none
+must "a seed commit, so a second branch has something to point at" \
+  env -C "$BASECHECK" git commit -q --allow-empty -m seed
+must "a second local branch --base could point at instead" \
+  env -C "$BASECHECK" git branch other/base
+
+NOBASE="$BASECHECK/nobase.md"
+{
+  echo "---"
+  echo "id: nobase"
+  echo "title: nobase, done"
+  echo "group: live"
+  echo "---"
+  cat "$BODY"
+} > "$NOBASE"
+
+refuses "a submission with no base anywhere is refused" \
+  'sets no `base:` and no --base' \
+  env -C "$BASECHECK" "$SPOOLWAY" queue add --from "$NOBASE"
+refuses "and nothing was queued for it" "" \
+  env -C "$BASECHECK" "$SPOOLWAY" queue show nobase
+
+works "--base covers a submission with no base of its own" \
+  env -C "$BASECHECK" "$SPOOLWAY" queue add --from "$NOBASE" --base plan/x
+says "and the task is cut from the flag's branch" "base: plan/x" \
+  env -C "$BASECHECK" "$SPOOLWAY" queue show nobase
+
+OWNBASE="$BASECHECK/ownbase.md"
+{
+  echo "---"
+  echo "id: ownbase"
+  echo "title: ownbase, done"
+  echo "group: live"
+  echo "base: plan/x"
+  echo "---"
+  cat "$BODY"
+} > "$OWNBASE"
+works "a document's own base wins over --base" \
+  env -C "$BASECHECK" "$SPOOLWAY" queue add --from "$OWNBASE" --base other/base
+says "and the task is cut from the document's own branch, not the flag's" \
+  "base: plan/x" env -C "$BASECHECK" "$SPOOLWAY" queue show ownbase
+
 # --------------------------------------------------------- pipeline contract
 # `pipeline default` is gone — the format is now printed from the binary
 # itself, in `pipeline contract`, rather than dumped from the shipped files.
@@ -1783,16 +1839,19 @@ fi
 {
   echo "---"; echo "id: hook-blocked"; echo "title: hook-blocked, done"
   echo "stage: blocked"; echo "blocked_from: implement"; echo "group: live"
+  echo "base: plan/live"
   echo "touches: [notes/hook-blocked.md]"; echo "---"; cat "$BODY"
 } > "$SPOOLWAY_PROJECT_HOME/queue/hook-blocked.md"
 {
   echo "---"; echo "id: hook-paused"; echo "title: hook-paused, done"
   echo "stage: paused"; echo "paused_at: implement"; echo "group: live"
+  echo "base: plan/live"
   echo "touches: [notes/hook-paused.md]"; echo "---"; cat "$BODY"
 } > "$SPOOLWAY_PROJECT_HOME/queue/hook-paused.md"
 {
   echo "---"; echo "id: hook-done"; echo "title: hook-done, done"
   echo "stage: done"; echo "group: live"
+  echo "base: plan/live"
   echo "touches: [notes/hook-done.md]"; echo "---"; cat "$BODY"
 } > "$SPOOLWAY_PROJECT_HOME/queue/hook-done.md"
 
@@ -1910,6 +1969,7 @@ has "and the ticket was linked under it as a sub-issue, by numeric id" \
   echo "---"; echo "id: github-blocked"; echo "title: github-blocked, done"
   echo "stage: blocked"; echo "blocked_from: implement"
   echo "group: github-single"
+  echo "base: plan/live"
   echo "ticket: $TICKET"
   echo "touches: [notes/github-blocked.md]"; echo "---"; cat "$BODY"
 } > "$SPOOLWAY_PROJECT_HOME/queue/github-blocked.md"

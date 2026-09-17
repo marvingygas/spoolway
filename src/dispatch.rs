@@ -734,16 +734,6 @@ impl<'a> Dispatcher<'a> {
             ));
         }
 
-        // A task queued before bases were recorded has none. The branch this
-        // dispatcher's own checkout is on is what it would have been given, so
-        // it is what it is cut from — decided once here rather than at each of
-        // the several places below that ask a task what it is based on.
-        if let Ok(branch) = self.repo.branch() {
-            for task in &mut tasks {
-                task.front.base.get_or_insert_with(|| branch.clone());
-            }
-        }
-
         let mine = our_checkouts(self.repo, &tasks);
 
         // The anchor tabs a held workspace's create_pane used to leave
@@ -943,6 +933,20 @@ impl<'a> Dispatcher<'a> {
         let mut candidates: Vec<Candidate> = Vec::new();
 
         'tasks: for index in 0..tasks.len() {
+            // A base is chosen now — by a document's own `base:` or
+            // `queue add --base` — never invented here from whichever branch
+            // this dispatcher's own checkout happens to have out. A task
+            // still missing one, queued before that rule held or edited by
+            // hand since, is refused rather than given one.
+            if tasks[index].front.base.is_none() {
+                report.problems.push(format!(
+                    "{}: has no `base:` — edit the task file to add one, or `queue remove` it \
+                     and resubmit with `queue add --base`",
+                    tasks[index].id(),
+                ));
+                continue;
+            }
+
             let pipeline = match self.pipelines.for_task(&tasks[index]) {
                 Ok(pipeline) => pipeline.clone(),
                 Err(err) => {
@@ -4393,10 +4397,14 @@ fn ensure_workspace(
         persist_task(repo, task, report_seen)?;
     }
 
-    let base = match &task.front.base {
-        Some(base) => base.clone(),
-        None => repo.branch()?,
-    };
+    // `collect_candidates` refuses a task with no `base:` before it ever
+    // reaches a step that would call this — never invented here from
+    // whichever branch this checkout happens to have out.
+    let base = task
+        .front
+        .base
+        .clone()
+        .with_context(|| format!("{}: has no `base:` to cut a workspace from", task.id()))?;
     // Every lane runs in a worktree. The only question is whose, and git
     // answers it rather than a setting: a branch cannot be checked out twice, so
     // a task whose branch somebody already has out is *borrowing* that checkout
@@ -6374,7 +6382,10 @@ mod tests {
             plan: None,
             gate_at: None,
             branch: None,
-            base: None,
+            // `fixture`'s own checkout branch — a base is required now, and
+            // every test that does not care what it is gets one for free;
+            // a test about a missing base clears it explicitly with `edit`.
+            base: Some("work".into()),
             run: None,
             cut_from: None,
             base_commit: None,
@@ -6463,6 +6474,32 @@ mod tests {
         assert_eq!(task.front.workspace_id.as_deref(), Some("w9"));
         assert_eq!(task.front.pane_id.as_deref(), Some("w9:p1"));
         assert_eq!(task.prompts_at("implement"), 1);
+    }
+
+    /// A task with no `base:` — queued before the rule held, or edited by
+    /// hand since — is refused rather than given one from whichever branch
+    /// this dispatcher's own checkout happens to have out.
+    #[test]
+    fn a_task_with_no_base_is_refused_rather_than_given_one() {
+        let repo = fixture("no-base");
+        let path = add_task_with(&repo, "demo", "queued", |f| f.base = None);
+        let mux = FakeMux::new(vec![]);
+
+        let report = run_pass(&repo, &mux);
+
+        assert!(mux.did("create_workspace").is_empty(), "{:?}", mux.calls());
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|p| p.contains("demo") && p.contains("base:")),
+            "{:?}",
+            report.problems
+        );
+
+        let task = reload(&path);
+        assert_eq!(task.stage(), "queued");
+        assert_eq!(task.front.base, None);
     }
 
     /// A run of two plans is still one tab: every lane of one project shares

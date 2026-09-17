@@ -355,9 +355,6 @@ fn run() -> Result<()> {
                 Command::Queue {
                     command: Some(QueueCommand::Show { task }),
                 } => commands::queue_show(&repo, task),
-                // `cwd`, not `repo.root`: a task is based on the branch of the
-                // checkout it was queued in, which is a plan's worktree far
-                // more often than it is the main one.
                 Command::Queue {
                     command: Some(QueueCommand::Add(args)),
                 } => {

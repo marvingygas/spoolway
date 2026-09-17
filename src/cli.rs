@@ -1038,16 +1038,25 @@ pub struct QueueAddArgs {
     /// `group`, `source`, `plan`, `pipeline`, `gate_at` and `base` are a
     /// document's to set; `stage`, `run`, `attempts`, `base_commit` and
     /// `cut_from` are spoolway's alone, and a document setting one is
-    /// refused by name. A document that leaves `base` out is based on the
-    /// branch the checkout this command runs in has out; one that sets it
-    /// must name a branch this repository has locally. Any other key
-    /// survives untouched, for a project's own metadata.
+    /// refused by name. A document's own `base:` wins over `--base`; a
+    /// document that sets neither is refused by name, naming the document,
+    /// rather than based on whichever branch this checkout happens to have
+    /// out. One that sets a base must name a branch this repository has
+    /// locally. Any other key survives untouched, for a project's own
+    /// metadata.
     ///
     /// Omitted entirely, nothing is queued: the pipeline's skeleton document
     /// is printed instead, for a person to save, fill in, and hand back
     /// through this same flag.
     #[arg(long = "from", value_name = "PATH")]
     pub from: Vec<String>,
+
+    /// The base every document in this submission is cut from and merges
+    /// back into, unless a document names its own `base:` — which always
+    /// wins. Required, here or in each document, since neither is invented
+    /// from the branch this checkout happens to have out any more.
+    #[arg(long, value_name = "BRANCH")]
+    pub base: Option<String>,
 
     /// Validate and say what would happen, writing nothing: the project root
     /// and home directory resolved, the base branch, and every task that
@@ -1086,6 +1095,13 @@ pub struct TaskContractArgs {
     /// as JSON instead.
     #[arg(long = "from", value_name = "PATH")]
     pub from: Vec<String>,
+
+    /// The base to check a document against when it sets none of its own —
+    /// see `queue add --base`. A document that sets neither this nor its
+    /// own `base:` is refused, exactly as `queue add --from` would refuse
+    /// it.
+    #[arg(long, value_name = "BRANCH")]
+    pub base: Option<String>,
 }
 
 /// Read one issue out of this project's own tracker.

@@ -515,14 +515,31 @@ TASKBODY
 # `queue add --from` reads, since the per-task flags it used to take
 # (`--body-file`, `--touches`, `--depends-on`, `--plan`, `--pipeline`,
 # `--parallel`) are gone.
+#
+# `base:` is filled in here, off the branch checked out where this runs,
+# unless a suite already named its own — a base is chosen now, never
+# invented by `queue add` from whichever branch a checkout happens to have
+# out, and this is what every suite that has no opinion of its own about a
+# base relied on before that changed.
 task_doc() {
   local path=$1 id=$2 body=$3
   shift 3
+  local has_base=0
+  for line in "$@"; do
+    case "$line" in
+      base:*) has_base=1 ;;
+    esac
+  done
   {
     echo "---"
     echo "id: $id"
     echo "title: $id, done"
     for line in "$@"; do echo "$line"; done
+    if [ "$has_base" -eq 0 ]; then
+      local branch
+      branch=$(git branch --show-current 2>/dev/null) || branch=
+      [ -n "$branch" ] && echo "base: $branch"
+    fi
     echo "---"
     cat "$body"
   } >"$path"

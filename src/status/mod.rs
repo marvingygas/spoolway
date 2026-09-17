@@ -4822,6 +4822,7 @@ mod tests {
         // writes nothing; it has to accept the document exactly as it is.
         let contract_args = crate::cli::TaskContractArgs {
             from: vec![pending_doc.display().to_string()],
+            base: None,
         };
         crate::commands::task_contract(&repo, &pipelines, &contract_args, &repo.root).unwrap();
 
@@ -4830,6 +4831,7 @@ mod tests {
         // without editing it by hand.
         let queue_args = crate::cli::QueueAddArgs {
             from: vec![pending_doc.display().to_string()],
+            base: Some("group/demo".to_string()),
             dry_run: false,
         };
         crate::commands::queue_add(&repo, &pipelines, &queue_args, &repo.root, false).unwrap();

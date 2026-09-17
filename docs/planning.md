@@ -19,10 +19,9 @@ flowchart LR
 
 ## Why a plan is a branch
 
-`spoolway queue` writes the branch of the current checkout into each task's `base:`. That
-branch is the plan's branch. Queue a plan from the branch the work should land in, such as
-`main` or a release branch. Several plans can be queued from one checkout. They all share one
-queue and one dispatcher.
+Each task's `base:` is the branch the plan lands in, such as `main` or a release branch. Set it
+in each task document, or once with `spoolway queue add --base` for the whole submission.
+Several plans can be queued from one checkout. They all share one queue and one dispatcher.
 
 ## Two skills, cut at approval
 
