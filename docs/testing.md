@@ -73,7 +73,7 @@ with a `// covers:` line.
 | `flow` | A task's whole life: queued, implement, review, handover, archived |
 | `commands` | Command steps: `run:`, exit-code routing, `background:`, `timeout:`; the queue screen submitting a group; `issue_tracking.key_in_names` |
 | `stacking` | Three chained tasks, each pull request on the branch it is cut from |
-| `stack` | `spoolway stack`: the squash, a refused lease, an empty diff, a bad `branch:`, the body from the task file |
+| `stack` | `spoolway stack`: the squash, a refused lease, an empty diff, a bad `branch:`, the body from the task file, a base branch that exists locally and nowhere else |
 | `conflicts` | A base that moves under a waiting branch, and the rebase |
 | `forge` | The `gh` test double, and a hand-off with nothing to hand over |
 | `disaster` | A hard kill with lanes live, a stale lock, a restart over a running lane, a stop with live lanes, retention, a dead multiplexer |

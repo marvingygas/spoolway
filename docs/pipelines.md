@@ -277,7 +277,10 @@ from, and registers the GitHub stack. It uses git and `gh` only. No model runs.
 
 ```mermaid
 flowchart LR
-  A[commit leftovers] --> B[squash to one commit] --> C[push --force-with-lease]
+  A[commit leftovers] --> B[squash to one commit] --> H{base branch on origin?}
+  H -->|yes| C[push --force-with-lease]
+  H -->|no, local only| P[publish the base to origin] --> C
+  H -->|no, cannot be published| R[refuse — nothing pushed]
   C --> D{pull request exists?}
   D -->|yes| E[reuse it]
   D -->|no| F[open it against the base branch]
@@ -296,6 +299,9 @@ flowchart LR
 - The pull request's title is the task's `title:`. Its body is the task file's body plus a
   trailer that lists files outside `touches` and predicted conflicts with open `parallel: true`
   tasks.
+- A base branch that exists locally but not on `origin` is pushed to `origin` before the pull
+  request is opened. A base that cannot be published refuses before the task's own branch is
+  force-pushed, so a failed run leaves nothing published.
 - An empty diff against the cut point opens no pull request.
 - A git or `gh` failure routes to `on_fail`. Resuming `handover` reuses the existing pull
   request.

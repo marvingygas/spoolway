@@ -766,7 +766,10 @@ over](pipelines.md#spoolway-stack-hands-the-change-over).
 ```mermaid
 flowchart LR
   A[commit what is uncommitted] --> B[squash to one commit named after title:]
-  B --> C[push --force-with-lease]
+  B --> H{base branch on origin?}
+  H -->|yes| C[push --force-with-lease]
+  H -->|no, local only| P[publish the base to origin] --> C
+  H -->|no, cannot be published| R[refuse — nothing pushed]
   C --> D[open or reuse the pull request]
   D --> E[register the GitHub stack]
 ```
