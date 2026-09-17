@@ -309,7 +309,6 @@ auto_commit = true           # commit a lane's leftover work when its step settl
 enabled = true               # the overnight switch
 max_output_tokens = 0        # output-token ceiling for a run with nobody watching; 0 is none
 max_cost_usd = 0.0           # dollar ceiling for the same run; 0 is none
-skip_blocked_lane = true     # a cleared block carries the task past the step it blocked on
 blocked_agent = "claude"     # who staffs `blocked` when nobody is at the keyboard
 blocked_model = "claude-opus-5"
 blocked_effort = "medium"

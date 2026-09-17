@@ -150,10 +150,12 @@ pub fn report(
         // `blocked` declares no `on_pass` of its own — where its pass goes is
         // read from the task's own record of where it stopped, by
         // `cleared_block_target`. For an agent step, that is one step *past*
-        // there under the default rather than back onto it: the unblocker did
-        // that step's work, so arriving back on it would pay for the work
-        // twice. A command step has no such trade — see `cleared_block_target`'s
-        // own doc for why it is always handed back to itself.
+        // there rather than back onto it: the unblocker did that step's work,
+        // so arriving back on it would pay for the work twice — a `--pass`
+        // from `blocked` is taken at its word, unconditionally, which is what
+        // the `true` below means. A command step has no such trade — see
+        // `cleared_block_target`'s own doc for why it is always handed back
+        // to itself.
         //
         // Either way this goes through the same `resume_at` that
         // `spoolway resume` performs by hand: the loop budgets out of the step
@@ -161,8 +163,7 @@ pub fn report(
         // the block — which had often already read the tree and done most of
         // the work — is marked to be continued rather than replaced by a cold
         // one.
-        let target =
-            cleared_block_target(&task, pipeline, repo.config.unattended.skip_blocked_lane);
+        let target = cleared_block_target(&task, pipeline, true);
         resume_at(&mut task, pipeline, &target);
         target
     } else if paused_from_blocked {
@@ -176,9 +177,10 @@ pub fn report(
         // So this parks on `paused` instead, exactly as a gated pass does,
         // and — unlike an ordinary block, which calls `set_blocked_from`
         // below — leaves `blocked_from` untouched rather than clearing it.
-        // `spoolway resume` needs it later to compute the very same
-        // destination a pass would have reached, through the same
-        // `cleared_block_target` above; clearing it here would leave that
+        // `spoolway resume` needs it later to know which step to hand the
+        // task back to — through the same `cleared_block_target` above, but
+        // with `takes_over: false`, since nothing here claimed that step's
+        // work was done; clearing `blocked_from` here would leave that
         // resume nothing to read and no better fallback than the pipeline's
         // entry.
         let origin = task
@@ -759,12 +761,18 @@ pub fn resume_target(task: &Task, pipeline: &Pipeline) -> String {
 /// claim it makes in its report. A command step's output is a `git push` or a
 /// pull request opened, and "I did that step's work" from an unblocker does
 /// not make either one exist; only running the command does. So a task
-/// blocked on a command step resumes on that same step, whatever
-/// `unattended.skip_blocked_lane` says — the setting only ever decided what
-/// an *agent* step's take-over was worth, and a command step was never
-/// eligible for it.
+/// blocked on a command step resumes on that same step, whatever `takes_over`
+/// says.
 ///
-/// Two cases hand back whatever the setting says, because there is nothing to
+/// `takes_over` is the reported verb, not a setting: [`report`]'s own pass
+/// from `blocked` passes `true` unconditionally, because a `--pass` is the
+/// only outcome that reaches this function directly — the work is done, on
+/// the unblocker's word. [`past_the_gate`] passes `false`, because reaching
+/// it through a cleared block means a person is resuming a task that landed
+/// on `paused` by `--pause`, `--fail` or `--block` — none of which claim the
+/// step's work is done, so nothing here is carried past it.
+///
+/// Two cases hand back whatever `takes_over` says, because there is nothing to
 /// carry the task to: an origin the pipeline no longer has, and an origin that
 /// declares no `on_pass` of its own.
 pub fn cleared_block_target(task: &Task, pipeline: &Pipeline, takes_over: bool) -> String {
@@ -801,8 +809,9 @@ pub fn cleared_block_target(task: &Task, pipeline: &Pipeline, takes_over: bool) 
 /// at the other end of the pipeline, and the counters it never spent are worth
 /// keeping.
 ///
-/// The step it stopped on, rather than `target`, because under
-/// `unattended.skip_blocked_lane` those are no longer the same step. A task that
+/// The step it stopped on, rather than `target`, because a `--pass` from
+/// `blocked` on an agent step carries `target` one step past there — see
+/// `cleared_block_target` — so those are no longer the same step. A task that
 /// spent `e2e → test` and blocked resumes at `test`, and handing back the
 /// budgets out of `test` would return counters nothing spent while leaving the
 /// spent one in place — so the first failure at `test` would route to `e2e`,
@@ -917,7 +926,7 @@ pub fn resume(
     // and neither has a gate to answer. Checked ahead of `--stage`, which a
     // person names to reroute a genuine gate on purpose.
     match task.front.paused_at.is_some() && args.stage.is_none() {
-        true => past_the_gate(repo, pipelines, task, args),
+        true => past_the_gate(pipelines, task, args),
         false => back_onto_its_step(repo, pipelines, task, args),
     }
 }
@@ -1049,12 +1058,7 @@ fn free_stale_lanes(repo: &Repo, pipelines: &Pipelines, task: &Task) {
 /// edited while a task sat on `paused` should route the task the way the file
 /// says today; a destination frozen at report time would send it somewhere the
 /// project has since stopped meaning.
-fn past_the_gate(
-    repo: &Repo,
-    pipelines: &Pipelines,
-    mut task: Task,
-    args: &ResumeArgs,
-) -> Result<()> {
+fn past_the_gate(pipelines: &Pipelines, mut task: Task, args: &ResumeArgs) -> Result<()> {
     let pipeline = pipelines.for_task(&task)?;
 
     // The step it paused on, which is the only thing that says where "on" is.
@@ -1075,14 +1079,18 @@ fn past_the_gate(
         )
     })?;
 
-    // A pause `commands::report` raised from `blocked` itself, told apart from
-    // an ordinary gated step's pause by the one thing only that road leaves
-    // behind: `blocked_from`, still naming the very step `paused_at` does.
-    // Its own pass never runs `blocked`'s absent `on_pass` — it takes
-    // `blocked_from`'s, through the same `cleared_block_target` a pass from
-    // `blocked` reads — so accepting it here has to reach exactly there too,
-    // rather than the plain `on_pass` below, which is what an ordinary gate
-    // means and is not what a person clearing this one is answering.
+    // A `--pause`, `--fail` or `--block` `commands::report` raised from
+    // `blocked` itself, told apart from an ordinary gated step's pause by the
+    // one thing only that road leaves behind: `blocked_from`, still naming
+    // the very step `paused_at` does. None of those three verbs claim the
+    // blocked step's work is done — only a `--pass` from `blocked` does that,
+    // and it never lands here: it resolves straight through `report`'s own
+    // `cleared_block_target` call and never reaches `paused` at all. So
+    // resuming this one always hands the task back to the step it blocked
+    // on, through the same `cleared_block_target` with `takes_over: false` —
+    // never past it, whatever kind of step it is — rather than the plain
+    // `on_pass` below, which is what an ordinary gate means and is not what a
+    // person clearing this one is answering.
     let cleared_block = !args.reject && task.front.blocked_from.as_deref() == Some(gated.as_str());
 
     let outcome = match args.reject {
@@ -1090,8 +1098,7 @@ fn past_the_gate(
         true => Outcome::Fail,
     };
     let destination = if cleared_block {
-        let target =
-            cleared_block_target(&task, pipeline, repo.config.unattended.skip_blocked_lane);
+        let target = cleared_block_target(&task, pipeline, false);
         resume_at(&mut task, pipeline, &target);
         target
     } else {
@@ -1114,16 +1121,29 @@ fn past_the_gate(
         );
     }
 
-    let note = args.message.clone().unwrap_or_else(|| match args.reject {
-        true => format!("`{gated}` rejected at the gate"),
-        false => format!("`{gated}` released at the gate"),
-    });
+    let note = args
+        .message
+        .clone()
+        .unwrap_or_else(|| match (cleared_block, args.reject) {
+            (true, _) => format!("block cleared by hand; nothing was done at `{gated}`"),
+            (false, true) => format!("`{gated}` rejected at the gate"),
+            (false, false) => format!("`{gated}` released at the gate"),
+        });
 
     task.front.paused_at = None;
     task.set_stage(&destination, Some(&note));
     task.save()?;
 
-    println!("{}: {gated} --{outcome}--> {destination}", args.task);
+    // `destination` always equals `gated` here — `cleared_block_target` with
+    // `takes_over: false` hands the task straight back to the step it
+    // blocked on — so the plain `{gated} --pass--> {destination}` phrasing
+    // below would print a step arrowing to itself, reading like a pass that
+    // ran and landed nowhere rather than a block being cleared.
+    if cleared_block {
+        println!("{}: {gated}: block cleared by hand", args.task);
+    } else {
+        println!("{}: {gated} --{outcome}--> {destination}", args.task);
+    }
     Ok(())
 }
 
@@ -1752,10 +1772,10 @@ mod tests {
     }
 
     /// The same shape, but the step that blocked is a command step rather
-    /// than an agent one. `skip_blocked_lane` still reads `true`, but a
-    /// command step is never eligible for the take-over it names: the
-    /// unblocker's word is not what a `git push` or a pull request needs, so
-    /// the pass hands the task back to the step itself rather than past it.
+    /// than an agent one. A command step is never eligible for the
+    /// take-over a `--pass` from `blocked` otherwise gets: the unblocker's
+    /// word is not what a `git push` or a pull request needs, so the pass
+    /// hands the task back to the step itself rather than past it.
     #[test]
     fn a_staffed_blocked_steps_pass_hands_a_command_step_back_to_itself() {
         let repo = unattended_fixture("staffed-blocked-command-pass");
@@ -1785,14 +1805,17 @@ mod tests {
         assert_eq!(task.front.blocked_from, None, "nothing is blocked any more");
     }
 
-    /// The same pass with `unattended.skip_blocked_lane` off, which is what
-    /// the key is for: the task lands back on the step it blocked on, and the
-    /// lane that was already there is continued rather than replaced by a
-    /// cold one.
+    /// A `--block` reported from `blocked` parks on `paused` first (see
+    /// `a_staffed_blocked_steps_fail_block_or_pause_lands_on_paused`), and
+    /// resuming it hands the task back to the step it blocked on rather than
+    /// past it: `past_the_gate`'s own `cleared_block` branch always passes
+    /// `takes_over: false` to `cleared_block_target`, because a `--block`
+    /// never claims the step's work is done the way a `--pass` from
+    /// `blocked` does. The lane that blocked is continued, not replaced by a
+    /// cold one, the same as a take-over would leave it.
     #[test]
-    fn skip_blocked_lane_off_hands_the_task_back_to_where_it_blocked() {
-        let mut repo = unattended_fixture("blocked-hands-back");
-        repo.config.unattended.skip_blocked_lane = false;
+    fn a_block_reported_from_blocked_hands_the_task_back_to_where_it_blocked_once_resumed() {
+        let repo = fixture("blocked-hands-back-block");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "t"]);
@@ -1805,12 +1828,92 @@ mod tests {
         task.front.blocked_from = Some("work".into());
         task.save().unwrap();
 
-        report_outcome(&repo, &pipelines, "stuck", Outcome::Pass);
+        report_outcome(&repo, &pipelines, "stuck", Outcome::Block);
+        let task = queued(&repo, "stuck");
+        assert_eq!(
+            task.stage(),
+            crate::pipeline::PAUSED,
+            "parks for a person first"
+        );
+
+        resume(
+            &repo,
+            &pipelines,
+            &crate::cli::ResumeArgs {
+                task: "stuck".into(),
+                stage: None,
+                reject: false,
+                message: None,
+            },
+            None,
+        )
+        .unwrap();
+
         let task = queued(&repo, "stuck");
         assert_eq!(
             task.stage(),
             "work",
-            "the pass returns it to `blocked_from`"
+            "a block is never taken as the unblocker's word for the step's work — it goes \
+             back, never past it"
+        );
+        assert_eq!(
+            task.front.resume.as_deref(),
+            Some("work"),
+            "the lane that blocked is continued, not replaced by a cold one"
+        );
+        assert_eq!(task.front.blocked_from, None, "nothing is blocked any more");
+        let log = task.section("## Status Log").unwrap();
+        assert!(
+            log.contains("block cleared by hand; nothing was done at `work`"),
+            "{log}"
+        );
+    }
+
+    /// The same, for `--pause` — the one outcome from `blocked` the old tests
+    /// never covered here, since a `--pause` from anywhere but `blocked` did
+    /// not exist before this rule.
+    #[test]
+    fn a_pause_reported_from_blocked_also_hands_the_task_back_to_where_it_blocked_once_resumed() {
+        let repo = fixture("blocked-hands-back-pause");
+        let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+        add(&repo, "stuck", &[]);
+        let pipelines = staffed_pipelines();
+
+        let mut task = queued(&repo, "stuck");
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        task.front.blocked_from = Some("work".into());
+        task.save().unwrap();
+
+        report_outcome(&repo, &pipelines, "stuck", Outcome::Pause);
+        let task = queued(&repo, "stuck");
+        assert_eq!(
+            task.stage(),
+            crate::pipeline::PAUSED,
+            "parks for a person first"
+        );
+
+        resume(
+            &repo,
+            &pipelines,
+            &crate::cli::ResumeArgs {
+                task: "stuck".into(),
+                stage: None,
+                reject: false,
+                message: None,
+            },
+            None,
+        )
+        .unwrap();
+
+        let task = queued(&repo, "stuck");
+        assert_eq!(
+            task.stage(),
+            "work",
+            "nothing here could clear it, so a person's resume hands it back rather than \
+             carrying it past"
         );
         assert_eq!(
             task.front.resume.as_deref(),
@@ -1935,8 +2038,8 @@ mod tests {
             assert_eq!(
                 task.front.blocked_from.as_deref(),
                 Some("work"),
-                "{outcome}: the origin survives, for a resume to read the same destination a \
-                 pass would have reached"
+                "{outcome}: the origin survives, for a resume to know which step to hand the \
+                 task back to"
             );
         }
     }

@@ -1103,21 +1103,22 @@ impl Pipeline {
 
             // `blocked` routes itself, in one turn: a pass is read from where
             // the task stopped rather than from this step. For an agent step
-            // that is one step past there under `unattended.skip_blocked_lane`,
-            // back onto it when that is off; a command step is always handed
-            // back to itself, whatever the setting says. Anything else
-            // (`--fail`, `--block`, or `--pause`) parks the task on `paused`
-            // for a person, never back onto `blocked` itself. Each of the keys
-            // that would otherwise say one of those things is refused by
-            // name, pointing at what actually decides it instead of leaving a
+            // that is one step past there, on the unblocker's word that the
+            // work is done; a command step is always handed back to itself,
+            // whatever kind of pass it was. Anything else (`--fail`,
+            // `--block`, or `--pause`) parks the task on `paused` for a
+            // person, never back onto `blocked` itself, and a person resuming
+            // it hands it back to the step it blocked on rather than past it —
+            // see `commands::report::past_the_gate`. Each of the keys that
+            // would otherwise say one of those things is refused by name,
+            // pointing at what actually decides it instead of leaving a
             // reader to wonder why the graph disagrees with the file.
             if step.id == BLOCKED {
                 if step.on_pass.is_some() {
                     bail!(
                         "step `blocked` declares `on_pass:` — where its pass goes is read from \
                          the step the task blocked on, not from here: past that step for an \
-                         agent step (or back onto it under `unattended.skip_blocked_lane = \
-                         false`), always back onto it for a command step; delete `on_pass:`"
+                         agent step, always back onto it for a command step; delete `on_pass:`"
                     );
                 }
                 if step.on_fail.is_some() {
@@ -1634,10 +1635,10 @@ impl Pipeline {
     /// `blocked` itself has none: `validate` refuses it `on_pass`, `on_fail`
     /// and `on_loop_max`, so there is nothing declared to report, and its real
     /// routing — read from the step the task blocked on for a pass, back to
-    /// itself on a block — is decided at runtime from task state and
-    /// `unattended.skip_blocked_lane`, not from the graph. Reporting a
-    /// self-edge here would read as the very unbounded cycle `blocked` is
-    /// deliberately exempt from.
+    /// itself on a block — is decided at runtime from task state and the
+    /// reported verb, not from the graph. Reporting a self-edge here would
+    /// read as the very unbounded cycle `blocked` is deliberately exempt
+    /// from.
     pub fn destinations<'a>(&'a self, step: &'a Step) -> Vec<&'a str> {
         if step.id == BLOCKED {
             return Vec::new();

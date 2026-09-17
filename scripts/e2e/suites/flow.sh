@@ -309,17 +309,18 @@ for outcome in pause block; do
   fi
   has "paused_at names the step it originally blocked on" "paused_at: implement" \
     "$SPOOLWAY_PROJECT_HOME/queue/$task.md"
-  has "blocked_from survives the pause, for the resume below to read" \
+  has "blocked_from survives the pause, naming the step to hand back to" \
     "blocked_from: implement" "$SPOOLWAY_PROJECT_HOME/queue/$task.md"
 done
 
-# And resuming either one reaches exactly what a pass from `blocked` would
-# have — `implement`'s own `on_pass` — not back onto `implement` to redo it.
+# And resuming either one hands the task back to the step it blocked on —
+# `implement` itself, to run again — never past it to `implement`'s own
+# `on_pass`: only a `--pass` from `blocked` takes the unblocker at its word.
 must "resuming the paused task" "$SPOOLWAY" resume stuck-pause
-if [ "$(stage_of stuck-pause)" = review ]; then
-  ok "resuming a pause from \`blocked\` carries the task past where it blocked"
+if [ "$(stage_of stuck-pause)" = implement ]; then
+  ok "resuming a pause from \`blocked\` hands the task back to where it blocked"
 else
-  bad "resuming a pause from \`blocked\` carries the task past where it blocked (at \`$(stage_of stuck-pause)\`)"
+  bad "resuming a pause from \`blocked\` hands the task back to where it blocked (at \`$(stage_of stuck-pause)\`)"
 fi
 rm -f "$SPOOLWAY_PROJECT_HOME/queue/stuck-pause.md" "$SPOOLWAY_PROJECT_HOME/queue/stuck-block.md"
 

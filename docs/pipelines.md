@@ -200,10 +200,10 @@ step. Any other key is refused. Keys left out fall back to the config.
     effort: high
 ```
 
-- A pass carries the task past the blocked step to that step's `on_pass`. Set
-  `unattended.skip_blocked_lane = false` to land it on the blocked step instead. A command
-  step is always resumed at itself.
-- The unblocker pauses the task with `spoolway report --pause` when the work cannot be done.
+- A `--pass` carries the task past the blocked step to that step's `on_pass` for an agent step,
+  and back to itself for a command step.
+- A `--pause`, `--fail` or `--block` parks the task on `paused`. `spoolway resume` then hands it
+  back to the step it blocked on.
 - `spoolway dispatch` refuses an unattended run with a blank `blocked_model`.
 - `spoolway pipeline show` marks where each pipeline's `blocked` step comes from.
 
