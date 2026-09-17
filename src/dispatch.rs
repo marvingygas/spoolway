@@ -8964,7 +8964,7 @@ mod tests {
         assert_eq!(
             task.front.blocked_from.as_deref(),
             Some("implement"),
-            "blocked_from survives, for a resume to reach the same destination a pass would"
+            "blocked_from survives, for a resume to know which step to hand the task back to"
         );
     }
 

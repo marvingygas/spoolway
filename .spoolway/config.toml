@@ -14,7 +14,6 @@
 # unattended.enabled                    true, false            false                                                   Whether this run stops for a person, or resumes every block itself with `max_output_tokens` as the only brake.
 # unattended.max_output_tokens          <tokens>               0                                                       Output tokens one unattended run may spend before the dispatcher stops starting work; 0 is no ceiling.
 # unattended.max_cost_usd               <dollars>              0                                                       Dollars one unattended run may spend before the dispatcher stops starting work, priced from the resolved model table; 0 is no ceiling.
-# unattended.skip_blocked_lane          true, false            true                                                    Whether clearing a block on an agent step carries the task past the step it blocked on, on the grounds that the unblocker did that step's work; false hands it back to that step instead. A command step is always handed back to itself, whatever this says.
 # unattended.blocked_agent              <profile>              claude                                                  Which `[agents.*]` profile staffs `blocked` in an unattended run, for every pipeline that does not declare its own `blocked` step.
 # unattended.blocked_model              <model>                claude-opus-5                                           The model that profile runs, staffing `blocked`. Blank refuses to start an unattended run: nobody would be able to clear a block.
 # unattended.blocked_effort             <level>                (blank)                                                 How hard that model thinks, staffing `blocked`.
@@ -62,7 +61,6 @@ auto_commit = true
 enabled = true
 max_output_tokens = 0
 max_cost_usd = 0.0
-skip_blocked_lane = true
 blocked_agent = "claude"
 blocked_model = "claude-opus-5"
 blocked_effort = "medium"

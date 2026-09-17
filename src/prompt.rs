@@ -247,15 +247,16 @@ pub fn contract(repo: &Repo, pipelines: &Pipelines, args: &PromptContractArgs) -
     // `on_pass`, and `step.destination` reading that as "stays put" would tell
     // the one lane most likely to read this that a pass leaves the task where
     // it is, which is the opposite of true — a pass moves it on from whatever
-    // it blocked on, this lane's own work standing in for that step's. And
-    // nothing short of `--pause` — or a `--fail`/`--block`, read the same way
-    // — ever routes back onto `blocked` itself any more: both park the task
-    // on `paused`, with the same destination a pass would have reached
-    // waiting for a person.
+    // it blocked on, this lane's own work standing in for that step's. A
+    // `--pause` — or a `--fail`/`--block`, read the same way — never claims
+    // that work is done, so it parks on `paused` instead, and a person's
+    // `spoolway resume` hands the task back to the step it blocked on rather
+    // than past it: the one destination this lane's own pass would have
+    // reached, and the only one a `--pause` never gets to on its own.
     if step.id == crate::pipeline::BLOCKED {
         println!("     --pass  → on from whatever this task blocked on, your work standing in");
         println!(
-            "     --pause → `paused`, never back onto `blocked` — the same destination a pass would have reached, waiting for a person"
+            "     --pause → `paused`, waiting for a person — `spoolway resume` then hands the task back to whatever it blocked on, not past it"
         );
     } else {
         for (outcome, label) in [

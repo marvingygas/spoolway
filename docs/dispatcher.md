@@ -266,12 +266,13 @@ when there is none.
 An escalation puts the task on `blocked`. In an attended run the board marks the row amber and
 names the pane in NEXT, and the task waits for `spoolway resume`. In an
 [unattended run](pipelines.md#unattended-runs) a lane starts on the `blocked` step instead, using
-the `[unattended]` `blocked_*` settings, and `unattended.skip_blocked_lane` decides whether the
-task continues past the step it blocked on.
+the `[unattended]` `blocked_*` settings.
 
 A staffed `blocked` lane answers with `--pass` when it cleared the way, or `--pause` when it
-cannot. A `--fail` or `--block` from it is read as `--pause`. All three put the task on
-`paused`, and `spoolway resume` then carries it to the step a pass out of `blocked` would.
+cannot. A `--fail` or `--block` from it is read as `--pause`. A `--pass` carries the task past
+the blocked step to that step's `on_pass`, or back to itself for a command step. A `--pause`,
+`--fail` or `--block` puts the task on `paused`, and `spoolway resume` then hands it back to the
+step it blocked on.
 
 A blocked task keeps its pane open until it is resumed.
 

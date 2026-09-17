@@ -1793,18 +1793,10 @@ pub struct Unbanked {
 /// destination the dispatcher would not actually take it to. Read for both a
 /// parked block and a staffed one: the row differs in state and colour, not
 /// in where the arrow points.
-fn blocked_next(
-    repo: &Repo,
-    task: &crate::task::Task,
-    pipeline: &crate::pipeline::Pipeline,
-) -> String {
+fn blocked_next(task: &crate::task::Task, pipeline: &crate::pipeline::Pipeline) -> String {
     format!(
         "→ {}",
-        crate::commands::cleared_block_target(
-            task,
-            pipeline,
-            repo.config.unattended.skip_blocked_lane
-        )
+        crate::commands::cleared_block_target(task, pipeline, true)
     )
 }
 
@@ -1816,26 +1808,21 @@ fn blocked_next(
 /// Two different roads out of `paused`, told apart the same way
 /// `commands::report::resume` tells them apart before choosing between
 /// `past_the_gate` and `back_onto_its_step`. A `paused_at` names a gate that
-/// passed, so resuming carries the task *past* it — to `cleared_block_target`
-/// for a block reported as `--pause`, told apart from an ordinary gate by
-/// `blocked_from` naming the same step, or to the step's own `on_pass`
-/// otherwise. A `parked_from` with no gate — a person's own keypress, or a
-/// lane `escalate_clock` gave up on — names nothing to pass: `unpark` sends
-/// the task straight back onto that exact step, so this names the step
-/// itself rather than whatever comes after it.
-fn paused_next(
-    repo: &Repo,
-    task: &crate::task::Task,
-    pipeline: &crate::pipeline::Pipeline,
-) -> Option<String> {
+/// passed, so resuming carries the task *past* it — to the step's own
+/// `on_pass` — unless `blocked_from` names the same step, which means it
+/// parked here on a `--pause`, `--fail` or `--block` from `blocked` rather
+/// than an ordinary gate: none of those three claim the step's work is done,
+/// so resuming hands the task back to that step instead, through the same
+/// `cleared_block_target` with `takes_over: false` that `past_the_gate`
+/// reads. A `parked_from` with no gate — a person's own keypress, or a lane
+/// `escalate_clock` gave up on — names nothing to pass: `unpark` sends the
+/// task straight back onto that exact step, so this names the step itself
+/// rather than whatever comes after it.
+fn paused_next(task: &crate::task::Task, pipeline: &crate::pipeline::Pipeline) -> Option<String> {
     if let Some(gated) = task.front.paused_at.as_deref() {
         let step = pipeline.step(gated)?;
         return Some(if task.front.blocked_from.as_deref() == Some(gated) {
-            crate::commands::cleared_block_target(
-                task,
-                pipeline,
-                repo.config.unattended.skip_blocked_lane,
-            )
+            crate::commands::cleared_block_target(task, pipeline, false)
         } else {
             step.destination(crate::pipeline::Outcome::Pass)
                 .map(str::to_string)?
@@ -1987,18 +1974,14 @@ fn build_rows(
                 // lane of its own still mid-turn — resuming into a pane a
                 // person or an agent is actively using would race it.
                 let resumable = graph.ready(task.id()) && !lane_busy(lanes, &step_ids, task.id());
-                (
-                    State::Blocked,
-                    blocked_next(repo, task, pipeline),
-                    resumable,
-                )
+                (State::Blocked, blocked_next(task, pipeline), resumable)
             }
             // The step a pass would carry it to, not a description of what it
             // is waiting on — the same rule a block reads its resumability
             // by, on exactly the same two conditions.
             None if task.stage() == crate::pipeline::PAUSED => {
                 let resumable = graph.ready(task.id()) && !lane_busy(lanes, &step_ids, task.id());
-                let target = paused_next(repo, task, pipeline);
+                let target = paused_next(task, pipeline);
                 let next = match (target, resumable) {
                     (Some(step), true) => format!("→ {step} — [r] resumes it"),
                     (Some(step), false) => {
@@ -2074,7 +2057,7 @@ fn build_rows(
                     // staffed lane working it right now reads the same
                     // destination a cleared block would, and nothing else:
                     // acceptance criterion 1.
-                    blocked_next(repo, task, pipeline)
+                    blocked_next(task, pipeline)
                 } else {
                     match pipeline.next_running_step(&step.id) {
                         // Plain text, no colour: this string is clipped to the
@@ -4036,6 +4019,44 @@ mod tests {
 
         assert!(row.resumable, "{}", row.next);
         assert_eq!(row.next, "→ review");
+    }
+
+    /// A task paused by a `--pause`, `--fail` or `--block` from `blocked` —
+    /// told apart from an ordinary gate by `blocked_from` naming the same
+    /// step as `paused_at` — reads its NEXT column as the step it blocked on,
+    /// not past it: `paused_next`'s cleared-block branch now passes
+    /// `takes_over: false` to `cleared_block_target`, the same rule
+    /// `past_the_gate` resumes it by.
+    #[test]
+    fn a_cleared_block_row_names_the_step_it_blocked_on_not_past_it() {
+        let repo = fixture("paused-cleared-block");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "wall", &[], None);
+        let mut task = repo.task("wall").unwrap();
+        task.front.blocked_from = Some("implement".into());
+        task.front.paused_at = Some("implement".into());
+        task.set_stage(crate::pipeline::PAUSED, None);
+        task.save().unwrap();
+
+        let tasks = repo.tasks().unwrap();
+        let graph = Graph::build(&tasks, &pipelines, &repo.archive_dir());
+        let rows = build_rows(
+            &repo,
+            &tasks,
+            &pipelines,
+            &graph,
+            &BTreeSet::new(),
+            &[],
+            &[],
+            None,
+        )
+        .unwrap();
+        let row = rows.iter().find(|r| r.id == "wall").unwrap();
+
+        assert_eq!(
+            row.next, "→ implement — [r] resumes it",
+            "never past `implement`, unlike an ordinary gate's own `on_pass`"
+        );
     }
 
     /// `r` on a paused row goes through exactly the code `spoolway

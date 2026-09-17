@@ -27,10 +27,10 @@ the pull request number in its handoff; merge it, release the gate, and `ready` 
 against the `main` that now carries it. Releasing the gate without merging just re-finds
 the same blocker and spends a lap of `ready`'s loop.
 
-`released` is not ceremony. `publish` is an agent step, and under
-`unattended.skip_blocked_lane` a cleared block on an agent step carries the task one step
-*past* it — so a release could reach `done` with nothing published. A command step is
-never carried past, so `released` is what makes `done` mean released.
+`released` is not ceremony. `publish` is an agent step, and a `--pass` out of `blocked` carries
+the task one step *past* it — so a release could reach `done` with nothing published if
+`publish` were the last word. A command step is never carried past, so `released` is what makes
+`done` mean released.
 
 ## Cutting a release
 

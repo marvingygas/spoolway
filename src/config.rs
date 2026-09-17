@@ -857,27 +857,17 @@ pub struct UnattendedConfig {
     /// its own doc for what that means.
     pub max_cost_usd: f64,
 
-    /// Whether the `blocked` step's pass counts as the blocked step's own pass.
-    ///
-    /// The unblocker is told to *do the blocked step's work* — write the code,
-    /// fix the check, make the call. If it did, then handing the task back to
-    /// that step re-runs work that is already finished, and re-running an agent
-    /// step means paying for it a second time. So a pass here takes an *agent*
-    /// step's task to wherever the blocked step's `on_pass` pointed, one step
-    /// past where it stopped. Set `false` to hand it back to the step it
-    /// blocked on instead, which is what spoolway did before this key existed.
-    ///
-    /// **A command step ignores this key.** Its output is a `git push` or a
-    /// pull request opened, and the unblocker's word that it happened does
-    /// not make either one exist — only running the command does. So a task
-    /// blocked on a command step is always handed back to that step to run
-    /// again, whatever this says.
-    ///
-    /// Two things are unaffected either way. A task with no recorded origin
-    /// still has nowhere forward to go, so it is not carried anywhere — see
-    /// [`crate::commands::resume_target`]. And a blocked step whose origin
-    /// declares no `on_pass` hands back, because there is no next step to name.
-    pub skip_blocked_lane: bool,
+    /// Retired: whether the `blocked` step's pass counted as the blocked
+    /// step's own pass, `false` handing the task back to the step it blocked
+    /// on instead. That question is answered by the reported verb now, not a
+    /// setting — a `--pass` always takes the unblocker at its word, and a
+    /// `--pause`, `--fail` or `--block` always hands the task back once a
+    /// person resumes it — see [`crate::commands::cleared_block_target`].
+    /// Kept only so an existing config still parses; dropped unconditionally
+    /// on the next save.
+    #[allow(dead_code)]
+    #[serde(default, skip_serializing)]
+    skip_blocked_lane: bool,
 
     /// Which agent profile staffs `blocked` in an unattended run.
     ///
@@ -920,9 +910,7 @@ impl Default for UnattendedConfig {
             enabled: false,
             max_output_tokens: 0,
             max_cost_usd: 0.0,
-            // The unblocker is asked to do the blocked step's work, so the
-            // default takes it at its word and carries on from there.
-            skip_blocked_lane: true,
+            skip_blocked_lane: false,
             // What every shipped pipeline's own `blocked` step used to spell
             // out by hand, before this table replaced it.
             blocked_agent: "claude".into(),
@@ -2789,31 +2777,49 @@ mod tests {
     /// A whole table missing from a config reads as its *shipped* defaults,
     /// not as the zero value of each field's type.
     ///
-    /// `unattended.skip_blocked_lane` is the field that actually broke this
+    /// `unattended.skip_blocked_lane` was the field that actually broke this
     /// way once, back when it lived on `[dispatch]` as `blocked_takes_over`:
     /// `#[serde(default)]` on the field itself, rather than on the
     /// container, gives `bool::default()` — `false` — and every project
     /// that had not rewritten its config would have quietly gone on doing
-    /// the old thing. That is exactly what happened for one commit. It is
-    /// written out unconditionally now, but the container-level default this
-    /// test checks is what protects the next field like it, whichever table
-    /// it lands on.
+    /// the old thing. That is exactly what happened for one commit.
+    /// `blocked_session` is a live field with the same shape — written out
+    /// unconditionally, defaulting to `true` — so the container-level
+    /// default this test checks is what protects it, and the next field like
+    /// it, whichever table it lands on.
     #[test]
     fn a_config_missing_a_whole_table_reads_its_shipped_defaults() {
         let config: Config = toml::from_str("[dispatch]\ninterval = \"10s\"\n")
             .expect("a config predating [unattended] must still parse");
         assert!(
-            config.unattended.skip_blocked_lane,
+            config.unattended.blocked_session,
             "a file that has never heard of [unattended] means its shipped default, not `false`"
         );
 
         // Set deliberately, it survives the round trip.
-        let off: Config = toml::from_str("[unattended]\nskip_blocked_lane = false\n").unwrap();
-        assert!(!off.unattended.skip_blocked_lane);
+        let off: Config = toml::from_str("[unattended]\nblocked_session = false\n").unwrap();
+        assert!(!off.unattended.blocked_session);
         assert!(
             toml::to_string(&off)
                 .unwrap()
-                .contains("skip_blocked_lane = false")
+                .contains("blocked_session = false")
+        );
+    }
+
+    /// `unattended.skip_blocked_lane` retires the way `session_reuse_uncached`
+    /// and `quota_ceiling` do: an existing config still parses, and the key
+    /// is gone on the next save because nothing reads it any more — clearing
+    /// a block now reads the reported verb instead, see
+    /// [`crate::commands::cleared_block_target`].
+    #[test]
+    fn skip_blocked_lane_parses_and_drops() {
+        let raw = "[unattended]\nskip_blocked_lane = false\n";
+        let config: Config =
+            toml::from_str(raw).expect("a retired skip_blocked_lane must still parse");
+        assert!(
+            !toml::to_string(&config)
+                .unwrap()
+                .contains("skip_blocked_lane")
         );
     }
 

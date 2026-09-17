@@ -133,15 +133,6 @@ pub const REFERENCE: &[Reference] = &[
                     starting work, priced from the resolved model table; 0 is no ceiling.",
     },
     Reference {
-        key: "unattended.skip_blocked_lane",
-        values: "true, false",
-        default: "true",
-        sentence: "Whether clearing a block on an agent step carries the task past the step \
-                    it blocked on, on the grounds that the unblocker did that step's work; \
-                    false hands it back to that step instead. A command step is always \
-                    handed back to itself, whatever this says.",
-    },
-    Reference {
         key: "unattended.blocked_agent",
         values: "<profile>",
         default: "claude",
@@ -1027,30 +1018,16 @@ mod tests {
         );
     }
 
-    /// `unattended.skip_blocked_lane` is written out at every value, unlike
-    /// the old `[dispatch]` key it replaced — see
-    /// [`crate::config::UnattendedConfig`] — so `set` reaches it the ordinary
-    /// way, through the file rather than through a seeded slot.
+    /// `unattended.skip_blocked_lane` is retired, the same road
+    /// `dispatch.blocked_takes_over` — the key it replaced — took:
+    /// `get`/`set` never resolve it, so this reaches `config.rs`'s own
+    /// refusal on load rather than confkv's read/write-while-absent path.
+    /// Clearing a block reads the reported verb now — see
+    /// [`crate::commands::cleared_block_target`].
     #[test]
-    fn skip_blocked_lane_is_written_at_every_value_and_set_the_ordinary_way() {
-        let config = Config::default();
-        assert_eq!(
-            get(&config, "unattended.skip_blocked_lane").unwrap(),
-            "true"
-        );
-        assert!(
-            toml::to_string(&config)
-                .unwrap()
-                .contains("skip_blocked_lane"),
-            "unlike the retired dispatch.blocked_takes_over, this key is never hidden"
-        );
-
-        let off = set(&config, "unattended.skip_blocked_lane", "false").unwrap();
-        assert!(!off.unattended.skip_blocked_lane);
-        assert_eq!(get(&off, "unattended.skip_blocked_lane").unwrap(), "false");
-
-        let on = set(&off, "unattended.skip_blocked_lane", "true").unwrap();
-        assert!(on.unattended.skip_blocked_lane);
+    fn skip_blocked_lane_is_refused_rather_than_resolved() {
+        let err = get(&Config::default(), "unattended.skip_blocked_lane").unwrap_err();
+        assert!(err.to_string().contains("no config key"), "{err}");
     }
 
     /// A config naming the retired `dispatch.tear_lanes_on_stop` is refused

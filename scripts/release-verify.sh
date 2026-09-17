@@ -8,6 +8,18 @@
 # being published. A command step is never carried past, so whatever this
 # script asserts is the real condition for `done`.
 #
+# Every check below reads the version from `origin/main`, so a `publish` that
+# pushed nothing at all leaves this script proving the release that shipped
+# last time and exiting 0 — which is how run `release-spoolway-3` reached
+# `done` with no tag, no packages and nothing published. So the run is
+# anchored to the candidate it was cut for: `SPOOLWAY_TASK_FILE`, the one
+# variable a command step is given that leads back to this task, names the
+# document whose `base_commit:` is the commit `main` stood at when the lane
+# was cut. If `origin/main` is still sitting on it, no release commit was
+# pushed and there is nothing here to verify. (Agent lanes are handed
+# `SPOOLWAY_HEAD`, which carries the same fact in one word; command steps
+# are not, so this reads the document instead.)
+#
 # Needs only git, curl, jq and gh — deliberately not node or npm, which a
 # release lane's own machine is not required to have. Nothing here
 # authenticates to npm: every read is of a public package.
@@ -19,6 +31,47 @@ die() { say "release-verify: $*"; exit 1; }
 registry=https://registry.npmjs.org
 
 git fetch --quiet --tags --force origin
+
+# The frozen candidate, read out of the leading `---` block of the task
+# document so a `base_commit:` written in the prose below it cannot be
+# mistaken for the key. Empty when the variable is unset — run by hand, or by
+# anything that is not a dispatched command step — and empty too when the
+# document carries no such key, which is what a borrowed checkout records:
+# neither of those has a candidate to anchor to, and both keep the
+# unanchored behaviour rather than failing a release over a missing hint.
+anchor=""
+if [ -n "${SPOOLWAY_TASK_FILE:-}" ]; then
+  # Set but unreadable is not the same absence: the dispatcher writes this
+  # path itself, so a path that does not resolve means something is wrong
+  # with the run, and falling back would silently reopen the hole above.
+  [ -r "$SPOOLWAY_TASK_FILE" ] || die "SPOOLWAY_TASK_FILE names $SPOOLWAY_TASK_FILE, which is not readable"
+  anchor="$(awk '
+    NR == 1 { if ($0 != "---") exit; next }
+    $0 == "---" { exit }
+    /^base_commit:/ {
+      sub(/^base_commit:[ \t]*/, "")
+      gsub(/["\047]/, "")
+      sub(/[ \t]*$/, "")
+      print
+      exit
+    }
+  ' "$SPOOLWAY_TASK_FILE")"
+  case "$anchor" in
+    "") ;;
+    *[!0-9a-f]*) die "base_commit in $SPOOLWAY_TASK_FILE is '$anchor', which is not a commit" ;;
+  esac
+fi
+
+if [ -n "$anchor" ]; then
+  head="$(git rev-parse origin/main)"
+  # Prefix rather than equality: `base_commit:` is a full rev-parse when the
+  # dispatcher writes it, but an abbreviated one hand-edited into the
+  # document still names the same commit.
+  if [ "${head#"$anchor"}" != "$head" ]; then
+    die "origin/main is still at $head, the candidate this task was cut from — publish pushed no release commit, so there is nothing to verify"
+  fi
+  say "anchored to $anchor; origin/main has moved on to $head"
+fi
 
 version="$(git show origin/main:Cargo.toml | awk '/^\[package\]/{p=1;next} /^\[/{p=0} p && /^version *=/{gsub(/[" ]/,"",$3); print $3; exit}')"
 [ -n "$version" ] || die "could not read the package version from origin/main:Cargo.toml"

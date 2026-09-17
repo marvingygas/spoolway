@@ -831,15 +831,16 @@ pub struct DispatchArgs {
     /// a step to route to. The lane is staffed by `unattended.blocked_agent` and
     /// its four companion keys (or by the five keys a declared `blocked` step
     /// overrides), `loop` applies to it as usual, and nothing bounds how many
-    /// times it round-trips. When that lane passes, `unattended.skip_blocked_lane`
-    /// decides where an *agent* step lands: on by default, it carries one step
-    /// past where the block was hit, on the unblocker's word that the work is
-    /// done; set `false`, it hands the task back to the step it blocked on to
-    /// run again. A command step ignores this setting — the unblocker's word
-    /// is not a `git push` or a pull request, so it always runs again. A
-    /// step's `gate:` is not one of the things this lifts — a gate is a
-    /// person's decision by design, so a gated pass still parks on `paused` and
-    /// still waits for `spoolway resume`.
+    /// times it round-trips. Where its own report lands follows the verb it
+    /// reports, the same as attended: a `--pass` carries an *agent* step one
+    /// step past where the block was hit, on the unblocker's word that the
+    /// work is done; a command step always runs again, since the unblocker's
+    /// word is not a `git push` or a pull request. Anything else it
+    /// reports — `--pause`, `--fail` or `--block` — parks the task in front
+    /// of a person the same as it would attended, since nobody here can
+    /// stand in for one twice. A step's `gate:` is not one of the things this
+    /// lifts — a gate is a person's decision by design, so a gated pass still
+    /// parks on `paused` and still waits for `spoolway resume`.
     ///
     /// Overrides `unattended.enabled` for this run only, which is the shape
     /// the setting wants — the overnight run and the one you sit with are the
@@ -908,9 +909,9 @@ pub struct ReportArgs {
     pub block: bool,
 
     /// Nothing short of a person can clear this. Only means anything on
-    /// `blocked`; refused on every other step. Parks the task on `paused`
-    /// with the same destination a pass would have reached, waiting for
-    /// `spoolway resume`.
+    /// `blocked`; refused on every other step. Parks the task on `paused`,
+    /// waiting for `spoolway resume` — which hands it back to the step it
+    /// blocked on, not to the destination a pass would have reached.
     #[arg(long, group = "outcome")]
     pub pause: bool,
 
@@ -1880,7 +1881,10 @@ mod tests {
             !help.contains("does not stage `blocked`"),
             "stale two-branch description is back: {help}"
         );
-        assert!(help.contains("skip_blocked_lane"), "{help}");
+        assert!(
+            help.contains("one step past where the block was hit"),
+            "{help}"
+        );
         assert!(help.contains("materialises"), "{help}");
     }
 
