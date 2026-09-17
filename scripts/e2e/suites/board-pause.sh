@@ -339,6 +339,66 @@ else bad "enter carries out the unqueue"; tail -30 "$BOARD_LOG" | sed 's/^/     
 has "the document lands back in pending" "id: stalled" "$SPOOLWAY_PROJECT_HOME/pending/stalled.md"
 has "and so does the one that never ran" "id: never-run" "$SPOOLWAY_PROJECT_HOME/pending/never-run.md"
 
+# ------------------------------------------- `u` carries a dependent chain
+# The reach this task adds: `u` on a task a still-queued task depends on no
+# longer refuses outright — it lists the whole chain of unstarted tasks that
+# reach it through `depends_on` and carries every one of them back to
+# pending together. Restarted fresh, with its own group sorted ahead of
+# every other row's `board`, so the freshly restarted board's empty cursor
+# always lands somewhere in it first — the same trick the blocked-row
+# section below uses for the same reason.
+#
+# `chain-head` depends on `chain-gate`, a `hang`-mode lane of its own — a
+# dependency cannot cross a group (`queue add` refuses it), so gating
+# `chain-head` on something still paused elsewhere in the run, the way
+# `queue_idle` does for every other idle task here, is not available inside
+# a fresh group of its own. A live lane that never returns is: with nothing
+# to make it `Done`, `chain-head` never becomes ready, and is still
+# genuinely `queued` — not already off running its own pipeline — when `u`
+# is pressed. `chain-gate` sorts above it in the group, so it takes two
+# `down`s rather than one to reach the row `u` is this section's own.
+board_stop
+mkdir -p "$CTL"
+echo hang > "$CTL/chain-gate"
+task_doc "$LIVE/chain-gate.md" chain-gate "$BODY" "group: 0-chain" \
+  "touches: [notes/chain-gate.md]"
+must "chain-gate queues" "$SPOOLWAY" queue add --from "$LIVE/chain-gate.md"
+task_doc "$LIVE/chain-head.md" chain-head "$BODY" "group: 0-chain" \
+  "touches: [notes/chain-head.md]" "depends_on: [chain-gate]"
+must "chain-head queues" "$SPOOLWAY" queue add --from "$LIVE/chain-head.md"
+task_doc "$LIVE/chain-tail.md" chain-tail "$BODY" "group: 0-chain" \
+  "touches: [notes/chain-tail.md]" "depends_on: [chain-head]"
+must "chain-tail queues" "$SPOOLWAY" queue add --from "$LIVE/chain-tail.md"
+board_start
+
+CHAIN_GATE_PID=$(lane_pid "chain-gate · implement" 30)
+if [ -n "$CHAIN_GATE_PID" ]; then ok "the gate lane is really mid-turn"
+else bad "the gate lane is really mid-turn"; fi
+draws "the board draws the chain" "chain-tail"
+
+press $'\x1b[B'
+sleep 2
+press $'\x1b[B'
+sleep 2
+press u
+
+draws "\`u\` on the chain's head opens a panel naming both" "unqueue chain-head"
+draws "the dependent, marked with what it depends on" \
+  "chain-tail   (depends on chain-head)"
+draws "and offers enter for both, esc to cancel" "[enter] unqueue them   [esc] cancel"
+stage_stays "nothing moves while the panel is open" chain-head queued
+stage_stays "not even the dependent" chain-tail queued
+
+press $'\r'
+if poll_until 25 _gone chain-head; then ok "enter carries the head back to pending"
+else bad "enter carries the head back to pending"; tail -30 "$BOARD_LOG" | sed 's/^/        /'; fi
+if poll_until 25 _gone chain-tail; then ok "and carries the dependent along with it"
+else bad "and carries the dependent along with it"; tail -30 "$BOARD_LOG" | sed 's/^/        /'; fi
+has "the head's document lands back in pending" "id: chain-head" \
+  "$SPOOLWAY_PROJECT_HOME/pending/chain-head.md"
+has "and so does the dependent's" "id: chain-tail" \
+  "$SPOOLWAY_PROJECT_HOME/pending/chain-tail.md"
+
 # ------------------------------------ `p` reaches a blocked row with a live lane
 #
 # The reach this task adds: the unblocker can be mid-turn on a `blocked` row

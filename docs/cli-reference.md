@@ -126,8 +126,9 @@ Resume one task. Same as `spoolway resume <task>` with no other flags.
 ### `spoolway queue unqueue <task>`
 
 Carry a not-started task's document back to the pending directory, with every reserved key
-stripped. `spoolway queue add --from` takes the result again unchanged. Same as the board's
-`u` key.
+stripped. `spoolway queue add --from` takes the result again unchanged. The board's `u` key
+carries the same task and every unstarted task that depends on it; this command has no panel
+to list a chain on, so it refuses instead.
 
 ```
 spoolway queue unqueue <task>
@@ -167,7 +168,7 @@ Run the pipeline. It draws the live board and keeps running until the queue is e
 | `↑` `↓` | Move the cursor |
 | `r` / `R` | Resume the highlighted paused or blocked task / every paused task |
 | `p` / `P` | Interrupt and park the highlighted task / every live lane |
-| `u` / `U` | Move the highlighted queued task / every unstarted task back to pending |
+| `u` / `U` | Move the highlighted queued task, and every unstarted task that depends on it, back to pending / do the same for every unstarted task in the run |
 | `ctrl-c` | Stop the run |
 
 | Flag | Default | What it does |

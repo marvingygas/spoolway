@@ -294,9 +294,11 @@ fn queue_unqueue_all(repo: &Repo) -> Result<()> {
 
 /// One task, named on the command line: [`crate::status::not_started`]
 /// carries it straight through [`unqueue_or_bail`], refusing a sibling
-/// still queued that names it in `depends_on` exactly as the board's bare
-/// `u` does. Anything further along is refused unless `force` says to tear
-/// its checkout down first — see [`queue_unqueue_forced`].
+/// still queued that names it in `depends_on` — this command has no panel to
+/// list a chain on, unlike the board's own `u`, which carries that
+/// dependent back to pending alongside it instead. Anything further along
+/// is refused unless `force` says to tear its checkout down first — see
+/// [`queue_unqueue_forced`].
 fn queue_unqueue_one(repo: &Repo, pipelines: &Pipelines, id: &str, force: bool) -> Result<()> {
     let tasks = repo.tasks()?;
     let task = tasks.iter().find(|t| t.id() == id).with_context(|| {
@@ -10280,8 +10282,9 @@ body\n";
     }
 
     /// A task on `queued` names a sibling that depends on it in the
-    /// refusal, exactly as the board's bare `u` declines to open its panel
-    /// at all — and a task the queue does not have names itself.
+    /// refusal — this command has no panel to carry the two back together,
+    /// unlike the board's own `u` — and a task the queue does not have
+    /// names itself.
     #[test]
     fn queue_unqueue_refuses_a_queued_dependency_and_an_unknown_id() {
         let repo = fixture("queue-unqueue-refusal");

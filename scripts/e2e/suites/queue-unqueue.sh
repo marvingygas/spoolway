@@ -34,9 +34,11 @@ BODY="$LIVE/body.md"
 task_body "$BODY"
 
 # ------------------------------------------------------- the round trip out and back
-# A dependency still queued refuses a bare unqueue of the task it depends on,
-# exactly as the board's own `u` declines to open its panel — `--all` carries
-# both back together, with no per-task check, exactly as `U` does.
+# A dependency still queued refuses a bare unqueue of the task it depends on
+# — this command has no panel to list a chain on, unlike the board's own `u`,
+# which now carries that dependent back to pending alongside it instead.
+# `--all` carries both back together, with no per-task check, exactly as `U`
+# does.
 task_doc "$LIVE/base.md" base "$BODY" "group: unq" "touches: [notes/base.md]"
 must "base queues" "$SPOOLWAY" queue add --from "$LIVE/base.md"
 task_doc "$LIVE/dependent.md" dependent "$BODY" "group: unq" \
