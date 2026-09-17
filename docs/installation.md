@@ -262,6 +262,7 @@ What `update` replaces, file by file:
 | Prompts | Nothing. |
 | Document skeletons | Nothing. |
 | Task skeletons | Nothing. |
+| A retired template | Removed, with the reason it is gone. |
 
 `update` never merges. A marked block you edited by hand stops the update on that file.
 `spoolway update --replace <path>` writes the shipped file over yours and saves your version

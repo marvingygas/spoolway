@@ -1,12 +1,12 @@
 //! `spoolway template contract`: the shapes a project writes prose into that
-//! are neither a pipeline nor a prompt — a task's own body, a lane's seven
-//! typed messages, and the pull request body `spoolway stack` opens.
+//! are neither a pipeline nor a prompt — a task's own body, and a lane's
+//! seven typed messages.
 //!
-//! None of these are parsed the way a pipeline file is: every one is prose a
-//! project owns outright, read back whole or substituted by name, never
-//! validated against a schema. This command exists so an agent asked to
-//! reshape one reaches for what actually reads it — [`crate::task_template`]
-//! and [`crate::lane_prompts`] — rather than guessing at a placeholder's
+//! Neither is parsed the way a pipeline file is: each is prose a project owns
+//! outright, read back whole or substituted by name, never validated against
+//! a schema. This command exists so an agent asked to reshape one reaches for
+//! what actually reads it — [`crate::task_template`] and
+//! [`crate::lane_prompts`] — rather than guessing at a placeholder's
 //! spelling.
 
 use super::*;
@@ -24,9 +24,9 @@ fn render_template_contract(repo: &Repo) -> String {
     out.push_str("THE TEMPLATE CONTRACT\n");
     out.push_str("=====================\n\n");
     out.push_str(
-        "Three shapes, none of them parsed the way a pipeline file is: each is prose a \
-         project\nowns outright, read back whole or substituted by name — never validated \
-         against a\nschema, never rewritten by `spoolway update` once it exists.\n\n",
+        "Two shapes, neither parsed the way a pipeline file is: each is prose a project\nowns \
+         outright, read back whole or substituted by name — never validated against a\nschema, \
+         never rewritten by `spoolway update` once it exists.\n\n",
     );
 
     out.push_str("TASK — .spoolway/templates/tasks/<pipeline>.md\n");
@@ -61,14 +61,6 @@ fn render_template_contract(repo: &Repo) -> String {
          takes\n  one placeholder of its own: `{from}`.\n\n",
     );
 
-    out.push_str("PR — .spoolway/templates/pull-request.md\n");
-    out.push_str(
-        "  What `spoolway stack`'s optional summary turn fills in: the first line becomes \
-         the\n  pull request's title, everything below it the body. No `${...}` \
-         placeholder —\n  a project writes headings and instructions for the model, the same \
-         way a task\n  skeleton does.\n\n",
-    );
-
     out.push_str("This project's own files:\n");
     out.push_str(&format!(
         "  {}\n",
@@ -78,10 +70,6 @@ fn render_template_contract(repo: &Repo) -> String {
         "  {}\n",
         relative(&repo.checkout, &repo.lane_prompts_path())
     ));
-    out.push_str(&format!(
-        "  {}\n",
-        relative(&repo.checkout, &repo.pull_request_template_path())
-    ));
     out
 }
 
@@ -89,23 +77,27 @@ fn render_template_contract(repo: &Repo) -> String {
 mod tests {
     use super::*;
 
-    /// The mockup's own promise: the task, lane-prompt and PR shapes, and no
+    /// The mockup's own promise: the task and lane-prompt shapes, and no
     /// format copied in — only the paths this project's own templates
-    /// already live at, and pointers at the modules that read them.
+    /// already live at, and pointers at the modules that read them. No `PR —`
+    /// section: nothing reads the pull request template any more, so it is
+    /// not one of the shapes this contract names.
     #[test]
-    fn template_contract_names_all_three_shapes() {
+    fn template_contract_names_the_task_and_lane_prompt_shapes_and_no_longer_the_pr_one() {
         let repo = crate::commands::testutil::fixture("template-contract");
         let text = render_template_contract(&repo);
         for fact in [
             "TASK —",
             "LANE-PROMPT —",
-            "PR —",
             "opening",
             "task_file",
             "Status Log",
-            "pull-request.md",
         ] {
             assert!(text.contains(fact), "template contract drops `{fact}`");
         }
+        assert!(
+            !text.contains("PR —"),
+            "template contract still names a shape nothing reads"
+        );
     }
 }

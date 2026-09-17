@@ -199,6 +199,11 @@ has "the key block now reads the way this binary ships it" \
 byte_for_byte_outside_block "the prose around the refreshed block came back byte for byte" \
   "$WORK/0.1.0/before-default.yml" "$PIPELINE"
 
+works "the 0.1.0 fixture's dead task-log template is swept" \
+  test ! -e .spoolway/templates/task-log.md
+works "the 0.1.0 fixture's dead pull request template is swept" \
+  test ! -e .spoolway/templates/pull-request.md
+
 # ------------------------------------------------------------- 0.2.0: no-op
 #
 # By 0.2.0 the fold had already happened — `[housekeeping]` is the only table
@@ -216,5 +221,27 @@ has "the housekeeping value already in place survives the update" \
   "retention_days = 45" .spoolway/config.toml
 byte_for_byte_outside_block "the prose around the already-current block is untouched" \
   "$WORK/0.2.0/before-default.yml" "$PIPELINE"
+
+works "the 0.2.0 fixture's dead task-log template is swept" \
+  test ! -e .spoolway/templates/task-log.md
+works "the 0.2.0 fixture's dead pull request template is swept" \
+  test ! -e .spoolway/templates/pull-request.md
+
+# --------------------------------------------------------- 0.3.0: dead templates
+#
+# `spoolway update` gained a sweep for a template the binary no longer ships —
+# `install::RETIRED_TEMPLATES` — after the config fold above had already
+# landed, so this fixture is the sharpest proof that the sweep runs on its
+# own: nothing about the fold or the pipeline key block is new by 0.3.0, only
+# whether the two dead templates the fixture still carries are gone
+# afterwards.
+stage 0.3.0
+
+must "spoolway update runs against the 0.3.0 project" "$SPOOLWAY" update
+
+works "the 0.3.0 fixture's dead task-log template is swept" \
+  test ! -e .spoolway/templates/task-log.md
+works "the 0.3.0 fixture's dead pull request template is swept" \
+  test ! -e .spoolway/templates/pull-request.md
 
 finish

@@ -71,8 +71,9 @@ pub enum Outcome {
         path: String,
         why: String,
     },
-    /// A stale directory this project no longer ships — [`crate::install::
-    /// RETIRED_SKILLS`], and nothing else — removed outright rather than
+    /// A stale skill directory or template file this project no longer ships
+    /// — [`crate::install::RETIRED_SKILLS`] or [`crate::install::
+    /// RETIRED_TEMPLATES`], and nothing else — removed outright rather than
     /// rewritten.
     Removed {
         path: String,
@@ -305,6 +306,7 @@ pub fn scan(repo: &Repo, args: &UpdateArgs) -> Result<Vec<Outcome>> {
     templates(repo, args, &mut outcomes)?;
     skills(repo, args, &mut outcomes)?;
     retired_skills(repo, args, &mut outcomes)?;
+    retired_templates(repo, args, &mut outcomes)?;
     pipelines(repo, args, &mut outcomes)?;
     Ok(outcomes)
 }
@@ -680,10 +682,6 @@ fn shipped_for(repo: &Repo, path: &Path) -> Option<String> {
         return crate::assets::task_template(stem).map(str::to_string);
     }
 
-    if *path == repo.pull_request_template_path() {
-        return Some(crate::assets::PULL_REQUEST_TEMPLATE.to_string());
-    }
-
     if *path == repo.lane_prompts_path() {
         return Some(crate::assets::LANE_PROMPTS.to_string());
     }
@@ -833,6 +831,27 @@ fn retired_skills(repo: &Repo, args: &UpdateArgs, outcomes: &mut Vec<Outcome>) -
             }
             outcomes.push(Outcome::removed(&shown, "renamed to spoolway-config"));
         }
+    }
+    Ok(())
+}
+
+/// Remove a template this project no longer ships under
+/// `.spoolway/templates/` — [`crate::install::RETIRED_TEMPLATES`], and
+/// nothing else, the same bargain [`retired_skills`] keeps for a stale skill
+/// directory. A file under that directory the project wrote itself is named
+/// by neither list nor by anything `init` still places, so it is never
+/// touched.
+fn retired_templates(repo: &Repo, args: &UpdateArgs, outcomes: &mut Vec<Outcome>) -> Result<()> {
+    for (name, why) in crate::install::RETIRED_TEMPLATES {
+        let path = repo.checkout.join(name);
+        if !path.is_file() {
+            continue;
+        }
+        let shown = crate::platform::relative(&repo.checkout, &path);
+        if !args.dry_run {
+            std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+        }
+        outcomes.push(Outcome::removed(&shown, *why));
     }
     Ok(())
 }
@@ -1917,5 +1936,73 @@ mod tests {
 
         assert!(stale.is_dir(), "a dry run must not delete anything");
         assert_eq!(outcome_lines(&outcomes).len(), 1);
+    }
+
+    /// Both dead templates go, each with its own reason, and a project's own
+    /// file under `.spoolway/templates/` — named by neither
+    /// [`crate::install::RETIRED_TEMPLATES`] nor a shape `init` still
+    /// places — is left exactly where it was.
+    #[test]
+    fn update_removes_both_retired_templates_and_leaves_a_projects_own_file() {
+        let repo = fixture("retired-templates");
+        let dir = repo.checkout.join(".spoolway/templates");
+        let task_log = dir.join("task-log.md");
+        let pull_request = dir.join("pull-request.md");
+        std::fs::write(&task_log, "stale\n").unwrap();
+        std::fs::write(&pull_request, "stale\n").unwrap();
+        let untouched = dir.join("a-projects-own-notes.md");
+        std::fs::write(&untouched, "mine\n").unwrap();
+
+        let mut outcomes = Vec::new();
+        retired_templates(&repo, &args(), &mut outcomes).unwrap();
+
+        assert!(!task_log.exists(), "task-log.md must be removed");
+        assert!(!pull_request.exists(), "pull-request.md must be removed");
+        assert!(
+            untouched.is_file(),
+            "a file not on the retired list must never be touched"
+        );
+
+        let lines = outcome_lines(&outcomes);
+        assert!(
+            lines.iter().any(|l| {
+                l.starts_with("removed")
+                    && l.contains("task-log.md")
+                    && l.contains("no longer written to a task file")
+            }),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| {
+                l.starts_with("removed")
+                    && l.contains("pull-request.md")
+                    && l.contains("the pull request body is the task file itself")
+            }),
+            "{lines:?}"
+        );
+    }
+
+    /// A dry run reports both removals without deleting anything — the same
+    /// promise [`update_dry_run_reports_a_stale_skill_without_removing_it`]
+    /// keeps for a retired skill.
+    #[test]
+    fn update_dry_run_reports_retired_templates_without_removing_them() {
+        let repo = fixture("retired-templates-dry-run");
+        let dir = repo.checkout.join(".spoolway/templates");
+        let task_log = dir.join("task-log.md");
+        let pull_request = dir.join("pull-request.md");
+        std::fs::write(&task_log, "stale\n").unwrap();
+        std::fs::write(&pull_request, "stale\n").unwrap();
+
+        let mut outcomes = Vec::new();
+        let dry = UpdateArgs {
+            dry_run: true,
+            replace: Vec::new(),
+        };
+        retired_templates(&repo, &dry, &mut outcomes).unwrap();
+
+        assert!(task_log.is_file(), "a dry run must not delete anything");
+        assert!(pull_request.is_file(), "a dry run must not delete anything");
+        assert_eq!(outcome_lines(&outcomes).len(), 2);
     }
 }

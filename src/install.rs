@@ -162,6 +162,27 @@ const SKILLS: &[Skill] = &[
 /// comment above.
 pub const RETIRED_SKILLS: &[&str] = &["spoolway-pipeline"];
 
+/// Templates under `.spoolway/templates/` this project once shipped and no
+/// longer does, each with the reason `spoolway update` reports beside it — a
+/// short, hand-written literal, and never derived from anything the binary
+/// ships today, for the same reason [`RETIRED_SKILLS`] is: a template this
+/// binary still ships must never appear here by construction, and a
+/// project's own file under `.spoolway/templates/` — named by neither this
+/// list nor the shapes `init` still places — is never touched. `task-log.md`
+/// stopped being written when `assets::TASK_LOG`, `config::TASK_LOG_TEMPLATE`
+/// and `src/task_log.rs` were removed; `pull-request.md` stopped being read
+/// when `spoolway stack` started sending the task file's own body verbatim.
+pub const RETIRED_TEMPLATES: &[(&str, &str)] = &[
+    (
+        ".spoolway/templates/task-log.md",
+        "no longer written to a task file",
+    ),
+    (
+        ".spoolway/templates/pull-request.md",
+        "the pull request body is the task file itself",
+    ),
+];
+
 /// One file an install would write.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Planned {

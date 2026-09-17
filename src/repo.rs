@@ -399,10 +399,6 @@ impl Repo {
         self.checkout.join(crate::config::TRACKING_TEMPLATES_DIR)
     }
 
-    pub fn pull_request_template_path(&self) -> PathBuf {
-        self.checkout.join(crate::config::PULL_REQUEST_TEMPLATE)
-    }
-
     /// Where a project overrides the seven typed messages a lane's pane
     /// receives — see [`crate::lane_prompts`].
     pub fn lane_prompts_path(&self) -> PathBuf {

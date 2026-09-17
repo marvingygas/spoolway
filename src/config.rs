@@ -45,16 +45,9 @@ pub const JOBS_FILE: &str = ".spoolway/jobs.toml";
 /// The bare name of a cron-job store, for the user-scoped copy that lives
 /// directly under the project's machine home beside `lanes.json`.
 pub const JOBS_STORE: &str = "jobs.toml";
-/// A pull request template, beside the task templates but a single file
-/// rather than one per pipeline. Nothing in this binary reads it any more —
-/// `spoolway stack` writes the task file's own body verbatim now — but
-/// `init` and `update` still install and manage it, the same as any other
-/// file in this module.
-pub const PULL_REQUEST_TEMPLATE: &str = ".spoolway/templates/pull-request.md";
 /// Every typed message a lane's pane receives, one `##` section per state —
-/// beside the task templates, a single file rather than one per pipeline,
-/// the same shape as the pull request template above. See
-/// [`crate::lane_prompts`].
+/// beside the task templates, a single file rather than one per pipeline.
+/// See [`crate::lane_prompts`].
 pub const LANE_PROMPTS_TEMPLATE: &str = ".spoolway/templates/lane-prompts.md";
 
 /// Runtime state, kept out of the checkout entirely — see
