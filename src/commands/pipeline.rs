@@ -450,7 +450,7 @@ fn template() -> String {
          \x20\x20\x20\x20model: {local_model}\n\
          \x20\x20\x20\x20session: true\n\
          \x20\x20\x20\x20on_pass: review\n\
-         \x20\x20\x20\x20on_fail: blocked\n\
+         \x20\x20\x20\x20# on_fail:                a fail with none of its own goes to `blocked`\n\
          \n\
          \x20\x20# A command step: no model, no lane, no worker slot. `run:` is what makes\n\
          \x20\x20# it one, and its exit code is the outcome — zero takes `on_pass`, anything\n\
@@ -462,7 +462,7 @@ fn template() -> String {
          \x20\x20\x20\x20# headless: true            run detached, with no pane, the way every command did before\n\
          \x20\x20\x20\x20# last: true                only the top task of a chain runs it\n\
          \x20\x20\x20\x20on_pass: done\n\
-         \x20\x20\x20\x20on_fail: blocked\n\
+         \x20\x20\x20\x20# on_fail:                a fail with none of its own goes to `blocked`\n\
          \n\
          \x20\x20# A terminal step: the task stops here. `end: true` is declared rather\n\
          \x20\x20# than inferred, so a mistyped `agnet:` is an error instead of a silent stop.\n\
@@ -817,11 +817,13 @@ pub fn pipeline_check(repo: &Repo, pipelines: Result<Pipelines>, json: bool) -> 
 
     pipelines.validate()?;
 
-    // Gate and description warnings, gathered up front: they are worth a
-    // person's attention but never fail this check on their own — see
-    // `Pipeline::gate_warnings` and `Pipeline::description_warnings`.
+    // Redundant-key, gate and description warnings, gathered up front: they
+    // are worth a person's attention but never fail this check on their own
+    // — see `Pipeline::redundant_on_fail_warnings`, `Pipeline::gate_warnings`
+    // and `Pipeline::description_warnings`.
     let mut gate_warnings = Vec::new();
     for pipeline in pipelines.pipelines.values() {
+        gate_warnings.extend(pipeline.redundant_on_fail_warnings());
         gate_warnings.extend(pipeline.gate_warnings());
         gate_warnings.extend(pipeline.description_warnings());
     }

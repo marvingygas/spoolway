@@ -184,7 +184,6 @@ steps:
     model: Ornith-1.5-35B-A3B
     session: true
     on_pass: review
-    on_fail: blocked
 
   - id: review
     description: Check the diff against the acceptance criteria and project standards.
@@ -204,21 +203,18 @@ steps:
     prompt: archivist
     model: Ornith-1.5-35B-A3B
     on_pass: handover
-    on_fail: blocked
 
   - id: handover
     description: Commit, squash, push and open this task's pull request — no model,
       no rebase. Nothing is merged here; a person lands it.
     run: spoolway stack
     on_pass: checks
-    on_fail: blocked
 
   - id: checks
     description: Wait for the pull request's checks, and fail if they are red.
     run: gh pr checks --watch --fail-fast
     timeout: 45m
     on_pass: done
-    on_fail: blocked
 ```
 
 **You do not have to write one by hand.** The `/spoolway-config` skill writes and edits

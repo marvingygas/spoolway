@@ -33,7 +33,6 @@ steps:
     effort: high
     gate: true
     on_pass: ready
-    on_fail: blocked
 
   - id: preflight
     description: Freeze the release candidate and assemble its diff, pull requests, contributors, version and changelog state.
@@ -57,7 +56,6 @@ steps:
     session: true
     gate: true
     on_pass: publish
-    on_fail: blocked
 
   - id: publish
     description: Commit the section with the version bump, rehearse, tag, publish, and verify the published body against it.
@@ -73,4 +71,3 @@ steps:
     run: scripts/release-verify.sh
     timeout: 15m
     on_pass: done
-    on_fail: blocked

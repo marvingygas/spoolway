@@ -1425,6 +1425,31 @@ impl Pipeline {
             .collect()
     }
 
+    /// Steps declaring `on_fail: blocked` — exactly the step [`Step::
+    /// destination`] already falls back to for a `Fail` with no `on_fail` of
+    /// its own, so the key changes nothing about where a failure routes.
+    ///
+    /// Not a refusal, the same as [`Self::gate_warnings`]: a pipeline
+    /// carrying the key still runs identically to one without it. Worth a
+    /// warning anyway, because it also silences [`Self::gate_warnings`] on a
+    /// gated step without changing what a rejection there does — see that
+    /// method's own doc comment — so a person reading `pipeline check`'s
+    /// clean gate report has no way to know the step still has nowhere of
+    /// its own to send a fail.
+    pub fn redundant_on_fail_warnings(&self) -> Vec<String> {
+        self.steps
+            .iter()
+            .filter(|step| step.on_fail.as_deref() == Some(BLOCKED))
+            .map(|step| {
+                format!(
+                    "{}: `{}` declares `on_fail: blocked`, which is where a fail goes with no \
+                     `on_fail` at all — delete the key.",
+                    self.name, step.id
+                )
+            })
+            .collect()
+    }
+
     /// A missing `description:`, and one long enough to stop being scannable
     /// in the one-line-per-pipeline list `pipeline list` prints.
     ///
@@ -2158,6 +2183,74 @@ mod tests {
         }
     }
 
+    /// `on_fail: blocked` is exactly what an absent `on_fail` already
+    /// resolves to, so it warns — and a step with no `on_fail` at all draws
+    /// nothing, since there is no redundant key there to name.
+    #[test]
+    fn redundant_on_fail_blocked_warns_once_per_step() {
+        let pipeline = Pipeline::parse(
+            "solo",
+            "steps:\n  \
+             - id: a\n    agent: pi\n    prompt: implementer\n    model: m\n    \
+               on_pass: b\n    on_fail: blocked\n  \
+             - id: b\n    agent: pi\n    prompt: implementer\n    model: m\n    \
+               on_pass: z\n  \
+             - id: z\n    end: true\n",
+        )
+        .unwrap();
+
+        let warnings = pipeline.redundant_on_fail_warnings();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("`a` declares `on_fail: blocked`"),
+            "{warnings:?}"
+        );
+    }
+
+    /// The doc comment on `redundant_on_fail_warnings` and `gate_warnings`
+    /// both make a claim: the redundant key silences the gate warning
+    /// without changing where a rejection at that gate goes. This is the
+    /// proof — a gated step declaring `on_fail: blocked` draws the
+    /// redundant-key warning and not the gate warning; delete the key and
+    /// the two swap places.
+    #[test]
+    fn a_gated_steps_redundant_on_fail_silences_its_own_gate_warning() {
+        let with_key = Pipeline::parse(
+            "solo",
+            "steps:\n  \
+             - id: a\n    agent: pi\n    prompt: implementer\n    model: m\n    \
+               gate: true\n    on_pass: z\n    on_fail: blocked\n  \
+             - id: z\n    end: true\n",
+        )
+        .unwrap();
+        assert_eq!(with_key.redundant_on_fail_warnings().len(), 1);
+        assert_eq!(with_key.gate_warnings().len(), 0);
+
+        let without_key = Pipeline::parse(
+            "solo",
+            "steps:\n  \
+             - id: a\n    agent: pi\n    prompt: implementer\n    model: m\n    \
+               gate: true\n    on_pass: z\n  \
+             - id: z\n    end: true\n",
+        )
+        .unwrap();
+        assert_eq!(without_key.redundant_on_fail_warnings().len(), 0);
+        assert_eq!(without_key.gate_warnings().len(), 1);
+
+        // Deleting the key changed nothing about where a fail or a block from
+        // `a` actually goes — the whole point of the key being redundant.
+        let a_with = with_key.step("a").unwrap();
+        let a_without = without_key.step("a").unwrap();
+        assert_eq!(
+            a_with.destination(Outcome::Fail),
+            a_without.destination(Outcome::Fail)
+        );
+        assert_eq!(
+            a_with.destination(Outcome::Block),
+            a_without.destination(Outcome::Block)
+        );
+    }
+
     /// A command step names no model on purpose, so it does not make a
     /// configured agent step sharing an id read as model-less.
     // covers: step.run — a command step runs no agent, so it carries no model to be missing
@@ -2342,8 +2435,12 @@ mod tests {
                 Some("checks"),
                 "pipeline `{name}`"
             );
+            // `on_fail` is absent, not `blocked`: that key is redundant with
+            // no `on_fail` at all — see `Pipeline::redundant_on_fail_warnings`
+            // — so the routing this test cares about is read from
+            // `destination`, the one place it is actually decided.
             assert_eq!(
-                handover.on_fail.as_deref(),
+                handover.destination(Outcome::Fail),
                 Some(BLOCKED),
                 "pipeline `{name}`: a failed `spoolway stack` is a person's call, not \
                  another agent step"
@@ -2351,7 +2448,7 @@ mod tests {
             let checks = pipeline.step("checks").expect("`checks`");
             assert_eq!(checks.on_pass.as_deref(), Some(DONE), "pipeline `{name}`");
             assert_eq!(
-                checks.on_fail.as_deref(),
+                checks.destination(Outcome::Fail),
                 Some(BLOCKED),
                 "pipeline `{name}`: a red check is a person's call, not another handover"
             );

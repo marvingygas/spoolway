@@ -234,17 +234,14 @@ pub fn contract(repo: &Repo, pipelines: &Pipelines, args: &PromptContractArgs) -
 
     println!();
     println!("6  HOW A LANE FINISHES");
-    // `blocked` gets two forms, not three: `--fail` and `--block` are still
-    // accepted there, but `commands::report` reads either the same way it
-    // reads a `--pause`, so offering them here as a distinct choice would
-    // teach a lane a shape that no longer routes anywhere different.
-    if step.id == crate::pipeline::BLOCKED {
-        println!("   spoolway report --pass  -m \"<one line on what happened>\"");
-        println!("   spoolway report --pause -m \"<what needs a person, and why>\"");
-    } else {
-        println!("   spoolway report --pass  -m \"<one line on what happened>\"");
-        println!("   spoolway report --fail  -m \"<one line on what happened>\"");
-        println!("   spoolway report --block -m \"<what is in the way>\"");
+    // The same forms and the same refusals as `report_contract` composes
+    // into the system prompt this lane was launched with — read from there
+    // rather than restated, so the two can never drift apart. See
+    // `crate::compose::report_contract` for why `blocked` keeps two forms,
+    // and why every other step offers `--fail` only when it routes
+    // somewhere `--block` does not.
+    for line in crate::compose::report_contract(step).lines() {
+        println!("   {line}");
     }
     println!();
     println!("   Exactly once, then stop. Where each outcome takes this task:");
@@ -264,11 +261,19 @@ pub fn contract(repo: &Repo, pipelines: &Pipelines, args: &PromptContractArgs) -
             "     --pause → `paused`, waiting for a person — `spoolway resume` then hands the task back to whatever it blocked on, not past it"
         );
     } else {
+        // `--fail` is left out of this table exactly when `report_contract`
+        // already refused it above — a destination line for a form the
+        // lane may never use would read as a second, contradicting offer.
+        let fail_offered = step.destination(crate::pipeline::Outcome::Fail)
+            != step.destination(crate::pipeline::Outcome::Block);
         for (outcome, label) in [
             (crate::pipeline::Outcome::Pass, "--pass "),
             (crate::pipeline::Outcome::Fail, "--fail "),
             (crate::pipeline::Outcome::Block, "--block"),
         ] {
+            if outcome == crate::pipeline::Outcome::Fail && !fail_offered {
+                continue;
+            }
             match step.destination(outcome) {
                 Some(next) => println!("     {label} → `{next}`"),
                 None => println!("     {label} → stays on `{}`", step.id),
