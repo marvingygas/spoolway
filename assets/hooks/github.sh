@@ -4,7 +4,9 @@
 # someone runs `spoolway issue show`, then on queued, blocked, paused and
 # done.
 #
-# Every command here was run against a real repository with gh 2.97.0,
+# spoolway-requires: gh >= 2.97.0
+#
+# Every command here was run against a real repository at that version,
 # except `gh pr edit --body-file -` and the `done` branch's own `gh issue
 # comment`: those two write, and nobody has yet had a throwaway pull
 # request to let them write to. Both `gh pr view` forms the `done` branch

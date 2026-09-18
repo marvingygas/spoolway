@@ -651,6 +651,13 @@ fn issue_tracking_checks(
             None => Ok(None),
         },
     ));
+    // A hook declares the tools it needs with its own `# spoolway-requires:`
+    // lines — see `crate::tracking::required_tools` — and this is where each
+    // one is actually checked against the machine doctor runs on. Grouped
+    // right after the `fetch`-branch check: both read the hook's own text for
+    // a promise it may not be keeping, this one keeps the machine's tools
+    // from making the same silent gap.
+    findings.extend(required_tool_checks(&repo.checkout, &tracking.hook));
     // `issue_tracking.key_in_names` prefixes every generated name with a
     // `slug=` the hook answers — but `spoolway update` never rewrites a hook
     // a project already has, so a project that turned the flag on without
@@ -687,6 +694,162 @@ fn issue_tracking_checks(
                     )),
                 },
             ));
+        }
+    }
+    findings
+}
+
+/// The first run of `<digit>(.<digit>)*` in `text`, read as a version — every
+/// shape a shipped hook's own tool answers `--version` with: `gh`'s carries a
+/// build date in parens after it, `acli`'s a `-stable` suffix, `jq`'s a `jq-`
+/// prefix and no space at all. `None` when nothing in `text` reads as one,
+/// which is the unreadable-answer case [`tool_version_finding`] turns into a
+/// note rather than a failure.
+fn parse_version(text: &str) -> Option<Vec<u64>> {
+    let start = text.find(|c: char| c.is_ascii_digit())?;
+    let rest = &text[start..];
+    let end = rest
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(rest.len());
+    rest[..end]
+        .split('.')
+        .filter(|part| !part.is_empty())
+        .map(|part| part.parse().ok())
+        .collect()
+}
+
+/// [`parse_version`]'s own output, back as the dotted string a person wrote —
+/// what a passing row and a failing one both name the version found as.
+fn format_version(version: &[u64]) -> String {
+    version
+        .iter()
+        .map(u64::to_string)
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+/// Whether `found` is below `floor`, component by component with a missing
+/// trailing one read as `0` — the same padding [`crate::release::is_newer`]
+/// gives a version comparison, and for the same reason: comparing two
+/// `Vec<u64>` lexicographically instead would read `found`'s missing `.0` as
+/// smaller than `floor`'s explicit one, failing a `jq-1.6` against a floor of
+/// `1.6.0` that a person reading either string would call equal.
+fn below_floor(found: &[u64], floor: &[u64]) -> bool {
+    for index in 0..found.len().max(floor.len()) {
+        let found = found.get(index).copied().unwrap_or(0);
+        let floor = floor.get(index).copied().unwrap_or(0);
+        if found != floor {
+            return found < floor;
+        }
+    }
+    false
+}
+
+/// One `# spoolway-requires:` declaration, turned into the row it produces —
+/// pure, so the message shapes are tested without a real PATH or a real
+/// binary to run. `answered` is what `<tool> --version` already printed,
+/// combining stdout and stderr the way a tool's own version banner may land
+/// on either; `None` when the tool could not even be asked — not on PATH, or
+/// its `--version` failed to run at all — and turns into no finding here at
+/// all: [`required_tool_checks`]'s own caller, `issue_tracking_checks`,
+/// already has a not-on-PATH row for `gh`, `acli` and `jq` (see
+/// `gh_status` and the jira PATH checks), and doubling that gap under a
+/// second name is exactly what the acceptance criteria rule out.
+fn tool_version_finding(
+    required: &crate::tracking::RequiredTool,
+    hook_display: &str,
+    answered: Option<&str>,
+) -> Option<Finding> {
+    let answered = answered?;
+    let label = format!("`{}` is at least {}", required.tool, required.floor);
+    // The non-goal ruling out a general constraint grammar covers the floor
+    // too: a `spoolway-requires` line this project itself never wrote could
+    // still name something that does not parse as a plain version.
+    let Some(floor) = parse_version(&required.floor) else {
+        return Some(Finding::Note(format!(
+            "{hook_display} declares `spoolway-requires: {} >= {}`, whose version does not read \
+             as `<number>.<number>...` — this cannot be checked",
+            required.tool, required.floor
+        )));
+    };
+    let Some(found) = parse_version(answered) else {
+        return Some(Finding::Note(format!(
+            "{hook_display} requires `{}` >= {}, but `{} --version` answered \"{}\", which does \
+             not read as a version — this cannot be checked",
+            required.tool,
+            required.floor,
+            required.tool,
+            first_line(answered)
+        )));
+    };
+    Some(Finding::Check(
+        label,
+        if below_floor(&found, &floor) {
+            Err(anyhow::anyhow!(
+                "`{}` is {}, and {hook_display} requires {} >= {}. Upgrade {}, or clear \
+                 issue_tracking.hook.",
+                required.tool,
+                format_version(&found),
+                required.tool,
+                required.floor,
+                required.tool,
+            ))
+        } else {
+            Ok(Some(format_version(&found)))
+        },
+    ))
+}
+
+/// Every `# spoolway-requires:` line the configured hook's own text declares,
+/// checked against what each named tool actually answers to `--version` on
+/// this machine — the one check here that runs a tool rather than only
+/// stat-ing or reading it, the same way [`gh_status`] does for `spoolway
+/// stack`'s own `gh`.
+///
+/// `None` from [`crate::tracking::hook_path_in`] — a blank or malformed
+/// `hook` — or a script that cannot be read produce no findings at all: both
+/// are a different check's failure already, reported elsewhere in
+/// `issue_tracking_checks`.
+fn required_tool_checks(checkout: &Path, hook_name: &str) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let Some(path) = crate::tracking::hook_path_in(checkout, hook_name) else {
+        return findings;
+    };
+    let Ok(script) = std::fs::read_to_string(&path) else {
+        return findings;
+    };
+    let hook_display = relative(checkout, &path);
+    for parsed in crate::tracking::required_tools(&script) {
+        match parsed {
+            Ok(required) => {
+                // Not on PATH is a different check's failure — `gh_status`
+                // when the hook is `github.sh`, the jira PATH checks when it
+                // is `jira.sh` — so this reports nothing rather than a
+                // second, differently-worded row for the same gap.
+                if which(&required.tool).is_none() {
+                    continue;
+                }
+                let answered = std::process::Command::new(&required.tool)
+                    .arg("--version")
+                    .output()
+                    .ok()
+                    .map(|out| {
+                        format!(
+                            "{}{}",
+                            String::from_utf8_lossy(&out.stdout),
+                            String::from_utf8_lossy(&out.stderr)
+                        )
+                    });
+                findings.extend(tool_version_finding(
+                    &required,
+                    &hook_display,
+                    answered.as_deref(),
+                ));
+            }
+            Err(raw) => findings.push(Finding::Note(format!(
+                "{hook_display} has an unreadable `# spoolway-requires:` line (`{raw}`) — only \
+                 `<tool> >= <version>` is understood, so this line is ignored"
+            ))),
         }
     }
     findings
@@ -2128,6 +2291,250 @@ mod tests {
             .unwrap();
         let err = acli.as_ref().unwrap_err();
         assert!(err.to_string().contains("jira.sh"), "{err}");
+    }
+
+    /// `parse_version` finds the first run of digits and dots in whatever a
+    /// tool's own `--version` prints, tolerant of a name, a `v` prefix and a
+    /// build date around it — every shape a shipped hook's own tool answers
+    /// with.
+    #[test]
+    fn parse_version_reads_the_first_dotted_number() {
+        assert_eq!(
+            parse_version("gh version 2.97.0 (2024-06-03)"),
+            Some(vec![2, 97, 0])
+        );
+        assert_eq!(parse_version("jq-1.6"), Some(vec![1, 6]));
+        assert_eq!(
+            parse_version("acli version 1.3.30-stable"),
+            Some(vec![1, 3, 30])
+        );
+        assert_eq!(parse_version("no digits here"), None);
+    }
+
+    /// A found version below the declared floor fails, naming the tool, the
+    /// version found and the hook that requires it; a found version at or
+    /// above the floor passes.
+    #[test]
+    fn tool_version_finding_fails_below_the_floor_and_passes_at_it() {
+        let required = crate::tracking::RequiredTool {
+            tool: "gh".into(),
+            floor: "2.97.0".into(),
+        };
+        let finding = tool_version_finding(
+            &required,
+            ".spoolway/hooks/github.sh",
+            Some("gh version 2.46.0 (2024-01-01)"),
+        )
+        .unwrap();
+        let Finding::Check(label, outcome) = &finding else {
+            panic!("{finding:?}")
+        };
+        assert_eq!(label, "`gh` is at least 2.97.0");
+        let err = outcome.as_ref().unwrap_err().to_string();
+        assert!(err.contains("gh` is 2.46.0"), "{err}");
+        assert!(err.contains(".spoolway/hooks/github.sh"), "{err}");
+        assert!(err.contains("gh >= 2.97.0"), "{err}");
+
+        let passing = tool_version_finding(
+            &required,
+            ".spoolway/hooks/github.sh",
+            Some("gh version 2.97.0 (2024-06-03)"),
+        )
+        .unwrap();
+        let Finding::Check(_, outcome) = &passing else {
+            panic!("{passing:?}")
+        };
+        assert!(outcome.is_ok(), "{outcome:?}");
+    }
+
+    /// A found version with fewer components than the floor — `jq-1.6`
+    /// against a floor of `1.6.0` — is not below it: comparing the two
+    /// `Vec<u64>` lexicographically would read a missing trailing `.0` as
+    /// smaller, which is exactly the false failure the "unreadable version
+    /// is a note, never a failure" criterion exists to rule out (a short
+    /// version is readable, just short).
+    #[test]
+    fn tool_version_finding_treats_a_missing_trailing_zero_as_equal() {
+        let required = crate::tracking::RequiredTool {
+            tool: "jq".into(),
+            floor: "1.6.0".into(),
+        };
+        let finding =
+            tool_version_finding(&required, ".spoolway/hooks/jira.sh", Some("jq-1.6")).unwrap();
+        let Finding::Check(_, outcome) = &finding else {
+            panic!("{finding:?}")
+        };
+        assert!(outcome.is_ok(), "{outcome:?}");
+    }
+
+    /// A declared floor that does not parse as `<number>.<number>...` — a
+    /// hook writing `# spoolway-requires: gh >= latest` — is a note, never a
+    /// failure: the non-goal ruling out a general constraint grammar means
+    /// this is reported as unreadable, not force-fit to some interpretation
+    /// of "latest".
+    #[test]
+    fn tool_version_finding_notes_an_unreadable_floor_rather_than_failing() {
+        let required = crate::tracking::RequiredTool {
+            tool: "gh".into(),
+            floor: "latest".into(),
+        };
+        let finding = tool_version_finding(
+            &required,
+            ".spoolway/hooks/github.sh",
+            Some("gh version 2.97.0 (2024-06-03)"),
+        )
+        .unwrap();
+        let Finding::Note(text) = &finding else {
+            panic!("{finding:?}")
+        };
+        assert!(text.contains("gh >= latest"), "{text}");
+        assert!(text.contains(".spoolway/hooks/github.sh"), "{text}");
+    }
+
+    /// A tool's `--version` answering something that does not read as a
+    /// version is a note, never a failure — an unparseable answer must not
+    /// fail a project that is actually fine.
+    #[test]
+    fn tool_version_finding_notes_an_unreadable_answer_rather_than_failing() {
+        let required = crate::tracking::RequiredTool {
+            tool: "gh".into(),
+            floor: "2.97.0".into(),
+        };
+        let finding =
+            tool_version_finding(&required, ".spoolway/hooks/github.sh", Some("???")).unwrap();
+        assert!(matches!(finding, Finding::Note(_)), "{finding:?}");
+    }
+
+    /// No answer at all — the tool was not on PATH, or its `--version` could
+    /// not even be run — produces no finding here: an existing check already
+    /// owns the not-on-PATH failure, and doubling it up would report the same
+    /// gap twice under two different names.
+    #[test]
+    fn tool_version_finding_is_silent_with_no_answer() {
+        let required = crate::tracking::RequiredTool {
+            tool: "gh".into(),
+            floor: "2.97.0".into(),
+        };
+        assert!(tool_version_finding(&required, ".spoolway/hooks/github.sh", None).is_none());
+    }
+
+    /// The whole path through `issue_tracking_checks`, not just
+    /// `tool_version_finding` on its own: a hook declaring
+    /// `# spoolway-requires: cargo >= <version>` is checked against this
+    /// machine's real `cargo` — the one binary this project's own build
+    /// guarantees is on PATH wherever its tests run — failing when the floor
+    /// is set absurdly high and passing when it plainly is not.
+    #[test]
+    fn issue_tracking_checks_enforces_a_declared_tool_version() {
+        let repo = scratch_repo("requires-version");
+        let hooks_dir = repo.checkout.join(".spoolway/hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        std::fs::write(
+            hooks_dir.join("versioned.sh"),
+            "#!/bin/sh\n# spoolway-requires: cargo >= 999.0.0\nexit 0\n",
+        )
+        .unwrap();
+        let findings = issue_tracking_checks(&repo, &tracking("versioned.sh"));
+        let outcome = findings
+            .iter()
+            .find_map(|f| match f {
+                Finding::Check(label, outcome) if label == "`cargo` is at least 999.0.0" => {
+                    Some(outcome)
+                }
+                _ => None,
+            })
+            .expect("no row for the declared cargo version");
+        let err = outcome.as_ref().unwrap_err().to_string();
+        assert!(err.contains("999.0.0"), "{err}");
+        assert!(err.contains("versioned.sh"), "{err}");
+
+        std::fs::write(
+            hooks_dir.join("versioned.sh"),
+            "#!/bin/sh\n# spoolway-requires: cargo >= 0.0.1\nexit 0\n",
+        )
+        .unwrap();
+        let findings = issue_tracking_checks(&repo, &tracking("versioned.sh"));
+        let outcome = findings
+            .iter()
+            .find_map(|f| match f {
+                Finding::Check(label, outcome) if label == "`cargo` is at least 0.0.1" => {
+                    Some(outcome)
+                }
+                _ => None,
+            })
+            .expect("no row for the declared cargo version");
+        assert!(outcome.is_ok(), "{outcome:?}");
+    }
+
+    /// A `# spoolway-requires:` line that does not parse as `<tool> >=
+    /// <version>` — the third non-goal, ruling out a general constraint
+    /// grammar — is reported as its own note naming the raw line, rather than
+    /// dropped or force-interpreted.
+    #[test]
+    fn required_tool_checks_notes_an_unreadable_declaration_line() {
+        let checkout = crate::scratch::root("doctor-unreadable-requires-line");
+        let _ = std::fs::remove_dir_all(&checkout);
+        let hooks_dir = checkout.join(".spoolway/hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        std::fs::write(
+            hooks_dir.join("odd.sh"),
+            "#!/bin/sh\n# spoolway-requires: gh ~= 2.97.0\nexit 0\n",
+        )
+        .unwrap();
+        let findings = required_tool_checks(&checkout, "odd.sh");
+        let note = findings
+            .iter()
+            .find_map(|f| match f {
+                Finding::Note(text) => Some(text),
+                _ => None,
+            })
+            .expect("no note for the unreadable line");
+        assert!(note.contains("odd.sh"), "{note}");
+        assert!(note.contains("gh ~= 2.97.0"), "{note}");
+    }
+
+    /// A declaration naming a tool that is not on PATH at all produces no row
+    /// of its own — the not-on-PATH failure belongs to whatever check already
+    /// covers that binary (`acli`/`jq` for `jira.sh`, `gh` for `spoolway
+    /// stack`), and this must not report the same gap a second time under a
+    /// different name.
+    #[test]
+    fn issue_tracking_checks_defers_to_the_existing_not_on_path_failure() {
+        let repo = scratch_repo("requires-missing-tool");
+        let hooks_dir = repo.checkout.join(".spoolway/hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        std::fs::write(
+            hooks_dir.join("versioned.sh"),
+            "#!/bin/sh\n# spoolway-requires: definitely-not-a-real-binary >= 1.0.0\nexit 0\n",
+        )
+        .unwrap();
+        let findings = issue_tracking_checks(&repo, &tracking("versioned.sh"));
+        assert!(
+            findings.iter().all(|f| !matches!(
+                f,
+                Finding::Check(label, _) if label.contains("definitely-not-a-real-binary")
+            )),
+            "{findings:?}"
+        );
+    }
+
+    /// A hook with no `# spoolway-requires:` line at all produces exactly the
+    /// rows it produces today — no new row appears just because the check
+    /// now exists.
+    #[test]
+    fn issue_tracking_checks_is_unchanged_with_no_requires_line() {
+        let repo = scratch_repo("no-requires");
+        let hooks_dir = repo.checkout.join(".spoolway/hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        std::fs::write(hooks_dir.join("plain.sh"), "#!/bin/sh\nexit 0\n").unwrap();
+        let findings = issue_tracking_checks(&repo, &tracking("plain.sh"));
+        assert!(
+            findings.iter().all(|f| !matches!(
+                f,
+                Finding::Check(label, _) if label.contains("is at least")
+            )),
+            "{findings:?}"
+        );
     }
 
     /// `key_in_names` on, but the configured hook script never writes

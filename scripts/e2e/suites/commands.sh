@@ -1937,6 +1937,16 @@ must "the hook is switched to the real github.sh" \
   "$SPOOLWAY" config set issue_tracking.hook github.sh
 must "and a project key" "$SPOOLWAY" config set issue_tracking.project_key acme/app
 
+# The `# spoolway-requires: gh >= 2.97.0` line this task added to the real,
+# shipped `github.sh` — not a hand-written stand-in the way every unit test
+# of this check is — read off disk and checked against this stub's own
+# `--version` answer. The one place both are real text rather than a value a
+# unit test chose inline, so drift between the two — the shipped floor
+# moving without the double's answer following it, or the reverse — would
+# show up here and nowhere else.
+silent_about "doctor is quiet about the shipped github.sh's own declared gh version" \
+  "requires gh >=" "$SPOOLWAY" doctor
+
 # After both, not before: the dispatcher reads the config once at startup and
 # the block above this one left `fail.sh` in it, so a restart any earlier
 # would run every hook here as the always-failing one — silently, since that

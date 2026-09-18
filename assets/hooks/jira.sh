@@ -4,7 +4,10 @@
 # someone runs `spoolway issue show`, then on queued, blocked, paused and
 # done.
 #
-# Every `acli` command below was checked against acli 1.3.30-stable. Three
+# spoolway-requires: acli >= 1.3.30
+# spoolway-requires: jq >= 1.6
+#
+# Every `acli` command below was checked against that version. Three
 # things need a site to confirm, and each is a one-line edit if yours
 # differs: that `workitem create --json` names the new key `.key`, that your
 # project spells its link type `Blocks` and its epic status `Done`, and — for

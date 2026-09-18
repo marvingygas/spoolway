@@ -510,6 +510,41 @@ pub(crate) fn has_fetch_branch(script: &str) -> bool {
     script.contains("fetch")
 }
 
+/// One `# spoolway-requires: <tool> >= <version>` line, parsed out of a
+/// hook's own text — see [`required_tools`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RequiredTool {
+    pub tool: String,
+    pub floor: String,
+}
+
+/// Every `# spoolway-requires:` line in `script`, in the order they appear —
+/// the static check `spoolway doctor` runs alongside [`has_fetch_branch`] and
+/// [`writes_slug_line`], the same plain-text-scan shape. A line that does not
+/// parse as `<tool> >= <version>` comes back as its own raw text (`Err`)
+/// rather than being dropped or force-fit to the nearest legal shape: the
+/// non-goal ruling out a general constraint grammar means `doctor` reports it
+/// as unreadable rather than interpreting it, and this is where that text is
+/// kept for it to say so with.
+pub(crate) fn required_tools(script: &str) -> Vec<Result<RequiredTool, String>> {
+    script
+        .lines()
+        .filter_map(|line| {
+            let rest = line.trim().strip_prefix('#')?.trim();
+            let rest = rest.strip_prefix("spoolway-requires:")?.trim();
+            Some(match rest.split_once(">=") {
+                Some((tool, floor)) if !tool.trim().is_empty() && !floor.trim().is_empty() => {
+                    Ok(RequiredTool {
+                        tool: tool.trim().to_string(),
+                        floor: floor.trim().to_string(),
+                    })
+                }
+                _ => Err(rest.to_string()),
+            })
+        })
+        .collect()
+}
+
 /// Whether `script`'s own text ever writes a `slug=` line — the static check
 /// `spoolway doctor` runs when `issue_tracking.key_in_names` is on, the same
 /// shape as [`has_fetch_branch`]. A plain substring search: every shipped
@@ -1171,6 +1206,43 @@ mod tests {
         assert!(!pauses_on_fail(&repo));
         repo.config.issue_tracking.on_fail = "pause".into();
         assert!(pauses_on_fail(&repo));
+    }
+
+    /// One `# spoolway-requires:` line per tool a hook declares, in the order
+    /// they appear, alongside a line that does not parse as `<tool> >=
+    /// <version>` — reported back as its own raw text rather than dropped or
+    /// force-fit, since the non-goal rules out a general constraint grammar.
+    #[test]
+    fn required_tools_reads_every_declaration_line() {
+        let script = "#!/bin/sh\n\
+             # spoolway-requires: gh >= 2.97.0\n\
+             #\n\
+             # spoolway-requires: jq >= 1.6\n\
+             # spoolway-requires: nonsense-line\n\
+             echo hi\n";
+        let found = required_tools(script);
+        assert_eq!(
+            found,
+            vec![
+                Ok(RequiredTool {
+                    tool: "gh".to_string(),
+                    floor: "2.97.0".to_string(),
+                }),
+                Ok(RequiredTool {
+                    tool: "jq".to_string(),
+                    floor: "1.6".to_string(),
+                }),
+                Err("nonsense-line".to_string()),
+            ]
+        );
+    }
+
+    /// A script with no `# spoolway-requires:` line at all reads back empty
+    /// — the acceptance criterion that a hook declaring nothing is checked
+    /// exactly as it is today.
+    #[test]
+    fn required_tools_is_empty_with_no_declaration() {
+        assert!(required_tools("#!/bin/sh\necho hi\n").is_empty());
     }
 
     /// The whole of what makes `hook_path`'s join safe: a name holding a
