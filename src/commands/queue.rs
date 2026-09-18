@@ -6571,7 +6571,7 @@ mod tests {
         let doc = skeleton_document(&repo, &pipelines).unwrap();
 
         assert!(doc.starts_with("---\nid:"), "{doc}");
-        assert!(doc.contains("## Goal"), "{doc}");
+        assert!(doc.contains("## Intend"), "{doc}");
         assert!(
             !doc.contains("spoolway:contract"),
             "the note to whoever maintains the skeleton is not task content:\n{doc}"

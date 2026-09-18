@@ -8,7 +8,7 @@ cause — that is what reproducing is for.
 - [[what the affected code is responsible for]]
 - [[what is already ruled in or out]]
 
-## Bug
+## Intend
 
 [[What goes wrong, in a sentence or two, for someone who has not seen it happen.]]
 

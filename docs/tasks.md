@@ -32,7 +32,7 @@ depends_on:
   - login
 ---
 ## Context
-## Goal
+## Intend
 ## Non-goals
 ## Acceptance criteria
 ## References
@@ -117,7 +117,7 @@ spoolway never reads the body. It is written once, from the skeleton in
 | Section | What goes there |
 |---|---|
 | `## Context` | Three to five facts about the system today and the decision this task implements. |
-| `## Goal` | What the task achieves, in one or two sentences. |
+| `## Intend` | What the task achieves, in one or two sentences. |
 | `## Mockup` | What the result looks like, drawn as the thing itself. Delete the heading when nothing a person opens changes. The reviewer checks the change against it. |
 | `## Non-goals` | What the task must not do. |
 | `## Acceptance criteria` | Statements that are true or false when the task is done. |

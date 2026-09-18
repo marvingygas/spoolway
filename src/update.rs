@@ -1589,7 +1589,7 @@ mod tests {
             // The flat file a project had before prompts gained a directory.
             // `--replace` still reaches it, because reading still finds it.
             (prompts.join("reviewer.md"), "## "),
-            (repo.task_templates_dir().join("default.md"), "## Goal"),
+            (repo.task_templates_dir().join("default.md"), "## Intend"),
         ] {
             let shipped = shipped_for(&repo, &path)
                 .unwrap_or_else(|| panic!("nothing shipped for {}", path.display()));

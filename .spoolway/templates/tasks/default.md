@@ -9,7 +9,7 @@ the obvious approach wrong. Facts and names, not argument.
 - [[the decision it implements, in one line]]
 - [[the constraint that would otherwise be discovered the hard way]]
 
-## Goal
+## Intend
 
 [[What this task achieves, in a sentence or two, for someone who has not read the
 plan it came from.]]
