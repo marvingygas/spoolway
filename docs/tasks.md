@@ -56,6 +56,7 @@ as JSON.
 | `base` | you | The branch the group lands in. Required, here or with `spoolway queue add --base`. |
 | `source` | you | Where the task came from: an issue URL, a plan page path, a name. Never parsed. |
 | `plan` | you | The plan page's absolute path, when `source` holds an issue. Never parsed. |
+| `group_description` | you | The group's own words for its tracker issue. See [Issue tracking](configuration.md#open--a-fifth-event-run-by-queue-add-itself). |
 | `epic`, `ticket` | the `open` hook, or you | Tracker references. A document that sets `ticket:` itself skips the hook. See [Issue tracking](configuration.md#open--a-fifth-event-run-by-queue-add-itself). |
 | `stage` | the pipeline | The step the task is on. |
 | `branch` | the dispatcher | `task/<id>`, or `task/<slug>-<id>` with `issue_tracking.key_in_names`. |
@@ -103,6 +104,10 @@ and its dependent must share the same `base` and the same `group`.
 When `depends_on` names more than one id, the first must be the one whose branch already
 contains the others. `queue add` reorders the list to put it first. A list with no such id is
 refused.
+
+When `issue_tracking.hook` is set, one document in a group must set `group_description:`. A
+document already queued in the same group also satisfies it. A submission is refused, naming
+the group, when none does.
 
 ### The body is the project's
 

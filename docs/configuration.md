@@ -348,9 +348,19 @@ the line's floor.
 
 `spoolway queue add` calls the hook with `SPOOLWAY_EVENT=open` once per document that has no
 `ticket:` yet, in dependency order, before it writes anything. The script also gets
-`SPOOLWAY_DEPENDS_TICKETS` (the ticket ids of the task's `depends_on`), `SPOOLWAY_EPIC_BODY`
-and `SPOOLWAY_TICKET_BODY` (rendered from `.spoolway/templates/tracking/epic.md` and
-`ticket.md`).
+`SPOOLWAY_DEPENDS_TICKETS` (the ticket ids of the task's `depends_on`), `SPOOLWAY_GROUP_DESCRIPTION`
+(the group's `group_description:`, blank if no document set one), `SPOOLWAY_EPIC_BODY` and
+`SPOOLWAY_TICKET_BODY` (rendered from `.spoolway/templates/tracking/epic.md` and `ticket.md`).
+`SPOOLWAY_TASK_FILE` is the document's own path while this hook runs, blank when the document
+has no file of its own, such as a `queue add --from -` stream entry.
+
+The submission is refused, naming the group, when no document in a group sets
+`group_description:`.
+
+A rendered `epic.md` or `ticket.md` line is dropped entirely, its own newline with it, when it
+holds at least one `${SPOOLWAY_*}` placeholder and every placeholder on that line resolves
+empty. A line with no placeholder, or one where at least one placeholder resolves to
+something, renders unchanged.
 
 The script answers by writing lines to the file named in `SPOOLWAY_OUT`:
 

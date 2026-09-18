@@ -37,6 +37,7 @@ const OPTIONAL_KEYS: &[&str] = &[
     "epic",
     "ticket",
     "base",
+    "group_description",
 ];
 
 /// The keys spoolway's own dispatcher machinery throws away unconditionally
@@ -169,6 +170,14 @@ const FIELD_SENTENCES: &[(&str, &str)] = &[
          submission's own `queue add --base` instead; a submission that sets \
          neither is refused, naming the document.",
     ),
+    (
+        "group_description",
+        "The group's own words for the issue a mirror opens above it — carried \
+         verbatim into the open hook's `SPOOLWAY_GROUP_DESCRIPTION`. Only one \
+         document of a group needs to set it; a submission is refused, naming \
+         the group, when a hook is configured and none of the group's documents \
+         set it. Never required when no hook is configured.",
+    ),
 ];
 
 /// Rules `check_dependencies_set` and `validate_batch` enforce over a whole
@@ -187,6 +196,10 @@ fn set_rules() -> Vec<String> {
         "a dependency and its dependent must share the same `base` — a dependent's \
          worktree is cut from its dependency's branch, and that only ever merges \
          back into its own group's base"
+            .to_string(),
+        "when `issue_tracking.hook` is configured, every group must set \
+         `group_description:` on at least one of its documents — never required \
+         with no hook configured"
             .to_string(),
     ]
 }

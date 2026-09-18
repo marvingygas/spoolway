@@ -1750,7 +1750,7 @@ dispatcher_restart
 # deterministic below — the two can never reach `done` in the same pass, so
 # `tracked-a`'s own hook always sees `tracked-b` still open.
 task_doc "$LIVE/tracked-a.md" tracked-a "$BODY" "group: tracked-pair" \
-  "touches: [notes/tracked-a.md]"
+  "touches: [notes/tracked-a.md]" "group_description: a dependent pair, tracked end to end"
 task_doc "$LIVE/tracked-b.md" tracked-b "$BODY" "group: tracked-pair" \
   "touches: [notes/tracked-b.md]" "depends_on: [tracked-a]"
 must "the first of a dependent pair queues" "$SPOOLWAY" queue add --from "$LIVE/tracked-a.md"
@@ -1815,13 +1815,30 @@ fi
 ticket="acme/app#$(next)"
 { echo "epic=$epic"; echo "ticket=$ticket"; } >"$SPOOLWAY_OUT"
 echo "$SPOOLWAY_DEPENDS_TICKETS" >"$dir/depends.$SPOOLWAY_TASK"
+# Proves `SPOOLWAY_TASK_FILE` names a path the hook can actually open right
+# now — the document mid-flight, still in `pending/`, not the `queue/`
+# destination `queue add` has not written yet (that used to be the bug: the
+# document did not exist there until after every hook in the batch had run).
+cat "$SPOOLWAY_TASK_FILE" >"$dir/task-file.$SPOOLWAY_TASK"
+echo "$SPOOLWAY_GROUP_DESCRIPTION" >"$dir/group-description.$SPOOLWAY_TASK"
 EOF
 chmod +x .spoolway/hooks/open.sh
 must "the hook is switched to one that opens tickets" \
   "$SPOOLWAY" config set issue_tracking.hook open.sh
 
+# A group with a hook configured and no `group_description:` on any of its
+# documents is refused outright, naming the group — before the hook is ever
+# run, and before anything is queued.
+task_doc "$LIVE/undescribed.md" undescribed "$BODY" "group: undescribed-group" \
+  "touches: [notes/undescribed.md]"
+refuses "a group with no group_description is refused once a hook is configured" \
+  "group \`undescribed-group\` sets no \`group_description:\`" \
+  "$SPOOLWAY" queue add --from "$LIVE/undescribed.md"
+works "nothing was queued for the refused group" \
+  test ! -e "$SPOOLWAY_PROJECT_HOME/queue/undescribed.md"
+
 task_doc "$LIVE/opened-a.md" opened-a "$BODY" "group: opened-pair" \
-  "touches: [notes/opened-a.md]"
+  "touches: [notes/opened-a.md]" "group_description: a mirrored pair of tasks"
 task_doc "$LIVE/opened-b.md" opened-b "$BODY" "group: opened-pair" \
   "touches: [notes/opened-b.md]" "depends_on: [opened-a]"
 must "a dependent pair queues in one call, opening a ticket for each" \
@@ -1837,13 +1854,19 @@ has "the dependent's own, different ticket" "ticket: acme/app#" "$OPENED_B"
 has "the dependent's call carried its parent's ticket id" \
   "$(grep '^ticket:' "$OPENED_A" | awk '{print $2}')" \
   "$SPOOLWAY_PROJECT_HOME/tracking/depends.opened-b"
+has "the open hook read the real, live contents of the document" \
+  "id: opened-a" "$SPOOLWAY_PROJECT_HOME/tracking/task-file.opened-a"
+has "the group's own words reached the hook on the first task" \
+  "a mirrored pair of tasks" "$SPOOLWAY_PROJECT_HOME/tracking/group-description.opened-a"
+has "and on the dependent, which set no group_description of its own" \
+  "a mirrored pair of tasks" "$SPOOLWAY_PROJECT_HOME/tracking/group-description.opened-b"
 
 # A batch of two, the second of which the hook above refuses by name: nothing
 # is queued, but the first document's own ticket was already written back
 # into it in place, in `$LIVE` — not the queue — so a second `queue add` over
 # the same two documents resumes rather than opening a second set.
 task_doc "$LIVE/opened-ok.md" opened-ok "$BODY" "group: opened-fail-batch" \
-  "touches: [notes/opened-ok.md]"
+  "touches: [notes/opened-ok.md]" "group_description: a batch that fails partway through"
 task_doc "$LIVE/opened-fails.md" opened-fails "$BODY" "group: opened-fail-batch" \
   "touches: [notes/opened-fails.md]"
 refuses "a mid-batch hook failure queues nothing" "opened-fails" \
@@ -1903,7 +1926,7 @@ must "key_in_names is turned on" \
   "$SPOOLWAY" config set issue_tracking.key_in_names true
 
 task_doc "$LIVE/keyed-a.md" keyed-a "$BODY" "group: keyed-rework" \
-  "touches: [notes/keyed-a.md]"
+  "touches: [notes/keyed-a.md]" "group_description: reworking the keyed pair"
 task_doc "$LIVE/keyed-b.md" keyed-b "$BODY" "group: keyed-rework" \
   "touches: [notes/keyed-b.md]" "depends_on: [keyed-a]"
 says "queue add names the prefix it applied" \
@@ -1948,7 +1971,7 @@ must "the hook now always fails" "$SPOOLWAY" config set issue_tracking.hook fail
 must "and on_fail pauses the task" "$SPOOLWAY" config set issue_tracking.on_fail pause
 
 task_doc "$LIVE/hook-queued.md" hook-queued "$BODY" "group: live" \
-  "touches: [notes/hook-queued.md]"
+  "touches: [notes/hook-queued.md]" "group_description: a task under an always-failing hook"
 must "a task queues under an always-failing hook" \
   "$SPOOLWAY" queue add --from "$LIVE/hook-queued.md"
 
@@ -2068,7 +2091,8 @@ GHSTUB
 chmod +x "$LOWVER_BIN/gh"
 
 task_doc "$LIVE/github-gate.md" github-gate "$BODY" \
-  "group: github-gate" "touches: [notes/github-gate.md]"
+  "group: github-gate" "touches: [notes/github-gate.md]" \
+  "group_description: proving the gh version gate"
 GATE_OUT="$LIVE/github-gate.out"
 env PATH="$LOWVER_BIN:$PATH" "$SPOOLWAY" queue add --from "$LIVE/github-gate.md" \
   >"$GATE_OUT" 2>&1
@@ -2098,7 +2122,8 @@ dispatcher_restart
 # A group of one, so the script's own `epic` branch never fires — this is
 # about the ticket half, which every group size takes.
 task_doc "$LIVE/github-open-check.md" github-open-check "$BODY" \
-  "group: github-single" "touches: [notes/github-open-check.md]"
+  "group: github-single" "touches: [notes/github-open-check.md]" \
+  "group_description: proving the real open branch"
 must "queuing it calls the real hook's open branch" \
   "$SPOOLWAY" queue add --from "$LIVE/github-open-check.md"
 
@@ -2121,7 +2146,8 @@ has "with the rendered ticket body, not the template's raw placeholders" \
 # the node id `gh issue view --json id` hands back, so this is the case that
 # catches that pair being swapped.
 task_doc "$LIVE/github-pair-a.md" github-pair-a "$BODY" \
-  "group: github-pair" "touches: [notes/github-pair-a.md]"
+  "group: github-pair" "touches: [notes/github-pair-a.md]" \
+  "group_description: proving the epic and sub-issue branch"
 task_doc "$LIVE/github-pair-b.md" github-pair-b "$BODY" \
   "group: github-pair" "touches: [notes/github-pair-b.md]"
 must "queuing a group of two calls the hook's epic branch too" \
@@ -2197,6 +2223,7 @@ fi
 # `source:` (every other task in this suite) exactly alone.
 task_doc "$LIVE/github-hang-under.md" github-hang-under "$BODY" \
   "group: github-hang-single" "touches: [notes/github-hang-under.md]" \
+  "group_description: proving hang_under links the filed issue" \
   "source: $GH_STUB_URL/acme/app/issues/$FETCH_NUM"
 must "queuing a task whose source names a filed issue calls the open branch" \
   "$SPOOLWAY" queue add --from "$LIVE/github-hang-under.md"

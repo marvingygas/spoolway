@@ -258,6 +258,19 @@ pub struct Frontmatter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
 
+    /// The group's own words for the issue a mirror opens above it —
+    /// carried verbatim into `SPOOLWAY_GROUP_DESCRIPTION` on the `open`
+    /// event, and into nothing else spoolway does. Only one document of a
+    /// group needs to set it; `queue add`'s own `validate_batch` looks at
+    /// every document of a submission's group together, not this one field
+    /// alone, and refuses the whole batch when a hook is configured and none
+    /// of them carry it — an issue with a hook but no group description
+    /// would have nothing of its own to say. Never required when no hook is
+    /// configured: a project with no `issue_tracking.hook` set pays for none
+    /// of this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_description: Option<String>,
+
     /// A reference to where this task came from — an issue URL, a plan page
     /// path, a bare name. Nothing in spoolway parses it; it is carried for a
     /// person to follow back, and for nothing else.

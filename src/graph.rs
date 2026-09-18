@@ -586,6 +586,7 @@ mod tests {
                 resume: None,
                 pipeline: Some("default".to_string()),
                 group: group.map(str::to_string),
+                group_description: None,
                 source: None,
                 plan: None,
                 gate_at: None,

@@ -143,6 +143,8 @@ pub fn open_ticket(
     group_size: usize,
     group_epic: &str,
     depends_tickets: &str,
+    group_description: &str,
+    task_file: &str,
 ) -> Result<OpenResult> {
     let Some(hook) = hook_path(repo) else {
         return Ok(OpenResult::NoHook);
@@ -156,7 +158,15 @@ pub fn open_ticket(
     let ticket_body_path = dir.join(format!("{key}.ticket-body.md"));
     let _ = std::fs::remove_file(&out_path);
 
-    let mut env = open_env(repo, task, group_size, group_epic, depends_tickets);
+    let mut env = open_env(
+        repo,
+        task,
+        group_size,
+        group_epic,
+        depends_tickets,
+        group_description,
+        task_file,
+    );
     std::fs::write(
         &epic_body_path,
         crate::task_template::render_tracking(
@@ -242,9 +252,16 @@ pub(crate) const OPEN_EVENT_VARS: &[(&str, &str)] = &[
     ("SPOOLWAY_TASK", "the id it is about to be queued under"),
     ("SPOOLWAY_SOURCE", "the task document's own `source:`"),
     ("SPOOLWAY_GROUP", "its `group:`"),
+    (
+        "SPOOLWAY_GROUP_DESCRIPTION",
+        "its group's own `group_description:`, if one was set",
+    ),
     ("SPOOLWAY_BRANCH", "its `branch:`"),
     ("SPOOLWAY_TITLE", "its title"),
-    ("SPOOLWAY_TASK_FILE", "the queued document's path"),
+    (
+        "SPOOLWAY_TASK_FILE",
+        "the document's path while this hook runs; blank when it has no file of its own",
+    ),
     (
         "SPOOLWAY_GROUP_SIZE",
         "how many tasks this group is opening at once",
@@ -276,12 +293,28 @@ pub(crate) const OPEN_EVENT_VARS: &[(&str, &str)] = &[
 /// [`build_env`] gives the four dispatch events that also makes sense before
 /// a task has ever moved: no `SPOOLWAY_FROM`, since nothing has happened to
 /// this task yet to name.
+///
+/// `task_file` is handed in rather than read off `task.path`: at the moment
+/// this hook runs the task has not been written to the queue yet — `task.
+/// path` already names where `validate_batch` intends to save it, a file
+/// that does not exist until after every document in the batch has opened
+/// its ticket. The caller passes the path the document actually sits at
+/// right now instead, which is what usually makes `SPOOLWAY_TASK_FILE` a
+/// path a hook can open — usually, not always: a document with no file of
+/// its own at all, such as a `queue add --from -` stream entry, has nothing
+/// truthful to hand over, and the caller passes the empty string for that
+/// case rather than a name nothing can open. `group_description` is
+/// likewise the caller's to resolve — `open_tickets` reads it off whichever
+/// document in the group set it,
+/// this task's own frontmatter included.
 fn open_env(
     repo: &Repo,
     task: &Task,
     group_size: usize,
     group_epic: &str,
     depends_tickets: &str,
+    group_description: &str,
+    task_file: &str,
 ) -> BTreeMap<String, String> {
     let front = &task.front;
     BTreeMap::from([
@@ -296,14 +329,15 @@ fn open_env(
             front.group.clone().unwrap_or_default(),
         ),
         (
+            "SPOOLWAY_GROUP_DESCRIPTION".to_string(),
+            group_description.to_string(),
+        ),
+        (
             "SPOOLWAY_BRANCH".to_string(),
             front.branch.clone().unwrap_or_default(),
         ),
         ("SPOOLWAY_TITLE".to_string(), front.title.clone()),
-        (
-            "SPOOLWAY_TASK_FILE".to_string(),
-            task.path.display().to_string(),
-        ),
+        ("SPOOLWAY_TASK_FILE".to_string(), task_file.to_string()),
         (
             "SPOOLWAY_PROJECT_KEY".to_string(),
             repo.config.issue_tracking.project_key.clone(),
@@ -917,6 +951,7 @@ mod tests {
             resume: None,
             pipeline: None,
             group: None,
+            group_description: None,
             source: None,
             plan: None,
             gate_at: None,
@@ -1156,7 +1191,7 @@ mod tests {
         // tracking directory it points into exists — so they are added here
         // exactly the way that caller does, rather than expected of
         // `open_env` itself.
-        let mut open = open_env(&repo, &t, 1, "", "");
+        let mut open = open_env(&repo, &t, 1, "", "", "", "demo.md");
         open.insert("SPOOLWAY_OUT".to_string(), String::new());
         open.insert("SPOOLWAY_EPIC_BODY".to_string(), String::new());
         open.insert("SPOOLWAY_TICKET_BODY".to_string(), String::new());
@@ -1330,7 +1365,7 @@ mod tests {
         let repo = fixture("open-no-hook");
         let t = task("demo", |_| {});
         assert_eq!(
-            open_ticket(&repo, &t, 1, "", "").unwrap(),
+            open_ticket(&repo, &t, 1, "", "", "", "demo.md").unwrap(),
             OpenResult::NoHook
         );
     }
@@ -1357,6 +1392,8 @@ mod tests {
             &mut repo,
             "open.sh",
             r#"cat "$SPOOLWAY_EPIC_BODY" >"$SPOOLWAY_EPIC_BODY.seen"
+               cat "$SPOOLWAY_TASK_FILE" >"$SPOOLWAY_EPIC_BODY.task-file.seen"
+               echo "$SPOOLWAY_GROUP_DESCRIPTION" >"$SPOOLWAY_EPIC_BODY.description.seen"
                { echo "epic=$SPOOLWAY_GROUP_SIZE-parents:$SPOOLWAY_DEPENDS_TICKETS"; \
                  echo "ticket=acme/app#43"; } >"$SPOOLWAY_OUT""#,
         );
@@ -1365,7 +1402,22 @@ mod tests {
             f.source = Some("/plans/scanner-rework.html".into());
         });
 
-        let result = open_ticket(&repo, &t, 3, "", "acme/app#42").unwrap();
+        // The document this task came from, sitting wherever `queue add`
+        // reads it from mid-flight — not `t.path`, which names where it
+        // will land in the queue, a file that does not exist yet.
+        let source_doc = repo.root.join("scan-pending.md");
+        std::fs::write(&source_doc, "the document's own live contents\n").unwrap();
+
+        let result = open_ticket(
+            &repo,
+            &t,
+            3,
+            "",
+            "acme/app#42",
+            "Mirrors a group of scans.",
+            &source_doc.display().to_string(),
+        )
+        .unwrap();
         assert_eq!(
             result,
             OpenResult::Answered {
@@ -1382,6 +1434,23 @@ mod tests {
                 .unwrap();
         assert!(seen.contains("group `scanner-rework`"), "{seen}");
         assert!(seen.contains("/plans/scanner-rework.html"), "{seen}");
+
+        // `SPOOLWAY_TASK_FILE` names a path the hook can actually open and
+        // read — the document's real, current contents, not the queue path
+        // `validate_batch` has merely decided on.
+        let task_file_seen = std::fs::read_to_string(
+            repo.tracking_dir()
+                .join(format!("{key}.epic-body.md.task-file.seen")),
+        )
+        .unwrap();
+        assert_eq!(task_file_seen, "the document's own live contents\n");
+
+        let description_seen = std::fs::read_to_string(
+            repo.tracking_dir()
+                .join(format!("{key}.epic-body.md.description.seen")),
+        )
+        .unwrap();
+        assert_eq!(description_seen.trim(), "Mirrors a group of scans.");
     }
 
     /// A hook that exits non-zero is `Failed`, carrying the code back rather
@@ -1394,7 +1463,7 @@ mod tests {
         let t = task("split-fields", |_| {});
 
         assert_eq!(
-            open_ticket(&repo, &t, 1, "", "").unwrap(),
+            open_ticket(&repo, &t, 1, "", "", "", "split-fields.md").unwrap(),
             OpenResult::Failed { exit_code: Some(7) }
         );
     }

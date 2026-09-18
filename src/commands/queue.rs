@@ -860,8 +860,66 @@ pub(crate) fn validate_batch(
         tasks.push(task);
     }
 
+    require_group_description(repo, &tasks)?;
     check_dependencies_set(repo, pipelines, &mut tasks)?;
     Ok(tasks)
+}
+
+/// Whether `task` itself carries a non-blank `group_description:`.
+fn has_group_description(task: &Task) -> bool {
+    task.front
+        .group_description
+        .as_deref()
+        .is_some_and(|d| !d.trim().is_empty())
+}
+
+/// Refuse this submission when a hook is configured and some group it names
+/// carries a `group_description:` on none of its documents — the group's
+/// issue would then have nothing of its own to say, only whatever a hook
+/// script guesses from a task's title. A no-op with no hook configured: the
+/// acceptance criteria are explicit that `group_description:` is never
+/// required for a project that has not turned issue tracking on at all.
+///
+/// Also satisfied by an already-queued sibling of the same bare group (never
+/// an archived one — [`Repo::tasks`] reads only the queue) — the same
+/// cross-submission lookup [`open_tickets`] runs for a group's epic and
+/// slug, stripping a recognised `<slug>-` prefix before comparing: a group
+/// opened over more than one `queue add` call sets its description once, on
+/// whichever call opens it, and a later call adding more of the same group
+/// is not asked to repeat it.
+fn require_group_description(repo: &Repo, tasks: &[Task]) -> Result<()> {
+    if !crate::tracking::configured(repo) {
+        return Ok(());
+    }
+
+    let existing = repo.tasks().unwrap_or_default();
+    let mut seen: std::collections::BTreeSet<&str> = Default::default();
+    for group in tasks.iter().filter_map(|t| t.front.group.as_deref()) {
+        if !seen.insert(group) {
+            continue;
+        }
+        let in_batch = tasks
+            .iter()
+            .filter(|t| t.front.group.as_deref() == Some(group))
+            .any(has_group_description);
+        let in_queue = existing.iter().any(|sibling| {
+            let sib_slug = match sibling.extra_str("slug") {
+                s if accept_slug(s) => s,
+                _ => "",
+            };
+            let bare = strip_slug_prefix(sibling.front.group.as_deref().unwrap_or(""), sib_slug);
+            bare == group && has_group_description(sibling)
+        });
+        if !(in_batch || in_queue) {
+            bail!(
+                "group `{group}` sets no `group_description:` on any of its documents, and \
+                 `issue_tracking.hook` names `{}` — the group's issue would have nothing to \
+                 say. Set it on one document of the group.",
+                repo.config.issue_tracking.hook
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Where a task id already sits on disk — the queue directory, where a run
@@ -978,8 +1036,15 @@ fn queue_add_documents(
     // than left to `?`, which would otherwise print it as an ordinary
     // error and exit 1 the way `dispatch::overrides_gate`'s own `esc`
     // never does (review finding 5).
-    if let Err(err) = open_and_prefix(repo, documents, &mut tasks, crate::ask::interactive(), true)
-    {
+    let task_files = readable_task_files(documents);
+    if let Err(err) = open_and_prefix(
+        repo,
+        documents,
+        &task_files,
+        &mut tasks,
+        crate::ask::interactive(),
+        true,
+    ) {
         return match err.downcast_ref::<GateCancelled>() {
             Some(_) => Ok(()),
             None => Err(err),
@@ -1040,6 +1105,40 @@ fn remove_pending_sources(repo: &Repo, documents: &[(String, String)]) {
     }
 }
 
+/// The path of each of `documents`, in order, that is actually a file on
+/// disk right now — what [`open_and_prefix`]'s own `task_files` wants for a
+/// `--from` or queue-screen submission, where the document and the file a
+/// hook could read are normally the same thing. The empty string stands in
+/// for one that is not: a `--from -` stream entry is named `<stdin>#N` by
+/// [`gather_documents`], never a real path, and handing that to a hook as
+/// `SPOOLWAY_TASK_FILE` would be handing it something no `cat` can open —
+/// the same failure this whole `task_files` split exists to end.
+///
+/// Canonicalised, not merely checked with `is_file`: a name here can be
+/// relative to wherever `spoolway` itself was started (`--from ../t.md`,
+/// or a `--from <dir>` whose entries [`gather_documents`] joins onto that
+/// same relative `dir`), but the hook it is handed to runs with its
+/// current directory set to `repo.root` (see [`crate::tracking::open_ticket`]
+/// and, under it, `Runs::start`'s own `cwd`) — a relative name would resolve
+/// against the wrong directory there, either failing to open at all or,
+/// worse, silently opening whatever unrelated file happens to sit at that
+/// path from `repo.root`. `canonicalize` answers both questions in one
+/// call: it fails exactly when there is no real file to resolve, which is
+/// the same empty-string case `is_file` caught, and every path it accepts
+/// comes back absolute, so `repo.root`'s cwd resolves it identically to
+/// wherever `spoolway` was actually run from (review round 2 finding 6).
+fn readable_task_files(documents: &[(String, String)]) -> Vec<String> {
+    documents
+        .iter()
+        .map(|(name, _)| {
+            std::fs::canonicalize(name)
+                .ok()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
 /// What every path that saves a validated batch runs between
 /// [`validate_batch`] and its writes: open the batch's tickets, then apply
 /// the prefix `issue_tracking.key_in_names` asks for. One place for the
@@ -1051,9 +1150,20 @@ fn remove_pending_sources(repo: &Repo, documents: &[(String, String)]) {
 ///
 /// `documents` are the files a failed hook call writes the ids it already
 /// opened back into, so a re-run resumes rather than opening a second set —
-/// see [`write_back_ids`]. A routine hands an empty list: its minted
-/// document has no file of its own, and the source under
-/// `.spoolway/routines/` is never written to.
+/// see [`write_back_ids`]. A routine hands an empty list: writing an id back
+/// into `.spoolway/routines/` would consume a document meant to be queued
+/// again, not once.
+///
+/// `task_files` is a *different* list, index-aligned with `tasks` rather
+/// than `documents`, naming the real path each task's document currently
+/// sits at for `SPOOLWAY_TASK_FILE` to point a hook at — never the same
+/// thing as `documents` staying empty: a routine's document is never
+/// written back into, but it is a real file under `.spoolway/routines/` a
+/// hook can safely be handed to read, and [`queue_routine_target`] and
+/// [`finish_routine`] pass it here while still passing `documents` as `&[]`.
+/// An entry is the empty string when nothing backs it — a `--from -` stream
+/// document read from standard input, say — rather than a path nothing can
+/// open.
 ///
 /// `interactive` is not `crate::ask::interactive()`'s own tty check —
 /// callers driving the queue screen (`finish_submit`, `finish_routine`) pass
@@ -1077,6 +1187,7 @@ fn remove_pending_sources(repo: &Repo, documents: &[(String, String)]) {
 fn open_and_prefix(
     repo: &Repo,
     documents: &[(String, String)],
+    task_files: &[String],
     tasks: &mut [Task],
     interactive: bool,
     own_terminal: bool,
@@ -1094,7 +1205,7 @@ fn open_and_prefix(
     // it into the queue — because a sibling document further down the batch
     // turned out to be broken — would be a ticket nothing ever points back
     // at.
-    let group_slug = open_tickets(repo, documents, tasks)?;
+    let group_slug = open_tickets(repo, documents, task_files, tasks)?;
 
     // The prefix goes on in a pass of its own, after the hook has answered:
     // the slug does not exist until `open_tickets` has run, and `branch:` was
@@ -1415,9 +1526,14 @@ fn prefix_generated_names(tasks: &mut [Task], group_slug: &BTreeMap<String, Stri
 /// already in the queue as well as this batch. Empty unless
 /// `issue_tracking.key_in_names` is on and a hook actually answered a slug;
 /// [`prefix_generated_names`] is what applies it.
+///
+/// `task_files` is index-aligned with `tasks`, not `documents` — see
+/// [`open_and_prefix`]'s own doc comment on why the two lists differ — and
+/// is what `SPOOLWAY_TASK_FILE` is resolved from below.
 fn open_tickets(
     repo: &Repo,
     documents: &[(String, String)],
+    task_files: &[String],
     tasks: &mut [Task],
 ) -> Result<BTreeMap<String, String>> {
     // `group:` on every task in this batch is still the bare name a document
@@ -1431,9 +1547,27 @@ fn open_tickets(
     }
 
     let mut group_size: BTreeMap<String, usize> = BTreeMap::new();
+    // The group's own words for the issue this batch is about to open —
+    // whichever document of the group set `group_description:` first, in
+    // batch order, or an already-queued sibling's if none in the batch did
+    // (seeded below, alongside `group_epic`). `require_group_description`
+    // has already refused the batch outright when a hook is configured and
+    // neither found one, so this only ever comes back empty for a group
+    // that skipped that gate because no hook was configured at all.
+    let mut group_description: BTreeMap<String, String> = BTreeMap::new();
     for task in tasks.iter() {
         if let Some(group) = &task.front.group {
             *group_size.entry(group.clone()).or_insert(0) += 1;
+            if let Some(description) = task
+                .front
+                .group_description
+                .as_deref()
+                .filter(|d| !d.trim().is_empty())
+            {
+                group_description
+                    .entry(group.clone())
+                    .or_insert_with(|| description.to_string());
+            }
         }
     }
     // Seeded from the queue too, not only this batch: a group opened over
@@ -1464,6 +1598,11 @@ fn open_tickets(
             group_epic
                 .entry(bare.clone())
                 .or_insert_with(|| epic.to_string());
+        }
+        if has_group_description(&sibling) {
+            group_description
+                .entry(bare.clone())
+                .or_insert_with(|| sibling.front.group_description.clone().unwrap_or_default());
         }
         if key_in_names && !sib_slug.is_empty() {
             group_slug
@@ -1533,9 +1672,23 @@ fn open_tickets(
             .collect::<Result<Vec<_>>>()?
             .join(" ");
         let known_epic = group_epic.get(&group).cloned().unwrap_or_default();
+        let known_description = group_description.get(&group).cloned().unwrap_or_default();
         let size = *group_size.get(&group).unwrap_or(&1);
+        // The path this document actually sits at right now — the caller's
+        // to resolve, and never `tasks[i].path`: that names where
+        // `validate_batch` intends to save the task, a file that does not
+        // exist until every document in this batch has opened its ticket.
+        let task_file = task_files.get(i).cloned().unwrap_or_default();
 
-        match crate::tracking::open_ticket(repo, &tasks[i], size, &known_epic, &depends_tickets)? {
+        match crate::tracking::open_ticket(
+            repo,
+            &tasks[i],
+            size,
+            &known_epic,
+            &depends_tickets,
+            &known_description,
+            &task_file,
+        )? {
             crate::tracking::OpenResult::NoHook => unreachable!("checked configured() above"),
             crate::tracking::OpenResult::Answered {
                 epic,
@@ -4796,7 +4949,8 @@ fn finish_submit(
     // gracefully under a script or a closed pane. `own_terminal: false`
     // since `queue_screen` already holds a `TermGuard` for the whole of
     // `run_screen` — see `open_and_prefix`'s own doc comment.
-    open_and_prefix(repo, documents, &mut pending, true, false)?;
+    let task_files = readable_task_files(documents);
+    open_and_prefix(repo, documents, &task_files, &mut pending, true, false)?;
 
     for task in &pending {
         task.save()?;
@@ -5397,7 +5551,20 @@ pub(crate) fn queue_routine_target(
     // answer for a run a person actually declined. Turning it into a fake
     // empty success here would let the dispatcher believe this minute's
     // firing already happened.
-    open_and_prefix(repo, &[], &mut tasks, crate::ask::interactive(), true)?;
+    //
+    // `documents` is `&[]` — nothing here is ever written back into — but
+    // `task_files` is not: a routine's own document is a real file under
+    // `.spoolway/routines/`, safe for a hook to read, only never to write
+    // to.
+    let task_files = readable_task_files(&documents);
+    open_and_prefix(
+        repo,
+        &[],
+        &task_files,
+        &mut tasks,
+        crate::ask::interactive(),
+        true,
+    )?;
     // All or none: everything above parsed and validated, so these writes
     // are the commit — the same discipline `queue_add_documents` follows.
     for task in &tasks {
@@ -5413,11 +5580,19 @@ pub(crate) fn queue_routine_target(
 /// documents under `.spoolway/routines/` are never touched — a routine is
 /// meant to be queued again, not consumed by being queued once — which is
 /// why nothing is handed to [`open_and_prefix`] to write ids back into.
-fn finish_routine(repo: &Repo, tasks: &mut [Task], base: &str) -> Result<String> {
+/// `task_files` still names each one's real path, for a hook's own
+/// `SPOOLWAY_TASK_FILE` to point at — see [`open_and_prefix`]'s own doc
+/// comment on why that is a different list from the empty `documents`.
+fn finish_routine(
+    repo: &Repo,
+    tasks: &mut [Task],
+    task_files: &[String],
+    base: &str,
+) -> Result<String> {
     // `interactive: true`, `own_terminal: false` — driven from the queue
     // screen's own routines pane, which already holds the terminal for the
     // whole of `run_screen`; see `open_and_prefix`'s own doc comment.
-    open_and_prefix(repo, &[], tasks, true, false)?;
+    open_and_prefix(repo, &[], task_files, tasks, true, false)?;
     for task in tasks.iter() {
         task.save()?;
     }
@@ -5450,8 +5625,9 @@ fn begin_routine_queue(
     if documents.is_empty() {
         return Mode::Browsing;
     }
+    let task_files = readable_task_files(&documents);
     match validate_batch(repo, pipelines, Some(base), &documents) {
-        Ok(mut tasks) => match finish_routine(repo, &mut tasks, base) {
+        Ok(mut tasks) => match finish_routine(repo, &mut tasks, &task_files, base) {
             Ok(msg) => after_write(repo, msg),
             Err(err) => refusal_mode("queue refused", err),
         },
@@ -5484,9 +5660,10 @@ fn begin_routine_solo(
     let mut doc = with_frontmatter_field(&task.doc, "id", &id);
     doc = with_frontmatter_field(&doc, "depends_on", "[]");
     let documents = vec![(task.path.display().to_string(), doc)];
+    let task_files = readable_task_files(&documents);
 
     match validate_batch(repo, pipelines, Some(base), &documents) {
-        Ok(mut tasks) => match finish_routine(repo, &mut tasks, base) {
+        Ok(mut tasks) => match finish_routine(repo, &mut tasks, &task_files, base) {
             Ok(msg) => after_write(repo, msg),
             Err(err) => refusal_mode("queue refused", err),
         },
@@ -5556,6 +5733,66 @@ mod tests {
         assert_eq!(strip_slug_prefix("auth-rework", "proj-12"), "auth-rework");
         // The slug must be followed by a hyphen to count as a prefix.
         assert_eq!(strip_slug_prefix("proj-12x", "proj-12"), "proj-12x");
+    }
+
+    /// A hook runs with its own current directory set to `repo.root`, not
+    /// wherever `spoolway` itself happened to be started from — so
+    /// `readable_task_files` must hand back an absolute path even for a
+    /// document named relatively (`--from ../t.md`, or an entry
+    /// `gather_documents` joined onto a relative `--from <dir>`); a relative
+    /// name would resolve against the wrong directory once the hook reads it
+    /// (review round 2 finding 6). This does not switch the process's own
+    /// working directory to prove it — that is global state shared by every
+    /// test running in parallel — it only checks the shape of the answer:
+    /// relative in, absolute out, matching what `canonicalize` itself
+    /// resolves the same name to.
+    ///
+    /// The document deliberately does *not* come from [`crate::scratch::
+    /// root`], unlike every other fixture in this crate: that helper only
+    /// ever answers a path already absolute under the system temp
+    /// directory, and this test's whole premise needs a name that starts
+    /// out relative to `std::env::current_dir()` — the one shape
+    /// `scratch::root` cannot produce (review round 3 finding 7).
+    #[test]
+    fn readable_task_files_resolves_a_relative_name_to_an_absolute_path() {
+        let dir = std::path::PathBuf::from("target").join(format!(
+            "task-files-relative-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let relative = dir.join("doc.md");
+        std::fs::write(&relative, "hi").unwrap();
+
+        let documents = vec![(relative.display().to_string(), String::new())];
+        let resolved = readable_task_files(&documents);
+
+        assert_eq!(resolved.len(), 1);
+        assert!(
+            std::path::Path::new(&resolved[0]).is_absolute(),
+            "a relative document name must resolve to an absolute path: {resolved:?}"
+        );
+        assert_eq!(
+            std::fs::canonicalize(&relative)
+                .unwrap()
+                .display()
+                .to_string(),
+            resolved[0]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A name naming nothing real — the `<stdin>#N` [`gather_documents`]
+    /// mints for a stream entry, chief among them — resolves to the empty
+    /// string, the same as it did under the old `is_file` check.
+    #[test]
+    fn readable_task_files_is_empty_for_a_name_that_resolves_to_nothing() {
+        let documents = vec![("<stdin>#1".to_string(), String::new())];
+        assert_eq!(readable_task_files(&documents), vec![String::new()]);
     }
 
     #[test]
@@ -9980,6 +10217,94 @@ mod tests {
             );
         }
 
+        /// The mockup this covers verbatim: a hook is configured, and the
+        /// group being submitted sets `group_description:` on none of its
+        /// documents — refused, naming the group and the hook, before
+        /// anything is queued or the hook is ever run.
+        #[test]
+        fn a_group_with_no_description_is_refused_once_a_hook_is_configured() {
+            let mut repo = fixture("open-no-description");
+            with_hook(&mut repo, "exit 1");
+            let text = document("mirrored", "group: issue-mirror\n", BODY);
+            let path = write_doc(&repo, "mirrored.md", &text);
+
+            let err = queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&[&path]),
+                &repo.root,
+                false,
+            )
+            .unwrap_err();
+            let err = err.to_string();
+            assert!(err.contains("group `issue-mirror`"), "{err}");
+            assert!(err.contains("group_description"), "{err}");
+            assert!(err.contains("open.sh"), "{err}");
+            assert!(
+                !repo.queue_dir().join("mirrored.md").exists(),
+                "nothing was queued"
+            );
+            assert!(
+                std::fs::read_dir(repo.tracking_dir())
+                    .map(|mut d| d.next().is_none())
+                    .unwrap_or(true),
+                "the hook was never run — the refusal is ahead of it"
+            );
+        }
+
+        /// A project with no hook configured pays for none of this: the same
+        /// group with no `group_description:` on any document queues cleanly.
+        #[test]
+        fn a_group_with_no_description_is_fine_with_no_hook_configured() {
+            let repo = fixture("open-no-description-no-hook");
+            let text = document("mirrored", "group: issue-mirror\n", BODY);
+            let path = write_doc(&repo, "mirrored.md", &text);
+
+            queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&[&path]),
+                &repo.root,
+                false,
+            )
+            .unwrap();
+
+            assert!(repo.queue_dir().join("mirrored.md").exists());
+        }
+
+        /// `gather_documents` names a `--from -` stream entry `<stdin>#N`,
+        /// never a path — [`readable_task_files`] must not hand that name to
+        /// the hook as `SPOOLWAY_TASK_FILE` just because it looks like one:
+        /// the empty string, not a name nothing can open.
+        #[test]
+        fn a_document_with_no_backing_file_gets_an_empty_task_file() {
+            let mut repo = fixture("open-no-backing-file");
+            with_hook(
+                &mut repo,
+                r#"printf '%s' "$SPOOLWAY_TASK_FILE" >"$(dirname "$SPOOLWAY_OUT")/task-file.seen"
+                   echo "ticket=T-1" >"$SPOOLWAY_OUT""#,
+            );
+            let doc = document(
+                "streamed",
+                "group: streamed\ngroup_description: read from stdin\n",
+                BODY,
+            );
+            let documents = vec![("<stdin>#1".to_string(), doc)];
+            let mut tasks =
+                validate_batch(&repo, &Pipelines::builtin(), Some("plan/demo"), &documents)
+                    .unwrap();
+            let task_files = readable_task_files(&documents);
+            open_and_prefix(&repo, &documents, &task_files, &mut tasks, false, true).unwrap();
+
+            let seen = std::fs::read_to_string(repo.tracking_dir().join("task-file.seen"));
+            assert_eq!(
+                seen.unwrap(),
+                "",
+                "`<stdin>#1` is not a path — the hook must see nothing rather than a name it \
+                 cannot open"
+            );
+        }
+
         /// The hook runs once per document, in dependency order, and its
         /// `epic=`/`ticket=` answer — read from the file at `SPOOLWAY_OUT` —
         /// lands in the queued document's own frontmatter. The dependent's
@@ -9996,7 +10321,11 @@ mod tests {
                    } >"$SPOOLWAY_OUT""#,
             );
 
-            let parent = document("scan-pending", "group: scanner-rework\n", BODY);
+            let parent = document(
+                "scan-pending",
+                "group: scanner-rework\ngroup_description: scanning rework\n",
+                BODY,
+            );
             let parent_path = write_doc(&repo, "scan-pending.md", &parent);
             let child = document(
                 "split-fields",
@@ -10042,7 +10371,8 @@ mod tests {
             with_hook(&mut repo, "exit 1");
             let text = document(
                 "retry-drops",
-                "group: scanner-rework\nepic: acme/app#42\nticket: acme/app#45\n",
+                "group: scanner-rework\ngroup_description: scanning rework\n\
+                 epic: acme/app#42\nticket: acme/app#45\n",
                 BODY,
             );
             let path = write_doc(&repo, "retry-drops.md", &text);
@@ -10073,7 +10403,11 @@ mod tests {
                    { echo "epic=acme/app#42"; echo "ticket=acme/app#43"; } >"$SPOOLWAY_OUT""#,
             );
 
-            let first = document("scan-pending", "group: scanner-rework\n", BODY);
+            let first = document(
+                "scan-pending",
+                "group: scanner-rework\ngroup_description: scanning rework\n",
+                BODY,
+            );
             let first_path = write_doc(&repo, "scan-pending.md", &first);
             let second = document("split-fields", "group: scanner-rework\n", BODY);
             let second_path = write_doc(&repo, "split-fields.md", &second);
@@ -10154,7 +10488,11 @@ mod tests {
         fn a_hook_failing_on_the_first_call_says_so_with_nothing_to_resume_from() {
             let mut repo = fixture("open-fails-first-call");
             with_hook(&mut repo, "exit 3");
-            let text = document("opens-first", "group: solo\n", BODY);
+            let text = document(
+                "opens-first",
+                "group: solo\ngroup_description: opens first\n",
+                BODY,
+            );
             let path = write_doc(&repo, "opens-first.md", &text);
 
             let err = queue_add(
@@ -10198,7 +10536,11 @@ mod tests {
                    { echo "ticket=PROJ-13"; echo "slug=proj-12"; } >"$SPOOLWAY_OUT""#,
             );
 
-            let a = document("auth-01", "group: auth-rework\n", BODY);
+            let a = document(
+                "auth-01",
+                "group: auth-rework\ngroup_description: auth rework\n",
+                BODY,
+            );
             let a_path = write_doc(&repo, "auth-01.md", &a);
             let b = document("auth-02", "group: auth-rework\n", BODY);
             let b_path = write_doc(&repo, "auth-02.md", &b);
@@ -10264,7 +10606,11 @@ mod tests {
                    { echo "ticket=t-$SPOOLWAY_TASK"; echo "slug=$slug"; } >"$SPOOLWAY_OUT""#,
             );
 
-            let a = document("chain-a", "group: chain\n", BODY);
+            let a = document(
+                "chain-a",
+                "group: chain\ngroup_description: chained work\n",
+                BODY,
+            );
             let a_path = write_doc(&repo, "chain-a.md", &a);
             let b = document("chain-b", "group: chain\ndepends_on: [chain-a]\n", BODY);
             let b_path = write_doc(&repo, "chain-b.md", &b);
@@ -10329,7 +10675,11 @@ mod tests {
                      echo "url=https://acme.atlassian.net/browse/PROJ-12"; } >"$SPOOLWAY_OUT""#,
             );
 
-            let parent = document("auth-01", "group: auth-rework\n", BODY);
+            let parent = document(
+                "auth-01",
+                "group: auth-rework\ngroup_description: auth rework\n",
+                BODY,
+            );
             let parent_path = write_doc(&repo, "auth-01.md", &parent);
             let child = document(
                 "auth-02",
@@ -10379,9 +10729,11 @@ mod tests {
             repo.config.issue_tracking.key_in_names = true;
             with_hook(
                 &mut repo,
-                r#"{ echo "ticket=PROJ-13"; echo "slug=proj-12"; } >"$SPOOLWAY_OUT""#,
+                r#"cat "$SPOOLWAY_TASK_FILE" >"$(dirname "$SPOOLWAY_OUT")/task-file.seen"
+                   { echo "ticket=PROJ-13"; echo "slug=proj-12"; } >"$SPOOLWAY_OUT""#,
             );
-            let source = "---\nid: audit\ntitle: audit\ngroup: demo\n---\n## Goal\n\nDo it.\n";
+            let source = "---\nid: audit\ntitle: audit\ngroup: demo\n\
+                          group_description: nightly audit\n---\n## Goal\n\nDo it.\n";
             let path = write_routine(&repo, "nightly", "audit", source);
 
             let tasks = queue_routine_target(
@@ -10411,6 +10763,14 @@ mod tests {
                 source,
                 "the routine's source is never written to"
             );
+            // The hook could actually open `SPOOLWAY_TASK_FILE` and read the
+            // real document — the routine's own file under
+            // `.spoolway/routines/`, not the nonexistent queue path a
+            // routine mint never gets written to before this call.
+            assert_eq!(
+                std::fs::read_to_string(repo.tracking_dir().join("task-file.seen")).unwrap(),
+                source
+            );
         }
 
         /// A routine has no document on disk for a failed batch's ids to be
@@ -10425,7 +10785,8 @@ mod tests {
                 r#"if [ "$SPOOLWAY_TASK" != "${SPOOLWAY_TASK#second}" ]; then exit 1; fi
                    echo "ticket=PROJ-13" >"$SPOOLWAY_OUT""#,
             );
-            let first = "---\nid: first\ntitle: first\ngroup: demo\n---\n## Goal\n\nDo it.\n";
+            let first = "---\nid: first\ntitle: first\ngroup: demo\n\
+                         group_description: nightly work\n---\n## Goal\n\nDo it.\n";
             let second = "---\nid: second\ntitle: second\ngroup: demo\ndepends_on: [first]\n---\n## Goal\n\nDo it.\n";
             let first_path = write_routine(&repo, "nightly", "first", first);
             let second_path = write_routine(&repo, "nightly", "second", second);
@@ -10466,7 +10827,15 @@ mod tests {
                 &mut repo,
                 r#"{ echo "ticket=PROJ-13"; echo "slug=proj-12"; } >"$SPOOLWAY_OUT""#,
             );
-            write_pending(&repo, "wire", &document("wire", "group: one\n", BODY));
+            write_pending(
+                &repo,
+                "wire",
+                &document(
+                    "wire",
+                    "group: one\ngroup_description: wiring it up\n",
+                    BODY,
+                ),
+            );
             let mut groups = listed(&repo);
             let mut state = ScreenState::new();
             handle_browse_key(&groups, &mut state, Key::Char(' '));
@@ -10499,7 +10868,11 @@ mod tests {
                      echo "url=https://acme.atlassian.net/browse/PROJ-12"; } >"$SPOOLWAY_OUT""#,
             );
 
-            let doc = document("auth-01", "group: auth-rework\n", BODY);
+            let doc = document(
+                "auth-01",
+                "group: auth-rework\ngroup_description: auth rework\n",
+                BODY,
+            );
             let path = write_doc(&repo, "auth-01.md", &doc);
             queue_add(
                 &repo,
@@ -10533,7 +10906,11 @@ mod tests {
                 r#"{ echo "ticket=PROJ-13"; echo "slug=PROJ-12"; } >"$SPOOLWAY_OUT""#,
             );
 
-            let doc = document("auth-01", "group: auth-rework\n", BODY);
+            let doc = document(
+                "auth-01",
+                "group: auth-rework\ngroup_description: auth rework\n",
+                BODY,
+            );
             let path = write_doc(&repo, "auth-01.md", &doc);
             queue_add(
                 &repo,
@@ -10560,7 +10937,11 @@ mod tests {
             repo.config.issue_tracking.key_in_names = true;
             with_hook(&mut repo, r#"{ echo "ticket=PROJ-13"; } >"$SPOOLWAY_OUT""#);
 
-            let doc = document("auth-01", "group: auth-rework\nslug: PROJ-12\n", BODY);
+            let doc = document(
+                "auth-01",
+                "group: auth-rework\ngroup_description: auth rework\nslug: PROJ-12\n",
+                BODY,
+            );
             let path = write_doc(&repo, "auth-01.md", &doc);
             queue_add(
                 &repo,
@@ -10588,7 +10969,11 @@ mod tests {
                 r#"{ echo "ticket=PROJ-13"; echo "url=/browse/PROJ-12"; } >"$SPOOLWAY_OUT""#,
             );
 
-            let doc = document("auth-01", "group: auth-rework\n", BODY);
+            let doc = document(
+                "auth-01",
+                "group: auth-rework\ngroup_description: auth rework\n",
+                BODY,
+            );
             let path = write_doc(&repo, "auth-01.md", &doc);
             queue_add(
                 &repo,
@@ -10619,7 +11004,11 @@ mod tests {
                      echo "url=https://acme.atlassian.net/browse/${epic:-PROJ-13}"; } >"$SPOOLWAY_OUT""#,
             );
 
-            let a = document("auth-01", "group: auth-rework\n", BODY);
+            let a = document(
+                "auth-01",
+                "group: auth-rework\ngroup_description: auth rework\n",
+                BODY,
+            );
             let a_path = write_doc(&repo, "auth-01.md", &a);
             let b = document("auth-02", "group: auth-rework\n", BODY);
             let b_path = write_doc(&repo, "auth-02.md", &b);
@@ -10681,7 +11070,11 @@ mod tests {
                 r#"{ echo "epic=$SPOOLWAY_EPIC"; echo "ticket=t-$SPOOLWAY_TASK"
                      echo "slug=re-1"; } >"$SPOOLWAY_OUT""#,
             );
-            let doc = document("fresh", "group: rework\n", BODY);
+            let doc = document(
+                "fresh",
+                "group: rework\ngroup_description: fresh rework\n",
+                BODY,
+            );
             let path = write_doc(&repo, "fresh.md", &doc);
             queue_add(
                 &repo,
@@ -10903,7 +11296,11 @@ mod tests {
         fn open_and_prefix_skips_open_tickets_when_a_requirement_is_unmet() {
             let mut repo = fixture("tool-gate-open-and-prefix");
             with_versioned_hook(&mut repo, "999.0.0");
-            let doc = document("solo", "group: solo\n", BODY);
+            let doc = document(
+                "solo",
+                "group: solo\ngroup_description: a solo task\n",
+                BODY,
+            );
             let mut tasks = validate_batch(
                 &repo,
                 &Pipelines::builtin(),
@@ -10912,7 +11309,7 @@ mod tests {
             )
             .unwrap();
 
-            open_and_prefix(&repo, &[], &mut tasks, false, true).unwrap();
+            open_and_prefix(&repo, &[], &[], &mut tasks, false, true).unwrap();
 
             assert_eq!(tasks[0].extra_str("ticket"), "");
             assert_eq!(tasks[0].extra_str("epic"), "");
