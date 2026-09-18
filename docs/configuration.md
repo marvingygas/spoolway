@@ -381,8 +381,60 @@ refuses.
 
 | Script | Needs | What it does |
 |---|---|---|
-| `github.sh` / `github.ps1` | `gh`, logged in | Reads an issue on `fetch`. Creates the epic and ticket on `open`, nests them under the issue in `SPOOLWAY_SOURCE`, and returns `slug=gh-<number>` and `url=`. Comments with the task file on `blocked` and `paused`. Closes the epic on the group's last `done`. |
+| `github.sh` / `github.ps1` | `gh`, logged in | Reads an issue on `fetch`. Creates the epic and ticket on `open`, nests them under the issue in `SPOOLWAY_SOURCE`, and returns `slug=gh-<number>` and `url=`. Comments with the task file on `blocked` and `paused`. On `done` it hands the ticket to the task's pull request with a `Closes #<n>` trailer and comments that the issue is awaiting merge. It closes nothing. |
 | `jira.sh` / `jira.ps1` | `acli`, and `jq` for `.sh` | The same events. Returns the lowercased key as the slug. Comments name the task without attaching the file. Check the link type, epic status and JSON field names named in the script's header against your site. |
+
+### How a GitHub issue gets closed
+
+The shipped GitHub hooks never close an issue. A task reaches `done` when `spoolway stack`
+has opened that task's pull request, and nobody has merged or reviewed anything at that
+point. Closing there would mark work as delivered before it was.
+
+Instead the `done` branch appends a `Closes #<n>` trailer to the pull request's body, where
+`<n>` is the task's own ticket, and comments on the issue that it is awaiting merge. The
+trailer is a record of which issue this pull request delivers. Closing the issue is GitHub's
+job after the merge.
+
+What your repository has to configure depends on where the pull request points:
+
+- A pull request targeting the repository's **default branch** needs no setup. GitHub honours
+  the closing reference itself and closes the issue when the pull request merges.
+- A pull request targeting **another task's branch** — which is what stacked groups produce —
+  does not close anything on merge. GitHub ignores closing keywords for pull requests that do
+  not target the default branch. Such a repository has to close those issues itself.
+
+Watching pushes to the default branch will not do it. The hook writes the `Closes #<n>`
+trailer into the pull request's body, and nowhere else. No commit message carries it, so a
+push-triggered workflow has nothing to read the ticket out of.
+
+What works is a workflow triggered on the pull request itself. Trigger on `pull_request:`
+with the `closed` type, and gate the job on `github.event.pull_request.merged == true` so it
+skips pull requests that were closed without merging. The job then reads
+`github.event.pull_request.body`, takes the `Closes #<n>` reference out of it, and closes
+that issue with `gh issue close`.
+
+```mermaid
+flowchart LR
+  Task[task issue] -->|done: hook adds Closes #n to PR body| PR[pull request]
+  PR -->|merges, targets default branch| Closed[GitHub closes the issue]
+  PR -->|merges, targets another task's branch| Workflow[workflow on pull_request: closed, merged]
+  Workflow -->|reads PR body, gh issue close| Closed
+```
+
+`spoolway init` does not write that workflow. It is a repository policy, not something
+Spoolway imposes.
+
+A group's epic is never touched on `done` either. The hook nests each task's ticket under the
+epic as a sub-issue when the group is queued, and leaves the epic alone after that.
+
+GitHub does not close a parent issue when its last sub-issue closes. It only shows the
+progress. If you want the epic to close on its own, the same merged-pull-request workflow has
+to do it: after closing a task's issue, list that issue's parent's sub-issues and close the
+parent when none of them are open any more. The epic then closes only after every task in the
+group has actually merged.
+
+The shipped Jira hooks are unchanged. Jira has no pull request lifecycle of its own, so
+`jira.sh` and `jira.ps1` still transition the epic on the group's last `done`.
 
 ## Retired keys
 

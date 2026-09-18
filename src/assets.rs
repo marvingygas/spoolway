@@ -166,11 +166,26 @@ pub fn tracking_template(name: &str) -> Option<&'static str> {
 /// hook it has already written, the same rule a prompt or a task skeleton
 /// already follows once a project has made a file its own.
 ///
-/// `github.sh`'s `open`, `done`, `blocked` and `paused` branches were run
-/// against a real repository: the issues they create, the `sub_issues` link,
-/// the comment and the close all landed. Its `fetch` branch, and every branch
-/// of the Jira pair, are written the same careful way but have not been run
-/// against a live tracker — `jira.sh`'s `acli` commands were checked flag by
+/// `github.sh`'s `open`, `blocked` and `paused` branches were run against a
+/// real repository: the issues they create, the `sub_issues` link and the
+/// comment all landed. Its `done` branch hands the ticket to its pull
+/// request with a `Closes #<n>` trailer rather than closing anything itself.
+/// Both of that branch's `gh pr view` lookups were confirmed live and return
+/// the shapes it reads; its two writing calls, `gh pr edit` and
+/// `gh issue comment`, were not, because nobody has yet had a throwaway
+/// pull request to let them write to. `github.ps1` was run under Windows
+/// PowerShell 5.1 against a stub `gh`, which is what caught the byte order
+/// mark that script now has to keep — see
+/// `the_shipped_github_powershell_hook_keeps_its_byte_order_mark` — and,
+/// separately, why its own `gh pr edit` writes a temporary file rather than
+/// piping the body straight into `gh`'s stdin: 5.1 encodes a piped string as
+/// `$OutputEncoding`, plain ASCII by default, which would silently mangle
+/// any non-ASCII character the body holds. `github.sh` has no such pipeline
+/// to worry about — a POSIX pipe carries the exact bytes `printf` wrote —
+/// so it keeps piping into `--body-file -`. The `fetch` branch, plus every
+/// branch of the Jira pair, are written
+/// the same careful way but have not been run against a live tracker —
+/// `jira.sh`'s `acli` commands were checked flag by
 /// flag against acli 1.3.30-stable, and its header names what still wants a
 /// project's own site to confirm: the field `workitem create --json` puts the
 /// new key in and `workitem view --json` puts an issue's own fields in,
@@ -224,6 +239,258 @@ pub const PIPELINE_KEYS_END: &str = IGNORE_END;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One of [`HOOK_SCRIPTS`] by name, panicking on a typo rather than
+    /// silently comparing against nothing.
+    fn hook_script(name: &str) -> &'static str {
+        HOOK_SCRIPTS
+            .iter()
+            .find(|(known, _)| *known == name)
+            .unwrap_or_else(|| panic!("no shipped hook script named {name}"))
+            .1
+    }
+
+    /// `github.ps1` has to start with a UTF-8 byte order mark, because
+    /// `platform::powershell` falls back to Windows PowerShell 5.1 wherever
+    /// pwsh is not installed, and 5.1 decodes a script with no mark as the
+    /// machine's ANSI code page instead of UTF-8. On a Western European
+    /// code page an em dash anywhere in the file — this script's comments
+    /// use plenty, even where the `done` branch's own messages since moved
+    /// to plain hyphens — becomes three characters ending in a right double
+    /// quote, which PowerShell treats as a string delimiter wherever one
+    /// falls inside a string literal, closing it early and failing the
+    /// whole script to parse before it runs a single command. This was
+    /// found by running the shipped script under `powershell.exe` 5.1 with
+    /// a stub `gh` on `PATH`; the mark is the fix and this guards it, since
+    /// the text check below is a much cheaper way to catch the mark going
+    /// missing than `tracking::windows_powershell_tests` re-discovering it
+    /// by failing to parse on the next Windows CI run. `jira.ps1` is
+    /// deliberately not covered here: it uses PowerShell 7's `??` operator
+    /// and so never parsed under 5.1 in the first place.
+    #[test]
+    fn the_shipped_github_powershell_hook_keeps_its_byte_order_mark() {
+        assert!(
+            hook_script("github.ps1").starts_with('\u{feff}'),
+            "github.ps1 lost its UTF-8 byte order mark, so Windows PowerShell 5.1 \
+             will misread its em dashes as string delimiters and refuse to parse it"
+        );
+    }
+
+    /// The GitHub hooks hand a ticket to its own pull request at `done`
+    /// rather than closing anything — see the `done` branch of both scripts.
+    /// A `gh issue close` anywhere in either shipped script would silently
+    /// undo that, so it is refused outright rather than left to a live-repo
+    /// run nobody in CI can make.
+    #[test]
+    fn shipped_github_hooks_never_close_an_issue() {
+        for name in ["github.sh", "github.ps1"] {
+            let script = hook_script(name);
+            assert!(
+                !script.contains("issue close"),
+                "{name} still closes a GitHub issue"
+            );
+        }
+    }
+
+    /// `github.sh` and `github.ps1` are one shipped behaviour in two
+    /// languages — see the module doc above — so the `done` handoff this
+    /// task added has to land in both the same way, including every bug two
+    /// review rounds found: the trailer search safe against a shorter
+    /// ticket number matching inside a longer one, a byte-accurate (not
+    /// character-counting) check against GitHub's 65,536-byte body limit
+    /// that fails outright rather than truncating the existing body (which
+    /// risks cutting `spoolway stack`'s own trailer), and every `gh` call —
+    /// the branch lookup, the body read, the edit, the handoff comment —
+    /// checked for failure rather than treated as an incidental step. Static
+    /// substring checks can only prove these markers are present in both
+    /// files, not that either script's logic is correct on its own — see
+    /// `tracking::tests` for execution-level proof of `github.sh`'s
+    /// behavior covering all of the above, and
+    /// `tracking::windows_powershell_tests` for the same proof for
+    /// `github.ps1`, run for real under PowerShell rather than by a text
+    /// comparison against this file: `#[cfg(windows)]`, so it runs on
+    /// `test-windows` in CI (`.github/workflows/verify.yml`) and is
+    /// compiled out everywhere else, including here.
+    #[test]
+    fn github_sh_and_ps1_hand_off_to_a_pull_request_the_same_way() {
+        let sh = hook_script("github.sh");
+        let ps1 = hook_script("github.ps1");
+        for script in [sh, ps1] {
+            for marker in [
+                "Closes #",
+                "gh pr view",
+                "gh pr edit",
+                "gh issue comment",
+                "65536",
+                "awaiting merge",
+                "exit 1",
+            ] {
+                assert!(script.contains(marker), "hook script drops `{marker}`");
+            }
+        }
+        // Each platform checks every `gh` call's own result in its own
+        // idiom — sh's exit status directly, PowerShell's `$LASTEXITCODE` —
+        // rather than treating a failed lookup, read, edit or comment as
+        // nothing to react to. `gh` is called four times in the done
+        // branch (the branch lookup, the body read, the edit, the handoff
+        // comment); each needs its own check.
+        assert_eq!(
+            sh.matches("if !").count(),
+            4,
+            "github.sh no longer checks all four `gh` calls in its done branch"
+        );
+        assert_eq!(
+            ps1.matches("LASTEXITCODE").count(),
+            4,
+            "github.ps1 no longer checks all four `gh` calls in its done branch"
+        );
+        // The branch lookup can also succeed with nothing to report — a
+        // `done` this hook fires for always has a pull request behind it by
+        // then, so that has to fail too rather than read as "nothing to do".
+        assert!(
+            sh.contains("if [ -z \"$pr\" ]"),
+            "github.sh no longer treats a missing pull request as a failure"
+        );
+        assert!(
+            ps1.contains("if (-not $pr)"),
+            "github.ps1 no longer treats a missing pull request as a failure"
+        );
+        // Neither platform may cut the existing pull request body to make
+        // room for the trailer any more — that risks truncating `spoolway
+        // stack`'s own trailer — so it must fail instead once the two no
+        // longer fit. `head -c` is also this file's own way of capping the
+        // blocked/paused task-file comment below, which is unrelated and
+        // must stay, so this checks for the specific budget variable the
+        // done branch used to cut the body with rather than the bare tool
+        // name.
+        assert!(
+            !sh.contains("head -c \"$budget\""),
+            "github.sh still truncates an oversized pull request body"
+        );
+        assert!(
+            !ps1.contains(".Substring(0"),
+            "github.ps1 still truncates an oversized pull request body"
+        );
+        // GitHub's limit is bytes, not characters — `${#var}`/`.Length`
+        // undercount anything outside plain ASCII.
+        assert!(
+            sh.contains("wc -c"),
+            "github.sh sizes the body by character count, not bytes"
+        );
+        assert!(
+            ps1.contains("GetByteCount"),
+            "github.ps1 sizes the body by character count, not bytes"
+        );
+        // Windows PowerShell 5.1 mangles non-ASCII bytes piped straight into
+        // a native command's stdin (`$OutputEncoding` defaults to ASCII) —
+        // review finding — so the body must reach `gh pr edit` through a
+        // file written with an explicit encoding instead of a piped string.
+        assert!(
+            !ps1.contains("| gh pr edit"),
+            "github.ps1 still pipes the pull request body to `gh pr edit`, \
+             risking Windows PowerShell 5.1's ASCII-only stdin encoding"
+        );
+        assert!(
+            ps1.contains("WriteAllText") && ps1.contains("--body-file $bodyFile"),
+            "github.ps1 no longer writes the pull request body to an explicitly-encoded file"
+        );
+        // The read-side half of the same class of bug, review finding: a
+        // captured native command's stdout decodes via
+        // `[Console]::OutputEncoding`, the OEM code page by default rather
+        // than UTF-8, so a title, comment or body `gh` reads back could
+        // still come back garbled even with the write side fixed. See
+        // `tracking::windows_powershell_tests::
+        // github_ps1_done_preserves_the_original_bodys_line_structure_and_bytes`
+        // for the execution proof this fix actually works — a source
+        // check can only prove the line exists, not that it does anything.
+        assert!(
+            ps1.contains("[Console]::OutputEncoding = [System.Text.Encoding]::UTF8"),
+            "github.ps1 no longer fixes its own native-output decoding to UTF-8"
+        );
+        // Review finding: `spoolway resume` is not how a held `done` hook
+        // retries at all — `tracking::retry_if_failed`'s own doc says so —
+        // so recommending it anywhere here would be wrong regardless of how
+        // it was worded, not just an unscoped claim. A literal, absolute
+        // ban catches a reintroduction directly rather than trusting a
+        // positive check on the *replacement* wording to notice one; the
+        // explanatory comment above the `done` branch on both platforms is
+        // written to describe this without ever typing that phrase, so the
+        // ban costs nothing there.
+        assert!(
+            !sh.contains("spoolway resume"),
+            "github.sh recommends `spoolway resume`, which a held `done` hook never retries \
+             through — see `tracking::retry_if_failed`'s own doc"
+        );
+        assert!(
+            !ps1.contains("spoolway resume"),
+            "github.ps1 recommends `spoolway resume`, which a held `done` hook never retries \
+             through — see `tracking::retry_if_failed`'s own doc"
+        );
+        // The positive half of the same finding: every one of the done
+        // branch's six recovery messages (the four checked `gh` calls plus
+        // the two result checks — no pull request found, body over the
+        // byte limit — that are not `gh` failures but still end the branch
+        // the same way) still has to explain the *real* recovery path —
+        // automatic retry under `on_fail = pause`, a manual fallback
+        // otherwise — not just drop the wrong claim and go silent. Counted
+        // by `on_fail = pause` rather than a longer phrase like "retries
+        // this automatically": `github.sh`'s own multi-argument `echo`
+        // calls wrap that phrase across two string literals on two source
+        // lines, which a substring search across the whole file would miss
+        // even though the two arguments still read as one sentence once
+        // `echo` joins them at runtime — see
+        // `tracking::tests::github_sh_done_fails_when_the_pull_request_lookup_fails`
+        // for the actual execution proof that they do; nothing in this
+        // file runs a shell, so it can only count source text. One of the
+        // seven total matches below is the explanatory comment above the
+        // branch, not a message; two of the total `on_fail = ignore`
+        // matches split the same way, one message and one comment.
+        assert_eq!(
+            sh.matches("on_fail = pause").count(),
+            7,
+            "github.sh drops the automatic-retry explanation from one of its six done-branch \
+             errors, or the comment naming the same thing"
+        );
+        assert_eq!(
+            ps1.matches("on_fail = pause").count(),
+            7,
+            "github.ps1 drops the automatic-retry explanation from one of its six done-branch \
+             errors, or the comment naming the same thing"
+        );
+        assert_eq!(
+            sh.matches("on_fail = ignore").count(),
+            2,
+            "github.sh drops the manual-fallback explanation naming the shipped default"
+        );
+        assert_eq!(
+            ps1.matches("on_fail = ignore").count(),
+            2,
+            "github.ps1 drops the manual-fallback explanation naming the shipped default"
+        );
+        // Review finding: a workflow on a push to the default branch cannot
+        // recover the ticket, because the `Closes #<n>` trailer lives only
+        // in the pull request's own body, never in a commit message — the
+        // named automation has to trigger on the pull request itself.
+        assert!(
+            sh.contains("pull_request:") && sh.contains("merged"),
+            "github.sh's stacked-task automation example is still the unusable push-based one"
+        );
+    }
+
+    /// This task's non-goals rule out touching Jira's own `done` behaviour:
+    /// the shipped Jira pair still transitions the epic to `Done` once a
+    /// group's last task settles there, unlike the GitHub pair this task
+    /// changed.
+    #[test]
+    fn shipped_jira_hooks_keep_transitioning_the_epic_on_done() {
+        for name in ["jira.sh", "jira.ps1"] {
+            let script = hook_script(name);
+            assert!(
+                script.contains("workitem transition") && script.contains("--status Done"),
+                "{name} no longer transitions the epic to Done"
+            );
+        }
+    }
 
     /// Nothing parses a prompt any more, which makes one thing worth asserting
     /// instead: that every shipped prompt is prose and carries no leftover
