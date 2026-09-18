@@ -55,6 +55,29 @@ source "$HERE/../agents.sh"
 
 MODEL=${SPOOLWAY_E2E_CLOUD_MODEL:-claude-haiku-4-5-20251001}
 
+# warmth_cleanup
+#
+# This is the one suite that runs `SPOOLWAY_E2E_REAL_HOME=1`: every other
+# suite's project home is a scratch `$HOME` that `run.sh`'s own trap wipes
+# whole, but this one's is `$HOME/.spoolway/proj-<id>`, under the real home,
+# and nothing else ever removes it — the `rm -rf "$HOME"/.spoolway/proj-*`
+# below, before `configure_project`, only clears a *previous* run's
+# leftovers, on the way in.
+#
+# Replaces `lib.sh`'s own `trap dispatcher_stop EXIT` (the same override
+# `board-pause.sh` makes for its own board process) rather than adding a
+# second EXIT trap: `dispatcher_stop` still runs, first, exactly as it did.
+# Installed before the opt-out `finish` calls below fire, since a failed
+# `must` reaches the trap the same way a clean finish does and `$HOME` is
+# untouched either way until `new_repo` runs — `${SPOOLWAY_PROJECT_HOME:-}`
+# is read at the trap's own fire time, not this one, so it sees whatever
+# `project_home_after_init` corrected it to once `configure_project` ran.
+warmth_cleanup() {
+  dispatcher_stop
+  [ -n "${SPOOLWAY_PROJECT_HOME:-}" ] && rm -rf "$SPOOLWAY_PROJECT_HOME"
+}
+trap warmth_cleanup EXIT
+
 # ------------------------------------------------------------------ opt in
 if [ "${SPOOLWAY_E2E_CLOUD:-}" != 1 ]; then
   echo "  skipped — set SPOOLWAY_E2E_CLOUD=1 to spend $MODEL tokens on this one"

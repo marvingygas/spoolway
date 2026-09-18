@@ -18,14 +18,20 @@ use crate::repo::Repo;
 /// How long a line survives before [`open`] drops it.
 const WINDOW_DAYS: i64 = 30;
 
-/// Where one project's problems accumulate: `~/.spoolway/logs/<home's own
-/// directory name>.log`.
+/// Where one project's problems accumulate: `<repo.home's own
+/// parent>/logs/<home's own directory name>.log` — `~/.spoolway/logs/…` for
+/// a real project, since `repo.home` there is `~/.spoolway/<label>-<id>`.
 ///
 /// Flat, and one file per project — unlike [`crate::mux::project_home`],
 /// which nests a project's queue and archive under its own directory, this
 /// sits beside every other project's log rather than inside any one of
 /// them, since a problem worth keeping after a project's own home is wiped
 /// by hand is exactly the kind this file is for.
+///
+/// Resolved against `repo.home`'s own parent, not `mux::home()` — a fixture
+/// whose `home` sits entirely under a scratch directory has no `~/.spoolway`
+/// to leak into, and the parent of whatever `home` it was given is always
+/// the directory that one actually sits beside. See issue #188.
 ///
 /// Named off `repo.home`'s own basename (`<label>-<id>`), not
 /// `repo.root`'s — the label is frozen at a checkout's first stamp and the
@@ -38,10 +44,17 @@ pub fn path(repo: &Repo) -> PathBuf {
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| crate::mux::project_label(&repo.root));
-    crate::mux::home()
-        .join(".spoolway")
-        .join("logs")
-        .join(format!("{name}.log"))
+    // `repo.home` has no parent only for `/` or an empty path — never a real
+    // `home`, which is always at least one component under something. Kept
+    // rather than `.unwrap()`'d so a `repo.home` built by hand for a test
+    // that skips that convention cannot panic this; the real `~/.spoolway`
+    // is the nearest thing to a sane answer left.
+    let state_root = repo
+        .home
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(crate::mux::state_root);
+    state_root.join("logs").join(format!("{name}.log"))
 }
 
 /// Trims a project's log to the last thirty days. Called once, at the start
@@ -185,5 +198,29 @@ mod tests {
         let dir = crate::scratch::root("problem-log-missing");
         let path = dir.join("proj.log");
         assert!(trim(&path).is_ok());
+    }
+
+    /// Issue #188: `path` names the right basename but joins it onto
+    /// `mux::home()` — the real `~/.spoolway` — instead of onto `repo.home`'s
+    /// own parent. A fixture whose `home` sits entirely under a scratch
+    /// directory should never have its problem log land anywhere outside
+    /// that scratch directory.
+    #[test]
+    fn a_fixtures_problem_log_stays_under_the_fixtures_own_scratch_home() {
+        let fixture_root = crate::scratch::root("problem-log-leak-home");
+        let repo = Repo {
+            root: fixture_root.clone(),
+            checkout: fixture_root.clone(),
+            config: Config::default(),
+            home: fixture_root.join("leak-id"),
+        };
+
+        let log_path = path(&repo);
+        assert!(
+            log_path.starts_with(&fixture_root),
+            "the problem log escaped its fixture's scratch home: {} is not under {}",
+            log_path.display(),
+            fixture_root.display()
+        );
     }
 }
