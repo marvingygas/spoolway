@@ -4655,6 +4655,41 @@ pub(crate) fn reset_for_reuse(name: &str, doc: &str) -> Result<String> {
     Ok(format!("---\n{yaml}---\n{body}"))
 }
 
+/// The pipeline the trial picker assigned this task, written into its document
+/// before [`parse_submission`] is given it.
+///
+/// The picker's first screen exists precisely to route a document that names
+/// no pipeline of its own: [`TrialState::new`] opens such a task unassigned,
+/// the panel draws it `(unset)`, and that screen's `enter` refuses to advance
+/// until `←`/`→` has given every task one. But `parse_submission` refuses a
+/// document with no `pipeline:`, and it is handed the *source* document — so
+/// without this the picker refused every task it was built to route, the whole
+/// batch was abandoned with `trial refused:`, and nothing was minted. Stamping
+/// `front.pipeline` on the arm afterwards cannot save it: the refusal has
+/// already happened by then.
+///
+/// Written over whatever the document said rather than only filled in when it
+/// is blank, because the screen may equally have cycled a task *off* the
+/// pipeline its own document named — `trial.pipeline` is the authority here,
+/// which is the same order of precedence `front.pipeline` is stamped in below.
+fn with_trial_pipeline(name: &str, doc: &str, pipeline: &str) -> Result<String> {
+    let (yaml, body) =
+        crate::task::split_fence(doc).with_context(|| format!("{name}: not a task document"))?;
+    let value: serde_norway::Value = serde_norway::from_str(yaml)
+        .with_context(|| format!("{name}: frontmatter is not valid YAML"))?;
+    let mut mapping = value
+        .as_mapping()
+        .with_context(|| format!("{name}: frontmatter is not a mapping"))?
+        .clone();
+    mapping.insert(
+        serde_norway::Value::String("pipeline".to_string()),
+        serde_norway::Value::String(pipeline.to_string()),
+    );
+    let yaml = serde_norway::to_string(&serde_norway::Value::Mapping(mapping))
+        .with_context(|| format!("{name}: re-serialising the frontmatter"))?;
+    Ok(format!("---\n{yaml}---\n{body}"))
+}
+
 /// One trial arm: the source document parsed exactly as `queue add --from`
 /// would, with the four things a trial names for the task itself stamped
 /// on afterwards — the id spoolway minted, the trial the whole batch shares,
@@ -4673,6 +4708,10 @@ pub(crate) fn reset_for_reuse(name: &str, doc: &str) -> Result<String> {
 /// key an earlier run stamped on it — reaches `parse_submission` looking like
 /// a document a producer wrote for a fresh run, rather than being refused for
 /// setting a reserved key spoolway itself put there.
+///
+/// The picker's chosen pipeline goes into that document *before* it is parsed,
+/// by [`with_trial_pipeline`], and not only onto the arm afterwards — see that
+/// function for why stamping `front.pipeline` below is too late on its own.
 fn build_trial_arm(
     name: &str,
     doc: &str,
@@ -4683,6 +4722,7 @@ fn build_trial_arm(
     skip: &std::collections::BTreeSet<String>,
 ) -> Result<Task> {
     let doc = reset_for_reuse(name, doc)?;
+    let doc = with_trial_pipeline(name, &doc, &pipeline.name)?;
     let mut arm = parse_submission(name, &doc, Some(base))?;
     arm.front.id = id.to_string();
     arm.front.branch = Some(format!("task/{id}"));
@@ -8396,6 +8436,46 @@ mod tests {
             !repo.queue_dir().join("solo.md").exists(),
             "the bare id is never queued by a trial"
         );
+    }
+
+    /// The picker's whole reason to exist, and the one case nothing covered:
+    /// a document naming no pipeline at all. Every other trial test goes
+    /// through `document`, which fills in `pipeline: default` unless the
+    /// document names one — so all of them arrived already routed, and the
+    /// unassigned task the assign screen is *for* was never driven end to
+    /// end. It did not work: `build_trial_arm` hands `parse_submission` the
+    /// source document, which refuses one with no `pipeline:`, so the whole
+    /// batch was abandoned with `trial refused:` and nothing was minted.
+    ///
+    /// A bare `pipeline:` rather than no line at all, so `document`'s own
+    /// fill-in steps aside and the document reads exactly as unassigned as
+    /// one a person left blank by hand — the same shape `scripts/e2e`'s
+    /// `task_doc` writes for this.
+    #[test]
+    fn a_trial_routes_a_document_that_names_no_pipeline_of_its_own() {
+        let repo = fixture("screen-trial-unassigned");
+        write_pending(
+            &repo,
+            "solo",
+            &document(
+                "solo",
+                "group: audits\ntouches: [src/solo.rs]\npipeline:\n",
+                BODY,
+            ),
+        );
+        let groups = listed(&repo);
+
+        // `p` opens the picker with `solo` drawn `(unset)`, which `enter`
+        // alone will not advance past. One `→` lands it on `bugfix` — the
+        // pipeline that sorts first, there being no current position to
+        // cycle away from — `enter` advances to the skips screen, `enter`
+        // launches with nothing ticked, and `n` declines the dispatcher.
+        screen(&repo, groups, "p\x1b[C\r\rn");
+
+        let arm = queued(&repo, "solo-1");
+        assert_eq!(arm.front.pipeline.as_deref(), Some("bugfix"));
+        assert_eq!(arm.front.group.as_deref(), Some("audits"));
+        assert_eq!(arm.front.branch.as_deref(), Some("task/solo-1"));
     }
 
     /// A group of more than one task mints one arm per task, all sharing the
