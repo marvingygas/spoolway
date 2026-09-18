@@ -42,6 +42,20 @@ Keep the report short. Present every grounded finding, ranked by likely value. F
 state the problem, the evidence, the likely cause, and a recommended prompt or pipeline fix.
 Say when the evidence is limited or another cause is still possible.
 
+Put the findings in a table, one row each, ranked: the problem, the fix you propose, and the
+files that fix would touch with the size of each edit in lines. Whoever reads this is deciding
+what to apply, and the cost of a change belongs beside the case for it. Keep the evidence — the
+task name and the lane's own words — in prose around the table, not inside a cell where it will
+not fit.
+
+| # | Finding | Proposed fix | Files & edit size |
+|---|---------|--------------|-------------------|
+| 1 | What is wrong, and what it cost | The exact edit, named | `path/to/file` (N lines)<br>**+N / -N** at :LL |
+
+Close with a totals line once the set is big enough that somebody wants one number for applying
+all of it. Where a finding has two honest fixes — a one-line carve-out and a new pipeline — put
+both in the cell with their two sizes, and say which you would take.
+
 Make prompt fixes exact and short. Add only what is needed to stop the issue from happening
 again, without repeating rules already present. Also check existing prompts for stale text.
 Recommend removal only when the run record or current control plane gives a clear reason that
