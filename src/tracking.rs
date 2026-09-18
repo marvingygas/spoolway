@@ -1492,4 +1492,331 @@ mod tests {
         assert_eq!(missing_slug_line(&repo.checkout, "", true), None);
         assert_eq!(missing_slug_line(&repo.checkout, "../escaped", true), None);
     }
+
+    // The shipped `github.sh`'s `done` branch, run for real rather than
+    // asserted on by substring: a stub `gh` on `PATH` ahead of the real one
+    // (the way `spoolway stack`'s own end-to-end suite stubs `gh` through
+    // `SPOOLWAY_GH` — `github.sh` has no such override, so the redirection
+    // has to happen at `PATH` instead) records every call it receives under
+    // `stub/` inside the fixture's own root, which is also the hook's `$PWD`
+    // — `Runs::start` always runs a hook with `cwd` set to `repo.root` — so
+    // every test fixture's `stub/` directory is already isolated by
+    // `fixture`'s own scratch root and nothing here needs a process-global
+    // environment variable.
+
+    /// A `gh` stand-in for the `done`-branch tests below: it logs every
+    /// invocation, answers `pr view`'s two `--json` shapes from files the
+    /// test writes first, captures whatever `gh pr edit` is given on stdin,
+    /// and can be told to fail each of its four calls independently —
+    /// `stub/pr_view_branch_fail` for the branch lookup, `stub/
+    /// pr_view_body_fail` for the body read, `stub/edit_fail` for the edit,
+    /// `stub/comment_fail` for the handoff comment — which is what the
+    /// failure-propagation tests below each need one of.
+    fn write_stub_gh(bin_dir: &std::path::Path) {
+        std::fs::create_dir_all(bin_dir).unwrap();
+        let script = r#"#!/bin/sh
+echo "$*" >> stub/gh.log
+case "$1 $2" in
+  "pr view")
+    case "$*" in
+      *"--json url"*)
+        [ -f stub/pr_view_branch_fail ] && exit 1
+        cat stub/pr_url
+        ;;
+      *"--json body"*)
+        [ -f stub/pr_view_body_fail ] && exit 1
+        cat stub/body
+        ;;
+    esac
+    ;;
+  "pr edit")
+    cat > stub/edit_body.received
+    [ -f stub/edit_fail ] && exit 1
+    ;;
+  "issue comment")
+    [ -f stub/comment_fail ] && exit 1
+    echo posted >> stub/comment.log
+    ;;
+  "issue close")
+    echo "$*" >> stub/close.log
+    ;;
+esac
+exit 0
+"#;
+        let path = bin_dir.join("gh");
+        std::fs::write(&path, script).unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+    }
+
+    /// A fixture whose `.spoolway/hooks/github.sh` is the real shipped
+    /// script — [`crate::assets::HOOK_SCRIPTS`], not a paraphrase of it —
+    /// with one line prepended to put the stub `gh` above ahead of the
+    /// (absent) real one on `PATH`. Returns the fixture, a `demo` task on
+    /// `task/demo` naming `ticket` as given, and the `stub/` directory the
+    /// test still needs to seed before calling [`fire`].
+    fn github_done_fixture(name: &str, ticket: &str) -> (Repo, Task, PathBuf) {
+        let mut repo = fixture(name);
+        let stub = repo.root.join("stub");
+        write_stub_gh(&stub.join("bin"));
+
+        let real = crate::assets::HOOK_SCRIPTS
+            .iter()
+            .find(|(known, _)| *known == "github.sh")
+            .expect("github.sh is a shipped hook")
+            .1;
+        let script = format!("PATH=\"{}:$PATH\"\n{real}", stub.join("bin").display());
+        with_hook(&mut repo, "github.sh", &script);
+
+        std::fs::create_dir_all(repo.queue_dir()).unwrap();
+        std::fs::write(
+            repo.queue_dir().join("demo.md"),
+            "---\nid: demo\nstage: queued\n---\n",
+        )
+        .unwrap();
+        let t = task("demo", |f| {
+            f.branch = Some("task/demo".into());
+            f.extra
+                .insert("ticket".into(), serde_norway::Value::String(ticket.into()));
+        });
+        (repo, t, stub)
+    }
+
+    /// Acceptance criterion: `done` leaves the ticket open, hands it to its
+    /// pull request unambiguously, and closes nothing.
+    #[test]
+    fn github_sh_done_hands_the_ticket_to_its_pull_request_without_closing_it() {
+        let (repo, t, stub) =
+            github_done_fixture("done-handoff", "https://github.com/o/r/issues/12");
+        std::fs::write(stub.join("pr_url"), "https://github.com/o/r/pull/9\n").unwrap();
+        std::fs::write(stub.join("body"), "Existing description.\n").unwrap();
+
+        fire(&repo, &t, crate::pipeline::DONE, 1).unwrap();
+        assert_eq!(
+            settle(&repo, &t, crate::pipeline::DONE),
+            RunState::Exited(0)
+        );
+
+        let received = std::fs::read_to_string(stub.join("edit_body.received")).unwrap();
+        assert!(received.starts_with("Existing description."));
+        assert!(
+            received.contains("Closes #12"),
+            "trailer missing: {received}"
+        );
+        assert!(
+            stub.join("comment.log").exists(),
+            "no handoff comment posted"
+        );
+        assert!(
+            !stub.join("close.log").exists(),
+            "the ticket or epic was closed"
+        );
+    }
+
+    /// Review finding: a plain substring search for `Closes #12` also
+    /// matches inside `Closes #123`, so ticket #12 would read as already
+    /// linked when only a different, longer ticket actually is. The fixed
+    /// script must still add ticket #12's own trailer alongside it.
+    #[test]
+    fn github_sh_done_does_not_mistake_a_longer_ticket_number_for_an_existing_link() {
+        let (repo, t, stub) =
+            github_done_fixture("done-boundary", "https://github.com/o/r/issues/12");
+        std::fs::write(stub.join("pr_url"), "https://github.com/o/r/pull/9\n").unwrap();
+        std::fs::write(stub.join("body"), "Some description.\n\nCloses #123\n").unwrap();
+
+        fire(&repo, &t, crate::pipeline::DONE, 1).unwrap();
+        assert_eq!(
+            settle(&repo, &t, crate::pipeline::DONE),
+            RunState::Exited(0)
+        );
+
+        let received = std::fs::read_to_string(stub.join("edit_body.received")).unwrap();
+        assert!(
+            received.contains("Closes #123"),
+            "the existing link was dropped"
+        );
+        // The trailer is the last thing appended, so its own `Closes #12` is
+        // never followed by another digit here — the one shape that proves
+        // the boundary check, rather than a plain substring search, is what
+        // decided to add it.
+        assert!(
+            received.trim_end().ends_with("Closes #12"),
+            "ticket #12 was never linked: {received}"
+        );
+    }
+
+    /// A retried `done` — the hook fires again after an earlier failure —
+    /// must not double the trailer once the pull request already names this
+    /// exact ticket.
+    #[test]
+    fn github_sh_done_does_not_double_the_trailer_on_a_retry() {
+        let (repo, t, stub) =
+            github_done_fixture("done-idempotent", "https://github.com/o/r/issues/12");
+        std::fs::write(stub.join("pr_url"), "https://github.com/o/r/pull/9\n").unwrap();
+        std::fs::write(stub.join("body"), "Already linked.\n\nCloses #12\n").unwrap();
+
+        fire(&repo, &t, crate::pipeline::DONE, 1).unwrap();
+        assert_eq!(
+            settle(&repo, &t, crate::pipeline::DONE),
+            RunState::Exited(0)
+        );
+
+        assert!(
+            !stub.join("edit_body.received").exists(),
+            "a retried done must not edit an already-linked pull request"
+        );
+        assert!(stub.join("comment.log").exists());
+    }
+
+    /// Review finding: a failed `gh pr edit` used to be silently followed by
+    /// the "handed off" comment and a zero exit, claiming a handoff that
+    /// never happened. The hook must stop instead — no comment, and a
+    /// failing exit code so `issue_tracking.on_fail` can react.
+    #[test]
+    fn github_sh_done_stops_and_fails_when_the_pull_request_edit_fails() {
+        let (repo, t, stub) =
+            github_done_fixture("done-edit-fails", "https://github.com/o/r/issues/12");
+        std::fs::write(stub.join("pr_url"), "https://github.com/o/r/pull/9\n").unwrap();
+        std::fs::write(stub.join("body"), "Body.\n").unwrap();
+        std::fs::write(stub.join("edit_fail"), "").unwrap();
+
+        fire(&repo, &t, crate::pipeline::DONE, 1).unwrap();
+        assert_eq!(
+            settle(&repo, &t, crate::pipeline::DONE),
+            RunState::Exited(1)
+        );
+
+        assert!(
+            !stub.join("comment.log").exists(),
+            "a failed handoff must not be reported as one"
+        );
+    }
+
+    /// Review finding: GitHub refuses a pull request body over 65,536 bytes
+    /// outright, and this used to be handled by cutting bytes off the end —
+    /// which risks truncating `spoolway stack`'s own trailer (its
+    /// conflict/touches list and co-author tag). The fix fails loudly
+    /// instead: no edit at all, rather than a shortened, possibly corrupted
+    /// one.
+    #[test]
+    fn github_sh_done_fails_actionably_instead_of_truncating_an_oversized_body() {
+        let (repo, t, stub) =
+            github_done_fixture("done-oversized", "https://github.com/o/r/issues/5");
+        std::fs::write(stub.join("pr_url"), "https://github.com/o/r/pull/1\n").unwrap();
+        std::fs::write(stub.join("body"), "a".repeat(70_000)).unwrap();
+
+        fire(&repo, &t, crate::pipeline::DONE, 1).unwrap();
+        assert_eq!(
+            settle(&repo, &t, crate::pipeline::DONE),
+            RunState::Exited(1)
+        );
+
+        assert!(
+            !stub.join("edit_body.received").exists(),
+            "an oversized body must never be edited — truncated or otherwise"
+        );
+        assert!(
+            !stub.join("comment.log").exists(),
+            "a refused handoff must not be reported as one"
+        );
+    }
+
+    /// Review finding: a failed pull-request lookup used to read exactly
+    /// like "no pull request yet" and the hook would exit clean, though by
+    /// the time `done` fires `spoolway stack` has always already opened one
+    /// — so this is a real failure, not a normal case to skip past.
+    #[test]
+    fn github_sh_done_fails_when_the_pull_request_lookup_fails() {
+        let (repo, t, stub) =
+            github_done_fixture("done-lookup-fails", "https://github.com/o/r/issues/12");
+        std::fs::write(stub.join("pr_view_branch_fail"), "").unwrap();
+
+        fire(&repo, &t, crate::pipeline::DONE, 1).unwrap();
+        assert_eq!(
+            settle(&repo, &t, crate::pipeline::DONE),
+            RunState::Exited(1)
+        );
+
+        assert!(!stub.join("comment.log").exists());
+        assert!(!stub.join("edit_body.received").exists());
+
+        // `src/assets.rs`'s own parity test counts recovery phrases in the
+        // source text, but `echo`'s multi-argument calls wrap a few of
+        // those phrases across two string literals on two source lines —
+        // this is the real, runtime proof that the two arguments still
+        // join into one sentence rather than running together or gaining
+        // an extra space, which a source-only check can never confirm.
+        let log =
+            std::fs::read_to_string(runs(&repo).log_path(&Runs::key("done", "demo"))).unwrap();
+        assert!(
+            log.contains("check that `gh` is logged in to"),
+            "the multi-line `echo` call's own line wrap does not join into one sentence at \
+             runtime: {log}"
+        );
+    }
+
+    /// The same "never silently skip" rule applies when the lookup succeeds
+    /// but finds nothing: a `done` this hook was fired for always has a
+    /// pull request behind it, so no result is as much a failure as a
+    /// nonzero exit is.
+    #[test]
+    fn github_sh_done_fails_when_no_pull_request_is_found() {
+        let (repo, t, stub) = github_done_fixture("done-no-pr", "https://github.com/o/r/issues/12");
+        std::fs::write(stub.join("pr_url"), "").unwrap();
+
+        fire(&repo, &t, crate::pipeline::DONE, 1).unwrap();
+        assert_eq!(
+            settle(&repo, &t, crate::pipeline::DONE),
+            RunState::Exited(1)
+        );
+
+        assert!(!stub.join("comment.log").exists());
+    }
+
+    /// Review finding: an unchecked body read meant a later, successful
+    /// edit could replace the pull request's entire description with just
+    /// the trailer — the hook must stop before it ever gets there.
+    #[test]
+    fn github_sh_done_stops_before_editing_when_the_body_read_fails() {
+        let (repo, t, stub) =
+            github_done_fixture("done-body-read-fails", "https://github.com/o/r/issues/12");
+        std::fs::write(stub.join("pr_url"), "https://github.com/o/r/pull/9\n").unwrap();
+        std::fs::write(stub.join("pr_view_body_fail"), "").unwrap();
+
+        fire(&repo, &t, crate::pipeline::DONE, 1).unwrap();
+        assert_eq!(
+            settle(&repo, &t, crate::pipeline::DONE),
+            RunState::Exited(1)
+        );
+
+        assert!(
+            !stub.join("edit_body.received").exists(),
+            "a failed body read must never be followed by a destructive edit"
+        );
+        assert!(!stub.join("comment.log").exists());
+    }
+
+    /// Review finding: a failed handoff comment used to be swallowed by the
+    /// done branch's own unconditional success, so the hook could exit
+    /// clean without ever describing the handoff as the acceptance
+    /// criteria require.
+    #[test]
+    fn github_sh_done_fails_when_the_handoff_comment_fails() {
+        let (repo, t, stub) =
+            github_done_fixture("done-comment-fails", "https://github.com/o/r/issues/12");
+        std::fs::write(stub.join("pr_url"), "https://github.com/o/r/pull/9\n").unwrap();
+        std::fs::write(stub.join("body"), "Body.\n").unwrap();
+        std::fs::write(stub.join("comment_fail"), "").unwrap();
+
+        fire(&repo, &t, crate::pipeline::DONE, 1).unwrap();
+        assert_eq!(
+            settle(&repo, &t, crate::pipeline::DONE),
+            RunState::Exited(1)
+        );
+
+        // The edit itself went through — only the comment failed — so a
+        // retry should not have to redo work that already succeeded.
+        assert!(stub.join("edit_body.received").exists());
+    }
 }

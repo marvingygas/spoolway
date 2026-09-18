@@ -73,7 +73,17 @@ fn render_hook_contract() -> String {
 
     out.push_str("spoolway doctor  checks the script names `fetch` when the event is used, and\n");
     out.push_str(
-        "                 writes a `slug=` line when `issue_tracking.key_in_names` is on.\n",
+        "                 writes a `slug=` line when `issue_tracking.key_in_names` is on.\n\n",
+    );
+
+    out.push_str(
+        "GitHub's `done` is a pull request handed off, not a merge: `spoolway stack` has just\n\
+         opened it, and nobody has reviewed anything yet. The shipped `github.sh`\n\
+         hook must not close the GitHub issue on `done` — it hands the issue to that pull\n\
+         request instead, so GitHub's own merge automation is what closes the issue once a\n\
+         person actually merges. A custom GitHub hook should keep that split. This is a\n\
+         GitHub-specific recommendation: other trackers, including the shipped Jira hook, keep\n\
+         whatever `done` behaviour suits their own lifecycle.\n",
     );
     out
 }
@@ -105,5 +115,38 @@ mod tests {
         // see `SPOOLWAY_OUT`, since nothing reads an answer back from them.
         let open_section = text.split("queued, blocked").next().unwrap();
         assert!(!open_section.contains("SPOOLWAY_FROM"));
+    }
+
+    /// The acceptance criterion behind the whole task this contract text was
+    /// last edited for: GitHub's `done` is a handoff, never a close, and the
+    /// recommendation is scoped to GitHub rather than imposed on every
+    /// tracker a hook might talk to.
+    #[test]
+    fn hook_contract_scopes_the_done_is_not_merge_guidance_to_github() {
+        let text = render_hook_contract();
+        // Each assertion below is a distinct claim the acceptance criteria
+        // make: a looser one (just "GitHub" and "Jira" appearing anywhere)
+        // would still pass if the load-bearing sentences it is drawn from
+        // were edited away, which is exactly what a prior version of this
+        // test let happen.
+        for fact in [
+            "GitHub's `done` is a pull request handed off, not a merge",
+            "must not close the GitHub issue on `done`",
+            "GitHub's own merge automation is what closes the issue",
+            "GitHub-specific recommendation",
+        ] {
+            assert!(text.contains(fact), "hook contract drops `{fact}`");
+        }
+        // The rule names Jira only to say it is exempt, never to extend the
+        // no-close policy onto it.
+        let jira_sentence = text
+            .split("GitHub-specific recommendation")
+            .nth(1)
+            .expect("the exemption clause follows the phrase naming it");
+        assert!(
+            jira_sentence.contains("Jira")
+                && jira_sentence.contains("whatever `done` behaviour suits their own"),
+            "hook contract does not say Jira keeps its own `done` behaviour"
+        );
     }
 }
