@@ -9,18 +9,24 @@
 #
 # Pull requests are flat files under $GH_STUB_PRS, one per number: `base=`,
 # `head=` and `title=` lines, plus a `<n>.body` file holding the body exactly
-# as `--body-file` handed it over. $GH_STUB_URL is the `file://…` prefix a
-# `gh pr view --json url` answer is built from.
+# as `--body-file` handed it over, and `<n>.comment` the last comment `gh pr
+# comment` posted (`--body` or `--body-file -`, either form). $GH_STUB_URL is
+# the `file://…` prefix a `gh pr view --json url` answer is built from.
 #
 # Issues are the same shape, under $GH_STUB_ISSUES: `<n>` holds `repo=` and
 # `title=`, `<n>.body` is the file `-F` named, `<n>.comment` is the last
 # comment posted (`--body-file -` reads it off stdin), and `<n>.closed`
-# exists once `gh issue close` has run. `<n>.labels.json` and
-# `<n>.comments.json`, in real `gh --json`'s own shape — `[{"name":...}]`
-# and `[{"author":{"login":...},"body":...}]` — are not written by anything
-# this stub does; a suite seeds them by hand to stand in for an issue a
-# person already filed, with labels and comments on it before `fetch` ever
-# runs. Both read back as `[]` when absent.
+# exists once `gh issue close` has run. `<n>.labels` is a plain list, one
+# label per line, seeded by `issue create --label` and mutated in place by
+# `issue edit --add-label`/`--remove-label` — the marker-and-label design's
+# own way of tracking status, since GitHub issues have no state past
+# open/closed. `<n>.parent` and `<n>.blocked_by` hold `issue create`'s own
+# `--parent`/`--blocked-by` value, when either was given. `<n>.labels.json`
+# and `<n>.comments.json`, in real `gh --json`'s own shape —
+# `[{"name":...}]` and `[{"author":{"login":...},"body":...}]` — are not
+# written by anything this stub does; a suite seeds them by hand to stand in
+# for an issue a person already filed, with labels and comments on it before
+# `fetch` ever runs. Both read back as `[]` when absent.
 set -euo pipefail
 
 PRS=${GH_STUB_PRS:?GH_STUB_PRS must name where pull requests live}
@@ -92,13 +98,32 @@ case "${1:-}" in
   pr)
     case "${2:-}" in
       view)
+        # `--jq` filters the raw shape below for real, the same way `issue
+        # view` already does — `github.sh`'s `done` branch asks for
+        # `--json url --jq .url` to unwrap a bare string rather than the
+        # whole object, and `-r` is what strips the quotes `jq` would
+        # otherwise wrap a string result in, matching real `gh`'s own
+        # `--jq` output.
         branch=$3
+        shift 3
+        jqf=""
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --jq) jqf=$2; shift 2 ;;
+            *) shift ;;
+          esac
+        done
         n=$(pr_for_branch "$branch") || {
           echo "no pull requests found for branch \"$branch\"" >&2
           exit 1
         }
-        printf '{"number":%s,"url":"%s/pull/%s","state":"OPEN"}\n' \
-          "$n" "${GH_STUB_URL:-file:///origin}" "$n"
+        raw=$(printf '{"number":%s,"url":"%s/pull/%s","state":"OPEN"}\n' \
+          "$n" "${GH_STUB_URL:-file:///origin}" "$n")
+        if [ -n "$jqf" ]; then
+          echo "$raw" | jq -r "$jqf"
+        else
+          echo "$raw"
+        fi
         ;;
       create)
         shift 2
@@ -125,6 +150,35 @@ case "${1:-}" in
         cp "$bodyfile" "$PRS/$n.body"
         printf '%s/pull/%s\n' "${GH_STUB_URL:-file:///origin}" "$n"
         ;;
+      comment)
+        # `gh pr comment <url-or-number> -R <repo> --body <text>` — the
+        # target is the third word, same rule `issue comment` below
+        # follows. `github.sh`'s marker comment always uses `--body`, never
+        # `--body-file`, so this only needs the one form — but both are
+        # accepted, the same atomic write-then-rename `issue comment`
+        # already uses so a watcher never reads a half-written file.
+        target=$3
+        shift 3
+        bodyfile="" body=""
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --body) body=$2; shift 2 ;;
+            --body-file) bodyfile=$2; shift 2 ;;
+            *) shift ;;
+          esac
+        done
+        n=${target##*/}
+        if [ -n "$bodyfile" ]; then
+          if [ "$bodyfile" = "-" ]; then
+            cat > "$PRS/$n.comment.part"
+          else
+            cp "$bodyfile" "$PRS/$n.comment.part"
+          fi
+        else
+          printf '%s' "$body" > "$PRS/$n.comment.part"
+        fi
+        mv "$PRS/$n.comment.part" "$PRS/$n.comment"
+        ;;
       *) echo "gh pr ${2:-<nothing>}: not implemented by this stub" >&2; exit 1 ;;
     esac
     ;;
@@ -132,19 +186,62 @@ case "${1:-}" in
     case "${2:-}" in
       create)
         shift 2
-        repo="" title="" bodyfile=""
+        repo="" title="" bodyfile="" parent="" blocked_by="" labels=""
         while [ $# -gt 0 ]; do
           case "$1" in
             -R) repo=$2; shift 2 ;;
             -t) title=$2; shift 2 ;;
             -F) bodyfile=$2; shift 2 ;;
+            --parent) parent=$2; shift 2 ;;
+            --blocked-by) blocked_by=$2; shift 2 ;;
+            # Repeatable, the way real `gh issue create` accepts it — one
+            # call names `spoolway:task` alone, but nothing stops a project
+            # from having its own labels alongside it someday.
+            --label) labels="$labels${labels:+ }$2"; shift 2 ;;
             *) shift ;;
           esac
         done
         n=$(next_issue)
         { echo "repo=$repo"; echo "title=$title"; } > "$ISSUES/$n"
         cp "$bodyfile" "$ISSUES/$n.body"
+        # Plain text, one flag's own value per file — not the pre-seeded
+        # `.labels.json` shape `fetch`'s own tests write by hand for an
+        # issue spoolway never created; `issue edit` below reads and
+        # rewrites this same file for the labels it adds or removes.
+        [ -n "$parent" ] && echo "$parent" > "$ISSUES/$n.parent"
+        [ -n "$blocked_by" ] && echo "$blocked_by" > "$ISSUES/$n.blocked_by"
+        for label in $labels; do echo "$label"; done > "$ISSUES/$n.labels"
         printf '%s/%s/issues/%s\n' "${GH_STUB_URL:-file:///origin}" "$repo" "$n"
+        ;;
+      edit)
+        # `gh issue edit <ref> -R <repo> --remove-label X --add-label Y` —
+        # `mark_in_progress` and `hand_off_for_review`'s label swap, the
+        # marker-and-label design's own way of tracking a ticket's status
+        # since GitHub issues have no state past open/closed. Applied in
+        # call order, remove before add, the same order `github.sh` itself
+        # always passes them in.
+        shift 2
+        ref=$1
+        shift
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            -R) shift 2 ;;
+            --remove-label)
+              n=${ref##*/}
+              touch "$ISSUES/$n.labels"
+              grep -vFx "$2" "$ISSUES/$n.labels" > "$ISSUES/$n.labels.tmp" 2>/dev/null || true
+              mv "$ISSUES/$n.labels.tmp" "$ISSUES/$n.labels"
+              shift 2
+              ;;
+            --add-label)
+              n=${ref##*/}
+              touch "$ISSUES/$n.labels"
+              grep -qFx "$2" "$ISSUES/$n.labels" 2>/dev/null || echo "$2" >> "$ISSUES/$n.labels"
+              shift 2
+              ;;
+            *) shift ;;
+          esac
+        done
         ;;
       view)
         # Two shapes share this one case: `gh issue view <ref> -R <repo>

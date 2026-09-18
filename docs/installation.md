@@ -71,6 +71,7 @@ flowchart LR
   I --> R[.spoolway/prompts/&lt;name&gt;/PROMPT.md]
   I --> T[.spoolway/templates/]
   I --> H[.spoolway/hooks/]
+  I --> W[.github/workflows/spoolway-issues.yml]
   I --> S[provider skills directory]
   I --> N[~/.spoolway/&lt;project&gt;/project.toml]
 ```
@@ -84,6 +85,7 @@ flowchart LR
 | `.spoolway/templates/tasks/` | One task skeleton per shipped pipeline. |
 | `.spoolway/templates/tracking/` | The `epic.md` and `ticket.md` bodies a tracker hook renders. |
 | `.spoolway/hooks/` | `github.sh` and `jira.sh`. See [`[issue_tracking]`](configuration.md#issue_tracking--a-hook-fired-on-four-task-events). |
+| `.github/workflows/spoolway-issues.yml` | Closes an issue once its pull request merges. Written only when the tracker is github. |
 | `~/.spoolway/<label>-<id>/project.toml` | Records the id and the checkout this home belongs to. |
 | The provider's skills directory | The five pipeline skills. See [The pipeline skills](#the-pipeline-skills). |
 

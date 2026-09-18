@@ -1,6 +1,3 @@
-Opened automatically for group `${SPOOLWAY_GROUP}`.
-
-One issue per task, hung under this one as the group is queued.
-Progress arrives as comments on the children, not here.
-
-Plan: ${SPOOLWAY_SOURCE}
+- Group: `${SPOOLWAY_GROUP}`
+- Source: `${SPOOLWAY_SOURCE}`
+- Tasks queued together: `${SPOOLWAY_GROUP_SIZE}`

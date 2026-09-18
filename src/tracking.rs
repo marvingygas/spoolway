@@ -1647,37 +1647,45 @@ mod tests {
     // environment variable.
 
     /// A `gh` stand-in for the `done`-branch tests below: it logs every
-    /// invocation, answers `pr view`'s two `--json` shapes from files the
-    /// test writes first, captures whatever `gh pr edit` is given on stdin,
-    /// and can be told to fail each of its four calls independently —
-    /// `stub/pr_view_branch_fail` for the branch lookup, `stub/
-    /// pr_view_body_fail` for the body read, `stub/edit_fail` for the edit,
-    /// `stub/comment_fail` for the handoff comment — which is what the
+    /// invocation, answers `pr view`'s `--json url` shape from a file the
+    /// test writes first, captures whatever `--body` argument `gh pr
+    /// comment` and `gh issue comment` are each given, and can be told to
+    /// fail any of its four calls independently — `stub/pr_view_fail` for
+    /// the branch lookup, `stub/pr_comment_fail` for the marker comment,
+    /// `stub/issue_edit_fail` for the label swap, `stub/issue_comment_fail`
+    /// for the final "ready for review" comment — which is what the
     /// failure-propagation tests below each need one of.
     fn write_stub_gh(bin_dir: &std::path::Path) {
         std::fs::create_dir_all(bin_dir).unwrap();
         let script = r#"#!/bin/sh
 echo "$*" >> stub/gh.log
+# `--body` always takes its text as the very next argument here — captured
+# by walking "$@" rather than assuming a fixed position, since `pr comment`
+# and `issue comment` each carry a different number of flags ahead of it.
+body=""
+prev=""
+for arg in "$@"; do
+  [ "$prev" = "--body" ] && body=$arg
+  prev=$arg
+done
 case "$1 $2" in
   "pr view")
-    case "$*" in
-      *"--json url"*)
-        [ -f stub/pr_view_branch_fail ] && exit 1
-        cat stub/pr_url
-        ;;
-      *"--json body"*)
-        [ -f stub/pr_view_body_fail ] && exit 1
-        cat stub/body
-        ;;
-    esac
+    [ -f stub/pr_view_fail ] && exit 1
+    cat stub/pr_url
     ;;
-  "pr edit")
-    cat > stub/edit_body.received
-    [ -f stub/edit_fail ] && exit 1
+  "pr comment")
+    [ -f stub/pr_comment_fail ] && exit 1
+    printf '%s' "$body" > stub/pr_comment.received
+    echo posted >> stub/pr_comment.log
+    ;;
+  "issue edit")
+    [ -f stub/issue_edit_fail ] && exit 1
+    echo "$*" >> stub/issue_edit.log
     ;;
   "issue comment")
-    [ -f stub/comment_fail ] && exit 1
-    echo posted >> stub/comment.log
+    [ -f stub/issue_comment_fail ] && exit 1
+    printf '%s' "$body" > stub/issue_comment.received
+    echo posted >> stub/issue_comment.log
     ;;
   "issue close")
     echo "$*" >> stub/close.log
@@ -1725,14 +1733,16 @@ exit 0
         (repo, t, stub)
     }
 
-    /// Acceptance criterion: `done` leaves the ticket open, hands it to its
-    /// pull request unambiguously, and closes nothing.
+    /// Acceptance criterion: `done` leaves the ticket open, marks the pull
+    /// request with the marker `.github/workflows/spoolway-issues.yml`
+    /// trusts, relabels the ticket for review, and closes nothing itself —
+    /// closing is that workflow's job, once the pull request actually
+    /// merges.
     #[test]
     fn github_sh_done_hands_the_ticket_to_its_pull_request_without_closing_it() {
         let (repo, t, stub) =
             github_done_fixture("done-handoff", "https://github.com/o/r/issues/12");
         std::fs::write(stub.join("pr_url"), "https://github.com/o/r/pull/9\n").unwrap();
-        std::fs::write(stub.join("body"), "Existing description.\n").unwrap();
 
         fire(&repo, &t, crate::pipeline::DONE, 1).unwrap();
         assert_eq!(
@@ -1740,15 +1750,21 @@ exit 0
             RunState::Exited(0)
         );
 
-        let received = std::fs::read_to_string(stub.join("edit_body.received")).unwrap();
-        assert!(received.starts_with("Existing description."));
+        let marker = std::fs::read_to_string(stub.join("pr_comment.received")).unwrap();
         assert!(
-            received.contains("Closes #12"),
-            "trailer missing: {received}"
+            marker.contains("<!-- spoolway-issue: https://github.com/o/r/issues/12 -->"),
+            "marker missing: {marker}"
         );
+        let edit = std::fs::read_to_string(stub.join("issue_edit.log")).unwrap();
         assert!(
-            stub.join("comment.log").exists(),
-            "no handoff comment posted"
+            edit.contains("--remove-label spoolway:in-progress"),
+            "{edit}"
+        );
+        assert!(edit.contains("--add-label spoolway:review"), "{edit}");
+        let ready = std::fs::read_to_string(stub.join("issue_comment.received")).unwrap();
+        assert!(
+            ready.contains("ready for review in https://github.com/o/r/pull/9"),
+            "{ready}"
         );
         assert!(
             !stub.join("close.log").exists(),
@@ -1756,123 +1772,16 @@ exit 0
         );
     }
 
-    /// Review finding: a plain substring search for `Closes #12` also
-    /// matches inside `Closes #123`, so ticket #12 would read as already
-    /// linked when only a different, longer ticket actually is. The fixed
-    /// script must still add ticket #12's own trailer alongside it.
-    #[test]
-    fn github_sh_done_does_not_mistake_a_longer_ticket_number_for_an_existing_link() {
-        let (repo, t, stub) =
-            github_done_fixture("done-boundary", "https://github.com/o/r/issues/12");
-        std::fs::write(stub.join("pr_url"), "https://github.com/o/r/pull/9\n").unwrap();
-        std::fs::write(stub.join("body"), "Some description.\n\nCloses #123\n").unwrap();
-
-        fire(&repo, &t, crate::pipeline::DONE, 1).unwrap();
-        assert_eq!(
-            settle(&repo, &t, crate::pipeline::DONE),
-            RunState::Exited(0)
-        );
-
-        let received = std::fs::read_to_string(stub.join("edit_body.received")).unwrap();
-        assert!(
-            received.contains("Closes #123"),
-            "the existing link was dropped"
-        );
-        // The trailer is the last thing appended, so its own `Closes #12` is
-        // never followed by another digit here — the one shape that proves
-        // the boundary check, rather than a plain substring search, is what
-        // decided to add it.
-        assert!(
-            received.trim_end().ends_with("Closes #12"),
-            "ticket #12 was never linked: {received}"
-        );
-    }
-
-    /// A retried `done` — the hook fires again after an earlier failure —
-    /// must not double the trailer once the pull request already names this
-    /// exact ticket.
-    #[test]
-    fn github_sh_done_does_not_double_the_trailer_on_a_retry() {
-        let (repo, t, stub) =
-            github_done_fixture("done-idempotent", "https://github.com/o/r/issues/12");
-        std::fs::write(stub.join("pr_url"), "https://github.com/o/r/pull/9\n").unwrap();
-        std::fs::write(stub.join("body"), "Already linked.\n\nCloses #12\n").unwrap();
-
-        fire(&repo, &t, crate::pipeline::DONE, 1).unwrap();
-        assert_eq!(
-            settle(&repo, &t, crate::pipeline::DONE),
-            RunState::Exited(0)
-        );
-
-        assert!(
-            !stub.join("edit_body.received").exists(),
-            "a retried done must not edit an already-linked pull request"
-        );
-        assert!(stub.join("comment.log").exists());
-    }
-
-    /// Review finding: a failed `gh pr edit` used to be silently followed by
-    /// the "handed off" comment and a zero exit, claiming a handoff that
-    /// never happened. The hook must stop instead — no comment, and a
-    /// failing exit code so `issue_tracking.on_fail` can react.
-    #[test]
-    fn github_sh_done_stops_and_fails_when_the_pull_request_edit_fails() {
-        let (repo, t, stub) =
-            github_done_fixture("done-edit-fails", "https://github.com/o/r/issues/12");
-        std::fs::write(stub.join("pr_url"), "https://github.com/o/r/pull/9\n").unwrap();
-        std::fs::write(stub.join("body"), "Body.\n").unwrap();
-        std::fs::write(stub.join("edit_fail"), "").unwrap();
-
-        fire(&repo, &t, crate::pipeline::DONE, 1).unwrap();
-        assert_eq!(
-            settle(&repo, &t, crate::pipeline::DONE),
-            RunState::Exited(1)
-        );
-
-        assert!(
-            !stub.join("comment.log").exists(),
-            "a failed handoff must not be reported as one"
-        );
-    }
-
-    /// Review finding: GitHub refuses a pull request body over 65,536 bytes
-    /// outright, and this used to be handled by cutting bytes off the end —
-    /// which risks truncating `spoolway stack`'s own trailer (its
-    /// conflict/touches list and co-author tag). The fix fails loudly
-    /// instead: no edit at all, rather than a shortened, possibly corrupted
-    /// one.
-    #[test]
-    fn github_sh_done_fails_actionably_instead_of_truncating_an_oversized_body() {
-        let (repo, t, stub) =
-            github_done_fixture("done-oversized", "https://github.com/o/r/issues/5");
-        std::fs::write(stub.join("pr_url"), "https://github.com/o/r/pull/1\n").unwrap();
-        std::fs::write(stub.join("body"), "a".repeat(70_000)).unwrap();
-
-        fire(&repo, &t, crate::pipeline::DONE, 1).unwrap();
-        assert_eq!(
-            settle(&repo, &t, crate::pipeline::DONE),
-            RunState::Exited(1)
-        );
-
-        assert!(
-            !stub.join("edit_body.received").exists(),
-            "an oversized body must never be edited — truncated or otherwise"
-        );
-        assert!(
-            !stub.join("comment.log").exists(),
-            "a refused handoff must not be reported as one"
-        );
-    }
-
-    /// Review finding: a failed pull-request lookup used to read exactly
-    /// like "no pull request yet" and the hook would exit clean, though by
-    /// the time `done` fires `spoolway stack` has always already opened one
-    /// — so this is a real failure, not a normal case to skip past.
+    /// Review finding, ported: a failed pull-request lookup used to read
+    /// exactly like "no pull request yet" and the hook would exit clean,
+    /// though by the time `done` fires `spoolway stack` has always already
+    /// opened one — so this is a real failure, not a normal case to skip
+    /// past.
     #[test]
     fn github_sh_done_fails_when_the_pull_request_lookup_fails() {
         let (repo, t, stub) =
             github_done_fixture("done-lookup-fails", "https://github.com/o/r/issues/12");
-        std::fs::write(stub.join("pr_view_branch_fail"), "").unwrap();
+        std::fs::write(stub.join("pr_view_fail"), "").unwrap();
 
         fire(&repo, &t, crate::pipeline::DONE, 1).unwrap();
         assert_eq!(
@@ -1880,22 +1789,9 @@ exit 0
             RunState::Exited(1)
         );
 
-        assert!(!stub.join("comment.log").exists());
-        assert!(!stub.join("edit_body.received").exists());
-
-        // `src/assets.rs`'s own parity test counts recovery phrases in the
-        // source text, but `echo`'s multi-argument calls wrap a few of
-        // those phrases across two string literals on two source lines —
-        // this is the real, runtime proof that the two arguments still
-        // join into one sentence rather than running together or gaining
-        // an extra space, which a source-only check can never confirm.
-        let log =
-            std::fs::read_to_string(runs(&repo).log_path(&Runs::key("done", "demo"))).unwrap();
-        assert!(
-            log.contains("check that `gh` is logged in to"),
-            "the multi-line `echo` call's own line wrap does not join into one sentence at \
-             runtime: {log}"
-        );
+        assert!(!stub.join("pr_comment.log").exists());
+        assert!(!stub.join("issue_edit.log").exists());
+        assert!(!stub.join("issue_comment.log").exists());
     }
 
     /// The same "never silently skip" rule applies when the lookup succeeds
@@ -1913,18 +1809,18 @@ exit 0
             RunState::Exited(1)
         );
 
-        assert!(!stub.join("comment.log").exists());
+        assert!(!stub.join("pr_comment.log").exists());
     }
 
-    /// Review finding: an unchecked body read meant a later, successful
-    /// edit could replace the pull request's entire description with just
-    /// the trailer — the hook must stop before it ever gets there.
+    /// A failed marker comment must stop the handoff outright — the ticket
+    /// is not yet relabelled or told anything, so nothing here claims a
+    /// handoff `.github/workflows/spoolway-issues.yml` cannot yet see.
     #[test]
-    fn github_sh_done_stops_before_editing_when_the_body_read_fails() {
+    fn github_sh_done_stops_when_the_marker_comment_fails() {
         let (repo, t, stub) =
-            github_done_fixture("done-body-read-fails", "https://github.com/o/r/issues/12");
+            github_done_fixture("done-marker-fails", "https://github.com/o/r/issues/12");
         std::fs::write(stub.join("pr_url"), "https://github.com/o/r/pull/9\n").unwrap();
-        std::fs::write(stub.join("pr_view_body_fail"), "").unwrap();
+        std::fs::write(stub.join("pr_comment_fail"), "").unwrap();
 
         fire(&repo, &t, crate::pipeline::DONE, 1).unwrap();
         assert_eq!(
@@ -1932,24 +1828,43 @@ exit 0
             RunState::Exited(1)
         );
 
-        assert!(
-            !stub.join("edit_body.received").exists(),
-            "a failed body read must never be followed by a destructive edit"
-        );
-        assert!(!stub.join("comment.log").exists());
+        assert!(!stub.join("issue_edit.log").exists());
+        assert!(!stub.join("issue_comment.log").exists());
     }
 
-    /// Review finding: a failed handoff comment used to be swallowed by the
-    /// done branch's own unconditional success, so the hook could exit
-    /// clean without ever describing the handoff as the acceptance
-    /// criteria require.
+    /// A failed label swap must stop before the final "ready for review"
+    /// comment — the marker is already posted by this point (see
+    /// `hand_off_for_review`'s own doc: it is written first on purpose), but
+    /// nothing downstream of the failed call runs.
     #[test]
-    fn github_sh_done_fails_when_the_handoff_comment_fails() {
+    fn github_sh_done_stops_when_the_label_swap_fails() {
+        let (repo, t, stub) =
+            github_done_fixture("done-label-fails", "https://github.com/o/r/issues/12");
+        std::fs::write(stub.join("pr_url"), "https://github.com/o/r/pull/9\n").unwrap();
+        std::fs::write(stub.join("issue_edit_fail"), "").unwrap();
+
+        fire(&repo, &t, crate::pipeline::DONE, 1).unwrap();
+        assert_eq!(
+            settle(&repo, &t, crate::pipeline::DONE),
+            RunState::Exited(1)
+        );
+
+        assert!(stub.join("pr_comment.log").exists());
+        assert!(!stub.join("issue_comment.log").exists());
+    }
+
+    /// Review finding, ported: a failed final comment used to be swallowed
+    /// by the done branch's own unconditional success, so the hook could
+    /// exit clean without ever describing the handoff as the acceptance
+    /// criteria require. The marker and the label swap have already landed
+    /// by this point, so a retry only needs to redo the one comment that
+    /// failed.
+    #[test]
+    fn github_sh_done_fails_when_the_final_comment_fails() {
         let (repo, t, stub) =
             github_done_fixture("done-comment-fails", "https://github.com/o/r/issues/12");
         std::fs::write(stub.join("pr_url"), "https://github.com/o/r/pull/9\n").unwrap();
-        std::fs::write(stub.join("body"), "Body.\n").unwrap();
-        std::fs::write(stub.join("comment_fail"), "").unwrap();
+        std::fs::write(stub.join("issue_comment_fail"), "").unwrap();
 
         fire(&repo, &t, crate::pipeline::DONE, 1).unwrap();
         assert_eq!(
@@ -1957,8 +1872,7 @@ exit 0
             RunState::Exited(1)
         );
 
-        // The edit itself went through — only the comment failed — so a
-        // retry should not have to redo work that already succeeded.
-        assert!(stub.join("edit_body.received").exists());
+        assert!(stub.join("pr_comment.log").exists());
+        assert!(stub.join("issue_edit.log").exists());
     }
 }

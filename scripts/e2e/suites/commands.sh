@@ -232,6 +232,10 @@ has "and the project it files into" 'project_key = "acme/app"' \
 works "the github hook is written" test -f "$INITDIR/github/.spoolway/hooks/github.sh"
 works "and so is jira's, unchosen or not" test -f "$INITDIR/github/.spoolway/hooks/jira.sh"
 works "a hook is written executable" test -x "$INITDIR/github/.spoolway/hooks/github.sh"
+works "answering github also writes the workflow that closes a mirrored issue" \
+  test -f "$INITDIR/github/.github/workflows/spoolway-issues.yml"
+works "none never gets one" \
+  test ! -e "$INITDIR/unasked/.github/workflows/spoolway-issues.yml"
 
 # `none` — `unasked`'s own `init` above already took every default with
 # nobody there to ask, which includes the tracker question defaulting to
@@ -2119,8 +2123,10 @@ lacks "and no epic either" "epic:" "$SPOOLWAY_PROJECT_HOME/queue/github-gate.md"
 # stub was just added to, which it could not have inherited when it started.
 dispatcher_restart
 
-# A group of one, so the script's own `epic` branch never fires — this is
-# about the ticket half, which every group size takes.
+# A group of one still gets its own epic now — every group does, whatever
+# its size (see `.spoolway/hooks/github.sh`'s own `open` branch doc) — so
+# this proves the ticket half *and* the epic half together, both linked by
+# `--parent` rather than the old design's separate `sub_issues` REST call.
 task_doc "$LIVE/github-open-check.md" github-open-check "$BODY" \
   "group: github-single" "touches: [notes/github-open-check.md]" \
   "group_description: proving the real open branch"
@@ -2128,45 +2134,60 @@ must "queuing it calls the real hook's open branch" \
   "$SPOOLWAY" queue add --from "$LIVE/github-open-check.md"
 
 TICKET=$(grep '^ticket:' "$SPOOLWAY_PROJECT_HOME/queue/github-open-check.md" | awk '{print $2}')
-if [ -n "$TICKET" ]; then
-  ok "github.sh answered a ticket url on open"
+EPIC=$(grep '^epic:' "$SPOOLWAY_PROJECT_HOME/queue/github-open-check.md" | awk '{print $2}')
+if [ -n "$TICKET" ] && [ -n "$EPIC" ]; then
+  ok "github.sh answered a ticket and an epic url on open"
 else
-  bad "github.sh answered a ticket url on open"
+  bad "github.sh answered a ticket and an epic url on open"
 fi
 ISSUE_NUM=${TICKET##*/}
+EPIC_NUM=${EPIC##*/}
 has "the stub's issue was created against the configured project" \
   "repo=acme/app" "$GH_STUB_ISSUES/$ISSUE_NUM"
 has "with the rendered ticket body, not the template's raw placeholders" \
-  "Opened automatically for task \`github-open-check\`." \
+  "Mirrors task \`github-open-check\` in group \`github-single\`." \
   "$GH_STUB_ISSUES/$ISSUE_NUM.body"
+has "the ticket carries the task label" "spoolway:task" "$GH_STUB_ISSUES/$ISSUE_NUM.labels"
+has "the epic carries the group label" "spoolway:group" "$GH_STUB_ISSUES/$EPIC_NUM.labels"
+has "and the ticket is parented under the epic, by native --parent" \
+  "$EPIC" "$GH_STUB_ISSUES/$ISSUE_NUM.parent"
 
-# A group of two, so the script's `epic` branch fires as well — and with it the
-# `gh api .../sub_issues` call that is the only way `gh` 2.97.0 can make one
-# issue the child of another. The endpoint takes the issue's *numeric* id, not
-# the node id `gh issue view --json id` hands back, so this is the case that
-# catches that pair being swapped.
+# A group of two: the same epic is shared, `github-pair-b` also depends on
+# `github-pair-a`, and `--blocked-by` is what carries that dependency's own
+# ticket across onto the second issue.
 task_doc "$LIVE/github-pair-a.md" github-pair-a "$BODY" \
   "group: github-pair" "touches: [notes/github-pair-a.md]" \
-  "group_description: proving the epic and sub-issue branch"
+  "group_description: proving a shared epic and native parent/blocked-by links"
 task_doc "$LIVE/github-pair-b.md" github-pair-b "$BODY" \
-  "group: github-pair" "touches: [notes/github-pair-b.md]"
+  "group: github-pair" "touches: [notes/github-pair-b.md]" \
+  "depends_on: [github-pair-a]"
 must "queuing a group of two calls the hook's epic branch too" \
   "$SPOOLWAY" queue add --from "$LIVE/github-pair-a.md" --from "$LIVE/github-pair-b.md"
 
 PAIR_EPIC=$(grep '^epic:' "$SPOOLWAY_PROJECT_HOME/queue/github-pair-a.md" | awk '{print $2}')
-PAIR_TICKET=$(grep '^ticket:' "$SPOOLWAY_PROJECT_HOME/queue/github-pair-a.md" | awk '{print $2}')
+PAIR_TICKET_A=$(grep '^ticket:' "$SPOOLWAY_PROJECT_HOME/queue/github-pair-a.md" | awk '{print $2}')
+PAIR_TICKET_B=$(grep '^ticket:' "$SPOOLWAY_PROJECT_HOME/queue/github-pair-b.md" | awk '{print $2}')
+PAIR_EPIC_B=$(grep '^epic:' "$SPOOLWAY_PROJECT_HOME/queue/github-pair-b.md" | awk '{print $2}')
 if [ -n "$PAIR_EPIC" ]; then
   ok "github.sh answered an epic url for a group of two"
 else
   bad "github.sh answered an epic url for a group of two"
 fi
-has "the epic carries the group's name, not a task's" \
-  "title=github-pair" "$GH_STUB_ISSUES/${PAIR_EPIC##*/}"
-has "and the ticket was linked under it as a sub-issue, by numeric id" \
-  "sub_issue_id=${PAIR_TICKET##*/}" "$GH_STUB_ISSUES/${PAIR_EPIC##*/}.sub_issues"
+works "both tasks of the pair share the one epic" \
+  test "$PAIR_EPIC" = "$PAIR_EPIC_B"
+has "the epic's title is the group description's own first line, not the group's name" \
+  "title=proving a shared epic and native parent/blocked-by links" \
+  "$GH_STUB_ISSUES/${PAIR_EPIC##*/}"
+has "the first ticket is parented under the shared epic" \
+  "$PAIR_EPIC" "$GH_STUB_ISSUES/${PAIR_TICKET_A##*/}.parent"
+has "the second ticket names the first as blocking it" \
+  "${PAIR_TICKET_A##*/}" "$GH_STUB_ISSUES/${PAIR_TICKET_B##*/}.blocked_by"
 
 # Placed on `blocked` by hand, the same way `hook-blocked` above stands in for
 # a pipeline actually reaching it — naming the ticket `open` already secured.
+# Carries its own `## Status Log`, unlike `$BODY`: `comment_snapshot` prints
+# that section's own content, or nothing at all when a task file has none —
+# so proving it actually reaches the comment needs one here to extract.
 {
   echo "---"; echo "id: github-blocked"; echo "title: github-blocked, done"
   echo "stage: blocked"; echo "blocked_from: implement"
@@ -2174,22 +2195,23 @@ has "and the ticket was linked under it as a sub-issue, by numeric id" \
   echo "base: plan/live"; echo "pipeline: default"
   echo "ticket: $TICKET"
   echo "touches: [notes/github-blocked.md]"; echo "---"; cat "$BODY"
+  echo; echo "## Status Log"
+  echo "- blocked on implement, waiting on a dependency"
 } > "$SPOOLWAY_PROJECT_HOME/queue/github-blocked.md"
 
 dispatcher_start
 # Waits for the comment this task's own hook posts, not merely for a file at
-# that name. `github-open-check` holds the same ticket, so its own blocked or
-# paused comment can land on this issue first and be overwritten a moment
-# later; polling on the content asserts against the right one whichever
-# arrives first.
+# that name. `github-open-check` holds the same ticket, so its own `queued`
+# label edit or blocked comment can land first; polling on the content
+# asserts against the right one whichever arrives first.
 for _ in $(seq 1 150); do
-  grep -q "id: github-blocked" "$GH_STUB_ISSUES/$ISSUE_NUM.comment" 2>/dev/null && break
+  grep -q "github-blocked" "$GH_STUB_ISSUES/$ISSUE_NUM.comment" 2>/dev/null && break
   sleep 0.2
 done
-has "the blocked event's comment carries the task file" \
-  "id: github-blocked" "$GH_STUB_ISSUES/$ISSUE_NUM.comment"
-has "task file heading and all, inside the collapsed block" \
-  "<details><summary>Task file</summary>" "$GH_STUB_ISSUES/$ISSUE_NUM.comment"
+has "the blocked event's comment names the task" \
+  "github-blocked" "$GH_STUB_ISSUES/$ISSUE_NUM.comment"
+has "and carries the status log section, not the whole task file" \
+  "## Status Log" "$GH_STUB_ISSUES/$ISSUE_NUM.comment"
 
 # --------------------------------------------------------------- fetch, real
 # A person's own issue, filed on the tracker before spoolway ever touched
@@ -2217,22 +2239,23 @@ else
 fi
 
 # ------------------------------------------------------- open hangs under it
-# Queuing a task whose own `source:` names that same filed issue: the
-# `open` branch's `hang_under` has to recognise it and link the new ticket
-# as a GitHub sub-issue underneath — and, separately, leave a plan-page
-# `source:` (every other task in this suite) exactly alone.
+# Queuing a task whose own `source:` names that same filed issue: `open`'s
+# `same_repo_issue` check has to recognise it and give the group's own new
+# epic a native `--parent` naming it — and, separately, leave a plan-page
+# `source:` (every other task in this suite) exactly alone, since none of
+# those match `same_repo_issue`'s own `.../issues/<n>` pattern.
 task_doc "$LIVE/github-hang-under.md" github-hang-under "$BODY" \
   "group: github-hang-single" "touches: [notes/github-hang-under.md]" \
-  "group_description: proving hang_under links the filed issue" \
+  "group_description: proving same_repo_issue parents the epic natively" \
   "source: $GH_STUB_URL/acme/app/issues/$FETCH_NUM"
 must "queuing a task whose source names a filed issue calls the open branch" \
   "$SPOOLWAY" queue add --from "$LIVE/github-hang-under.md"
 
-HANG_TICKET=$(grep '^ticket:' "$SPOOLWAY_PROJECT_HOME/queue/github-hang-under.md" | awk '{print $2}')
-has "the filed issue now lists the new ticket as a GitHub sub-issue" \
-  "sub_issue_id=${HANG_TICKET##*/}" "$GH_STUB_ISSUES/$FETCH_NUM.sub_issues"
-works "and github-open-check's own ticket, queued with no source: at all, never grew one" \
-  test ! -e "$GH_STUB_ISSUES/${TICKET##*/}.sub_issues"
+HANG_EPIC=$(grep '^epic:' "$SPOOLWAY_PROJECT_HOME/queue/github-hang-under.md" | awk '{print $2}')
+has "the filed issue is named as the new epic's own parent" \
+  "$GH_STUB_URL/acme/app/issues/$FETCH_NUM" "$GH_STUB_ISSUES/${HANG_EPIC##*/}.parent"
+works "and github-open-check's own epic, queued with no source: at all, never grew one" \
+  test ! -e "$GH_STUB_ISSUES/$EPIC_NUM.parent"
 
 # --------------------------------------------------------------- retention
 # `retain` sweeps byproducts and never live state, whatever its age.

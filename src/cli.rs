@@ -620,11 +620,14 @@ pub struct SpendArgs {
 #[command(
     long_about = "Scaffold a project: config, pipelines, prompts, skeletons, ignore rules \
         — and the three answers that would otherwise be edited in afterwards.\n\n\
-        `--tracker` and `--project-key` are asked at a terminal and \
-        skipped everywhere else, so a script that runs `init` gets the defaults and no \
-        prompt. Give any of them as a flag and it is not asked either. `--provider` is asked \
-        every time, fresh project or not — installing skills is worth doing even for a \
-        project that has everything else already.\n\n\
+        `--project-key` alone is asked at a terminal and skipped everywhere else, so a \
+        script that runs `init` gets the defaults and no prompt; give it as a flag and it \
+        is not asked either. `--tracker` differs: with no value it opens the tracker \
+        picker whatever the project's age, and with a value it answers outright without \
+        asking, also whatever the project's age — an established project's `config.toml` \
+        is edited in place rather than rewritten. `--provider` is asked every time, fresh \
+        project or not — installing skills is worth doing even for a project that has \
+        everything else already.\n\n\
         `--provider` is the coding agent *you* plan in. A fresh project installs that \
         provider's skills, creates its one agent profile, and points every scaffolded lane \
         at it. Model and effort stay blank for each step because spoolway cannot choose \
@@ -632,7 +635,9 @@ pub struct SpendArgs {
         `--tracker` names the issue tracker `[issue_tracking]` points at — `github`, `jira` \
         or `none` — and `--project-key` is the project its tickets open into. Every hook \
         script is written whichever answer this is, so switching trackers later is a \
-        `spoolway config set issue_tracking.hook` away, not a second `init`."
+        `spoolway config set issue_tracking.hook` away, not a second `init`. Answering \
+        `github` also writes `.github/workflows/spoolway-issues.yml`, the workflow that \
+        closes a mirrored issue once its pull request merges."
 )]
 pub struct InitArgs {
     /// Overwrite existing config, pipeline, and prompt files.
@@ -668,11 +673,18 @@ pub struct InitArgs {
     #[arg(long, value_enum)]
     pub provider: Option<PlanningAgent>,
 
-    /// Which issue tracker `[issue_tracking]` names. Asked at a terminal, on
-    /// a fresh project only; `none` when there is nobody to ask, which
-    /// writes every hook script but leaves the table empty.
-    #[arg(long, value_enum)]
-    pub tracker: Option<Tracker>,
+    /// Which issue tracker `[issue_tracking]` names — `github`, `jira` or
+    /// `none`. Given with no value, opens the tracker picker whatever the
+    /// project's age; given a value, answers it outright without asking,
+    /// also whatever the project's age; left out entirely, the question is
+    /// asked only on a fresh project and skipped on one that already has a
+    /// config. A plain string rather than `Tracker`, because `""` — what
+    /// `default_missing_value` fills a valueless `--tracker` with — names
+    /// none of that enum's three variants; `commands::init` parses the rest
+    /// with the same case-insensitive rule clap's own `value_enum` would
+    /// have used.
+    #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "TRACKER")]
+    pub tracker: Option<String>,
 
     /// The project the chosen tracker's tickets open into: `owner/repo` on
     /// github, a project key on jira. Ignored when `--tracker` answers

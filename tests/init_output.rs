@@ -116,6 +116,68 @@ fn assert_scaffold(project: &Project, agent: &str) {
     }
 }
 
+/// One `kept`/`wrote`/`set` row, in the column every such row shares.
+fn row(verb: &str, what: &str) -> String {
+    format!("  {verb:<9}{what}")
+}
+
+/// Every path under `rel` (a `.spoolway/...` directory `init` populates),
+/// relative to the project root, in the order a plain recursive walk of
+/// disk finds them — not necessarily the order `init` itself considered
+/// them in, which is why the tests below check each path's own row is
+/// present rather than pinning the whole transcript's line order. What
+/// paths actually exist is read off disk rather than duplicated here from
+/// `assets::PROMPTS` and friends: this project's own prompt and hook lists
+/// are not this test's to keep in sync by hand.
+fn files_under(project: &Project, rel: &str) -> Vec<String> {
+    fn walk(dir: &Path, root: &Path, out: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).expect("read dir").flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, root, out);
+            } else {
+                out.push(
+                    path.strip_prefix(root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                );
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&project.as_ref().join(rel), project.as_ref(), &mut out);
+    out
+}
+
+/// Every file `init` places outside `.github/`, whatever tracker was
+/// answered — the workflow is conditional on `github` and each call site
+/// below adds it separately when it applies.
+fn scaffold_paths(project: &Project) -> Vec<String> {
+    let mut paths = vec![".spoolway/config.toml".to_string()];
+    for dir in [
+        ".spoolway/pipelines",
+        ".spoolway/prompts",
+        ".spoolway/templates/tasks",
+        ".spoolway/templates/tracking",
+        ".spoolway/hooks",
+    ] {
+        paths.extend(files_under(project, dir));
+    }
+    paths
+}
+
+/// Every one of `paths` has its own `verb` row somewhere in `stdout` —
+/// acceptance criterion 3's "wrote or kept for every file it considered",
+/// checked by membership rather than by line order, which nothing in that
+/// criterion promises.
+fn assert_report_rows(stdout: &str, verb: &str, paths: &[String]) {
+    for path in paths {
+        let needle = row(verb, path);
+        assert!(stdout.contains(&needle), "missing `{needle}` in:\n{stdout}");
+    }
+}
+
 #[test]
 fn fresh_init_prints_every_mockup_row_then_the_documented_closing_lines() {
     let project = Project::new("fresh");
@@ -124,50 +186,22 @@ fn fresh_init_prints_every_mockup_row_then_the_documented_closing_lines() {
     let id = std::fs::read_to_string(project.as_ref().join(".git/spoolway-id"))
         .expect("init stamps a project id");
     let id = id.trim();
-    // The mockup's own counts (`6 pipelines`, `9 prompts`) are this
-    // project's numbers as of an earlier draft, not a fixed contract — this
-    // project ships two pipelines and five prompts. Printing the mockup's
-    // literal digits regardless of what is actually on disk would be
-    // printing something false; read the real counts instead and hold every
-    // row's exact wording and column to the letter.
-    let pipelines = std::fs::read_dir(project.as_ref().join(".spoolway/pipelines"))
-        .expect("read pipeline dir")
-        .count();
-    let prompts = std::fs::read_dir(project.as_ref().join(".spoolway/prompts"))
-        .expect("read prompt dir")
-        .count();
+    let out = stdout(&result);
 
-    // The whole visible transcript, stdout and stderr both: every row the
-    // mockup shows, in its order and column, and then the two closing lines
-    // `docs/cli-reference.md` and `docs/installation.md` document. The
-    // mockup stops at the skills line because it is an excerpt of the run
-    // this task changes, not a pin on everything `init` prints — it elides
-    // the tracker question the same way.
+    // Every file a fresh run placed gets its own `wrote` row — the mockup's
+    // own point — followed by the `stamped` row and the two closing lines
+    // `docs/cli-reference.md` and `docs/installation.md` document.
     assert_eq!(stderr(&result), "");
-    assert_eq!(
-        stdout(&result),
-        format!(
-            "  wrote    .spoolway/config.toml\n\
-             {}\n\
-             {}\n\
-             \x20 stamped  .git/spoolway-id       {id}\n\
-             Skills installed successfully.\n\
-             {CLOSING_LINES}",
-            wrote_row(".spoolway/pipelines/", pipelines, "pipeline"),
-            wrote_row(".spoolway/prompts/", prompts, "prompt"),
-        )
+    assert_report_rows(&out, "wrote", &scaffold_paths(&project));
+    assert!(
+        out.contains(&format!("  stamped  .git/spoolway-id       {id}")),
+        "{out}"
+    );
+    assert!(
+        out.ends_with(&format!("Skills installed successfully.\n{CLOSING_LINES}")),
+        "{out}"
     );
     assert_scaffold(&project, "claude");
-}
-
-/// The mockup's `wrote` row: the same left column every `wrote`/`stamped`
-/// row shares, followed by a count and the plural noun it counts.
-fn wrote_row(path: &str, count: usize, noun: &str) -> String {
-    format!(
-        "  wrote    {path:<width$}{count} {noun}{plural}",
-        width = 23,
-        plural = if count == 1 { "" } else { "s" }
-    )
 }
 
 #[test]
@@ -178,10 +212,16 @@ fn repeat_init_that_adds_skills_omits_project_success() {
     let pipeline_before =
         std::fs::read(project.as_ref().join(".spoolway/pipelines/default.yml")).unwrap();
 
-    assert_eq!(
-        stdout(&project.run(&["init", "--provider", "codex"])),
-        "Skills installed successfully.\n"
-    );
+    let paths = scaffold_paths(&project);
+    let out = stdout(&project.run(&["init", "--provider", "codex"]));
+
+    // Nothing was missing, so every file gets a `kept` row rather than a
+    // `wrote` one, and the run closes by saying so — no tracker flag was
+    // given, so `[issue_tracking]` was never touched either.
+    assert_report_rows(&out, "kept", &paths);
+    assert!(out.contains("Skills installed successfully.\n"), "{out}");
+    assert!(out.trim_end().ends_with("nothing to install."), "{out}");
+    assert!(!out.contains("Project initialized successfully."));
     assert!(project.as_ref().join(".claude/skills").is_dir());
     let codex_plan = project
         .as_ref()
@@ -200,47 +240,183 @@ fn repeat_init_that_adds_skills_omits_project_success() {
 }
 
 /// A repeat `init` that restores nothing but a missing prompt *asset* —
-/// `archivist`'s `document.md`, never its own `PROMPT.md` — must still say
-/// it wrote to `.spoolway/prompts/`: the row counts prompt directories a
-/// run touched at all, not only the ones whose own `PROMPT.md` was missing.
+/// `archivist`'s `document.md`, never its own `PROMPT.md` — reports that one
+/// path `wrote`, and everything else it considered `kept`.
 #[test]
-fn repeat_init_that_restores_only_a_missing_prompt_asset_reports_the_prompts_row() {
+fn repeat_init_that_restores_only_a_missing_prompt_asset_writes_that_one_path_and_keeps_the_rest() {
     let project = Project::new("asset-only");
     project.init("claude");
-    std::fs::remove_file(
-        project
-            .as_ref()
-            .join(".spoolway/prompts/archivist/assets/document.md"),
-    )
-    .expect("remove the archivist prompt's document.md");
+    let asset = project
+        .as_ref()
+        .join(".spoolway/prompts/archivist/assets/document.md");
+    std::fs::remove_file(&asset).expect("remove the archivist prompt's document.md");
 
-    let output = stdout(&project.run(&["init", "--provider", "claude"]));
+    let mut kept = scaffold_paths(&project);
+    kept.retain(|p| p != ".spoolway/prompts/archivist/assets/document.md");
 
-    assert_eq!(
-        output,
-        format!(
-            "{}\nSkills installed successfully.\n",
-            wrote_row(".spoolway/prompts/", 1, "prompt")
-        )
-    );
+    let out = stdout(&project.run(&["init", "--provider", "claude"]));
+
     assert!(
-        project
-            .as_ref()
-            .join(".spoolway/prompts/archivist/assets/document.md")
-            .exists(),
+        out.contains(&row(
+            "wrote",
+            ".spoolway/prompts/archivist/assets/document.md"
+        )),
+        "{out}"
+    );
+    assert_report_rows(&out, "kept", &kept);
+    assert!(out.contains("Skills installed successfully.\n"), "{out}");
+    assert!(
+        asset.exists(),
         "the missing asset must actually be restored"
     );
 }
 
+/// `--project-key` given alone, with no `--tracker`, is still dropped on an
+/// established project — the one refusal this task's own acceptance
+/// criteria leaves alone.
 #[test]
-fn repeat_init_keeps_actionable_tracker_warnings() {
-    let project = Project::new("warning");
+fn repeat_init_still_refuses_a_bare_project_key() {
+    let project = Project::new("bare-project-key");
     project.init("claude");
 
-    let output = stdout(&project.run(&["init", "--provider", "codex", "--tracker", "github"]));
-    assert!(output.contains("--tracker/--project-key were not applied"));
-    assert!(output.ends_with("Skills installed successfully.\n"));
-    assert!(!output.contains("Project initialized successfully."));
+    let out = stdout(&project.run(&["init", "--provider", "codex", "--project-key", "acme/app"]));
+    assert!(
+        out.contains("--project-key was not applied without --tracker"),
+        "{out}"
+    );
+    let config = std::fs::read_to_string(project.as_ref().join(".spoolway/config.toml")).unwrap();
+    assert!(!config.contains("acme/app"), "{config}");
+}
+
+/// Acceptance criterion 4: `--tracker` with a value answers `[issue_tracking]`
+/// outright on an established project, editing the two keys into
+/// `config.toml` in place rather than refusing — and answering `github`
+/// also writes the workflow that closes a mirrored issue.
+#[test]
+fn repeat_init_with_a_tracker_value_applies_it_to_an_existing_config() {
+    let project = Project::new("tracker-apply");
+    project.init("claude");
+
+    let out = stdout(&project.run(&[
+        "init",
+        "--provider",
+        "codex",
+        "--tracker",
+        "github",
+        "--project-key",
+        "acme/app",
+    ]));
+
+    assert!(out.contains(&row("kept", ".spoolway/config.toml")), "{out}");
+    assert!(
+        out.contains(&row("set", "issue_tracking.hook = github.sh")),
+        "{out}"
+    );
+    assert!(
+        out.contains(&row("set", "issue_tracking.project_key = acme/app")),
+        "{out}"
+    );
+    assert!(
+        out.contains(&row("wrote", ".github/workflows/spoolway-issues.yml")),
+        "{out}"
+    );
+    assert!(out.trim_end().ends_with("issue tracking is on."), "{out}");
+    assert!(!out.contains("Project initialized successfully."));
+
+    let config = std::fs::read_to_string(project.as_ref().join(".spoolway/config.toml")).unwrap();
+    assert!(config.contains("hook = \"github.sh\""), "{config}");
+    assert!(config.contains("project_key = \"acme/app\""), "{config}");
+    assert!(
+        project
+            .as_ref()
+            .join(".github/workflows/spoolway-issues.yml")
+            .exists()
+    );
+}
+
+/// Review finding 4: `--tracker` with no value opens the picker whatever
+/// the project's age, but a script running unattended — the shape every
+/// test in this file runs under, with no terminal for `crate::ask::
+/// interactive` to find — has nobody to answer that picker. Answering
+/// `none` on the person's behalf would silently clear a tracker the
+/// project already had, so an established project's `[issue_tracking]` is
+/// left exactly as it is instead, with a note explaining why, and no `set`
+/// row at all.
+#[test]
+fn repeat_init_with_a_bare_tracker_flag_and_nobody_to_ask_leaves_an_established_config_alone() {
+    let project = Project::new("tracker-bare");
+    project.run(&["init", "--provider", "claude", "--tracker", "github"]);
+    let config_before = std::fs::read(project.as_ref().join(".spoolway/config.toml")).unwrap();
+
+    let out = stdout(&project.run(&["init", "--provider", "claude", "--tracker"]));
+    assert!(
+        out.contains("nobody to answer its picker") && out.contains("[issue_tracking] was left"),
+        "{out}"
+    );
+    assert!(!out.contains("issue_tracking.hook ="), "{out}");
+    assert_eq!(
+        std::fs::read(project.as_ref().join(".spoolway/config.toml")).unwrap(),
+        config_before
+    );
+}
+
+/// Review finding 2: `spoolway init` answering `github` must leave an
+/// existing `.github/workflows/spoolway-issues.yml` exactly as a project
+/// left it — the same rule a hook or a tracking template already follows —
+/// proven with sentinel bytes a shipped workflow would never itself
+/// contain.
+#[test]
+fn repeat_init_with_tracker_github_never_overwrites_an_existing_workflow_file() {
+    let project = Project::new("workflow-untouched");
+    project.init("claude");
+    let workflow = project
+        .as_ref()
+        .join(".github/workflows/spoolway-issues.yml");
+    std::fs::create_dir_all(workflow.parent().unwrap()).unwrap();
+    let mine = "name: mine\n# not the shipped workflow\n";
+    std::fs::write(&workflow, mine).unwrap();
+
+    let out = stdout(&project.run(&[
+        "init",
+        "--provider",
+        "claude",
+        "--tracker",
+        "github",
+        "--project-key",
+        "acme/app",
+    ]));
+
+    assert!(
+        out.contains(&row("kept", ".github/workflows/spoolway-issues.yml")),
+        "{out}"
+    );
+    assert_eq!(std::fs::read_to_string(&workflow).unwrap(), mine);
+}
+
+/// Review finding 3: a bare re-run with no `--tracker` at all never touches
+/// `[issue_tracking]` (`tracker_touched` is false), so whether the
+/// workflow row reads `kept` has to come from the tracker already on disk
+/// — `Config::load_tracked` in `github_in_force` — not from an answer this
+/// run gave. Nothing else in this file starts from a project whose tracker
+/// is already `github`, so nothing else exercises that fallback.
+#[test]
+fn a_bare_repeat_init_reports_the_workflow_kept_from_the_tracker_already_on_disk() {
+    let project = Project::new("workflow-kept-from-disk");
+    project.run(&[
+        "init",
+        "--provider",
+        "claude",
+        "--tracker",
+        "github",
+        "--project-key",
+        "acme/app",
+    ]);
+
+    let out = stdout(&project.run(&["init", "--provider", "claude"]));
+    assert!(
+        out.contains(&row("kept", ".github/workflows/spoolway-issues.yml")),
+        "{out}"
+    );
 }
 
 #[test]
@@ -256,27 +432,16 @@ fn forced_init_reprints_every_wrote_row_and_closes_like_a_fresh_run() {
         "--tracker",
         "none",
     ]);
-    let pipelines = std::fs::read_dir(project.as_ref().join(".spoolway/pipelines"))
-        .expect("read pipeline dir")
-        .count();
-    let prompts = std::fs::read_dir(project.as_ref().join(".spoolway/prompts"))
-        .expect("read prompt dir")
-        .count();
+    let out = stdout(&result);
 
-    // `--force` rewrites the scaffold, so every `wrote` row fires again —
+    // `--force` rewrites the scaffold, so every row fires `wrote` again —
     // but the id is already stamped from the first `init`, and `--force`
     // does not re-stamp it, so there is no `stamped` row here at all.
-    assert_eq!(
-        stdout(&result),
-        format!(
-            "  wrote    .spoolway/config.toml\n\
-             {}\n\
-             {}\n\
-             Skills installed successfully.\n\
-             {CLOSING_LINES}",
-            wrote_row(".spoolway/pipelines/", pipelines, "pipeline"),
-            wrote_row(".spoolway/prompts/", prompts, "prompt"),
-        )
+    assert_report_rows(&out, "wrote", &scaffold_paths(&project));
+    assert!(!out.contains("stamped"), "{out}");
+    assert!(
+        out.ends_with(&format!("Skills installed successfully.\n{CLOSING_LINES}")),
+        "{out}"
     );
     assert_eq!(stderr(&result), "");
     assert_scaffold(&project, "codex");

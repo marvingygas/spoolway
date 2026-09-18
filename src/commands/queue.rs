@@ -891,6 +891,16 @@ fn require_group_description(repo: &Repo, tasks: &[Task]) -> Result<()> {
     if !crate::tracking::configured(repo) {
         return Ok(());
     }
+    // A hook whose declared tool floor this machine cannot meet never opens
+    // a ticket — [`tool_requirements_gate`] switches tracking off for the
+    // submission before [`open_tickets`] is reached — so demanding a
+    // `group_description:` here as well would refuse a submission over a
+    // description nothing is ever going to read. Pre-existing gap: this
+    // check validates the whole batch before the screen's own gate runs,
+    // so without this it fires first and the gate is never seen.
+    if !unmet_requirements(repo).is_empty() {
+        return Ok(());
+    }
 
     let existing = repo.tasks().unwrap_or_default();
     let mut seen: std::collections::BTreeSet<&str> = Default::default();
