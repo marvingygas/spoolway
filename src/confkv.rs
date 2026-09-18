@@ -86,12 +86,6 @@ pub const REFERENCE: &[Reference] = &[
                     pass looks.",
     },
     Reference {
-        key: "dispatch.default_pipeline",
-        values: "<name>",
-        default: "default",
-        sentence: "Which pipeline a task runs on when its own `pipeline:` is absent.",
-    },
-    Reference {
         key: "dispatch.auto_commit",
         values: "true, false",
         default: "true",

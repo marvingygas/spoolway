@@ -272,7 +272,7 @@ mod tests {
         std::fs::create_dir_all(&state).unwrap();
         std::fs::write(
             state.join("config.toml"),
-            "[dispatch]\ndefault_pipeline = \"from-root\"\n",
+            "[dispatch]\nworktree_root = \"from-root\"\n",
         )
         .unwrap();
         git(&root, &["add", "-A"]);
@@ -292,7 +292,7 @@ mod tests {
         );
         std::fs::write(
             wt.join(crate::config::STATE_DIR).join("config.toml"),
-            "[dispatch]\ndefault_pipeline = \"from-worktree\"\n",
+            "[dispatch]\nworktree_root = \"from-worktree\"\n",
         )
         .unwrap();
 
@@ -314,12 +314,12 @@ mod tests {
     #[test]
     fn config_get_answers_for_the_checkout_not_the_root() {
         let (repo, _root) = worktree_fixture("get");
-        config_get(&repo, "dispatch.default_pipeline", false).unwrap();
+        config_get(&repo, "dispatch.worktree_root", false).unwrap();
         // `config_get` prints to stdout, which a unit test cannot capture
         // cheaply — so this also asserts the lower-level read it goes
         // through, which is the part that actually decides the answer.
         let config = Config::load(&repo.checkout).unwrap();
-        assert_eq!(config.dispatch.default_pipeline, "from-worktree");
+        assert_eq!(config.dispatch.worktree_root, "from-worktree");
     }
 
     #[test]
@@ -337,7 +337,7 @@ mod tests {
         let before_root = std::fs::read_to_string(Config::path_in(&root)).unwrap();
         let before_wt = std::fs::read_to_string(Config::path_in(&repo.checkout)).unwrap();
 
-        let err = config_set(&repo, "dispatch.default_pipeline", "changed")
+        let err = config_set(&repo, "dispatch.worktree_root", "changed")
             .expect_err("config set must refuse inside a linked worktree");
         let message = format!("{err:#}");
         assert!(
@@ -350,7 +350,7 @@ mod tests {
         // directory as a `Path`, but not the same string.
         assert!(
             message.contains(&format!(
-                "spoolway -C {} config set dispatch.default_pipeline changed",
+                "spoolway -C {} config set dispatch.worktree_root changed",
                 repo.root.display()
             )),
             "message did not name the -C invocation: {message}"
@@ -371,9 +371,9 @@ mod tests {
     #[test]
     fn config_set_in_the_main_checkout_writes_exactly_where_it_writes_today() {
         let repo = crate::commands::testutil::fixture("config-set-main");
-        config_set(&repo, "dispatch.default_pipeline", "changed").unwrap();
+        config_set(&repo, "dispatch.worktree_root", "changed").unwrap();
         let config = Config::load(&repo.root).unwrap();
-        assert_eq!(config.dispatch.default_pipeline, "changed");
+        assert_eq!(config.dispatch.worktree_root, "changed");
     }
 
     /// `config list` runs both ways, prints `key = value` rows, and names

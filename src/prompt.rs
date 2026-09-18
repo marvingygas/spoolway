@@ -344,7 +344,12 @@ fn subject<'a>(
 
     let pipeline = match &args.pipeline {
         Some(name) => pipelines.get(name)?,
-        None => pipelines.get(&pipelines.default)?,
+        None => bail!(
+            "no `--task` and no `--pipeline` — spoolway has no project default to fall back \
+             to, so one of the two has to name where this contract comes from. Pipelines \
+             defined here: {}.",
+            pipelines.names().join(", ")
+        ),
     };
 
     let step = match &args.step {
@@ -944,6 +949,29 @@ fn invocations_in(line: &str, segment: &str, out: &mut Vec<(String, Vec<String>,
 mod tests {
     use super::*;
 
+    /// There is no project default to fall back to any more, so bare
+    /// `spoolway prompt contract` — no `--task`, no `--pipeline` — is
+    /// refused rather than silently opening on whichever pipeline used to
+    /// be the default.
+    #[test]
+    fn contract_with_neither_task_nor_pipeline_is_refused() {
+        let repo = crate::commands::testutil::fixture("prompt-contract-no-subject");
+        let pipelines = Pipelines::builtin();
+        let args = crate::cli::PromptContractArgs {
+            step: None,
+            pipeline: None,
+            task: None,
+        };
+        let err = contract(&repo, &pipelines, &args).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("no `--task` and no `--pipeline`"),
+            "{message}"
+        );
+        assert!(message.contains("bugfix"), "{message}");
+        assert!(message.contains("default"), "{message}");
+    }
+
     fn messages(findings: &[Finding]) -> Vec<&String> {
         findings.iter().map(|f| &f.message).collect()
     }
@@ -1087,7 +1115,6 @@ mod tests {
         )
         .unwrap();
         let pipelines = crate::pipeline::Pipelines {
-            default: "solo".into(),
             pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
         };
 

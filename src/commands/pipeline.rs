@@ -8,14 +8,14 @@ pub fn pipeline_show(repo: &Repo, pipelines: &Pipelines, json: bool) -> Result<(
         note.print(json)?;
     }
     for pipeline in pipelines.pipelines.values() {
-        show_one(pipeline, &pipelines.default)?;
+        show_one(pipeline)?;
     }
     Ok(())
 }
 
-/// Every pipeline's name, one per line, marking the default, with its
-/// `description:` indented underneath — the fact a reader is choosing
-/// between pipelines on, not just their names.
+/// Every pipeline's name, one per line, with its `description:` indented
+/// underneath — the fact a reader is choosing between pipelines on, not
+/// just their names.
 ///
 /// For `/spoolway-plan`'s own cutting step, which needs a name to write onto
 /// a task's card as `pipeline:` and nothing else — not a step, not an agent,
@@ -35,11 +35,7 @@ pub fn pipeline_list(repo: &Repo, pipelines: &Pipelines, json: bool) -> Result<(
         return Ok(());
     }
     for pipeline in pipelines.pipelines.values() {
-        let marker = match pipeline.name == pipelines.default {
-            true => " (default)",
-            false => "",
-        };
-        println!("{}{marker}", pipeline.name);
+        println!("{}", pipeline.name);
         if let Some(description) = &pipeline.description {
             println!("    {description}");
         }
@@ -54,25 +50,21 @@ pub fn pipeline_list(repo: &Repo, pipelines: &Pipelines, json: bool) -> Result<(
 #[derive(Debug, serde::Serialize)]
 struct PipelineListEntry {
     name: String,
-    default: bool,
     description: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
 struct PipelineListJson {
-    default: String,
     pipelines: Vec<PipelineListEntry>,
 }
 
 fn build_list(pipelines: &Pipelines) -> PipelineListJson {
     PipelineListJson {
-        default: pipelines.default.clone(),
         pipelines: pipelines
             .pipelines
             .values()
             .map(|pipeline| PipelineListEntry {
                 name: pipeline.name.clone(),
-                default: pipeline.name == pipelines.default,
                 description: pipeline.description.clone(),
             })
             .collect(),
@@ -483,17 +475,8 @@ pub fn pipeline_contract(repo: &Repo, pipelines: &Pipelines) -> Result<()> {
     Ok(())
 }
 
-fn show_one(pipeline: &Pipeline, default: &str) -> Result<()> {
-    let marks = if pipeline.name == default {
-        "  (default)"
-    } else {
-        ""
-    };
-    println!(
-        "pipeline `{}`{marks}  entry: {}",
-        pipeline.name,
-        pipeline.entry(),
-    );
+fn show_one(pipeline: &Pipeline) -> Result<()> {
+    println!("pipeline `{}`  entry: {}", pipeline.name, pipeline.entry());
     if let Some(description) = &pipeline.description {
         println!("    {description}");
     }
@@ -1353,21 +1336,24 @@ mod tests {
         pipeline_list(&repo, &pipelines, false).expect("listing names alone cannot fail");
     }
 
-    /// `--json pipeline list` carries the default pipeline's name and, per
-    /// pipeline, its name, whether it is the default, and its description —
-    /// the same facts the prose form prints, as fields a script can read
-    /// without parsing English.
+    /// `--json pipeline list` carries, per pipeline, its name and
+    /// description — the same facts the prose form prints, as fields a
+    /// script can read without parsing English — and no default marker,
+    /// since spoolway routes on nothing but each task's own `pipeline:`.
     #[test]
-    fn build_list_carries_name_default_and_description_per_pipeline() {
+    fn build_list_carries_name_and_description_per_pipeline_with_no_default() {
         let pipelines = Pipelines::builtin();
         let value: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&build_list(&pipelines)).unwrap()).unwrap();
-        assert_eq!(value["default"], pipelines.default);
+        assert!(value.get("default").is_none(), "{value}");
         let entries = value["pipelines"].as_array().expect("a pipelines array");
         assert_eq!(entries.len(), pipelines.pipelines.len());
         for entry in entries {
             assert!(entry.get("name").is_some(), "missing `name`: {entry}");
-            assert!(entry.get("default").is_some(), "missing `default`: {entry}");
+            assert!(
+                entry.get("default").is_none(),
+                "unexpected `default`: {entry}"
+            );
             assert!(
                 entry.get("description").is_some(),
                 "missing `description`: {entry}"
@@ -1408,7 +1394,6 @@ mod tests {
         )
         .unwrap();
         let pipelines = Pipelines {
-            default: "solo".into(),
             pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
         };
 
@@ -1440,7 +1425,6 @@ mod tests {
         )
         .unwrap();
         let pipelines = Pipelines {
-            default: "solo".into(),
             pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
         };
 
@@ -1524,7 +1508,6 @@ mod tests {
         )
         .unwrap();
         let pipelines = Pipelines {
-            default: "solo".into(),
             pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
         };
 
@@ -1558,7 +1541,6 @@ mod tests {
         )
         .unwrap();
         let pipelines = Pipelines {
-            default: "solo".into(),
             pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
         };
 
@@ -1598,7 +1580,6 @@ mod tests {
         )
         .unwrap();
         let pipelines = Pipelines {
-            default: "solo".into(),
             pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
         };
 
@@ -1633,7 +1614,6 @@ mod tests {
         )
         .unwrap();
         let pipelines = Pipelines {
-            default: "solo".into(),
             pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
         };
 
@@ -1672,7 +1652,6 @@ mod tests {
         )
         .unwrap();
         let pipelines = Pipelines {
-            default: "solo".into(),
             pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
         };
 
@@ -1709,7 +1688,6 @@ mod tests {
         )
         .unwrap();
         let pipelines = Pipelines {
-            default: "solo".into(),
             pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
         };
 
@@ -1750,13 +1728,13 @@ mod tests {
         )
         .unwrap();
         let pipelines = Pipelines {
-            default: "solo".into(),
             pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
         };
 
         let task = crate::task::Task::parse(
             repo.queue_dir().join("demo.md"),
-            "---\nid: demo\nstage: queued\nskip: [not-a-step]\n---\n## Goal\ndo the thing\n",
+            "---\nid: demo\nstage: queued\npipeline: solo\nskip: [not-a-step]\n---\n## Goal\ndo \
+             the thing\n",
         )
         .unwrap();
         std::fs::create_dir_all(repo.queue_dir()).unwrap();
@@ -1991,8 +1969,7 @@ mod tests {
 
         let result = crate::platform::test_home::with_home(&fake_home, || {
             let home = crate::mux::project_home(&root).unwrap();
-            let mut config = Config::default();
-            config.dispatch.default_pipeline = pipeline.to_string();
+            let config = Config::default();
             let repo = Repo {
                 checkout: root.clone(),
                 root: root.clone(),

@@ -70,7 +70,7 @@ the shape. spoolway never reads the page. See [Planning](planning.md).
 ## Pipeline
 
 A pipeline is a named graph of steps in `.spoolway/pipelines/`. A task names one in its
-`pipeline:` field, or takes the project's default.
+required `pipeline:` field.
 
 Two pipelines ship: `default` for one change, and `bugfix` for a reproduce-first fix. They are
 samples. Edit them, or replace them with the flow your team runs. See

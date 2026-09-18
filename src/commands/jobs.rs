@@ -278,12 +278,19 @@ struct Draft {
 }
 
 impl Draft {
+    /// There is no project default to seed a new job's pipeline with, so
+    /// this opens on whichever pipeline sorts first — a starting point for
+    /// the picker panel to change, not a choice made on the person's behalf.
     fn new(pipelines: &Pipelines) -> Draft {
         Draft {
             editing: None,
             routine: String::new(),
             schedule: String::new(),
-            pipeline: pipelines.default.clone(),
+            pipeline: pipelines
+                .names()
+                .first()
+                .map(|n| n.to_string())
+                .unwrap_or_default(),
             scope: Scope::User,
             enabled: true,
         }
@@ -1143,7 +1150,7 @@ fn schedule_panel(draft: &Draft) -> Vec<String> {
 
 /// The pipeline picker's overlay: every pipeline the repo defines, narrowed by
 /// the typed query, the highlighted one showing the first line of its own
-/// description and the project default marked.
+/// description.
 fn pipeline_panel(pipelines: &Pipelines, query: &str, cursor: usize) -> Vec<String> {
     let matches = pipeline_matches(pipelines, query);
     let cursor = cursor.min(matches.len().saturating_sub(1));
@@ -1154,12 +1161,7 @@ fn pipeline_panel(pipelines: &Pipelines, query: &str, cursor: usize) -> Vec<Stri
     }
     for (index, name) in matches.iter().enumerate() {
         let marker = if index == cursor { ">" } else { " " };
-        let default = if *name == pipelines.default {
-            "  (default)"
-        } else {
-            ""
-        };
-        body.push(clip(&format!("{marker} {name}{default}")));
+        body.push(clip(&format!("{marker} {name}")));
         if index == cursor {
             if let Ok(pipeline) = pipelines.get(name)
                 && let Some(description) = &pipeline.description
@@ -1330,8 +1332,9 @@ mod tests {
         seed_routines(&repo);
 
         // n → new; space ticks the first folder (`nightly`); enter uses it;
-        // type the expression; enter accepts it; enter chooses the default
-        // pipeline.
+        // type the expression; enter accepts it; enter chooses whichever
+        // pipeline the picker opened on — the one that sorts first, there
+        // being no project default to seed it with instead.
         drive(&repo, "n \r0 3 * * 1-5\r\r");
 
         let jobs = jobs::load(&repo).unwrap();
@@ -1340,7 +1343,10 @@ mod tests {
         assert_eq!(jobs[0].scope, Scope::User);
         assert_eq!(jobs[0].spec.schedule, "0 3 * * 1-5");
         assert_eq!(jobs[0].spec.routine, "nightly");
-        assert_eq!(jobs[0].spec.pipeline, Pipelines::builtin().default);
+        assert_eq!(
+            jobs[0].spec.pipeline,
+            Pipelines::builtin().names().first().unwrap().to_string()
+        );
         assert!(jobs[0].spec.enabled);
     }
 

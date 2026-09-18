@@ -50,15 +50,26 @@ mkdir -p "$WORKTREES"
 #
 # A task file with exactly the fields a cut worktree carries — written by
 # hand, since this suite never runs a dispatch pass to cut one for real.
+# `pipeline:` is required now, so this fills in the built-in `default`
+# pipeline unless a caller already named its own.
 queue_task() {
   local id=$1; shift
   mkdir -p "$SPOOLWAY_PROJECT_HOME/queue"
+  local has_pipeline=0
+  for line in "$@"; do
+    case "$line" in
+      pipeline:*) has_pipeline=1 ;;
+    esac
+  done
   {
     echo "---"
     echo "id: $id"
     echo "title: $id, a change of its own"
     echo "stage: handover"
     for line in "$@"; do echo "$line"; done
+    if [ "$has_pipeline" -eq 0 ]; then
+      echo "pipeline: default"
+    fi
     echo "---"
     printf '## Goal\n\nAdd `notes/%s.md`.\n\n## Non-goals\n\nOut of scope.\n\n## Acceptance criteria\n\n- `notes/%s.md` exists.\n' \
       "$id" "$id"

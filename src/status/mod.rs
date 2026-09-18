@@ -2426,7 +2426,8 @@ fn done_rows(
 
 /// The name [`done_rows`] prints in its PIPELINE column: the pipeline an
 /// archived task named, resolved the same way [`Pipelines::for_task`] would
-/// — or the project's default where it named none — but never an error.
+/// — but never an error, and never a project default, since there is none
+/// any more.
 ///
 /// A live task's pipeline is read through `for_task`, which fails the whole
 /// row-building pass if the name it carries is not one this project defines
@@ -2436,14 +2437,15 @@ fn done_rows(
 /// possibly a run or two ago, so the same name going missing since is not a
 /// misconfiguration to fail on — it is only a name nothing here can resolve,
 /// and the row still has to print *something*, so it prints that name
-/// verbatim instead.
+/// verbatim instead. One predating `pipeline:` altogether named none at all,
+/// and prints as much rather than a name it never carried.
 fn archived_pipeline_name(pipelines: &Pipelines, declared: Option<&str>) -> String {
     match declared {
         Some(name) => pipelines
             .get(name)
             .map(|p| p.name.clone())
             .unwrap_or_else(|_| name.to_string()),
-        None => pipelines.default.clone(),
+        None => "(none)".to_string(),
     }
 }
 
@@ -2794,6 +2796,24 @@ mod tests {
     use crate::status::testutil::*;
     use crate::status::view::{GUTTER, OSC8, RecentEvent, ST, Verdict, ticker};
 
+    /// An archived task that named a pipeline no longer defined prints that
+    /// name verbatim rather than failing the row, and one that predates
+    /// `pipeline:` altogether — never having named one at all — prints
+    /// `(none)` rather than a project default that no longer exists.
+    #[test]
+    fn archived_pipeline_name_covers_a_retired_name_and_a_task_predating_the_key() {
+        let pipelines = Pipelines::builtin();
+        assert_eq!(
+            archived_pipeline_name(&pipelines, Some("default")),
+            "default"
+        );
+        assert_eq!(
+            archived_pipeline_name(&pipelines, Some("retired-pipeline")),
+            "retired-pipeline"
+        );
+        assert_eq!(archived_pipeline_name(&pipelines, None), "(none)");
+    }
+
     /// The footer's slot count is what says whether more work can start, so it
     /// has to count the lanes the dispatcher counts and nothing else. A
     /// multiplexer holds a person's own sessions too, and a lane name carries
@@ -2886,10 +2906,12 @@ mod tests {
         )
         .unwrap();
         let pipelines = Pipelines {
-            default: "impl_ui".to_string(),
             pipelines: [("impl_ui".to_string(), pipeline)].into_iter().collect(),
         };
         add(&repo, "login", &[], Some("implement"));
+        let mut login = repo.task("login").unwrap();
+        login.front.pipeline = Some("impl_ui".to_string());
+        login.save().unwrap();
         let tasks = repo.tasks().unwrap();
 
         let used = slots_used(&repo, &tasks, &pipelines, &[]);
@@ -3676,7 +3698,7 @@ mod tests {
 
         let active = rows(&repo, &pipelines).unwrap();
         let login = active.iter().find(|r| r.id == "login").unwrap();
-        assert_eq!(login.pipeline, pipelines.default, "{}", login.pipeline);
+        assert_eq!(login.pipeline, "default", "{}", login.pipeline);
         let hotfix_row = active.iter().find(|r| r.id == "hotfix").unwrap();
         assert_eq!(hotfix_row.pipeline, "bugfix");
 

@@ -991,7 +991,7 @@ mod tests {
         crate::repo::run(&repo.root, "git", &["commit", "-q", "-m", "seed"]).unwrap();
 
         let doc = "---\nid: other\ntitle: other, done\ngroup: demo\nparallel: true\n\
-                   ---\n## Goal\n\nDo the thing.\n";
+                   pipeline: default\n---\n## Goal\n\nDo the thing.\n";
         let path = repo.root.join(".other-doc.md");
         std::fs::write(&path, doc).unwrap();
         queue_add(

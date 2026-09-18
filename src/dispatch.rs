@@ -6048,7 +6048,7 @@ mod tests {
         });
         let task = Task::load(&path).unwrap();
         let pipelines = Pipelines::builtin();
-        let pipeline = pipelines.get(&pipelines.default).unwrap();
+        let pipeline = pipelines.get("default").unwrap();
         let step = pipeline.require_step("implement").unwrap();
 
         let prompt = sent(&repo, &task, pipeline, step);
@@ -6087,7 +6087,7 @@ mod tests {
         let task = Task::load(&path).unwrap();
 
         let pipelines = Pipelines::builtin();
-        let pipeline = pipelines.get(&pipelines.default).unwrap();
+        let pipeline = pipelines.get("default").unwrap();
         let step = pipeline.require_step("implement").unwrap();
         let prompt = sent(&repo, &task, pipeline, step);
 
@@ -6111,7 +6111,7 @@ mod tests {
     fn what_you_have_reads_the_dependencys_branch_not_the_tasks_own_base() {
         let repo = fixture("what-you-have");
         let pipelines = Pipelines::builtin();
-        let pipeline = pipelines.get(&pipelines.default).unwrap();
+        let pipeline = pipelines.get("default").unwrap();
         let step = pipeline.require_step("implement").unwrap();
 
         let solo = Task::load(&add_task_with(&repo, "solo", "implement", |front| {
@@ -6170,7 +6170,7 @@ mod tests {
         });
         let task = Task::load(&path).unwrap();
         let pipelines = Pipelines::builtin();
-        let pipeline = pipelines.get(&pipelines.default).unwrap();
+        let pipeline = pipelines.get("default").unwrap();
         let step = pipeline.require_step("implement").unwrap();
 
         assert!(!sent(&repo, &task, pipeline, step).contains("/abs/path/to/demo.html"));
@@ -6185,7 +6185,7 @@ mod tests {
         let path = add_task(&repo, "login", "implement");
         let task = Task::load(&path).unwrap();
         let pipelines = Pipelines::builtin();
-        let pipeline = pipelines.get(&pipelines.default).unwrap();
+        let pipeline = pipelines.get("default").unwrap();
         let step = pipeline.require_step("implement").unwrap();
 
         let prompt = sent(&repo, &task, pipeline, step);
@@ -6375,7 +6375,9 @@ mod tests {
             parked_from: None,
             escalated: false,
             resume: None,
-            pipeline: None,
+            // Required now — a test naming a task with no `pipeline:` of
+            // its own overrides this back to `None` explicitly with `edit`.
+            pipeline: Some("default".to_string()),
             group: None,
             source: None,
             plan: None,
@@ -13731,7 +13733,7 @@ mod tests {
     /// running `run`, so the whole graph either side of it is the shipped one.
     fn pipelines_running(run: &str, background: bool) -> Pipelines {
         let mut pipelines = Pipelines::builtin();
-        let name = pipelines.default.clone();
+        let name = "default".to_string();
         let pipeline = pipelines.pipelines.get_mut(&name).unwrap();
         let step = pipeline
             .steps
@@ -13759,7 +13761,7 @@ mod tests {
     /// The same, with a timeout short enough for a test to reach.
     fn pipelines_running_for(run: &str, background: bool, timeout: Duration) -> Pipelines {
         let mut pipelines = pipelines_running(run, background);
-        let name = pipelines.default.clone();
+        let name = "default".to_string();
         let pipeline = pipelines.pipelines.get_mut(&name).unwrap();
         pipeline
             .steps
@@ -13982,7 +13984,7 @@ mod tests {
         let mut pipelines = pipelines_running("echo hidden", false);
         pipelines
             .pipelines
-            .get_mut(&pipelines.default.clone())
+            .get_mut("default")
             .unwrap()
             .steps
             .iter_mut()
@@ -14133,7 +14135,7 @@ mod tests {
     fn a_candidate_with_no_agent_is_reported_rather_than_skipped() {
         let repo = fixture("no-agent");
         let mut pipelines = Pipelines::builtin();
-        let name = pipelines.default.clone();
+        let name = "default".to_string();
         pipelines
             .pipelines
             .get_mut(&name)
@@ -14228,7 +14230,7 @@ mod tests {
     /// a spent loop bound and a red mechanical gate both come down to.
     fn pipelines_failing_to_blocked() -> Pipelines {
         let mut pipelines = pipelines_running("exit 1", false);
-        let name = pipelines.default.clone();
+        let name = "default".to_string();
         let pipeline = pipelines.pipelines.get_mut(&name).unwrap();
         let step = pipeline
             .steps
@@ -14307,7 +14309,7 @@ mod tests {
         // `implement` fails back to `review`, and `review` allows one lap in
         // from `implement` before giving up to `blocked`.
         let mut pipelines = pipelines_running("exit 1", false);
-        let name = pipelines.default.clone();
+        let name = "default".to_string();
         let pipeline = pipelines.pipelines.get_mut(&name).unwrap();
         let implement = pipeline
             .steps
@@ -14445,7 +14447,7 @@ mod tests {
         let path = add_task_with_worktree(&repo, "demo", "implement");
         let mux = FakeMux::new(vec![]);
         let mut pipelines = pipelines_running("exit 1", true);
-        let name = pipelines.default.clone();
+        let name = "default".to_string();
         pipelines
             .pipelines
             .get_mut(&name)
@@ -14527,7 +14529,7 @@ mod tests {
         let path = add_task_with_worktree(&repo, "demo", "implement");
         let mux = FakeMux::new(vec![]);
         let mut pipelines = pipelines_running("exit 0", true);
-        let name = pipelines.default.clone();
+        let name = "default".to_string();
         pipelines
             .pipelines
             .get_mut(&name)
@@ -14609,7 +14611,7 @@ mod tests {
             "the background run must have landed in a pane of its own"
         );
 
-        let name = pipelines.default.clone();
+        let name = "default".to_string();
         let pipeline = pipelines.pipelines.get(&name).unwrap();
         let mut report = Report::default();
         Dispatcher::new(&repo, &pipelines, &mux, false).reap_stale_runs(

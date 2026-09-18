@@ -670,12 +670,15 @@ pub struct DispatchConfig {
     #[serde(default, skip_serializing)]
     auto_unblock: bool,
 
-    /// Pipeline a task runs on when its `pipeline:` field is absent.
-    ///
-    /// Here rather than in a pipeline file because no pipeline can answer it:
-    /// naming the default is a statement about the set, and a file that claimed
-    /// to be the default would be a second one waiting to claim it too.
-    pub default_pipeline: String,
+    /// Retired: the pipeline a task ran on when its own `pipeline:` was
+    /// absent. Every task now names its pipeline itself — a document with
+    /// none is refused before it can queue, and dispatch refuses the whole
+    /// start over any live task still missing one — so there is nothing left
+    /// for a project-wide default to answer. Kept only so an existing config
+    /// still parses; dropped unconditionally on the next save.
+    #[allow(dead_code)]
+    #[serde(default, skip_serializing)]
+    default_pipeline: String,
 
     /// Whether spoolway commits a lane's leftover work when its step settles.
     ///
@@ -750,7 +753,7 @@ impl Default for DispatchConfig {
             open: String::new(),
             max_launches: 0,
             auto_unblock: false,
-            default_pipeline: "default".into(),
+            default_pipeline: String::new(),
             auto_commit: true,
             priority: Priority::default(),
             tear_lanes_on_stop: None,
@@ -2694,7 +2697,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// An `[effort]` table, the three retired `[dispatch]` keys, and the
+    /// An `[effort]` table, four retired `[dispatch]` keys, and the
     /// whole `[plans]` table — `store` included, the once-live key beside
     /// its two already-retired siblings — must all still parse, the way
     /// `[criteria]` does, and none of them come back out on the next save.
@@ -2710,6 +2713,7 @@ mod tests {
                     max_launches = 1\n\
                     open_on_escalation = true\n\
                     open = \"kitty\"\n\
+                    default_pipeline = \"impl\"\n\
                     [effort]\n\
                     sensitive_paths = [\"src/auth/**\"]\n\
                     [effort.tier_models]\n\
@@ -2723,6 +2727,7 @@ mod tests {
         let rendered = toml::to_string(&config).unwrap();
         assert!(!rendered.contains("max_launches"));
         assert!(!rendered.contains("open_on_escalation"));
+        assert!(!rendered.contains("default_pipeline"));
         assert!(!rendered.contains("tier_models"));
         assert!(!rendered.contains("sensitive_paths"));
         assert!(!rendered.contains("[plans"));
@@ -3159,7 +3164,7 @@ mod tests {
     fn an_override_merges_by_dotted_key_onto_the_tracked_config() {
         with_override_fixture(
             "dotted-key",
-            "[unattended]\nenabled = false\n[dispatch]\ndefault_pipeline = \"impl\"\n",
+            "[unattended]\nenabled = false\n[dispatch]\nworktree_root = \"/tracked\"\n",
             |root| {
                 let overrides = crate::overrides::dir_for(root).unwrap();
                 std::fs::create_dir_all(&overrides).unwrap();
@@ -3172,7 +3177,7 @@ mod tests {
                 let config = Config::load(root).unwrap();
                 assert!(config.unattended.enabled, "the patched key must win");
                 assert_eq!(
-                    config.dispatch.default_pipeline, "impl",
+                    config.dispatch.worktree_root, "/tracked",
                     "a key the patch never named must still come from the tracked file"
                 );
             },

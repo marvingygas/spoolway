@@ -131,7 +131,8 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // Not counted: a repo with nothing to do is not a storm, and restarting
     // into an empty queue forever is a caller's own choice to make, not
     // something this guard has any business refusing.
-    if repo.tasks()?.is_empty() {
+    let live_tasks = repo.tasks()?;
+    if live_tasks.is_empty() {
         if crate::jobs::enabled_count(repo) == 0 {
             println!("nothing is queued, so there is nothing to dispatch.");
             println!("  spoolway queue add --from <path>");
@@ -140,6 +141,15 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         print_staying_up(&crate::jobs::staying_up(repo));
         idle_announced = true;
     }
+
+    // Every live task's own routing source, checked whole before anything
+    // starts: `pipeline:` is the only place a task's pipeline comes from any
+    // more — there is no project default to fall back to — and a task that
+    // cannot resolve one is broken whether or not a lane ever reaches it.
+    // Refused here, ahead of the lock, for the same reason as the three
+    // checks below: found and fixed by a person reading this line, not
+    // discovered mid-run and left for someone to stop by hand.
+    check_task_routes(pipelines, &live_tasks)?;
 
     // A start that gets this far can actually run. Whatever the guard above
     // was counting, it was counting starts that could not — this is not one
@@ -873,6 +883,38 @@ pub(crate) fn check_backend_checkout(
     Ok(Some(format!("{} · main checkout", mux.name())))
 }
 
+/// Refuse the whole start over any live task whose `pipeline:` does not
+/// resolve — absent, or naming a pipeline this project does not define.
+/// There is no project default any more, so a task that cannot route here
+/// never will on its own; refusing before the lock and before any lane
+/// starts is what keeps that from being found only once a lane tries to run
+/// it, on whichever task happens to reach it first.
+///
+/// Deliberately its own function rather than a third [`Refusal`] fed through
+/// [`refuse`]: `doctor` has no use for this one — a task file is not a
+/// project setting for it to hold a row open on — and the mockup this task
+/// draws is its own multi-line shape, not the single line `refuse` joins a
+/// [`Refusal`]'s `reason` and `fix` into.
+fn check_task_routes(pipelines: &Pipelines, tasks: &[Task]) -> Result<()> {
+    let choices = pipelines.names().join(", ");
+    for task in tasks {
+        match task.front.pipeline.as_deref().map(str::trim) {
+            None | Some("") => bail!(
+                "refusing to start: task `{}` has no `pipeline:`\n  Set `pipeline:` to one of: \
+                 {choices}.\n\nNothing was dispatched.",
+                task.id()
+            ),
+            Some(name) if pipelines.get(name).is_err() => bail!(
+                "refusing to start: task `{}` names a pipeline that does not exist: `{name}`\n  \
+                 Set `pipeline:` to one of: {choices}.\n\nNothing was dispatched.",
+                task.id()
+            ),
+            Some(_) => {}
+        }
+    }
+    Ok(())
+}
+
 /// Draw the read-only board over a run someone else's process is driving.
 ///
 /// The queue re-reads and the multiplexer call the board already makes are
@@ -1044,6 +1086,75 @@ mod tests {
         );
     }
 
+    /// A task naming no `pipeline:` refuses the whole start, naming the task
+    /// and every pipeline defined here — there is no project default left
+    /// to route it through instead.
+    #[test]
+    fn check_task_routes_refuses_a_task_with_no_pipeline() {
+        let pipelines = Pipelines::builtin();
+        let routeless = crate::task::Task::parse(
+            std::path::PathBuf::from("routeless.md"),
+            "---\nid: routeless\nstage: queued\n---\nbody\n",
+        )
+        .unwrap();
+        let err = check_task_routes(&pipelines, &[routeless]).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("refusing to start: task `routeless` has no `pipeline:`"),
+            "{message}"
+        );
+        assert!(
+            message.contains("Set `pipeline:` to one of: bugfix, default."),
+            "{message}"
+        );
+        assert!(message.contains("Nothing was dispatched."), "{message}");
+    }
+
+    /// A task naming a pipeline this project does not define refuses the
+    /// whole start too, naming both the task and the pipeline it could not
+    /// find, alongside the same list of defined choices.
+    #[test]
+    fn check_task_routes_refuses_a_task_naming_an_unknown_pipeline() {
+        let pipelines = Pipelines::builtin();
+        let unknown = crate::task::Task::parse(
+            std::path::PathBuf::from("unknown.md"),
+            "---\nid: unknown\nstage: queued\npipeline: not-a-real-pipeline\n---\nbody\n",
+        )
+        .unwrap();
+        let err = check_task_routes(&pipelines, &[unknown]).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(
+            message.contains(
+                "refusing to start: task `unknown` names a pipeline that does not exist: \
+                 `not-a-real-pipeline`"
+            ),
+            "{message}"
+        );
+        assert!(
+            message.contains("Set `pipeline:` to one of: bugfix, default."),
+            "{message}"
+        );
+    }
+
+    /// A batch where every task names an existing pipeline passes through
+    /// untouched — an ordinary explicit route is never refused alongside a
+    /// broken one it happens to share a call with.
+    #[test]
+    fn check_task_routes_passes_every_task_with_an_explicit_existing_pipeline() {
+        let pipelines = Pipelines::builtin();
+        let a = crate::task::Task::parse(
+            std::path::PathBuf::from("a.md"),
+            "---\nid: a\nstage: queued\npipeline: default\n---\nbody\n",
+        )
+        .unwrap();
+        let b = crate::task::Task::parse(
+            std::path::PathBuf::from("b.md"),
+            "---\nid: b\nstage: queued\npipeline: bugfix\n---\nbody\n",
+        )
+        .unwrap();
+        assert!(check_task_routes(&pipelines, &[a, b]).is_ok());
+    }
+
     /// A lock already held exits 4, whether or not it is the first start to
     /// find it that way.
     #[test]
@@ -1129,10 +1240,7 @@ mod tests {
             serde_norway::from_str("steps:\n  - id: a\n    end: true\n").unwrap();
         let mut pipelines = std::collections::BTreeMap::new();
         pipelines.insert("default".to_string(), pipeline);
-        Pipelines {
-            default: "default".to_string(),
-            pipelines,
-        }
+        Pipelines { pipelines }
     }
 
     /// Blank both `user.name` and `user.email` locally, overriding whatever

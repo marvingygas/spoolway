@@ -284,14 +284,20 @@ else
   echo "$CHECK_JSON" | sed 's/^/        /'
 fi
 
-# The three things this task added to the bare call: which pipeline is the
-# default, a `fields` sentence for every key the JSON itself says is
-# required or optional, and a `body` string shipped alongside every
-# pipeline's other own facts — not a second command, not a second read.
-if jq -e '.default | type == "string"' <<<"$CHECK_JSON" >/dev/null 2>&1; then
-  ok "the contract names this project's default pipeline"
+# There is no project default any more — `dispatch.default_pipeline` is
+# retired — so the contract advertises no `default` field at all, and
+# `pipeline` is one of the required keys, not a courtesy the document may
+# skip.
+if jq -e '.default == null' <<<"$CHECK_JSON" >/dev/null 2>&1; then
+  ok "the contract advertises no project default pipeline"
 else
-  bad "the contract names this project's default pipeline"
+  bad "the contract advertises no project default pipeline"
+  echo "$CHECK_JSON" | sed 's/^/        /'
+fi
+if jq -e '.keys.required | index("pipeline") != null' <<<"$CHECK_JSON" >/dev/null 2>&1; then
+  ok "the contract requires pipeline:"
+else
+  bad "the contract requires pipeline:"
   echo "$CHECK_JSON" | sed 's/^/        /'
 fi
 
@@ -340,6 +346,59 @@ else
   diff <(echo "$BEFORE_CHECK") <(echo "$AFTER_CHECK") | sed 's/^/        /'
 fi
 
+# ------------------------------------------------------- explicit pipeline
+# `pipeline:` is required now — there is no `dispatch.default_pipeline` to
+# route an omission through any more — so a document naming none is refused
+# the same way one naming no `group:` already is, by `task contract --from`
+# and by `queue add --from` alike.
+NOPIPELINE="$LIVE/nopipeline.md"
+{
+  echo "---"
+  echo "id: no-pipeline"
+  echo "title: no-pipeline, done"
+  echo "group: live"
+  echo "---"
+  cat "$BODY"
+} > "$NOPIPELINE"
+
+OUT=$("$SPOOLWAY" task contract --from "$NOPIPELINE" 2>&1)
+STATUS=$?
+if [ "$STATUS" -ne 0 ]; then ok "task contract --from a document with no pipeline: exits non-zero"
+else bad "task contract --from a document with no pipeline: exits non-zero"; fi
+if grep -qF "pipeline:" <<<"$OUT"; then
+  ok "and names the missing key"
+else bad "and names the missing key"; sed 's/^/        /' <<<"$OUT"; fi
+
+OUT=$("$SPOOLWAY" queue add --from "$NOPIPELINE" 2>&1)
+STATUS=$?
+if [ "$STATUS" -ne 0 ]; then ok "queue add --from the same document exits non-zero"
+else bad "queue add --from the same document exits non-zero"; fi
+if [ ! -e "$SPOOLWAY_PROJECT_HOME/queue/no-pipeline.md" ]; then
+  ok "and nothing was queued"
+else bad "and nothing was queued"; fi
+
+# An unknown pipeline is refused the same way, naming the document and the
+# defined choices rather than the bare "no pipeline `x`" a `pipeline get`
+# lookup would give.
+NOSUCHPIPE="$LIVE/nosuchpipe.md"
+{
+  echo "---"
+  echo "id: no-such-pipeline"
+  echo "title: no-such-pipeline, done"
+  echo "group: live"
+  echo "pipeline: not-a-real-pipeline"
+  echo "base: plan/live"
+  echo "---"
+  cat "$BODY"
+} > "$NOSUCHPIPE"
+OUT=$("$SPOOLWAY" task contract --from "$NOSUCHPIPE" 2>&1)
+STATUS=$?
+if [ "$STATUS" -ne 0 ]; then ok "task contract --from a document naming an unknown pipeline exits non-zero"
+else bad "task contract --from a document naming an unknown pipeline exits non-zero"; fi
+if grep -qF "not-a-real-pipeline" <<<"$OUT"; then
+  ok "and names the pipeline it could not find"
+else bad "and names the pipeline it could not find"; sed 's/^/        /' <<<"$OUT"; fi
+
 # ------------------------------------------------------------ explicit base
 # A task's base is a value somebody chose — a document's own `base:` or a
 # `queue add --base` covering the whole submission — never the branch this
@@ -366,6 +425,7 @@ NOBASE="$BASECHECK/nobase.md"
   echo "id: nobase"
   echo "title: nobase, done"
   echo "group: live"
+  echo "pipeline: default"
   echo "---"
   cat "$BODY"
 } > "$NOBASE"
@@ -388,6 +448,7 @@ OWNBASE="$BASECHECK/ownbase.md"
   echo "title: ownbase, done"
   echo "group: live"
   echo "base: plan/x"
+  echo "pipeline: default"
   echo "---"
   cat "$BODY"
 } > "$OWNBASE"
@@ -454,9 +515,11 @@ lacks "with no mention of the bundled sample it dropped" "bugfix" "$PICHECK_OUT"
 
 # ---------------------------------------------------------- prompt contract
 # `prompt contract` gains a seventh section, on every call, whatever
-# `--step` names — the prompt skeleton, not a paraphrase of it.
+# `--step` names — the prompt skeleton, not a paraphrase of it. There is no
+# project default pipeline to fall back to any more, so the call now has to
+# name one explicitly.
 says "prompt contract prints the shape-to-write section" \
-  "THE SHAPE TO WRITE" "$SPOOLWAY" prompt contract
+  "THE SHAPE TO WRITE" "$SPOOLWAY" prompt contract --pipeline default
 
 # ------------------------------------------------------------- the queue screen
 # The one thing no unit test can reach: `spoolway queue` reading real keystrokes
@@ -731,6 +794,35 @@ if git -C "$FORGE/origin.git" show "task/opener:primed.txt" >/dev/null 2>&1; the
 else
   bad "and the checkout it wrote into was one it cut itself"
 fi
+
+# --------------------------------------------------------------- routeless task
+# There is no project default to fall back to any more, so a legacy or
+# hand-edited document that reached the live queue with no resolvable
+# `pipeline:` has to be caught before any lane starts, not discovered by the
+# first lane unlucky enough to be picked for it. Written straight into the
+# queue directory — the one shape `queue add --from`'s own refusal can never
+# produce, since it never lets such a document reach the queue at all — with
+# the dispatcher already stopped from the dry run above, so this start is a
+# real, lockless one.
+task_doc "$SPOOLWAY_PROJECT_HOME/queue/routeless.md" routeless "$BODY" \
+  "stage: queued" "group: live" "touches: [notes/routeless.md]" "pipeline:"
+OUT=$("$SPOOLWAY" dispatch --dry-run 2>&1)
+STATUS=$?
+if [ "$STATUS" -ne 0 ]; then ok "dispatch refuses the whole start over a routeless task"
+else bad "dispatch refuses the whole start over a routeless task"; fi
+if grep -qF "refusing to start: task \`routeless\` has no \`pipeline:\`" <<<"$OUT"; then
+  ok "and names the task"
+else bad "and names the task"; sed 's/^/        /' <<<"$OUT"; fi
+if grep -qF "Set \`pipeline:\` to one of:" <<<"$OUT" && grep -qF "default" <<<"$OUT"; then
+  ok "and lists the pipelines it could choose"
+else bad "and lists the pipelines it could choose"; sed 's/^/        /' <<<"$OUT"; fi
+if grep -qF "Nothing was dispatched." <<<"$OUT"; then
+  ok "and says nothing was dispatched"
+else bad "and says nothing was dispatched"; sed 's/^/        /' <<<"$OUT"; fi
+if [ "$(stage_of routeless)" = queued ]; then
+  ok "and the routeless task never left queued"
+else bad "and the routeless task never left queued (at \`$(stage_of routeless)\`)"; fi
+rm -f "$SPOOLWAY_PROJECT_HOME/queue/routeless.md"
 
 # ------------------------------------------------------------- blocking, failing
 # A non-zero exit is a failure, and it takes the step's own `on_fail` — the
@@ -1465,7 +1557,7 @@ WT="$LIVE/worktrees/config-wt"
 must "cutting a worktree for a config of its own" \
   git worktree add -q -b task/config-diff "$WT" plan/live
 must "giving the worktree's own config a value the project's does not have" \
-  sed -i 's|^default_pipeline = .*|default_pipeline = "from-the-worktree"|' \
+  sed -i 's|^worktree_root = .*|worktree_root = "from-the-worktree"|' \
   "$WT/.spoolway/config.toml"
 must "committing the worktree's own config" \
   git -C "$WT" add .spoolway/config.toml
@@ -1473,22 +1565,22 @@ must "committing the worktree's own config" \
   git -C "$WT" commit -qm "e2e: a config value only this worktree has"
 
 says "config get in the worktree reads its own value" "from-the-worktree" \
-  "$SPOOLWAY" -C "$WT" config get dispatch.default_pipeline
+  "$SPOOLWAY" -C "$WT" config get dispatch.worktree_root
 silent_about "config get in the main checkout does not see it" "from-the-worktree" \
-  "$SPOOLWAY" config get dispatch.default_pipeline
+  "$SPOOLWAY" config get dispatch.worktree_root
 says "config path in the worktree names its own file, not the project's" \
   "$WT/.spoolway/config.toml" "$SPOOLWAY" -C "$WT" config path
 
 BEFORE_ROOT=$(cat .spoolway/config.toml)
 BEFORE_WT=$(cat "$WT/.spoolway/config.toml")
-OUT=$("$SPOOLWAY" -C "$WT" config set dispatch.default_pipeline "should-not-land" 2>&1)
+OUT=$("$SPOOLWAY" -C "$WT" config set dispatch.worktree_root "should-not-land" 2>&1)
 STATUS=$?
 if [ "$STATUS" -ne 0 ]; then ok "config set in the worktree exits non-zero"
 else bad "config set in the worktree exits non-zero"; sed 's/^/        /' <<<"$OUT"; fi
 if grep -qF "the dispatcher reads the project's config, not this worktree's." <<<"$OUT"; then
   ok "and says why"
 else bad "and says why"; sed 's/^/        /' <<<"$OUT"; fi
-if grep -qF -- "-C $PROJECT config set dispatch.default_pipeline should-not-land" <<<"$OUT"; then
+if grep -qF -- "-C $PROJECT config set dispatch.worktree_root should-not-land" <<<"$OUT"; then
   ok "and names the exact -C invocation that would write to the project"
 else bad "and names the exact -C invocation that would write to the project"; sed 's/^/        /' <<<"$OUT"; fi
 if [ "$(cat .spoolway/config.toml)" = "$BEFORE_ROOT" ]; then
@@ -1864,19 +1956,19 @@ fi
 {
   echo "---"; echo "id: hook-blocked"; echo "title: hook-blocked, done"
   echo "stage: blocked"; echo "blocked_from: implement"; echo "group: live"
-  echo "base: plan/live"
+  echo "base: plan/live"; echo "pipeline: default"
   echo "touches: [notes/hook-blocked.md]"; echo "---"; cat "$BODY"
 } > "$SPOOLWAY_PROJECT_HOME/queue/hook-blocked.md"
 {
   echo "---"; echo "id: hook-paused"; echo "title: hook-paused, done"
   echo "stage: paused"; echo "paused_at: implement"; echo "group: live"
-  echo "base: plan/live"
+  echo "base: plan/live"; echo "pipeline: default"
   echo "touches: [notes/hook-paused.md]"; echo "---"; cat "$BODY"
 } > "$SPOOLWAY_PROJECT_HOME/queue/hook-paused.md"
 {
   echo "---"; echo "id: hook-done"; echo "title: hook-done, done"
   echo "stage: done"; echo "group: live"
-  echo "base: plan/live"
+  echo "base: plan/live"; echo "pipeline: default"
   echo "touches: [notes/hook-done.md]"; echo "---"; cat "$BODY"
 } > "$SPOOLWAY_PROJECT_HOME/queue/hook-done.md"
 
@@ -1994,7 +2086,7 @@ has "and the ticket was linked under it as a sub-issue, by numeric id" \
   echo "---"; echo "id: github-blocked"; echo "title: github-blocked, done"
   echo "stage: blocked"; echo "blocked_from: implement"
   echo "group: github-single"
-  echo "base: plan/live"
+  echo "base: plan/live"; echo "pipeline: default"
   echo "ticket: $TICKET"
   echo "touches: [notes/github-blocked.md]"; echo "---"; cat "$BODY"
 } > "$SPOOLWAY_PROJECT_HOME/queue/github-blocked.md"
@@ -2077,7 +2169,7 @@ touch -d "2 days ago" "$OLD_PROMPT"
 OLD_QUEUED="$SPOOLWAY_PROJECT_HOME/queue/aged-queued-task.md"
 {
   echo "---"; echo "id: aged-queued-task"; echo "title: aged-queued-task, done"
-  echo "stage: queued"; echo "group: live"
+  echo "stage: queued"; echo "group: live"; echo "pipeline: default"
   echo "touches: [notes/aged-queued-task.md]"; echo "---"; cat "$BODY"
 } > "$OLD_QUEUED"
 touch -d "2 days ago" "$OLD_QUEUED"

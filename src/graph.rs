@@ -584,7 +584,7 @@ mod tests {
                 parked_from: None,
                 escalated: false,
                 resume: None,
-                pipeline: None,
+                pipeline: Some("default".to_string()),
                 group: group.map(str::to_string),
                 source: None,
                 plan: None,

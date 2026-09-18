@@ -408,7 +408,9 @@ fi
 # --------------------------------------------------------------------- config
 
 say "configuring $MODEL, $WORKERS lanes, ${CTX} tokens"
-spoolway config set dispatch.default_pipeline end-to-end
+# No `dispatch.default_pipeline` to set any more — every task document this
+# suite queues names `pipeline: end-to-end` itself (see queue-plan.sh), the
+# only pipeline this project has.
 spoolway config set agents.pi.concurrency "$WORKERS"
 # A window belongs to the model rather than to the profile that launches it, so
 # it is keyed by model name. Unquoted even though a real name has dots in it:

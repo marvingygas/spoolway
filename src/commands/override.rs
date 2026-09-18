@@ -462,16 +462,11 @@ mod tests {
         )
         .unwrap();
         std::fs::create_dir_all(root.join(".spoolway")).unwrap();
-        std::fs::write(
-            Config::path_in(&root),
-            "[dispatch]\ndefault_pipeline = \"demo\"\n",
-        )
-        .unwrap();
+        std::fs::write(Config::path_in(&root), "[dispatch]\n").unwrap();
 
         let result = crate::platform::test_home::with_home(&fake_home, || {
             let home = crate::mux::project_home(&root).unwrap();
-            let mut config = Config::default();
-            config.dispatch.default_pipeline = "demo".to_string();
+            let config = Config::default();
             let repo = Repo {
                 checkout: root.clone(),
                 root: root.clone(),
@@ -577,7 +572,7 @@ mod tests {
             .unwrap();
             write_atomic(
                 &crate::overrides::config_patch_path(&dir),
-                "[dispatch]\ndefault_pipeline = \"bugfix\"\n",
+                "[dispatch]\nworktree_root = \"/patched\"\n",
             )
             .unwrap();
 
@@ -592,7 +587,7 @@ mod tests {
             assert_eq!(rows[1].kind, "whole file");
             assert_eq!(rows[1].overrides, "—");
             assert_eq!(rows[2].kind, "patch");
-            assert_eq!(rows[2].overrides, "dispatch.default_pipeline");
+            assert_eq!(rows[2].overrides, "dispatch.worktree_root");
         });
     }
 
@@ -708,14 +703,14 @@ mod tests {
         with_repo("promote-config", |repo| {
             write_atomic(
                 &crate::overrides::config_patch_path(&repo.overrides_dir()),
-                "[dispatch]\ndefault_pipeline = \"bugfix\"\n",
+                "[dispatch]\nworktree_root = \"/promoted\"\n",
             )
             .unwrap();
 
             override_promote(repo, "config.toml").unwrap();
 
             let tracked_config = std::fs::read_to_string(Config::path_in(&repo.root)).unwrap();
-            assert!(tracked_config.contains("default_pipeline = \"bugfix\""));
+            assert!(tracked_config.contains("worktree_root = \"/promoted\""));
             assert!(!crate::overrides::config_patch_path(&repo.overrides_dir()).is_file());
         });
     }

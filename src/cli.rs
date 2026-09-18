@@ -1381,12 +1381,14 @@ pub struct WhatsNewArgs {
 
 #[derive(Debug, Args)]
 pub struct PromptContractArgs {
-    /// Step to render the contract for. Defaults to the first agent step of the
-    /// default pipeline, since that is the one most prompts are written for.
+    /// Step to render the contract for. Defaults to --pipeline's first agent
+    /// step, since that is the one most prompts are written for.
     #[arg(long)]
     pub step: Option<String>,
 
-    /// Pipeline the step belongs to. Defaults to the file's `default:`.
+    /// Pipeline the step belongs to. Required unless --task names a real
+    /// queued task to read it off instead — there is no project default to
+    /// fall back to.
     #[arg(long)]
     pub pipeline: Option<String>,
 

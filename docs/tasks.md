@@ -48,7 +48,7 @@ as JSON.
 | `id` | you | The task's name. Also the file name and the branch suffix. Required. |
 | `title` | you | One Conventional Commits line, such as `feat(queue): add a --dry-run flag`. Becomes the squashed commit subject and the pull request title. Required. |
 | `group` | you | The group of work this task belongs to. Tasks of one group run in one shared tab. Required. |
-| `pipeline` | you | The pipeline this task runs on. Empty means the project's default. |
+| `pipeline` | you | The pipeline this task runs on. Required, and must name a pipeline that exists. |
 | `touches` | you | Globs of the files this task changes. Drives conflict detection and the `document` step. |
 | `depends_on` | you | Task ids that must reach `done` before this one starts. |
 | `parallel` | you | `true` marks a missing `depends_on` to another `parallel: true` task of the same group as chosen on purpose. See [Declaring a fan on purpose](#declaring-a-fan-on-purpose). |
@@ -139,11 +139,13 @@ their `## Handoff`, the scope its `touches` globs set, and the scratch directory
 ### Get the skeleton
 
 ```
-spoolway queue add                 # prints a document skeleton for the default pipeline
+spoolway queue add                 # prints a document skeleton with a `pipeline:` row to fill in
 ```
 
-Body skeletons live in `.spoolway/templates/tasks/`, one per pipeline. `bugfix.md` serves the
-`bugfix` pipeline. `default.md` serves every pipeline without a file of its own.
+The skeleton's `pipeline:` row names the first pipeline alphabetically and lists every other
+choice in a trailing comment. Body skeletons live in `.spoolway/templates/tasks/`, one per
+pipeline. `bugfix.md` serves the `bugfix` pipeline. `default.md` serves every pipeline without
+a file of its own.
 
 ### Add it
 

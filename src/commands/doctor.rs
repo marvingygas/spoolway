@@ -1996,7 +1996,7 @@ mod tests {
         let (root, checkout) = two_configs(
             "names-key",
             "[dispatch]\nmax_launches = 3\n",
-            "[dispatch]\ndefault_pipeline = \"x\"\n",
+            "[dispatch]\nworktree_root = \"x\"\n",
         );
         assert!(
             names_key(&root, "max_launches"),
@@ -2015,10 +2015,7 @@ mod tests {
         pipeline.validate().unwrap();
         let mut pipelines = std::collections::BTreeMap::new();
         pipelines.insert("default".to_string(), pipeline);
-        Pipelines {
-            default: "default".to_string(),
-            pipelines,
-        }
+        Pipelines { pipelines }
     }
 
     fn tracking(hook: &str) -> crate::config::IssueTrackingConfig {

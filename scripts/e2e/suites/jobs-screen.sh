@@ -36,15 +36,18 @@ task_doc .spoolway/routines/nightly/audit-deps.md audit-deps "$BODY" "group: nig
 STORE="$SPOOLWAY_PROJECT_HOME/jobs.toml"
 
 # n opens the routines browser; space ticks the first folder (`nightly`);
-# enter uses it; the expression is typed; enter accepts it; enter chooses the
-# default pipeline. The screen then ends as the pipe drains.
+# enter uses it; the expression is typed; enter accepts it; enter chooses
+# whichever pipeline the picker opens on — there is no project default any
+# more, so it opens on the alphabetically first of the shipped set
+# (`bugfix`, `default`), which is `bugfix`. The screen then ends as the pipe
+# drains.
 printf 'n \r0 3 * * 1-5\r\r' | "$SPOOLWAY" jobs >/dev/null 2>&1
 
 works "the walk writes a job store" test -f "$STORE"
 has "under a table named for the routine" "[jobs.nightly]" "$STORE"
 has "carrying the typed expression" 'schedule = "0 3 * * 1-5"' "$STORE"
 has "pointed at the picked routine" 'routine = "nightly"' "$STORE"
-has "on the project default pipeline" 'pipeline = "default"' "$STORE"
+has "on the pipeline the picker opened on" 'pipeline = "bugfix"' "$STORE"
 lacks "enabled by default, so no key for it" "enabled" "$STORE"
 
 says "and jobs list now shows it" "nightly" "$SPOOLWAY" jobs list
