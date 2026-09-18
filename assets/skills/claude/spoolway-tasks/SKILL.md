@@ -90,8 +90,17 @@ reading the file whole.
    `medium` or `large` — the sizing assumption you just made, put where a person can see it,
    so a `large` where they expected two tasks is something they can turn down by picking a
    different count. Line the three columns up with spaces, pipeline last, and wrap the
-   sentences under each task at around 48 characters, because the option box they are read in
-   is narrow.
+   sentences under each task at around 48 characters, because the preview box they are read
+   in is narrow.
+
+   **The block is the option's `preview`, never its `description`.** `preview` is the only
+   field that renders it as written: a monospace box that keeps the newlines and holds the
+   three columns in line. A `description` is prose — it reflows, and the newlines come back
+   as stray glyphs that run every candidate together into one paragraph nobody can read a
+   count out of. So each option carries the block in `preview`, and in `description` one
+   plain sentence saying what that count trades away — never a second copy of the layout.
+   Previews need `multiSelect: false`, which this ballot already is. "Generate a pipeline
+   for this plan" is not a candidate and takes no preview: its one line stays a description.
 
 3. **Write one document per task**, with **Write**, at
    `~/.spoolway/<project>/pending/<task-id>.md`. Frontmatter first, then the body in the shape
