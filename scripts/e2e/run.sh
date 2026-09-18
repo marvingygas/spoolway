@@ -292,6 +292,25 @@ failed=()
 total_pass=0
 total_fail=0
 
+# A suite that hangs has to fail, and fail naming itself. Without a bound it is
+# indistinguishable from a slow one: the run stops printing, and the only thing
+# that ever ends it is the `suite` step's own 45-minute budget or a CI job
+# timeout — both of which report a whole tier that took too long rather than the
+# suite that stopped. `task/explicit-task-route` spent two of those before
+# anybody read the last `ok` and saw where it had got to, and the hang itself
+# was a race that passed on a quiet machine and caught on a loaded one, so the
+# lane never saw it at all.
+#
+# TERM first, so each suite's own EXIT trap still takes its dispatcher and its
+# lanes down rather than orphaning them into the next suite's tree; KILL after a
+# grace period for whatever ignored it. The budget scales with `E2E_AGENTS` the
+# same way `drive` scales its own waits — a stand-in's turn is over in
+# milliseconds and a real model's takes minutes.
+E2E_SUITE_TIMEOUT=${E2E_SUITE_TIMEOUT:-10m}
+if [ "${E2E_AGENTS:-mock}" = real ]; then
+  E2E_SUITE_TIMEOUT=${E2E_SUITE_TIMEOUT_REAL:-100m}
+fi
+
 for suite in "${SUITES[@]}"; do
   file="$E2E_DIR/suites/$suite.sh"
   if [ ! -f "$file" ]; then
@@ -306,8 +325,19 @@ for suite in "${SUITES[@]}"; do
   mkdir -p "$work"
   # Its own tree, its own process. A suite that leaves a mess behind — and the
   # ones that end in `blocked` on purpose all do — cannot reach the next.
+  status=0
   SUITE="$suite" WORK="$work" E2E_RESULTS="$RESULTS" \
-    bash "$file" || failed+=("$suite")
+    timeout -k 30s "$E2E_SUITE_TIMEOUT" bash "$file" || status=$?
+  # 124 is `timeout`'s own verdict; 137 is a suite that sat through the TERM
+  # and had to be killed. Either way it is the budget that ended this, not the
+  # suite, so it is reported as the one thing a bare non-zero exit cannot say.
+  if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
+    printf '  \033[31mTIMEOUT\033[0m  no further in %s — hung, not slow\n' \
+      "$E2E_SUITE_TIMEOUT" >&2
+    failed+=("$suite (timed out)")
+  elif [ "$status" -ne 0 ]; then
+    failed+=("$suite")
+  fi
 done
 
 while read -r name p f; do

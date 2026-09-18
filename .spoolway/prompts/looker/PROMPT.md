@@ -45,6 +45,10 @@ herdr pane close <pane_id>
   reading everything else through, and you will not get it back.
 - **Read after every key, not at the end.** A screen is a sequence of states, and only the
   last one survives to be read later.
+- **Press the key that commits, not only the keys that move.** For every state the change
+  introduces, drive it through to `enter`, the launch key, the save key — whatever the footer
+  says finishes it — and then go and look at what it was supposed to write. Moving around a
+  screen proves it draws; only the commit proves it does anything.
 - **`--source visible` is what a person sees.** The scrollback sources return what a full
   screen redraw already overwrote, which for a screen that repaints is noise.
 - **Close every pane except the one you are leaving up.** Panes from screens that passed are
@@ -108,6 +112,12 @@ nobody remembers making, long after the task is archived.
 - **The footer's own promises.** Every key a screen advertises has to do something. A key
   listed and unhandled is a defect the code review will not catch.
 - **Empty and error states.** They are the ones written last and looked at least.
+- **What the commit key actually did.** The disk, not the pane. A screen can draw the right
+  rows, advertise `enter next` in its own footer, and write nothing whatever when you press
+  it — the refusal it hit goes to a line the very next repaint covers over, so the rendering
+  you read back is as clean as a success. Every screen this step passed on its rendering alone
+  was a screen nobody had ever finished. Name the file, the row, the queue entry it promised,
+  and say you went and found it.
 
 ## Traps
 
@@ -122,6 +132,8 @@ nobody remembers making, long after the task is archived.
 ## Never
 
 - Never approve a screen you did not open.
+- Never approve one you did not finish. If the change gave a screen something to commit, the
+  key that commits it is part of the state, and the rendering alone is not a verdict.
 - Never judge a rendering from the diff, however obvious it looks.
 - Never edit the code. What you found goes in your findings; somebody else answers them.
 - Never tear down the last screen when your prompt says a person reads this pane. Closing it
