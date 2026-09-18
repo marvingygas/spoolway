@@ -1,6 +1,6 @@
 ---
 name: spoolway-config
-description: Change anything in spoolway's control plane — the pipelines in `.spoolway/pipelines/*.yml`, the prompts their agent steps run, `config.toml`, the task and lane templates, and the issue-tracking hooks — as a temporary override that leaves the checkout clean, or as an edit to the tracked file. Use it whenever somebody wants a different model, effort, timeout, concurrency, prompt or step anywhere in spoolway, whether they said override, try, tweak, change or set. Fetches every format from the binary itself and checks what it wrote.
+description: Write or change anything spoolway runs on — a pipeline, a step, the PROMPT.md a step's lane is briefed with, `config.toml`, the task and lane templates, or an issue hook. Use it whenever somebody wants a new pipeline, a new or rewritten prompt, or a different model, effort, timeout or concurrency anywhere in spoolway — said as override, try, tweak, change or set. Fetches every format from the binary itself and checks what it wrote.
 ---
 
 # spoolway-config
