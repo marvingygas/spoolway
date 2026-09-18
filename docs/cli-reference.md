@@ -65,6 +65,12 @@ already in the queue or the archive is left where it is, and the report names it
 fails validation is refused and nothing is deleted. See [Queueing a
 plan](planning.md#queueing-a-plan).
 
+With `[issue_tracking]` configured, `enter` first checks the hook's declared tool
+requirements. A requirement this machine does not meet draws a gate naming what is unmet:
+`enter` queues the group with issue tracking switched off, and `esc` returns to the queue
+screen with nothing queued. See [the shipped hook
+scripts](configuration.md#the-shipped-hook-scripts).
+
 ### `spoolway queue add`
 
 Queue task documents. This is the only way a task enters the queue. See [Queueing a
@@ -88,7 +94,9 @@ With no `--from`, it prints the default pipeline's skeleton document to fill in.
 A `--from` path under this project's own pending directory is deleted once the batch is
 written. A `--from` path anywhere else, including `-`, is read and left alone.
 
-With `[issue_tracking]` configured, it opens a ticket per document first. See
+With `[issue_tracking]` configured, it checks the hook's declared tool requirements first; an
+unmet one prints the same gate the queue screen draws and proceeds without a ticket, since
+there is no key to wait on. Otherwise it opens a ticket per document. See
 [`open`](configuration.md#open--a-fifth-event-run-by-queue-add-itself).
 
 ### `spoolway queue list`

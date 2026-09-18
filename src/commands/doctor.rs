@@ -705,7 +705,12 @@ fn issue_tracking_checks(
 /// prefix and no space at all. `None` when nothing in `text` reads as one,
 /// which is the unreadable-answer case [`tool_version_finding`] turns into a
 /// note rather than a failure.
-fn parse_version(text: &str) -> Option<Vec<u64>> {
+///
+/// `pub(crate)` so `commands::queue`'s own submit gate — see
+/// `queue::unmet_requirements` — reads a hook's declared floor and a tool's
+/// live answer the same way this check does, rather than a second
+/// hand-rolled parse drifting from this one.
+pub(crate) fn parse_version(text: &str) -> Option<Vec<u64>> {
     let start = text.find(|c: char| c.is_ascii_digit())?;
     let rest = &text[start..];
     let end = rest
@@ -720,7 +725,9 @@ fn parse_version(text: &str) -> Option<Vec<u64>> {
 
 /// [`parse_version`]'s own output, back as the dotted string a person wrote —
 /// what a passing row and a failing one both name the version found as.
-fn format_version(version: &[u64]) -> String {
+///
+/// `pub(crate)`, alongside [`parse_version`], for the same reuse.
+pub(crate) fn format_version(version: &[u64]) -> String {
     version
         .iter()
         .map(u64::to_string)
@@ -734,7 +741,9 @@ fn format_version(version: &[u64]) -> String {
 /// `Vec<u64>` lexicographically instead would read `found`'s missing `.0` as
 /// smaller than `floor`'s explicit one, failing a `jq-1.6` against a floor of
 /// `1.6.0` that a person reading either string would call equal.
-fn below_floor(found: &[u64], floor: &[u64]) -> bool {
+///
+/// `pub(crate)`, alongside [`parse_version`], for the same reuse.
+pub(crate) fn below_floor(found: &[u64], floor: &[u64]) -> bool {
     for index in 0..found.len().max(floor.len()) {
         let found = found.get(index).copied().unwrap_or(0);
         let floor = floor.get(index).copied().unwrap_or(0);

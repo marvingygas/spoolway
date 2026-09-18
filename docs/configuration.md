@@ -382,9 +382,14 @@ never changes them. Switch trackers with
 
 A hook script names the tools it needs with a `# spoolway-requires: <tool> >= <version>`
 comment line, one per tool. `spoolway doctor` reads these lines and checks each named tool's
-`--version` output against the floor. A tool below its floor fails the row; a tool missing
-from PATH is reported by the existing PATH check instead. Only `<tool> >= <version>` is
-understood; any other shape in the line is reported as unreadable rather than interpreted.
+`--version` output against the floor. Only `<tool> >= <version>` is understood; any other
+shape in the line is reported as unreadable rather than interpreted.
+
+Every submit route — the queue screen's `enter`, `spoolway queue add --from` and a routine —
+checks the same lines before it opens any ticket. A tool below its floor, or missing from
+PATH, gates the submission: the queue screen's `enter` shows what is unmet and waits for
+`enter` to queue without issue tracking or `esc` to back out, and a non-interactive submit
+prints the same notice and proceeds. See [`spoolway queue`](cli-reference.md#spoolway-queue).
 
 | Script | Needs | What it does |
 |---|---|---|

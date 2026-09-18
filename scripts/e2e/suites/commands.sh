@@ -1947,6 +1947,45 @@ must "and a project key" "$SPOOLWAY" config set issue_tracking.project_key acme/
 silent_about "doctor is quiet about the shipped github.sh's own declared gh version" \
   "requires gh >=" "$SPOOLWAY" doctor
 
+# ------------------------------------------- gh below the floor: the submit gate
+# `queue add --from` is the non-interactive route the gate's own mockup
+# names — printing the same block a person would see and proceeding without
+# waiting for a key, since nothing here is a terminal. A `--version`-only
+# double stands in for `gh`, just for this one call: the hook this proves
+# never runs is never asked for anything else, and the suite's own PATH is
+# left pointed at the full double for every github.sh test after this one.
+LOWVER_BIN="$LIVE/gh-lowver-bin"
+mkdir -p "$LOWVER_BIN"
+cat >"$LOWVER_BIN/gh" <<'GHSTUB'
+#!/bin/sh
+case "$1" in
+  --version) echo "gh version 2.46.0 (2024-01-01)"; exit 0 ;;
+esac
+exit 1
+GHSTUB
+chmod +x "$LOWVER_BIN/gh"
+
+task_doc "$LIVE/github-gate.md" github-gate "$BODY" \
+  "group: github-gate" "touches: [notes/github-gate.md]"
+GATE_OUT="$LIVE/github-gate.out"
+env PATH="$LOWVER_BIN:$PATH" "$SPOOLWAY" queue add --from "$LIVE/github-gate.md" \
+  >"$GATE_OUT" 2>&1
+GATE_STATUS=$?
+if [ "$GATE_STATUS" -eq 0 ]; then
+  ok "a submit whose declared gh version is unmet still queues"
+else
+  bad "a submit whose declared gh version is unmet still queues (exit $GATE_STATUS)"
+  sed 's/^/        /' "$GATE_OUT"
+fi
+has "the gate names the unmet declaration" "gh >= 2.97.0" "$GATE_OUT"
+has "and says issue tracking is not supported" \
+  "issue tracking is not supported." "$GATE_OUT"
+works "the task reached the queue anyway" \
+  test -f "$SPOOLWAY_PROJECT_HOME/queue/github-gate.md"
+lacks "with the hook never invoked — no ticket written" \
+  "ticket:" "$SPOOLWAY_PROJECT_HOME/queue/github-gate.md"
+lacks "and no epic either" "epic:" "$SPOOLWAY_PROJECT_HOME/queue/github-gate.md"
+
 # After both, not before: the dispatcher reads the config once at startup and
 # the block above this one left `fail.sh` in it, so a restart any earlier
 # would run every hook here as the always-failing one — silently, since that

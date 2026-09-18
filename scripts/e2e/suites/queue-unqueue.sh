@@ -193,4 +193,50 @@ refuses "in the other flag order too" "--all --force" \
 works "paused-route's checkout is untouched by either refusal" \
   test -n "$(worktree_of paused-route)"
 
+# ------------------------------------------------ the tool-requirements gate
+# The one route the mockup itself draws: the queue screen's own `enter`,
+# gated over a hook whose declared `gh` floor this machine's `gh` cannot
+# meet — a `--version`-only double is enough, since the hook this gate
+# exists to keep uncalled is never asked for anything else. `esc` returns to
+# the queue screen with nothing queued and nothing opened; `enter` over the
+# gate queues the batch anyway, with `open_tickets` never reached at all —
+# no `ticket:`, no `epic:`, on the task that lands in the queue.
+must "the hook is set to github.sh" \
+  "$SPOOLWAY" config set issue_tracking.hook github.sh
+must "and a project key" \
+  "$SPOOLWAY" config set issue_tracking.project_key acme/app
+
+LOWVER_BIN="$LIVE/gh-lowver-bin"
+mkdir -p "$LOWVER_BIN"
+cat >"$LOWVER_BIN/gh" <<'GHSTUB'
+#!/bin/sh
+case "$1" in
+  --version) echo "gh version 2.46.0 (2024-01-01)"; exit 0 ;;
+esac
+exit 1
+GHSTUB
+chmod +x "$LOWVER_BIN/gh"
+
+pending_doc gate-esc "$BODY" "group: gate-esc" "touches: [notes/gate-esc.md]"
+
+GATE_ESC_OUT="$LIVE/gate-esc.out"
+printf ' \r\x1b' | env PATH="$LOWVER_BIN:$PATH" "$SPOOLWAY" queue >"$GATE_ESC_OUT" 2>&1
+has "the gate draws over an unmet gh version" \
+  "issue tracking is not supported." "$GATE_ESC_OUT"
+has "naming the declared floor" "gh >= 2.97.0" "$GATE_ESC_OUT"
+works "esc leaves the document in pending, unqueued" \
+  test -f "$SPOOLWAY_PROJECT_HOME/pending/gate-esc.md"
+works "and nothing reached the queue" \
+  test ! -e "$SPOOLWAY_PROJECT_HOME/queue/gate-esc.md"
+
+GATE_ENTER_OUT="$LIVE/gate-enter.out"
+printf ' \r\rn' | env PATH="$LOWVER_BIN:$PATH" "$SPOOLWAY" queue >"$GATE_ENTER_OUT" 2>&1
+has "the gate draws the same way when enter is pressed instead" \
+  "issue tracking is not supported." "$GATE_ENTER_OUT"
+works "enter over the gate queues the batch anyway" \
+  test -f "$SPOOLWAY_PROJECT_HOME/queue/gate-esc.md"
+lacks "with the hook never invoked — no ticket written" \
+  "ticket:" "$SPOOLWAY_PROJECT_HOME/queue/gate-esc.md"
+lacks "and no epic either" "epic:" "$SPOOLWAY_PROJECT_HOME/queue/gate-esc.md"
+
 finish
