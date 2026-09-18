@@ -20,16 +20,21 @@
 //! dispatcher's own functions. A document saying the same things would be wrong
 //! the first time one of them changed, and nothing would fail to say so.
 //!
-//! And it *reads* what a project wrote, against the step that runs it — for a
-//! `spoolway …` command this release does not have, checked against clap's
-//! own command tree ([`stale_commands`]). This is the one rule left in this
-//! lint: the others read prose for style and opinion, and a check that can
-//! only ever be somebody's taste is not one worth failing a build over. This
-//! rule is different, because it is a fact rather than an opinion — this is
-//! what an upgrade used to prevent by regenerating half the file, and nothing
-//! is regenerated now, so the drift has to be found by reading instead, which
-//! is the trade the format's removal actually made. A surviving finding fails
-//! `spoolway pipeline check`, the only command that reaches this lint.
+//! And it *reads* what a project wrote, against the step that runs it. Two
+//! rules, of two different kinds. [`stale_commands`] is a fact, not an
+//! opinion — a `spoolway …` command this release does not have, checked
+//! against clap's own command tree. This is what an upgrade used to prevent
+//! by regenerating half the file, and nothing is regenerated now, so the
+//! drift has to be found by reading instead, which is the trade the format's
+//! removal actually made. A surviving finding fails `spoolway pipeline
+//! check`. [`restated_report_contract`] is a heuristic on prose, and says so:
+//! a prompt naming `spoolway report` or one of its flags usually means
+//! section 7's contract got copied into the file it warns about rather than
+//! left to the band spoolway injects at launch, but a prompt whose role is
+//! writing *about* spoolway has a real reason to name it, and reading prose
+//! cannot tell the two apart — so it only ever warns, never fails. Both
+//! reach `spoolway pipeline check`, the only command that reaches this lint,
+//! on the channel their kind belongs to.
 //!
 //! What it no longer reads for is a git verb the step was not granted. Nothing
 //! grants git verbs any more: git up to the pull request is `spoolway
@@ -229,17 +234,14 @@ pub fn contract(repo: &Repo, pipelines: &Pipelines, args: &PromptContractArgs) -
 
     println!();
     println!("6  HOW A LANE FINISHES");
-    // `blocked` gets two forms, not three: `--fail` and `--block` are still
-    // accepted there, but `commands::report` reads either the same way it
-    // reads a `--pause`, so offering them here as a distinct choice would
-    // teach a lane a shape that no longer routes anywhere different.
-    if step.id == crate::pipeline::BLOCKED {
-        println!("   spoolway report --pass  -m \"<one line on what happened>\"");
-        println!("   spoolway report --pause -m \"<what needs a person, and why>\"");
-    } else {
-        println!("   spoolway report --pass  -m \"<one line on what happened>\"");
-        println!("   spoolway report --fail  -m \"<one line on what happened>\"");
-        println!("   spoolway report --block -m \"<what is in the way>\"");
+    // The same forms and the same refusals as `report_contract` composes
+    // into the system prompt this lane was launched with — read from there
+    // rather than restated, so the two can never drift apart. See
+    // `crate::compose::report_contract` for why `blocked` keeps two forms,
+    // and why every other step offers `--fail` only when it routes
+    // somewhere `--block` does not.
+    for line in crate::compose::report_contract(step).lines() {
+        println!("   {line}");
     }
     println!();
     println!("   Exactly once, then stop. Where each outcome takes this task:");
@@ -259,11 +261,19 @@ pub fn contract(repo: &Repo, pipelines: &Pipelines, args: &PromptContractArgs) -
             "     --pause → `paused`, waiting for a person — `spoolway resume` then hands the task back to whatever it blocked on, not past it"
         );
     } else {
+        // `--fail` is left out of this table exactly when `report_contract`
+        // already refused it above — a destination line for a form the
+        // lane may never use would read as a second, contradicting offer.
+        let fail_offered = step.destination(crate::pipeline::Outcome::Fail)
+            != step.destination(crate::pipeline::Outcome::Block);
         for (outcome, label) in [
             (crate::pipeline::Outcome::Pass, "--pass "),
             (crate::pipeline::Outcome::Fail, "--fail "),
             (crate::pipeline::Outcome::Block, "--block"),
         ] {
+            if outcome == crate::pipeline::Outcome::Fail && !fail_offered {
+                continue;
+            }
             match step.destination(outcome) {
                 Some(next) => println!("     {label} → `{next}`"),
                 None => println!("     {label} → stays on `{}`", step.id),
@@ -279,6 +289,21 @@ pub fn contract(repo: &Repo, pipelines: &Pipelines, args: &PromptContractArgs) -
     println!("   Headings and bullets a small local model can skim. One default per choice,");
     println!("   never a menu. Write only what the model does not already know: the traps,");
     println!("   the conventions, the mistake it is about to make.");
+    println!();
+    println!("   NEVER IN A PROMPT. spoolway writes each of these itself, at launch:");
+    println!("     the report commands and their flags              section 6");
+    println!("     `## Status Log`, `## Handoff`, `## Blocker`, and what goes under them");
+    println!("     one step, nobody reads you, nothing wakes you, commit as you go");
+    println!("     SPOOLWAY_* and where the task file is            sections 3 and 4");
+    println!("   A second copy goes stale, and a lane holding two contracts follows neither.");
+    println!("   `spoolway pipeline check` warns on a prompt naming a report command or flag.");
+    println!();
+    println!("   NO EXAMPLES. No sample task, no worked case, no invented file, no \"for");
+    println!("   example\" — the task in front of the lane is the example. A path in this");
+    println!("   repo, a command that runs, this project's own names in a table: those are");
+    println!("   facts, and they stay.");
+    println!();
+    println!("   NO SENTENCE DEFENDING A RULE, and no jargon. State it once and stop.");
 
     println!();
     println!("Write the prompt at the altitude of the role: what to read, what to judge,");
@@ -560,11 +585,33 @@ pub fn show(repo: &Repo, name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Read every prompt against the steps that run it. The only rule left is
-/// [`stale_commands`]; a prompt no step runs yet still gets read, the same as
-/// every other rule this lint ever had, since a prompt written before its
-/// step is wired up is the normal state halfway through adding one.
+/// Read every prompt against the steps that run it, for [`stale_commands`] —
+/// the rule that fails `spoolway pipeline check`. A prompt no step runs yet
+/// still gets read, the same as every other rule this lint ever had, since a
+/// prompt written before its step is wired up is the normal state halfway
+/// through adding one.
 pub fn lint(repo: &Repo, pipelines: &Pipelines) -> Result<Vec<Finding>> {
+    read_prompts(repo, pipelines, stale_commands)
+}
+
+/// Read every prompt against the steps that run it, for
+/// [`restated_report_contract`] — the rule that only ever warns. Kept as its
+/// own entry point rather than folded into [`lint`], because the two rules
+/// answer to different channels of `pipeline_check` and must never be mixed
+/// into one list a caller then has to re-sort by kind.
+pub fn lint_warnings(repo: &Repo, pipelines: &Pipelines) -> Result<Vec<Finding>> {
+    read_prompts(repo, pipelines, restated_report_contract)
+}
+
+/// The traversal both lint entry points share: every prompt a step runs,
+/// plus every prompt no step runs, each read once against `rule`. Only the
+/// rule differs between [`lint`] and [`lint_warnings`], so this is the one
+/// place that walks pipelines, steps and the prompt directory.
+fn read_prompts(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    rule: fn(&str, &str, &str) -> Vec<Finding>,
+) -> Result<Vec<Finding>> {
     let mut findings = Vec::new();
     let mut seen = BTreeSet::new();
 
@@ -580,7 +627,7 @@ pub fn lint(repo: &Repo, pipelines: &Pipelines) -> Result<Vec<Finding>> {
                 continue;
             };
             let at = format!("{}/{}", pipeline.name, step.id);
-            for finding in stale_commands(name, &body, &at) {
+            for finding in rule(name, &body, &at) {
                 // One prompt on two steps must not say the same thing twice.
                 if seen.insert((finding.prompt.clone(), finding.message.clone())) {
                     findings.push(finding);
@@ -595,7 +642,7 @@ pub fn lint(repo: &Repo, pipelines: &Pipelines) -> Result<Vec<Finding>> {
             continue;
         }
         let body = std::fs::read_to_string(&entry.path)?;
-        for finding in stale_commands(&entry.name, &body, "") {
+        for finding in rule(&entry.name, &body, "") {
             if seen.insert((finding.prompt.clone(), finding.message.clone())) {
                 findings.push(finding);
             }
@@ -710,6 +757,103 @@ fn subcommands(node: &clap::Command) -> Vec<String> {
     node.get_subcommands()
         .filter(|sub| !sub.is_hide_set())
         .map(|sub| sub.get_name().to_string())
+        .collect()
+}
+
+/// The long flags `spoolway report` actually takes, read off clap's own
+/// command tree at run time rather than a list kept beside it — the same
+/// reason [`stale_commands`] reads the whole tree: a rename here must not
+/// need a second edit to stay caught.
+fn report_flags() -> Vec<String> {
+    use clap::CommandFactory;
+    let cli = crate::cli::Cli::command();
+    let report = cli
+        .find_subcommand("report")
+        .expect("`report` is a real spoolway command");
+    report
+        .get_arguments()
+        .filter_map(|arg| arg.get_long())
+        .map(str::to_string)
+        .collect()
+}
+
+/// A prompt naming `spoolway report`, or one of its flags, on its own —
+/// section 7's ban on restating what spoolway injects at every launch. Never
+/// a `pipeline_check` problem: a prompt whose role is writing *about*
+/// spoolway (this project's own `spoolway-config` prompt, say) has a real
+/// reason to name the command, and reading prose cannot tell that reason
+/// from a copied-in report contract, so this only ever reaches the warnings
+/// channel — see [`crate::commands::pipeline::pipeline_check`].
+///
+/// Two separate scans, because a restated flag is often quoted alone,
+/// nowhere near the word `spoolway`: `invocations` only pairs a flag with
+/// the command it followed, which would miss "Leave what the fixer needs
+/// with `--handoff`."
+fn restated_report_contract(name: &str, body: &str, at: &str) -> Vec<Finding> {
+    let flags = report_flags();
+    let mut out = Vec::new();
+
+    for (line, path, _flags) in invocations(body) {
+        if path.first().map(String::as_str) == Some("report") {
+            out.push(Finding {
+                prompt: name.to_string(),
+                at: at.to_string(),
+                // The prompt's own line, not the sample line from the
+                // mockup — the same choice `stale_commands` and the flag
+                // branch below make, and the reason `read_prompts`'
+                // dedup-by-message does not collapse two occurrences of
+                // `spoolway report` on different lines into one finding.
+                message: format!(
+                    "names `spoolway report`, which spoolway injects under every prompt at \
+                     launch — the line is `{}`",
+                    line.trim()
+                ),
+            });
+        }
+    }
+
+    for line in body.lines() {
+        for segment in line.split('`') {
+            for flag in flags_named(segment) {
+                if flags.contains(&flag) {
+                    out.push(Finding {
+                        prompt: name.to_string(),
+                        at: at.to_string(),
+                        message: format!(
+                            "names `--{flag}`, a flag of `spoolway report`, which spoolway \
+                             injects at launch — the line is `{}`",
+                            line.trim()
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
+    out
+}
+
+/// Every `--flag` token in one stretch of text, with no requirement that a
+/// `spoolway` word precede it — the same cleaning [`invocations_in`] applies
+/// before splitting on whitespace, kept separate because that function only
+/// ever looks at flags following a command it has already walked.
+fn flags_named(segment: &str) -> Vec<String> {
+    let cleaned: String = segment
+        .chars()
+        .map(|c| match c {
+            '"' | '\'' | '(' | ')' | ',' | ';' => ' ',
+            other => other,
+        })
+        .collect();
+    cleaned
+        .split_whitespace()
+        .filter_map(|word| word.strip_prefix("--"))
+        .flat_map(|word| word.split('|'))
+        .map(|word| word.trim_start_matches('-').trim_end_matches('.'))
+        .filter(|word| {
+            !word.is_empty() && word.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        })
+        .map(str::to_string)
         .collect()
 }
 
@@ -894,6 +1038,108 @@ mod tests {
     #[test]
     fn alternatives_written_with_a_pipe_are_read_as_separate_flags() {
         assert!(stale_commands("ok", "`spoolway report --pass|--fail|--block`", "").is_empty());
+    }
+
+    /// A prompt naming `spoolway report` outright — section 7's ban on
+    /// restating the band spoolway injects at launch. The message quotes
+    /// this prompt's own line, not a sample from the contract's mockup —
+    /// `-m` is a short flag, so this line alone trips only this one rule,
+    /// and pins what the finding actually says.
+    #[test]
+    fn naming_spoolway_report_is_a_finding() {
+        let findings = restated_report_contract(
+            "reviewer",
+            "Finish with `spoolway report -m \"<verdict>\"`.",
+            "rev/review",
+        );
+        assert_eq!(findings.len(), 1, "{:?}", messages(&findings));
+        assert!(
+            findings[0]
+                .message
+                .contains("the line is `Finish with `spoolway report -m \"<verdict>\"`.`"),
+            "{}",
+            findings[0].message
+        );
+        assert_eq!(findings[0].at, "rev/review");
+    }
+
+    /// Two occurrences on two different lines must be two findings, not
+    /// one collapsed by `read_prompts`' dedup-by-message — which is exactly
+    /// what a message built from a constant, rather than the prompt's own
+    /// line, used to do.
+    #[test]
+    fn two_occurrences_on_different_lines_are_two_findings() {
+        let repo = fixture("restated-report-two-lines");
+        let tracked = directory_form(&repo, "implementer");
+        std::fs::create_dir_all(tracked.parent().unwrap()).unwrap();
+        std::fs::write(
+            &tracked,
+            "# implementer\n\n\
+             Finish with `spoolway report -m \"<verdict>\"`.\n\
+             On failure, also run `spoolway report -m \"<why>\"`.\n",
+        )
+        .unwrap();
+
+        let pipeline = crate::pipeline::Pipeline::parse(
+            "solo",
+            "steps:\n  - id: a\n    agent: claude\n    prompt: implementer\n    \
+             model: m\n    on_pass: z\n  - id: z\n    end: true\n",
+        )
+        .unwrap();
+        let pipelines = crate::pipeline::Pipelines {
+            default: "solo".into(),
+            pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
+        };
+
+        let findings = lint_warnings(&repo, &pipelines).unwrap();
+        assert_eq!(findings.len(), 2, "{:?}", messages(&findings));
+
+        std::fs::remove_dir_all(&repo.checkout).ok();
+    }
+
+    /// A restated flag is often quoted on its own, nowhere near the word
+    /// `spoolway` — `--handoff` here names a flag `spoolway report` takes.
+    #[test]
+    fn naming_a_report_flag_alone_is_a_finding() {
+        let findings = restated_report_contract(
+            "reviewer",
+            "Leave what the fixer needs with `--handoff`.",
+            "rev/review",
+        );
+        assert_eq!(findings.len(), 1, "{:?}", messages(&findings));
+        assert!(
+            findings[0].message.contains("--handoff"),
+            "{}",
+            findings[0].message
+        );
+    }
+
+    /// The non-goals' own English forms must stay quiet: "report" and
+    /// "handoff" show up in ordinary prose that names no command and no
+    /// flag, and a rule that cannot tell the difference is one a project
+    /// turns off.
+    #[test]
+    fn ordinary_english_about_reporting_is_not_a_finding() {
+        for line in [
+            "Something genuinely wrong outside your scope is a finding to report.",
+            "A test that is wrong goes in your report, not in your diff.",
+            "Record the commands in the handoff.",
+        ] {
+            let findings = restated_report_contract("ok", line, "");
+            assert!(
+                findings.is_empty(),
+                "false positive on: {line}: {:?}",
+                messages(&findings)
+            );
+        }
+    }
+
+    /// A flag some other command takes, not `spoolway report`'s, must not
+    /// fire — this rule is about the report contract specifically, not
+    /// every `--flag` in a prompt.
+    #[test]
+    fn a_flag_of_a_different_command_is_not_a_finding() {
+        assert!(restated_report_contract("ok", "Run `spoolway queue add --skip`.", "").is_empty());
     }
 
     /// A repo whose `home` is a scratch directory of its own — `overrides_dir`

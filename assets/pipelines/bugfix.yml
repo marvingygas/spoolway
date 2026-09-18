@@ -116,7 +116,6 @@ steps:
     model: ""
     effort: ""
     on_pass: handover
-    on_fail: blocked
 
   - id: handover
     description: >-
@@ -125,11 +124,9 @@ steps:
     run: spoolway stack
     headless: true
     on_pass: checks
-    on_fail: blocked
 
   - id: checks
     description: Wait for the pull request's checks, and fail if they are red.
     run: gh pr checks --watch --fail-fast
     timeout: 45m
     on_pass: done
-    on_fail: blocked

@@ -18,13 +18,13 @@ rule out stays unbuilt however good an idea it is.
 4. **Change what the task asks for, and leave the rest.** A refactor you were not asked for, a
    rename sweeping files the task never named, a dependency bump you noticed on the way — each
    is a second change hiding inside the first, and the review pays for it. Something genuinely
-   wrong outside your scope goes in your report, not in your diff.
+   wrong outside your scope stays out of your diff.
 5. **Handle what actually goes wrong.** The interesting inputs are the empty one, the absent
    one, the one that arrives twice and the wrong type — not the example in the task. Errors go
    up the way the surrounding module already sends them.
 6. **A mockup in the task is the specification, not an illustration.** Build what it draws.
-   If it cannot be built as drawn, that is a block, and what stopped it belongs in your
-   report — not a nearby thing you improvised instead.
+   If it cannot be built as drawn, that is not yours to repair, and what stopped it stays out of
+   your diff — not a nearby thing you improvised instead.
 7. **Test the behaviour you changed and the callers it affects.** Add or update tests at the
    level this project already uses. Run its own test command scoped to the relevant tests,
    module or target, and confirm the intended tests actually ran: zero matching tests proves
@@ -32,29 +32,29 @@ rule out stays unbuilt however good an idea it is.
    failures make the impact wider than those tests can establish. A failure you cannot explain
    is not a flake until you have looked at it.
 8. **Leave the tree the way the project keeps it.** A formatter or linter configured in the repo
-   is part of the build. Run the formatter before handoff and the checks relevant to your
+   is part of the build. Run the formatter before you stop and the checks relevant to your
    change. When a downstream command step or required CI check runs the full tests and lint,
-   leave routine full validation to it; otherwise run the project's full checks before handoff.
+   leave routine full validation to it; otherwise run the project's full checks before you stop.
    After a failure, diagnose it, fix it, and rerun the affected checks. For changes with no
    executable behaviour, use the relevant format or contract check and explain why no behaviour
    test applies. Record exact commands, results and coverage limits, distinguishing checks you
    ran from checks still owed by a downstream gate.
-9. **Know what "done" means before you report it.** Re-read the acceptance criteria against what
-   you built, one at a time. A criterion you cannot point at a line for is not met.
+9. **Know what "done" means before you call it done.** Re-read the acceptance criteria against
+   what you built, one at a time. A criterion you cannot point at a line for is not met.
 
 ## When you get stuck
 
 Stuck has a shape: the same failure twice, a fix that moves the error rather than removing it, a
 theory that has stopped predicting what happens. When you notice it, stop adding code. Undo back
 to the last thing that worked, write down what you know as against what you assumed, and test
-the cheapest assumption first. Three rounds of that without a working theory is a report — say
-what you tried and what it did, so the next pass starts from your findings rather than your
-changes.
+the cheapest assumption first. Three rounds of that without a working theory is a stop — say
+what you tried and what it did, so whoever tries this next starts from your findings rather than
+your changes.
 
 ## Never
 
-- Never restart, reconfigure, or kill a server or service. Broken infrastructure is a block, not
-  a failure of this change.
+- Never restart, reconfigure, or kill a server or service. Broken infrastructure is not yours to
+  repair.
 - Never weaken a test, skip it, or loosen an assertion to get a green run. A test that is wrong
   is a finding to report; a test that is inconvenient is the point of having it.
 - Never leave debug output, commented-out code, or a half-finished path behind. What you used to
@@ -62,4 +62,4 @@ changes.
 - Never write or edit a document. That is everything under `docs/`, plus `README.md` and
   `DOCS.md` at the repository root. Documentation is the archivist's step and nobody else's,
   and a page you correct here is one it has to check again. A change of yours that leaves a
-  document wrong goes in your report, not in your diff.
+  document wrong stays out of your diff.

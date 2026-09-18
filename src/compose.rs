@@ -114,7 +114,7 @@ pub(crate) fn system_prompt(
         situating = situating(pipeline, step, task, repo)?,
         prompt = prompt.trim(),
         policy = policy(repo, task, pipeline, step),
-        contract = report_contract(pipeline, step.id == crate::pipeline::BLOCKED),
+        contract = report_contract(step),
     ))
 }
 
@@ -450,17 +450,24 @@ pub(crate) fn policy(repo: &Repo, task: &Task, pipeline: &Pipeline, step: &Step)
 }
 
 /// The step this task arrived from, when this pass exists because that
-/// step's own `on_fail` named this step and its `on_pass` named somewhere
-/// else — never when both routes lead here, which cannot say which one was
-/// taken. Shared by [`failed_command`] and [`arrived_by_fail_paragraph`],
-/// which each answer for one kind of step that can leave this true: a
-/// command step's exit code for the former, an agent step's own reported
-/// fail for the latter.
+/// step's *fail* route led here and its *pass* route led somewhere else —
+/// never when both routes lead here, which cannot say which one was taken.
+/// Shared by [`failed_command`] and [`arrived_by_fail_paragraph`], which
+/// each answer for one kind of step that can leave this true: a command
+/// step's exit code for the former, an agent step's own reported fail for
+/// the latter.
+///
+/// Read through [`Step::destination`], not the raw `on_fail`/`on_pass`
+/// fields: a step declaring no `on_fail` of its own still fails to
+/// `blocked`, and this has to notice that arrival exactly the same as one
+/// that names the step outright.
 fn arrived_by_fail<'a>(task: &Task, pipeline: &'a Pipeline, step: &Step) -> Option<&'a Step> {
     let from = task.front.arrived_from.as_deref()?;
     let previous = pipeline.step(from)?;
-    let arrived_by = |route: &Option<String>| route.as_deref() == Some(step.id.as_str());
-    (arrived_by(&previous.on_fail) && !arrived_by(&previous.on_pass)).then_some(previous)
+    let arrived_by =
+        |outcome: crate::pipeline::Outcome| previous.destination(outcome) == Some(step.id.as_str());
+    (arrived_by(crate::pipeline::Outcome::Fail) && !arrived_by(crate::pipeline::Outcome::Pass))
+        .then_some(previous)
 }
 
 /// The paragraph a lane gets when a *command* step failed into it.
@@ -544,28 +551,67 @@ fn arrived_by_fail_paragraph(repo: &Repo, task: &Task, pipeline: &Pipeline, step
 /// leaves something for the next — spoolway's to enable, never a project's
 /// to be reminded about.
 ///
-/// `pipeline` is unused now that naming it is gone from the wording — kept
-/// on the signature the same way [`resume_prompt`] keeps its own unused
-/// `pipeline`, so a caller never has to remember which of these functions
-/// needs it.
-pub(crate) fn report_contract(_pipeline: &Pipeline, blocked: bool) -> String {
-    // `blocked` gets two forms, not three: `commands::report` turns a
-    // `--fail` or a `--block` from this step straight into `paused` anyway,
-    // so offering them here would teach a lane a shape that no longer exists.
-    let forms = match blocked {
-        true => {
-            "    spoolway report --pass  -m \"<one line on what happened>\"\n    \
-                  spoolway report --pause -m \"<what needs a person, and why>\"\n    \
-                  --handoff \"<what the next step should know>\"   repeatable"
-        }
-        false => {
-            "    spoolway report --pass  -m \"<one line on what happened>\"\n    \
-                  spoolway report --fail  -m \"<one line on what happened>\"\n    \
-                  spoolway report --block -m \"<what is in the way>\"\n    \
-                  --handoff \"<what the next step should know>\"   repeatable"
-        }
+/// A lane is offered only the outcomes that route somewhere different from
+/// each other. `blocked` is the fixed case — [`crate::pipeline::Step::
+/// destination`] never actually asks it for a `Fail` or a `Block`, since
+/// `commands::report` reads either the same way it reads a `--pause` before
+/// the question reaches the graph — so it keeps its own two forms, `--pass`
+/// and `--pause`. Every other step compares `destination(Fail)` against
+/// `destination(Block)`: equal, and a `--fail` would park the task exactly
+/// where a `--block` already does, so it is withheld; distinct, and both are
+/// offered. `--block` is the one kept on a collision rather than `--fail`,
+/// because a step declaring no `on_fail` of its own reads as "nowhere in
+/// particular to send a failure", which is what a block already means, and
+/// not as a promise that failing this step is a distinct outcome from
+/// getting stuck on it.
+///
+/// A form this left out is named anyway, under refusal wording — a lane
+/// that has never been told a command exists cannot be tempted to reach for
+/// it, but a lane that infers `--fail` from having seen `--block` and
+/// `--pass` can, so the gap is closed rather than left silent.
+pub(crate) fn report_contract(step: &Step) -> String {
+    use crate::pipeline::Outcome;
+
+    let blocked = step.id == crate::pipeline::BLOCKED;
+    let fail_redundant =
+        !blocked && step.destination(Outcome::Fail) == step.destination(Outcome::Block);
+
+    let forms = if blocked {
+        "    spoolway report --pass  -m \"<one line on what happened>\"\n    \
+              spoolway report --pause -m \"<what needs a person, and why>\"\n    \
+              --handoff \"<what the next step should know>\"   repeatable"
+    } else if fail_redundant {
+        "    spoolway report --pass  -m \"<one line on what happened>\"\n    \
+              spoolway report --block -m \"<what is in the way>\"\n    \
+              --handoff \"<what the next step should know>\"   repeatable"
+    } else {
+        "    spoolway report --pass  -m \"<one line on what happened>\"\n    \
+              spoolway report --fail  -m \"<one line on what happened>\"\n    \
+              spoolway report --block -m \"<what is in the way>\"\n    \
+              --handoff \"<what the next step should know>\"   repeatable"
     };
-    format!("Your last action is one `spoolway report` command:\n\n{forms}")
+
+    let withheld: &[&str] = if blocked {
+        &["spoolway report --fail", "spoolway report --block"]
+    } else if fail_redundant {
+        &["spoolway report --fail"]
+    } else {
+        &[]
+    };
+
+    let mut contract = format!("Your last action is one `spoolway report` command:\n\n{forms}");
+    if !withheld.is_empty() {
+        contract.push_str(
+            "\n\nThese commands are not available to you. Never use one, under any\n\
+             circumstance:\n\n",
+        );
+        let lines: String = withheld
+            .iter()
+            .map(|command| format!("    {command}\n"))
+            .collect();
+        contract.push_str(lines.trim_end());
+    }
+    contract
 }
 
 /// The built-in wording for each of the seven typed messages a lane's pane
@@ -732,8 +778,15 @@ pub(crate) fn park_prompt(
 /// launched with. Its own function rather than inlined at the one call
 /// site, so `spoolway prompt contract` can render it too, against the same
 /// wording a real nudge would use.
-pub(crate) fn reminder_prompt(repo: &Repo, pipeline: &Pipeline, step: &Step) -> String {
-    let contract = report_contract(pipeline, step.id == crate::pipeline::BLOCKED);
+///
+/// `pipeline` is unused now that [`report_contract`] reads everything it
+/// needs off `step` — kept on the signature for the same reason
+/// [`opening_prompt`] and [`park_prompt`] keep their own unused `pipeline`:
+/// this is one of the seven [`lane_prompt_for_state`] dispatches to by the
+/// same match arm shape, and a caller should not have to remember which of
+/// them needs it.
+pub(crate) fn reminder_prompt(repo: &Repo, _pipeline: &Pipeline, step: &Step) -> String {
+    let contract = report_contract(step);
     crate::lane_prompts::render(
         repo,
         "reminder",

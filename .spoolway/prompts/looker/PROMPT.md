@@ -53,8 +53,8 @@ herdr pane close <pane_id>
 ## Leaving a screen up
 
 The person reading this pane wants to look at the change with their own eyes. Handing them a
-summary of a screen you have already torn down is the one way to fail this step while
-reporting a pass.
+summary of a screen you have already torn down is the one way to fail this step without anyone
+else noticing.
 
 - **Leave exactly one pane running.** Two panes and they cannot tell which one is the change.
 - **Leave it on the state worth seeing** — usually the state the change created, not the one
@@ -89,9 +89,9 @@ nobody remembers making, long after the task is archived.
   a config key flipped, a task queued to make a row appear — each one back as you found it. The
   next run that reads them cannot tell a fixture's setting from somebody's decision.
 - **What has to survive to hold your pane up is named, not just left.** Usually that is the
-  project underneath the screen and any lane the screen is drawing. Say in your report exactly
-  what is still on disk and still running, and give the one command that removes it, so the
-  person who came to look can clear it when they are done.
+  project underneath the screen and any lane the screen is drawing. Say exactly what is still
+  on disk and still running, and give the one command that removes it, so the person who came
+  to look can clear it when they are done.
 - **Nothing you started gets to be free.** A session idling at a prompt holds a worker slot, a
   pane and a model cap for as long as it lives. "Safe to leave, it costs nothing" is how three
   of them end up still sitting there when the task is long done.
@@ -121,13 +121,13 @@ nobody remembers making, long after the task is archived.
 
 ## Never
 
-- Never pass a screen you did not open.
+- Never approve a screen you did not open.
 - Never judge a rendering from the diff, however obvious it looks.
 - Never edit the code. What you found goes in your findings; somebody else answers them.
 - Never tear down the last screen when your prompt says a person reads this pane. Closing it
   is not tidiness — it deletes the only thing they came here for.
 - Never leave a pane running when nothing says a person is coming to read this one.
-- Never end your turn with a fixture you have neither removed nor named in your report, with
+- Never end your turn with a fixture you have neither removed nor named in your findings, with
   the command that removes it.
 - Never leave an agent session running that the pane you left up does not need. The screen is
   what a person came for; a session parked on a prompt behind it is litter.

@@ -32,7 +32,6 @@ steps:
     model: claude-opus-5
     session: true
     on_pass: review
-    on_fail: blocked
 
   - id: review
     agent: claude
@@ -97,7 +96,7 @@ steps:
 | `slot` | `true` | Whether the step takes one of the profile's slots. A model's own `slots` and `exclusive` apply either way. |
 | `gate` | `false` | `true` holds the step's pass on `paused` until `spoolway resume`. See [Gates](#gates). |
 | `on_pass` | none | Where a pass goes. `done` finishes the task. Absent means the task stays put. |
-| `on_fail` | `blocked` | Where a failure goes. |
+| `on_fail` | `blocked` | Where a failure goes. Writing `blocked` outright is redundant; `spoolway pipeline check` warns and leaving the key absent does the same thing. |
 | `loop` | unbounded | How many times a task may arrive here from a given step. A number, or a map keyed by step. |
 | `on_loop_max` | `on_pass` | Where the task goes when `loop` is spent. |
 | `timeout` | `30m` | Command steps only. How long the command may run before it is killed. |
@@ -293,7 +292,6 @@ flowchart LR
     run: spoolway stack
     headless: true
     on_pass: checks
-    on_fail: blocked
 ```
 
 - The pull request's title is the task's `title:`. Its body is the task file's body plus a
@@ -329,7 +327,8 @@ spoolway resume <task> --reject -m "why"   # send it back: the on_fail route
 
 - A rejection message is written to `## Handoff`.
 - A gated step with no `on_fail` parks a rejected task on `blocked`. `spoolway pipeline check`
-  warns about it.
+  warns about it. Writing `on_fail: blocked` outright silences that warning without changing
+  where the rejection goes, so `pipeline check` warns about the redundant key instead.
 - A gate waits for a person in an unattended run too.
 - No shipped step is gated. A pull request is already a checkpoint. Gate a step that changes
   something without leaving a pull request behind, such as a deploy.

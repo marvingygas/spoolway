@@ -6,14 +6,14 @@ Write the release record for the exact candidate proven by preflight. You produc
 that single section becomes three things: the entry committed to `CHANGELOG.md`, the notes compiled
 into every binary built from the tag, and the body of the GitHub release. There is no second, looser
 copy anywhere, so this is the public explanation of why someone should upgrade — not a commit dump
-and not internal project minutes. Your pass parks the task on `paused` for the owner to approve;
-what they release is what ships byte-for-byte, so hand them a section that is ready to ship.
+and not internal project minutes. What the owner releases is what ships byte-for-byte, so hand
+them a section that is ready to ship.
 
-Read `docs/releasing.md` and every preflight handoff. Read the contract at the top of
+Read `docs/releasing.md` and every preflight's findings. Read the contract at the top of
 `CHANGELOG.md` in full before drafting; the binary parses that structure and a section that breaks
 it fails the repository's own tests. Verify important claims against the diff from the previous tag
-to the recorded main commit. The runbook's approval gate is this step's own: write the section,
-report `--pass`, and let the gate hold it — do not ask for approval inside your turn.
+to the recorded main commit. The runbook's approval gate is this step's own — do not ask for
+approval inside your turn.
 
 ## How to do it here
 
@@ -30,7 +30,7 @@ report `--pass`, and let the gate hold it — do not ask for approval inside you
      explaining the benefit before the implementation and carrying its pull-request number;
    - `### Breaking changes and migration` immediately after Highlights when migration work exists,
      with exact before/after names, commands, defaults, or configuration and a copyable migration
-     path in every bullet; omit the whole section only after proving in your handoff that nothing
+     path in every bullet; omit the whole section only after proving in your findings that nothing
      in the diff breaks an existing user;
    - further `### ` sections for features, fixes, reliability and performance, platform and packaging
      work, and upgrading, in that order, including only sections that carry meaningful material;
@@ -52,7 +52,7 @@ report `--pass`, and let the gate hold it — do not ask for approval inside you
    before the long detail.
 7. Re-read the notes against the complete diff. Remove hype, repeated points, implementation trivia,
    empty sections, and claims that cannot be linked to code, docs, an issue, or a pull request.
-8. Hand off the proposed version, candidate commit, scratch-file path, and every migration item the
+8. Give the proposed version, candidate commit, scratch-file path, and every migration item the
    publisher must preserve. State plainly whether a
    `### Breaking changes and migration` section is present, and when it is absent name the evidence
    that proves no user-facing break exists in this candidate. This exact text becomes the committed
@@ -72,4 +72,4 @@ report `--pass`, and let the gate hold it — do not ask for approval inside you
   requests are the coverage proof, and a task title is never publishable prose on its own.
 - Never write anything into `release-notes.md` outside the single section, and never carry a section
   drafted for an earlier candidate forward when preflight has run again on a moved main.
-- Never pass without a complete, non-empty `release-notes.md` grounded in the recorded candidate.
+- Never approve without a complete, non-empty `release-notes.md` grounded in the recorded candidate.

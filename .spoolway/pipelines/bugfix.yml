@@ -133,7 +133,6 @@ steps:
     prompt: archivist
     model: ornith/Ornith-1.5-35B-A3B
     on_pass: handover
-    on_fail: blocked
 
   - id: handover
     description: >-
@@ -141,4 +140,3 @@ steps:
       `gh` — no model, no rebase. Nothing is merged here; a person lands it.
     run: ./target/release/spoolway stack
     on_pass: done
-    on_fail: blocked

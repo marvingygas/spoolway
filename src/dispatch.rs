@@ -14833,8 +14833,12 @@ mod tests {
             handover.run.is_some(),
             "`handover` should run `spoolway stack`, not a prompt"
         );
+        // No `on_fail:` of its own — that key would only repeat where a fail
+        // already goes with none at all (see
+        // `Pipeline::redundant_on_fail_warnings`) — so the routing this test
+        // cares about is read from `destination`.
         assert_eq!(
-            handover.on_fail.as_deref(),
+            handover.destination(crate::pipeline::Outcome::Fail),
             Some(crate::pipeline::BLOCKED),
             "a failed `spoolway stack` should park the task for a person, not hand off \
              to a second agent step"
@@ -15192,7 +15196,11 @@ mod tests {
     }
 
     /// The report contract moved to the end of the system prompt, after
-    /// policy, and names `--handoff` — `--finding` is gone entirely.
+    /// policy, and names `--handoff` — `--finding` is gone entirely. The
+    /// builtin `default` pipeline's `implement` declares no `on_fail` of its
+    /// own, so `--fail` lands on `blocked` exactly where `--block` does and
+    /// the contract withholds it — the system prompt's true final line is
+    /// therefore the refusal naming it, not `--handoff`.
     #[test]
     fn the_system_prompt_ends_with_the_report_contract() {
         let repo = fixture("prompt-contract");
@@ -15204,12 +15212,13 @@ mod tests {
         let prompt =
             crate::compose::system_prompt(&repo, &task, pipeline, step, "[prompt]").unwrap();
         assert!(
-            prompt
-                .trim_end()
-                .ends_with("--handoff \"<what the next step should know>\"   repeatable"),
+            prompt.trim_end().ends_with("spoolway report --fail"),
             "got: {prompt}"
         );
-        assert!(prompt.contains("--handoff"), "got: {prompt}");
+        assert!(
+            prompt.contains("--handoff \"<what the next step should know>\"   repeatable"),
+            "got: {prompt}"
+        );
         assert!(!prompt.contains("--finding"), "got: {prompt}");
     }
 
@@ -15327,8 +15336,11 @@ mod tests {
 
     /// `blocked`'s own branch of the report contract — acceptance criterion
     /// 5 — offers `--pass` and `--pause` only: no other step's system prompt
-    /// should ever name `--pause`, and `blocked`'s should never name `--fail`
-    /// or `--block`.
+    /// should ever name `--pause`, and `blocked`'s should never offer
+    /// `--fail` or `--block` as a usable form. Both are still named, once
+    /// each, under the refusal wording that says a lane may never use them —
+    /// see `compose::report_contract` — so the assertions check for the
+    /// usable form (`-m "..."`) rather than the bare flag.
     #[test]
     fn the_blocked_steps_report_contract_offers_pass_and_pause_only() {
         let repo = fixture("prompt-contract-blocked");
@@ -15340,8 +15352,20 @@ mod tests {
         let prompt =
             crate::compose::system_prompt(&repo, &task, pipeline, step, "[prompt]").unwrap();
         assert!(prompt.contains("--pause"), "got: {prompt}");
-        assert!(!prompt.contains("--fail"), "got: {prompt}");
-        assert!(!prompt.contains("--block"), "got: {prompt}");
+        assert!(
+            !prompt.contains("--fail  -m"),
+            "--fail must never be offered as a usable form: got: {prompt}"
+        );
+        assert!(
+            !prompt.contains("--block -m"),
+            "--block must never be offered as a usable form: got: {prompt}"
+        );
+        assert!(
+            prompt.contains("These commands are not available to you"),
+            "the refused forms should be named under the refusal wording: got: {prompt}"
+        );
+        assert!(prompt.contains("spoolway report --fail"), "got: {prompt}");
+        assert!(prompt.contains("spoolway report --block"), "got: {prompt}");
 
         let implement = pipeline.step("implement").unwrap();
         let elsewhere =
@@ -15349,6 +15373,32 @@ mod tests {
         assert!(
             !elsewhere.contains("--pause"),
             "no other step offers --pause: got: {elsewhere}"
+        );
+    }
+
+    /// A step whose fail and block routes actually differ — `default`'s
+    /// `review`, `on_fail: implement`, `on_pass: document` — offers `--fail`
+    /// as a real form and names no refusal at all: withholding it is a
+    /// per-step decision, not a blanket ban on the flag.
+    #[test]
+    fn a_step_whose_fail_and_block_routes_differ_offers_fail_with_no_refusal() {
+        let repo = fixture("prompt-contract-fail-offered");
+        let pipelines = Pipelines::builtin();
+        let pipeline = pipelines.get("default").unwrap();
+        let step = pipeline.step("review").unwrap();
+        assert_ne!(
+            step.destination(crate::pipeline::Outcome::Fail),
+            step.destination(crate::pipeline::Outcome::Block),
+            "this test needs a step whose fail and block destinations differ"
+        );
+        let task = reload(&add_task(&repo, "demo", "review"));
+
+        let prompt =
+            crate::compose::system_prompt(&repo, &task, pipeline, step, "[prompt]").unwrap();
+        assert!(prompt.contains("--fail  -m"), "got: {prompt}");
+        assert!(
+            !prompt.contains("These commands are not available to you"),
+            "no form should be refused here: got: {prompt}"
         );
     }
 

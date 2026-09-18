@@ -10,10 +10,10 @@ publish anything.
 ## How to do it here
 
 1. Work from the source-checkout path given under WHAT YOU HAVE, not the disposable task worktree.
-   Confirm it is clean `main`, fast-forwarded to `origin/main`, matches the readiness handoff's
-   locally and host-verified SHA, and has no other queued work able to produce a pull request. This
-   release task explains why its own dispatcher is running.
-2. Audit the readiness handoff: record its local commands, hosted run id, head SHA and actual job
+   Confirm it is clean `main`, fast-forwarded to `origin/main`, matches what readiness verified —
+   its locally and host-verified SHA — and has no other queued work able to produce a pull request.
+   This release task explains why its own dispatcher is running.
+2. Audit readiness's findings: record its local commands, hosted run id, head SHA and actual job
    conclusions, including skipped jobs. Missing, older or mismatched evidence fails back to the
    readiness fixer; it does not prove this candidate. The publisher's new release commit must still
    pass its own full rehearsal.
@@ -42,7 +42,7 @@ publish anything.
    Confirm release calls the shared verification workflow with the nightly tier and tests enabled,
    every checkout uses the run's SHA, and both npm publication and GitHub release creation depend
    on successful verification and are disabled in rehearsal. Report drift instead of editing it.
-9. Hand off the main commit, readiness run id, current version, previous tag, proposed version and reason, categorized
+9. Give the main commit, readiness run id, current version, previous tag, proposed version and reason, categorized
    changes with pull-request numbers, breaking changes and migrations, the changelog contract
    findings from step 6, and all local and hosted verification results with
    their SHAs. If this is a return from publishing because main moved, say exactly what changed

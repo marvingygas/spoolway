@@ -35,13 +35,14 @@ The rest of the job is the same as any implementation turn here.
 - **Say what you expect to be true, then check it.** A helper that already exists, a field that
   is nullable, a call site you did not know about — spend the one command that confirms it.
 - **Change what the task asks for, and leave the rest.** A refactor you were not asked for is a
-  second change hiding inside the first. Something genuinely wrong outside your scope goes in
-  your report, not in your diff.
+  second change hiding inside the first. Something genuinely wrong outside your scope stays out
+  of your diff.
 - **Test what actually goes wrong.** The interesting inputs are the empty one, the absent one,
   the one that arrives twice and the wrong type — not the example in the task. Each of those is
   its own red-green lap.
 - **A mockup in the task is the specification, not an illustration.** Build what it draws. If it
-  cannot be built as drawn, that is a block, and what stopped it belongs in your report.
+  cannot be built as drawn, that is not yours to repair, and what stopped it stays out of your
+  diff.
 - **Explain the non-obvious in prose.** Every module opens with a `//!` block saying why it
   exists. A magic number, a carve-out or a defensive branch carries the failure it prevents, in
   a comment. This project's reviews fail a change that drops that habit.
@@ -55,16 +56,16 @@ the intended tests must actually run; zero matching tests proves nothing. After 
 diagnose it, fix it, and rerun the affected tests. Check the traps below before concluding the
 failure is yours.
 
-Run `cargo fmt` before handoff. The downstream `test` step owns full tests, Clippy and the other
-mechanical checks; do not repeat that gate routinely. Broaden your checks when a shared
+Run `cargo fmt` before you stop. The downstream `test` step owns full tests, Clippy and the
+other mechanical checks; do not repeat that gate routinely. Broaden your checks when a shared
 interface, dependency, build change or unexplained failure makes the impact wider than the
-focused tests can establish. Record the exact commands, results and coverage limits in the
-handoff, including the observed red and green results; distinguish your focused checks from
+focused tests can establish. Record the exact commands, results and coverage limits in your
+findings, including the observed red and green results; distinguish your focused checks from
 the full gate that has yet to run.
 
-**Know what "done" means before you report it.** Re-read the acceptance criteria one at a time,
-and for each one name the test that would fail if the behaviour were removed. A criterion with
-no such test is not met.
+**Know what "done" means before you call it done.** Re-read the acceptance criteria one at a
+time, and for each one name the test that would fail if the behaviour were removed. A criterion
+with no such test is not met.
 
 ## Traps
 
@@ -91,17 +92,18 @@ no such test is not met.
   is real. Re-run, or run the one test on its own, before you touch anything.
 
 - **Some behaviour has no cheap unit test, and forcing one is worse than saying so.** Where the
-  honest test is an end-to-end one, write it there and say in your report which criterion it
-  covers. Where no test can reach it at all, that is a finding for your report, not a reason to
-  write code with no red phase behind it.
+  honest test is an end-to-end one, write it there and name which criterion it covers. Where no
+  test can reach it at all, that is a finding, not a reason to write code with no red phase
+  behind it.
 
 ## When you get stuck
 
 Stuck has a shape: the same failure twice, a fix that moves the error rather than removing it, a
 theory that has stopped predicting what happens. When you notice it, stop adding code. Go back
 to the last green commit, write down what you know as against what you assumed, and test the
-cheapest assumption first. Three rounds of that without a working theory is a report — say what
-you tried and what it did, so the next pass starts from your findings rather than your changes.
+cheapest assumption first. Three rounds of that without a working theory is a stop — say what
+you tried and what it did, so whoever tries this next starts from your findings rather than your
+changes.
 
 ## Never
 
@@ -116,10 +118,10 @@ you tried and what it did, so the next pass starts from your findings rather tha
   `cargo test` in your worktree as much as you like, but `cargo install` or copying your build
   over the running dispatcher's own binary overwrites the process that started you. Installing
   is a person's decision, taken between runs.
-- Never restart, reconfigure, or kill a server or service. Broken infrastructure is a block, not
-  a failure of this change.
+- Never restart, reconfigure, or kill a server or service. Broken infrastructure is not yours to
+  repair.
 - Never leave debug output, commented-out code, or a half-finished path behind.
 - Never write or edit a document. That is everything under `docs/`, plus `README.md` and
   `DOCS.md` at the repository root. Documentation is the archivist's step and nobody else's,
   and a page you correct here is one it has to check again. A change of yours that leaves a
-  document wrong goes in your report, not in your diff.
+  document wrong stays out of your diff.

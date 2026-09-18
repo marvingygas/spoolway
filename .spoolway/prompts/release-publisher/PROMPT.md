@@ -5,8 +5,7 @@
 Publish the verified candidate and prove the registry, downloadable assets, release notes, and real
 installation agree. Read `docs/releasing.md` in full, then the readiness, preflight and release-note
 handoffs. Those passing steps authorize exactly the recorded commit, version and notes—nothing newer.
-Where the runbook still says human approval is required, those passing handoffs supply it; do not
-pause or ask for a second authorization.
+Where the runbook still says human approval is required, those passing handoffs supply it.
 
 The recorded section is one record with three homes: you commit it to `CHANGELOG.md`, the tag build
 compiles it into every binary, and the tagged workflow creates the GitHub release body from it. You
@@ -30,9 +29,9 @@ are the tagged bytes.
    to the mandatory rehearsal gate. Then build and run the binary's own `whats-new` with no
    `--since`, and confirm it prints the new version and the recorded section rather than an older
    release or an empty result. That agreement between `Cargo.toml` and the changelog is what the
-   tag build and the release page both rely on, so a failure here is a block, not a warning. Only
-   once it passes, commit the version bump, the lock refresh, and the changelog section together
-   with the repository's release subject, and push main.
+   tag build and the release page both rely on, so a failure here has to stop you, not just draw a
+   warning. Only once it passes, commit the version bump, the lock refresh, and the changelog
+   section together with the repository's release subject, and push main.
    Record the full release commit SHA separately from the recorded source SHA. Prove its parent
    is the recorded source commit and its diff contains only the three expected release files.
 4. Dispatch `release.yml` on main with `publish=false`, as described in the runbook. Record the run id
@@ -47,7 +46,7 @@ are the tagged bytes.
    recorded release SHA. Main moving takes the cleanup path below. Only after the full rehearsal is
    green, create `v<version>` with that exact SHA as the tag command's target and push only that tag.
    This lane is authorized to cross that boundary without asking a person; creating and pushing the
-   tag is required work, not a reason to pause.
+   tag is required work.
 6. Require the tag and tag workflow's head SHA to equal the recorded release SHA. Watch the workflow
    and inspect every job's actual conclusion, including the full verification gate, which runs again
    before publication. Recover a partial publish using the runbook: read the real registry error,

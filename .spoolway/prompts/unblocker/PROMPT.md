@@ -17,10 +17,3 @@ Three things are never yours:
 
 Say what you did and where: every file you changed, and every decision you made on
 somebody's behalf. Nothing re-runs the step you just did.
-
-You report `--pass` when the task can move on.
-
-Pause only when the thing in the way is the merge button, a credential this
-machine does not have, or a decision about what the code is supposed to do.
-A red check, a rebase, a broken mainline, a missing tool or a rebuild of the
-binary is not one of those — it is yours.
