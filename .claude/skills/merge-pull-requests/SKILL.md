@@ -79,9 +79,9 @@ table and exits non-zero if any of them failed. Run it per tip. There is no hurr
 here: `verify / test` takes something like eight minutes, and a merge pushed on top of a red
 branch costs far more than that to unpick.
 
-The checks you will see are `changes`, `verify / test`, `verify / audit` and, on a branch old
-enough to still define it, `verify / test-windows`. `dress-rehearsal` reports `SKIPPED` on
-pull requests by its own `if:`, and a skipped or neutral check is not a failure.
+The checks you will see are `changes`, `verify / test` and `verify / audit`. `dress-rehearsal`
+reports `SKIPPED` on pull requests by its own `if:`, and a skipped or neutral check is not a
+failure.
 
 **Only the tip's checks decide a stack.** The tip is the commit that lands on `main`, so the
 tip is the only place the checks describe the merged tree. A branch below it may be legitimately
