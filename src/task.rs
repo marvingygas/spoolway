@@ -431,6 +431,17 @@ pub struct Frontmatter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused_at: Option<String>,
 
+    /// Which road caught this pause — `"gate"` for a step's own
+    /// `gate: true`, `"schedule"` for a task's own `gate_at`. `gate_at`
+    /// clears itself the moment it fires (see `commands::report`), so this
+    /// is the one thing left to say which of the two ever held the task;
+    /// `paused_at` alone cannot, since both roads set it the same way.
+    /// Absent for a pause raised from `blocked` itself, which is not a catch
+    /// of either gate. Cleared the moment `paused_at` is, on the same
+    /// arrival, so it never outlives the pause it describes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_by: Option<String>,
+
     /// When the last of those lanes was launched, in epoch seconds.
     ///
     /// Only an unattended run reads it for the backoff, and only for the one

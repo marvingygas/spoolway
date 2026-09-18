@@ -195,17 +195,11 @@ pub fn contract(repo: &Repo, pipelines: &Pipelines, args: &PromptContractArgs) -
 
     println!();
     println!("3  THE MESSAGE TYPED INTO ITS PANE, ONCE IT IS UP");
-    println!(
-        "   Seven of these, one per state, each read from {} when the project has",
-        crate::lane_prompts::path(repo).display()
-    );
-    println!("   written that section and spoolway's own words otherwise.");
-    for state in crate::lane_prompts::STATES {
+    println!("   Seven of these, one per state, spoolway's own words — see `compose::STATES`.");
+    for state in crate::compose::STATES {
         println!();
         println!("   This is `{state}`:");
-        for line in
-            crate::compose::lane_prompt_for_state(repo, &task, pipeline, step, state).lines()
-        {
+        for line in crate::compose::lane_prompt_for_state(&task, pipeline, step, state).lines() {
             println!("   | {line}");
         }
     }
@@ -240,7 +234,7 @@ pub fn contract(repo: &Repo, pipelines: &Pipelines, args: &PromptContractArgs) -
     // `crate::compose::report_contract` for why `blocked` keeps two forms,
     // and why every other step offers `--fail` only when it routes
     // somewhere `--block` does not.
-    for line in crate::compose::report_contract(step).lines() {
+    for line in crate::compose::report_contract(&task, step).lines() {
         println!("   {line}");
     }
     println!();

@@ -473,14 +473,6 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
             true,
         )?;
     }
-    // The seven typed messages a lane's pane receives. One file, not one per
-    // pipeline or per state — a project overrides as many `##` sections as
-    // it wants and leaves the rest to fall back to spoolway's own words.
-    place(
-        root.join(crate::config::LANE_PROMPTS_TEMPLATE),
-        assets::LANE_PROMPTS.as_bytes(),
-        false,
-    )?;
     // No plan skeleton here any more. spoolway-plan carries its own, under the
     // skill's own `assets/`, and writes a self-contained page with it — there
     // is nothing left for `init` to place in the project.

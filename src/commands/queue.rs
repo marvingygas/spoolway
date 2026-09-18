@@ -759,6 +759,7 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Res
     front.tab_id = None;
     front.attempts = 0;
     front.paused_at = None;
+    front.paused_by = None;
     front.launched_at = None;
     front.prompts = Default::default();
     front.rounds = Default::default();

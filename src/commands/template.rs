@@ -1,13 +1,15 @@
-//! `spoolway template contract`: the shapes a project writes prose into that
-//! are neither a pipeline nor a prompt — a task's own body, and a lane's
-//! seven typed messages.
+//! `spoolway template contract`: the one shape a project writes prose into
+//! that is neither a pipeline nor a prompt — a task's own body.
 //!
-//! Neither is parsed the way a pipeline file is: each is prose a project owns
-//! outright, read back whole or substituted by name, never validated against
-//! a schema. This command exists so an agent asked to reshape one reaches for
-//! what actually reads it — [`crate::task_template`] and
-//! [`crate::lane_prompts`] — rather than guessing at a placeholder's
-//! spelling.
+//! Not parsed the way a pipeline file is: prose a project owns outright,
+//! read back whole or substituted by name, never validated against a
+//! schema. This command exists so an agent asked to reshape it reaches for
+//! what actually reads it — [`crate::task_template`] — rather than guessing
+//! at a placeholder's spelling. The seven typed messages a lane's pane
+//! receives used to be a second such shape, project-overridable through
+//! `.spoolway/templates/lane-prompts.md`; they are spoolway's own now, fixed
+//! wording with no template behind them, so this contract no longer names
+//! them.
 
 use super::*;
 
@@ -24,9 +26,9 @@ fn render_template_contract(repo: &Repo) -> String {
     out.push_str("THE TEMPLATE CONTRACT\n");
     out.push_str("=====================\n\n");
     out.push_str(
-        "Two shapes, neither parsed the way a pipeline file is: each is prose a project\nowns \
-         outright, read back whole or substituted by name — never validated against a\nschema, \
-         never rewritten by `spoolway update` once it exists.\n\n",
+        "One shape, not parsed the way a pipeline file is: prose a project owns\noutright, \
+         read back whole or substituted by name — never validated against a\nschema, never \
+         rewritten by `spoolway update` once it exists.\n\n",
     );
 
     out.push_str("TASK — .spoolway/templates/tasks/<pipeline>.md\n");
@@ -42,33 +44,10 @@ fn render_template_contract(repo: &Repo) -> String {
         crate::task_template::FALLBACK
     ));
 
-    out.push_str("LANE-PROMPT — .spoolway/templates/lane-prompts.md\n");
-    out.push_str("  One `## <state>` section per typed message a lane's pane receives:\n");
-    for state in crate::lane_prompts::STATES {
-        out.push_str(&format!("    {state}\n"));
-    }
-    out.push_str(
-        "  A project silent about one state — the file absent, the section absent, or the\n  \
-         section blank — gets spoolway's own built-in wording for it. Placeholders \
-         substituted:\n",
-    );
-    for placeholder in crate::lane_prompts::PLACEHOLDERS {
-        out.push_str(&format!("    {{{placeholder}}}\n"));
-    }
-    out.push_str(
-        "  A `{...}` naming anything else is left exactly as written. `## arrived-by-fail`, \
-         an\n  eighth section composed into the system prompt rather than typed into a pane, \
-         takes\n  one placeholder of its own: `{from}`.\n\n",
-    );
-
     out.push_str("This project's own files:\n");
     out.push_str(&format!(
         "  {}\n",
         relative(&repo.checkout, &repo.task_templates_dir())
-    ));
-    out.push_str(&format!(
-        "  {}\n",
-        relative(&repo.checkout, &repo.lane_prompts_path())
     ));
     out
 }
@@ -77,27 +56,24 @@ fn render_template_contract(repo: &Repo) -> String {
 mod tests {
     use super::*;
 
-    /// The mockup's own promise: the task and lane-prompt shapes, and no
-    /// format copied in — only the paths this project's own templates
-    /// already live at, and pointers at the modules that read them. No `PR —`
-    /// section: nothing reads the pull request template any more, so it is
-    /// not one of the shapes this contract names.
+    /// The mockup's own promise: the task shape and no format copied in —
+    /// only the path this project's own template lives at. No `LANE-PROMPT —`
+    /// section any more: the seven typed messages are spoolway's own, with no
+    /// project template behind them. No `PR —` section either: nothing reads
+    /// the pull request template any more, so it is not one of the shapes
+    /// this contract names.
     #[test]
-    fn template_contract_names_the_task_and_lane_prompt_shapes_and_no_longer_the_pr_one() {
+    fn template_contract_names_the_task_shape_and_no_longer_lane_prompt_or_pr() {
         let repo = crate::commands::testutil::fixture("template-contract");
         let text = render_template_contract(&repo);
-        for fact in [
-            "TASK —",
-            "LANE-PROMPT —",
-            "opening",
-            "task_file",
-            "Status Log",
-        ] {
+        for fact in ["TASK —", "Status Log"] {
             assert!(text.contains(fact), "template contract drops `{fact}`");
         }
-        assert!(
-            !text.contains("PR —"),
-            "template contract still names a shape nothing reads"
-        );
+        for gone in ["LANE-PROMPT —", "PR —"] {
+            assert!(
+                !text.contains(gone),
+                "template contract still names a shape nothing reads"
+            );
+        }
     }
 }

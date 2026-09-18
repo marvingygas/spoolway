@@ -6,17 +6,17 @@
 //! lives apart from [`crate::dispatch`]: composing what a lane is told does
 //! not need a running pass, a multiplexer or a task lock, only the same few
 //! facts every one of these functions takes.
-//! Two files are read on the way: the project's own
-//! `.spoolway/templates/lane-prompts.md`, through
-//! [`crate::lane_prompts::render`], and — when the task has a dependency —
-//! that dependency's own task file, for the branch its worktree was cut
-//! from (see [`Repo::dependency_branch`]). Both are why the typed-message
-//! functions take a [`Repo`], and the second is why [`system_prompt`] and
-//! [`situating`] return a `Result`: a dependency that cannot be resolved is
-//! an error, not a guessed branch name in the prompt. Writing the system
-//! prompt to disk (`write_system_prompt`) and everything about actually
-//! starting a lane with it stays in `dispatch`, which is the half of this
-//! that owns the filesystem and the multiplexer.
+//! One file is read on the way, when the task has a dependency: that
+//! dependency's own task file, for the branch its worktree was cut from
+//! (see [`Repo::dependency_branch`]) — why [`system_prompt`] and
+//! [`situating`] take a [`Repo`] and return a `Result`: a dependency that
+//! cannot be resolved is an error, not a guessed branch name in the prompt.
+//! The seven typed messages a lane's pane receives need nothing from disk —
+//! they are spoolway's own fixed wording, with no project override left to
+//! resolve against them — so their own functions take no [`Repo`] at all.
+//! Writing the system prompt to disk (`write_system_prompt`) and everything
+//! about actually starting a lane with it stays in `dispatch`, which is the
+//! half of this that owns the filesystem and the multiplexer.
 
 use anyhow::Result;
 
@@ -114,7 +114,7 @@ pub(crate) fn system_prompt(
         situating = situating(pipeline, step, task, repo)?,
         prompt = prompt.trim(),
         policy = policy(repo, task, pipeline, step),
-        contract = report_contract(step),
+        contract = report_contract(task, step),
     ))
 }
 
@@ -132,12 +132,11 @@ pub(crate) fn system_prompt(
 /// step — and the reader has no glossary, so it is defined in the sentence
 /// that introduces it rather than assumed.
 ///
-/// Two bullets vary by step. The second states whether a person reads this
-/// pane once the lane reports — true only for a gated step, whose pass parks
-/// rather than routes on; [`policy`] is the paragraph that asks the lane to
-/// act on that fact, this is only the fact itself. `blocked` alone rewrites
-/// the first bullet: every other lane owns one task's own step, and
-/// `blocked`'s does not.
+/// One bullet varies by step — `blocked` alone rewrites the first: every
+/// other lane owns one task's own step, and `blocked`'s does not. The rest
+/// read the same for every lane; a gated step's fact that a person opens
+/// this pane belongs to [`report_contract`], the form it qualifies, not
+/// here.
 pub(crate) fn situating(
     pipeline: &Pipeline,
     step: &Step,
@@ -155,29 +154,17 @@ pub(crate) fn situating(
             .to_string(),
     };
 
-    let second_bullet = match is_gated(step, task) {
-        true => {
-            "- Nobody follows your output as you produce it, but this step is gated: a \
-                  person opens this pane once you report. Ask nothing unless told to."
-        }
-        false => {
-            "- Nobody reads your output as you produce it, and no follow-up comes. Ask \
-                   nothing unless told to."
-        }
-    };
-
     Ok(format!(
         "YOUR LANE\n\n\
          spoolway runs one task at a time through a pipeline of steps, one agent per step. You \
          are a lane: step `{step}` of task `{task}` in pipeline `{pipeline}`, in a git \
          worktree spoolway cut for you. That worktree is your current directory.\n\n\
          {first_bullet}\n\
-         {second_bullet}\n\
-         - Nothing will wake you — not a background job, not a timer. Poll anything you wait \
-         on.\n\
+         - Your output is not read; only what you write to the task file reaches anyone. Ask \
+         nothing unless told to.\n\
+         - Nothing will wake you. Poll anything you wait on.\n\
          - Reporting is the only exit. A turn ended any other way stalls the task.\n\
-         - Commit as you go. Anything left uncommitted is committed for you in one lump when \
-         you report.\
+         - Commit as you go. Anything uncommitted is committed for you when you report.\
          {what_you_have}\
          {what_you_write_down}",
         step = step.id,
@@ -375,69 +362,19 @@ fn toolbox() -> String {
         .to_string()
 }
 
-/// Whether a step's pass will be parked for a person rather than routed on —
-/// the same two roads `commands::report` checks when it actually parks one.
-///
-/// Duplicated rather than shared: `commands::report` computes this alongside
-/// `outcome == Outcome::Pass` and `destination != BLOCKED`, neither of which
-/// exists yet while a prompt is being composed, and pulling the two clauses
-/// that do apply here out into a shared function would cost report.rs a
-/// rewrite this task does not ask for.
-fn is_gated(step: &Step, task: &Task) -> bool {
-    step.gate || task.front.gate_at.as_deref() == Some(step.id.as_str())
-}
-
-/// The four-part shape a lane that stops for a person ends its turn in — see
-/// [`policy`], the only place this is injected. Fixed wording, not validated:
-/// a lane that writes three parts instead of four gets no complaint, the same
-/// footing as everything else a prompt asks for.
-///
-/// Line four is fixed rather than a `spoolway resume` command line, because
-/// the board is where a person already is — see [`crate::status`]'s own `[r]
-/// resumes it`, which this borrows.
-const FOUR_PART_STOP: &str = "If you `--pause`, end your turn with, in order:\n\n  \
-     what this was about and what changed, for somebody who has forgotten\n  \
-     why it stopped here\n  \
-     what to do about it — one clear next step\n  \
-     \"Resume the task on the dispatcher (r/R).\"";
-
 /// Everything true of *this* pass and no other, as the paragraphs `THIS
-/// PASS` opens with: the gate, the four-part stop, a fix pass's findings, a
-/// failed command step.
+/// PASS` opens with: a fix pass's findings, a failed command step.
 ///
 /// This is the half that must not be a prompt's to write. Each of these is
-/// either per-project configuration or per-pass state, and a file that stated
-/// them would be a file that can contradict the config.
+/// per-pass state, and a file that stated it would be a file that can
+/// contradict the run. The gate fact — whether a person will read this pane
+/// once the lane reports, and how it ends its turn — used to live here too,
+/// as advice the binary had no way to enforce; it is gone, and
+/// [`report_contract`] states the one part of it a lane can act on, as a
+/// form rather than a paragraph.
 pub(crate) fn policy(repo: &Repo, task: &Task, pipeline: &Pipeline, step: &Step) -> String {
-    // A gated step used to say so in a paragraph asking the lane to print its
-    // question and end its turn. That did not work — the request *was* the
-    // enforcement, and a small model reads it, decides the work is fine and
-    // reports a pass straight through the gate. `gate:` stays entirely
-    // `commands::report`'s to enforce; this paragraph tells the lane the one
-    // fact worth knowing about its own pane instead — that a person opens it
-    // once the pass lands, where every other pane goes unread — so it can
-    // leave a real screen running instead of tearing it down.
-    let gate = match is_gated(step, task) {
-        false => String::new(),
-        true => "This step is gated: a person opens this pane once you report a pass. Leave \
-                 anything viewable running, close everything else, and finish with a short \
-                 account — what you built, what changed, where to look, and the name of the \
-                 pane you left running. One screen."
-            .to_string(),
-    };
-
-    // The two roads that reach a person: a gate, and `blocked`, where
-    // `--pause` is the other way out. Every other step routes on without
-    // anybody watching, so the shape a pane ends in is not worth the tokens.
-    let four_part_stop = match is_gated(step, task) || step.id == crate::pipeline::BLOCKED {
-        false => String::new(),
-        true => FOUR_PART_STOP.to_string(),
-    };
-
     let paragraphs: Vec<String> = [
-        gate,
-        four_part_stop,
-        arrived_by_fail_paragraph(repo, task, pipeline, step),
+        arrived_by_fail_paragraph(task, pipeline, step),
         failed_command(repo, task, pipeline, step),
     ]
     .into_iter()
@@ -497,31 +434,21 @@ fn failed_command(repo: &Repo, task: &Task, pipeline: &Pipeline, step: &Step) ->
     let log = runs.log_path(&crate::command_step::Runs::key(from, task.id()));
     format!(
         "The command step `{from}` failed and routes back here. It left an exit code and no \
-         report; its whole output is at\n\n    {}\n\nRead that first and find the actual \
-         failure before you touch anything. The tree is as `{from}` found it, so repeating \
-         work that already passed sends it back here unchanged.",
+         report; its whole output is at\n\n    {}",
         log.display(),
     )
 }
 
-/// The built-in `## arrived-by-fail` wording — see [`arrived_by_fail_paragraph`].
-const ARRIVED_BY_FAIL: &str = "Fix pass. `{from}` failed this task back to you; its findings \
-     are in {task_file}'s `## Handoff`, credited to `{from}`. Address exactly those. Do not \
-     re-litigate the verdict.";
-
 /// The paragraph a lane gets when an *agent* step failed it back here — what
 /// a failing `## Review` verdict used to say, before a review became this
-/// project's own concern and not spoolway's. The project's own words, from
-/// `.spoolway/templates/lane-prompts.md`'s `## arrived-by-fail` section, or
-/// spoolway's own built-in — see [`crate::lane_prompts::render`], the same
-/// per-section resolution the seven typed messages already use, reached
-/// directly here rather than through [`crate::lane_prompts::STATES`]: this
-/// is not one of the seven messages typed into a pane, it is a paragraph of
-/// the system prompt itself.
+/// project's own concern and not spoolway's. Spoolway's own fixed wording:
+/// a situation and where to read the rest, nothing about how to treat it —
+/// a project that wants a fix pass held to some further habit writes that
+/// into its own prompt.
 ///
 /// [`failed_command`]'s own case, not this one: a command step reports
 /// nothing, so there is no verdict here for it to name.
-fn arrived_by_fail_paragraph(repo: &Repo, task: &Task, pipeline: &Pipeline, step: &Step) -> String {
+fn arrived_by_fail_paragraph(task: &Task, pipeline: &Pipeline, step: &Step) -> String {
     let Some(previous) = arrived_by_fail(task, pipeline, step) else {
         return String::new();
     };
@@ -529,12 +456,11 @@ fn arrived_by_fail_paragraph(repo: &Repo, task: &Task, pipeline: &Pipeline, step
         return String::new();
     }
 
-    let task_file = task.path.display().to_string();
-    crate::lane_prompts::render(
-        repo,
-        "arrived-by-fail",
-        ARRIVED_BY_FAIL,
-        &[("from", previous.id.as_str()), ("task_file", &task_file)],
+    format!(
+        "Fix pass. `{from}` failed this task back. Its findings are in {task_file}'s `## \
+         Handoff`. Address exactly those.",
+        from = previous.id,
+        task_file = task.path.display(),
     )
 }
 
@@ -569,7 +495,15 @@ fn arrived_by_fail_paragraph(repo: &Repo, task: &Task, pipeline: &Pipeline, step
 /// that has never been told a command exists cannot be tempted to reach for
 /// it, but a lane that infers `--fail` from having seen `--block` and
 /// `--pass` can, so the gap is closed rather than left silent.
-pub(crate) fn report_contract(step: &Step) -> String {
+///
+/// One line closes the whole contract when `step` would hold a pass here —
+/// see [`crate::commands::gate_hold`], read against a hypothetical pass,
+/// since no real outcome exists yet while a prompt is being composed. Which
+/// gate answers picks the sentence: a step's own `gate: true` catches a pass
+/// and nothing else, so it reads *a pass is held here*; a task's own
+/// `gate_at` catches whatever is reported, so it reads *this report is held
+/// here, whatever it is*.
+pub(crate) fn report_contract(task: &Task, step: &Step) -> String {
     use crate::pipeline::Outcome;
 
     let blocked = step.id == crate::pipeline::BLOCKED;
@@ -611,44 +545,42 @@ pub(crate) fn report_contract(step: &Step) -> String {
             .collect();
         contract.push_str(lines.trim_end());
     }
+
+    let hypothetical_destination = step
+        .destination(Outcome::Pass)
+        .unwrap_or(crate::pipeline::BLOCKED)
+        .to_string();
+    if let Some(gate) =
+        crate::commands::gate_hold(task, step, Outcome::Pass, &hypothetical_destination)
+    {
+        let line = match gate {
+            crate::commands::Gate::Step => "A pass is held here for a person, who opens this pane.",
+            crate::commands::Gate::Schedule => {
+                "This report is held here for a person, whatever it is."
+            }
+        };
+        contract.push_str("\n\n");
+        contract.push_str(line);
+    }
     contract
 }
 
-/// The built-in wording for each of the seven typed messages a lane's pane
-/// receives, in [`crate::lane_prompts::STATES`] order — what
-/// [`crate::lane_prompts::render`] falls back to when a project's own
-/// `.spoolway/templates/lane-prompts.md` is silent about that state. See that
-/// module for the substitution rule and the fallback chain.
-const OPENING: &str = "{skills}\nRead {task_file} before anything else.";
-
-const RESUME: &str = "This lane was blocked and a person has cleared it. Same session: do not \
-     start over. The last `## Status Log` entry in {task_file} is what they did. Decide whether \
-     it clears what stopped you, then carry on.";
-
-const RESUME_UNATTENDED: &str = "This lane was blocked and an unblocker lane has since run on this task. Same session: do \
-     not start over. The last `## Status Log` entry in {task_file} is what it did, and `## \
-     Blocker` is what it tried. Decide whether that clears what stopped you, then carry on. If \
-     it does not, `--block` again with what you found.";
-
-const CARRY: &str = "Same session, continued: your next visit to this task, with nobody in between. What it \
-     asked for, or left, has been done. Do not start over, and do not re-read what you are \
-     still holding. What changed is in the `## Status Log` of {task_file}.";
-
-const PARK: &str = "A person stopped this lane's turn with a keypress and has put it back. \
-     Nothing was blocked and nothing changed. Same session: pick up where the interrupt cut you \
-     off.";
-
-const PARK_ESCALATED: &str = "This lane went quiet and never reported, so spoolway tore it down and put the task back \
-     here. Nothing failed a check. The last `## Status Log` entry in {task_file} says why. Same \
-     session: read it, then carry on.";
-
-const REMINDER: &str = "`{step}` ended its turn without reporting. Here is the report contract again:\n\n\
-     {report_contract}";
+/// Every state a lane's pane is prompted in, in the order a lane can reach
+/// them — what `spoolway prompt contract`'s section 3 shows, one state at a
+/// time. `reminder` is the odd one out — not a launch at all, but the nudge
+/// sent to a lane that has gone quiet.
+pub(crate) const STATES: &[&str] = &[
+    "opening",
+    "resume",
+    "resume-unattended",
+    "carry",
+    "park",
+    "park-escalated",
+    "reminder",
+];
 
 /// The message typed into a lane's pane once it is up: a pointer to the task
-/// file, and nothing else — spoolway's own wording, or the project's, if
-/// `.spoolway/templates/lane-prompts.md` names an `## opening` section of
-/// its own. See [`lane_prompts`].
+/// file, and nothing else.
 ///
 /// Everything else — the report forms, `--handoff`, the reasoning behind
 /// them — is in [`system_prompt`], the half a model reads
@@ -661,34 +593,22 @@ const REMINDER: &str = "`{step}` ended its turn without reporting. Here is the r
 /// again, it is already here.
 ///
 /// A step naming `skills:` gets one `/name` line per skill first, in
-/// declaration order, then a blank line, then `{task_file}`'s line,
-/// unchanged. It has to lead: a harness only expands a slash command where
-/// it opens a message, so an invocation appended after it would just be
-/// read as text about a skill rather than a command to run one. Substituted
-/// in as `{skills}` rather than hard-coded ahead of the template, so a
-/// project rewriting `## opening` still gets its skills invoked — and
-/// renders to nothing, not a stray blank line, when a step names none: the
-/// whole message is trimmed after substitution, which is what keeps the
-/// built-in wording identical to what this returned before the template
-/// existed.
-pub(crate) fn opening_prompt(
-    repo: &Repo,
-    task: &Task,
-    _pipeline: &Pipeline,
-    step: &Step,
-) -> String {
+/// declaration order, then a blank line, then the task file's own line. It
+/// has to lead: a harness only expands a slash command where it opens a
+/// message, so an invocation appended after it would just be read as text
+/// about a skill rather than a command to run one.
+pub(crate) fn opening_prompt(task: &Task, _pipeline: &Pipeline, step: &Step) -> String {
     let skills: String = step
         .skills
         .iter()
         .map(|name| format!("/{name}\n"))
         .collect();
-    let task_file = task.path.display().to_string();
-    crate::lane_prompts::render(
-        repo,
-        "opening",
-        OPENING,
-        &[("task_file", &task_file), ("skills", &skills)],
+    format!(
+        "{skills}\nRead {} before anything else.",
+        task.path.display()
     )
+    .trim()
+    .to_string()
 }
 
 /// What a resumed lane is told, instead of the opening briefing.
@@ -702,9 +622,7 @@ pub(crate) fn opening_prompt(
 /// Attended, a person has been and gone, and the `## Status Log` says what
 /// they did. Unattended, an unblocker lane has — the default staffing for
 /// `blocked` under `unattended.blocked_prompt` — and both `## Status Log`
-/// and `## Blocker` say what it tried. Telling an unattended lane that a
-/// person has cleared its path would send it looking through the log for a
-/// fix a person never made.
+/// and `## Blocker` say what it tried.
 ///
 /// No report form and no `stage:` warning here any more — both are already
 /// in [`system_prompt`], which a resumed lane was also launched with, so
@@ -712,18 +630,19 @@ pub(crate) fn opening_prompt(
 /// duplication this task cuts. `pipeline` is unused for the same reason it
 /// still appears: kept so the three prompt functions share one shape and a
 /// caller never has to remember which needs it.
-pub(crate) fn resume_prompt(
-    repo: &Repo,
-    task: &Task,
-    _pipeline: &Pipeline,
-    unattended: bool,
-) -> String {
-    let task_file = task.path.display().to_string();
-    let (state, builtin) = match unattended {
-        false => ("resume", RESUME),
-        true => ("resume-unattended", RESUME_UNATTENDED),
-    };
-    crate::lane_prompts::render(repo, state, builtin, &[("task_file", &task_file)])
+pub(crate) fn resume_prompt(task: &Task, _pipeline: &Pipeline, unattended: bool) -> String {
+    let task_file = task.path.display();
+    match unattended {
+        false => format!(
+            "This lane was blocked; a person has cleared it. Same session — do not start \
+             over. What they did is the last `## Status Log` entry in {task_file}."
+        ),
+        true => format!(
+            "This lane was blocked; an unblocker lane has since run. Same session — do not \
+             start over. What it did is the last `## Status Log` entry in {task_file}; what \
+             it tried is `## Blocker`."
+        ),
+    }
 }
 
 /// What a lane resumed by `session:` is told, instead of the opening
@@ -733,9 +652,13 @@ pub(crate) fn resume_prompt(
 /// `resume_prompt` exists to say. A `session:` step's prompt simply comes
 /// back for its next visit — a fix after a review, a second review after the
 /// fix — with nobody in between and nothing to explain except what changed.
-pub(crate) fn carry_prompt(repo: &Repo, task: &Task, _pipeline: &Pipeline) -> String {
-    let task_file = task.path.display().to_string();
-    crate::lane_prompts::render(repo, "carry", CARRY, &[("task_file", &task_file)])
+pub(crate) fn carry_prompt(task: &Task, _pipeline: &Pipeline) -> String {
+    format!(
+        "Same session, continued: your next visit to this task, with nobody in between. Do \
+         not start over. Why you are back is in `THIS PASS`; what changed is in the `## \
+         Status Log` of {}.",
+        task.path.display(),
+    )
 }
 
 /// What a lane resumed after a park is told, instead of the opening
@@ -755,66 +678,50 @@ pub(crate) fn carry_prompt(repo: &Repo, task: &Task, _pipeline: &Pipeline) -> St
 /// tear_down_and_escalate`], a lane reminded three times and torn down, or
 /// one stopped past its context ceiling — where something *did* happen, and
 /// `park`'s own wording would be false; `park-escalated` says what.
-pub(crate) fn park_prompt(
-    repo: &Repo,
-    task: &Task,
-    _pipeline: &Pipeline,
-    escalated: bool,
-) -> String {
-    let task_file = task.path.display().to_string();
+pub(crate) fn park_prompt(task: &Task, _pipeline: &Pipeline, escalated: bool) -> String {
     match escalated {
-        false => crate::lane_prompts::render(repo, "park", PARK, &[]),
-        true => crate::lane_prompts::render(
-            repo,
-            "park-escalated",
-            PARK_ESCALATED,
-            &[("task_file", &task_file)],
+        false => "A person stopped this lane's turn and has put it back. Nothing changed. \
+                  Same session — pick up where you were cut off."
+            .to_string(),
+        true => format!(
+            "This lane went quiet and was torn down; the task is back here. Nothing failed a \
+             check. Same session — why is in the last `## Status Log` entry in {}.",
+            task.path.display(),
         ),
     }
 }
 
 /// The seventh typed message: what a lane that has gone quiet is nudged with,
-/// naming the step it is on and repeating the report contract it was
-/// launched with. Its own function rather than inlined at the one call
-/// site, so `spoolway prompt contract` can render it too, against the same
-/// wording a real nudge would use.
-///
-/// `pipeline` is unused now that [`report_contract`] reads everything it
-/// needs off `step` — kept on the signature for the same reason
-/// [`opening_prompt`] and [`park_prompt`] keep their own unused `pipeline`:
-/// this is one of the seven [`lane_prompt_for_state`] dispatches to by the
-/// same match arm shape, and a caller should not have to remember which of
-/// them needs it.
-pub(crate) fn reminder_prompt(repo: &Repo, _pipeline: &Pipeline, step: &Step) -> String {
-    let contract = report_contract(step);
-    crate::lane_prompts::render(
-        repo,
-        "reminder",
-        REMINDER,
-        &[("step", &step.id), ("report_contract", &contract)],
+/// repeating the report contract it was launched with. Its own function
+/// rather than inlined at the one call site, so `spoolway prompt contract`
+/// can render it too, against the same wording a real nudge would use.
+pub(crate) fn reminder_prompt(task: &Task, step: &Step) -> String {
+    format!(
+        "`{}` ended its turn without reporting.\n\n{}",
+        step.id,
+        report_contract(task, step),
     )
 }
 
 /// Every one of the seven typed messages, rendered for `state` against a real
 /// or sample task — what `spoolway prompt contract`'s section 3 shows, one
-/// state at a time. `state` outside [`crate::lane_prompts::STATES`] renders
-/// empty rather than panicking: the contract's own loop is the only caller,
-/// and it never asks for anything else.
+/// state at a time. `state` outside [`STATES`] renders empty rather than
+/// panicking: the contract's own loop is the only caller, and it never asks
+/// for anything else.
 pub(crate) fn lane_prompt_for_state(
-    repo: &Repo,
     task: &Task,
     pipeline: &Pipeline,
     step: &Step,
     state: &str,
 ) -> String {
     match state {
-        "opening" => opening_prompt(repo, task, pipeline, step),
-        "resume" => resume_prompt(repo, task, pipeline, false),
-        "resume-unattended" => resume_prompt(repo, task, pipeline, true),
-        "carry" => carry_prompt(repo, task, pipeline),
-        "park" => park_prompt(repo, task, pipeline, false),
-        "park-escalated" => park_prompt(repo, task, pipeline, true),
-        "reminder" => reminder_prompt(repo, pipeline, step),
+        "opening" => opening_prompt(task, pipeline, step),
+        "resume" => resume_prompt(task, pipeline, false),
+        "resume-unattended" => resume_prompt(task, pipeline, true),
+        "carry" => carry_prompt(task, pipeline),
+        "park" => park_prompt(task, pipeline, false),
+        "park-escalated" => park_prompt(task, pipeline, true),
+        "reminder" => reminder_prompt(task, step),
         _ => String::new(),
     }
 }

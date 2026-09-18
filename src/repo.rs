@@ -399,12 +399,6 @@ impl Repo {
         self.checkout.join(crate::config::TRACKING_TEMPLATES_DIR)
     }
 
-    /// Where a project overrides the seven typed messages a lane's pane
-    /// receives — see [`crate::lane_prompts`].
-    pub fn lane_prompts_path(&self) -> PathBuf {
-        self.checkout.join(crate::config::LANE_PROMPTS_TEMPLATE)
-    }
-
     /// Every task's lane state, across every dispatcher this machine has run
     /// for this project.
     pub fn lanes_file(&self) -> PathBuf {

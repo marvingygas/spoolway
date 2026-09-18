@@ -548,12 +548,11 @@ and exits non-zero on a refusal.
 
 ### `spoolway template contract`
 
-Print the two prose templates a project owns and where each lives.
+Print the prose template a project owns and where it lives.
 
 | Template | File |
 |---|---|
 | Task body | `.spoolway/templates/tasks/<pipeline>.md` |
-| Lane messages | `.spoolway/templates/lane-prompts.md` |
 
 ### `spoolway hook contract`
 

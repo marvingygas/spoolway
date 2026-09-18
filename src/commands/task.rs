@@ -68,6 +68,7 @@ const IGNORED_KEYS: &[&str] = &[
     "pane_id",
     "tab_id",
     "paused_at",
+    "paused_by",
     "launched_at",
     "prompts",
     "rounds",

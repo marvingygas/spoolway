@@ -900,6 +900,7 @@ mod tests {
             tab_id: None,
             attempts: 0,
             paused_at: None,
+            paused_by: None,
             launched_at: None,
             prompts: Default::default(),
             rounds: Default::default(),

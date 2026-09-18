@@ -41,7 +41,7 @@ A lane is sent two things.
 flowchart LR
   A[spoolway's framing<br>WHAT YOU HAVE, WHAT YOU WRITE DOWN] --> S[system prompt file]
   B[your PROMPT.md, verbatim] --> S
-  C[this pass: gate, fix pass, failed command, report contract] --> S
+  C[this pass: fix pass, failed command, report contract] --> S
   S -->|"{prompt_file}"| L[lane]
   M[typed message: where the task file is] --> L
 ```
@@ -55,7 +55,6 @@ Paragraphs sent only when they apply:
 | Paragraph | Sent when |
 |---|---|
 | The previous step failed the task back. Work from its `## Handoff`. | the previous step routes `on_fail` here |
-| A person reads this pane after the report. Leave anything viewable running. | the step has `gate:` or the task's `gate_at:` names it |
 | A command step failed into this one, and where its log is. | the previous step is a command step whose `on_fail` is here |
 | The task blocked and nobody is coming. Clear the obstacle. | the lane runs in an [unattended run](pipelines.md#unattended-runs) |
 | `spoolway queue list`, `spoolway queue show`, `spoolway lane` and `spoolway resume`. | the step is `blocked` |
@@ -69,14 +68,17 @@ sits on. `WHAT YOU WRITE DOWN` lists the task-file headings spoolway appends to:
 
 The system prompt opens with the step and the task, then five rules:
 
-- One step's worth of the job. Other steps and other tasks are somebody else's.
-- Not a conversation. Nobody reads the pane unless the step is gated.
-- Nothing will wake you. Poll inside the turn for anything you wait on.
+- One step's worth of the job, and nothing enforces it. The role below is the whole of what is
+  the lane's.
+- The lane's output is not read. Only what it writes to the task file reaches anyone. It asks
+  nothing unless told to.
+- Nothing will wake you. Poll anything you wait on.
 - Reporting is the only exit. A turn ended any other way stalls the task.
 - Commit as you go. Uncommitted work is committed for you when the lane reports.
 
-A `blocked` step gets a different opening and a `READING THE RUN` block naming
-`spoolway queue list`, `spoolway queue show`, `spoolway lane` and `spoolway resume`.
+A `blocked` step gets a different first rule — its remit is the run, not one task's step — and a
+`READING THE RUN` block naming `spoolway queue list`, `spoolway queue show`, `spoolway lane` and
+`spoolway resume`.
 
 A report can leave a note for the next step with `--handoff "<text>"`. It is written into the
 task file's `## Handoff` and can be repeated.
@@ -100,7 +102,7 @@ It prints seven sections:
 | 3 | The message typed into its pane | One sentence naming the task file, after any `skills:` invocations |
 | 4 | The environment every lane has | The table below |
 | 5 | What a lane may reach | Whatever the person running the dispatcher can |
-| 6 | How a lane finishes | The forms this step may use, and where each one routes. `--fail` is left out when it would route where `--block` already does. On `blocked`: `--pass` and `--pause`. A form left out is named under a refusal, so the lane knows it exists and may not use it |
+| 6 | How a lane finishes | The forms this step may use, and where each one routes. `--fail` is left out when it would route where `--block` already does. On `blocked`: `--pass` and `--pause`. A form left out is named under a refusal, so the lane knows it exists and may not use it. A step held in front of a person adds one line saying so: a step's own `gate:` holds a pass, for whoever opens the pane; a task's own `gate_at:` holds the report whatever it is |
 | 7 | The shape to write | The headings below, then what a prompt may never restate, the ban on examples, and the ban on sentences defending a rule |
 
 | Variable | What it is |
