@@ -7,7 +7,6 @@
 # dispatch.worktree_root                <path>                 (blank)                                                 Where a dispatched task's worktree is cut, whatever the backend; blank means `~/.spoolway/<project>/worktrees`.
 # dispatch.interval                     <duration>             10s                                                     How long the dispatcher waits between passes.
 # dispatch.lane_quiet                   <duration>             15m                                                     How long a lane may say nothing before the dispatcher reminds it to report. Not the same thing as `interval`, which is only how often a pass looks.
-# dispatch.default_pipeline             <name>                 default                                                 Which pipeline a task runs on when its own `pipeline:` is absent.
 # dispatch.auto_commit                  true, false            true                                                    Whether spoolway commits a lane's leftover work when its step settles.
 # dispatch.priority                     group, any             group                                                   Whether a free slot is filled from every ready task, or from the group already landing first.
 # dispatch.lane_child_ceiling           <duration>             1h                                                      How long a lane may be excused for a process it started that is still running before the reminder loop treats it as silent anyway.
@@ -54,7 +53,6 @@ tmux_mode = "grouped"
 worktree_root = ""
 interval = "10s"
 lane_quiet = "15m"
-default_pipeline = "impl"
 auto_commit = true
 
 [unattended]
