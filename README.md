@@ -61,7 +61,7 @@ npm install -g spoolway
 ```
 
 The package is a small wrapper around a prebuilt binary. It runs on Linux (x64, arm64,
-musl), macOS (Apple Silicon, Intel) and Windows (x64, experimental). `spoolway update` shows
+musl) and macOS (Apple Silicon, Intel). `spoolway update` shows
 what changed, and `spoolway whats-new` prints the release notes offline.
 
 From source instead, in a clone of this repository:
@@ -284,7 +284,7 @@ Event hooks sync tasks with an issue tracker. Sample scripts for GitHub and Jira
 | `done` | A task finishes |
 
 **The two shipped scripts are samples.** `spoolway init` writes `github.sh` and `jira.sh` into
-`.spoolway/hooks/`. A native Windows install gets the `.ps1` pair.
+`.spoolway/hooks/`.
 
 See **[Issue Tracking](docs/configuration.md#issue_tracking--a-hook-fired-on-four-task-events)**.
 

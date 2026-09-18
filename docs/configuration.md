@@ -375,14 +375,14 @@ refuses.
 
 ### The shipped hook scripts
 
-`spoolway init` writes `github.sh` and `jira.sh` into `.spoolway/hooks/`, or `github.ps1` and
-`jira.ps1` on native Windows. `spoolway update` never changes them. Switch trackers with
+`spoolway init` writes `github.sh` and `jira.sh` into `.spoolway/hooks/`. `spoolway update`
+never changes them. Switch trackers with
 `spoolway config set issue_tracking.hook <file>`.
 
 | Script | Needs | What it does |
 |---|---|---|
-| `github.sh` / `github.ps1` | `gh`, logged in | Reads an issue on `fetch`. Creates the epic and ticket on `open`, nests them under the issue in `SPOOLWAY_SOURCE`, and returns `slug=gh-<number>` and `url=`. Comments with the task file on `blocked` and `paused`. Closes the epic on the group's last `done`. |
-| `jira.sh` / `jira.ps1` | `acli`, and `jq` for `.sh` | The same events. Returns the lowercased key as the slug. Comments name the task without attaching the file. Check the link type, epic status and JSON field names named in the script's header against your site. |
+| `github.sh` | `gh`, logged in | Reads an issue on `fetch`. Creates the epic and ticket on `open`, nests them under the issue in `SPOOLWAY_SOURCE`, and returns `slug=gh-<number>` and `url=`. Comments with the task file on `blocked` and `paused`. Closes the epic on the group's last `done`. |
+| `jira.sh` | `acli` and `jq` | The same events. Returns the lowercased key as the slug. Comments name the task without attaching the file. Check the link type, epic status and JSON field names named in the script's header against your site. |
 
 ## Retired keys
 

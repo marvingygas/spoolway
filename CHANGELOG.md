@@ -28,6 +28,9 @@ bookkeeping out of them and describe user-visible outcomes.
 - A `--pass` out of a staffed `blocked` step now carries the task to that step's `on_pass` (or back to itself for a command step) instead of always advancing past it, and a `--pause`, `--fail` or `--block` from that lane now hands the task back to the step it blocked on via `spoolway resume` — before, all three outcomes advanced the task past the blocked step. The `unattended.skip_blocked_lane` config key that used to control this is retired: `spoolway config get unattended.skip_blocked_lane` and `spoolway config set unattended.skip_blocked_lane <value>` now fail with `no config key` instead of resolving it. Delete any `unattended.skip_blocked_lane = ...` line from `.spoolway/config.toml`; a config that still names it loads with a note that the key is no longer read and drops it on the next save. (#147)
 - `spoolway template contract` now lists three template shapes instead of four. `.spoolway/templates/task-log.md` (and the shipped `assets/task-log.md` fallback) is retired — the Status Log/Handoff/Blocker wording a lane is told to write is fixed and built into the binary rather than project-overridable. Delete any project-local `.spoolway/templates/task-log.md`; it is no longer read. (#135)
 
+### Removed
+- **Windows support.** The last release carrying a Windows binary is 0.3.x. Windows was always marked experimental and never had a headless backend. Run the Linux build under WSL: `wsl npm install -g spoolway`. `@spoolway/win32-x64` is deprecated on npm; published versions still install.
+
 ### Reliability
 - A Windows process that lost the race to migrate a project's legacy state directory (the `~/.spoolway/<name>/` → `~/.spoolway/<label>-<id>/` move from 0.3.0) could surface a bare "Access is denied" error out of a migration that had in fact just succeeded beside it — Windows reports a losing racer's rename as `ERROR_ACCESS_DENIED`, not the `ENOENT` spoolway checked for. The race is now read off the outcome (the legacy home gone, the id-keyed home standing as a directory) rather than off one errno, and a rename Windows is refusing over a held handle is retried for up to 500ms before it is treated as a real failure. (#149)
 - The same legacy-home migration had a second, platform-independent race one step further on: a process finishing an interrupted migration could hold a stale parse error over `project.toml` after a competing migration finished upgrading that same record in the window between the two, surfacing a raw `missing field id` out of a migration that had already succeeded. The record is now judged off a fresh read taken at the point of failure, not off the read that produced the now-stale error. (#151)
@@ -35,7 +38,7 @@ bookkeeping out of them and describe user-visible outcomes.
 
 ### Upgrading
 - Install or update with `npm install -g spoolway@0.4.0`, or run it without installing via `npx spoolway@0.4.0`.
-- The `spoolway` wrapper package selects one of six platform packages at install time: linux-x64-gnu, linux-arm64-gnu, linux-x64-musl, darwin-arm64, darwin-x64 and win32-x64.
+- The `spoolway` wrapper package selects one of five platform packages at install time: linux-x64-gnu, linux-arm64-gnu, linux-x64-musl, darwin-arm64 and darwin-x64.
 - After upgrading, run `spoolway whats-new` to read this record back from the installed binary.
 
 Release: https://github.com/marvingygas/spoolway/releases/tag/v0.4.0
