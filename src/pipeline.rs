@@ -1852,16 +1852,14 @@ fn opt(value: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
-/// Every pipeline defined for a project, and which one a task gets by default.
+/// Every pipeline defined for a project.
 ///
 /// Assembled rather than parsed: each pipeline is its own file under
-/// `.spoolway/pipelines/`, named by that file, and the two fields that are not
-/// per-pipeline come from config.toml.
+/// `.spoolway/pipelines/`, named by that file. There is no project default —
+/// every task names the pipeline it runs on, and a task that does not is
+/// refused before it can reach one.
 #[derive(Debug, Clone)]
 pub struct Pipelines {
-    /// Pipeline a task runs on when it names none. `dispatch.default_pipeline`.
-    pub default: String,
-
     pub pipelines: BTreeMap<String, Pipeline>,
 }
 
@@ -1934,9 +1932,9 @@ impl Pipelines {
             bail!(
                 "{} is the old single-file shape, which this spoolway no longer reads. \
                  Split it by hand: one `.spoolway/pipelines/<name>.yml` per `pipelines:` entry \
-                 (the file name is the pipeline name, so drop the map key), move `default:` to \
-                 `dispatch.default_pipeline` in config.toml, \
-                 then delete the old file. `spoolway pipeline contract` prints the annotated \
+                 (the file name is the pipeline name, so drop the map key and the old \
+                 `default:` — every task now names its own pipeline instead), then delete \
+                 the old file. `spoolway pipeline contract` prints the annotated \
                  blank for reference.",
                 old.display()
             );
@@ -1986,10 +1984,7 @@ impl Pipelines {
             }
         }
 
-        let mut set = Pipelines {
-            default: config.dispatch.default_pipeline.clone(),
-            pipelines,
-        };
+        let mut set = Pipelines { pipelines };
         set.validate()?;
 
         // Every `blocked` step's description is still `None` here: a
@@ -2041,23 +2036,15 @@ impl Pipelines {
         pipelines
     }
 
-    /// The two shipped pipelines, assembled against `config` rather than the
-    /// built-in default. `spoolway pipeline check` no longer opens these —
-    /// it derives every finding from a project's own loaded set — so this is
-    /// release-time proof only: `src/assets.rs`'s own tests hold
-    /// `assets/pipelines/*.yml` to the same structural rules and to
-    /// neutrality about Pi, model and effort choices.
-    ///
-    /// `dispatch.default_pipeline` is forced to `default` first: this is a
-    /// fixed two-pipeline reference set, not a project's real routing, and
-    /// `assemble`'s own [`Pipelines::validate`] refuses a default that names
-    /// a pipeline outside the set it is validating — which a project whose
-    /// real default is `impl`, say, would otherwise trip on every time.
+    /// The two shipped pipelines, assembled against `config`. `spoolway
+    /// pipeline check` no longer opens these — it derives every finding from
+    /// a project's own loaded set — so this is release-time proof only:
+    /// `src/assets.rs`'s own tests hold `assets/pipelines/*.yml` to the same
+    /// structural rules and to neutrality about Pi, model and effort
+    /// choices.
     #[cfg(test)]
     pub(crate) fn shipped(config: &crate::config::Config) -> Result<Pipelines> {
-        let mut config = config.clone();
-        config.dispatch.default_pipeline = "default".to_string();
-        Pipelines::assemble(builtin_pipelines()?, &config)
+        Pipelines::assemble(builtin_pipelines()?, config)
     }
 
     /// Look up a pipeline by name, with an error listing the defined ones.
@@ -2070,9 +2057,16 @@ impl Pipelines {
         })
     }
 
-    /// The pipeline a task runs on: the one it names, or the default.
+    /// The pipeline a task runs on. Every task must name one by now —
+    /// [`crate::commands::dispatch`]'s own start preflight refuses the whole
+    /// run before any lane reaches this — so a task still missing one here
+    /// is a defensive refusal, not the first place the absence is caught.
     pub fn for_task(&self, task: &crate::task::Task) -> Result<&Pipeline> {
-        let name = task.front.pipeline.as_deref().unwrap_or(&self.default);
+        let name = task
+            .front
+            .pipeline
+            .as_deref()
+            .with_context(|| format!("task `{}` has no `pipeline:`", task.id()))?;
         self.get(name)
             .with_context(|| format!("task `{}` names a pipeline that does not exist", task.id()))
     }
@@ -2132,15 +2126,6 @@ impl Pipelines {
     pub fn validate(&self) -> Result<()> {
         if self.pipelines.is_empty() {
             bail!("no pipelines defined");
-        }
-        if !self.pipelines.contains_key(&self.default) {
-            bail!(
-                "`dispatch.default_pipeline` names `{}`, and no file defines it \
-                 (defined: {}). Set it with `spoolway config set dispatch.default_pipeline \
-                 <name>`, or add the file it is asking for.",
-                self.default,
-                self.names().join(", ")
-            );
         }
         for (name, pipeline) in &self.pipelines {
             pipeline
@@ -2676,23 +2661,13 @@ mod tests {
         BTreeMap::from([(id.to_string(), parse_unchecked(id, &yaml).unwrap())])
     }
 
-    /// [`crate::config::Config::default`], pointed at `name` — every test
-    /// below builds one pipeline and has to name it as the default, or
-    /// `Pipelines::validate` refuses the set for a reason that has nothing to
-    /// do with what the test is about.
-    fn config_for(name: &str) -> crate::config::Config {
-        let mut config = crate::config::Config::default();
-        config.dispatch.default_pipeline = name.to_string();
-        config
-    }
-
     /// A pipeline that declares no `blocked` step of its own gets one built
     /// straight from `[unattended]`'s `blocked_*` keys, appended last, and
     /// `pipeline_check` — via `Pipelines::validate` — sees the same step
     /// `pipeline.step("blocked")` finds.
     #[test]
     fn assemble_materialises_blocked_from_config_for_a_pipeline_declaring_none() {
-        let mut config = config_for("solo");
+        let mut config = crate::config::Config::default();
         config.unattended.blocked_agent = "pi".into();
         config.unattended.blocked_model = "my-model".into();
         config.unattended.blocked_effort = "high".into();
@@ -2721,7 +2696,7 @@ mod tests {
     /// the others.
     #[test]
     fn assemble_fills_in_whatever_a_declared_override_left_out() {
-        let mut config = config_for("ui");
+        let mut config = crate::config::Config::default();
         config.unattended.blocked_agent = "claude".into();
         config.unattended.blocked_model = "config-model".into();
         config.unattended.blocked_effort = "medium".into();
@@ -2752,7 +2727,7 @@ mod tests {
     /// valid one.
     #[test]
     fn assemble_refuses_anything_but_the_five_keys_on_a_declared_override() {
-        let config = config_for("p");
+        let config = crate::config::Config::default();
         let cases: &[(&str, &str)] = &[
             ("description: nope\n", "description"),
             ("slot: false\n", "slot"),
@@ -2776,7 +2751,7 @@ mod tests {
     /// its own work the moment anything re-validated the assembled pipeline.
     #[test]
     fn revalidating_an_assembled_pipeline_does_not_refuse_its_own_blocked_description() {
-        let config = config_for("solo");
+        let config = crate::config::Config::default();
         let set = Pipelines::assemble(one_step_pipeline("solo", ""), &config).unwrap();
         set.validate()
             .expect("an assembled set must validate again cleanly");
@@ -2788,7 +2763,7 @@ mod tests {
     /// `spoolway config set` stays usable to fix it.
     #[test]
     fn a_blank_blocked_model_still_assembles() {
-        let mut config = config_for("solo");
+        let mut config = crate::config::Config::default();
         config.unattended.blocked_model = String::new();
 
         let set = Pipelines::assemble(one_step_pipeline("solo", ""), &config).unwrap();
@@ -3442,7 +3417,7 @@ mod tests {
             )
             .unwrap();
 
-            let pipelines = Pipelines::load(root, &config_for("impl")).unwrap();
+            let pipelines = Pipelines::load(root, &crate::config::Config::default()).unwrap();
             let pipeline = pipelines.get("impl").unwrap();
             let implement = pipeline.step("implement").unwrap();
             assert_eq!(implement.model.as_deref(), Some("claude-opus-5"));
@@ -3475,7 +3450,7 @@ mod tests {
             )
             .unwrap();
 
-            let err = Pipelines::load(root, &config_for("impl")).unwrap_err();
+            let err = Pipelines::load(root, &crate::config::Config::default()).unwrap_err();
             let message = format!("{err:#}");
             assert!(message.contains("nonesuch"), "{message}");
             assert!(message.contains("impl"), "{message}");
@@ -3497,7 +3472,7 @@ mod tests {
             )
             .unwrap();
 
-            let err = Pipelines::load(root, &config_for("impl")).unwrap_err();
+            let err = Pipelines::load(root, &crate::config::Config::default()).unwrap_err();
             let message = format!("{err:#}");
             assert!(message.contains("`id:`"), "{message}");
             assert!(
@@ -3521,7 +3496,7 @@ mod tests {
             )
             .unwrap();
 
-            let err = Pipelines::load(root, &config_for("impl")).unwrap_err();
+            let err = Pipelines::load(root, &crate::config::Config::default()).unwrap_err();
             assert!(format!("{err:#}").contains("unknown step"), "{err:#}");
         });
     }
@@ -3531,7 +3506,7 @@ mod tests {
     #[test]
     fn with_no_overrides_directory_load_is_unchanged() {
         with_override_fixture("absent", |root| {
-            let config = config_for("impl");
+            let config = crate::config::Config::default();
             let loaded = Pipelines::load(root, &config).unwrap();
             let tracked = Pipelines::load_tracked(root, &config).unwrap();
             assert_eq!(
@@ -3560,7 +3535,7 @@ mod tests {
             )
             .unwrap();
 
-            let config = config_for("impl");
+            let config = crate::config::Config::default();
             let tracked = Pipelines::load_tracked(root, &config).unwrap();
             assert_eq!(
                 tracked

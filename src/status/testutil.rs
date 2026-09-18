@@ -47,7 +47,7 @@ pub fn add_to(
     group: Option<&str>,
 ) {
     let mut frontmatter = format!(
-        "id: {id}\ntitle: {id}, done\ngroup: {}\n",
+        "id: {id}\ntitle: {id}, done\ngroup: {}\npipeline: default\n",
         group.unwrap_or("demo")
     );
     if !depends_on.is_empty() {

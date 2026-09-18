@@ -1029,29 +1029,26 @@ mod tests {
         std::fs::create_dir_all(root.join(".spoolway")).unwrap();
         std::fs::write(
             Config::path_in(&root),
-            "[dispatch]\n# chosen for this project\ndefault_pipeline = \"default\"\n",
+            "[dispatch]\n# chosen for this project\nworktree_root = \"/one\"\n",
         )
         .unwrap();
         let overrides = dir_for(&root).unwrap();
         std::fs::create_dir_all(&overrides).unwrap();
         std::fs::write(
             config_patch_path(&overrides),
-            "[dispatch]\ndefault_pipeline = \"bugfix\"\n",
+            "[dispatch]\nworktree_root = \"/two\"\n",
         )
         .unwrap();
 
         let changes = promote_config_patch(&root).unwrap();
         assert_eq!(
             changes,
-            vec![(
-                "dispatch.default_pipeline".to_string(),
-                "bugfix".to_string()
-            )]
+            vec![("dispatch.worktree_root".to_string(), "/two".to_string())]
         );
 
         let written = std::fs::read_to_string(Config::path_in(&root)).unwrap();
         assert!(written.contains("# chosen for this project"));
-        assert!(written.contains("default_pipeline = \"bugfix\""));
+        assert!(written.contains("worktree_root = \"/two\""));
     }
 
     /// Dropping an entry that was never there is refused by name, not a

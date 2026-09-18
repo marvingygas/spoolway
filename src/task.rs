@@ -234,7 +234,14 @@ pub struct Frontmatter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume: Option<String>,
 
-    /// Pipeline this task runs on. Absent means the default one.
+    /// Pipeline this task runs on — the only routing source spoolway reads
+    /// any more; there is no project default to fall back to. Still
+    /// `Option` rather than required at this layer, on purpose: a legacy or
+    /// hand-edited file predating that rule can still reach the live queue,
+    /// and something has to be able to parse it far enough to name the
+    /// problem — `queue add`'s own submission path is what actually refuses
+    /// a document naming none, and `spoolway dispatch`'s own start preflight
+    /// refuses the whole run over any live task still missing one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pipeline: Option<String>,
 

@@ -2,10 +2,10 @@
 //! is queued.
 //!
 //! `spoolway task contract` is the whole interface a producer needs. Printed
-//! bare, it is every key a document may set, every key it may not, which
-//! pipeline is this project's default, a sentence on how to size a
-//! breakdown, and — per pipeline — its id budget, the steps `gate_at`
-//! accepts, its own `description:`, which step is `last-of-chain`, and the
+//! bare, it is every key a document may set, every key it may not, a
+//! sentence on how to size a breakdown, and — per pipeline — its id budget,
+//! the steps `gate_at` accepts, its own `description:`, which step is
+//! `last-of-chain`, and the
 //! body skeleton itself; under `output` it is the directory a finished
 //! document is written to, what to name it there, and the two commands that
 //! check it and send it. One call, so a producer never has to be told
@@ -24,7 +24,7 @@ use super::*;
 
 /// Keys a document must set — refused by `parse_submission` when blank or
 /// absent.
-const REQUIRED_KEYS: &[&str] = &["id", "title", "group"];
+const REQUIRED_KEYS: &[&str] = &["id", "title", "group", "pipeline"];
 
 /// Keys a document may set, and spoolway keeps exactly what it wrote.
 const OPTIONAL_KEYS: &[&str] = &[
@@ -33,7 +33,6 @@ const OPTIONAL_KEYS: &[&str] = &[
     "touches",
     "depends_on",
     "parallel",
-    "pipeline",
     "gate_at",
     "epic",
     "ticket",
@@ -140,8 +139,8 @@ const FIELD_SENTENCES: &[(&str, &str)] = &[
     ),
     (
         "pipeline",
-        "Which pipeline to run this task on — leave unset to use the default \
-         named at the top of this contract.",
+        "Which pipeline to run this task on — required, and must name one of \
+         the pipelines below.",
     ),
     (
         "gate_at",
@@ -253,7 +252,6 @@ const SIZING: &str = "Cut a reasonable number of tasks for the shape at hand, ea
 /// contract`.
 #[derive(Debug, serde::Serialize)]
 struct Contract {
-    default: String,
     sizing: &'static str,
     output: ContractOutput,
     keys: ContractKeys,
@@ -292,7 +290,6 @@ fn build_contract(repo: &Repo, pipelines: &Pipelines) -> Contract {
     let pending = pending.display().to_string();
 
     Contract {
-        default: pipelines.default.clone(),
         sizing: SIZING,
         output: ContractOutput {
             verify: format!("spoolway task contract --from {pending}"),
@@ -336,7 +333,11 @@ fn print_check_report(tasks: &[Task], repo: &Repo, pipelines: &Pipelines) -> Res
             println!("{}", task.id());
         }
 
-        let pipeline_name = task.front.pipeline.as_deref().unwrap_or(&pipelines.default);
+        let pipeline_name = task
+            .front
+            .pipeline
+            .as_deref()
+            .expect("validate_batch refuses a document with no `pipeline:`");
         let pipeline = pipelines.get(pipeline_name)?;
         let budget = id_budget(super::queue::longest_agent_step(pipeline));
         let spare = budget.saturating_sub(task.id().len());
@@ -436,8 +437,15 @@ mod tests {
 
     /// A whole task document, in the shape `--from` accepts: `id:` plus
     /// whatever else `extra` puts in the frontmatter, then `body`.
+    /// `pipeline:` is required now, so this fills in the built-in `default`
+    /// pipeline unless `extra` already names one.
     fn document(id: &str, extra: &str, body: &str) -> String {
-        format!("---\nid: {id}\ntitle: {id}, done\n{extra}---\n{body}")
+        let pipeline = if extra.contains("pipeline:") {
+            ""
+        } else {
+            "pipeline: default\n"
+        };
+        format!("---\nid: {id}\ntitle: {id}, done\n{pipeline}{extra}---\n{body}")
     }
 
     /// Write `text` under `repo.root` and hand back the path a `--from`
@@ -547,7 +555,10 @@ mod tests {
             &serde_json::to_string(&build_contract(&repo, &Pipelines::builtin())).unwrap(),
         )
         .unwrap();
-        assert_eq!(value["default"], Pipelines::builtin().default);
+        assert!(
+            value.get("default").is_none(),
+            "no project default to advertise: {value}"
+        );
         assert!(value["sizing"].is_string(), "{value}");
         assert!(value.get("keys").is_some());
         assert!(value.get("fields").is_some());
@@ -649,8 +660,7 @@ mod tests {
     #[test]
     fn the_printed_id_budget_matches_check_task_id() {
         let pipeline = Pipelines::builtin();
-        let longest =
-            super::super::queue::longest_agent_step(pipeline.get(&pipeline.default).unwrap());
+        let longest = super::super::queue::longest_agent_step(pipeline.get("default").unwrap());
         let budget = id_budget(longest);
 
         let fits = "a".repeat(budget);

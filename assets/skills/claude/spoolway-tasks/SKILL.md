@@ -35,7 +35,7 @@ predates that block and the command comes back empty, say so to the caller and f
 reading the file whole.
 
 1. **Gather, before anything is sized.** One command, and nothing is opened past it:
-   `spoolway task contract` — the project's default pipeline, its own `sizing` guidance, and
+   `spoolway task contract` — every pipeline this project defines, its own `sizing` guidance, and
    per pipeline its `description:`, `id_budget`, `gate_at` steps, `last_of_chain`, and
    skeleton `body`.
 
@@ -144,10 +144,10 @@ reading the file whole.
    there is no chain at all — is the only one whose run of the pipeline ever reaches a step
    marked `last-of-chain` in step 1's contract. When that task's own routed pipeline
    carries none, the whole group loses that step silently: nobody after it ever runs it, since
-   every other task in the chain walks straight past. Re-route that one task — to the
-   project's default pipeline when it carries a `last-of-chain` step, otherwise to the first
-   pipeline from step 1's gathering that does — and say the swap out loud to the caller
-   instead of just writing a different `pipeline:` into its document.
+   every other task in the chain walks straight past. Re-route that one task to the first
+   pipeline from step 1's gathering that carries a `last-of-chain` step — there is no project
+   default to prefer over the rest — and say the swap out loud to the caller instead of just
+   writing a different `pipeline:` into its document.
 
 5. **Prove the documents.** `spoolway task contract --from ~/.spoolway/<project>/pending` —
    the same validation `queue add --from` runs, stopping short of the save. Fix what it

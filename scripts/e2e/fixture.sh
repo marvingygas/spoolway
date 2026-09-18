@@ -520,14 +520,22 @@ TASKBODY
 # unless a suite already named its own — a base is chosen now, never
 # invented by `queue add` from whichever branch a checkout happens to have
 # out, and this is what every suite that has no opinion of its own about a
-# base relied on before that changed.
+# base relied on before that changed. `pipeline:` is required the same
+# way now — there is no project default to fall back to — so this fills
+# in the built-in `default` pipeline unless a suite already named its own,
+# the same courtesy `base:` gets. A suite that wants a document left
+# genuinely unassigned — trials.sh's own picker cases — passes a bare
+# `"pipeline:"` line itself: matched the same as a real one, so the
+# auto-fill steps aside, and echoed empty rather than dropped, so the
+# document reads exactly as unassigned as one a person left blank by hand.
 task_doc() {
   local path=$1 id=$2 body=$3
   shift 3
-  local has_base=0
+  local has_base=0 has_pipeline=0
   for line in "$@"; do
     case "$line" in
       base:*) has_base=1 ;;
+      pipeline:*) has_pipeline=1 ;;
     esac
   done
   {
@@ -539,6 +547,9 @@ task_doc() {
       local branch
       branch=$(git branch --show-current 2>/dev/null) || branch=
       [ -n "$branch" ] && echo "base: $branch"
+    fi
+    if [ "$has_pipeline" -eq 0 ]; then
+      echo "pipeline: default"
     fi
     echo "---"
     cat "$body"

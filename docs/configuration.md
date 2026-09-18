@@ -108,7 +108,6 @@ tmux_mode = "grouped"
 worktree_root = ""
 interval = "10s"
 lane_quiet = "15m"
-default_pipeline = "default"
 auto_commit = true
 ```
 
@@ -120,7 +119,6 @@ auto_commit = true
 | `worktree_root` | blank | Where a task's worktree is created. Blank means `~/.spoolway/<project>/worktrees`. The directory is `task-<id>`, or `task-<slug>-<id>` with a tracker slug. |
 | `interval` | `10s` | Time between dispatcher passes. |
 | `lane_quiet` | `15m` | How long a lane may stay silent before the dispatcher reminds it to report. After three reminders the task is escalated. |
-| `default_pipeline` | `default` | The pipeline a task runs when it names none. |
 | `auto_commit` | `true` | Commit a lane's uncommitted work as `wip(<task>): <step>` when its step ends. A task with work spoolway could not commit stops at `blocked` instead of being archived. |
 | `priority` | `group` | Which ready task fills a free slot. `group` prefers a task whose group is already running. `any` weighs every ready task on steps left, group size and dependents. |
 | `lane_child_ceiling` | `1h` | How long a lane with a running child process is excused from the reminder loop. |
@@ -460,7 +458,7 @@ These keys still parse in an older `config.toml` and are dropped on the next sav
 | `[stack.summary]` | The task's `title:` and body are the pull request |
 | `[sandbox]`, `blocked_on_write`, `blocked_on_overreach` | Nothing. See [What confines a profile](agents.md#what-confines-a-profile). |
 | `[paths]`, `[docs]`, `[plans]` | Fixed locations. See [Runtime state](#runtime-state). |
-| `dispatch.max_launches`, `open_on_escalation`, `open`, `protected_branches`, `notify` | Nothing |
+| `dispatch.max_launches`, `open_on_escalation`, `open`, `protected_branches`, `notify`, `default_pipeline` | Nothing |
 | `pipeline_gen.pipeline_auto`, `pipeline_loop_default`, `pipeline_local_models` | Nothing |
 | `agents.<profile>.model`, `context_window`, `args`, `env`, `session_reuse_uncached` | `model:` on the step, `[models]`, and `models.<glob>.session_reuse_idle` |
 

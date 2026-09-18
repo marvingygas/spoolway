@@ -39,22 +39,29 @@ configure_project plan/live
 # (`bugfix`, `default`) the assign screen's `←`/`→` cycles through.
 BODY="$LIVE/body.md"
 task_body "$BODY"
-pending_doc alpha "$BODY" "group: audits" "touches: [src/main.rs]"
-pending_doc beta "$BODY" "group: audits" "touches: [src/main.rs]" \
+# A bare `pipeline:` line leaves each document genuinely unassigned — see
+# `task_doc`'s own doc comment — which is the whole point of this suite's
+# picker cases below.
+pending_doc alpha "$BODY" "group: audits" "touches: [src/main.rs]" "pipeline:"
+pending_doc beta "$BODY" "group: audits" "touches: [src/main.rs]" "pipeline:" \
   "depends_on: [alpha]"
 
 # `Tab` focuses the tasks pane on a task inside the group (`alpha`, first in
 # reading order since it is the dependency), proving `p` reaches the whole
 # group from a selected task too, not only from the groups pane. `p` opens
-# the assign-pipelines popup with every task already defaulted to this
-# project's own default pipeline; `←` cycles `alpha` onto `bugfix`, `j`
-# moves onto `beta` (left on `default`), `enter` advances to the skips
-# screen. There the flattened cursor opens on `alpha`'s first checkbox: one
-# `j` reaches its second, `fix`, and `space` ticks it; nine more `j`s walk
-# past the rest of `alpha`'s own checkboxes onto `beta`'s third one,
-# `document`, and `space` ticks that too. `enter` mints and writes both
-# arms; `n` declines the dispatcher offer.
-printf '\tp\x1b[Dj\rj jjjjjjjjj \rn' | "$SPOOLWAY" queue >/dev/null 2>&1
+# the assign-pipelines popup with every task unassigned — there is no
+# project default to seed it with any more, so `enter` on this screen
+# refuses to advance until every task has one. `←` on `alpha` lands on
+# `bugfix`, the pipeline that sorts first, since there is no current
+# position to cycle away from yet; two `→`s on `beta` land it on `default`
+# instead — one press to the same first-sorting `bugfix`, a second to cycle
+# past it. `enter` then advances to the skips screen. There the flattened
+# cursor opens on `alpha`'s first checkbox: one `j` reaches its second,
+# `fix`, and `space` ticks it; nine more `j`s walk past the rest of
+# `alpha`'s own checkboxes onto `beta`'s third one, `document`, and `space`
+# ticks that too. `enter` mints and writes both arms; `n` declines the
+# dispatcher offer.
+printf '\tp\x1b[Dj\x1b[C\x1b[C\rj jjjjjjjjj \rn' | "$SPOOLWAY" queue >/dev/null 2>&1
 
 works "the alpha arm reaches the queue" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/alpha-1.md"
@@ -66,7 +73,7 @@ works "two distinct minted ids — never either document's own bare one" \
 
 has "alpha's arm carries the pipeline cycled onto it" "pipeline: bugfix" \
   "$SPOOLWAY_PROJECT_HOME/queue/alpha-1.md"
-has "beta's arm keeps the default it was never cycled off of" \
+has "beta's arm carries the pipeline explicitly cycled onto it too" \
   "pipeline: default" "$SPOOLWAY_PROJECT_HOME/queue/beta-1.md"
 works "alpha's own ticked skip, and none of beta's" \
   bash -c 'grep -A1 "^skip:" "$1" | tail -1 | grep -qxF -- "- fix"' \
@@ -111,9 +118,11 @@ works "both source documents are left exactly where they were" \
 # reserved actions the instant a filter is open, so either letter inside the
 # query itself would fire the action early rather than narrow the list —
 # `f` narrows to it by name, `p` reaches it straight from the groups pane,
-# with no `Tab` needed. `enter` advances past the assign screen without
-# touching the pipeline it already defaulted to, and `enter` again launches
-# with nothing ticked to skip.
+# with no `Tab` needed. Two `→`s land it on `default` — one press to
+# `bugfix`, the pipeline that sorts first with nothing assigned yet, a
+# second past it — since `enter` refuses to advance with it still
+# unassigned; `enter` then advances past the assign screen, and `enter`
+# again launches with nothing ticked to skip.
 task_doc "$SPOOLWAY_PROJECT_HOME/queue/old-run.md" old-run "$BODY" \
   "group: old-run" \
   "touches: [src/main.rs]" \
@@ -123,18 +132,29 @@ task_doc "$SPOOLWAY_PROJECT_HOME/queue/old-run.md" old-run "$BODY" \
   "base: master" \
   "cut_from: master" \
   "base_commit: 0000000000000000000000000000000000000000" \
-  "attempts: 2"
+  "attempts: 2" \
+  "pipeline:"
 
-printf 'fold-run\rp\r\rn' | "$SPOOLWAY" queue >/dev/null 2>&1
+printf 'fold-run\rp\x1b[C\x1b[C\r\rn' | "$SPOOLWAY" queue >/dev/null 2>&1
 
 works "the reset lets a stamped document reach \`finish_trial\` at all" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/old-run-1.md"
-has "under the pipeline it defaulted to" "pipeline: default" \
+has "under the pipeline cycled onto it" "pipeline: default" \
   "$SPOOLWAY_PROJECT_HOME/queue/old-run-1.md"
 lacks "the reset held: no stamped stage on the forked arm" "stage: done" \
   "$SPOOLWAY_PROJECT_HOME/queue/old-run-1.md"
 lacks "nor the run id the earlier run minted" "run: r00000000000000af" \
   "$SPOOLWAY_PROJECT_HOME/queue/old-run-1.md"
+
+# The source document goes now that the arm is forked off it, and it has to:
+# `p` leaves a source exactly where it found it, and this one was written
+# straight into `queue/` with no `pipeline:` on purpose. A routeless document
+# in the live queue is precisely what `check_task_routes` refuses a whole
+# start over — correctly — so leaving it here would refuse every dispatcher
+# the rest of this suite starts, and the runtime half below would assert on
+# tasks nothing ever moved. The same disposal `commands.sh` does for its own
+# routeless fixture, for the same reason.
+rm -f "$SPOOLWAY_PROJECT_HOME/queue/old-run.md"
 
 # ------------------------------------------------------- dispatch and cleanup
 # Everything above only ever wrote queue files. From here a real dispatcher

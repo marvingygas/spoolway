@@ -61,8 +61,8 @@ steps:
     on_pass: done
 ```
 
-- A task picks its pipeline with its own `pipeline:` field. A task that names none runs
-  `dispatch.default_pipeline` from `config.toml`.
+- A task picks its pipeline with its own `pipeline:` field. The field is required and must
+  name a pipeline that exists.
 - Every step runs for every task, in order. There is no condition key. A step that should only
   run sometimes belongs in a second pipeline file.
 - A lane reads the pipelines on its own branch. See [Project](concepts.md#project).

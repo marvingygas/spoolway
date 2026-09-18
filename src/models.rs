@@ -1074,10 +1074,7 @@ mod tests {
         let pipeline: crate::pipeline::Pipeline = serde_norway::from_str(raw).unwrap();
         let mut pipelines = BTreeMap::new();
         pipelines.insert("default".to_string(), pipeline);
-        let pipelines = Pipelines {
-            default: "default".to_string(),
-            pipelines,
-        };
+        let pipelines = Pipelines { pipelines };
 
         assert_eq!(unrouted(&pipelines, &config), vec!["Qwen3.6-35B-A3B"]);
     }

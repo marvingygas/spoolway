@@ -88,8 +88,8 @@ task file's `## Handoff` and can be repeated.
 The binary prints the contract:
 
 ```
-spoolway prompt contract                    # the default pipeline's first agent step
-spoolway prompt contract --step review      # one step
+spoolway prompt contract --pipeline impl    # impl's first agent step
+spoolway prompt contract --pipeline impl --step review   # one step
 spoolway prompt contract --task login       # rendered against a real queued task
 ```
 

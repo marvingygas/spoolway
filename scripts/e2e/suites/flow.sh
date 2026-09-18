@@ -287,6 +287,7 @@ for outcome in pause block; do
     echo "title: stuck, blocked by hand ($outcome)"
     echo "stage: blocked"
     echo "blocked_from: implement"
+    echo "pipeline: default"
     echo "touches: [notes/$task.md]"
     echo "---"
     printf '## Goal\n\nAdd `notes/%s.md`.\n\n## Non-goals\n\nOut of scope.\n\n## Acceptance criteria\n\n- `notes/%s.md` exists.\n' \

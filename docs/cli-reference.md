@@ -89,7 +89,7 @@ spoolway queue add --from <PATH> --base <BRANCH>
 A document that sets neither its own `base:` nor `--base` is refused by name and nothing is
 written.
 
-With no `--from`, it prints the default pipeline's skeleton document to fill in.
+With no `--from`, it prints a skeleton document to fill in, with a `pipeline:` row to fill in.
 
 A `--from` path under this project's own pending directory is deleted once the batch is
 written. A `--from` path anywhere else, including `-`, is read and left alone.
@@ -191,6 +191,16 @@ Run the pipeline. It draws the live board and keeps running until the queue is e
 | `--unattended` | `unattended.enabled` | Start a lane on `blocked` for every blocked task. Nothing waits for a person. See [Unattended runs](pipelines.md#unattended-runs) |
 | `--attended` | | Park blocked tasks for a person, whatever the config says |
 | `--force` | | Start past the restart guard |
+
+Before it starts, it checks every live task's `pipeline:` field. A missing or unknown pipeline
+refuses the whole start and dispatches nothing:
+
+```
+refusing to start: task `auth-refresh` has no `pipeline:`
+  Set `pipeline:` to one of: bugfix, impl, impl_fast, impl_tdd, impl_ui, release.
+
+Nothing was dispatched.
+```
 
 If another dispatcher already holds the lock, the board opens read-only, headed `watching
 dispatcher`.
@@ -376,7 +386,7 @@ Print every pipeline as a flow, with every default resolved and each pipeline's
 
 ```
 $ spoolway pipeline show
-pipeline `impl`  (default)  entry: implement
+pipeline `impl`  entry: implement
     One unit of feature work, start to finish: implement against the acceptance criteria, review the diff, carry the change into the end-to-end suites, then document and hand over.
 
   implement  agent     agent=claude prompt=implementer model=claude-sonnet-5 session
@@ -399,7 +409,7 @@ Validate every pipeline file, its agent references and its prompts against the c
 
 ```
 $ spoolway pipeline check
-3 pipeline(s) valid: ["bugfix", "default", "local"], agents ["claude", "pi"]
+3 pipeline(s) valid: ["bugfix", "impl", "local"], agents ["claude", "pi"]
 ```
 
 A missing or overlong `description:` is a warning, not a failure.
@@ -414,24 +424,24 @@ Copy the blank to `.spoolway/pipelines/<name>.yml`, delete what you do not need,
 
 ### `spoolway pipeline list`
 
-Print every pipeline's name and description, marking the default.
+Print every pipeline's name and description.
 
 ```
 $ spoolway pipeline list
 bugfix
     Reproduce the bug first with a failing test, fix it, then run the same reproduction again to prove it is gone. For a defect with a known symptom and a way to trigger it, never for new work.
 
-impl (default)
+impl
     One unit of feature work, start to finish: implement against the acceptance criteria, review the diff, carry the change into the end-to-end suites, then document and hand over.
 ```
 
 ### `spoolway pipeline list --json`
 
-The same list as JSON: the default pipeline's name, then one entry per pipeline.
+The same list as JSON, one entry per pipeline.
 
 ```
 $ spoolway pipeline list --json
-{"default": "impl", "pipelines": [{"name": "bugfix", "default": false, "description": "..."}, ...]}
+{"pipelines": [{"name": "bugfix", "description": "..."}, ...]}
 ```
 
 A pipeline with no `description:` carries `"description": null`.
@@ -492,8 +502,8 @@ spoolway prompt contract [--step <STEP>] [--pipeline <PIPELINE>] [--task <TASK>]
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--step <STEP>` | first agent step of the default pipeline | Which step to render for |
-| `--pipeline <PIPELINE>` | the default pipeline | Which pipeline the step belongs to |
+| `--step <STEP>` | `--pipeline`'s first agent step | Which step to render for |
+| `--pipeline <PIPELINE>` | required unless `--task` names one | Which pipeline the step belongs to |
 | `--task <TASK>` | a sample task | Render against a real queued task |
 
 ### `spoolway prompt list`
@@ -549,9 +559,9 @@ spoolway task contract --from ~/.spoolway/<project>/pending/
 | `--from <PATH>` | | A document, a directory of `*.md` files, or `-` for stdin. Repeatable. Checked as one set. Writes nothing |
 | `--base <BRANCH>` | | The base to check a document against when it sets none of its own. Same rule as `queue add --base` |
 
-The contract holds the default pipeline, the sizing guidance, the output directory, the
-allowed and refused keys, one sentence per key, each pipeline's id budget and body skeleton,
-and the rules that hold across a set. `--from` runs the same validation as `queue add --from`
+The contract holds every pipeline's id budget and body skeleton, the sizing guidance, the
+output directory, the allowed and refused keys, one sentence per key, and the rules that hold
+across a set. `--from` runs the same validation as `queue add --from`
 and exits non-zero on a refusal.
 
 ### `spoolway template contract`

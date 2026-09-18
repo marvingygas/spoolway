@@ -191,10 +191,11 @@ fn run() -> Result<()> {
 
         // The config commands, and the migration, before the pipelines are
         // loaded — because these are the commands you run when the pipelines
-        // are what is wrong. `dispatch.default_pipeline` naming a file that is
-        // not there refuses the whole set, and `config set` is how you fix it:
-        // needing a valid set in order to run it would be a locked door with
-        // the key inside. Same reasoning as `doctor` reading a broken config.
+        // are what is wrong. A pipeline file that will not parse refuses the
+        // whole set, and `config set` is how you fix whatever else is broken
+        // in `config.toml`: needing a valid set in order to run it would be a
+        // locked door with the key inside. Same reasoning as `doctor` reading
+        // a broken config.
         //
         // Every read below is against `repo.checkout`, not `repo.root`: a
         // command answers about the file actually in front of it. `set` and

@@ -30,7 +30,7 @@ pub fn fixture(name: &str) -> Repo {
 }
 
 pub fn add(repo: &Repo, id: &str, depends_on: &[&str]) {
-    let mut frontmatter = format!("id: {id}\ntitle: {id}, done\ngroup: demo\n");
+    let mut frontmatter = format!("id: {id}\ntitle: {id}, done\ngroup: demo\npipeline: default\n");
     if !depends_on.is_empty() {
         frontmatter += &format!("depends_on: [{}]\n", depends_on.join(", "));
     }

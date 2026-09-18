@@ -522,8 +522,27 @@ fn print_skeleton_document(repo: &Repo, pipelines: &Pipelines) -> Result<()> {
 /// The text `print_skeleton_document` prints, pulled apart from the printing
 /// so it can be checked without capturing standard output.
 fn skeleton_document(repo: &Repo, pipelines: &Pipelines) -> Result<String> {
-    let pipeline = pipelines.get(&pipelines.default)?;
-    let body = crate::task_template::resolve(repo, pipeline.task_template_name());
+    // The body preview is the generic skeleton every pipeline without one of
+    // its own already falls back to — `task_template::FALLBACK` — rather
+    // than any one pipeline's own, which the `pipeline:` line below still
+    // has to name a real choice among but the body should not be shaped by.
+    let body = crate::task_template::resolve(repo, crate::task_template::FALLBACK);
+    let first = pipelines
+        .names()
+        .into_iter()
+        .next()
+        .context("no pipelines defined")?;
+
+    // The other rows below align their trailing `#` at column 29 with a
+    // literal run of spaces, which only works while the text ahead of it is
+    // fixed-width — `pipeline: {name}` is not, since a project's pipeline
+    // names vary, so this pads it to the same column instead of hard-coding
+    // a count of spaces that would only ever line up for one name's length.
+    let pipeline_row = format!(
+        "{:<29}# required — one of: {}",
+        format!("pipeline: {first}"),
+        pipelines.names().join(", ")
+    );
 
     Ok(format!(
         "---\n\
@@ -534,10 +553,9 @@ fn skeleton_document(repo: &Repo, pipelines: &Pipelines) -> Result<String> {
          touches: []                  # globs this task expects to modify\n\
          depends_on: []               # sibling task ids that must finish first\n\
          # base: branch-name          # the branch to cut from and merge into — required, here or with `queue add --base`\n\
-         # pipeline: {}               # which pipeline to run on — defaults to this project's default\n\
+         {pipeline_row}\n\
          # gate_at: step-id           # pause after that step reports, for a person to `spoolway resume`\n\
          ---\n{}",
-        pipelines.default,
         ends_with_newline(body),
     ))
 }
@@ -715,6 +733,11 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Res
              with its siblings, so a task with no group has nowhere to run"
         );
     }
+    // The only routing source a task has — there is no project default to
+    // fall back to, so a document naming none has nowhere to run.
+    if front.pipeline.as_deref().unwrap_or("").trim().is_empty() {
+        bail!("{name}: a document must set `pipeline:` — spoolway routes a task on nothing else");
+    }
 
     // Everything spoolway itself decides, whatever the document said —
     // exactly the fields `queue_add` always built by hand rather than trusted
@@ -808,10 +831,12 @@ pub(crate) fn validate_batch(
             .expect("parse_submission always resolves a base or refuses the document");
         check_document_base(repo, name, resolved)?;
 
-        let pipeline = match &task.front.pipeline {
-            Some(name) => pipelines.get(name)?,
-            None => pipelines.get(&pipelines.default)?,
-        };
+        let pipeline_name = task
+            .front
+            .pipeline
+            .as_deref()
+            .expect("parse_submission refuses a document with no `pipeline:`");
+        let pipeline = pipelines.get(pipeline_name)?;
         // A task id becomes a lane name, a branch and a file name. The lane
         // is the strictest of the three, and the only one that would fail
         // late.
@@ -2386,19 +2411,16 @@ struct TrialState {
 
 impl TrialState {
     /// Opened by `p`: every task in `group` starts out assigned its own
-    /// document's `pipeline:`, or this project's default when it names none
-    /// — the same fallback [`task_pipeline`] resolves — so every task already
-    /// has a pipeline the moment the picker opens and `enter` can advance
-    /// past the first screen at once.
-    fn new(pipelines: &Pipelines, group: &Group) -> TrialState {
+    /// document's `pipeline:` when it names one. There is no project default
+    /// to fall back to any more, so a legacy or hand-edited document naming
+    /// none opens unassigned instead — `←`/`→` on [`TrialStage::AssignPipelines`]
+    /// is what has to give it one before `enter` can advance, rather than the
+    /// picker silently choosing for it.
+    fn new(_pipelines: &Pipelines, group: &Group) -> TrialState {
         let pipeline = group
             .tasks
             .iter()
-            .map(|task| {
-                let name =
-                    doc_pipeline_name(&task.doc).unwrap_or_else(|| pipelines.default.clone());
-                (task_key(task), name)
-            })
+            .filter_map(|task| doc_pipeline_name(&task.doc).map(|name| (task_key(task), name)))
             .collect();
         TrialState {
             group: group_key(group),
@@ -2417,6 +2439,17 @@ impl TrialState {
 /// [`save_routine_panel`] already takes for [`Mode::SaveRoutine`].
 fn trial_group<'a>(groups: &'a [Group], trial: &TrialState) -> Option<&'a Group> {
     groups.iter().find(|group| group_key(group) == trial.group)
+}
+
+/// Whether every task in `group` has a pipeline assignment — what
+/// [`TrialStage::AssignPipelines`]'s own `enter` requires before advancing,
+/// since [`begin_trial`] has no project default left to hand an unassigned
+/// task instead.
+fn trial_fully_assigned(group: &Group, trial: &TrialState) -> bool {
+    group
+        .tasks
+        .iter()
+        .all(|task| trial.pipeline.contains_key(&task_key(task)))
 }
 
 /// `h`'s own three-way state: how far the left pane has widened past the
@@ -2745,17 +2778,31 @@ fn run_screen(
             Mode::Trial(trial) => match key {
                 Key::Char('q') => break,
                 // The first screen's own `enter`: advance to the second
-                // rather than launch anything — every task already has a
-                // pipeline the moment this mode opens (see `TrialState::new`),
-                // so there is nothing to require before moving on.
-                Key::Enter if trial.stage == TrialStage::AssignPipelines => {
+                // rather than launch anything — but only once every task has
+                // an assignment. A legacy or hand-edited document names none
+                // (see `TrialState::new`), and `begin_trial` has no default
+                // left to fall back to, so a task still unassigned here would
+                // otherwise be silently dropped from the batch rather than
+                // queued.
+                Key::Enter
+                    if trial.stage == TrialStage::AssignPipelines
+                        && trial_group(&groups, trial)
+                            .is_some_and(|group| trial_fully_assigned(group, trial)) =>
+                {
                     let mut trial = trial.clone();
                     trial.stage = TrialStage::ChooseSkips;
                     trial.cursor = 0;
                     state.mode = Mode::Trial(trial);
                 }
                 // The second screen's own `enter`: mint and write the batch.
-                Key::Enter => {
+                // Guarded on `ChooseSkips` rather than a bare fallthrough —
+                // an `enter` on the first screen with a task still
+                // unassigned must fall to the catch-all below instead
+                // (a no-op there), not reach `begin_trial`, which has
+                // nothing left to hand an unassigned task and would panic
+                // on the `.expect()` that assumes this screen already
+                // refused to let it through.
+                Key::Enter if trial.stage == TrialStage::ChooseSkips => {
                     let trial = trial.clone();
                     let base = crate::repo::branch_at(cwd)?;
                     state.mode = begin_trial(repo, pipelines, &base, &groups, &trial);
@@ -3250,16 +3297,13 @@ fn open_highlighted(repo: &Repo, groups: &[Group], state: &ScreenState) -> Mode 
     }
 }
 
-/// The pipeline a highlighted task's own document names, or this project's
-/// default when it names none — the same fallback `parse_submission` applies
-/// once the task is actually submitted, so the gate list offered here is
-/// never a step a real submission would resolve differently.
+/// The pipeline a highlighted task's own document names. `parse_submission`
+/// refuses a document naming none, so a document still missing one here —
+/// still being edited, not yet queueable — resolves nothing rather than
+/// guessing at a pipeline no real submission would end up on.
 fn task_pipeline<'a>(doc: &str, pipelines: &'a Pipelines) -> Result<&'a Pipeline> {
-    let name = doc_pipeline_name(doc);
-    match name.as_deref() {
-        Some(name) => pipelines.get(name),
-        None => pipelines.get(&pipelines.default),
-    }
+    let name = doc_pipeline_name(doc).context("document names no `pipeline:`")?;
+    pipelines.get(&name)
 }
 
 /// A peek at a document's own `pipeline:` key, without the rest of
@@ -3800,7 +3844,7 @@ fn task_row(marker: &str, name: &str, tail: &str, width: usize) -> String {
 /// keeps in view on a pane taller than the terminal.
 fn tasks_pane_lines(
     groups: &[Group],
-    pipelines: &Pipelines,
+    _pipelines: &Pipelines,
     state: &ScreenState,
     width: usize,
 ) -> (Vec<String>, (usize, usize)) {
@@ -3830,11 +3874,11 @@ fn tasks_pane_lines(
         };
         lines.push(task_row(marker, &task.id, tail, width));
 
-        // The same fallback `task_pipeline` resolves a gate picker's steps
-        // with, and `parse_submission` resolves a real submission with — a
-        // document naming no pipeline of its own still says which one will
-        // run it.
-        let pipeline = doc_pipeline_name(&task.doc).unwrap_or_else(|| pipelines.default.clone());
+        // There is no project default any more, so a document naming no
+        // pipeline of its own reads as unassigned here — the same as
+        // `task_pipeline` resolves nothing for it, and `parse_submission`
+        // refuses it outright once it is actually submitted.
+        let pipeline = doc_pipeline_name(&task.doc).unwrap_or_else(|| TRIAL_UNASSIGNED.to_string());
         lines.extend(labeled_row("Pipeline:", &pipeline, width));
 
         let depends_on = super::pending::depends_on(&task.doc);
@@ -3919,7 +3963,7 @@ fn routine_folder_lines(
 /// pending task, minus the `Gate:` row a routine has no gate picker to set.
 fn routine_task_lines(
     folder: Option<&RoutineFolder>,
-    pipelines: &Pipelines,
+    _pipelines: &Pipelines,
     nav: &RoutineNav,
     width: usize,
 ) -> (Vec<String>, (usize, usize)) {
@@ -3941,7 +3985,7 @@ fn routine_task_lines(
         // own to draw — see `task_row`'s own doc comment.
         lines.push(task_row(marker, &task.id, "", width));
 
-        let pipeline = doc_pipeline_name(&task.doc).unwrap_or_else(|| pipelines.default.clone());
+        let pipeline = doc_pipeline_name(&task.doc).unwrap_or_else(|| TRIAL_UNASSIGNED.to_string());
         lines.extend(labeled_row("Pipeline:", &pipeline, width));
 
         let depends_on = super::pending::depends_on(&task.doc);
@@ -4292,23 +4336,18 @@ fn trial_pipeline_names(pipelines: &Pipelines) -> Vec<&str> {
     pipelines.pipelines.keys().map(String::as_str).collect()
 }
 
-/// Every step of the pipeline `trial` has assigned a given task — the same
-/// fallback [`TrialState::new`] seeds a task with when its own document names
-/// none — or an empty slice when that name resolves to nothing at all, which
-/// nothing on this screen can actually cause since every name in `pipeline`
-/// came from [`trial_pipeline_names`] in the first place, but a reload
-/// swapping a project's pipelines out from under an open picker is handled
-/// the same careful way [`trial_group`] handles a group that moved.
+/// The pipeline `trial` has assigned a given task, or `None` for a task the
+/// picker has not been given one for yet — still unassigned, since
+/// [`TrialState::new`] seeds one only from the task's own document — or for
+/// one whose assignment named a pipeline a reload swapped out from under an
+/// open picker, handled the same careful way [`trial_group`] handles a group
+/// that moved.
 fn trial_task_pipeline<'a>(
     pipelines: &'a Pipelines,
     trial: &TrialState,
     task: &PendingTask,
 ) -> Option<&'a crate::pipeline::Pipeline> {
-    let name = trial
-        .pipeline
-        .get(&task_key(task))
-        .map(String::as_str)
-        .unwrap_or(&pipelines.default);
+    let name = trial.pipeline.get(&task_key(task))?;
     pipelines.get(name).ok()
 }
 
@@ -4345,7 +4384,7 @@ fn assign_pipelines_panel(
     let widest_pipeline = names
         .iter()
         .map(|name| name.chars().count())
-        .chain(std::iter::once(pipelines.default.chars().count()))
+        .chain(std::iter::once(TRIAL_UNASSIGNED.chars().count()))
         .max()
         .unwrap_or(0);
     let id_budget = width
@@ -4369,7 +4408,7 @@ fn assign_pipelines_panel(
             .pipeline
             .get(&task_key(task))
             .map(String::as_str)
-            .unwrap_or(&pipelines.default);
+            .unwrap_or(TRIAL_UNASSIGNED);
         let id = pad_to(&clip(task.id.clone(), id_width), id_width);
         body.push(clip(
             if i == trial.cursor && !names.is_empty() {
@@ -4381,11 +4420,15 @@ fn assign_pipelines_panel(
         ));
     }
 
-    panel(
-        &clip(format!("trial {}", group.name), width),
-        &body,
-        "↑↓ task   ←→ pipeline   enter next   esc cancel",
-    )
+    // `enter` on this screen silently refuses to advance until every task
+    // has an assignment (see `handle_trial_key`) — silently unless the
+    // footer says why, which is what it is here for.
+    let footer = if trial_fully_assigned(group, trial) {
+        "↑↓ task   ←→ pipeline   enter next   esc cancel"
+    } else {
+        "↑↓ task   ←→ pipeline   assign every task, then enter   esc cancel"
+    };
+    panel(&clip(format!("trial {}", group.name), width), &body, footer)
 }
 
 /// The widest a line [`choose_skips_panel`] draws may run before it wraps
@@ -4416,6 +4459,12 @@ fn checkbox_row_cap(layout: Layout) -> usize {
 /// Both shapes still start their pipeline column at the same offset, which
 /// is what keeps every row's pipeline name aligned under the last.
 const ASSIGN_ROW_CHROME_COLUMNS: usize = 11;
+
+/// What [`assign_pipelines_panel`] shows in the pipeline column for a task
+/// the trial picker has not been given one for yet — there is no project
+/// default to show instead, so this is what a legacy or hand-edited document
+/// naming none reads as until `←`/`→` gives it one.
+const TRIAL_UNASSIGNED: &str = "(unset)";
 
 /// Cut `line` to `width` columns, ending it in `…` when there was more,
 /// for the lines of the trial popups that are not built out of fixed-width
@@ -4466,7 +4515,7 @@ fn choose_skips_panel(
             .pipeline
             .get(&key)
             .map(String::as_str)
-            .unwrap_or(&pipelines.default);
+            .expect("trial_task_pipeline resolved, so this task has an assignment");
         // Same budget as the first screen's rows: the pipeline name says
         // which steps are listed underneath, so it outranks the tail of a
         // very long id. The outer `clip` is the backstop for a pipeline
@@ -4576,16 +4625,17 @@ fn handle_trial_key(group: &Group, pipelines: &Pipelines, mut trial: TrialState,
                 Key::Left | Key::Right if !names.is_empty() => {
                     if let Some(task) = group.tasks.get(trial.cursor) {
                         let key_ = task_key(task);
-                        let current = trial
+                        let at = trial
                             .pipeline
                             .get(&key_)
-                            .cloned()
-                            .unwrap_or_else(|| pipelines.default.clone());
-                        let at = names.iter().position(|n| *n == current).unwrap_or(0);
-                        let next = if key == Key::Left {
-                            (at + names.len() - 1) % names.len()
-                        } else {
-                            (at + 1) % names.len()
+                            .and_then(|current| names.iter().position(|n| n == current));
+                        let next = match (at, key) {
+                            (Some(at), Key::Left) => (at + names.len() - 1) % names.len(),
+                            (Some(at), _) => (at + 1) % names.len(),
+                            // Unassigned: whichever arrow is pressed first
+                            // lands on the pipeline that sorts first — there
+                            // is no current position to cycle away from.
+                            (None, _) => 0,
                         };
                         trial.pipeline.insert(key_, names[next].to_string());
                     }
@@ -4915,6 +4965,41 @@ pub(crate) fn reset_for_reuse(name: &str, doc: &str) -> Result<String> {
     Ok(format!("---\n{yaml}---\n{body}"))
 }
 
+/// The pipeline the trial picker assigned this task, written into its document
+/// before [`parse_submission`] is given it.
+///
+/// The picker's first screen exists precisely to route a document that names
+/// no pipeline of its own: [`TrialState::new`] opens such a task unassigned,
+/// the panel draws it `(unset)`, and that screen's `enter` refuses to advance
+/// until `←`/`→` has given every task one. But `parse_submission` refuses a
+/// document with no `pipeline:`, and it is handed the *source* document — so
+/// without this the picker refused every task it was built to route, the whole
+/// batch was abandoned with `trial refused:`, and nothing was minted. Stamping
+/// `front.pipeline` on the arm afterwards cannot save it: the refusal has
+/// already happened by then.
+///
+/// Written over whatever the document said rather than only filled in when it
+/// is blank, because the screen may equally have cycled a task *off* the
+/// pipeline its own document named — `trial.pipeline` is the authority here,
+/// which is the same order of precedence `front.pipeline` is stamped in below.
+fn with_trial_pipeline(name: &str, doc: &str, pipeline: &str) -> Result<String> {
+    let (yaml, body) =
+        crate::task::split_fence(doc).with_context(|| format!("{name}: not a task document"))?;
+    let value: serde_norway::Value = serde_norway::from_str(yaml)
+        .with_context(|| format!("{name}: frontmatter is not valid YAML"))?;
+    let mut mapping = value
+        .as_mapping()
+        .with_context(|| format!("{name}: frontmatter is not a mapping"))?
+        .clone();
+    mapping.insert(
+        serde_norway::Value::String("pipeline".to_string()),
+        serde_norway::Value::String(pipeline.to_string()),
+    );
+    let yaml = serde_norway::to_string(&serde_norway::Value::Mapping(mapping))
+        .with_context(|| format!("{name}: re-serialising the frontmatter"))?;
+    Ok(format!("---\n{yaml}---\n{body}"))
+}
+
 /// One trial arm: the source document parsed exactly as `queue add --from`
 /// would, with the four things a trial names for the task itself stamped
 /// on afterwards — the id spoolway minted, the trial the whole batch shares,
@@ -4933,6 +5018,10 @@ pub(crate) fn reset_for_reuse(name: &str, doc: &str) -> Result<String> {
 /// key an earlier run stamped on it — reaches `parse_submission` looking like
 /// a document a producer wrote for a fresh run, rather than being refused for
 /// setting a reserved key spoolway itself put there.
+///
+/// The picker's chosen pipeline goes into that document *before* it is parsed,
+/// by [`with_trial_pipeline`], and not only onto the arm afterwards — see that
+/// function for why stamping `front.pipeline` below is too late on its own.
 fn build_trial_arm(
     name: &str,
     doc: &str,
@@ -4943,6 +5032,7 @@ fn build_trial_arm(
     skip: &std::collections::BTreeSet<String>,
 ) -> Result<Task> {
     let doc = reset_for_reuse(name, doc)?;
+    let doc = with_trial_pipeline(name, &doc, &pipeline.name)?;
     let mut arm = parse_submission(name, &doc, Some(base))?;
     arm.front.id = id.to_string();
     arm.front.branch = Some(format!("task/{id}"));
@@ -5006,7 +5096,7 @@ fn begin_trial(
             .pipeline
             .get(&key)
             .cloned()
-            .unwrap_or_else(|| pipelines.default.clone());
+            .expect("the AssignPipelines screen's own `enter` refuses to advance until every task is assigned");
         let pipeline = match pipelines.get(&pipeline_name) {
             Ok(pipeline) => pipeline,
             Err(err) => return Mode::Outcome(format!("trial refused: {err:#}")),
@@ -5512,9 +5602,17 @@ mod tests {
     }
 
     /// A whole task document, in the shape `--from` accepts: `id:` plus
-    /// whatever else `extra` puts in the frontmatter, then `body`.
+    /// whatever else `extra` puts in the frontmatter, then `body`. `pipeline:`
+    /// is required now, so this fills in the built-in `default` pipeline
+    /// unless `extra` already names one — a test after the unassigned shape
+    /// itself builds its own document instead, bypassing this default.
     fn document(id: &str, extra: &str, body: &str) -> String {
-        format!("---\nid: {id}\ntitle: {id}, done\n{extra}---\n{body}")
+        let pipeline = if extra.contains("pipeline:") {
+            ""
+        } else {
+            "pipeline: default\n"
+        };
+        format!("---\nid: {id}\ntitle: {id}, done\n{pipeline}{extra}---\n{body}")
     }
 
     /// Write `text` under `repo.root` and hand back the path a `--from`
@@ -6241,6 +6339,27 @@ mod tests {
             !doc.contains("spoolway:contract"),
             "the note to whoever maintains the skeleton is not task content:\n{doc}"
         );
+        // `pipeline:` is required now, so the skeleton names a real, live
+        // choice uncommented — never `# pipeline: ...`, the shape every
+        // other optional row still uses.
+        let pipeline_row = doc
+            .lines()
+            .find(|line| line.starts_with("pipeline:"))
+            .unwrap_or_else(|| panic!("no uncommented `pipeline:` row:\n{doc}"));
+        let name = pipeline_row
+            .trim_start_matches("pipeline:")
+            .split('#')
+            .next()
+            .unwrap()
+            .trim();
+        assert!(
+            pipelines.get(name).is_ok(),
+            "`{name}` names a real pipeline: {doc}"
+        );
+        assert!(
+            !doc.contains("# pipeline:"),
+            "pipeline: must not be commented out, unlike the optional rows around it:\n{doc}"
+        );
 
         let args = QueueAddArgs {
             from: vec![],
@@ -6343,6 +6462,29 @@ mod tests {
         assert!(err.to_string().contains("explicit-task-base.md"), "{err:#}");
         assert!(err.to_string().contains("sets no `base:`"), "{err:#}");
         assert!(err.to_string().contains("--base"), "{err:#}");
+    }
+
+    /// There is no project default to route an omission through any more, so
+    /// a document naming no `pipeline:` is refused the same way one naming
+    /// no `group:` already is — built by hand rather than through
+    /// `document`, which now fills the key in.
+    #[test]
+    fn a_document_with_no_pipeline_is_refused() {
+        let text = format!("---\nid: demo\ntitle: demo, done\ngroup: demo\n---\n{BODY}");
+        let err = parse_submission("no-pipeline.md", &text, Some("plan/demo")).unwrap_err();
+        assert!(err.to_string().contains("no-pipeline.md"), "{err:#}");
+        assert!(err.to_string().contains("must set `pipeline:`"), "{err:#}");
+    }
+
+    /// A document that sets `pipeline:` to nothing but whitespace is refused
+    /// the same as one that omits the key outright — blank counts as absent,
+    /// the same courtesy `group:` already gets.
+    #[test]
+    fn a_document_with_a_blank_pipeline_is_refused() {
+        let text =
+            format!("---\nid: demo\ntitle: demo, done\ngroup: demo\npipeline: \"  \"\n---\n{BODY}");
+        let err = parse_submission("blank-pipeline.md", &text, Some("plan/demo")).unwrap_err();
+        assert!(err.to_string().contains("must set `pipeline:`"), "{err:#}");
     }
 
     /// The retired quota-and-usage-limit park fields have no struct home any
@@ -7482,13 +7624,14 @@ mod tests {
         // Only the blank separator the loop always opens a task with, the
         // task row, its Pipeline: row and its Depends on: row — nothing
         // past it, since this document has no title to draw a Description:
-        // row from.
+        // row from. The document names no `pipeline:` either, and there is
+        // no project default to show in its place any more.
         assert_eq!(
             lines,
             vec![
                 String::new(),
                 "  wire".to_string(),
-                format!("    {:<LABEL_FIELD$}{}", "Pipeline:", pipelines.default),
+                format!("    {:<LABEL_FIELD$}{}", "Pipeline:", TRIAL_UNASSIGNED),
                 "    Depends on:  -".to_string(),
             ],
             "{lines:?}"
@@ -7751,14 +7894,21 @@ mod tests {
         );
     }
 
-    /// `p`'s own first screen: every task in the group, its own row, and
-    /// every one already assigned a pipeline — its own document's, or this
-    /// project's default, the same fallback `task_pipeline` resolves — so
-    /// nothing is left blank the moment the picker opens.
+    /// `p`'s own first screen: every task in the group, its own row, and a
+    /// task whose document names its own `pipeline:` shown assigned to it
+    /// already — one that names none shows unassigned instead, there being
+    /// no project default left to seed it with.
     #[test]
     fn assign_pipelines_panel_lists_every_task_already_assigned_a_pipeline() {
         let repo = fixture("screen-trial-assign");
-        write_pending(&repo, "alpha", &document("alpha", "group: chain\n", BODY));
+        // Built by hand rather than through `document`, which now fills in
+        // `pipeline: default` — alpha's own point here is that it names
+        // none, so the picker opens it unassigned.
+        write_pending(
+            &repo,
+            "alpha",
+            &format!("---\nid: alpha\ntitle: alpha, done\ngroup: chain\n---\n{BODY}"),
+        );
         write_pending(
             &repo,
             "beta",
@@ -7784,11 +7934,13 @@ mod tests {
         assert!(flat.contains("trial chain"), "{flat}");
         assert!(flat.contains("assign one pipeline to every task"), "{flat}");
         assert!(flat.contains("alpha"), "{flat}");
-        assert!(flat.contains(&pipelines.default), "{flat}");
+        assert!(flat.contains(TRIAL_UNASSIGNED), "{flat}");
         assert!(flat.contains("beta"), "{flat}");
         assert!(flat.contains("bugfix"), "{flat}");
+        // alpha is still unassigned, so the footer says so rather than
+        // offering an `enter` that would silently refuse to advance.
         assert!(
-            flat.contains("↑↓ task   ←→ pipeline   enter next   esc cancel"),
+            flat.contains("↑↓ task   ←→ pipeline   assign every task, then enter   esc cancel"),
             "{flat}"
         );
     }
@@ -7796,34 +7948,50 @@ mod tests {
     /// `←`/`→` on the first screen cycles the highlighted task's own
     /// assignment through every project pipeline, wrapping past either end
     /// rather than stopping there, and never touches any other task's own
-    /// pick.
+    /// pick — an unassigned task the cursor never visited stays unassigned.
     #[test]
     fn left_right_cycles_only_the_highlighted_tasks_own_pipeline() {
         let repo = fixture("screen-trial-cycle");
-        write_pending(&repo, "alpha", &document("alpha", "group: demo\n", BODY));
-        write_pending(&repo, "beta", &document("beta", "group: demo\n", BODY));
+        // Built by hand, the same as the panel test above — both tasks have
+        // to open unassigned, and `document` would otherwise fill in
+        // `pipeline: default` for them.
+        write_pending(
+            &repo,
+            "alpha",
+            &format!("---\nid: alpha\ntitle: alpha, done\ngroup: demo\n---\n{BODY}"),
+        );
+        write_pending(
+            &repo,
+            "beta",
+            &format!("---\nid: beta\ntitle: beta, done\ngroup: demo\n---\n{BODY}"),
+        );
         let groups = listed(&repo);
         let pipelines = Pipelines::builtin();
         let group = &groups[0];
         let beta_key = task_key(&group.tasks[1]);
-        let beta_before = TrialState::new(&pipelines, group).pipeline[&beta_key].clone();
+        assert!(
+            !TrialState::new(&pipelines, group)
+                .pipeline
+                .contains_key(&beta_key),
+            "a document naming no `pipeline:` opens unassigned"
+        );
 
         let trial = TrialState::new(&pipelines, group);
         let Mode::Trial(trial) = handle_trial_key(group, &pipelines, trial, Key::Right) else {
             panic!("expected to stay on the trial picker");
         };
 
+        // Unassigned, so `→` lands on whichever pipeline sorts first.
         let names = trial_pipeline_names(&pipelines);
-        let at = names.iter().position(|n| *n == pipelines.default).unwrap();
-        let expected = names[(at + 1) % names.len()];
+        let expected = names[0];
         assert_eq!(
             trial.pipeline[&task_key(&group.tasks[0])],
             expected,
             "the highlighted task (alpha) moved on"
         );
-        assert_eq!(
-            trial.pipeline[&beta_key], beta_before,
-            "beta was never under the cursor, so its own pick must not move"
+        assert!(
+            !trial.pipeline.contains_key(&beta_key),
+            "beta was never under the cursor, so it must still be unassigned"
         );
     }
 
@@ -8593,6 +8761,46 @@ mod tests {
         );
     }
 
+    /// The picker's whole reason to exist, and the one case nothing covered:
+    /// a document naming no pipeline at all. Every other trial test goes
+    /// through `document`, which fills in `pipeline: default` unless the
+    /// document names one — so all of them arrived already routed, and the
+    /// unassigned task the assign screen is *for* was never driven end to
+    /// end. It did not work: `build_trial_arm` hands `parse_submission` the
+    /// source document, which refuses one with no `pipeline:`, so the whole
+    /// batch was abandoned with `trial refused:` and nothing was minted.
+    ///
+    /// A bare `pipeline:` rather than no line at all, so `document`'s own
+    /// fill-in steps aside and the document reads exactly as unassigned as
+    /// one a person left blank by hand — the same shape `scripts/e2e`'s
+    /// `task_doc` writes for this.
+    #[test]
+    fn a_trial_routes_a_document_that_names_no_pipeline_of_its_own() {
+        let repo = fixture("screen-trial-unassigned");
+        write_pending(
+            &repo,
+            "solo",
+            &document(
+                "solo",
+                "group: audits\ntouches: [src/solo.rs]\npipeline:\n",
+                BODY,
+            ),
+        );
+        let groups = listed(&repo);
+
+        // `p` opens the picker with `solo` drawn `(unset)`, which `enter`
+        // alone will not advance past. One `→` lands it on `bugfix` — the
+        // pipeline that sorts first, there being no current position to
+        // cycle away from — `enter` advances to the skips screen, `enter`
+        // launches with nothing ticked, and `n` declines the dispatcher.
+        screen(&repo, groups, "p\x1b[C\r\rn");
+
+        let arm = queued(&repo, "solo-1");
+        assert_eq!(arm.front.pipeline.as_deref(), Some("bugfix"));
+        assert_eq!(arm.front.group.as_deref(), Some("audits"));
+        assert_eq!(arm.front.branch.as_deref(), Some("task/solo-1"));
+    }
+
     /// A group of more than one task mints one arm per task, all sharing the
     /// one trial id, and a task that named a sibling in `depends_on` keeps
     /// waiting on it — remapped to that sibling's own minted id, since the
@@ -8693,7 +8901,7 @@ mod tests {
         std::fs::write(
             repo.archive_dir().join("finished.md"),
             "---\nid: finished\ntitle: finished, done\ngroup: audits\nstage: done\n\
-             depends_on: [long-gone]\n---\nbody\n",
+             pipeline: default\ndepends_on: [long-gone]\n---\nbody\n",
         )
         .unwrap();
         let groups = listed(&repo);
