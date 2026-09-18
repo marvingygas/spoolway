@@ -1025,6 +1025,7 @@ mod tests {
     #[test]
     fn promote_config_patch_keeps_comments_and_writes_every_key() {
         let root = crate::scratch::root("overrides-promote-config");
+        let home = crate::scratch::root("overrides-promote-config-home");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join(".spoolway")).unwrap();
         std::fs::write(
@@ -1032,23 +1033,30 @@ mod tests {
             "[dispatch]\n# chosen for this project\nworktree_root = \"/one\"\n",
         )
         .unwrap();
-        let overrides = dir_for(&root).unwrap();
-        std::fs::create_dir_all(&overrides).unwrap();
-        std::fs::write(
-            config_patch_path(&overrides),
-            "[dispatch]\nworktree_root = \"/two\"\n",
-        )
-        .unwrap();
 
-        let changes = promote_config_patch(&root).unwrap();
-        assert_eq!(
-            changes,
-            vec![("dispatch.worktree_root".to_string(), "/two".to_string())]
-        );
+        // `dir_for` -> `mux::project_home` resolves under `~/.spoolway` for a
+        // bare fixture directory with no git repository behind it — a real
+        // `$HOME`, unswapped, sends this test's own fixture there. See
+        // issue #188.
+        crate::platform::test_home::with_home(&home, || {
+            let overrides = dir_for(&root).unwrap();
+            std::fs::create_dir_all(&overrides).unwrap();
+            std::fs::write(
+                config_patch_path(&overrides),
+                "[dispatch]\nworktree_root = \"/two\"\n",
+            )
+            .unwrap();
 
-        let written = std::fs::read_to_string(Config::path_in(&root)).unwrap();
-        assert!(written.contains("# chosen for this project"));
-        assert!(written.contains("worktree_root = \"/two\""));
+            let changes = promote_config_patch(&root).unwrap();
+            assert_eq!(
+                changes,
+                vec![("dispatch.worktree_root".to_string(), "/two".to_string())]
+            );
+
+            let written = std::fs::read_to_string(Config::path_in(&root)).unwrap();
+            assert!(written.contains("# chosen for this project"));
+            assert!(written.contains("worktree_root = \"/two\""));
+        });
     }
 
     /// Dropping an entry that was never there is refused by name, not a
