@@ -83,10 +83,6 @@ reading the file whole.
 
    2  <task-id>                  <size>   <pipeline>
       What this task is, in one or two plain sentences.
-
-   PIPELINES
-
-   <pipeline>  That pipeline's own description:, copied verbatim.
    ```
 
    Number the tasks from 1 in `depends_on` order, so the chain reads down the page.
@@ -96,12 +92,6 @@ reading the file whole.
    different count. Line the three columns up with spaces, pipeline last, and wrap the
    sentences under each task at around 48 characters, because the option box they are read in
    is narrow.
-
-   `PIPELINES` closes every candidate. It names each distinct pipeline from the list above it
-   once, carrying that pipeline's own `description:` from step 1's contract, verbatim. A
-   person approves the routing by picking the count, not by a question of its own, so this is
-   the one place that sentence has to be. No pipeline reaches a document without having
-   appeared on this ballot first.
 
 3. **Write one document per task**, with **Write**, at
    `~/.spoolway/<project>/pending/<task-id>.md`. Frontmatter first, then the body in the shape
