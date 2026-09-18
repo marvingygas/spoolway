@@ -217,7 +217,7 @@ watched and never has to be named. An entry naming nothing that exists, or namin
 dropped, and the rest of the config still loads.
 
 Set the list with `spoolway config set watch.dirs ~/notes,docs`, comma-separated, the same as
-every other list-valued key. `spoolway update` keeps whatever a project has put there.
+every other list-valued key. `spoolway sync` keeps whatever a project has put there.
 
 ## `[agents.*]` — who runs a step
 
@@ -374,7 +374,7 @@ refuses.
 
 ### The shipped hook scripts
 
-`spoolway init` writes `github.sh` and `jira.sh` into `.spoolway/hooks/`. `spoolway update`
+`spoolway init` writes `github.sh` and `jira.sh` into `.spoolway/hooks/`. `spoolway sync`
 never changes them. Switch trackers with
 `spoolway config set issue_tracking.hook <file>`.
 

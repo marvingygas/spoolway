@@ -1,6 +1,6 @@
 ---
 domain: installation
-covers: ["src/install.rs", "src/update.rs", "src/release.rs", "src/release_notes.rs", "CHANGELOG.md", "src/assets.rs", "src/ask.rs", "src/gitignore.rs", "npm/**", "scripts/build-npm.mjs"]
+covers: ["src/install.rs", "src/update.rs", "src/sync.rs", "src/release.rs", "src/release_notes.rs", "CHANGELOG.md", "src/assets.rs", "src/ask.rs", "src/gitignore.rs", "npm/**", "scripts/build-npm.mjs"]
 ---
 
 # Installation and setup
@@ -110,7 +110,7 @@ Delete the directory to forget every task, plan and lane. The next command refus
 checkout still carries a stamp no home holds. Run `spoolway init --new-id` to start clean. See
 [Runtime state](configuration.md#runtime-state).
 
-`init` does not write to `.gitignore`. `spoolway update` removes the marked block an older
+`init` does not write to `.gitignore`. `spoolway sync` removes the marked block an older
 version wrote there.
 
 ### Upgrading from 0.2
@@ -203,25 +203,20 @@ error with its line and runs every check that does not need that file. It does t
 project's stamped home cannot be resolved, reporting that as one failed check. Flags are in the
 [CLI reference](cli-reference.md).
 
-## Keeping a project current
+## Keeping spoolway current
 
 ```
-spoolway update --dry-run     # print what would change
-spoolway update               # apply it
+spoolway update
 ```
 
-If npm installed this binary and a newer release is out, `update` first runs
+If npm installed this binary and a newer release is out, `update` runs
 `npm install -g spoolway@<version> --ignore-scripts` and then hands over to the new binary. At
 a terminal it then prints the old and new versions, the highlights, every migration that
-applies, and links to the full notes.
+applies, and links to the full notes. `update` installs the binary only. It runs from any
+directory, project or not, and writes no project file.
 
 `update` asks npm which release is out each time it runs. The wait is bounded. If npm does
-not answer in time, `update` says so, uses the last known version and carries on with the
-file work.
-
-The file work lands on the checkout `update` runs in. In a linked worktree that is the
-worktree's own tracked files, and the [`checkout:` line](cli-reference.md#the-checkout-line)
-names it first.
+not answer in time, `update` says so and uses the last known version.
 
 The release notes are compiled into the binary:
 
@@ -233,7 +228,7 @@ spoolway whats-new --since 0.1.0   # every later release, oldest first
 The source is [`CHANGELOG.md`](../CHANGELOG.md). Its contract is written at the top of the
 file.
 
-Two things stop the binary update. Neither stops the file updates.
+Two things stop the binary update:
 
 | What stops it | What happens |
 |---|---|
@@ -250,7 +245,18 @@ The line is not printed inside a lane, under `--json`, or when output is not a t
 it off with `housekeeping.update_check = false` in the config, or with
 `SPOOLWAY_SKIP_VERSION_CHECK=1` for one machine.
 
-What `update` replaces, file by file:
+## Keeping a project's files current
+
+```
+spoolway sync --dry-run     # print what would change
+spoolway sync               # apply it
+```
+
+`sync` brings a project's own files forward. It needs a project, and lands its writes on the
+checkout it runs in. In a linked worktree that is the worktree's own tracked files, and the
+[`checkout:` line](cli-reference.md#the-checkout-line) names it first.
+
+What `sync` replaces, file by file:
 
 | File | What is replaced |
 |---|---|
@@ -263,11 +269,15 @@ What `update` replaces, file by file:
 | Task skeletons | Nothing. |
 | A retired template | Removed, with the reason it is gone. |
 
-`update` never merges. A marked block you edited by hand stops the update on that file.
-`spoolway update --replace <path>` writes the shipped file over yours and saves your version
+`sync` never merges. A marked block you edited by hand stops the sync on that file.
+`spoolway sync --replace <path>` writes the shipped file over yours and saves your version
 beside it as `.bak`. That is also how to take a newer default prompt or skeleton on purpose.
 `spoolway doctor` reports files that are behind. `spoolway pipeline check` reports a prompt
 that names a command or flag this binary does not have.
+
+On success, `sync` records this binary's version and a fingerprint of the text it would write
+in a stamp under the project's home, one line per checkout. `spoolway init` writes the same
+stamp for a freshly scaffolded project.
 
 ## Platform notes
 

@@ -221,16 +221,16 @@ after it pick up a build nobody meant to be running.
 
 A merge is the thing that makes this project's own `.spoolway/` older than the binary reading
 it. New settings and new pipeline keys land in `assets/`, and the installed copy under
-`.spoolway/` keeps whatever the last `update` left. So `doctor` starts reporting files behind
+`.spoolway/` keeps whatever the last `sync` left. So `doctor` starts reporting files behind
 straight after the install, and the drift is the merge's, not the project's.
 
 ```
-spoolway update --dry-run                 # read this before taking it
-spoolway update
+spoolway sync --dry-run                   # read this before taking it
+spoolway sync
 spoolway doctor
 ```
 
-Read the dry run rather than skipping to `update`. It rewrites spoolway's half of files a
+Read the dry run rather than skipping to `sync`. It rewrites spoolway's half of files a
 person also writes in, and a pull request that changed a default is exactly the case where
 you want to see which one before it lands. Leave `--force-contract` and `--replace` alone
 here: both discard human edits, and neither is a merge's decision to make.
@@ -311,6 +311,6 @@ open list whether they were missed or refused.
   `git diff --name-only` outputs — and check that every line each side added is still in the
   merged file. It is a one-line loop and it is the only thing standing between a silent drop
   and a push.
-- **`spoolway update` was skipped, so `doctor` complains for weeks.** The drift step 10 clears
+- **`spoolway sync` was skipped, so `doctor` complains for weeks.** The drift step 10 clears
   looks like something wrong with the project. It is the merge's own doing, and it appears on
   every pass that brings in a new default.

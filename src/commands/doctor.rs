@@ -278,7 +278,7 @@ pub fn doctor(
             report.record_all(retired_key_notes(&repo.checkout));
             report.record_all(override_layer_note(repo));
             report.record(mux_finding(&mux));
-            doctor_update(repo, &mut report);
+            doctor_sync(repo, &mut report);
             report.record(match crate::lock::Lock::holder(&repo.lock_file())? {
                 Some(pid) => Finding::Note(format!("a dispatcher is running (pid {pid})")),
                 None => Finding::NoteVerbose("no dispatcher running".into()),
@@ -330,7 +330,7 @@ pub fn doctor(
     report.record_all(agent_checks(pipelines, &config));
     report.record_all(model_health_checks(pipelines, &config));
     report.record_all(agent_kind_checks(&config));
-    doctor_update(repo, &mut report);
+    doctor_sync(repo, &mut report);
     report.record_all(prompt_checks(repo, pipelines));
     report.record_all(jobs_checks(repo, pipelines));
 
@@ -631,7 +631,7 @@ fn issue_tracking_checks(
             },
         ));
     }
-    // `spoolway update` never rewrites a hook a project already has, so
+    // `spoolway sync` never rewrites a hook a project already has, so
     // every install that named a tracker before this event existed has a
     // script with no `fetch` branch — and running one anyway would read as
     // "fetched an issue with nothing on it" rather than "never
@@ -659,7 +659,7 @@ fn issue_tracking_checks(
     // from making the same silent gap.
     findings.extend(required_tool_checks(&repo.checkout, &tracking.hook));
     // `issue_tracking.key_in_names` prefixes every generated name with a
-    // `slug=` the hook answers — but `spoolway update` never rewrites a hook
+    // `slug=` the hook answers — but `spoolway sync` never rewrites a hook
     // a project already has, so a project that turned the flag on without
     // adding the line gets no prefix at all, silently, on every `queue add`.
     findings.push(Finding::Check(
@@ -1525,7 +1525,7 @@ fn prompt_checks(repo: &Repo, pipelines: &Pipelines) -> Vec<Finding> {
     // A prompt directory nothing runs is what a release leaves behind when it
     // stops shipping one — `summariser` went with `[stack.summary]` — and
     // what a step rename leaves when its prompt was not renamed with it.
-    // `update` never deletes a prompt, since the project may have written in
+    // `sync` never deletes a prompt, since the project may have written in
     // it; so it is said here, once, rather than found by whoever opens the
     // directory next.
     if let Ok(entries) = crate::prompt::entries(repo) {
@@ -1657,52 +1657,52 @@ fn gh_status() -> Result<Option<String>> {
     Ok(Some(path))
 }
 
-/// What `spoolway update` would do here, and above all what it would refuse.
+/// What `spoolway sync` would do here, and above all what it would refuse.
 ///
-/// The report `update` prints is the paths it wrote and one line, because
+/// The report `sync` prints is the paths it wrote and one line, because
 /// which files moved is the only question anybody runs it to answer. That
 /// leaves one thing homeless: a file it *declined* to touch, where somebody
 /// has edited the half a machine reads. Silence there is a project quietly
 /// running an old contract, so it surfaces here — which is where
 /// `docs/installation.md` has claimed to report it all along.
 ///
-/// Notes rather than problems, both of them. An outstanding update is a
+/// Notes rather than problems, both of them. An outstanding sync is a
 /// command somebody has not run yet, and a refusal is usually a deliberate
 /// edit; neither is a broken project, and neither should fail a `doctor` that
 /// a lane runs.
-fn doctor_update(repo: &Repo, report: &mut Report) {
-    let dry = crate::cli::UpdateArgs {
+fn doctor_sync(repo: &Repo, report: &mut Report) {
+    let dry = crate::cli::SyncArgs {
         dry_run: true,
         replace: Vec::new(),
     };
-    let Ok(outcomes) = crate::update::scan(repo, &dry) else {
+    let Ok(outcomes) = crate::sync::scan(repo, &dry) else {
         return;
     };
     // The scan reads `repo.root`'s copy, so that is the file whose absence
     // says `init` never ran here.
     let initialised = Config::path_in(&repo.root).is_file();
-    for note in update_notes(&outcomes, initialised) {
+    for note in sync_notes(&outcomes, initialised) {
         report.note(note);
     }
 }
 
-/// The notes [`doctor_update`] records for a dry `update` scan.
+/// The notes [`doctor_sync`] records for a dry `sync` scan.
 ///
 /// A file that is missing altogether from a project that was never
 /// initialised — no `config.toml` at all — is not *behind*: nothing was ever
-/// written for `update` to bring forward, and pointing at `update` there
+/// written for `sync` to bring forward, and pointing at `sync` there
 /// sends a person to the wrong command. Those files get a note of their own
-/// naming `spoolway init`; the "behind" note keeps only what `update` is
+/// naming `spoolway init`; the "behind" note keeps only what `sync` is
 /// actually for. In an initialised project a missing file is an ordinary
-/// thing for `update` to restore, and stays where it was.
-fn update_notes(outcomes: &[crate::update::Outcome], initialised: bool) -> Vec<String> {
+/// thing for `sync` to restore, and stays where it was.
+fn sync_notes(outcomes: &[crate::sync::Outcome], initialised: bool) -> Vec<String> {
     let mut notes = Vec::new();
     let mut behind: Vec<(&str, &str)> = Vec::new();
     let mut never_written: Vec<&str> = Vec::new();
     for outcome in outcomes {
         match outcome {
-            crate::update::Outcome::Wrote { path, detail }
-                if !initialised && detail == crate::update::MISSING =>
+            crate::sync::Outcome::Wrote { path, detail }
+                if !initialised && detail == crate::sync::MISSING =>
             {
                 if !never_written.contains(&path.as_str()) {
                     never_written.push(path);
@@ -1711,20 +1711,20 @@ fn update_notes(outcomes: &[crate::update::Outcome], initialised: bool) -> Vec<S
             // One file can be behind for several reasons at once — a config
             // gains a setting and has a note rewritten in the same pass — and
             // this is a count of files, not of reasons.
-            crate::update::Outcome::Wrote { path, detail } => {
+            crate::sync::Outcome::Wrote { path, detail } => {
                 if !behind.iter().any(|(known, _)| *known == path.as_str()) {
                     behind.push((path, detail));
                 }
             }
-            crate::update::Outcome::Blocked { path, why } => {
+            crate::sync::Outcome::Blocked { path, why } => {
                 notes.push(format!("{path}: {why}"));
             }
-            crate::update::Outcome::Removed { path, why } => {
+            crate::sync::Outcome::Removed { path, why } => {
                 if !behind.iter().any(|(known, _)| *known == path.as_str()) {
                     behind.push((path, why));
                 }
             }
-            crate::update::Outcome::Kept => {}
+            crate::sync::Outcome::Kept => {}
         }
     }
 
@@ -1744,7 +1744,7 @@ fn update_notes(outcomes: &[crate::update::Outcome], initialised: bool) -> Vec<S
         // One note, carrying its own continuation lines, so that the short
         // report and the full listing print the same block.
         let mut note = format!(
-            "{} file(s) here are behind this spoolway — `spoolway update` takes them",
+            "{} file(s) here are behind this spoolway — `spoolway sync` takes them",
             behind.len()
         );
         for (path, detail) in &behind {
@@ -2706,7 +2706,7 @@ mod tests {
     }
 
     /// A note that carries its own continuation lines — the list of files
-    /// `spoolway update` would take — prints the same block in both modes.
+    /// `spoolway sync` would take — prints the same block in both modes.
     #[test]
     fn a_multi_line_note_keeps_its_continuation_lines() {
         let mut report = Report::default();
@@ -2766,15 +2766,15 @@ mod tests {
     }
 
     /// A file missing from a project `init` never wrote is not *behind* —
-    /// `update` has nothing to bring forward there — so the note names
-    /// `init` for it and keeps the "behind" note for files `update` is for.
+    /// `sync` has nothing to bring forward there — so the note names
+    /// `init` for it and keeps the "behind" note for files `sync` is for.
     #[test]
-    fn a_never_initialised_project_is_sent_to_init_not_update() {
-        use crate::update::Outcome;
+    fn a_never_initialised_project_is_sent_to_init_not_sync() {
+        use crate::sync::Outcome;
         let outcomes = vec![
             Outcome::Wrote {
                 path: ".spoolway/config.toml".into(),
-                detail: crate::update::MISSING.into(),
+                detail: crate::sync::MISSING.into(),
             },
             Outcome::Wrote {
                 path: ".spoolway/prompts/a.md".into(),
@@ -2782,7 +2782,7 @@ mod tests {
             },
         ];
 
-        let notes = update_notes(&outcomes, false);
+        let notes = sync_notes(&outcomes, false);
         assert_eq!(notes.len(), 2, "{notes:?}");
         assert!(
             notes[0].contains("`spoolway init` writes them")
@@ -2797,10 +2797,31 @@ mod tests {
             "{notes:?}"
         );
 
-        // In an initialised project a missing file is `update`'s to restore.
-        let notes = update_notes(&outcomes, true);
+        // In an initialised project a missing file is `sync`'s to restore.
+        let notes = sync_notes(&outcomes, true);
         assert_eq!(notes.len(), 1, "{notes:?}");
         assert!(notes[0].starts_with("2 file(s) here are behind this spoolway"));
+    }
+
+    /// A file `sync` refused — hand-edited where only a machine reads — is
+    /// the one outcome that is a refusal, and it still surfaces here even
+    /// though the "behind" note above only ever counts what a sync would
+    /// write.
+    #[test]
+    fn a_blocked_file_is_still_reported() {
+        use crate::sync::Outcome;
+        let outcomes = vec![Outcome::Blocked {
+            path: ".spoolway/pipelines/default.yml".into(),
+            why: "its machine-readable block was edited by hand".into(),
+        }];
+
+        let notes = sync_notes(&outcomes, true);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(
+            notes[0].contains(".spoolway/pipelines/default.yml")
+                && notes[0].contains("edited by hand"),
+            "{notes:?}"
+        );
     }
 
     /// A settled binding is an `Ok` check naming the home it settled on —

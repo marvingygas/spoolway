@@ -35,7 +35,7 @@ object:
 
 The commands that print it: `pipeline show`, `pipeline check`, `pipeline list`, `pipeline
 override`, `prompt list`, `prompt override`, `config show`, `config list`, `config get`,
-`config path`, `config override`, `doctor` and `update`.
+`config path`, `config override`, `doctor` and `sync`.
 
 ## Your work
 
@@ -727,26 +727,38 @@ spoolway install codex
 
 ### `spoolway update`
 
-Install the latest release and bring forward the files spoolway writes, without touching what
-you wrote. Prompts and task skeletons are never touched. After an npm self-update at a
-terminal, it prints the release notes.
+Install the latest release. Runs from any directory, project or not, and writes no project
+file. After an npm self-update at a terminal, it prints the release notes.
+
+```
+spoolway update
+```
+
+The binary is only updated where npm installed it. A running dispatcher stops the install.
+`update` asks npm which release is out each time it runs. The wait is bounded. If npm does
+not answer in time, `update` uses the last known version and carries on.
+
+### `spoolway sync`
+
+Bring forward the files spoolway writes, without touching what you wrote. Prompts and task
+skeletons are never touched.
 
 It writes the checkout it runs in. In a linked worktree that is the worktree's own files, not
 the main checkout's, and the [`checkout:` line](#the-checkout-line) names which one.
 
 ```
-spoolway update --dry-run
-spoolway update
+spoolway sync --dry-run
+spoolway sync
 ```
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--dry-run` | | Print what would change. Writes and installs nothing |
+| `--dry-run` | | Print what would change. Writes nothing |
 | `--replace <PATH>` | | Replace one file with the shipped version. Yours is saved beside it as `.bak`. Repeatable |
 
-The binary is only updated where npm installed it. A running dispatcher stops the install.
-`update` asks npm which release is out each time it runs. The wait is bounded. If npm does
-not answer in time, `update` uses the last known version and carries on.
+On success, `sync` writes a stamp under the project's home recording this binary's version and
+a fingerprint of the text it would write, one line per checkout. `spoolway init` writes the
+same stamp for a freshly scaffolded project.
 
 ### `spoolway whats-new`
 

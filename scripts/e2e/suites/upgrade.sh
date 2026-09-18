@@ -3,7 +3,7 @@
 #
 # Every other suite builds its project from a seed written inline — see
 # `fixture.sh`'s own header for why that is right for everything else. It is
-# wrong for exactly one question: whether `spoolway update` still carries an
+# wrong for exactly one question: whether `spoolway sync` still carries an
 # *actual* old project forward, config values and hand-written prose alike.
 # A seed built by today's binary can only ever be current; the only way to
 # get something genuinely behind is to have really been that old release
@@ -14,13 +14,13 @@
 # table at 0.1.0, and directly under `[housekeeping]` at 0.2.0, since the fold
 # into it had already happened by then. One line of prose was hand-added
 # below the pipeline file's generated key block in each, for `spoolway
-# update` to preserve.
+# sync` to preserve.
 #
 # No `covers:` tag of its own, for the same reason `overrides.sh` carries
 # none: `housekeeping.retention_days` and the pipeline key block are already
 # regular settings with their own coverage: what is being asked here is
 # whether *moving* to them across a real upgrade still lands the value,
-# which is a question about `Config::migrate` and `spoolway update`, not
+# which is a question about `Config::migrate` and `spoolway sync`, not
 # about either setting.
 #
 # nightly only — see run.sh's own header for why, and the task's own goal:
@@ -173,7 +173,7 @@ byte_for_byte_outside_block() {
 # stage <version>
 #
 # A fresh repo with that version's own fixture laid over it, registered
-# under a scratch $HOME so `spoolway update` — which refuses an
+# under a scratch $HOME so `spoolway sync` — which refuses an
 # unregistered project — has something to run against. `spoolway init`
 # writes only what the fixture does not already have (see its own `place`),
 # so this claims the project without touching a byte the fixture carries.
@@ -182,9 +182,9 @@ byte_for_byte_outside_block() {
 # checked: unseeded, `release::newer()` finds no cache, decides it is stale,
 # and spawns a detached child that shells out to `npm view` — which nothing
 # here should ever do, and would run past this suite's own lifetime besides.
-# Stamping it with this binary's own version rather than a placeholder one
-# also keeps `spoolway update`'s own upgrade check honest: a placeholder
-# `newer()` believed was newer would send it into a real `npm install -g`.
+# `notify()` runs ahead of `init` and `sync` alike, so both need the cache
+# seeded, even though neither one is `update` and neither ever reaches
+# `release::upgrade`'s own live npm call.
 #
 # `release::cache_path()` reads `$XDG_STATE_HOME/spoolway/latest.json` in
 # preference to `$HOME/.local/state/...` — and an inherited `XDG_STATE_HOME`
@@ -222,7 +222,7 @@ cp "$PIPELINE" "$WORK/0.1.0/before-default.yml"
 has "the 0.1.0 fixture really does carry that release's own stale key block" \
   "cleanup           true" "$WORK/0.1.0/before-default.yml"
 
-must "spoolway update runs against the 0.1.0 project" "$SPOOLWAY" update
+must "spoolway sync runs against the 0.1.0 project" "$SPOOLWAY" sync
 
 has "the value set under the retired [retention] table reached [housekeeping]" \
   "retention_days = 90" .spoolway/config.toml
@@ -254,9 +254,9 @@ stage 0.2.0
 PIPELINE=".spoolway/pipelines/default.yml"
 cp "$PIPELINE" "$WORK/0.2.0/before-default.yml"
 
-must "spoolway update runs against the 0.2.0 project" "$SPOOLWAY" update
+must "spoolway sync runs against the 0.2.0 project" "$SPOOLWAY" sync
 
-has "the housekeeping value already in place survives the update" \
+has "the housekeeping value already in place survives the sync" \
   "retention_days = 45" .spoolway/config.toml
 byte_for_byte_outside_block "the prose around the already-current block is untouched" \
   "$WORK/0.2.0/before-default.yml" "$PIPELINE"
@@ -270,7 +270,7 @@ works "the 0.2.0 fixture's dead lane-prompts template is swept" \
 
 # --------------------------------------------------------- 0.3.0: dead templates
 #
-# `spoolway update` gained a sweep for a template the binary no longer ships —
+# `spoolway sync` gained a sweep for a template the binary no longer ships —
 # `install::RETIRED_TEMPLATES` — after the config fold above had already
 # landed, so this fixture is the sharpest proof that the sweep runs on its
 # own: nothing about the fold or the pipeline key block is new by 0.3.0, only
@@ -278,7 +278,7 @@ works "the 0.2.0 fixture's dead lane-prompts template is swept" \
 # afterwards.
 stage 0.3.0
 
-must "spoolway update runs against the 0.3.0 project" "$SPOOLWAY" update
+must "spoolway sync runs against the 0.3.0 project" "$SPOOLWAY" sync
 
 works "the 0.3.0 fixture's dead task-log template is swept" \
   test ! -e .spoolway/templates/task-log.md

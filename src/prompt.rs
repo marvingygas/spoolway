@@ -3,7 +3,7 @@
 //! A prompt is a directory under `.spoolway/prompts/` holding a `PROMPT.md`,
 //! selected by a step's `prompt:`. Nothing registers one, nothing compiles it
 //! in, and — since the file format was removed — nothing parses one either. It
-//! is prose the project owns outright: `spoolway update` never touches a
+//! is prose the project owns outright: `spoolway sync` never touches a
 //! prompt, and `init` writes one only where none exists.
 //!
 //! The directory exists so a role can keep belongings beside its prose, in an
@@ -654,8 +654,8 @@ fn read_prompts(
 /// Every `spoolway …` command a prompt names, checked against the CLI this
 /// binary actually has.
 ///
-/// This is the check that replaces the update pass. Prompts are never rewritten
-/// by an upgrade, which is the point — so the thing that used to be prevented by
+/// This is the check that replaces the sync pass. Prompts are never rewritten
+/// by a sync, which is the point — so the thing that used to be prevented by
 /// regenerating half the file has to be *found* instead. A renamed subcommand or
 /// a dropped flag in prompt prose is a lane running a subcommand
 /// against a binary that no longer has it, twenty minutes in, in a pane nobody is

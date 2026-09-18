@@ -53,6 +53,16 @@ pub enum Command {
     /// Set up `.spoolway/` in a repo: config, the default pipeline, and prompts.
     Init(InitArgs),
 
+    /// Install the newer binary, and nothing else.
+    #[command(long_about = "Install the newer binary, and nothing else.\n\n\
+        Checks npm for a newer release, and if there is one and this install can take it, \
+        runs `npm install -g spoolway@<version> --ignore-scripts` and hands over to the new \
+        binary. Runs from any directory, project or not — installing a binary is a fact about \
+        this machine's `PATH`, not about any project.\n\n\
+        `spoolway sync` is what brings a project's own files forward — `config.toml`, every \
+        tracked pipeline file, installed skills. See `spoolway sync --help`.")]
+    Update(UpdateArgs),
+
     /// Take what a newer spoolway writes, without touching what you wrote.
     #[command(
         long_about = "Take what a newer spoolway writes, without touching what you wrote.\n\n\
@@ -66,9 +76,10 @@ pub enum Command {
         project owns outright, with nothing generated inside them; `spoolway pipeline check` \
         is what tells you when one names a command this binary no longer has, and `--replace` \
         is how to take a shipped one back on purpose.\n\n\
-        `init` is still how a project starts. This is how one keeps up."
+        `init` is still how a project starts. `spoolway update` is how the binary itself \
+        keeps up; this is how its files do."
     )]
-    Update(UpdateArgs),
+    Sync(SyncArgs),
 
     /// Read the release notes embedded in this binary.
     WhatsNew(WhatsNewArgs),
@@ -270,7 +281,7 @@ pub const HELP_GROUPS: &[(&str, &[&str])] = &[
     ),
     (
         "Setting up:",
-        &["init", "install", "update", "whats-new", "doctor"],
+        &["init", "install", "update", "sync", "whats-new", "doctor"],
     ),
     ("Called by lanes, not by you:", &["report", "stack"]),
 ];
@@ -1351,12 +1362,17 @@ pub enum HookCommand {
     Contract,
 }
 
+/// `spoolway update` itself asks nothing beyond the command name: it runs the
+/// same way everywhere it is typed, project or not.
+#[derive(Debug, Args)]
+pub struct UpdateArgs {}
+
 #[derive(Debug, Args)]
 #[command(after_long_help = "\x1b[1mExamples:\x1b[0m\n  \
-        spoolway update --dry-run     what it would change, and nothing else\n  \
-        spoolway update               take it\n\n\
+        spoolway sync --dry-run     what it would change, and nothing else\n  \
+        spoolway sync               take it\n\n\
         Everything spoolway writes is tracked in git, so `git diff` is the review.")]
-pub struct UpdateArgs {
+pub struct SyncArgs {
     /// Print what would change and write nothing.
     #[arg(long)]
     pub dry_run: bool,
@@ -1929,13 +1945,26 @@ mod tests {
         assert!(help.contains("materialises"), "{help}");
     }
 
-    /// `update --help` describes what `src/update.rs` does — config values kept,
+    /// `update --help` describes what `src/update.rs` does now that it is
+    /// only the binary installer: no file work of any kind, and no dead
+    /// `--dry-run`/`--replace` flags that moved to `sync`.
+    #[test]
+    fn update_help_matches_what_update_does() {
+        let help = subcommand_long_help("update");
+        assert!(!help.contains("force-contract"), "{help}");
+        assert!(!help.contains("--dry-run"), "{help}");
+        assert!(!help.contains("--replace"), "{help}");
+        assert!(!help.contains("key reference"), "{help}");
+        assert!(help.contains("spoolway sync"), "{help}");
+    }
+
+    /// `sync --help` describes what `src/sync.rs` does — config values kept,
     /// pipeline key reference refreshed, `.gitignore` block removed, prompts and
     /// skeletons untouched — and no longer promises a task-skeleton block or the
     /// dead `--force-contract` flag (finding 24).
     #[test]
-    fn update_help_matches_what_update_does() {
-        let help = subcommand_long_help("update");
+    fn sync_help_matches_what_sync_does() {
+        let help = subcommand_long_help("sync");
         assert!(!help.contains("force-contract"), "{help}");
         assert!(
             !help.contains("Task skeletons and page templates carry"),

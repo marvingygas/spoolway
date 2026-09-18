@@ -568,13 +568,14 @@ fn decide_upgrade(
     }
 }
 
-/// Hand over to the binary that was just installed, so the files it writes are
-/// its own.
+/// Hand over to the binary that was just installed, so what runs from here on
+/// is its own.
 ///
-/// Every file `spoolway update` writes is generated from the running binary's
-/// `include_str!` tables, so a process that installs 0.2.0 and carries on is a
-/// process writing 0.1.0's files under a 0.2.0 install — the exact drift the
-/// command exists to close.
+/// The release-notes digest `update` prints once the handover returns is
+/// generated from the running binary's own `include_str!` tables — the exact
+/// reason `spoolway sync`'s files carry the same rule — so a process that
+/// installs 0.2.0 and carries on rather than handing over would report 0.2.0
+/// as current while still reading 0.1.0's compiled-in notes.
 ///
 /// Resolved through `PATH` rather than through `current_exe`, because
 /// `current_exe` on Unix is the *inode* this process is executing and npm has
@@ -582,11 +583,11 @@ fn decide_upgrade(
 ///
 /// `expect_version` is what the install just put down. `PATH` is not proof that
 /// the name now resolves to it — under `npx` or `node_modules/.bin` the first
-/// `spoolway` on `PATH` is still the old binary, which would run the file work
-/// with the old `include_str!` tables and exit 0. So the resolved binary is
-/// asked its version *before* it is handed the work: a mismatch refuses here,
-/// rather than letting the wrong binary rewrite the project's files and only
-/// then reporting the handover went astray.
+/// `spoolway` on `PATH` is still the old binary, which would run with the old
+/// `include_str!` tables and exit 0. So the resolved binary is asked its
+/// version *before* it is handed the relaunch: a mismatch refuses here,
+/// rather than letting the wrong binary answer for the handover and only
+/// then reporting it went astray.
 pub fn hand_over(args: &[String], expect_version: &str) -> Result<std::process::ExitStatus> {
     let program = std::env::var_os("PATH")
         .and_then(|path| crate::platform::which(PACKAGE, &path))

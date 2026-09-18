@@ -14,7 +14,7 @@
 //! byte of the file is copied through unread — that is what `config set` does,
 //! and setting a value is never the moment to migrate anything.
 //!
-//! Bringing a whole file forward is `spoolway update`, and there the answer is
+//! Bringing a whole file forward is `spoolway sync`, and there the answer is
 //! the opposite one: it rewrites the file from [`crate::config::Config::render`]
 //! and keeps only what a person set. **Every comment in `config.toml` is
 //! spoolway's**, which is what makes the file's explanations trustworthy — a
@@ -110,7 +110,7 @@ pub fn remove(text: &str, parts: &[&str]) -> Result<String> {
 ///
 /// A rewrite is one blunt act — the whole file, from the struct — so what it
 /// did is not visible in the act itself. This reads it back out of the two
-/// documents, so `update` can say "these five settings are new, this one is
+/// documents, so `sync` can say "these five settings are new, this one is
 /// gone" rather than only "written", and a person can decide whether the diff
 /// is worth opening.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -333,7 +333,7 @@ auto_commit = true
         assert!(edited.starts_with("[dispatch]\ninterval = \"10s\"\n"));
     }
 
-    /// What `update` reads back out of a rewrite, so its report is the rewrite's
+    /// What `sync` reads back out of a rewrite, so its report is the rewrite's
     /// own account of itself rather than a guess made before it ran.
     #[test]
     fn compare_names_the_settings_a_rewrite_added() {

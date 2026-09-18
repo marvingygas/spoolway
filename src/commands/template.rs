@@ -28,7 +28,7 @@ fn render_template_contract(repo: &Repo) -> String {
     out.push_str(
         "One shape, not parsed the way a pipeline file is: prose a project owns\noutright, \
          read back whole or substituted by name — never validated against a\nschema, never \
-         rewritten by `spoolway update` once it exists.\n\n",
+         rewritten by `spoolway sync` once it exists.\n\n",
     );
 
     out.push_str("TASK — .spoolway/templates/tasks/<pipeline>.md\n");

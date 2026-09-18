@@ -4,7 +4,7 @@
 //! [`crate::repo::Repo::home`] — so there is nothing left for an ignore rule
 //! to match. What is left of this module is the half that finds a marked
 //! block and takes it back out, for a project that was set up before the
-//! move: `spoolway init` and `spoolway update` both call [`remove`] once and
+//! move: `spoolway init` and `spoolway sync` both call [`remove`] once and
 //! write no rules of their own ever again.
 //!
 //! The markers are the whole of what makes that safe: everything between them
@@ -23,7 +23,7 @@ pub fn file(root: &Path) -> PathBuf {
     root.join(".gitignore")
 }
 
-/// What [`remove`] did, in the words `init` and `update` report it with.
+/// What [`remove`] did, in the words `init` and `sync` report it with.
 pub enum Removed {
     /// The block was there, and is gone now.
     Gone,

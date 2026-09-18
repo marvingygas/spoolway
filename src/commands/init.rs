@@ -407,7 +407,7 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
         ));
     }
     // Written whole, and never looked at again. A prompt is the project's from
-    // the moment `init` finishes: no update rewrites one, so nothing here has to
+    // the moment `init` finishes: no sync rewrites one, so nothing here has to
     // be a shape a later binary can still find its way around in.
     let mut prompts_written = 0usize;
     for prompt in assets::PROMPTS {
@@ -452,7 +452,7 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     }
     // The two ticket-body templates a tracker hook renders and hands to its
     // own `gh`/`acli` call — seeded once, like a task skeleton, and never
-    // looked at again by `update`. A project with neither file written gets
+    // looked at again by `sync`. A project with neither file written gets
     // a single line naming the task instead of this prose; see
     // `crate::task_template::resolve_tracking`.
     for (name, body) in assets::TRACKING_TEMPLATES {
@@ -513,6 +513,16 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     // were shipped, documented, and never installed.
     let installed = crate::install::install(root, answers.provider, args.force)?;
     crate::install::report(installed);
+    // A fresh (or freshly `--force`d) project is, by construction, exactly
+    // what this binary would write — so it is stamped the same fact
+    // `spoolway sync` would have recorded had it run here instead: this
+    // checkout, at this binary's version, matching what it would still
+    // write today. Best-effort, and never printed: a project's home
+    // resolving is not this command's own concern to fail over, and
+    // `bind` above has already settled it for every ordinary case.
+    if let Ok(home) = crate::mux::project_home(root) {
+        let _ = crate::sync::write_stamp(&home, root);
+    }
     // The mockup above ends its transcript at `crate::install::report`'s
     // line, but it is an excerpt of the run this task changes, not a
     // contract for every line `init` has ever printed: it also elides the
@@ -608,6 +618,21 @@ mod tests {
 
         // And the default provider's skills, installed rather than suggested.
         assert!(root.join(".claude").join("skills").is_dir());
+    }
+
+    /// `init` writes the same sync stamp `spoolway sync` would on success —
+    /// a fresh project is, by construction, exactly what this binary would
+    /// write, so the stamp says so without a sync ever having run.
+    #[test]
+    fn init_writes_a_sync_stamp() {
+        let root = scaffold("sync-stamp", &InitArgs::default());
+        let stamp = crate::platform::test_home::with_home(&home_for(&root), || {
+            let home = crate::mux::project_home(&root).unwrap();
+            crate::sync::read_stamp(&home, &root)
+        });
+        let (version, fingerprint) = stamp.expect("init records a sync stamp");
+        assert_eq!(version, crate::release::current());
+        assert!(!fingerprint.is_empty());
     }
 
     /// `spoolway init` stamps a project's home off its own `.git`, and a
@@ -1117,10 +1142,10 @@ mod tests {
     }
 
     /// The rule a prompt or a task skeleton already follows, proven for a
-    /// hook script too: once `init` has written one, `spoolway update` must
+    /// hook script too: once `init` has written one, `spoolway sync` must
     /// leave it exactly as it is, whatever a project has done to it since.
     #[test]
-    fn an_update_leaves_a_written_hook_alone() {
+    fn a_sync_leaves_a_written_hook_alone() {
         let root = scaffold(
             "hook-untouched",
             &InitArgs {
@@ -1141,22 +1166,22 @@ mod tests {
             home: root.join(".home"),
             root,
         };
-        // `scan`, not `run`: `run` checks for a newer release first, which
-        // is `update`'s own concern and not this one — see `update.rs`'s
+        // `scan`, not `run`: `run` also prints the report and writes the
+        // sync-stamp, neither of which this test is about — see `sync.rs`'s
         // own tests, which call `scan` for the same reason.
-        crate::update::scan(
+        crate::sync::scan(
             &repo,
-            &crate::cli::UpdateArgs {
+            &crate::cli::SyncArgs {
                 dry_run: false,
                 replace: Vec::new(),
             },
         )
-        .expect("update scan");
+        .expect("sync scan");
 
         assert_eq!(
             std::fs::read_to_string(&hook).unwrap(),
             mine,
-            "`spoolway update` must never touch a hook `init` has already written"
+            "`spoolway sync` must never touch a hook `init` has already written"
         );
     }
 

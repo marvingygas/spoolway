@@ -2,7 +2,7 @@
 # The override command surface, end to end: forking a knob out of the
 # tracked checkout, seeing it listed, and promoting it back in. Also carries
 # the four new `contract` commands (`config`, `override`, `template`, `hook`)
-# and `spoolway update`'s removal of the skill directory `spoolway-pipeline`
+# and `spoolway sync`'s removal of the skill directory `spoolway-pipeline`
 # was renamed from — CLI-level checks with nowhere better-fitting to live,
 # for the same reason the rest of this file is a suite rather than a unit
 # test: what matters is the process actually wired up, not the render.
@@ -157,9 +157,9 @@ says "and names the events a hook script runs on" \
   "SPOOLWAY_EVENT" \
   "$SPOOLWAY" hook contract
 
-# --------------------------------------------- update removes the old skill
+# ----------------------------------------------- sync removes the old skill
 # `spoolway-pipeline` was renamed to `spoolway-config`; a project that ran
-# `install` before the rename has the old directory on disk, and `update`
+# `install` before the rename has the old directory on disk, and `sync`
 # is the one chance to clean it up without touching anything else there.
 STALE=.claude/skills/spoolway-pipeline
 UNRELATED=.claude/skills/a-projects-own-skill
@@ -167,7 +167,7 @@ mkdir -p "$STALE" "$UNRELATED"
 echo "the old skill" > "$STALE/SKILL.md"
 echo "not spoolway's" > "$UNRELATED/SKILL.md"
 
-must "update, to clean up the rename" "$SPOOLWAY" update
+must "sync, to clean up the rename" "$SPOOLWAY" sync
 
 works "the stale renamed skill is gone" test ! -e "$STALE"
 works "a directory not on the retired list is untouched" \

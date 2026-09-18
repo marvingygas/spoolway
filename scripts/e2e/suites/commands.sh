@@ -73,6 +73,14 @@ says "an empty release range is explicit" "No releases follow $CURRENT." \
 refuses "a malformed release range is refused" "canonical numeric components" \
   env -C "$LIVE" "$SPOOLWAY" whats-new --since yesterday
 
+# `spoolway update` installs the binary and nothing else, so it is the other
+# command — beside `whats-new` above — that must work with no project ever
+# discovered: `$LIVE` here is not a git repository yet, let alone one carrying
+# `.spoolway/`. `--help` rather than a real run, since a real run would shell
+# out to npm.
+works "update --help works outside a project" \
+  env -C "$LIVE" "$SPOOLWAY" update --help
+
 # A command step's output has to travel with the change to be worth anything,
 # and where the change goes is the forge. So this suite needs one too, even
 # though nothing here is about handing over.
@@ -242,18 +250,18 @@ works "both hooks are written all the same" \
   test -f "$INITDIR/unasked/.spoolway/hooks/github.sh"
 works "the jira one too" test -f "$INITDIR/unasked/.spoolway/hooks/jira.sh"
 
-# `spoolway update` never touches a hook `init` has already written — the
+# `spoolway sync` never touches a hook `init` has already written — the
 # same rule a prompt or a task skeleton already follows once a project has
 # made a file its own.
 HOOK="$INITDIR/github/.spoolway/hooks/github.sh"
 printf '#!/bin/sh\necho mine\n' > "$HOOK"
-must "update runs over the tracker project" env -C "$INITDIR/github" "$SPOOLWAY" update
+must "sync runs over the tracker project" env -C "$INITDIR/github" "$SPOOLWAY" sync
 has "the hook this project edited is exactly as it left it" "echo mine" "$HOOK"
 
 # ------------------------------------------------------------ lane-prompts.md
 # The seven typed pane messages are spoolway's own now, with no project
 # override left to resolve against them — `init` no longer seeds one, and a
-# checkout carrying one from an older release is swept by `update` rather
+# checkout carrying one from an older release is swept by `sync` rather
 # than preserved. The sweep itself, against a real released tree, is
 # `upgrade.sh`'s: what only a fresh `init` can show is that a project started
 # today never gets the file in the first place.
@@ -264,11 +272,11 @@ works "init no longer seeds lane-prompts.md" test ! -e "$LANE_PROMPTS"
 # longer has anything to hand it back, since the file is not one spoolway
 # ships any more.
 printf 'a project'"'"'s own leftover.\n' > "$LANE_PROMPTS"
-must "update sweeps a leftover lane-prompts.md" env -C "$INITDIR/unasked" "$SPOOLWAY" update
+must "sync sweeps a leftover lane-prompts.md" env -C "$INITDIR/unasked" "$SPOOLWAY" sync
 works "and it is gone" test ! -e "$LANE_PROMPTS"
 refuses "so --replace has nothing left to hand back" \
   "not a file spoolway ships" \
-  env -C "$INITDIR/unasked" "$SPOOLWAY" update --replace .spoolway/templates/lane-prompts.md
+  env -C "$INITDIR/unasked" "$SPOOLWAY" sync --replace .spoolway/templates/lane-prompts.md
 
 # --------------------------------------------------------------- task contract
 # `task contract` never touches `.spoolway/` in either mode — bare, it only

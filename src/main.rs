@@ -46,6 +46,7 @@ mod screen;
 mod skeleton;
 mod spend;
 mod status;
+mod sync;
 mod task;
 mod task_template;
 mod teardown;
@@ -142,6 +143,13 @@ fn run() -> Result<()> {
             commands::init(&root, args)
         }
 
+        // Installing a binary is a fact about this machine's `PATH`, not
+        // about any project — so this runs before a project is even looked
+        // for, the same as `WhatsNew` above. `spoolway sync`, further down,
+        // is the file work `update` used to also do, and that still needs a
+        // real checkout to land in.
+        Command::Update(_) => update::run(&cwd),
+
         // The one command that has to survive a config it cannot read, because
         // it is the command you run to find out what is wrong with it. Every
         // other command below dies on the parse error; `doctor` reports it and
@@ -201,9 +209,11 @@ fn run() -> Result<()> {
         // command answers about the file actually in front of it. `set` and
         // `override promote` are the exceptions that write `repo.root`, and
         // refuse first if a linked worktree's `checkout` differs from it.
-        // `update`, further down, writes too, but against `repo.checkout` —
+        // `sync`, further down, writes too, but against `repo.checkout` —
         // see its own module doc — so it stays in step with every read here
-        // rather than joining `set`'s exception.
+        // rather than joining `set`'s exception. `update` writes no project
+        // file at all any more, and is handled above, before a project is
+        // even discovered.
         Command::Config(ConfigCommand::Contract) => {
             commands::config_contract(&Repo::discover(&cwd)?, cli.json)
         }
@@ -263,7 +273,7 @@ fn run() -> Result<()> {
             //
             // Read here, but not *demanded* here: the failure is handed to
             // `routing` and lands at the call sites that actually route. Most
-            // commands below never ask — `stack`, `update`, `pipeline check`,
+            // commands below never ask — `stack`, `sync`, `pipeline check`,
             // `queue show` — and a project pipeline file that no longer
             // parses must not be what stops them, for the same reason the
             // config commands above run ahead of this at all. Nothing is more
@@ -277,7 +287,8 @@ fn run() -> Result<()> {
                 | Command::Config(_)
                 | Command::Doctor(_)
                 | Command::WhatsNew(_)
-                | Command::VersionCheck => {
+                | Command::VersionCheck
+                | Command::Update(_) => {
                     unreachable!("handled above")
                 }
 
@@ -464,7 +475,7 @@ fn run() -> Result<()> {
                     crate::install::report(installed);
                     Ok(())
                 }
-                Command::Update(args) => update::run(&repo, args, cli.json),
+                Command::Sync(args) => sync::run(&repo, args, cli.json),
             }
         }
     }
@@ -474,7 +485,7 @@ fn run() -> Result<()> {
 ///
 /// The load itself runs for every command; only the commands below it that
 /// name this pay for a project pipeline file that no longer parses. That
-/// split is the whole point: `stack`, `update`, `pipeline check` and
+/// split is the whole point: `stack`, `sync`, `pipeline check` and
 /// `queue show` do not route, and stopping them because some *other* file
 /// under `.spoolway/pipelines/` is unreadable is how `pipeline check` — the
 /// command you run to find out which file — came to be unrunnable exactly

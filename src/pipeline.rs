@@ -64,7 +64,7 @@ pub const BUILTIN_PIPELINES: &[(&str, &str)] = &[
 /// A pipeline file's header is two things with different owners. The title line
 /// on top says what *this* pipeline is for, which only the project can write.
 /// The table under it lists every key this binary understands, which only the
-/// binary can keep true — so it is fenced, and `spoolway update` rewrites it.
+/// binary can keep true — so it is fenced, and `spoolway sync` rewrites it.
 /// A file without the markers has not opted in and is never written to.
 pub const KEY_BLOCK: crate::skeleton::Region = crate::skeleton::Region::Comment(
     crate::assets::PIPELINE_KEYS_BEGIN,
@@ -2441,7 +2441,7 @@ mod tests {
     }
 
     /// Every shipped pipeline carries the same key reference, fenced, and it is
-    /// the one `spoolway update` writes. Four files hold a copy of this block
+    /// the one `spoolway sync` writes. Four files hold a copy of this block
     /// and only one of them is the source; a `default` that drifted from a
     /// `bugfix` would hand half the projects the wrong table.
     #[test]
