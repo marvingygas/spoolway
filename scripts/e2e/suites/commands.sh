@@ -801,9 +801,17 @@ fi
 # `pipeline:` has to be caught before any lane starts, not discovered by the
 # first lane unlucky enough to be picked for it. Written straight into the
 # queue directory — the one shape `queue add --from`'s own refusal can never
-# produce, since it never lets such a document reach the queue at all — with
-# the dispatcher already stopped from the dry run above, so this start is a
-# real, lockless one.
+# produce, since it never lets such a document reach the queue at all.
+#
+# Stopped first, and the stop is load-bearing: `drive opener` above started a
+# dispatcher and left it running, and a `dispatch` that finds the lock held
+# does not refuse — it draws the read-only board instead, polling until
+# somebody stops it. That branch sits *above* the routing guard in `run`, so
+# with the lock held this dry run never reaches the refusal under test and
+# never returns either; the suite hangs until the job's own timeout kills it
+# rather than failing on the line that is wrong. The dry run in the scenario
+# above only worked because it had its own `dispatcher_stop` in front of it.
+dispatcher_stop
 task_doc "$SPOOLWAY_PROJECT_HOME/queue/routeless.md" routeless "$BODY" \
   "stage: queued" "group: live" "touches: [notes/routeless.md]" "pipeline:"
 OUT=$("$SPOOLWAY" dispatch --dry-run 2>&1)
