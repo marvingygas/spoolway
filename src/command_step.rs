@@ -271,9 +271,17 @@ impl Runs {
     /// group is piped to `tee`, so a person watching the pane sees every line
     /// as plain text while the log gets the same lines, and the `EXIT` trap
     /// still reads the command's own status — no `PIPESTATUS` needed, since
-    /// the group on the left of the pipe is what the trap watches, and `$$`
-    /// there is the invoking shell's pid, not the subshell tmux or herdr
-    /// actually runs it in.
+    /// the group on the left of the pipe is what the trap watches.
+    ///
+    /// The body runs inside its own `sh -c`, not a bare `{ ... }` group: a
+    /// brace group on the left of a pipe still runs in a subshell, but `$$`
+    /// there is inherited from the shell that forked it rather than computed
+    /// fresh, so the pid `wrapper_body`'s first line writes would name the
+    /// pane's own long-lived shell — which outlives every command ever run
+    /// in it — rather than this run. `sh -c` execs a genuinely new process
+    /// image, whose own `$$` is its own real pid: the same one that ends
+    /// when the pipeline's first process does, and the one a job-controlled
+    /// shell makes the leader of the pipeline's own process group.
     ///
     /// Answers with the script text alone; running it is [`crate::mux::Mux::run_in_pane`]'s
     /// job, since only the backend can put it somewhere a person can watch.
@@ -292,9 +300,13 @@ impl Runs {
         // stdin from /dev/null, same as the detached wrapper: a command step
         // is non-interactive by construction. Nothing to redirect stdout or
         // stderr to here — the whole group is piped to `tee` below instead.
-        Ok(format!(
-            "{{\nexec </dev/null\n{body}}} 2>&1 | tee -a {log_path}\n"
-        ))
+        //
+        // The body is handed to the nested `sh -c` as one quoted argument,
+        // not typed into the pane's own shell as syntax: this is text, going
+        // through a variable, and quoting it is what keeps it from being
+        // touched by the pane's shell before the nested one ever sees it.
+        let inner = crate::platform::quote(&format!("exec </dev/null\n{body}"));
+        Ok(format!("sh -c {inner} 2>&1 | tee -a {log_path}\n"))
     }
 
     /// Wait for the wrapper's pid file to appear — the one thing that says a
@@ -914,6 +926,59 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
         assert_eq!(f.runs.state("bench-demo"), RunState::Interrupted);
+    }
+
+    /// The pid `script_for_pane` records has to belong to the run itself, not
+    /// to the pane's own shell — a pane's shell outlives every command run in
+    /// it, the same way a terminal does, so a real pane feeds many scripts to
+    /// one long-lived shell process over its life rather than starting a
+    /// fresh one per run the way [`Fixture::start_in_pane`] does for every
+    /// other test here. Simulated with a shell whose stdin this test keeps
+    /// open past the run's own end, exactly what a live pane's shell does.
+    ///
+    /// `{ ... } 2>&1 | tee` puts the run's own group on the left of a pipe, a
+    /// subshell whose `$$` is inherited from the invoking shell rather than
+    /// its own — so the pid the wrapper's first line writes today names that
+    /// invoking shell, which is still going long after this command is over.
+    #[test]
+    fn a_paned_runs_pid_ends_when_the_command_does() {
+        let f = Fixture::new("paned-pid-lifetime");
+        let key = "build-demo";
+        let script = f
+            .runs
+            .script_for_pane(key, "true", &BTreeMap::new())
+            .unwrap();
+
+        let mut pane = std::process::Command::new("sh")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .current_dir(&f.root)
+            .spawn()
+            .unwrap();
+        let mut pane_stdin = pane.stdin.take().unwrap();
+        {
+            use std::io::Write;
+            pane_stdin.write_all(script.as_bytes()).unwrap();
+            pane_stdin.flush().unwrap();
+        }
+        // Left open on purpose: closing it would end the pane's shell on its
+        // own and prove nothing about the pid this run recorded.
+
+        assert_eq!(f.settle(key), RunState::Exited(0));
+
+        let pid = f
+            .runs
+            .read_pid(key)
+            .expect("the pid file the wrapper wrote is still there to read");
+        assert!(
+            !crate::headless::alive(pid),
+            "the pid recorded for `{key}` is still alive after the command it \
+             names is over — it names the pane's own shell, not the run"
+        );
+
+        drop(pane_stdin);
+        let _ = pane.wait();
     }
 
     /// The environment is exported before the `run:` line itself, in the
