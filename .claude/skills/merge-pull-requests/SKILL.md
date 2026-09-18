@@ -1,6 +1,6 @@
 ---
 name: merge-pull-requests
-description: Merge every open pull request on this repository into main — order the stacks, resolve the conflicts directly, verify the merged tree, push, prune the branches, and reinstall the binary. Triggered by a human after a dispatch run has left a batch of task pull requests open.
+description: Merge every open pull request on this repository into main — order the stacks, resolve the conflicts directly, fix whatever is red or hung on the branch it belongs to, verify the merged tree, push, prune the branches, and reinstall the binary. Triggered by a human after a dispatch run has left a batch of task pull requests open.
 disable-model-invocation: true
 ---
 
@@ -14,6 +14,12 @@ the pile in a single pass: every open pull request ends up on `main`, and the bi
 touched the same table, the same doc comment, the same sample frame. Work out what both
 changes wanted and write the line that gives them both it. Stop and ask the human only if
 the resolution would drop behaviour one of the tasks was accepted for.
+
+**Fix, do not defer.** The same goes for everything else the pass turns up: a red check, a
+hung job, a branch that no longer builds against `main`. The pile is only empty when the pull
+requests are merged, so a problem found on the way is this pass's problem. Diagnose it, fix it
+on the branch it belongs to, and carry on. A pull request handed back untouched with a note
+about what is wrong with it is the one outcome this skill exists to avoid.
 
 **Merging is local, not on the forge.** Nothing is merged through `gh pr merge`. You merge
 into `main` on this machine, verify the result compiles and passes, and push. GitHub then
@@ -88,11 +94,29 @@ tip is the only place the checks describe the merged tree. A branch below it may
 red: it can carry half a change, with the other half — the part that makes the suite pass —
 sitting in the branch above. Judge that red by reading it, not by assuming either way.
 
-So a red check has exactly two answers. On a tip, it stops the merge; a tip that cannot go
-green is a pull request that is not ready, and it waits for the next pass rather than holding
-up the others. Below a tip, open the failing job, find the commit further up the stack that
-resolves it, and say so in the report. If nothing up the stack resolves it, treat it as a red
-tip.
+**A red tip is something to fix, not something to defer.** It stops the merge, but stopping
+the merge is not the same as leaving the pull request for somebody else. Open the failing job,
+find what is actually wrong, and fix it on the branch: commit the fix to the pull request's own
+head, push, wait for the checks again, and merge it with the rest of the pile. These are this
+repository's own task branches, not contributions from strangers, and a red tip left for "the
+next pass" is a pull request nobody comes back to.
+
+The judgement is the same one conflicts get. Fix it yourself unless the fix would drop
+behaviour the task was accepted for, or unless the red is the task's *premise* being wrong
+rather than a mistake in carrying it out — a suite that fails because the feature does not work
+is not a suite to adjust. Those two stop and ask; everything else you fix.
+
+Below a tip, open the failing job, find the commit further up the stack that resolves it, and
+say so in the report. If nothing up the stack resolves it, treat it as a red tip and fix it the
+same way.
+
+**A check that hangs is a red check wearing a disguise**, and the expensive mistake is reading
+it as a slow one. Compare the step against its own duration on a green run before concluding
+anything: a job sitting at five times its usual time is stuck, and waiting out a 45-minute job
+timeout to be told so costs more than the whole merge. Do not wait for the forge — it serves no
+log until the job is over. Reproduce it locally instead: `git worktree add` on the branch,
+build, run the one suite under `timeout`, and read the hung process (`ps`, `/proc/<pid>/wchan`)
+while it is still hanging. The last `ok` the suite printed names the line that did not return.
 
 A branch whose checks never started is usually one pushed before the workflow existed. Push an
 empty commit or re-run the workflow and wait; do not merge it unchecked.
@@ -174,8 +198,9 @@ spoolway queue list      # until the dispatcher is no longer running
 
 A task reaches a pull request at its `handover` step, so a queue that still shows work has
 work still to merge. When the new pull requests appear, go back to step 1 and run the whole
-procedure again on them. **Do not queue new tasks** to fix anything you found on the way;
-this pass merges what exists.
+procedure again on them. **Do not queue new tasks** to fix anything you found on the way — a
+fix this pass needs, you make by hand, on the branch that needs it. Queueing is for work that
+is somebody's next decision, and it would hand this pass a moving pile it can never finish.
 
 ### 9. Install the build
 
@@ -243,8 +268,11 @@ resolution is a decision made on the human's behalf; it is the one part of this 
 cannot see from the log.
 
 Name any red check as well, including one below a tip that you merged anyway, and say what
-made it safe. Say which pull requests you left open for a red tip, so nobody has to work out
-from the open list whether they were missed or refused.
+made it safe. For a red tip you fixed, say what was broken and what you changed on the
+branch — the fix is a commit the task's author never wrote, and it is theirs to disagree with.
+Say which pull requests you left open, and whether it was because the fix would have dropped
+behaviour or because the failure was the task's premise, so nobody has to work out from the
+open list whether they were missed or refused.
 
 ## What has bitten before
 
@@ -258,6 +286,14 @@ from the open list whether they were missed or refused.
 - **Merged before the checks came back.** A pull request that has just been opened shows most
   of its checks still running, and a rollup read at the survey goes stale within minutes.
   Re-read it at the tip, with `--watch`, right before the merge.
+- **An e2e suite that hangs instead of failing, and reads as a slow job.** `dispatch` that
+  finds the lock held draws the read-only board and polls forever, and that branch sits above
+  the refusals in `run` — so a suite asserting on a refusal, with a dispatcher `drive` left
+  running, never reaches the thing under test and never returns. It burned a whole 45-minute
+  job timeout on #174 before anybody called it stuck. Two lessons, both general: a suite case
+  that expects a refusal needs `dispatcher_stop` in front of it, and a step running five times
+  its usual duration is hung, not slow — reproduce it locally rather than waiting for a log the
+  forge will not serve until the job ends.
 - **`main` moved between the survey and the merge.** Other things push here. If the merge
   behaves strangely, `git fetch origin` and check that `main` is still where step 2 left it.
 - **A hunk that references a deleted binding.** `git merge` keeps whichever side you tell it
