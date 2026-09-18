@@ -37,10 +37,10 @@ are the tagged bytes.
    is the recorded source commit and its diff contains only the three expected release files.
 4. Dispatch `release.yml` on main with `publish=false`, as described in the runbook. Record the run id
    and require its `headSha` to equal the release commit SHA. Watch it to completion, then inspect
-   actual job conclusions: shared Linux checks, nightly end-to-end tests, advisories, real Windows
-   tests, notes extraction, all six platform builds and package assembly must succeed. Skipped,
+   actual job conclusions: shared Linux checks, nightly end-to-end tests, advisories,
+   notes extraction, all five platform builds and package assembly must succeed. Skipped,
    cancelled or missing required jobs are not green. Only GitHub release creation is intentionally
-   skipped. Confirm the extracted section matches the recorded notes, all seven packages were packed,
+   skipped. Confirm the extracted section matches the recorded notes, all six packages were packed,
    hashes and sizes were printed, and the provenance repository is correct. A daily CI run, including
    one on the recorded source commit, never substitutes for this release-commit rehearsal.
 5. Fetch again and require clean local main, origin/main and the rehearsal's head SHA to equal the
@@ -56,8 +56,8 @@ are the tagged bytes.
    reason, rehearse the corrected commit with publication disabled, and require all checks to pass
    before moving the tag to it. A rerun alone uses the old tagged workflow. Product changes require
    fresh readiness, preflight and notes passes; never move a successful release tag.
-7. Verify the registry directly: all seven package names must report the recorded version. Verify the
-   GitHub release directly: six platform archives plus `SHA256SUMS` must exist.
+7. Verify the registry directly: all six package names must report the recorded version. Verify the
+   GitHub release directly: five platform archives plus `SHA256SUMS` must exist.
 8. Read the published release body back with `gh release view` and prove it is the recorded section.
    Compare it against the recorded scratch `release-notes.md` with a real diff, not by eye. Normalise
    carriage returns before comparing, because GitHub may store the body with CRLF line endings; treat
@@ -68,7 +68,7 @@ are the tagged bytes.
    executable's version command, and verify npm installed the wrapper plus exactly one platform
    package. Remove only that fixed-purpose temporary directory after the check.
 10. Report the recorded source SHA, release SHA, version and tag, rehearsal and publish run ids with
-    their head SHAs and required job conclusions, all seven registry versions, all seven
+    their head SHAs and required job conclusions, all six registry versions, all six
     release assets, the release-body diff result, the real-install result, and every failure plus
     recovery.
 

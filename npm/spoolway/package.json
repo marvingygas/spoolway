@@ -1,6 +1,7 @@
 {
   "name": "spoolway",
   "version": "0.1.0",
+  "os": ["linux", "darwin"],
   "description": "Minimalistic command line state machine for turning coding agents into a pipeline you can actually reason about",
   "keywords": [
     "agent",
@@ -25,7 +26,6 @@
     "@spoolway/linux-arm64": "0.1.0",
     "@spoolway/linux-x64-musl": "0.1.0",
     "@spoolway/darwin-arm64": "0.1.0",
-    "@spoolway/darwin-x64": "0.1.0",
-    "@spoolway/win32-x64": "0.1.0"
+    "@spoolway/darwin-x64": "0.1.0"
   }
 }

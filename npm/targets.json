@@ -40,14 +40,6 @@
       "cpu": "x64",
       "libc": null,
       "runner": "macos-latest"
-    },
-    {
-      "triple": "x86_64-pc-windows-msvc",
-      "pkg": "win32-x64",
-      "os": "win32",
-      "cpu": "x64",
-      "libc": null,
-      "runner": "windows-latest"
     }
   ]
 }

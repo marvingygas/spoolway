@@ -27,7 +27,6 @@ const PLATFORMS = {
   "linux-arm64-glibc": "linux-arm64",
   "darwin-arm64": "darwin-arm64",
   "darwin-x64": "darwin-x64",
-  "win32-x64": "win32-x64",
 };
 
 /// glibcVersionRuntime is absent from the diagnostic report on musl systems.
@@ -66,13 +65,9 @@ function resolveBinary() {
     );
   }
 
-  // Windows will not run an extension-less file, so the published binary keeps
-  // its .exe and the subpath has to ask for it by that name.
-  const exe = process.platform === "win32" ? "spoolway.exe" : "spoolway";
-
   const name = `${SCOPE}/${pkg}`;
   try {
-    return require.resolve(`${name}/bin/${exe}`);
+    return require.resolve(`${name}/bin/spoolway`);
   } catch {
     fail(
       `spoolway's binary for ${key} is missing.`,
