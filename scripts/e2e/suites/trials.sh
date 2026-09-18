@@ -146,6 +146,16 @@ lacks "the reset held: no stamped stage on the forked arm" "stage: done" \
 lacks "nor the run id the earlier run minted" "run: r00000000000000af" \
   "$SPOOLWAY_PROJECT_HOME/queue/old-run-1.md"
 
+# The source document goes now that the arm is forked off it, and it has to:
+# `p` leaves a source exactly where it found it, and this one was written
+# straight into `queue/` with no `pipeline:` on purpose. A routeless document
+# in the live queue is precisely what `check_task_routes` refuses a whole
+# start over — correctly — so leaving it here would refuse every dispatcher
+# the rest of this suite starts, and the runtime half below would assert on
+# tasks nothing ever moved. The same disposal `commands.sh` does for its own
+# routeless fixture, for the same reason.
+rm -f "$SPOOLWAY_PROJECT_HOME/queue/old-run.md"
+
 # ------------------------------------------------------- dispatch and cleanup
 # Everything above only ever wrote queue files. From here a real dispatcher
 # runs two trial arms and one ordinary task through the same `default`
