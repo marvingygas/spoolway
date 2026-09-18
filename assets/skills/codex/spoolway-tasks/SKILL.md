@@ -66,18 +66,46 @@ reading the file whole.
    — cut a reasonable number of tasks for the shape at hand, judged by subject, with each
    task's criteria kept under five bullets or split again.
 
-   **Offer the shape, with one request_user_input call.** Settle on a recommended count first, then put
+   **Offer the shape, as one printed ballot.** Settle on a recommended count first, then put
    **that count and the four below it** on the ballot, floored at 1 — a recommendation of 6
-   names 2, 3, 4, 5 and 6; a recommendation of 3 names 1, 2 and 3. Name every member in the
-   question text — `Split this shape: 2, 3, 4, 5 or 6 tasks — or generate a pipeline` — because
-   request_user_input takes only four options and one of the four is always "Generate a pipeline
-   for this plan" (`spoolway pipeline gen --plan <path>`, one line, session ends with nothing
-   cut): the three largest counts fill the remaining slots, largest first and marked
-   recommended, and the question text tells the person to type the rest under *Other*. Put
-   size and the routed pipeline's own name against every task name on every candidate, and
-   every pipeline named there carries its own `description:` verbatim in that option's own
-   text — a person approves the routing by picking the count, not by a question of its own, so
-   this is the one place the sentence has to be. No pipeline reaches a document without having
+   names 2, 3, 4, 5 and 6; a recommendation of 3 names 1, 2 and 3. Open with the line that
+   names every member — `Split this shape: 2, 3, 4, 5 or 6 tasks — or generate a pipeline` —
+   then give every count its own lettered section, largest first, the recommended one marked
+   as such, and say that the person answers with a letter. The last letter is always "Generate
+   a pipeline for this plan" (`spoolway pipeline gen --plan <path>`, one line, session ends
+   with nothing cut). A printed ballot has no option limit, so every count is shown in full
+   and nothing is left for the person to type out.
+
+   **Print the ballot and end the turn there.** Do not reach for a dialog tool: codex has none
+   outside plan mode, and a ballot half-asked is worse than one printed whole. The answer
+   arrives as the person's next prompt, so do not go on to write anything until it does.
+
+   **Every candidate is written in this one layout, and never in another:**
+
+   ```
+   1  <task-id>                  <size>   <pipeline>
+      What this task is, in one or two plain sentences.
+
+   2  <task-id>                  <size>   <pipeline>
+      What this task is, in one or two plain sentences.
+
+   PIPELINES
+
+   <pipeline>  That pipeline's own description:, copied verbatim.
+   ```
+
+   Number the tasks from 1 in `depends_on` order, so the chain reads down the page.
+   `<task-id>` is the id the document will carry, not a prose title. `<size>` is `small`,
+   `medium` or `large` — the sizing assumption you just made, put where a person can see it,
+   so a `large` where they expected two tasks is something they can turn down by picking a
+   different count. Line the three columns up with spaces, pipeline last, and wrap the
+   sentences under each task at around 48 characters, because a narrow terminal is what reads
+   them.
+
+   `PIPELINES` closes every candidate. It names each distinct pipeline from the list above it
+   once, carrying that pipeline's own `description:` from step 1's contract, verbatim. A
+   person approves the routing by picking the count, not by a question of its own, so this is
+   the one place that sentence has to be. No pipeline reaches a document without having
    appeared on this ballot first.
 
 3. **Write one document per task**, with **Write**, at

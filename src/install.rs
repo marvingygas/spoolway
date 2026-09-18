@@ -14,9 +14,13 @@
 //!
 //! - Claude calls its `AskUserQuestion` tool.
 //! - Codex calls `request_user_input`, which is the same thing under another
-//!   name.
-//! - pi has no dialog tool at all. Its copies print the question as output and
-//!   end the turn, and the person answers in their next prompt.
+//!   name — but only inside plan mode, so a copy whose question falls outside
+//!   one prints it instead.
+//! - pi has no dialog tool at all, and what a given install's plugins add is
+//!   not something a skill can count on.
+//!
+//! A copy that cannot open a dialog asks all the same: it prints the question
+//! as output and ends the turn, and the person answers in their next prompt.
 //!
 //! The layout follows the Agent Skills spec: a directory per skill with a
 //! `SKILL.md` entrypoint, a `name` matching that directory, and static
@@ -53,7 +57,9 @@ struct Skill {
     name: &'static str,
     /// The Claude copy, and the one the shape of a skill is written from.
     skill_md: &'static str,
-    /// The same procedure naming Codex's `request_user_input` tool.
+    /// The same procedure for Codex: naming its `request_user_input` tool
+    /// where the question lands inside plan mode, and printing the question
+    /// where it does not.
     codex_skill_md: &'static str,
     /// The same procedure again, written for an agent with no dialog tool:
     /// questions are printed and the turn ends there.
@@ -384,21 +390,16 @@ mod tests {
     }
 
     /// Provider-specific copies may differ only where the agent's tool really
-    /// has a different name. A Claude tool name in a Codex skill reads like an
-    /// instruction to call something that does not exist, which can turn a
-    /// required question into prose or stop the workflow entirely.
+    /// has a different name, or where the agent cannot reach one. A Claude tool
+    /// name in a Codex skill reads like an instruction to call something that
+    /// does not exist, which can turn a required question into prose or stop
+    /// the workflow entirely.
     #[test]
-    fn codex_skills_name_request_user_input_not_ask_user_question() {
+    fn codex_skills_never_name_claudes_question_tool() {
         for skill in SKILLS {
             assert!(
                 !skill.codex_skill_md.contains("AskUserQuestion"),
                 "{} still names Claude's question tool in its Codex copy",
-                skill.name
-            );
-            assert_eq!(
-                skill.codex_skill_md.contains("request_user_input"),
-                skill.skill_md.contains("AskUserQuestion"),
-                "{} does not preserve whether the procedure asks a question",
                 skill.name
             );
         }
@@ -422,31 +423,39 @@ mod tests {
 
     /// A question dropped in translation is the failure this whole split
     /// exists to avoid: the procedure carries on past a decision the person was
-    /// supposed to make. Where Claude's copy asks, pi's copy has to say both
-    /// that the question is printed and that the turn ends on it — printing a
-    /// question and continuing answers it on the person's behalf.
+    /// supposed to make. Where Claude's copy asks, every other copy has to ask
+    /// too — with that agent's own dialog tool, or, where it has none it can
+    /// reach, by saying both that the question is printed and that the turn
+    /// ends on it. Printing a question and continuing answers it on the
+    /// person's behalf.
     #[test]
-    fn a_pi_skill_that_asks_prints_the_question_and_stops() {
+    fn a_copy_with_no_dialog_prints_the_question_and_stops() {
         for skill in SKILLS {
             if !skill.skill_md.contains("AskUserQuestion") {
                 continue;
             }
-            let pi = skill.pi_skill_md.to_lowercase();
-            assert!(
-                pi.contains("print"),
-                "{}'s pi copy asks a question without saying it is printed",
-                skill.name
-            );
-            assert!(
-                pi.contains("end the turn") || pi.contains("ends there"),
-                "{}'s pi copy never says the turn ends on the question",
-                skill.name
-            );
-            assert!(
-                pi.contains("next prompt"),
-                "{}'s pi copy never says where the answer comes back",
-                skill.name
-            );
+            let others = [("codex", skill.codex_skill_md), ("pi", skill.pi_skill_md)];
+            for (provider, skill_md) in others {
+                if skill_md.contains("request_user_input") {
+                    continue;
+                }
+                let copy = skill_md.to_lowercase();
+                assert!(
+                    copy.contains("print"),
+                    "{}'s {provider} copy asks a question without saying it is printed",
+                    skill.name
+                );
+                assert!(
+                    copy.contains("end the turn") || copy.contains("ends there"),
+                    "{}'s {provider} copy never says the turn ends on the question",
+                    skill.name
+                );
+                assert!(
+                    copy.contains("next prompt"),
+                    "{}'s {provider} copy never says where the answer comes back",
+                    skill.name
+                );
+            }
         }
     }
 

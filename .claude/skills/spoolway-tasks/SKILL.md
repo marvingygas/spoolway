@@ -73,11 +73,34 @@ reading the file whole.
    AskUserQuestion takes only four options and one of the four is always "Generate a pipeline
    for this plan" (`spoolway pipeline gen --plan <path>`, one line, session ends with nothing
    cut): the three largest counts fill the remaining slots, largest first and marked
-   recommended, and the question text tells the person to type the rest under *Other*. Put
-   size and the routed pipeline's own name against every task name on every candidate, and
-   every pipeline named there carries its own `description:` verbatim in that option's own
-   text — a person approves the routing by picking the count, not by a question of its own, so
-   this is the one place the sentence has to be. No pipeline reaches a document without having
+   recommended, and the question text tells the person to type the rest under *Other*.
+
+   **Every candidate is written in this one layout, and never in another:**
+
+   ```
+   1  <task-id>                  <size>   <pipeline>
+      What this task is, in one or two plain sentences.
+
+   2  <task-id>                  <size>   <pipeline>
+      What this task is, in one or two plain sentences.
+
+   PIPELINES
+
+   <pipeline>  That pipeline's own description:, copied verbatim.
+   ```
+
+   Number the tasks from 1 in `depends_on` order, so the chain reads down the page.
+   `<task-id>` is the id the document will carry, not a prose title. `<size>` is `small`,
+   `medium` or `large` — the sizing assumption you just made, put where a person can see it,
+   so a `large` where they expected two tasks is something they can turn down by picking a
+   different count. Line the three columns up with spaces, pipeline last, and wrap the
+   sentences under each task at around 48 characters, because the option box they are read in
+   is narrow.
+
+   `PIPELINES` closes every candidate. It names each distinct pipeline from the list above it
+   once, carrying that pipeline's own `description:` from step 1's contract, verbatim. A
+   person approves the routing by picking the count, not by a question of its own, so this is
+   the one place that sentence has to be. No pipeline reaches a document without having
    appeared on this ballot first.
 
 3. **Write one document per task**, with **Write**, at
