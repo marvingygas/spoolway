@@ -83,6 +83,11 @@ pr_for_branch() {
 }
 
 case "${1:-}" in
+  # `spoolway doctor` reads this back to enforce github.sh's own `#
+  # spoolway-requires: gh >= 2.97.0` line — answered at that floor, so a
+  # doctor run against this double reads the same as one against the real,
+  # tested `gh`.
+  --version) echo "gh version 2.97.0 (2024-06-03)"; exit 0 ;;
   auth) exit 0 ;;
   pr)
     case "${2:-}" in

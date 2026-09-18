@@ -946,7 +946,19 @@ fn queue_add_documents(
     documents: &[(String, String)],
 ) -> Result<()> {
     let mut tasks = validate_batch(repo, pipelines, base, documents)?;
-    open_and_prefix(repo, documents, &mut tasks)?;
+    // `esc` from an interactive run — a real terminal on both ends of
+    // `queue add --from` — is not a refusal: it means the same thing it
+    // means on the queue screen, "go back", so it is caught here rather
+    // than left to `?`, which would otherwise print it as an ordinary
+    // error and exit 1 the way `dispatch::overrides_gate`'s own `esc`
+    // never does (review finding 5).
+    if let Err(err) = open_and_prefix(repo, documents, &mut tasks, crate::ask::interactive(), true)
+    {
+        return match err.downcast_ref::<GateCancelled>() {
+            Some(_) => Ok(()),
+            None => Err(err),
+        };
+    }
 
     // All or none: every document above already parsed and validated, so
     // nothing left here can fail — the writes are the commit.
@@ -1016,7 +1028,42 @@ fn remove_pending_sources(repo: &Repo, documents: &[(String, String)]) {
 /// see [`write_back_ids`]. A routine hands an empty list: its minted
 /// document has no file of its own, and the source under
 /// `.spoolway/routines/` is never written to.
-fn open_and_prefix(repo: &Repo, documents: &[(String, String)], tasks: &mut [Task]) -> Result<()> {
+///
+/// `interactive` is not `crate::ask::interactive()`'s own tty check —
+/// callers driving the queue screen (`finish_submit`, `finish_routine`) pass
+/// `true` unconditionally, since the screen already blocks on a key for
+/// every other prompt it draws regardless of whether a real terminal is on
+/// the other end, and `read_key` returning `None` is what ends it gracefully
+/// under a script or a closed pane. Only a caller with no screen at all —
+/// `queue_add_documents`, `queue_routine_target` — asks `crate::ask` whether
+/// anyone is really there.
+///
+/// `own_terminal` is a separate question: whether the gate must take the
+/// terminal for itself before it can safely block on a key. A caller with
+/// no screen at all has taken no guard of its own, so it passes `true`. The
+/// queue screen has already taken one for the whole of `run_screen` (see
+/// `queue_screen`'s own doc comment on why that guard is dropped only once
+/// the screen itself is done), and passes `false`: a second `TermGuard`
+/// nested inside it would still be safe to construct, but its `Drop` runs
+/// `show_cursor` and `drain_stdin` the moment this call returns, undoing the
+/// outer guard's own hidden cursor and leaving the rest of the session with
+/// the cursor visible again — review finding 2.
+fn open_and_prefix(
+    repo: &Repo,
+    documents: &[(String, String)],
+    tasks: &mut [Task],
+    interactive: bool,
+    own_terminal: bool,
+) -> Result<()> {
+    // Before `open_tickets` ever calls the hook: a declared requirement this
+    // machine cannot meet means the call can only fail, and by the time it
+    // does the group's epic may already exist on the forge — see
+    // `tool_requirements_gate`. `true` means the gate drew and this
+    // submission goes on with issue tracking switched off for it.
+    if tool_requirements_gate(repo, interactive, own_terminal)? {
+        return Ok(());
+    }
+
     // Before anything is queued: a ticket opened for a task that never made
     // it into the queue — because a sibling document further down the batch
     // turned out to be broken — would be a ticket nothing ever points back
@@ -1028,6 +1075,262 @@ fn open_and_prefix(repo: &Repo, documents: &[(String, String)], tasks: &mut [Tas
     // already stamped and the lane name already checked by `validate_batch`.
     prefix_generated_names(tasks, &group_slug);
     Ok(())
+}
+
+/// `esc` out of [`tool_requirements_gate_with`] — bailed as an ordinary
+/// `Err` so [`open_and_prefix`] stays the one place every route reaches
+/// [`open_tickets`] through, and told apart at each call site from a real
+/// refusal: `esc` means "go back", not "here is what went wrong". The queue
+/// screen's own callers — `begin_submission`, `begin_routine_queue`,
+/// `begin_routine_solo` — turn it into [`refusal_mode`]'s own `Mode::Outcome`
+/// rather than a message saying something failed; a caller with no screen at
+/// all — `queue_add_documents`, `queue_routine_target` — catches it and
+/// exits clean, the way `dispatch::overrides_gate`'s own `esc` does.
+#[derive(Debug)]
+struct GateCancelled;
+
+impl std::fmt::Display for GateCancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "cancelled at the tool-requirements gate")
+    }
+}
+
+impl std::error::Error for GateCancelled {}
+
+/// What an interactive screen submit's own `Err` becomes: every ordinary
+/// refusal keeps the `Mode::Outcome` a person has always seen here, and
+/// [`GateCancelled`] gets one too, rather than `Mode::Browsing` — the mode
+/// the screen was already showing when `enter` was pressed, and so a frame
+/// `draw`'s own unchanged-frame check (review finding 1) would never
+/// repaint over the gate's own printed block. `Mode::Outcome` always renders
+/// as a new frame, so the next draw clears it away; any key from there
+/// returns to browsing exactly as every other outcome message does.
+fn refusal_mode(prefix: &str, err: anyhow::Error) -> Mode {
+    match err.downcast_ref::<GateCancelled>() {
+        Some(_) => Mode::Outcome("nothing was queued.".to_string()),
+        None => Mode::Outcome(format!("{prefix}: {err:#}")),
+    }
+}
+
+/// One `# spoolway-requires:` declaration the configured hook's own text
+/// carries that this machine cannot meet right now — what
+/// [`tool_requirements_gate_with`] draws instead of letting [`open_tickets`]
+/// reach a hook call that can only fail.
+struct UnmetRequirement {
+    /// The hook's own configured name — `issue_tracking.hook` verbatim, the
+    /// bare filename the Mockup's own first column draws (`github.sh`, not
+    /// `doctor`'s full `.spoolway/hooks/github.sh` display, a different
+    /// surface answering a different question).
+    hook: String,
+    tool: String,
+    floor: String,
+    /// The version found and where it resolved, when `tool` is on PATH at
+    /// all but reads below `floor`. `None` covers both "not on PATH" and an
+    /// answer that does not read as a version at all — `doctor` turns the
+    /// second into a note rather than a failure, but a submit gate has no
+    /// softer outcome to fall back to: an answer it cannot parse is no more
+    /// usable than no answer, so it is unmet either way.
+    found: Option<(String, String)>,
+}
+
+/// Every [`UnmetRequirement`] the configured hook declares, checked the same
+/// way `spoolway doctor`'s own `required_tool_checks` does — see
+/// [`doctor::parse_version`], [`doctor::below_floor`] and
+/// [`doctor::format_version`], reused rather than parsed a second time —
+/// except broader: `doctor` leaves "not on PATH" to `gh_status` and the jira
+/// PATH checks, its own separate rows, but a submit gate has no sibling
+/// check to leave that to, and a hook calling a tool that plain is not
+/// there fails exactly the way one calling it under-versioned does.
+///
+/// Empty whenever `issue_tracking.hook` is blank or not a bare filename —
+/// the same no-op start [`open_tickets`] itself gives in each of those two
+/// cases, since [`crate::tracking::configured`] tests the same thing. A bare
+/// name whose script is missing or unreadable is *not* a third such case:
+/// `open_ticket` still runs it and gets `OpenResult::Failed` back, since
+/// `configured` never stats the file — only this gate's own reading of it
+/// comes back empty here, with nothing to check a requirement against.
+fn unmet_requirements(repo: &Repo) -> Vec<UnmetRequirement> {
+    let mut unmet = Vec::new();
+    let hook = repo.config.issue_tracking.hook.trim().to_string();
+    let Some(path) = crate::tracking::hook_path_in(&repo.checkout, &hook) else {
+        return unmet;
+    };
+    let Ok(script) = std::fs::read_to_string(&path) else {
+        return unmet;
+    };
+
+    for parsed in crate::tracking::required_tools(&script) {
+        // An unreadable `# spoolway-requires:` line is `doctor`'s own note
+        // to give, not a reason to gate a submit over text this project did
+        // not write.
+        let Ok(required) = parsed else { continue };
+        // The non-goal ruling out a general constraint grammar covers the
+        // floor too — a line this cannot parse is not this gate's to judge.
+        let Some(floor) = doctor::parse_version(&required.floor) else {
+            continue;
+        };
+
+        let Some(bin_path) = which(&required.tool) else {
+            unmet.push(UnmetRequirement {
+                hook: hook.clone(),
+                tool: required.tool,
+                floor: required.floor,
+                found: None,
+            });
+            continue;
+        };
+        let answered = std::process::Command::new(&required.tool)
+            .arg("--version")
+            .output()
+            .ok()
+            .map(|out| {
+                format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                )
+            });
+        match answered.as_deref().and_then(doctor::parse_version) {
+            Some(found) if !doctor::below_floor(&found, &floor) => {}
+            Some(found) => unmet.push(UnmetRequirement {
+                hook: hook.clone(),
+                tool: required.tool,
+                floor: required.floor,
+                found: Some((doctor::format_version(&found), bin_path)),
+            }),
+            None => unmet.push(UnmetRequirement {
+                hook: hook.clone(),
+                tool: required.tool,
+                floor: required.floor,
+                found: None,
+            }),
+        }
+    }
+    unmet
+}
+
+/// The gate's own box, drawn once per unmet requirement pair — the
+/// declaration line and what this machine actually has — followed by the
+/// one line saying what it means. Column widths grow with the content
+/// rather than staying fixed, the same way [`dispatch::print_overrides_notice`]
+/// sizes its own rows, so a longer hook name or tool never runs its column
+/// into the next.
+fn print_tool_gate_notice(out: &mut impl std::io::Write, unmet: &[UnmetRequirement]) -> Result<()> {
+    let col1 = unmet
+        .iter()
+        .flat_map(|u| [u.hook.len(), u.tool.len()])
+        .max()
+        .unwrap_or(0)
+        + 3;
+    let col2 = unmet
+        .iter()
+        .map(|u| match &u.found {
+            Some((found, _)) => found.len(),
+            None => "not on PATH".len(),
+        })
+        .chain(std::iter::once("requires".len()))
+        .max()
+        .unwrap_or(0)
+        + 3;
+
+    writeln!(out)?;
+    for u in unmet {
+        writeln!(
+            out,
+            "    {:<col1$}{:<col2$}{} >= {}",
+            u.hook, "requires", u.tool, u.floor
+        )?;
+        match &u.found {
+            Some((found, path)) => writeln!(out, "    {:<col1$}{:<col2$}{}", u.tool, found, path)?,
+            None => writeln!(out, "    {:<col1$}not on PATH", u.tool)?,
+        }
+    }
+    writeln!(out)?;
+    writeln!(out, "  issue tracking is not supported.")?;
+    writeln!(out)?;
+    Ok(())
+}
+
+/// Whether a batch's configured hook declares a tool requirement this
+/// machine does not meet, drawn before [`open_tickets`] is ever reached —
+/// `true` means the gate drew and issue tracking is switched off for this
+/// submission, `false` means every requirement is met (or none exist) and
+/// [`open_and_prefix`] goes on exactly as it does today. The one `Err` this
+/// ever returns is [`GateCancelled`], `esc`'s own signal back up to the
+/// caller that drove the screen.
+///
+/// `interactive` is [`open_and_prefix`]'s own — not decided here, since
+/// whether anyone is there to answer means something different for a
+/// caller with no screen at all than for one already mid-way through
+/// driving one; see that function's own doc comment. `own_terminal` is the
+/// same function's own second question — whether this call must take the
+/// terminal for itself before blocking on a key, or whether a caller
+/// already holds one (see review finding 2).
+///
+/// A thin wrapper over [`tool_requirements_gate_with`], the same split
+/// [`dispatch::overrides_gate`] draws around [`dispatch::overrides_gate_with`]
+/// and for the same reason: this is the only thing that touches the
+/// process's real stdio, so a test can drive every branch — including the
+/// no-tty print-and-proceed path — against an injected reader and writer
+/// instead.
+fn tool_requirements_gate(repo: &Repo, interactive: bool, own_terminal: bool) -> Result<bool> {
+    tool_requirements_gate_with(
+        repo,
+        interactive,
+        &mut crate::screen::RawStdin,
+        &mut std::io::stdout(),
+        own_terminal.then_some(crate::platform::TermGuard::new as fn() -> _),
+    )
+}
+
+/// [`tool_requirements_gate`]'s own logic. With nobody there to answer, the
+/// notice still prints — the run is otherwise silent about why tracking
+/// switched off — but nothing waits on a key nobody can press, the same
+/// unattended path [`dispatch::overrides_gate_with`] takes for a layer
+/// notice.
+///
+/// `term` is `None` for a caller already holding a terminal guard of its
+/// own — the queue screen, for the whole of `run_screen` — and `Some` for
+/// one that is not, taken only just before the first blocking read for the
+/// same reason `dispatch::overrides_gate_with`'s own guard is: every early
+/// return above it constructs nothing, hides nothing and shows nothing. A
+/// second guard nested inside the screen's own would still be memory-safe
+/// to build, but its `Drop` shows the cursor and drains stdin the moment
+/// this call returns — undoing the outer guard's own hidden cursor for the
+/// rest of the session (review finding 2), which is why the screen's own
+/// callers pass `None` rather than a second `TermGuard::new`.
+fn tool_requirements_gate_with(
+    repo: &Repo,
+    interactive: bool,
+    input: &mut impl PollableRead,
+    out: &mut impl std::io::Write,
+    term: Option<impl FnOnce() -> crate::platform::TermGuard>,
+) -> Result<bool> {
+    let unmet = unmet_requirements(repo);
+    if unmet.is_empty() {
+        return Ok(false);
+    }
+
+    print_tool_gate_notice(out, &unmet)?;
+    if !interactive {
+        return Ok(true);
+    }
+    writeln!(
+        out,
+        "  [enter] queue anyway, without issue tracking   [esc] back"
+    )?;
+
+    let _term = term.map(|term| term());
+    loop {
+        match read_key(input) {
+            Some(Key::Enter) => return Ok(true),
+            Some(Key::Esc) => return Err(GateCancelled.into()),
+            // The tty went away mid-question — nothing here may hang
+            // waiting for an answer that can no longer come.
+            None => return Ok(true),
+            _ => {}
+        }
+    }
 }
 
 /// Prefix each task's `group:`, `branch:` and stored `slug:` with the slug its
@@ -1259,38 +1562,37 @@ fn open_tickets(
                 let code = exit_code
                     .map(|c| c.to_string())
                     .unwrap_or_else(|| "no code".to_string());
-                // Three different sentences, not one with a blank filled in:
-                // "every one of those ids" has nothing to point at when this
-                // is the very first call in the batch to run at all, and a
-                // person reading that would go looking in `pending/` for
-                // ids that were never written — as they would when there was
-                // no document on disk to write them into, a routine's or one
-                // read from standard input.
-                let resume = if opened.is_empty() {
-                    "nothing had been opened yet, so there is nothing to resume from — \
-                     running this command again starts the batch fresh."
-                        .to_string()
-                } else if !written_back {
-                    format!(
-                        "{} had already been opened, and there is no document on disk to \
-                         record those ids in, so running this again opens a second set — \
-                         close those by hand first.",
-                        opened.join(" and "),
-                    )
-                } else {
-                    format!(
-                        "{} had already been opened, and every one of those ids is \
-                         written into its own document in {}, so running this command \
-                         again resumes rather than opening a second set.",
-                        opened.join(" and "),
-                        repo.pending_dir().display(),
-                    )
-                };
+                // `opened` and `ids` rows carry what this batch actually
+                // did, so they are left out entirely when nothing had been
+                // opened yet — there is nothing to resume from, and running
+                // this command again starts the batch fresh. `log` always
+                // names the one file that holds the hook's own stderr,
+                // never the tracking directory it lives under, so a person
+                // reading this does not have to go find it themselves.
+                let key = crate::command_step::Runs::key("open", tasks[i].id());
+                let log = relative(
+                    &repo.home,
+                    &crate::command_step::Runs::new(&repo.tracking_dir()).log_path(&key),
+                );
+                let mut rows = String::new();
+                for item in &opened {
+                    let label = if rows.is_empty() { "opened" } else { "" };
+                    rows.push_str(&format!("    {label:<9}{item}\n"));
+                }
+                if !opened.is_empty() {
+                    let ids = if written_back {
+                        "written into pending/".to_string()
+                    } else {
+                        "not written — no document on disk to record them in; close those \
+                         by hand first"
+                            .to_string()
+                    };
+                    rows.push_str(&format!("    {:<9}{ids}\n", "ids"));
+                }
+                rows.push_str(&format!("    {:<9}{log}", "log"));
                 bail!(
-                    "the open hook exited {code} for `{}` — nothing was queued.\n\
-                     {resume} the log is in {}.",
+                    "the open hook exited {code} for `{}` — nothing was queued.\n\n{rows}",
                     tasks[i].id(),
-                    repo.tracking_dir().display(),
                 );
             }
         }
@@ -4376,7 +4678,7 @@ fn begin_submission(
             clamp_cursors(groups, state);
             after_write(repo, msg)
         }
-        Err(err) => Mode::Outcome(format!("submission refused: {err:#}")),
+        Err(err) => refusal_mode("submission refused", err),
     }
 }
 
@@ -4436,7 +4738,14 @@ fn finish_submit(
     // next, with whatever batch, saves nothing without this check standing
     // between it and disk.
     check_dependencies_set(repo, pipelines, &mut pending)?;
-    open_and_prefix(repo, documents, &mut pending)?;
+    // `interactive: true` unconditionally: the queue screen already blocks
+    // on a key for every other prompt it draws — `Mode::Dispatch`'s `y`/`n`,
+    // `Mode::SaveRoutine` — whether or not the process happens to have a
+    // real terminal, and relies on `read_key` answering `None` to end
+    // gracefully under a script or a closed pane. `own_terminal: false`
+    // since `queue_screen` already holds a `TermGuard` for the whole of
+    // `run_screen` — see `open_and_prefix`'s own doc comment.
+    open_and_prefix(repo, documents, &mut pending, true, false)?;
 
     for task in &pending {
         task.save()?;
@@ -4986,8 +5295,18 @@ pub(crate) fn queue_routine_target(
     }
 
     let mut tasks = validate_batch(repo, pipelines, Some(base), &documents)?;
-    // No document to write ids back into — see `open_and_prefix`.
-    open_and_prefix(repo, &[], &mut tasks)?;
+    // No document to write ids back into — see `open_and_prefix`. This route
+    // has no screen at all — a job, or `--pipeline`'s own CLI caller — so it
+    // asks `crate::ask` whether anyone is really there and takes its own
+    // terminal, the same way `queue_add_documents` does. `esc`'s
+    // `GateCancelled` is left to propagate as an ordinary `Err` rather than
+    // caught here: both callers — `jobs::fire_job`'s dispatcher loop and its
+    // own `jobs run` — already treat any `Err` as "did not fire" and neither
+    // marks the job fired nor records queued ids, which is the one honest
+    // answer for a run a person actually declined. Turning it into a fake
+    // empty success here would let the dispatcher believe this minute's
+    // firing already happened.
+    open_and_prefix(repo, &[], &mut tasks, crate::ask::interactive(), true)?;
     // All or none: everything above parsed and validated, so these writes
     // are the commit — the same discipline `queue_add_documents` follows.
     for task in &tasks {
@@ -5004,7 +5323,10 @@ pub(crate) fn queue_routine_target(
 /// meant to be queued again, not consumed by being queued once — which is
 /// why nothing is handed to [`open_and_prefix`] to write ids back into.
 fn finish_routine(repo: &Repo, tasks: &mut [Task], base: &str) -> Result<String> {
-    open_and_prefix(repo, &[], tasks)?;
+    // `interactive: true`, `own_terminal: false` — driven from the queue
+    // screen's own routines pane, which already holds the terminal for the
+    // whole of `run_screen`; see `open_and_prefix`'s own doc comment.
+    open_and_prefix(repo, &[], tasks, true, false)?;
     for task in tasks.iter() {
         task.save()?;
     }
@@ -5040,7 +5362,7 @@ fn begin_routine_queue(
     match validate_batch(repo, pipelines, Some(base), &documents) {
         Ok(mut tasks) => match finish_routine(repo, &mut tasks, base) {
             Ok(msg) => after_write(repo, msg),
-            Err(err) => Mode::Outcome(format!("queue refused: {err:#}")),
+            Err(err) => refusal_mode("queue refused", err),
         },
         Err(err) => Mode::Outcome(format!("queue refused: {err:#}")),
     }
@@ -5075,7 +5397,7 @@ fn begin_routine_solo(
     match validate_batch(repo, pipelines, Some(base), &documents) {
         Ok(mut tasks) => match finish_routine(repo, &mut tasks, base) {
             Ok(msg) => after_write(repo, msg),
-            Err(err) => Mode::Outcome(format!("queue refused: {err:#}")),
+            Err(err) => refusal_mode("queue refused", err),
         },
         Err(err) => Mode::Outcome(format!("queue refused: {err:#}")),
     }
@@ -9563,6 +9885,14 @@ mod tests {
             assert!(err.contains("acme/app#42"), "{err}");
             assert!(err.contains("acme/app#43"), "{err}");
             assert!(
+                err.contains("ids      written into pending/"),
+                "the ids row must say where they landed: {err}"
+            );
+            assert!(
+                err.contains("log      tracking/split-fields · open.log"),
+                "{err}"
+            );
+            assert!(
                 !repo.queue_dir().join("scan-pending.md").exists(),
                 "nothing was queued, including the document that succeeded"
             );
@@ -9607,9 +9937,10 @@ mod tests {
 
         /// The one case above never reaches: the very first call in the
         /// batch is the one that fails, so nothing has been opened yet at
-        /// all. The message must not dangle a reference to ids that were
-        /// never written — no "and every one of those ids", nothing sending
-        /// a person to `pending/` to look for something that is not there.
+        /// all. The message carries no `opened` or `ids` row at all when
+        /// there is nothing for either to name — only `log`, naming the one
+        /// file that holds the hook's own stderr rather than the directory
+        /// it lives under.
         #[test]
         fn a_hook_failing_on_the_first_call_says_so_with_nothing_to_resume_from() {
             let mut repo = fixture("open-fails-first-call");
@@ -9628,8 +9959,12 @@ mod tests {
             let err = err.to_string();
 
             assert!(err.contains("opens-first"), "{err}");
-            assert!(!err.contains("those ids"), "{err}");
-            assert!(err.contains("nothing had been opened yet"), "{err}");
+            assert!(!err.contains("opened"), "{err}");
+            assert!(!err.contains("ids"), "{err}");
+            assert!(
+                err.contains("log      tracking/opens-first · open.log"),
+                "{err}"
+            );
             assert!(
                 !repo.queue_dir().join("opens-first.md").exists(),
                 "nothing was queued"
@@ -9896,8 +10231,12 @@ mod tests {
             .unwrap_err()
             .to_string();
 
-            assert!(err.contains("opens a second set"), "{err}");
-            assert!(!err.contains("pending"), "{err}");
+            assert!(
+                err.contains("ids      not written — no document on disk"),
+                "{err}"
+            );
+            assert!(err.contains("close those by hand first"), "{err}");
+            assert!(!err.contains("pending/"), "{err}");
             assert_eq!(std::fs::read_to_string(&first_path).unwrap(), first);
             assert_eq!(std::fs::read_to_string(&second_path).unwrap(), second);
             assert!(
@@ -10147,6 +10486,233 @@ mod tests {
             // `rework` and `PROJ-rework` are unrelated groups once `PROJ` is
             // rejected, so `fresh` did not inherit `EPIC-1`.
             assert_ne!(queued(&repo, "fresh").extra_str("epic"), "EPIC-1");
+        }
+    }
+
+    mod tool_requirements_gate_tests {
+        use super::*;
+
+        /// Points `[issue_tracking].hook` at an executable script declaring
+        /// a `cargo` requirement — `cargo` because it is the one binary this
+        /// project's own build guarantees is on PATH wherever its tests run,
+        /// the same choice `doctor`'s own version-gate tests make.
+        fn with_versioned_hook(repo: &mut Repo, floor: &str) {
+            let dir = repo.checkout.join(".spoolway/hooks");
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("versioned.sh");
+            std::fs::write(
+                &path,
+                format!("#!/bin/sh\n# spoolway-requires: cargo >= {floor}\nexit 0\n"),
+            )
+            .unwrap();
+            let mut perms = std::fs::metadata(&path).unwrap().permissions();
+            std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+            std::fs::set_permissions(&path, perms).unwrap();
+            repo.config.issue_tracking.hook = "versioned.sh".to_string();
+        }
+
+        /// No hook at all: `unmet_requirements` has nothing to read and the
+        /// gate returns straight through, exactly like `overrides_gate` over
+        /// a project with no layer.
+        #[test]
+        fn no_hook_configured_has_nothing_unmet() {
+            let repo = fixture("tool-gate-no-hook");
+            assert!(unmet_requirements(&repo).is_empty());
+        }
+
+        /// A declared floor this machine's own `cargo` already clears —
+        /// `unmet_requirements` reports nothing, and the gate proceeds
+        /// without drawing at all.
+        #[test]
+        fn a_met_requirement_draws_nothing() {
+            let mut repo = fixture("tool-gate-met");
+            with_versioned_hook(&mut repo, "0.0.1");
+            assert!(unmet_requirements(&repo).is_empty());
+
+            let mut input = keys("");
+            let mut out = Vec::new();
+            let skip = tool_requirements_gate_with(
+                &repo,
+                true,
+                &mut input,
+                &mut out,
+                Some(crate::platform::TermGuard::inert),
+            )
+            .unwrap();
+            assert!(!skip, "nothing unmet means issue tracking stays on");
+            assert!(out.is_empty(), "{out:?}");
+        }
+
+        /// An unmet floor draws the box the mockup shows — the hook, the
+        /// tool and the floor it declares, and what this machine actually
+        /// has for it — with nobody there to answer: printed and proceeding
+        /// without a key, the way the mockup's own non-interactive path
+        /// promises, and `input` is left empty on purpose so a `read_key`
+        /// call here would hang the test rather than fail it.
+        #[test]
+        fn an_unmet_requirement_draws_and_proceeds_with_no_tty() {
+            let mut repo = fixture("tool-gate-no-tty");
+            with_versioned_hook(&mut repo, "999.0.0");
+
+            let mut input = keys("");
+            let mut out = Vec::new();
+            let skip = tool_requirements_gate_with(
+                &repo,
+                false,
+                &mut input,
+                &mut out,
+                Some(crate::platform::TermGuard::inert),
+            )
+            .unwrap();
+            assert!(skip, "issue tracking must be switched off for this run");
+            let printed = String::from_utf8(out).unwrap();
+            assert!(printed.contains("versioned.sh"), "{printed}");
+            assert!(printed.contains("cargo >= 999.0.0"), "{printed}");
+            assert!(printed.contains("cargo"), "{printed}");
+            assert!(
+                printed.contains("issue tracking is not supported."),
+                "{printed}"
+            );
+            assert!(
+                !printed.contains("[enter]"),
+                "a non-interactive run never waits on a key: {printed}"
+            );
+        }
+
+        /// `enter` over the drawn gate queues the batch with issue tracking
+        /// switched off for this run — the same outcome the no-tty path
+        /// gives, reached instead by a person answering the prompt.
+        #[test]
+        fn enter_over_the_gate_skips_tracking() {
+            let mut repo = fixture("tool-gate-enter");
+            with_versioned_hook(&mut repo, "999.0.0");
+
+            let mut input = keys("\r");
+            let mut out = Vec::new();
+            let skip = tool_requirements_gate_with(
+                &repo,
+                true,
+                &mut input,
+                &mut out,
+                Some(crate::platform::TermGuard::inert),
+            )
+            .unwrap();
+            assert!(skip);
+            let printed = String::from_utf8(out).unwrap();
+            assert!(printed.contains("[enter] queue anyway"), "{printed}");
+        }
+
+        /// `esc` is the one path that must reach the caller as `GateCancelled`
+        /// — [`open_and_prefix`]'s own callers turn that into `Mode::Browsing`
+        /// rather than a refusal, since nothing here failed.
+        #[test]
+        fn esc_over_the_gate_cancels() {
+            let mut repo = fixture("tool-gate-esc");
+            with_versioned_hook(&mut repo, "999.0.0");
+
+            let mut input = keys("\x1b");
+            let mut out = Vec::new();
+            let err = tool_requirements_gate_with(
+                &repo,
+                true,
+                &mut input,
+                &mut out,
+                Some(crate::platform::TermGuard::inert),
+            )
+            .unwrap_err();
+            assert!(err.downcast_ref::<GateCancelled>().is_some(), "{err:#}");
+        }
+
+        /// Review finding 1: `Mode::Browsing` is exactly the mode the
+        /// screen was already showing when `enter` fired the submission
+        /// that hit the gate, so returning it on `esc` would render the
+        /// same frame `draw`'s own unchanged-frame check already has
+        /// cached and never repaint over the gate's raw-printed block.
+        /// `refusal_mode` must hand back a *different* mode instead, so the
+        /// next `draw` clears the screen — `Mode::Outcome` is what every
+        /// other refusal here already uses for exactly that reason.
+        #[test]
+        fn refusal_mode_never_returns_to_the_frame_that_was_already_on_screen() {
+            let cancelled = refusal_mode("submission refused", GateCancelled.into());
+            assert!(
+                !matches!(cancelled, Mode::Browsing),
+                "esc must not redraw the identical frame `enter` was pressed on: {cancelled:?}"
+            );
+            assert!(matches!(cancelled, Mode::Outcome(_)), "{cancelled:?}");
+
+            let refused = refusal_mode("submission refused", anyhow::anyhow!("bad batch"));
+            match refused {
+                Mode::Outcome(msg) => assert!(msg.contains("bad batch"), "{msg}"),
+                other => panic!("{other:?}"),
+            }
+        }
+
+        /// A tool the declared floor names but that is not on PATH at all is
+        /// unmet too — a submit gate has no sibling check to leave that gap
+        /// to the way `doctor` does, so it draws the same box with "not on
+        /// PATH" in place of a version and a location.
+        #[test]
+        fn a_tool_missing_from_path_entirely_is_unmet() {
+            let mut repo = fixture("tool-gate-missing-tool");
+            let dir = repo.checkout.join(".spoolway/hooks");
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("versioned.sh");
+            std::fs::write(
+                &path,
+                "#!/bin/sh\n# spoolway-requires: definitely-not-a-real-binary >= 1.0.0\nexit 0\n",
+            )
+            .unwrap();
+            let mut perms = std::fs::metadata(&path).unwrap().permissions();
+            std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+            std::fs::set_permissions(&path, perms).unwrap();
+            repo.config.issue_tracking.hook = "versioned.sh".to_string();
+
+            let unmet = unmet_requirements(&repo);
+            assert_eq!(
+                unmet.len(),
+                1,
+                "{:?}",
+                unmet.iter().map(|u| &u.tool).collect::<Vec<_>>()
+            );
+            assert!(unmet[0].found.is_none());
+
+            let mut out = Vec::new();
+            print_tool_gate_notice(&mut out, &unmet).unwrap();
+            let printed = String::from_utf8(out).unwrap();
+            assert!(printed.contains("not on PATH"), "{printed}");
+        }
+
+        /// `open_and_prefix` is the one call every submit route shares, and
+        /// this is the whole point of the gate living there: an unmet
+        /// requirement never reaches `open_tickets` at all, so no `epic:` or
+        /// `ticket:` lands on the task — the batch queues exactly as it
+        /// would with issue tracking switched off. Driven with
+        /// `interactive: false` — `queue_add_documents`'s own path when
+        /// `crate::ask::interactive()` says nobody is there — the same
+        /// no-tty branch the test above drives directly.
+        #[test]
+        fn open_and_prefix_skips_open_tickets_when_a_requirement_is_unmet() {
+            let mut repo = fixture("tool-gate-open-and-prefix");
+            with_versioned_hook(&mut repo, "999.0.0");
+            let doc = document("solo", "group: solo\n", BODY);
+            let mut tasks = validate_batch(
+                &repo,
+                &Pipelines::builtin(),
+                Some("plan/demo"),
+                &[("solo.md".to_string(), doc)],
+            )
+            .unwrap();
+
+            open_and_prefix(&repo, &[], &mut tasks, false, true).unwrap();
+
+            assert_eq!(tasks[0].extra_str("ticket"), "");
+            assert_eq!(tasks[0].extra_str("epic"), "");
+            assert!(
+                std::fs::read_dir(repo.tracking_dir())
+                    .map(|mut d| d.next().is_none())
+                    .unwrap_or(true),
+                "the hook must never have been called"
+            );
         }
     }
 

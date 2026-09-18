@@ -342,8 +342,9 @@ under `~/.spoolway/<project>/tracking/`. The board prints
 `issue_tracking: N hook failures — see tracking/` while any hook has failed.
 
 `spoolway doctor` reports a `hook` with a blank `project_key`, a `hook` that is not a bare
-file name, a script with no `fetch` branch, and `key_in_names` on with a script that never
-writes `slug=`.
+file name, a script with no `fetch` branch, `key_in_names` on with a script that never writes
+`slug=`, and a tool named in a `# spoolway-requires:` line whose installed version is below
+the line's floor.
 
 ### `open` — a fifth event, run by `queue add` itself
 
@@ -379,10 +380,21 @@ refuses.
 never changes them. Switch trackers with
 `spoolway config set issue_tracking.hook <file>`.
 
+A hook script names the tools it needs with a `# spoolway-requires: <tool> >= <version>`
+comment line, one per tool. `spoolway doctor` reads these lines and checks each named tool's
+`--version` output against the floor. Only `<tool> >= <version>` is understood; any other
+shape in the line is reported as unreadable rather than interpreted.
+
+Every submit route — the queue screen's `enter`, `spoolway queue add --from` and a routine —
+checks the same lines before it opens any ticket. A tool below its floor, or missing from
+PATH, gates the submission: the queue screen's `enter` shows what is unmet and waits for
+`enter` to queue without issue tracking or `esc` to back out, and a non-interactive submit
+prints the same notice and proceeds. See [`spoolway queue`](cli-reference.md#spoolway-queue).
+
 | Script | Needs | What it does |
 |---|---|---|
-| `github.sh` | `gh`, logged in | Reads an issue on `fetch`. Creates the epic and ticket on `open`, nests them under the issue in `SPOOLWAY_SOURCE`, and returns `slug=gh-<number>` and `url=`. Comments with the task file on `blocked` and `paused`. On `done` it hands the ticket to the task's pull request with a `Closes #<n>` trailer and comments that the issue is awaiting merge. It closes nothing. |
-| `jira.sh` | `acli` and `jq` | The same events. Returns the lowercased key as the slug. Comments name the task without attaching the file. Check the link type, epic status and JSON field names named in the script's header against your site. |
+| `github.sh` | `gh` >= 2.97.0, logged in | Reads an issue on `fetch`. Creates the epic and ticket on `open`, nests them under the issue in `SPOOLWAY_SOURCE`, and returns `slug=gh-<number>` and `url=`. Comments with the task file on `blocked` and `paused`. On `done` it hands the ticket to the task's pull request with a `Closes #<n>` trailer and comments that the issue is awaiting merge. It closes nothing. |
+| `jira.sh` | `acli` >= 1.3.30 and `jq` >= 1.6 | The same events. Returns the lowercased key as the slug. Comments name the task without attaching the file. Check the link type, epic status and JSON field names named in the script's header against your site. |
 
 ### How a GitHub issue gets closed
 

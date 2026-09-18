@@ -140,6 +140,11 @@ pr_number() {
 }
 
 case "${1:-}" in
+  # `spoolway doctor` reads this back to enforce a hook's own `#
+  # spoolway-requires: gh >= <version>` line — answered at or above what
+  # `assets/hooks/github.sh` declares, so a doctor run against this double
+  # reads the same as one against a real, current `gh`.
+  --version) echo "gh version 2.97.0 (2024-06-03)"; exit 0 ;;
   # `gh auth status` is a liveness check; this forge needs no credentials.
   auth) exit 0 ;;
   pr) ;;
