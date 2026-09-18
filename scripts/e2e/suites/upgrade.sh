@@ -240,6 +240,8 @@ works "the 0.1.0 fixture's dead task-log template is swept" \
   test ! -e .spoolway/templates/task-log.md
 works "the 0.1.0 fixture's dead pull request template is swept" \
   test ! -e .spoolway/templates/pull-request.md
+works "the 0.1.0 fixture's dead lane-prompts template is swept" \
+  test ! -e .spoolway/templates/lane-prompts.md
 
 # ------------------------------------------------------------- 0.2.0: no-op
 #
@@ -263,6 +265,8 @@ works "the 0.2.0 fixture's dead task-log template is swept" \
   test ! -e .spoolway/templates/task-log.md
 works "the 0.2.0 fixture's dead pull request template is swept" \
   test ! -e .spoolway/templates/pull-request.md
+works "the 0.2.0 fixture's dead lane-prompts template is swept" \
+  test ! -e .spoolway/templates/lane-prompts.md
 
 # --------------------------------------------------------- 0.3.0: dead templates
 #
@@ -270,7 +274,7 @@ works "the 0.2.0 fixture's dead pull request template is swept" \
 # `install::RETIRED_TEMPLATES` — after the config fold above had already
 # landed, so this fixture is the sharpest proof that the sweep runs on its
 # own: nothing about the fold or the pipeline key block is new by 0.3.0, only
-# whether the two dead templates the fixture still carries are gone
+# whether the three dead templates the fixture still carries are gone
 # afterwards.
 stage 0.3.0
 
@@ -280,5 +284,7 @@ works "the 0.3.0 fixture's dead task-log template is swept" \
   test ! -e .spoolway/templates/task-log.md
 works "the 0.3.0 fixture's dead pull request template is swept" \
   test ! -e .spoolway/templates/pull-request.md
+works "the 0.3.0 fixture's dead lane-prompts template is swept" \
+  test ! -e .spoolway/templates/lane-prompts.md
 
 finish

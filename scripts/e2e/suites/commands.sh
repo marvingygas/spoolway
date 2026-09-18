@@ -251,22 +251,24 @@ must "update runs over the tracker project" env -C "$INITDIR/github" "$SPOOLWAY"
 has "the hook this project edited is exactly as it left it" "echo mine" "$HOOK"
 
 # ------------------------------------------------------------ lane-prompts.md
-# The per-project override for a lane's seven typed pane messages — seeded by
-# `init`, left alone by `update` once a project has made it its own, and
-# restorable one file at a time.
+# The seven typed pane messages are spoolway's own now, with no project
+# override left to resolve against them — `init` no longer seeds one, and a
+# checkout carrying one from an older release is swept by `update` rather
+# than preserved. The sweep itself, against a real released tree, is
+# `upgrade.sh`'s: what only a fresh `init` can show is that a project started
+# today never gets the file in the first place.
 LANE_PROMPTS="$INITDIR/unasked/.spoolway/templates/lane-prompts.md"
-works "init seeded lane-prompts.md" test -f "$LANE_PROMPTS"
-has "with the opening section" "## opening" "$LANE_PROMPTS"
+works "init no longer seeds lane-prompts.md" test ! -e "$LANE_PROMPTS"
 
-printf '## opening\n\nours, not spoolway'"'"'s.\n' > "$LANE_PROMPTS"
-must "update runs over the unasked project" env -C "$INITDIR/unasked" "$SPOOLWAY" update
-has "lane-prompts.md this project edited is exactly as it left it" \
-  "ours, not spoolway's" "$LANE_PROMPTS"
-
-works "--replace restores the shipped file" \
+# A project carrying the file from before this change — `--replace` no
+# longer has anything to hand it back, since the file is not one spoolway
+# ships any more.
+printf 'a project'"'"'s own leftover.\n' > "$LANE_PROMPTS"
+must "update sweeps a leftover lane-prompts.md" env -C "$INITDIR/unasked" "$SPOOLWAY" update
+works "and it is gone" test ! -e "$LANE_PROMPTS"
+refuses "so --replace has nothing left to hand back" \
+  "not a file spoolway ships" \
   env -C "$INITDIR/unasked" "$SPOOLWAY" update --replace .spoolway/templates/lane-prompts.md
-has "back to spoolway's own resume wording" \
-  "This lane was blocked and a person has cleared it" "$LANE_PROMPTS"
 
 # --------------------------------------------------------------- task contract
 # `task contract` never touches `.spoolway/` in either mode — bare, it only

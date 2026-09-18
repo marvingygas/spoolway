@@ -16,7 +16,7 @@ use crate::config::{Config, STATE_DIR};
 use crate::fmt::{first_line, relative};
 use crate::graph::{DepState, Graph};
 use crate::mux::Mux;
-use crate::pipeline::{Outcome, Pipeline, Pipelines, StepKind};
+use crate::pipeline::{Outcome, Pipeline, Pipelines, Step, StepKind};
 use crate::repo::Repo;
 use crate::task::{Task, route_key, write_atomic};
 

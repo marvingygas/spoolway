@@ -198,13 +198,6 @@ pub const HOOK_SCRIPTS: &[(&str, &str)] = &[
     ("jira.sh", include_str!("../assets/hooks/jira.sh")),
 ];
 
-/// The seven typed messages a lane's pane receives — see
-/// [`crate::lane_prompts`]. Written whole by `init`, left alone by an
-/// ordinary `spoolway update`, and brought back to this text only by
-/// `spoolway update --replace .spoolway/templates/lane-prompts.md`, the same
-/// bargain every other file in this module keeps.
-pub const LANE_PROMPTS: &str = include_str!("../assets/lane-prompts.md");
-
 /// The markers around spoolway's rules in the project's `.gitignore`.
 ///
 /// A project already has a `.gitignore`, or wants one at its root — so the rules

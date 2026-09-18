@@ -2665,7 +2665,7 @@ impl<'a> Dispatcher<'a> {
                 return Ok(());
             }
 
-            let nudge = crate::compose::reminder_prompt(self.repo, pipeline, step);
+            let nudge = crate::compose::reminder_prompt(task, step);
             self.mux.prompt(&lane.name, &nudge)?;
             // Baselined *after* the nudge lands, not before. A lane with no
             // session to read its transcript by falls back to hashing the
@@ -5008,12 +5008,10 @@ fn start_one(
     // `resume_prompt` — the one prompt that must never reach a lane nothing
     // ever blocked.
     let prompt = match (previous.is_some(), via_session, parked) {
-        (true, _, true) => crate::compose::park_prompt(repo, task, pipeline, escalated),
-        (true, true, false) => crate::compose::carry_prompt(repo, task, pipeline),
-        (true, false, false) => {
-            crate::compose::resume_prompt(repo, task, pipeline, repo.unattended())
-        }
-        (false, _, _) => crate::compose::opening_prompt(repo, task, pipeline, step),
+        (true, _, true) => crate::compose::park_prompt(task, pipeline, escalated),
+        (true, true, false) => crate::compose::carry_prompt(task, pipeline),
+        (true, false, false) => crate::compose::resume_prompt(task, pipeline, repo.unattended()),
+        (false, _, _) => crate::compose::opening_prompt(task, pipeline, step),
     };
     // Take the lane back when its briefing does not land, exactly as the
     // `start_lane` failure above takes its pane back — and for a sharper
@@ -6253,7 +6251,7 @@ mod tests {
             "{}\n\n{}",
             crate::compose::system_prompt(repo, task, pipeline, step, "[the project's prompt]")
                 .unwrap(),
-            crate::compose::opening_prompt(repo, task, pipeline, step),
+            crate::compose::opening_prompt(task, pipeline, step),
         )
     }
 
@@ -6398,6 +6396,7 @@ mod tests {
             tab_id: None,
             attempts: 0,
             paused_at: None,
+            paused_by: None,
             launched_at: None,
             prompts: Default::default(),
             rounds: Default::default(),
@@ -9550,18 +9549,20 @@ mod tests {
         });
         let task = reload(&path);
 
-        // The gate paragraph is in there, but not the paragraph the old
-        // behaviour sent: nothing asks the lane to hold, pause, wait for, or
-        // approve its own pass — that stayed `commands::report`'s alone to
-        // decide.
+        // The gate fact is in there, as a line of the report contract, but
+        // not the paragraph the old behaviour sent: nothing asks the lane to
+        // hold, pause, wait for, or approve its own pass — that stayed
+        // `commands::report`'s alone to decide.
         let pipeline = pipelines.get("default").unwrap();
         let sent = format!(
             "{}{}",
             crate::compose::system_prompt(&repo, &task, pipeline, step, "[prompt]").unwrap(),
-            crate::compose::opening_prompt(&repo, &task, pipeline, step),
+            crate::compose::opening_prompt(&task, pipeline, step),
         );
-        assert!(sent.contains("This step is gated"), "got: {sent}");
-        assert!(sent.contains("a person opens this pane"), "got: {sent}");
+        assert!(
+            sent.contains("A pass is held here for a person, who opens this pane."),
+            "got: {sent}"
+        );
         for word in [
             "hold your pass",
             "wait for a person",
@@ -9603,6 +9604,7 @@ mod tests {
         let task = reload(&path);
         assert_eq!(task.stage(), crate::pipeline::PAUSED);
         assert_eq!(task.front.paused_at.as_deref(), Some("release"));
+        assert_eq!(task.front.paused_by.as_deref(), Some("gate"));
     }
 
     /// The failure this bounds is a model that ends its turn without running
@@ -11763,8 +11765,8 @@ mod tests {
         let pipelines = session_pipelines();
         let pipeline = pipelines.get("default").unwrap();
 
-        let carried = crate::compose::carry_prompt(&repo, &task, pipeline);
-        let unblocked = crate::compose::resume_prompt(&repo, &task, pipeline, false);
+        let carried = crate::compose::carry_prompt(&task, pipeline);
+        let unblocked = crate::compose::resume_prompt(&task, pipeline, false);
 
         assert!(carried.contains("nobody in between"), "{carried}");
         assert!(!carried.contains("unblocked"), "{carried}");
@@ -11786,15 +11788,12 @@ mod tests {
         let pipelines = session_pipelines();
         let pipeline = pipelines.get("default").unwrap();
 
-        let alone = crate::compose::resume_prompt(&repo, &task, pipeline, true);
+        let alone = crate::compose::resume_prompt(&task, pipeline, true);
 
         assert!(!alone.contains("a person has"), "{alone}");
         assert!(alone.contains("an unblocker lane has since run"), "{alone}");
         assert!(alone.contains("## Blocker"), "{alone}");
-        assert_ne!(
-            alone,
-            crate::compose::resume_prompt(&repo, &task, pipeline, false)
-        );
+        assert_ne!(alone, crate::compose::resume_prompt(&task, pipeline, false));
     }
 
     /// `resume_prompt`, `carry_prompt` and `park_prompt` no longer repeat the
@@ -11808,11 +11807,11 @@ mod tests {
         let pipeline = pipelines.get("default").unwrap();
 
         for prompt in [
-            crate::compose::resume_prompt(&repo, &task, pipeline, false),
-            crate::compose::resume_prompt(&repo, &task, pipeline, true),
-            crate::compose::carry_prompt(&repo, &task, pipeline),
-            crate::compose::park_prompt(&repo, &task, pipeline, false),
-            crate::compose::park_prompt(&repo, &task, pipeline, true),
+            crate::compose::resume_prompt(&task, pipeline, false),
+            crate::compose::resume_prompt(&task, pipeline, true),
+            crate::compose::carry_prompt(&task, pipeline),
+            crate::compose::park_prompt(&task, pipeline, false),
+            crate::compose::park_prompt(&task, pipeline, true),
         ] {
             for gone in [
                 "spoolway report --pass",
@@ -11830,21 +11829,21 @@ mod tests {
     /// obstacle that was never there — see the note beside it on why
     /// `resume_prompt`'s unattended half must not reach a park.
     #[test]
-    fn a_park_prompt_says_nothing_was_blocked() {
+    fn a_park_prompt_says_nothing_changed() {
         let repo = fixture("park-prompt");
         let task = reload(&add_task(&repo, "demo", "fix"));
         let pipelines = session_pipelines();
         let pipeline = pipelines.get("default").unwrap();
 
-        let parked = crate::compose::park_prompt(&repo, &task, pipeline, false);
+        let parked = crate::compose::park_prompt(&task, pipeline, false);
 
-        assert!(parked.contains("Nothing was blocked"), "{parked}");
+        assert!(parked.contains("Nothing changed"), "{parked}");
         assert!(!parked.contains("## Blocker"), "{parked}");
         assert_ne!(
             parked,
-            crate::compose::resume_prompt(&repo, &task, pipeline, false)
+            crate::compose::resume_prompt(&task, pipeline, false)
         );
-        assert_ne!(parked, crate::compose::carry_prompt(&repo, &task, pipeline));
+        assert_ne!(parked, crate::compose::carry_prompt(&task, pipeline));
     }
 
     /// `park_prompt(.., true)` — a lane `escalate_clock` gave up on — must
@@ -11859,7 +11858,7 @@ mod tests {
         let pipelines = session_pipelines();
         let pipeline = pipelines.get("default").unwrap();
 
-        let escalated = crate::compose::park_prompt(&repo, &task, pipeline, true);
+        let escalated = crate::compose::park_prompt(&task, pipeline, true);
 
         assert!(!escalated.contains("Nothing was blocked"), "{escalated}");
         assert!(escalated.contains("## Status Log"), "{escalated}");
@@ -11869,7 +11868,7 @@ mod tests {
         );
         assert_ne!(
             escalated,
-            crate::compose::park_prompt(&repo, &task, pipeline, false)
+            crate::compose::park_prompt(&task, pipeline, false)
         );
     }
 
@@ -11897,7 +11896,7 @@ mod tests {
         assert_eq!(mux.did("start"), ["start demo · implement"]);
         let sent = mux.read("demo · implement", 9999).unwrap();
         assert!(
-            sent.contains("A person stopped this lane's turn with a keypress"),
+            sent.contains("A person stopped this lane's turn and has put it back."),
             "an idle park's resume must still read `park_prompt`: {sent}"
         );
         let task = reload(&path);
@@ -11930,10 +11929,10 @@ mod tests {
         assert_eq!(mux.did("start"), ["start demo · implement"]);
         let sent = mux.read("demo · implement", 9999).unwrap();
         assert!(
-            sent.contains("This lane went quiet and never reported"),
+            sent.contains("This lane went quiet and was torn down"),
             "an escalated park's resume must read `park_prompt(.., true)`: {sent}"
         );
-        assert!(!sent.contains("A person stopped this lane's turn with a keypress"));
+        assert!(!sent.contains("A person stopped this lane's turn and has put it back."));
         let task = reload(&path);
         assert_eq!(task.front.parked_from, None);
         assert!(!task.front.escalated, "spent alongside `parked_from`");
@@ -14845,17 +14844,12 @@ mod tests {
         );
     }
 
-    /// A gated step and the plain step beside it differ by exactly the gate
-    /// paragraphs, and nothing else.
-    ///
-    /// The two used to be sent the same words — the paragraph asking a gated
-    /// lane to stop and print its question was the whole enforcement, and a
-    /// model that read it and reported a pass anyway walked straight through
-    /// the gate, so it was cut down to nothing at all. It is back now, but as
-    /// something the lane is told rather than something it is asked to act on:
-    /// the mechanism is still outside the session, in `commands::report`.
+    /// A gated step and the plain step beside it are told the identical
+    /// `situating` bullets and the identical `policy` — the gate fact is not
+    /// advice about how to behave, it is a line the report contract states,
+    /// and only the report contract differs between the two.
     #[test]
-    fn a_gated_step_and_the_step_beside_it_differ_by_the_gate_paragraphs_alone() {
+    fn a_gated_step_and_the_step_beside_it_differ_only_in_the_report_contract() {
         let repo = fixture("checkpoint-briefing");
         add_task(&repo, "t", "ask");
         let task = repo.task("t").unwrap();
@@ -14871,52 +14865,44 @@ mod tests {
         let gated_step = pipeline.step("ask").unwrap();
         let plain_step = pipeline.step("deploy").unwrap();
 
-        // `policy` differs only by a prefix: the gate paragraph, sent for the
-        // gated step and nothing at all for the plain one.
+        // `policy` carries no gate wording at all any more, for either step.
         let gated_policy = crate::compose::policy(&repo, &task, &pipeline, gated_step);
         let plain_policy = crate::compose::policy(&repo, &task, &pipeline, plain_step);
-        let gate_prefix = gated_policy
-            .strip_suffix(plain_policy.as_str())
-            .expect("the gated policy should be the plain one with a prefix added");
-        assert!(
-            gate_prefix.contains("This step is gated"),
-            "got: {gate_prefix}"
+        assert_eq!(
+            gated_policy, plain_policy,
+            "policy no longer mentions a gate"
         );
+        assert!(!gated_policy.to_lowercase().contains("gate"));
 
-        // `situating` differs only by the step id and one bullet — the one
-        // that says whether a person reads this pane once the lane reports.
+        // `situating` differs only by the step id — one wording, every lane.
         let gated_situating = crate::compose::situating(&pipeline, gated_step, &task, &repo)
             .unwrap()
             .replace("`ask`", "`X`");
         let plain_situating = crate::compose::situating(&pipeline, plain_step, &task, &repo)
             .unwrap()
             .replace("`deploy`", "`X`");
-        let gated_lines: Vec<&str> = gated_situating.lines().collect();
-        let plain_lines: Vec<&str> = plain_situating.lines().collect();
-        assert_eq!(gated_lines.len(), plain_lines.len());
-        let diffs: Vec<usize> = gated_lines
-            .iter()
-            .zip(&plain_lines)
-            .enumerate()
-            .filter(|(_, (g, p))| g != p)
-            .map(|(i, _)| i)
-            .collect();
         assert_eq!(
-            diffs,
-            vec![
-                gated_lines
-                    .iter()
-                    .position(|line| line.contains("this step is gated"))
-                    .unwrap()
-            ],
-            "situating should differ in exactly the gated bullet:\n\
-             gated: {gated_situating}\nplain: {plain_situating}"
+            gated_situating, plain_situating,
+            "situating no longer branches on whether the step is gated"
         );
-        assert!(gated_lines[diffs[0]].contains("a person opens this pane"));
+
+        // The report contract is where the two finally differ: the gated
+        // step's carries the fact, the plain one's does not.
+        let gated_contract = crate::compose::report_contract(&task, gated_step);
+        let plain_contract = crate::compose::report_contract(&task, plain_step);
+        assert!(
+            gated_contract.contains("A pass is held here for a person, who opens this pane."),
+            "got: {gated_contract}"
+        );
+        assert!(
+            !plain_contract.contains("held here for a person"),
+            "got: {plain_contract}"
+        );
     }
 
-    /// A step with no `gate:` at all gets neither paragraph — there is nothing
-    /// to say, and saying it would invite a lane to stop where it never should.
+    /// A step with no `gate:` at all, and no `gate_at` naming it, gets no
+    /// gate line at all — there is nothing to say, and saying it would
+    /// invite a lane to stop where it never should.
     #[test]
     fn an_ungated_step_is_told_nothing_about_gates() {
         let repo = fixture("gate-silent");
@@ -14928,42 +14914,8 @@ mod tests {
 
         assert!(!step.gate);
         let prompt = sent(&repo, &task, pipeline, step);
-        assert!(!prompt.contains("gated"));
+        assert!(!prompt.to_lowercase().contains("held here for a person"));
         assert!(!prompt.contains("dispatch.gates"));
-    }
-
-    /// Acceptance criterion 4's truth table: the four-part stop reaches a
-    /// gated step and `blocked` — the two roads that can put a pane in front
-    /// of a person — and nothing else.
-    #[test]
-    fn the_four_part_stop_reaches_a_gated_step_and_blocked_and_nothing_else() {
-        let repo = fixture("four-part-stop-truth-table");
-        add_task(&repo, "t", "ask");
-        let task = repo.task("t").unwrap();
-
-        let pipeline = crate::pipeline::Pipeline::parse(
-            "only",
-            "steps:\n\
-             \x20 - id: ask\n    agent: pi\n    gate: true\n    on_pass: deploy\n\
-             \x20 - id: deploy\n    agent: pi\n    on_pass: done\n",
-        )
-        .expect("hand-built pipeline");
-        let gated_step = pipeline.step("ask").unwrap();
-        let plain_step = pipeline.step("deploy").unwrap();
-
-        let marker = "Resume the task on the dispatcher";
-        let gated_policy = crate::compose::policy(&repo, &task, &pipeline, gated_step);
-        let plain_policy = crate::compose::policy(&repo, &task, &pipeline, plain_step);
-        assert!(gated_policy.contains(marker), "gated: {gated_policy}");
-        assert!(!plain_policy.contains(marker), "plain: {plain_policy}");
-
-        let default_pipelines = Pipelines::builtin();
-        let default_pipeline = default_pipelines.get("default").unwrap();
-        let blocked_step = default_pipeline.step(crate::pipeline::BLOCKED).unwrap();
-        let blocked_task = reload(&add_task(&repo, "u", crate::pipeline::BLOCKED));
-        let blocked_policy =
-            crate::compose::policy(&repo, &blocked_task, default_pipeline, blocked_step);
-        assert!(blocked_policy.contains(marker), "blocked: {blocked_policy}");
     }
 
     /// Acceptance criterion 5: `blocked`'s own `spoolway resume <task>` line
@@ -15095,7 +15047,10 @@ mod tests {
             assert!(prompt.contains(&format!("step `{step}`")), "{prompt}");
             assert!(prompt.contains("task `demo`"), "{prompt}");
             assert!(
-                prompt.contains("Nobody reads your output as you produce it"),
+                prompt.contains(
+                    "Your output is not read; only what you write to the task \
+                                  file reaches anyone"
+                ),
                 "{prompt}"
             );
             // And it is in the *system* prompt, not the typed message: the
@@ -15130,7 +15085,7 @@ mod tests {
         let prompt = sent(&repo, &task, pipeline, step);
         assert!(prompt.contains("Nothing will wake you"), "{prompt}");
         for gone in ["background job", "timer"] {
-            assert!(prompt.contains(gone), "`{gone}` is not named:\n{prompt}");
+            assert!(!prompt.contains(gone), "`{gone}` still named:\n{prompt}");
         }
         assert!(prompt.contains("Poll anything you wait on"), "{prompt}");
     }
@@ -15147,7 +15102,7 @@ mod tests {
         let step = pipeline.step("implement").unwrap();
         let task = reload(&add_task(&repo, "demo", "implement"));
 
-        let prompt = crate::compose::opening_prompt(&repo, &task, pipeline, step);
+        let prompt = crate::compose::opening_prompt(&task, pipeline, step);
         assert_eq!(
             prompt,
             format!("Read {} before anything else.", task.path.display())
@@ -15169,8 +15124,7 @@ mod tests {
         let plain_pipeline = Pipelines::builtin().get("default").unwrap().clone();
         let plain_step = plain_pipeline.step("implement").unwrap();
         let task = reload(&add_task(&repo, "demo", "implement"));
-        let plain_prompt =
-            crate::compose::opening_prompt(&repo, &task, &plain_pipeline, plain_step);
+        let plain_prompt = crate::compose::opening_prompt(&task, &plain_pipeline, plain_step);
 
         let mut pipeline = Pipelines::builtin().get("default").unwrap().clone();
         pipeline
@@ -15181,7 +15135,7 @@ mod tests {
             .skills = vec!["code-review".to_string(), "spoolway-doctor".to_string()];
         let step = pipeline.step("implement").unwrap();
 
-        let prompt = crate::compose::opening_prompt(&repo, &task, &pipeline, step);
+        let prompt = crate::compose::opening_prompt(&task, &pipeline, step);
         assert!(
             prompt.starts_with("/code-review\n/spoolway-doctor\n\n"),
             "got: {prompt}"
@@ -15420,6 +15374,41 @@ mod tests {
         // `document` — the shape this paragraph exists for.
         task.front.arrived_from = Some("review".to_string());
         assert!(sent(&repo, &task, pipeline, step).contains("Fix pass"));
+    }
+
+    /// Both halves of one launch, composed together, for a fix pass —
+    /// exactly the shape the Context section's own figure drew: the system
+    /// prompt open on "Fix pass", read right beside the message typed into
+    /// the pane. Where `carry_prompt` used to say *what it asked for, or
+    /// left, has been done* — asserting, on the very launch where the system
+    /// prompt says the opposite two paragraphs earlier — it now says nothing
+    /// that a `system_prompt` calling this a fix pass could contradict.
+    #[test]
+    fn a_fix_pass_composes_both_halves_without_contradicting_itself() {
+        let repo = fixture("fix-pass-both-halves");
+        let pipelines = Pipelines::builtin();
+        let pipeline = pipelines.get("default").unwrap();
+        // `implement` is a `session:` step, and `review`'s own `on_fail` is
+        // `implement` while its `on_pass` is `document` — the exact shape
+        // that sends this system prompt "Fix pass" and this typed message
+        // `carry_prompt`.
+        let step = pipeline.step("implement").unwrap();
+        let mut task = reload(&add_task(&repo, "demo", "implement"));
+        task.front.arrived_from = Some("review".to_string());
+
+        let system_prompt =
+            crate::compose::system_prompt(&repo, &task, pipeline, step, "[the project's prompt]")
+                .unwrap();
+        let typed = crate::compose::carry_prompt(&task, pipeline);
+
+        assert!(system_prompt.contains("Fix pass"), "{system_prompt}");
+        for claim in ["has been done", "asked for, or left"] {
+            assert!(
+                !typed.contains(claim),
+                "the typed message still contradicts the system prompt's own \"Fix pass\": \
+                 `{claim}` in {typed}"
+            );
+        }
     }
 
     /// A command step reports nothing, so a lane its failure routes to used to

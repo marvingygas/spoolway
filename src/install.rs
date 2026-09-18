@@ -177,7 +177,10 @@ pub const RETIRED_SKILLS: &[&str] = &["spoolway-pipeline"];
 /// list nor the shapes `init` still places — is never touched. `task-log.md`
 /// stopped being written when `assets::TASK_LOG`, `config::TASK_LOG_TEMPLATE`
 /// and `src/task_log.rs` were removed; `pull-request.md` stopped being read
-/// when `spoolway stack` started sending the task file's own body verbatim.
+/// when `spoolway stack` started sending the task file's own body verbatim;
+/// `lane-prompts.md` stopped being read when the seven typed messages a
+/// lane's pane receives became spoolway's own, with no project override left
+/// to resolve against them.
 pub const RETIRED_TEMPLATES: &[(&str, &str)] = &[
     (
         ".spoolway/templates/task-log.md",
@@ -186,6 +189,10 @@ pub const RETIRED_TEMPLATES: &[(&str, &str)] = &[
     (
         ".spoolway/templates/pull-request.md",
         "the pull request body is the task file itself",
+    ),
+    (
+        ".spoolway/templates/lane-prompts.md",
+        "the lane messages are spoolway's own",
     ),
 ];
 

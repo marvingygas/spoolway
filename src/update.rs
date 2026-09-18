@@ -682,10 +682,6 @@ fn shipped_for(repo: &Repo, path: &Path) -> Option<String> {
         return crate::assets::task_template(stem).map(str::to_string);
     }
 
-    if *path == repo.lane_prompts_path() {
-        return Some(crate::assets::LANE_PROMPTS.to_string());
-    }
-
     // The ignore rules are deliberately not here. They are a block in a file the
     // project owns the rest of, so there is no whole-file version of it to write:
     // `ignores` above refreshes the block, on every run, and that is the only way
@@ -1411,32 +1407,6 @@ mod tests {
         );
     }
 
-    /// `lane-prompts.md` is prose a project owns outright, the same rule a
-    /// prompt or a task skeleton already keeps — so an ordinary update must
-    /// not read it, rewrite it, or say a word about it.
-    #[test]
-    fn lane_prompts_is_never_touched_by_an_update() {
-        let repo = fixture("lane-prompts-untouched");
-        let path = repo.lane_prompts_path();
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, "## opening\n\nkeep me\n").unwrap();
-
-        run(&repo, &args(), false).unwrap();
-        let outcomes = scan(&repo, &args()).unwrap();
-
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            "## opening\n\nkeep me\n"
-        );
-        assert!(
-            !outcome_lines(&outcomes)
-                .iter()
-                .any(|line| line.contains("lane-prompts")),
-            "{:?}",
-            outcome_lines(&outcomes)
-        );
-    }
-
     /// `templates` has nothing to iterate now that the plan skeleton is
     /// gone — `crate::skeleton::skeletons()` ships empty — so a run over it
     /// reports nothing and fails nothing, whatever is on disk.
@@ -1620,7 +1590,6 @@ mod tests {
             // `--replace` still reaches it, because reading still finds it.
             (prompts.join("reviewer.md"), "## "),
             (repo.task_templates_dir().join("default.md"), "## Goal"),
-            (repo.lane_prompts_path(), "## opening"),
         ] {
             let shipped = shipped_for(&repo, &path)
                 .unwrap_or_else(|| panic!("nothing shipped for {}", path.display()));
@@ -1930,18 +1899,20 @@ mod tests {
         assert_eq!(outcome_lines(&outcomes).len(), 1);
     }
 
-    /// Both dead templates go, each with its own reason, and a project's own
-    /// file under `.spoolway/templates/` — named by neither
+    /// All three dead templates go, each with its own reason, and a project's
+    /// own file under `.spoolway/templates/` — named by neither
     /// [`crate::install::RETIRED_TEMPLATES`] nor a shape `init` still
     /// places — is left exactly where it was.
     #[test]
-    fn update_removes_both_retired_templates_and_leaves_a_projects_own_file() {
+    fn update_removes_every_retired_template_and_leaves_a_projects_own_file() {
         let repo = fixture("retired-templates");
         let dir = repo.checkout.join(".spoolway/templates");
         let task_log = dir.join("task-log.md");
         let pull_request = dir.join("pull-request.md");
+        let lane_prompts = dir.join("lane-prompts.md");
         std::fs::write(&task_log, "stale\n").unwrap();
         std::fs::write(&pull_request, "stale\n").unwrap();
+        std::fs::write(&lane_prompts, "stale\n").unwrap();
         let untouched = dir.join("a-projects-own-notes.md");
         std::fs::write(&untouched, "mine\n").unwrap();
 
@@ -1950,6 +1921,7 @@ mod tests {
 
         assert!(!task_log.exists(), "task-log.md must be removed");
         assert!(!pull_request.exists(), "pull-request.md must be removed");
+        assert!(!lane_prompts.exists(), "lane-prompts.md must be removed");
         assert!(
             untouched.is_file(),
             "a file not on the retired list must never be touched"
@@ -1972,9 +1944,17 @@ mod tests {
             }),
             "{lines:?}"
         );
+        assert!(
+            lines.iter().any(|l| {
+                l.starts_with("removed")
+                    && l.contains("lane-prompts.md")
+                    && l.contains("the lane messages are spoolway's own")
+            }),
+            "{lines:?}"
+        );
     }
 
-    /// A dry run reports both removals without deleting anything — the same
+    /// A dry run reports every removal without deleting anything — the same
     /// promise [`update_dry_run_reports_a_stale_skill_without_removing_it`]
     /// keeps for a retired skill.
     #[test]
@@ -1983,8 +1963,10 @@ mod tests {
         let dir = repo.checkout.join(".spoolway/templates");
         let task_log = dir.join("task-log.md");
         let pull_request = dir.join("pull-request.md");
+        let lane_prompts = dir.join("lane-prompts.md");
         std::fs::write(&task_log, "stale\n").unwrap();
         std::fs::write(&pull_request, "stale\n").unwrap();
+        std::fs::write(&lane_prompts, "stale\n").unwrap();
 
         let mut outcomes = Vec::new();
         let dry = UpdateArgs {
@@ -1995,6 +1977,7 @@ mod tests {
 
         assert!(task_log.is_file(), "a dry run must not delete anything");
         assert!(pull_request.is_file(), "a dry run must not delete anything");
-        assert_eq!(outcome_lines(&outcomes).len(), 2);
+        assert!(lane_prompts.is_file(), "a dry run must not delete anything");
+        assert_eq!(outcome_lines(&outcomes).len(), 3);
     }
 }

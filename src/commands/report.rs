@@ -249,22 +249,32 @@ pub fn report(
     // of it. `spoolway resume` is what tells a caught pass from a caught fail
     // or block apart again, from `last_report` and `blocked_from` — see
     // `past_the_gate`.
-    let scheduled = task.front.gate_at.as_deref() == Some(current.as_str());
-    let gated = if scheduled {
-        true
-    } else {
-        step.gate && outcome == Outcome::Pass && destination != crate::pipeline::BLOCKED
-    };
-    if gated {
+    let hold = gate_hold(&task, step, outcome, &destination);
+    let gated = hold.is_some();
+    // What the status log says about this arrival, in place of the lane's own
+    // `-m` message — the Mockup draws the gate note alone, and this is that
+    // wording change. The lane's own account of the pass genuinely does not
+    // reach this log line any more: a lane leaving something for the person
+    // who answers the gate to read has `--handoff` for it, credited to
+    // `current` in `## Handoff` above, same as any other step — the `-m`
+    // message itself is not copied there automatically, so a lane that wants
+    // both has to say so with `--handoff` too.
+    let mut pause_note = None;
+    if let Some(kind) = hold {
         task.front.paused_at = Some(current.clone());
+        task.front.paused_by = Some(kind.as_str().to_string());
         destination = crate::pipeline::PAUSED.to_string();
+        pause_note = Some(match kind {
+            Gate::Schedule => "held by this task's own schedule".to_string(),
+            Gate::Step => "held by this step's own gate".to_string(),
+        });
         // Spent, not standing, whoever wrote it — the board's `s` is the
         // example, but a `gate_at` typed by hand into the document fires and
         // clears exactly the same way. A step's own `gate: true` is the one
         // that holds every task that ever reaches it. Left set, a later
         // route that brought this task back onto the same step — a loop, a
         // `--stage` reroute — would gate it a second time nobody asked for.
-        if scheduled {
+        if kind == Gate::Schedule {
             task.front.gate_at = None;
         }
     }
@@ -351,7 +361,10 @@ pub fn report(
         at: chrono::Utc::now().timestamp(),
     });
 
-    task.set_stage(&destination, args.message.as_deref());
+    task.set_stage(
+        &destination,
+        pause_note.as_deref().or(args.message.as_deref()),
+    );
     task.save()?;
 
     // Printed only now the task file is on disk: a note about a commit that
@@ -760,6 +773,50 @@ pub fn resume_target(task: &Task, pipeline: &Pipeline) -> String {
         .unwrap_or_else(|| pipeline.entry().to_string())
 }
 
+/// Which of the two roads holds a task at `step` for `outcome`/`destination`
+/// — the one predicate every reader of a gate now shares, rather than each
+/// deriving its own copy. `compose::report_contract` asks it of a
+/// hypothetical pass, before a lane has run; [`report`] asks it of the real
+/// outcome and the destination it just resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gate {
+    /// A task's own `gate_at`, set by whoever wrote its document — catches
+    /// this step's outcome whatever it was.
+    Schedule,
+    /// A step's own `gate: true` — catches a pass and only a pass, and only
+    /// one whose destination is not already `blocked`.
+    Step,
+}
+
+impl Gate {
+    /// The word this is recorded as in `paused_by` — see [`crate::task::
+    /// Frontmatter::paused_by`].
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Gate::Schedule => "schedule",
+            Gate::Step => "gate",
+        }
+    }
+}
+
+/// Whether `step` holds this task for `outcome`/`destination` — the two
+/// roads [`report`] itself parks a pass in front of a person for, carrying
+/// both clauses a hand copy of this once dropped: a step's own `gate: true`
+/// only ever catches a pass whose destination is not already `blocked`,
+/// where a task's own `gate_at` catches whatever is reported. `Schedule`
+/// wins the ambiguity when a task carries both, since it answers a broader
+/// question and is spent the moment it fires either way — see [`report`]'s
+/// own use of this.
+pub fn gate_hold(task: &Task, step: &Step, outcome: Outcome, destination: &str) -> Option<Gate> {
+    if task.front.gate_at.as_deref() == Some(step.id.as_str()) {
+        return Some(Gate::Schedule);
+    }
+    if step.gate && outcome == Outcome::Pass && destination != crate::pipeline::BLOCKED {
+        return Some(Gate::Step);
+    }
+    None
+}
+
 /// Where clearing a block takes the task, which is not the same question as
 /// where it stopped.
 ///
@@ -823,17 +880,25 @@ pub enum Caught {
     Blocked,
 }
 
-/// What a paused task's schedule or gate caught, read back from `last_report`
-/// rather than guessed from the stage alone.
+/// What a paused task's schedule or gate caught, read back from `paused_by`
+/// and `last_report` rather than guessed from the stage alone.
 ///
 /// `None` for a pause `commands::report` raised from `blocked` itself: that
-/// road's own report was filed *from* `blocked`, not from `gated`, since
-/// `blocked` has no `on_pass` of its own for the report to have run against.
-/// Every other road that reaches `paused` — a step's own `gate: true`, or a
-/// schedule catching whatever this step reported — filed its report from
-/// `gated` itself, so `last_report.step == gated` is exactly the fact that
-/// tells the two apart, and the only one there is: no frontmatter key of its
-/// own remembers which road a pause took.
+/// road's own report was filed *from* `blocked`, not from `gated`, and never
+/// sets `paused_by` — see [`crate::task::Frontmatter::paused_by`], the key
+/// that now records the road outright and is what decides the Some/None
+/// answer once it is set: `report` never writes it without also filing
+/// `last_report` from `gated` in the same save, so trusting it here rather
+/// than re-checking `last_report.step` against `gated` changes nothing for
+/// a task this task ever paused. A task already sitting on `paused` from
+/// before `paused_by` existed carries none, so the fallback this was built
+/// on outright — `last_report.step == gated`, filed only by a road that
+/// actually caught something — still answers for it.
+///
+/// `last_report` still does the rest once a catch is confirmed: `paused_by`
+/// says only *that* something was caught, not *what* — the Pass/Fail/Blocked
+/// split below still reads the outcome it banked and `blocked_from`, exactly
+/// as it always has.
 ///
 /// [`Caught::Blocked`] stands for more than a raw `--block`: `blocked_from`
 /// naming `gated` is what `report` leaves behind whenever the destination it
@@ -841,12 +906,12 @@ pub enum Caught {
 /// `set_blocked_from` and `apply_loop_budget` in [`report`] — and that one
 /// fact is all that survives to be read back here.
 pub fn caught_at(task: &Task, gated: &str) -> Option<Caught> {
-    let outcome = task
-        .front
-        .last_report
-        .as_ref()
-        .filter(|r| r.step == gated)
-        .and_then(|r| r.outcome.parse::<Outcome>().ok())?;
+    let report = task.front.last_report.as_ref()?;
+    let caught = task.front.paused_by.is_some() || report.step == gated;
+    if !caught {
+        return None;
+    }
+    let outcome = report.outcome.parse::<Outcome>().ok()?;
     if task.front.blocked_from.as_deref() == Some(gated) {
         return Some(Caught::Blocked);
     }
@@ -1031,6 +1096,7 @@ fn back_onto_its_step(
     let returned = resume_at(&mut task, pipeline, &target);
     // Whatever gate it was waiting on, it is not waiting on it here any more.
     task.front.paused_at = None;
+    task.front.paused_by = None;
     // A `--stage` reroute past a park leaves this ordinary road instead of
     // `unpark`'s, but the park is answered all the same — left set, this
     // would still name the step on a later, ordinary retry, and `start_one`
@@ -1221,6 +1287,7 @@ fn past_the_gate(pipelines: &Pipelines, mut task: Task, args: &ResumeArgs) -> Re
         });
 
     task.front.paused_at = None;
+    task.front.paused_by = None;
     task.set_stage(&destination, Some(&note));
     task.save()?;
 
@@ -2780,6 +2847,7 @@ mod tests {
         let task = queued(&repo, "ship");
         assert_eq!(task.stage(), crate::pipeline::PAUSED);
         assert_eq!(task.front.paused_at.as_deref(), Some("deploy"));
+        assert_eq!(task.front.paused_by.as_deref(), Some("gate"));
 
         resume(
             &repo,
@@ -2797,6 +2865,94 @@ mod tests {
         let task = queued(&repo, "ship");
         assert_eq!(task.stage(), "announce", "resume takes the `on_pass` route");
         assert_eq!(task.front.paused_at, None);
+        assert_eq!(task.front.paused_by, None, "cleared alongside paused_at");
+    }
+
+    /// `caught_at` — read by `resume` and the board alike — must still tell a
+    /// gate catch from a pause raised at `blocked` itself for a task that
+    /// paused before `paused_by` existed: `report` strips it here rather than
+    /// setting it, the same shape a task file written before this key would
+    /// carry. The fallback is `last_report.step == gated`, exactly what
+    /// `caught_at` always inferred this from.
+    #[test]
+    fn a_gated_pass_with_no_paused_by_still_resumes_by_the_old_inference() {
+        clear_lane_env();
+        let repo = fixture("gate-release-no-paused-by");
+        let pipelines = gate_pipelines();
+        add(&repo, "ship", &[]);
+        let mut task = queued(&repo, "ship");
+        task.set_stage("deploy", None);
+        task.save().unwrap();
+
+        report(
+            &repo,
+            &pipelines,
+            &ReportArgs {
+                task: Some("ship".into()),
+                pass: true,
+                fail: false,
+                block: false,
+                pause: false,
+                message: Some("deployed".into()),
+                handoff: vec![],
+            },
+            Some("deploy"),
+        )
+        .unwrap();
+
+        let mut task = queued(&repo, "ship");
+        assert_eq!(task.front.paused_by.as_deref(), Some("gate"));
+        task.front.paused_by = None;
+        task.save().unwrap();
+
+        resume(
+            &repo,
+            &pipelines,
+            &crate::cli::ResumeArgs {
+                task: "ship".into(),
+                stage: None,
+                reject: false,
+                message: None,
+            },
+            None,
+        )
+        .unwrap();
+
+        let task = queued(&repo, "ship");
+        assert_eq!(
+            task.stage(),
+            "announce",
+            "resume still takes the on_pass route"
+        );
+    }
+
+    /// `paused_by` is what actually decides `caught_at` now, not a second
+    /// check against `last_report.step` that happens to agree with it on
+    /// every real report — a task whose `last_report` names a step other
+    /// than the one it paused at (never written by `report` itself, but
+    /// nothing stops a hand edit) still reads as a catch once `paused_by` is
+    /// set, which the old `last_report.step == gated` check alone would
+    /// have refused.
+    #[test]
+    fn paused_by_alone_is_enough_for_caught_at_to_read_a_catch() {
+        let repo = fixture("caught-at-paused-by-alone");
+        add(&repo, "ship", &[]);
+        let mut task = queued(&repo, "ship");
+        task.front.paused_at = Some("deploy".into());
+        task.front.paused_by = Some("schedule".into());
+        task.front.last_report = Some(crate::task::LastReport {
+            step: "build".into(),
+            outcome: "pass".into(),
+            at: 0,
+        });
+        task.set_stage(crate::pipeline::PAUSED, None);
+        task.save().unwrap();
+
+        assert_eq!(
+            caught_at(&task, "deploy"),
+            Some(Caught::Pass),
+            "paused_by alone should be enough, whatever last_report.step names"
+        );
     }
 
     /// The other road to the same pause: a task's own `gate_at`, set by
@@ -2833,6 +2989,7 @@ mod tests {
         let task = queued(&repo, "ship");
         assert_eq!(task.stage(), crate::pipeline::PAUSED);
         assert_eq!(task.front.paused_at.as_deref(), Some("build"));
+        assert_eq!(task.front.paused_by.as_deref(), Some("schedule"));
         // Spent the moment it fired, unlike a pipeline's own `gate: true`,
         // which never comes off — a later route back onto `build` must not
         // find it still armed.

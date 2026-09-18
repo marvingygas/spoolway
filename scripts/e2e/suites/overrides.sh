@@ -148,8 +148,8 @@ says "and names the merge rule" \
   "$SPOOLWAY" override contract
 
 works "template contract exits zero" "$SPOOLWAY" template contract
-says "and names the two shapes" \
-  "LANE-PROMPT" \
+says "and names the one shape it still has" \
+  "TASK —" \
   "$SPOOLWAY" template contract
 
 works "hook contract exits zero" "$SPOOLWAY" hook contract
