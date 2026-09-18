@@ -7,6 +7,5 @@ cargo fmt --check
 cargo deny check advisories
 cargo clippy --all-targets --locked -- -D warnings
 cargo test --all-targets --locked
-cargo check --target x86_64-pc-windows-gnu --all-targets --locked
 cargo build --release
 ./target/release/spoolway pipeline check

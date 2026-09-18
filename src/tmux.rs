@@ -1005,16 +1005,15 @@ impl Mux for Tmux {
         // a stand-in agent in front of the real one.
         match spec.path_prefix {
             Some(prefix) => {
-                let shell = crate::platform::Shell::Posix;
                 let exec: Vec<String> = std::iter::once(spec.kind.to_string())
                     .chain(spec.args.iter().cloned())
-                    .map(|arg| shell.quote(&arg))
+                    .map(|arg| crate::platform::quote(&arg))
                     .collect();
                 args.push("sh".into());
                 args.push("-c".into());
                 args.push(format!(
                     "{}; exec {}",
-                    shell.path_export(prefix),
+                    crate::platform::path_export(prefix),
                     exec.join(" ")
                 ));
             }

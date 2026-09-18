@@ -1068,19 +1068,16 @@ impl Herdr {
     /// file's only reader, and a fresh pane always wants the current
     /// environment, never a generation back.
     ///
-    /// Written one assignment per line — [`crate::platform::Shell::env_export_lines`],
+    /// Written one assignment per line — [`crate::platform::env_export_lines`],
     /// not the single-line `env_export` a pane is typed — matching the
-    /// task's own mockup, and named with [`crate::platform::Shell::source_extension`]'s
-    /// own answer for the dialect: PowerShell refuses to dot-source a file
-    /// not named `.ps1`.
+    /// task's own mockup.
     ///
     /// This is the dispatcher's whole inherited environment for a command
     /// step — see [`crate::dispatch::Dispatcher::start_command_in_pane`] —
     /// so whatever secret it was started with (a forge token, an API key)
-    /// lands in this file too. Created `0600` on Unix, right after writing
-    /// it, so a shared machine's other users see a directory listing and
-    /// nothing more; Windows ACLs already restrict a user's own `~` to
-    /// itself, which is the platform's own answer to the same question.
+    /// lands in this file too. Created `0600` right after writing it, so a
+    /// shared machine's other users see a directory listing and nothing
+    /// more.
     fn hand_environment(
         &self,
         dir_name: &str,
@@ -1089,17 +1086,19 @@ impl Herdr {
     ) -> Result<String> {
         let dir = project_home(&self.cwd)?.join(dir_name);
         std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-        let sh = crate::platform::Shell::CURRENT;
-        let path = dir.join(format!("{key}.{}", sh.source_extension()));
-        std::fs::write(&path, format!("{}\n", sh.env_export_lines(env)))
-            .with_context(|| format!("writing {}", path.display()))?;
+        let path = dir.join(format!("{key}.env"));
+        std::fs::write(
+            &path,
+            format!("{}\n", crate::platform::env_export_lines(env)),
+        )
+        .with_context(|| format!("writing {}", path.display()))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
                 .with_context(|| format!("restricting {}", path.display()))?;
         }
-        Ok(sh.source_command(&path))
+        Ok(crate::platform::source_command(&path))
     }
 }
 
@@ -1873,7 +1872,7 @@ impl Mux for Herdr {
         // PATH. Nothing sets it in a real run; the tests use it to put a
         // stand-in agent in front of the real one.
         if let Some(prefix) = spec.path_prefix {
-            let export = crate::platform::Shell::CURRENT.path_export(prefix);
+            let export = crate::platform::path_export(prefix);
             self.call_ignoring_result(&["pane", "run", spec.pane_id, &export])?;
         }
 
@@ -2796,7 +2795,6 @@ mod tests {
         crate::platform::test_home::with_home(&base, || {
             let config = crate::config::DispatchConfig::default();
             let herdr = Herdr::new(&base, &base, &config).unwrap();
-            let sh = crate::platform::Shell::CURRENT;
             let env = BTreeMap::from([
                 ("SPOOLWAY_TASK".to_string(), "demo".to_string()),
                 ("SPOOLWAY_STEP".to_string(), "implement".to_string()),
@@ -2806,26 +2804,23 @@ mod tests {
                 .hand_environment("system-prompts", "demo · implement", &env)
                 .unwrap();
 
-            // Named with the dialect's own extension, not a plain `.env` —
-            // PowerShell refuses to dot-source anything else.
             let path = project_home(&base)
                 .unwrap()
                 .join("system-prompts")
-                .join(format!("demo · implement.{}", sh.source_extension()));
+                .join("demo · implement.env");
             assert_eq!(
                 source,
-                sh.source_command(&path),
+                crate::platform::source_command(&path),
                 "the pane is told to source exactly the file that was written"
             );
             let written = std::fs::read_to_string(&path).unwrap();
             assert_eq!(
                 written,
-                format!("{}\n", sh.env_export_lines(&env)),
+                format!("{}\n", crate::platform::env_export_lines(&env)),
                 "one assignment per line, as the mockup draws it — not env_export's \
                  single-line pane form, which nothing here needs to race against"
             );
 
-            #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
                 let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
@@ -3384,7 +3379,6 @@ mod tests {
     /// (`Herdr::hand_environment`, a lane's worktree root) landing in the
     /// wrong directory on a resolution failure is worse than the command
     /// refusing to run at all.
-    #[cfg(unix)]
     #[test]
     fn project_home_refuses_rather_than_falls_back_on_a_real_error() {
         use std::os::unix::fs::PermissionsExt;

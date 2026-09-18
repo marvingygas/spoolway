@@ -600,13 +600,6 @@ impl<'a> Dispatcher<'a> {
         // git to let go of it first — no `worktree remove`, so no `branch
         // -D` either, and the branch this function exists to clean up is
         // left behind, exactly the litter its own doc comment describes.
-        // One spelling for both sides of the `starts_with` below, through
-        // the same [`crate::platform::PathExt`] every other comparison in
-        // spoolway goes through: on Windows `canonicalize` alone answers in
-        // verbatim form — `\\?\C:\…` — while the fallback for a path that
-        // no longer exists keeps its raw spelling, so a gone worktree under
-        // a live scratch directory compares a bare drive path against a
-        // prefixed one and never matches.
         let canonical_scratch = scratch.comparable();
 
         let listing = self

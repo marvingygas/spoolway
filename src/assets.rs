@@ -152,19 +152,16 @@ pub fn tracking_template(name: &str) -> Option<&'static str> {
         .map(|(_, text)| *text)
 }
 
-/// The four hook scripts `spoolway init` writes into `.spoolway/hooks/` — a
-/// `.sh`/`.ps1` pair per tracker, each calling the tracker's own
-/// command-line tool (`gh` or `acli`) rather than any tracker's HTTP API
-/// directly. Every one is written whatever a project answered the tracker
-/// question, or none at all: switching trackers later is a
-/// `spoolway config set issue_tracking.hook` away, not a second `init`.
+/// The two hook scripts `spoolway init` writes into `.spoolway/hooks/`, one
+/// per tracker, each calling the tracker's own command-line tool (`gh` or
+/// `acli`) rather than any tracker's HTTP API directly. Both are written
+/// whatever a project answered the tracker question, or none at all:
+/// switching trackers later is a `spoolway config set issue_tracking.hook`
+/// away, not a second `init`.
 ///
-/// Only one pair of these ever runs on a given platform — `.sh` wherever
-/// [`crate::platform::shell_command`] reaches for `sh -c`, `.ps1` wherever it
-/// reaches for PowerShell instead — so `init` writes only the pair its own
-/// platform can run; see `commands::init`. `spoolway update` never touches a
-/// hook it has already written, the same rule a prompt or a task skeleton
-/// already follows once a project has made a file its own.
+/// `spoolway update` never touches a hook it has already written, the same
+/// rule a prompt or a task skeleton already follows once a project has made
+/// a file its own.
 ///
 /// `github.sh`'s `open`, `done`, `blocked` and `paused` branches were run
 /// against a real repository: the issues they create, the `sub_issues` link,
@@ -191,8 +188,6 @@ pub fn tracking_template(name: &str) -> Option<&'static str> {
 pub const HOOK_SCRIPTS: &[(&str, &str)] = &[
     ("github.sh", include_str!("../assets/hooks/github.sh")),
     ("jira.sh", include_str!("../assets/hooks/jira.sh")),
-    ("github.ps1", include_str!("../assets/hooks/github.ps1")),
-    ("jira.ps1", include_str!("../assets/hooks/jira.ps1")),
 ];
 
 /// The seven typed messages a lane's pane receives — see

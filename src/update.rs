@@ -1028,16 +1028,8 @@ mod tests {
     }
 
     fn successful_status() -> std::process::ExitStatus {
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::ExitStatusExt;
-            std::process::ExitStatus::from_raw(0)
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::ExitStatusExt;
-            std::process::ExitStatus::from_raw(0)
-        }
+        use std::os::unix::process::ExitStatusExt;
+        std::process::ExitStatus::from_raw(0)
     }
 
     #[test]

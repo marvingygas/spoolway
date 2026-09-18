@@ -46,13 +46,11 @@ static SEQ: AtomicU64 = AtomicU64::new(0);
 ///
 /// The temporary directory is resolved through [`crate::platform::PathExt`]
 /// before anything is joined onto it, so that every path a fixture builds is
-/// already in the one spelling spoolway compares and records paths in.
-/// Without that, a GitHub `windows-latest` runner's `temp_dir()` answers with
-/// the 8.3 short form — `C:\Users\RUNNER~1\AppData\Local\Temp` — every
-/// fixture path inherits it, and each one then compares unequal to the same
-/// directory as resolved by anything under test. `temp_dir()` is resolved
-/// rather than the joined path because the joined path does not exist yet;
-/// its parent always does.
+/// already in the one spelling spoolway compares and records paths in —
+/// symlinks resolved, so a fixture path compares equal to the same directory
+/// as resolved by anything under test. `temp_dir()` is resolved rather than
+/// the joined path because the joined path does not exist yet; its parent
+/// always does.
 pub(crate) fn root(name: &str) -> PathBuf {
     reclaim_finished_runs();
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
@@ -64,9 +62,8 @@ pub(crate) fn root(name: &str) -> PathBuf {
 /// `root` is called thousands of times over a suite.
 ///
 /// Reach for this rather than `std::env::temp_dir()` in any test that
-/// compares a scratch path against the temporary directory holding it: the
-/// two spellings do not compare equal on Windows, which is the whole reason
-/// this exists.
+/// compares a scratch path against the temporary directory holding it: a
+/// symlinked temp directory otherwise compares unequal to itself.
 pub(crate) fn temp_root() -> PathBuf {
     use std::sync::OnceLock;
     static TEMP: OnceLock<PathBuf> = OnceLock::new();
@@ -77,27 +74,15 @@ pub(crate) fn temp_root() -> PathBuf {
     .clone()
 }
 
-/// Set a path's modification time, file or directory, on either platform.
+/// Set a path's modification time, file or directory.
 ///
 /// A test that dates an entry cannot just `File::options().write(true)` its
-/// way there: a directory cannot be opened for writing, and the read-only
-/// handle that works for one on Unix is refused outright on Windows, where
-/// opening a directory at all takes `FILE_FLAG_BACKUP_SEMANTICS` and
-/// `set_modified` needs `FILE_WRITE_ATTRIBUTES` on the handle whichever kind
-/// of path it is.
+/// way there: a directory cannot be opened for writing, so it is opened
+/// read-only instead — `set_modified` only needs a handle, not one open for
+/// writing.
 #[cfg(test)]
 pub(crate) fn set_mtime(path: &Path, to: std::time::SystemTime) {
     let mut options = std::fs::File::options();
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        // FILE_WRITE_ATTRIBUTES, then FILE_FLAG_BACKUP_SEMANTICS — neither is
-        // exported by windows-sys' std-adjacent modules, and both are fixed
-        // parts of the Win32 ABI, written out the way `headless::JOB_OBJECT_TERMINATE`
-        // is.
-        options.access_mode(0x0100).custom_flags(0x0200_0000);
-    }
-    #[cfg(not(windows))]
     match path.is_dir() {
         true => options.read(true),
         false => options.write(true),

@@ -181,7 +181,7 @@ pub fn open_ticket(
         ticket_body_path.display().to_string(),
     );
 
-    let run_line = crate::platform::Shell::Posix.quote(&hook.display().to_string());
+    let run_line = crate::platform::quote(&hook.display().to_string());
     let runs = runs(repo);
     runs.start(&key, &run_line, &repo.root, &env)?;
 
@@ -473,7 +473,7 @@ pub fn fetch_issue(repo: &Repo, reference: &str) -> Result<FetchResult> {
     let mut env = fetch_env(reference, &repo.config.issue_tracking.project_key);
     env.insert("SPOOLWAY_OUT".to_string(), out_path.display().to_string());
 
-    let run_line = crate::platform::Shell::Posix.quote(&hook.display().to_string());
+    let run_line = crate::platform::quote(&hook.display().to_string());
     let runs = runs(repo);
     runs.start(&key, &run_line, &repo.root, &env)?;
 
@@ -612,9 +612,9 @@ pub fn fire(repo: &Repo, task: &Task, event: &str, group_open: usize) -> Result<
 
     let env = build_env(repo, task, event, group_open);
     // Quoted the same way a lane's own environment is — see
-    // `platform::Shell::quote` — so a checkout path holding a space still
+    // `platform::quote` — so a checkout path holding a space still
     // reaches the shell as one argument.
-    let run_line = crate::platform::Shell::Posix.quote(&hook.display().to_string());
+    let run_line = crate::platform::quote(&hook.display().to_string());
     runs.start(&key, &run_line, &repo.root, &env)?;
     Ok(())
 }
@@ -834,14 +834,10 @@ fn build_env(repo: &Repo, task: &Task, event: &str, group_open: usize) -> BTreeM
     env
 }
 
-// A hook run goes through `command_step::Runs::start`, which spawns and
-// reads liveness on either platform now — that is not why these tests stay
-// Unix only. What is: the fixtures below write a hook as a `#!/bin/sh`
-// script made executable by its file mode and run as a bare path, relying on
-// the shebang line to say what runs it. There is no Windows equivalent of
-// "an executable file names its own interpreter", so compiling these there
-// would only assert a platform this fixture never claimed.
-#[cfg(all(test, unix))]
+// A hook run goes through `command_step::Runs::start`. The fixtures below
+// write a hook as a `#!/bin/sh` script made executable by its file mode and
+// run as a bare path, relying on the shebang line to say what runs it.
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::Config;
@@ -1178,18 +1174,13 @@ mod tests {
     }
 
     /// The whole of what makes `hook_path`'s join safe: a name holding a
-    /// separator, or naming `.` or `..`, is never one path component. On
-    /// Windows a drive prefix is not one either — `C:evil.ps1` resolves
-    /// drive-relative, outside the hooks directory (review finding 56).
+    /// separator, or naming `.` or `..`, is never one path component
+    /// (review finding 56).
     #[test]
     fn is_bare_filename_refuses_anything_that_is_not_one_component() {
         assert!(is_bare_filename("github.sh"));
         assert!(is_bare_filename("jira-cloud.sh"));
         for escaping in ["../evil.sh", "sub/dir.sh", "a\\b.sh", ".", ".."] {
-            assert!(!is_bare_filename(escaping), "`{escaping}` is not bare");
-        }
-        #[cfg(windows)]
-        for escaping in ["C:evil.ps1", "C:\\evil.ps1", "\\\\host\\share\\x"] {
             assert!(!is_bare_filename(escaping), "`{escaping}` is not bare");
         }
     }

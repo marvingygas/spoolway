@@ -716,10 +716,8 @@ fn common_git_dir(dir: &Path) -> Result<Option<PathBuf>> {
         return Ok(None);
     }
     // Canonicalized so it compares against the `start` every caller has
-    // already canonicalized. On Windows the two spellings otherwise never
-    // match: git prints `C:/Users/…` while `canonicalize` answers verbatim
-    // `\\?\C:\…`, whose prefix component is a different thing — and with
-    // that mismatch every main checkout read as a linked worktree.
+    // already canonicalized — a symlinked checkout otherwise compares
+    // unequal to itself.
     let canonical = common
         .canonical()
         .with_context(|| format!("resolving the git directory for {}", dir.display()))?;
@@ -1489,10 +1487,10 @@ fn process_cwd_under(dir: &Path) -> bool {
 }
 
 /// The same question as the Linux arm above, answered through `sysinfo`
-/// instead of `/proc`: macOS and Windows have no file for this to read
-/// directly (libproc and a PEB read, respectively), and `sysinfo` already
-/// carries both behind one call, refreshed for cwd alone rather than every
-/// metric it can report. A process caught mid-exit is not a concern here
+/// instead of `/proc`: macOS has no file for this to read directly — it
+/// takes a libproc call instead — and `sysinfo` already carries that behind
+/// one call, refreshed for cwd alone rather than every metric it can report.
+/// A process caught mid-exit is not a concern here
 /// the way it is for the Linux `is_running` check: `sysinfo` only lists
 /// processes it could actually query just now, so a stale entry for one
 /// already gone does not linger the way a `/proc/<pid>` directory briefly
@@ -1633,15 +1631,14 @@ fn migrate_legacy_home(root: &Path, legacy: &Path) -> Result<PathBuf> {
             // fine — silently discarding it left exactly that finding
             // unfixed once.
             if let Err(err) = run(root, "git", &args) {
-                // Quoted with this platform's own shell syntax, not joined
-                // bare: a normal home or checkout path can carry a space (a
-                // person's own username, most often), and an unquoted
-                // command a person cannot paste back verbatim fails the
-                // person-facing error-message standard just as surely as a
-                // missing path does.
+                // Quoted rather than joined bare: a normal home or checkout
+                // path can carry a space (a person's own username, most
+                // often), and an unquoted command a person cannot paste back
+                // verbatim fails the person-facing error-message standard
+                // just as surely as a missing path does.
                 let quoted_paths: Vec<String> = new_paths
                     .iter()
-                    .map(|path| crate::platform::Shell::CURRENT.quote(path))
+                    .map(|path| crate::platform::quote(path))
                     .collect();
                 println!(
                     "  worktree repair failed: {err:#}\n  run this by hand in {}:\n    git \
@@ -1660,14 +1657,6 @@ fn migrate_legacy_home(root: &Path, legacy: &Path) -> Result<PathBuf> {
     Ok(home)
 }
 
-/// How long [`rename_onto_home`] keeps retrying a rename Windows is refusing
-/// over an open handle, and how long it pauses between attempts. Long enough
-/// for a loaded runner, and short enough that a rename genuinely stuck — a
-/// destination already standing with content of its own, say — reports its
-/// own error rather than hanging on it.
-const RENAME_PATIENCE: std::time::Duration = std::time::Duration::from_millis(500);
-const RENAME_PAUSE: std::time::Duration = std::time::Duration::from_millis(20);
-
 /// Move `legacy` onto `home`, answering whether *this* call is the one that
 /// moved it — `false` meaning another racer got there first and there is
 /// nothing left to do but agree.
@@ -1676,59 +1665,15 @@ const RENAME_PAUSE: std::time::Duration = std::time::Duration::from_millis(20);
 /// computes the identical destination (`stamped_id`'s own atomic hard-link
 /// means they all agree on one `id`, see its own doc), so a legacy home
 /// gone with `home` standing as a directory *is* that migration, whatever
-/// this particular call's rename happened to report. Keying it on `ENOENT`
-/// alone is what shipped wrong: a losing racer on Windows is told
-/// `ERROR_ACCESS_DENIED`, not that the source is missing, and surfaced a
-/// bare "Access is denied" out of a migration that had in fact just
-/// succeeded beside it.
-///
-/// Windows contention is its own case, separate from a lost race, and the
-/// reason anything waits here: a directory there cannot be renamed while
-/// anything holds a handle inside it, and a racer still reading the legacy
-/// home — or the winner's own rename, mid-flight — is exactly that. Failing
-/// on the first `ERROR_ACCESS_DENIED` would refuse a call whose turn had
-/// simply not come yet, so the rename is retried over a bounded window and
-/// whichever way the contention settles is answered above: this call moves
-/// it, or finds it moved. Unix has no such window — a rename there either
-/// succeeds or has already lost — so nothing waits.
+/// this particular call's rename happened to report.
 fn rename_onto_home(legacy: &Path, home: &Path) -> Result<bool> {
-    let mut waited = std::time::Duration::ZERO;
-    loop {
-        let err = match std::fs::rename(legacy, home) {
-            Ok(()) => return Ok(true),
-            Err(err) => err,
-        };
-        if !legacy.exists() && home.is_dir() {
-            return Ok(false);
+    match std::fs::rename(legacy, home) {
+        Ok(()) => Ok(true),
+        Err(_) if !legacy.exists() && home.is_dir() => Ok(false),
+        Err(err) => {
+            Err(err).with_context(|| format!("moving {} to {}", legacy.display(), home.display()))
         }
-        if !contended(&err, cfg!(windows)) || waited >= RENAME_PATIENCE {
-            return Err(err)
-                .with_context(|| format!("moving {} to {}", legacy.display(), home.display()));
-        }
-        std::thread::sleep(RENAME_PAUSE);
-        waited += RENAME_PAUSE;
     }
-}
-
-/// Whether `err` is Windows refusing a rename it may well allow a moment
-/// later, rather than a failure worth reporting.
-///
-/// `windows` is passed in rather than read from `cfg!` in here so that a
-/// test can ask for both answers on one platform: this crate's own rule
-/// that a `#[cfg(windows)]` body is never built on Linux CI (see
-/// [`crate::platform`]), applied to a judgement rather than to a path.
-///
-/// `ERROR_ACCESS_DENIED` is the one actually seen — `os error 5`, from
-/// racing migrations on `windows-latest`. `ERROR_SHARING_VIOLATION` is the
-/// same contention under Win32's other spelling for it, named by number
-/// because Rust maps it to no `ErrorKind` of its own. Neither counts off
-/// Windows, where `PermissionDenied` on a rename means what it says and
-/// waiting on it would only delay the error.
-fn contended(err: &std::io::Error, windows: bool) -> bool {
-    const ERROR_SHARING_VIOLATION: i32 = 32;
-    windows
-        && (err.kind() == std::io::ErrorKind::PermissionDenied
-            || err.raw_os_error() == Some(ERROR_SHARING_VIOLATION))
 }
 
 /// Overwrite `root`'s own stamp with `id`, whatever it already held —
@@ -1995,9 +1940,9 @@ pub(crate) fn is_valid_id(candidate: &str) -> bool {
 }
 
 /// A label safe to `join` onto `state_root()` unchanged: one normal path
-/// component, never a separator, `.`/`..`, or a Windows drive-relative
-/// spelling like `C:evil` — the same rule `crate::tracking::is_bare_filename`
-/// enforces on a hook name for the same reason. A corrupted `spoolway-label`
+/// component, never a separator or `.`/`..` — the same rule
+/// `crate::tracking::is_bare_filename` enforces on a hook name for the same
+/// reason. A corrupted `spoolway-label`
 /// holding something like `/tmp/victim` or `../../victim` must not be able
 /// to walk `project_home`'s answer outside `~/.spoolway/` at all.
 fn is_valid_label(candidate: &str) -> bool {
@@ -2567,7 +2512,6 @@ mod tests {
     /// `discover_lenient` down with it: `doctor` is the one command whose
     /// entire point is to run when something about the project is broken,
     /// and it cannot report a finding about a `Repo` it was never handed.
-    #[cfg(unix)]
     #[test]
     fn a_home_resolution_failure_does_not_stop_lenient_discovery() {
         use std::os::unix::fs::PermissionsExt;
@@ -3039,7 +2983,6 @@ mod tests {
     /// id" and silently taken as licence to transfer the binding: neither
     /// proceeding nor guessing is allowed, only recording a move whose
     /// cause is actually known (see the task's non-goals).
-    #[cfg(unix)]
     #[test]
     fn bind_an_indeterminate_read_of_the_other_checkout_refuses_rather_than_guessing() {
         use std::os::unix::fs::PermissionsExt;
@@ -3723,11 +3666,7 @@ mod tests {
     }
 
     /// A lost race is read off the outcome — the legacy home gone with the
-    /// id-keyed home standing — and not off the one errno Unix happens to
-    /// report for it. This is the Windows failure in the form every
-    /// platform can run: there the losing racer is told
-    /// `ERROR_ACCESS_DENIED`, not the `ENOENT` this branch used to insist
-    /// on, and the migration beside it had already succeeded either way.
+    /// id-keyed home standing — and not off the one errno reported for it.
     #[test]
     fn a_home_found_already_moved_reports_the_race_lost_not_an_error() {
         let (legacy, home) = rename_pair("loser");
@@ -3739,17 +3678,11 @@ mod tests {
         );
     }
 
-    /// A rename that is genuinely stuck rather than raced still reports its
-    /// own error once the patience is spent: the legacy home is still
-    /// standing, so nothing has migrated, and pretending otherwise would
-    /// write a binding for a home that never moved.
-    ///
-    /// A destination directory that already holds content of its own is the
-    /// stuck shape both platforms agree on — `ENOTEMPTY` on Unix, and the
-    /// `ERROR_ACCESS_DENIED` Windows reports for any rename onto a standing
-    /// directory, waited out and then reported. A plain *file* at the
-    /// destination is not that shape: Windows moves a directory straight
-    /// over one, where Unix refuses.
+    /// A rename that is genuinely stuck rather than raced reports its own
+    /// error: the legacy home is still standing, so nothing has migrated,
+    /// and pretending otherwise would write a binding for a home that never
+    /// moved. A destination directory that already holds content of its own
+    /// is `ENOTEMPTY`.
     #[test]
     fn a_rename_that_is_stuck_rather_than_raced_still_fails() {
         let (legacy, home) = rename_pair("stuck");
@@ -3763,36 +3696,6 @@ mod tests {
             "the error names what it was moving: {said}"
         );
         assert!(legacy.is_dir(), "and leaves the old home where it stands");
-    }
-
-    /// [`contended`] answers for Windows on every platform, so both halves
-    /// of the judgement are checked here rather than only the one this CI
-    /// leg happens to build for.
-    #[test]
-    fn only_windows_reads_a_refused_rename_as_worth_waiting_on() {
-        use std::io::{Error, ErrorKind};
-
-        // `ERROR_ACCESS_DENIED`, which Rust maps to a kind of its own on
-        // Windows, is the refusal the racing migration actually hit.
-        let denied = Error::from(ErrorKind::PermissionDenied);
-        // `ERROR_SHARING_VIOLATION`, which it maps to no kind, so the raw
-        // number is the only way to name it. On Unix 32 is `EPIPE`, which
-        // is precisely why `windows` gates the question at all.
-        let sharing = Error::from_raw_os_error(32);
-        let missing = Error::from(ErrorKind::NotFound);
-
-        assert!(contended(&denied, true));
-        assert!(
-            !contended(&denied, false),
-            "a Unix refusal means what it says"
-        );
-        assert!(contended(&sharing, true), "the other Win32 spelling of it");
-        assert!(!contended(&sharing, false));
-        assert!(
-            !contended(&missing, true),
-            "a missing source is not waiting"
-        );
-        assert!(!contended(&missing, false));
     }
 
     /// The scratch pair [`reread_record`]'s own tests work on: a home
@@ -3995,7 +3898,6 @@ mod tests {
     /// is not true, and a caller resolving a home would silently fall back
     /// to a basename-keyed one instead of reporting that something is
     /// actually wrong.
-    #[cfg(unix)]
     #[test]
     fn a_write_failure_is_an_error_not_an_absent_stamp() {
         use std::os::unix::fs::PermissionsExt;
@@ -4130,13 +4032,12 @@ mod tests {
     /// stamped and every caller fell back to the basename — even though a
     /// file calling itself "the" stamp sat right there in `.git`.
     ///
-    /// `#[cfg(unix)]`: on Windows `\` really is a path separator, so
-    /// `.join("api\\copy")` below would name two path components, not one
-    /// unsafe basename, and the rename would fail against a directory that
-    /// was never created. `sanitize_label_folds_an_unsafe_character_to_a_safe_one`
-    /// below covers the same fix platform-independently, straight against
-    /// `sanitize_label` rather than through a real rename.
-    #[cfg(unix)]
+    /// A raw `\` is a legal Unix filename character and no path separator
+    /// at all, so `.join("api\\copy")` below names one unsafe basename
+    /// rather than two path components.
+    /// `sanitize_label_folds_an_unsafe_character_to_a_safe_one` below covers
+    /// the same fix straight against `sanitize_label` rather than through a
+    /// real rename.
     #[test]
     fn a_basename_that_is_not_a_safe_label_still_stamps_and_reads_back() {
         let base = crate::scratch::root("repo-test-unsafe-label");
@@ -4144,8 +4045,8 @@ mod tests {
         std::fs::create_dir_all(&base).unwrap();
         crate::scratch::git_init(&base, &["-q", "-b", "main"]);
         // Renamed to a basename `is_valid_label` refuses outright — a raw
-        // `\`, legal in a Unix filename, is indistinguishable from a
-        // Windows path separator to `is_bare_filename`.
+        // `\` is legal in a Unix filename but is not one path component to
+        // `is_bare_filename`, which treats it the same as `/`.
         let weird = base.parent().unwrap().join("api\\copy");
         let _ = std::fs::remove_dir_all(&weird);
         std::fs::rename(&base, &weird).unwrap();

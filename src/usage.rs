@@ -1475,16 +1475,10 @@ fn state_root_in(home: &Path) -> PathBuf {
 
 /// Fill `buf` from the operating system's own CSPRNG.
 ///
-/// `/dev/urandom` is not the only way to ask, and on Windows it is not a way
-/// at all — so a build that could not open it used to fall straight through to
-/// a clock-and-pid stand-in, which made every Windows session id predictable
-/// and let two run ids minted in one clock tick collide (review finding 42).
-///
 /// - Linux asks `getrandom(2)` first: it needs no file descriptor, so it
 ///   still answers with a full fd table or a chroot that has no `/dev`.
-/// - Windows asks `ProcessPrng`, the documented user-mode CSPRNG entry point.
-/// - Every Unix falls back to reading the device, which is what this always
-///   did.
+/// - Every Unix falls back to reading `/dev/urandom`, which is what this
+///   always did.
 ///
 /// `false` only when none of those worked, which leaves the caller its
 /// counter-plus-clock fallback rather than a panic on a launch path.
@@ -1500,15 +1494,6 @@ fn os_random(buf: &mut [u8]) -> bool {
             return true;
         }
     }
-    #[cfg(windows)]
-    {
-        // SAFETY: `ProcessPrng` fills exactly `buf.len()` bytes at the given
-        // pointer and, per its contract, cannot fail on a supported Windows.
-        unsafe {
-            windows_sys::Win32::Security::Cryptography::ProcessPrng(buf.as_mut_ptr(), buf.len());
-        }
-        true
-    }
     #[cfg(unix)]
     {
         // Exactly `buf.len()` bytes. `/dev/urandom` never reaches EOF, so
@@ -1516,10 +1501,6 @@ fn os_random(buf: &mut [u8]) -> bool {
         std::fs::File::open("/dev/urandom")
             .and_then(|mut f| std::io::Read::read_exact(&mut f, buf))
             .is_ok()
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        false
     }
 }
 
@@ -1708,11 +1689,6 @@ fn ledger_identity(path: &Path) -> (u64, Option<std::time::SystemTime>, Option<u
 fn file_ino(meta: &std::fs::Metadata) -> Option<u64> {
     use std::os::unix::fs::MetadataExt;
     Some(meta.ino())
-}
-
-#[cfg(not(unix))]
-fn file_ino(_meta: &std::fs::Metadata) -> Option<u64> {
-    None
 }
 
 /// [`read`], cached process-wide and refreshed only past what was already

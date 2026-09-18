@@ -1085,25 +1085,14 @@ fn set_key(doc: &mut toml_edit::DocumentMut, trust: &Trust, cwd: &std::path::Pat
     Some(())
 }
 
-/// Link `from` to `to`, and copy only where the platform will not make a
-/// link at all.
+/// Link `from` to `to`, and copy only where that fails.
 ///
 /// A link keeps a credential refreshed in the real home valid here; a copy
 /// goes stale the moment the token rotates, and one is left per lane (review
-/// finding 63). Unix has always had `symlink`. On Windows a symlink needs a
-/// privilege a service often lacks, so a hard link — same volume — is the
-/// fallback before a copy; on any other platform a hard link is all that is
-/// tried before copying.
+/// finding 63).
+#[cfg(unix)]
 fn link_seed(from: &std::path::Path, to: &std::path::Path) {
-    #[cfg(unix)]
     let linked = std::os::unix::fs::symlink(from, to).is_ok();
-    #[cfg(windows)]
-    let linked = std::os::windows::fs::symlink_file(from, to)
-        .or_else(|_| std::fs::hard_link(from, to))
-        .is_ok();
-    #[cfg(not(any(unix, windows)))]
-    let linked = std::fs::hard_link(from, to).is_ok();
-
     if !linked {
         let _ = std::fs::copy(from, to);
     }
@@ -1685,9 +1674,7 @@ mod tests {
     /// A seed file is linked, not copied, so a credential rotated in the real
     /// home — written to a temp name and renamed into place, the ordinary
     /// shape — is still valid through the per-session home (review finding
-    /// 63). On Unix the link is a symlink; the copy fallback is only for a
-    /// platform that will not make one.
-    #[cfg(unix)]
+    /// 63).
     #[test]
     fn link_seed_links_so_a_rotation_stays_valid() {
         let real = crate::scratch::root("agent-seed-real");

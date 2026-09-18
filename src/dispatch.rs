@@ -5851,7 +5851,6 @@ mod tests {
             self.log(format!("split_pane {tab_id} -> {pane}"));
             Ok(pane)
         }
-        #[cfg(unix)]
         fn run_in_pane(
             &self,
             tab_id: &str,
@@ -7919,7 +7918,6 @@ mod tests {
     /// records both spellings of every worktree path, and `owns_cwd` falls
     /// back to a canonical comparison — either half alone closes this, and
     /// the test exercises both.
-    #[cfg(unix)]
     #[test]
     fn owns_cwd_matches_a_worktree_path_the_backend_canonicalised() {
         let repo = fixture("owns-cwd-symlink");
@@ -8062,9 +8060,8 @@ mod tests {
     #[test]
     fn sweep_anchor_tabs_spares_a_tab_holding_a_pane_a_run_actually_recorded() {
         let repo = fixture("sweep-anchor-tabs");
-        // Not `add_task_with_worktree`: that helper is `#[cfg(unix)]`, because
-        // its other callers run a real command process, and this test is built
-        // for every target the crate checks against, Windows included.
+        // Not `add_task_with_worktree`: that helper's other callers run a
+        // real command process, and this one has no need of that.
         let checkout = repo.root.join("wt-demo");
         std::fs::create_dir_all(&checkout).unwrap();
         add_task_with(&repo, "demo", "implement", |front| {
@@ -13427,7 +13424,6 @@ mod tests {
     /// down over a commit that never happened (review finding 4). This is the
     /// road every shipped pipeline takes to `done`: a command step, not an
     /// agent's `spoolway report`.
-    #[cfg(unix)]
     #[test]
     fn a_cleanup_terminal_holds_a_task_whose_work_cannot_be_committed() {
         use std::os::unix::fs::PermissionsExt;
@@ -13728,17 +13724,11 @@ mod tests {
 
     // ------------------------------------------------------------ command steps
     //
-    // POSIX-only, every one of them, and not for want of trying: the `run:`
-    // lines below are sh idioms (`pwd >`, `exit 2` read back through a POSIX
-    // wrapper) rather than the platform-neutral `sleep`/`exit`/`echo` the
-    // handful of tests elsewhere use. `command_step` itself spawns and reads
-    // liveness on either platform now — it is these lines that are Unix only,
-    // not the spawn — so these are compiled where a POSIX shell can read them
-    // rather than failing where there is not one.
+    // The `run:` lines below are sh idioms (`pwd >`, `exit 2` read back
+    // through a POSIX wrapper), which is simply what `command_step` runs.
 
     /// A pipeline whose `implement` step has been replaced by a command step
     /// running `run`, so the whole graph either side of it is the shipped one.
-    #[cfg(unix)]
     fn pipelines_running(run: &str, background: bool) -> Pipelines {
         let mut pipelines = Pipelines::builtin();
         let name = pipelines.default.clone();
@@ -13767,7 +13757,6 @@ mod tests {
     }
 
     /// The same, with a timeout short enough for a test to reach.
-    #[cfg(unix)]
     fn pipelines_running_for(run: &str, background: bool, timeout: Duration) -> Pipelines {
         let mut pipelines = pipelines_running(run, background);
         let name = pipelines.default.clone();
@@ -13787,7 +13776,6 @@ mod tests {
     /// The fake multiplexer hands back a path and creates nothing, which is
     /// enough for every test about lanes — nothing is ever run in them. A
     /// command step runs a real process in that directory, so it needs one.
-    #[cfg(unix)]
     fn add_task_with_worktree(repo: &Repo, id: &str, stage: &str) -> PathBuf {
         let worktree = repo.root.join(format!("wt-{id}"));
         std::fs::create_dir_all(&worktree).unwrap();
@@ -13804,7 +13792,6 @@ mod tests {
     /// Wait for the dispatcher to move the task off the command step, running
     /// passes rather than sleeping: what is being waited for is a process, and
     /// only a pass reads its exit code.
-    #[cfg(unix)]
     fn drive(repo: &Repo, pipelines: &Pipelines, mux: &FakeMux, path: &Path, want: &str) -> Report {
         let started = std::time::Instant::now();
         loop {
@@ -13824,7 +13811,6 @@ mod tests {
     /// The blocking case, end to end through the dispatcher: the command runs
     /// in the task's own worktree, the pass waits for it, and a zero exit takes
     /// the `on_pass` route.
-    #[cfg(unix)]
     #[test]
     fn a_command_step_runs_and_a_clean_exit_routes_on_pass() {
         let repo = fixture("command-pass");
@@ -13857,7 +13843,6 @@ mod tests {
     /// The default now: a command step with no `headless:` key runs in a
     /// pane of its own, split off the task's own tab, and a passing exit
     /// closes it behind it.
-    #[cfg(unix)]
     #[test]
     fn a_command_step_with_no_headless_key_runs_in_a_pane_and_closes_it() {
         let repo = fixture("command-pane-pass");
@@ -13891,7 +13876,6 @@ mod tests {
     /// dispatcher, read nowhere a pane would otherwise see it — still reaches
     /// a paned command step the same way it already reaches a headless one by
     /// ordinary process inheritance.
-    #[cfg(unix)]
     #[test]
     fn a_paned_commands_environment_carries_what_the_dispatcher_process_has() {
         let repo = fixture("command-pane-env");
@@ -13926,7 +13910,6 @@ mod tests {
     /// `SPOOLWAY="$PWD/target/release/spoolway" scripts/e2e/run.sh` is the
     /// real one that did: this project's own end-to-end suites, read from the
     /// worktree, run against the main checkout's stale binary.
-    #[cfg(unix)]
     #[test]
     fn a_paned_command_never_inherits_the_dispatchers_own_directory() {
         let repo = fixture("command-pane-pwd");
@@ -13959,7 +13942,6 @@ mod tests {
     /// identity, and anything in the lane that reads them — the herdr skill
     /// an agent runs, a `run:` line calling `herdr pane …` — then acts on the
     /// dispatcher's pane rather than its own.
-    #[cfg(unix)]
     #[test]
     fn a_paned_command_never_inherits_the_dispatchers_own_pane_identity() {
         let repo = fixture("command-pane-mux-identity");
@@ -13992,7 +13974,6 @@ mod tests {
 
     /// `headless: true` is the escape hatch back to today's silent, detached
     /// run — no pane is ever asked for.
-    #[cfg(unix)]
     #[test]
     fn headless_true_never_asks_for_a_pane() {
         let repo = fixture("command-headless");
@@ -14021,7 +14002,6 @@ mod tests {
     /// A failing command's pane closes the instant the task leaves the step,
     /// the same as a passing one — not left standing on the chance the step
     /// is retried later.
-    #[cfg(unix)]
     #[test]
     fn a_failing_paned_commands_pane_closes_on_departure() {
         let repo = fixture("command-pane-fail");
@@ -14083,7 +14063,6 @@ mod tests {
     /// slot and dropped it in silence, so the board said `nothing to do` for as
     /// long as the run lasted. Nothing about a `run:` needs a lane to have gone
     /// first — the command cuts the task's worktree itself.
-    #[cfg(unix)]
     #[test]
     fn a_queued_task_whose_entry_is_a_command_step_starts_it() {
         let repo = fixture("command-entry");
@@ -14121,7 +14100,6 @@ mod tests {
 
     /// The dry run of the same. `set_stage` writes the task file, and a dry run
     /// may not — so this arm says what it would start and stops there.
-    #[cfg(unix)]
     #[test]
     fn a_dry_run_of_a_command_entry_says_so_and_writes_nothing() {
         let repo = fixture("command-entry-dry");
@@ -14185,7 +14163,6 @@ mod tests {
     /// A non-zero exit is a failure, and it takes the step's own `on_fail`
     /// rather than the pipeline's blocked step — the whole point of putting a
     /// build in the graph is that a broken one routes to the fix step.
-    #[cfg(unix)]
     // covers: step.on_fail — where a step's failure sends the task
     #[test]
     fn a_failing_command_routes_on_fail() {
@@ -14206,7 +14183,6 @@ mod tests {
     /// lane sent in to clear the block never reads. A non-zero exit now also
     /// writes the step, the code and the log path onto the task itself, so
     /// that lane can see what actually broke.
-    #[cfg(unix)]
     // covers: the `run:` step exiting non-zero — what it leaves on the task
     #[test]
     fn a_failing_command_writes_the_step_code_and_log_onto_the_task() {
@@ -14231,7 +14207,6 @@ mod tests {
 
     /// A clean exit writes nothing onto the task — there is no failure to
     /// carry forward, and every ordinary pass would otherwise grow the file.
-    #[cfg(unix)]
     #[test]
     fn a_clean_command_exit_writes_nothing_onto_the_task() {
         let repo = fixture("command-pass-writes-nothing");
@@ -14251,7 +14226,6 @@ mod tests {
 
     /// A pipeline whose command step fails straight to `blocked`, which is what
     /// a spent loop bound and a red mechanical gate both come down to.
-    #[cfg(unix)]
     fn pipelines_failing_to_blocked() -> Pipelines {
         let mut pipelines = pipelines_running("exit 1", false);
         let name = pipelines.default.clone();
@@ -14272,7 +14246,6 @@ mod tests {
     /// any pass could look. The lane then reported, the task went back where it
     /// blocked from, and a gate that never turned green circled forever in the
     /// one kind of run that has a person to stop for.
-    #[cfg(unix)]
     #[test]
     fn an_attended_run_parks_on_blocked_instead_of_staffing_it() {
         let repo = fixture("blocked-attended");
@@ -14305,7 +14278,6 @@ mod tests {
     /// but the dispatcher's command-step arm never did — so a task blocked by a
     /// red mechanical gate arrived with no `blocked_from`, and `resume_target`
     /// had no origin to carry it back to.
-    #[cfg(unix)]
     #[test]
     fn a_command_step_blocking_records_the_step_it_blocked_on() {
         let repo = fixture("blocked-origin-direct");
@@ -14326,7 +14298,6 @@ mod tests {
     /// step whose loop budget is already spent, so `apply_loop_budget`
     /// redirects it to `blocked` instead. The redirect is the only thing that
     /// changed about the destination, and it used to lose the origin with it.
-    #[cfg(unix)]
     #[test]
     fn a_spent_loop_budget_redirecting_a_command_to_blocked_still_records_the_origin() {
         let repo = fixture("blocked-origin-budget");
@@ -14372,7 +14343,6 @@ mod tests {
     /// The other half, so the fix above is a distinction and not a blanket
     /// refusal: an unattended run has nobody to park in front of, so it staffs
     /// `blocked` exactly as it always did.
-    #[cfg(unix)]
     #[test]
     fn an_unattended_run_still_staffs_blocked_on_arrival() {
         let repo = unattended_fixture("blocked-unattended");
@@ -14395,7 +14365,6 @@ mod tests {
     /// While the command is running the task stays exactly where it is, and the
     /// pass does not wait on it — a four-minute build must not be four minutes
     /// in which no other task can move.
-    #[cfg(unix)]
     #[test]
     fn a_pass_does_not_wait_for_a_running_command() {
         let repo = fixture("command-running");
@@ -14432,7 +14401,6 @@ mod tests {
 
     /// The background half: the task moves on the same pass the command starts,
     /// and the command is still running behind it.
-    #[cfg(unix)]
     #[test]
     fn a_background_command_lets_the_task_move_on() {
         let repo = fixture("command-background");
@@ -14471,7 +14439,6 @@ mod tests {
     /// this test has nothing to do with — an agent that died at launch, which
     /// escalates on its own. Calling the function under test directly is what
     /// isolates one behaviour from the other.
-    #[cfg(unix)]
     #[test]
     fn a_background_commands_failure_routes_the_task_wherever_it_has_moved_on() {
         let repo = fixture("command-background-fail");
@@ -14554,7 +14521,6 @@ mod tests {
     /// The other half: a background command that passes, or one still going,
     /// changes nothing about where the task is — a zero exit is left exactly
     /// as unread as a step with no `on_fail` leaves every code.
-    #[cfg(unix)]
     #[test]
     fn a_background_commands_success_leaves_the_task_where_it_already_is() {
         let repo = fixture("command-background-pass");
@@ -14614,7 +14580,6 @@ mod tests {
     /// code. Closed here whether or not the step declares `on_fail`, and
     /// whether or not the code is zero: the run is over either way, and the
     /// tab has no more live work in that pane to show.
-    #[cfg(unix)]
     #[test]
     fn a_background_commands_pane_closes_at_reap() {
         let repo = fixture("command-background-pane");
@@ -14673,7 +14638,6 @@ mod tests {
     /// pass finds the task still here, reads `Running`, and used to hold it
     /// against the command's own timeout: six hours behind an observer, for
     /// a placement that failed once.
-    #[cfg(unix)]
     #[test]
     fn a_background_command_already_running_still_lets_the_task_move_on() {
         let repo = fixture("command-background-rearrival");
@@ -14709,7 +14673,6 @@ mod tests {
     /// Cleanup removes the task's worktree, and a background command is still
     /// running in it. Left alone it would spend the rest of its life writing
     /// into a directory that no longer exists.
-    #[cfg(unix)]
     #[test]
     fn cleanup_stops_a_background_command_still_running() {
         let repo = fixture("command-cleanup");
@@ -14738,7 +14701,6 @@ mod tests {
     /// The hang. A blocking command that never ends would park its task for as
     /// long as the dispatcher runs, and no other clock in a pass has an opinion
     /// about it — so the step's own timeout is the only thing that ends it.
-    #[cfg(unix)]
     #[test]
     fn a_command_that_runs_past_its_timeout_is_stopped_and_routed() {
         let repo = fixture("command-timeout");
@@ -14784,7 +14746,6 @@ mod tests {
     /// never looks again — the sweep is the only thing that can stop it, and
     /// without it `background:` plus a task that blocks is a process nothing
     /// ever reaps.
-    #[cfg(unix)]
     #[test]
     fn a_background_command_past_its_timeout_is_reaped() {
         let repo = fixture("command-timeout-background");
@@ -14823,7 +14784,6 @@ mod tests {
 
     /// A dry run says what it would start and starts nothing. A pass a person
     /// runs to look at the pipeline must not launch a deploy script.
-    #[cfg(unix)]
     #[test]
     fn a_dry_run_starts_no_command() {
         let repo = fixture("command-dry");
@@ -15571,19 +15531,14 @@ mod tests {
 
     // --------------------------------------------------------- issue_tracking
     //
-    // POSIX-only, but not for the command steps above's reason — `fire`
-    // (see `crate::tracking`) starts a hook through `command_step::Runs::start`
-    // the same as any other run, and that spawns and reads liveness on either
-    // platform now. What stays Unix-only is `write_hook`'s own fixture: a
-    // `#!/bin/sh` script made executable by its file mode and then run as a
-    // bare path, which relies on the shebang line to say what runs it — there
-    // is no Windows equivalent of "an executable file names its own
-    // interpreter", so these are compiled where that is true rather than
-    // failing where it is not.
+    // `fire` (see `crate::tracking`) starts a hook through
+    // `command_step::Runs::start` the same as any other run. `write_hook`'s
+    // own fixture writes a `#!/bin/sh` script made executable by its file
+    // mode and then run as a bare path, relying on the shebang line to say
+    // what runs it.
     /// Writes an executable `.spoolway/hooks/<name>` and points
     /// `[issue_tracking]` at it — the fixture every `issue_tracking` test
     /// below shares.
-    #[cfg(unix)]
     fn write_hook(repo: &Repo, name: &str, script: &str) {
         let dir = repo.checkout.join(".spoolway/hooks");
         std::fs::create_dir_all(&dir).unwrap();
@@ -15598,7 +15553,6 @@ mod tests {
     /// what every `issue_tracking` test below needs to observe a hook's exit
     /// code reaching a *later* pass, since the hook itself is spawned
     /// detached and no one pass waits on it.
-    #[cfg(unix)]
     fn pass_until_settled(
         repo: &Repo,
         mux: &FakeMux,
@@ -15620,7 +15574,6 @@ mod tests {
     /// lands the task on `paused` when the event was `queued` — caught
     /// before the dependency gate would otherwise have let it straight
     /// through, since this task has no dependency to wait on at all.
-    #[cfg(unix)]
     #[test]
     fn a_failing_queued_hook_under_on_fail_pause_lands_the_task_on_paused() {
         let mut repo = fixture("hook-queued-pause");
@@ -15647,7 +15600,6 @@ mod tests {
     /// with the same hook is held at `paused` (see the test above this
     /// one), so a trial task reaching its first step instead means `fire`
     /// was never called for it.
-    #[cfg(unix)]
     #[test]
     fn a_trial_arm_never_fires_the_queued_issue_tracking_hook() {
         let mut repo = fixture("hook-queued-trial-suppressed");
@@ -15670,7 +15622,6 @@ mod tests {
     /// ordinary task out of the archive under `on_fail = "pause"` (see
     /// `a_failing_done_hook_under_on_fail_pause_holds_the_task_out_of_the_archive`)
     /// must never run for a trial arm, so the arm archives straight through.
-    #[cfg(unix)]
     #[test]
     fn a_trial_arm_never_fires_the_done_issue_tracking_hook() {
         let mut repo = fixture("hook-done-trial-suppressed");
@@ -15701,7 +15652,6 @@ mod tests {
     /// still hold the task — reacting only once a code is actually known,
     /// never merely because a pass happened not to see one yet. Without the
     /// fix, this task would have started a lane on the very first pass.
-    #[cfg(unix)]
     #[test]
     fn a_slow_failing_queued_hook_under_on_fail_pause_never_starts_the_task() {
         let mut repo = fixture("hook-queued-slow-pause");
@@ -15737,7 +15687,6 @@ mod tests {
     /// and no behaviour change". Gating the hold on `pauses_on_fail` alone
     /// would deadlock every queued task forever, since `fire` never starts
     /// anything for either shape and `exit_code` could only ever read `None`.
-    #[cfg(unix)]
     #[test]
     fn on_fail_pause_with_no_hook_configured_never_holds_a_queued_task() {
         for hook in ["", "../escapes.sh"] {
@@ -15759,7 +15708,6 @@ mod tests {
     /// since `fire` is deliberately skipped for it — so the hold must be
     /// skipped too, or `dispatch --dry-run` reports the opposite of what a
     /// real pass would do.
-    #[cfg(unix)]
     #[test]
     fn a_dry_run_under_on_fail_pause_still_says_it_would_start_the_task() {
         let mut repo = fixture("hook-queued-dry-run");
@@ -15797,7 +15745,6 @@ mod tests {
     /// very next pass, for real, is what actually starts it — proving the
     /// gate is the `dry_run` flag itself, not some other reason the hook
     /// never ran.
-    #[cfg(unix)]
     #[test]
     fn dry_run_never_fires_the_tracking_hook_the_gate_is_checked_directly() {
         let mut repo = fixture("hook-gate-dry-run");
@@ -15831,7 +15778,6 @@ mod tests {
     /// The same failure with `on_fail` left blank (`"ignore"`) changes
     /// nothing about where the task goes — it starts exactly as it would
     /// with no hook at all, and the failure is only ever recorded.
-    #[cfg(unix)]
     #[test]
     fn a_failing_queued_hook_under_on_fail_ignore_still_starts_the_task() {
         let mut repo = fixture("hook-queued-ignore");
@@ -15855,7 +15801,6 @@ mod tests {
 
     /// Acceptance criterion: a non-zero hook exit under `on_fail = "pause"`
     /// holds the task out of the archive when the event was `done`.
-    #[cfg(unix)]
     #[test]
     fn a_failing_done_hook_under_on_fail_pause_holds_the_task_out_of_the_archive() {
         let mut repo = fixture("hook-done-pause");
@@ -15882,7 +15827,6 @@ mod tests {
     /// forever, because nothing ever forgot the run so it could try again.
     /// The dispatcher must actually retry it, not just leave that
     /// possibility to `crate::tracking::retry_if_failed`'s own unit test.
-    #[cfg(unix)]
     #[test]
     fn a_failing_done_hook_under_on_fail_pause_is_retried_not_stuck_forever() {
         let mut repo = fixture("hook-done-retry");
@@ -15921,7 +15865,6 @@ mod tests {
     /// still finds it failing, so the board's count must not go quiet the
     /// moment a retry begins. `failure_count` has to keep seeing this key as
     /// failing across many passes of retrying, not just the first one.
-    #[cfg(unix)]
     #[test]
     fn the_board_keeps_counting_a_done_hold_while_it_retries() {
         let mut repo = fixture("hook-done-retry-visible");
@@ -15963,7 +15906,6 @@ mod tests {
     /// A hook failing on `blocked` or `paused` only ever records the
     /// failure — those two are already stopped for a person, so nothing
     /// about the task's stage moves, whatever `on_fail` says.
-    #[cfg(unix)]
     #[test]
     fn a_failing_hook_on_blocked_only_records_the_failure() {
         let mut repo = fixture("hook-blocked-record");
@@ -15996,7 +15938,6 @@ mod tests {
     /// the two spellings of the same directory never agree without
     /// canonicalising first. Before this task's fix, the mismatch meant the
     /// branch this function exists to clean up was left behind.
-    #[cfg(unix)]
     #[test]
     fn reclaim_scratch_matches_a_worktree_reached_through_a_symlink() {
         let repo = fixture("reclaim-scratch-symlink");

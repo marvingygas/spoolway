@@ -56,7 +56,7 @@ pub fn issue_show(repo: &Repo, reference: &str) -> Result<()> {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

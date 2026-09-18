@@ -157,7 +157,6 @@ cargo fmt --check
 cargo deny check advisories
 cargo clippy --all-targets --locked -- -D warnings
 cargo test --all-targets --locked
-cargo check --target x86_64-pc-windows-gnu --all-targets --locked
 cargo build --release
 ./target/release/spoolway pipeline check
 ```
@@ -170,8 +169,7 @@ SPOOLWAY="$PWD/target/release/spoolway" scripts/e2e/run.sh --tier pr
 ```
 
 A failure sends the task back to the step before `test` (`e2e` in `impl`, `reproduce-again`
-in `bugfix`), at most twice, then `on_loop_max` parks it. The gate needs `cargo-deny` and the
-`x86_64-pc-windows-gnu` target installed.
+in `bugfix`), at most twice, then `on_loop_max` parks it. The gate needs `cargo-deny` installed.
 
 `.github/workflows/ci.yml` runs daily on `main` at 03:17 UTC. Pushes and pull requests do
 not trigger it. The Linux job runs the same gate plus the `nightly` tier. A Windows job runs
