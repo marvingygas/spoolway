@@ -5743,7 +5743,6 @@ mod tests {
     /// board's `p` reads, with no edit to `queue_pause` itself. `blocked_from`
     /// survives untouched beside the fresh `parked_from: blocked`.
     #[test]
-    #[cfg(unix)]
     fn queue_pause_interrupts_a_blocked_tasks_live_unblocker() {
         let mut repo = fixture("queue-pause-blocked");
         repo.config.dispatch.backend = crate::config::Backend::Headless;
@@ -5801,11 +5800,7 @@ mod tests {
 
         let runs = crate::command_step::Runs::new(&repo.commands_dir());
         let key = crate::command_step::Runs::key("checks", "solo");
-        let sleep = if cfg!(windows) {
-            "Start-Sleep -Seconds 20"
-        } else {
-            "sleep 20"
-        };
+        let sleep = "sleep 20";
         let pid = runs
             .start(&key, sleep, &repo.checkout, &BTreeMap::new())
             .unwrap();
@@ -9407,7 +9402,6 @@ mod tests {
     // the moment one call fails. A hook run is `sh -c` under `libc::setsid()`
     // under the hood, the same Unix-only path `command_step` and `tracking`
     // themselves are — see their own test modules for why.
-    #[cfg(unix)]
     mod open_hook {
         use super::*;
 

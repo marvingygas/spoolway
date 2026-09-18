@@ -2344,7 +2344,6 @@ mod tests {
     /// reaches the branch under test, and answers with the unavailable note
     /// instead. There is no other backend to stand in: tmux is Unix-only too.
     #[test]
-    #[cfg(unix)]
     fn a_backend_with_no_real_pane_is_a_note_not_a_check() {
         let mux = headless_mux("no-real-pane");
         assert!(matches!(
@@ -2554,7 +2553,6 @@ mod tests {
     /// was `discover_lenient`'s `Config::load` failing for the same reason
     /// `project_home` just did, which a hand-built `None` can never
     /// reproduce.
-    #[cfg(unix)]
     #[test]
     fn a_real_home_resolution_failure_does_not_cascade_into_a_config_finding() {
         use std::os::unix::fs::PermissionsExt;

@@ -118,27 +118,3 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check advisories
-
-  # Windows is a supported target, and the parts of spoolway that differ there
-  # are exactly the parts a Linux run cannot exercise: the PowerShell dialect
-  # typed at a pane, the PATHEXT lookup, the `.cmd` shim, and the process check
-  # standing in for /proc. Building it is not enough — those have to run.
-  #
-  # No e2e here: the suites are bash, and what they cover is platform-neutral.
-  # What is platform-specific is in the unit tests.
-  test-windows:
-    if: inputs.run-tests
-    timeout-minutes: 30
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.sha }}
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-
-      # Every unit test whose behaviour forks on the platform — the PowerShell
-      # dialect, the PATHEXT lookup, the `.cmd` shim, the process check.
-      - run: cargo test --all-targets --locked

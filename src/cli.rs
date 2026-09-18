@@ -747,10 +747,9 @@ pub enum Provider {
 /// asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Tracker {
-    /// `.spoolway/hooks/github.sh` (the `.ps1` twin on native Windows),
-    /// calling `gh`.
+    /// `.spoolway/hooks/github.sh`, calling `gh`.
     Github,
-    /// `.spoolway/hooks/jira.sh` (or `.ps1`), calling `acli`.
+    /// `.spoolway/hooks/jira.sh`, calling `acli`.
     Jira,
     /// No hook is named. The scripts are written all the same — see
     /// `commands::init` — so turning tracking on later is a config edit, not
@@ -779,15 +778,12 @@ impl Tracker {
     }
 
     /// The `[issue_tracking].hook` value this answer writes: a bare filename
-    /// inside `.spoolway/hooks/`, in the extension this platform's own pair
-    /// actually runs — `.sh` wherever `platform::shell_command` reaches for
-    /// `sh -c`, `.ps1` wherever it reaches for PowerShell instead. Blank for
-    /// `none`, which is what turns issue tracking off.
+    /// inside `.spoolway/hooks/`. Blank for `none`, which is what turns
+    /// issue tracking off.
     pub fn hook_name(self) -> String {
-        let ext = if cfg!(windows) { "ps1" } else { "sh" };
         match self {
-            Tracker::Github => format!("github.{ext}"),
-            Tracker::Jira => format!("jira.{ext}"),
+            Tracker::Github => "github.sh".to_string(),
+            Tracker::Jira => "jira.sh".to_string(),
             Tracker::None => String::new(),
         }
     }

@@ -165,6 +165,10 @@ function stampWrapper() {
   const manifest = JSON.parse(fs.readFileSync(file, "utf8"));
 
   manifest.version = version;
+  // npm installs the wrapper unconditionally unless this narrows the platforms
+  // it considers valid -- without it, a platform this release dropped still
+  // gets a wrapper with nothing runnable inside its optionalDependencies.
+  manifest.os = [...new Set(targets.map((t) => t.os))];
   manifest.optionalDependencies = Object.fromEntries(
     targets.map((t) => [`${scope}/${t.pkg}`, version]),
   );

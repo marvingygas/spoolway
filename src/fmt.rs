@@ -64,10 +64,7 @@ pub(crate) fn first_line(text: &str) -> &str {
         .unwrap_or("")
 }
 
-/// A repo-relative path, always written with forward slashes.
-///
-/// See [`crate::platform::relative`] for why the separator is normalised, and
-/// for the test that holds the Windows answer to account from either platform.
+/// A repo-relative path. See [`crate::platform::relative`].
 pub(crate) fn relative(root: &Path, path: &Path) -> String {
     crate::platform::relative(root, path)
 }

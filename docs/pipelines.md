@@ -238,7 +238,7 @@ A build, a test suite, a formatter or a deploy script is a command step.
     on_fail: fix
 ```
 
-- `run:` goes to the shell whole: `sh -c` on Unix, PowerShell on Windows. Pipes, `&&` and
+- `run:` goes to the shell whole, via `sh -c`. Pipes, `&&` and
   globs work. There is no `shell:` key.
 - It runs in the task's worktree with `SPOOLWAY_TASK`, `SPOOLWAY_STEP`, `SPOOLWAY_REPO`,
   `SPOOLWAY_WORKTREE` and `SPOOLWAY_TASK_FILE` set, and with the privileges of whoever started

@@ -20,7 +20,7 @@ credential, service or clean checkout is a `block`, with the exact external cond
    check into “green.”
 3. Dispatch `gh workflow run ci.yml --ref main -f tier=nightly`, identify the new run by its id and
    head SHA, and watch it to completion. Read every required job's actual conclusion, including the
-   real Windows tests and end-to-end suite. A watch command returning zero is not evidence by
+   end-to-end suite. A watch command returning zero is not evidence by
    itself, and a run for another SHA does not count.
 4. If anything fails, reproduce it as closely as this platform allows and reduce the evidence to
    one complete blocker set: failing command or job, exact assertion or error, affected files, the

@@ -170,11 +170,11 @@ pub fn config_edit(checkout: &Path) -> Result<()> {
 }
 
 /// Resolve the user's editor the way every `spoolway *edit`-shaped command
-/// does: `$VISUAL`, then `$EDITOR`, then a platform default.
+/// does: `$VISUAL`, then `$EDITOR`, then `vi`.
 pub(super) fn editor_from_env() -> String {
     std::env::var("VISUAL")
         .or_else(|_| std::env::var("EDITOR"))
-        .unwrap_or_else(|_| if cfg!(windows) { "notepad" } else { "vi" }.to_string())
+        .unwrap_or_else(|_| "vi".to_string())
 }
 
 /// Open `path` in the resolved editor and wait for it, refusing on a
@@ -196,13 +196,13 @@ pub(super) fn open_in_editor(path: &Path) -> Result<()> {
 ///
 /// `$VISUAL`/`$EDITOR` is interpolated unquoted on purpose, so `code --wait`
 /// still splits into a program and a flag. The path is quoted through the
-/// platform's own escaper, which escapes an embedded `'` for both dialects — a
-/// plain `format!("… '{}'")` would break the quoting on a checkout path that
+/// platform's own escaper, which escapes an embedded `'` — a plain
+/// `format!("… '{}'")` would break the quoting on a checkout path that
 /// contains one, and the editor would exit on a syntax error (finding 71).
 fn editor_command(editor: &str, path: &Path) -> String {
     format!(
         "{editor} {}",
-        crate::platform::Shell::CURRENT.quote(&path.display().to_string())
+        crate::platform::quote(&path.display().to_string())
     )
 }
 

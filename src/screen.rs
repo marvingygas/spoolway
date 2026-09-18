@@ -80,43 +80,20 @@ pub(crate) struct RawStdin;
 
 impl std::io::Read for RawStdin {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        #[cfg(unix)]
-        {
-            // SAFETY: `buf` is a valid, appropriately sized buffer for the
-            // duration of this call, and stdin's descriptor is open for the
-            // life of the process.
-            let n = unsafe { libc::read(libc::STDIN_FILENO, buf.as_mut_ptr().cast(), buf.len()) };
-            if n < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(n as usize)
+        // SAFETY: `buf` is a valid, appropriately sized buffer for the
+        // duration of this call, and stdin's descriptor is open for the
+        // life of the process.
+        let n = unsafe { libc::read(libc::STDIN_FILENO, buf.as_mut_ptr().cast(), buf.len()) };
+        if n < 0 {
+            return Err(std::io::Error::last_os_error());
         }
-        #[cfg(not(unix))]
-        {
-            std::io::Read::read(&mut std::io::stdin(), buf)
-        }
+        Ok(n as usize)
     }
 }
 
 impl PollableRead for RawStdin {
-    #[cfg(unix)]
     fn byte_pending(&self, timeout: std::time::Duration) -> bool {
         fd_has_byte_within(libc::STDIN_FILENO, timeout)
-    }
-
-    // No Windows termios means no Windows raw mode either (see
-    // `platform::TermGuard`): stdin is cooked there, and a cooked stdin
-    // cannot be asked whether a byte is waiting without blocking on it until
-    // a whole line has been typed. Answering `true` was what made the
-    // board's wait do exactly that — the frame stopped redrawing and the
-    // next pass waited on Enter (jobs review finding 8). `false` is the
-    // answer that never blocks: a caller with a sleep to fall back on takes
-    // it, and a screen that means to block for a key reads without asking
-    // first — see `commands::queue::wait_for_key` and
-    // `commands::jobs::jobs_wait_for_key`.
-    #[cfg(not(unix))]
-    fn byte_pending(&self, _timeout: std::time::Duration) -> bool {
-        false
     }
 }
 
@@ -295,7 +272,6 @@ mod tests {
     /// A real OS pipe, so a test can control exactly when the reading end
     /// sees a byte — the one thing a `Cursor` can never simulate, since its
     /// bytes are always all there from the start.
-    #[cfg(unix)]
     fn pipe() -> (std::os::unix::io::RawFd, std::os::unix::io::RawFd) {
         let mut fds = [0i32; 2];
         // SAFETY: `fds` is a well-formed two-element buffer `pipe` fills in.
@@ -303,7 +279,6 @@ mod tests {
         (fds[0], fds[1])
     }
 
-    #[cfg(unix)]
     fn close(fd: std::os::unix::io::RawFd) {
         // SAFETY: `fd` is a descriptor this test opened and is done with.
         unsafe {
@@ -318,7 +293,6 @@ mod tests {
     // it returns promptly, not just eventually, is what proves the freeze is
     // gone rather than just shortened.
     #[test]
-    #[cfg(unix)]
     fn a_pipe_with_nothing_written_is_not_pending_and_does_not_hang() {
         let (read_end, write_end) = pipe();
         let start = std::time::Instant::now();
@@ -335,7 +309,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
     fn a_pipe_with_a_byte_already_written_is_pending_immediately() {
         let (read_end, write_end) = pipe();
         // SAFETY: `write_end` is the pipe's own write end, `buf` a live byte.
@@ -363,7 +336,6 @@ mod tests {
     /// `0`, same as the existing empty-`Cursor` path `read_key` already
     /// handles as end of input, not as a lone `Esc`.
     #[test]
-    #[cfg(unix)]
     fn a_closed_pipe_is_pending_too_so_read_still_sees_the_eof() {
         let (read_end, write_end) = pipe();
         close(write_end);
@@ -394,17 +366,14 @@ mod tests {
     /// over a descriptor whose timing it actually controls — a `Cursor`
     /// can't stand in here, since every one of its bytes is already "there"
     /// the instant it exists and can never model a byte arriving late.
-    #[cfg(unix)]
     struct PipeRead(std::fs::File);
 
-    #[cfg(unix)]
     impl std::io::Read for PipeRead {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
             self.0.read(buf)
         }
     }
 
-    #[cfg(unix)]
     impl PollableRead for PipeRead {
         fn byte_pending(&self, timeout: std::time::Duration) -> bool {
             use std::os::unix::io::AsRawFd;
@@ -418,7 +387,6 @@ mod tests {
     // hangs on the lone Esc nor eats the keystroke that follows it once the
     // ambiguity is resolved.
     #[test]
-    #[cfg(unix)]
     fn a_key_typed_well_after_a_lone_escape_is_not_swallowed() {
         use std::os::unix::io::FromRawFd;
         let (read_end, write_end) = pipe();
@@ -467,7 +435,6 @@ mod tests {
     // agreement for a burst sent all at once, the normal way a tty delivers
     // one.
     #[test]
-    #[cfg(unix)]
     fn an_arrow_key_sent_as_one_burst_is_not_misread_as_a_bare_escape() {
         use std::os::unix::io::FromRawFd;
         let (read_end, write_end) = pipe();

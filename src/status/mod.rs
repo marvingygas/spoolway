@@ -876,13 +876,13 @@ impl Board {
 /// The command line `o` runs on a document, everywhere `o` appears.
 ///
 /// The same resolution `spoolway config edit` already uses: `$VISUAL`, then
-/// `$EDITOR`, then a platform default. Shared between [`Board::open_cursor`]
+/// `$EDITOR`, then `vi`. Shared between [`Board::open_cursor`]
 /// and the queue screen's own `o` — `crate::commands::queue::open_highlighted`
 /// — so the two can never resolve to two different editors.
 pub(crate) fn editor_command(path: &Path) -> String {
     let editor = std::env::var("VISUAL")
         .or_else(|_| std::env::var("EDITOR"))
-        .unwrap_or_else(|_| if cfg!(windows) { "notepad" } else { "vi" }.to_string());
+        .unwrap_or_else(|_| "vi".to_string());
     format!("{editor} '{}'", path.display())
 }
 
@@ -4568,7 +4568,6 @@ mod tests {
     /// catch: the old shape interrupted the lane *before* this panel ever
     /// opened, so this is also what pins that it no longer does.
     #[test]
-    #[cfg(unix)]
     fn pressing_shift_p_opens_a_panel_over_a_live_headless_lane_and_only_enter_interrupts_it() {
         let mut repo = fixture("pause-live-lane");
         repo.config.dispatch.backend = crate::config::Backend::Headless;
@@ -4618,7 +4617,6 @@ mod tests {
     /// touched before `enter` answers it: the task file it would write is
     /// still exactly what it was when the panel opened.
     #[test]
-    #[cfg(unix)]
     fn pressing_p_on_a_live_agent_lane_names_the_turn_and_says_it_is_only_interrupted() {
         let mut repo = fixture("pause-cursor-agent-lane");
         repo.config.dispatch.backend = crate::config::Backend::Headless;
@@ -4666,7 +4664,6 @@ mod tests {
     /// answers back to `Browsing`, the task's stage never moves off
     /// `implement`, and the lane the panel named is still there afterwards.
     #[test]
-    #[cfg(unix)]
     fn pressing_s_on_the_pause_panel_schedules_a_gate_and_leaves_the_lane_running() {
         let mut repo = fixture("schedule-pause-cursor");
         repo.config.dispatch.backend = crate::config::Backend::Headless;
@@ -4698,7 +4695,6 @@ mod tests {
     /// step, clears the schedule it wrote rather than writing it again —
     /// the mockup's "pressing `s` again... clears it".
     #[test]
-    #[cfg(unix)]
     fn pressing_s_again_clears_a_scheduled_pause() {
         let mut repo = fixture("schedule-pause-toggle");
         repo.config.dispatch.backend = crate::config::Backend::Headless;
@@ -4822,7 +4818,6 @@ mod tests {
     /// "paused")` stays zero, and the row's own NEXT column carries no loop
     /// counter across it.
     #[test]
-    #[cfg(unix)]
     fn pressing_p_then_shift_r_round_trips_a_task_without_banking_a_lap() {
         let mut repo = fixture("park-round-trip");
         repo.config.dispatch.backend = crate::config::Backend::Headless;
@@ -5012,7 +5007,6 @@ mod tests {
     /// the park writes, and `resume` afterwards carries the session back
     /// onto `blocked` rather than opening a fresh one.
     #[test]
-    #[cfg(unix)]
     fn pressing_p_on_a_blocked_row_with_a_live_unblocker_interrupts_it_and_resumes_onto_blocked() {
         let mut repo = fixture("pause-blocked-live-lane");
         repo.config.dispatch.backend = crate::config::Backend::Headless;

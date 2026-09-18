@@ -162,7 +162,6 @@ pub fn row(id: &str) -> Row {
 /// A real headless lane for `login · implement`, running a script that
 /// sleeps — what a test needs to press keys against something actually
 /// live. Hands back the backend and the lane's name.
-#[cfg(unix)]
 pub fn live_headless_lane(repo: &Repo) -> (Box<dyn crate::mux::Mux>, String) {
     live_headless_lane_at(repo, "login", "implement", "implementer")
 }
@@ -170,7 +169,6 @@ pub fn live_headless_lane(repo: &Repo) -> (Box<dyn crate::mux::Mux>, String) {
 /// [`live_headless_lane`], but at an arbitrary task id, step and label —
 /// what a test needs to put a live lane behind a `blocked` row, where the
 /// unblocker rather than the implementer is the one staffing the step.
-#[cfg(unix)]
 pub fn live_headless_lane_at(
     repo: &Repo,
     id: &str,

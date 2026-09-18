@@ -156,22 +156,9 @@ pub fn attach(repo: &Repo, pipelines: &Pipelines, mux: &dyn Mux, args: &AttachAr
         // every other kind.
         .envs(adapter.session_env(&session));
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        // Become the agent: same terminal, same stdio, nothing left behind.
-        Err(command.exec()).with_context(|| format!("starting `{}`", argv[0]))
-    }
-    #[cfg(not(unix))]
-    {
-        let status = command
-            .status()
-            .with_context(|| format!("starting `{}`", argv[0]))?;
-        if !status.success() {
-            bail!("`{}` exited with {status}", argv[0]);
-        }
-        Ok(())
-    }
+    use std::os::unix::process::CommandExt;
+    // Become the agent: same terminal, same stdio, nothing left behind.
+    Err(command.exec()).with_context(|| format!("starting `{}`", argv[0]))
 }
 
 /// The counterpart of typing into the lane's pane, for the backend that has no

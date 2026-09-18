@@ -51,18 +51,6 @@ use crate::config::DispatchConfig;
 use crate::mux::{
     Lane, LaneSpec, LaneStatus, Mux, Workspace, branch_slug, cut_worktree, worktree_root,
 };
-use crate::platform::Shell;
-
-/// The dialect a turn's script is written in.
-///
-/// `Shell::Posix` rather than `Shell::CURRENT`, and not an oversight: this
-/// backend has no Windows arm at all — detaching a turn is `libc::setsid()`,
-/// which exists only on Unix, and [`Headless::is_available`] refuses to start
-/// one anywhere else. `crate::command_step` answers the same need on Windows
-/// through a process group and a named job object instead. Naming the dialect
-/// it actually emits keeps that honest, rather than implying a Windows path
-/// this backend never takes.
-const SH: Shell = Shell::Posix;
 
 /// Where lane records and logs live, under the project's home directory —
 /// see [`crate::repo::Repo::headless_dir`].
@@ -257,11 +245,11 @@ impl Headless {
         // as much — and a pipeline pays that on every turn it ever runs.
         script.push_str(&format!(
             "exec </dev/null >>{} 2>&1\n",
-            SH.quote(&self.log_path(&record.name).display().to_string())
+            crate::platform::quote(&self.log_path(&record.name).display().to_string())
         ));
         script.push_str(&format!(
             "echo $$ >{}\n",
-            SH.quote(&self.pid_path(&record.name).display().to_string())
+            crate::platform::quote(&self.pid_path(&record.name).display().to_string())
         ));
 
         // A PATH prefix goes on first, because the agent is resolved through
@@ -269,14 +257,14 @@ impl Headless {
         // both backends rather than two. Nothing sets it in a real run; the
         // tests use it to put a stand-in agent in front of the real one.
         if let Some(prefix) = &record.path_prefix {
-            script.push_str(&SH.path_export(prefix));
+            script.push_str(&crate::platform::path_export(prefix));
             script.push('\n');
         }
         // The same one-line export a herdr lane gets, from the same place — a
         // lane's environment is how `spoolway report` knows which task it
         // belongs to, and two spellings of it would be two ways to lose it.
         if !record.env.is_empty() {
-            script.push_str(&SH.env_export(&record.env));
+            script.push_str(&crate::platform::env_export(&record.env));
             script.push('\n');
         }
 
@@ -286,7 +274,7 @@ impl Headless {
         script.push_str(&format!(
             "printf '\\n=== turn %s (%s) ===\\n' {} {}\n",
             record.turns + 1,
-            SH.quote(&record.label)
+            crate::platform::quote(&record.label)
         ));
 
         // The kind's own name unless its row says the executable is called
@@ -297,11 +285,11 @@ impl Headless {
         let program = crate::agent::adapter(&record.kind)
             .map(crate::agent::Adapter::program)
             .unwrap_or(&record.kind);
-        let mut command = vec![SH.quote(program)];
-        command.extend(args.iter().map(|arg| SH.quote(arg)));
-        command.push(SH.quote(prompt));
+        let mut command = vec![crate::platform::quote(program)];
+        command.extend(args.iter().map(|arg| crate::platform::quote(arg)));
+        command.push(crate::platform::quote(prompt));
         let command_line = command.join(" ");
-        let exit_path = SH.quote(&self.exit_path(&record.name).display().to_string());
+        let exit_path = crate::platform::quote(&self.exit_path(&record.name).display().to_string());
 
         script.push_str(&command_line);
         script.push('\n');
@@ -388,10 +376,7 @@ pub(crate) fn await_pid_file(mut read: impl FnMut() -> Option<u32>) -> Option<u3
 /// Why this backend refuses to start anywhere but Unix, and what to do
 /// instead — the same shape [`crate::mux::Herdr::unavailable`] and
 /// [`crate::tmux::Tmux::unavailable`] already answer with: what is missing,
-/// and the `dispatch.backend` that works in its place. Shared between
-/// [`Headless::unavailable`] and `spawn_detached_shell`'s `#[cfg(not(unix))]`
-/// stub below, which can only be reached if `is_available` answered wrongly —
-/// the same sentence either way it is read.
+/// and the `dispatch.backend` that works in its place.
 const NOT_UNIX: &str = "headless lanes need `libc::setsid()` to detach a turn, and this \
      platform has no such syscall. Dispatch through a multiplexer instead: set \
      `dispatch.backend = \"herdr\"` or `\"tmux\"`.";
@@ -426,13 +411,6 @@ pub(crate) fn spawn_detached_shell(script: &str, cwd: &Path) -> Result<std::proc
         .stderr(std::process::Stdio::null())
         .spawn()
         .map_err(Into::into)
-}
-
-/// See the Unix arm's doc — never called in production: [`Headless::is_available`]
-/// refuses this backend everywhere but Unix.
-#[cfg(not(unix))]
-pub(crate) fn spawn_detached_shell(_script: &str, _cwd: &Path) -> Result<std::process::Child> {
-    bail!("{NOT_UNIX}")
 }
 
 /// End the whole process group `pid` leads, insisting only if asking fails.
@@ -471,141 +449,6 @@ pub fn kill_group(pid: u32) {
     // processes down. Waiting out that gap is the difference between `stop`
     // and a suggestion.
     settles_within(pid, std::time::Duration::from_secs(5));
-}
-
-/// End the job [`spawn_detached`] put `pid` in, and everything still running
-/// under it.
-///
-/// [`Headless::is_available`] still refuses this backend on Windows —
-/// `setsid` is what detaches a *lane's* turn and there is no such thing — so
-/// in practice this is reached only through [`crate::command_step`], which
-/// has its own Windows spawn. Kept here rather than there because it is the
-/// same shared implementation [`alive`] already is: one place that answers
-/// "is it still going" and "end it", for whichever caller starts a pid this
-/// way.
-///
-/// The job is the first choice and `taskkill /T /F` the fallback, because
-/// each covers what the other cannot. A job's name is only findable while
-/// somebody still holds a handle to it — see [`spawn_detached`], which keeps
-/// its handle open for exactly this lookup — so a run spawned by a process
-/// that has since exited, or by the pane backend, which never made a job at
-/// all (`Runs::script_for_pane`, when a step carries no `headless:` key),
-/// opens nothing here. `taskkill /T` walks the live parent-child tree
-/// instead: no handle needed, but a grandchild whose parent already exited
-/// is unlinked from that tree and escapes it, which is the hole the job
-/// exists to close. Trying the job first and falling back is both answers,
-/// each where it works.
-#[cfg(windows)]
-pub fn kill_group(pid: u32) {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::JobObjects::{OpenJobObjectW, TerminateJobObject};
-
-    if pid == 0 {
-        return;
-    }
-    let name = job_name(pid);
-    // SAFETY: `OpenJobObjectW` with a name, checked for null before use;
-    // `TerminateJobObject` on the handle it returns; `CloseHandle` once, on
-    // the one path that opened it.
-    let job_found = unsafe {
-        let job = OpenJobObjectW(JOB_OBJECT_TERMINATE, 0, name.as_ptr());
-        if !job.is_null() {
-            TerminateJobObject(job, 1);
-            CloseHandle(job);
-        }
-        !job.is_null()
-    };
-    if !job_found {
-        let _ = std::process::Command::new("taskkill")
-            .args(["/T", "/F", "/PID", &pid.to_string()])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-    }
-    // `TerminateJobObject` only asks; every caller's next line assumes the
-    // process is actually down — see this function's Unix twin, which waits
-    // out the same gap after its own signal.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while std::time::Instant::now() < deadline && crate::lock::is_running(pid) {
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-}
-
-/// No portable notion of a process group on anything else this builds for.
-#[cfg(not(any(unix, windows)))]
-pub fn kill_group(_pid: u32) {}
-
-/// Job-object access needed to reopen a run's job by name and end it.
-/// windows-sys does not export this bit — it is written out the way
-/// `lock.rs`'s `SYNCHRONIZE` is: a fixed part of the Win32 ABI, unchanged
-/// since the API shipped.
-#[cfg(windows)]
-const JOB_OBJECT_TERMINATE: u32 = 0x0008;
-
-/// The name a run's job is opened and reopened by — its own pid, which
-/// [`kill_group`] is always given the same way `group_alive` is on Unix:
-/// read back off the pid file [`spawn_detached`]'s wrapper wrote as its first
-/// act. `Local\` keeps it out of the global namespace, which only a service
-/// session would need to reach into on purpose.
-#[cfg(windows)]
-fn job_name(pid: u32) -> Vec<u16> {
-    format!("Local\\spoolway-job-{pid}\0")
-        .encode_utf16()
-        .collect()
-}
-
-/// Spawn `command` detached: a new process group, so it does not answer to
-/// this console's own signals, and a named job object, so [`kill_group`] can
-/// find and end the whole tree it grows later — from a different process,
-/// by pid alone, holding no handle of its own.
-///
-/// This is Windows' side of what `setsid` gives the Unix path: a run that
-/// outlives the pass that started it. It is not `CREATE_SUSPENDED` plus a
-/// job assignment before anything in the child runs — `std::process::Command`
-/// has no way to reach the primary thread to resume it — so there is a gap
-/// between the process starting and this call assigning it to the job. The
-/// gap is not the shape of anything a wrapper script does as its first act,
-/// which is why it is left rather than hand-rolling `CreateProcessW`.
-///
-/// The job handle is deliberately kept open — leaked — rather than closed
-/// once the process is assigned. The object itself would survive on its
-/// member processes alone, but its *name* would not: a named kernel object
-/// drops out of the namespace when its last handle closes, and the name is
-/// the only way [`kill_group`] ever reaches this job again. Closing the
-/// handle here is what made every `stop` on a detached Windows run a silent
-/// no-op. One leaked handle per spawned run, held for this process's
-/// lifetime, is the price of the lookup; a run outliving this process falls
-/// to `kill_group`'s `taskkill` fallback instead.
-#[cfg(windows)]
-pub(crate) fn spawn_detached(
-    mut command: std::process::Command,
-) -> std::io::Result<std::process::Child> {
-    use std::os::windows::io::AsRawHandle;
-    use std::os::windows::process::CommandExt;
-    use windows_sys::Win32::Foundation::HANDLE;
-    use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW};
-    use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
-
-    command.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
-    let child = command.spawn()?;
-
-    // SAFETY: `CreateJobObjectW` with a name and no security attributes,
-    // checked for null; `AssignProcessToJobObject` on that job and the
-    // process handle `spawn` just returned, which this process owns
-    // outright. Best-effort: a job that failed to create or assign leaves
-    // the process running undetached rather than not running at all, and
-    // `kill_group` falls back to `taskkill` for a job it cannot open. The
-    // job handle is never closed — see the doc comment above for why the
-    // leak is the point.
-    unsafe {
-        let name = job_name(child.id());
-        let job = CreateJobObjectW(std::ptr::null(), name.as_ptr());
-        if !job.is_null() {
-            AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE);
-        }
-    }
-
-    Ok(child)
 }
 
 /// The negative pid is the whole process group: the shell is its leader thanks
@@ -698,14 +541,8 @@ pub fn alive(pid: u32) -> bool {
         .is_some_and(|state| state != "Z")
 }
 
-/// No `/proc` here, so the answer comes from [`crate::lock::is_running`] —
-/// Windows has no zombie state for it to misread (a pid whose process exited
-/// reads as exited however many handles are still open on it, which that
-/// function's zero-length wait already distinguishes), and the non-Linux unix
-/// arm's `kill -0` is the portable best that platform offers. Reading `/proc`
-/// unconditionally here made every pid on Windows read dead, so a command
-/// step's run with a live wrapper reported `Interrupted` on the very pass
-/// that started it.
+/// macOS has no `/proc`, so the answer comes from [`crate::lock::is_running`]
+/// instead — `kill -0` is the portable best that platform offers.
 #[cfg(not(target_os = "linux"))]
 pub fn alive(pid: u32) -> bool {
     crate::lock::is_running(pid)
@@ -772,12 +609,9 @@ impl Mux for Headless {
 
     fn is_available(&self) -> bool {
         // Nothing to connect to — the question is only whether a lane could be
-        // written down and detached. Detaching is `libc::setsid()` now, a
-        // syscall rather than a binary on PATH, so the only way left for this
-        // backend to be unavailable is a lane directory it cannot write to.
-        // It is still Unix-only: `spawn_detached_shell` has nothing to call on
-        // Windows, which detaches through a process group and a named job
-        // object instead — see `crate::command_step`'s own Windows arm.
+        // written down and detached. Detaching is `libc::setsid()`, which
+        // exists only on Unix, so the only other way left for this backend to
+        // be unavailable is a lane directory it cannot write to.
         cfg!(unix) && std::fs::create_dir_all(self.lane_dir()).is_ok()
     }
 
@@ -1163,17 +997,8 @@ mod tests {
     /// exercises how a lane actually starts rather than a simulation of it.
     /// Everything below spawns real processes and
     /// reads their real output; nothing here talks to a model.
-    ///
-    /// Which is why the tests that take a turn are `#[cfg(unix)]`. A turn is
-    /// `sh -c` detached with `libc::setsid()`, and the stand-in agent is a
-    /// `#!/bin/sh` script — a syscall with no Windows equivalent, which is why
-    /// `is_available` refuses to start a lane there at all. What is left
-    /// running on Windows is everything that decides something without
-    /// launching anything: the id round trips, the branch slug, where
-    /// worktrees are cut, and the refusals.
     struct Fixture {
         root: PathBuf,
-        #[cfg_attr(not(unix), allow(dead_code))]
         bin: PathBuf,
         mux: Headless,
     }
@@ -1199,9 +1024,7 @@ mod tests {
         /// so the backend launches it exactly as it would the real thing.
         ///
         /// `#!/bin/sh` and `chmod +x`, which is the honest shape of the thing
-        /// being tested — see the note on [`Fixture`] about why the tests that
-        /// use this one are POSIX-only.
-        #[cfg(unix)]
+        /// being tested.
         fn agent(&self, kind: &str, body: &str) -> &Fixture {
             let path = self.bin.join(kind);
             std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
@@ -1213,7 +1036,6 @@ mod tests {
         }
 
         /// A lane placed in the fixture root, ready to be prompted.
-        #[cfg(unix)]
         fn lane(&self, name: &str, kind: &str, args: &[&str]) -> String {
             let pane = new_pane_id(&self.root);
             let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
@@ -1231,7 +1053,6 @@ mod tests {
             pane
         }
 
-        #[cfg(unix)]
         fn status(&self, name: &str) -> LaneStatus {
             self.mux
                 .list_lanes()
@@ -1244,7 +1065,6 @@ mod tests {
 
         /// Block until the lane's turn is over, so an assertion about a finished
         /// turn is never a race with a process that is still starting.
-        #[cfg(unix)]
         fn settle(&self, name: &str) {
             let started = std::time::Instant::now();
             while started.elapsed() < std::time::Duration::from_secs(20) {
@@ -1267,7 +1087,6 @@ mod tests {
     }
 
     /// The whole lifecycle of one lane, against a real process.
-    #[cfg(unix)]
     #[test]
     fn a_lane_is_idle_until_prompted_then_working_then_done() {
         let f = Fixture::new("lifecycle");
@@ -1301,7 +1120,6 @@ mod tests {
     /// `Done` is the resting state a settled lane sits in, and the dispatcher
     /// reads it as "ended its turn, may be prompted again". A backend that
     /// reported an exited turn as anything else would strand every lane.
-    #[cfg(unix)]
     #[test]
     fn a_finished_turn_settles_rather_than_disappearing() {
         let f = Fixture::new("settled");
@@ -1319,7 +1137,6 @@ mod tests {
     /// The claim the whole backend rests on: a second turn reopens the first
     /// one's conversation. The stand-in records the argv it was handed, so this
     /// asserts what the agent would actually have received.
-    #[cfg(unix)]
     #[test]
     fn a_second_turn_resumes_the_session_the_first_one_opened() {
         let f = Fixture::new("resume");
@@ -1348,7 +1165,6 @@ mod tests {
 
     /// pi's flag continues a session it already has, so its second turn is the
     /// same argv — the other half of the adapter contract.
-    #[cfg(unix)]
     #[test]
     fn a_pi_lane_keeps_its_session_flag_across_turns() {
         let f = Fixture::new("resume-pi");
@@ -1370,7 +1186,6 @@ mod tests {
 
     /// One log per lane, across every turn — which is what the reminder loop
     /// hashes to decide whether a lane is making progress.
-    #[cfg(unix)]
     #[test]
     fn a_lanes_log_accumulates_across_its_turns() {
         let f = Fixture::new("log-accumulates");
@@ -1394,7 +1209,6 @@ mod tests {
 
     /// `read` is the reminder loop's fallback progress signal, so it has to be
     /// bounded the way a pane's scrollback is.
-    #[cfg(unix)]
     #[test]
     fn reading_a_lane_returns_only_the_tail() {
         let f = Fixture::new("tail");
@@ -1411,7 +1225,6 @@ mod tests {
 
     /// A turn still running is not to be disturbed: a second process would open
     /// the same session twice and one of them would lose.
-    #[cfg(unix)]
     #[test]
     fn a_lane_mid_turn_refuses_a_second_prompt() {
         let f = Fixture::new("busy");
@@ -1435,7 +1248,6 @@ mod tests {
     /// Written by hand rather than by killing a dispatcher, because the window
     /// is a few microseconds wide: the e2e `disaster` suite hits it by chance
     /// about one run in four, which is a flake rather than a test.
-    #[cfg(unix)]
     #[test]
     fn a_running_turn_outranks_a_record_that_never_recorded_it() {
         let f = Fixture::new("crash-window");
@@ -1471,7 +1283,6 @@ mod tests {
     /// Tearing a lane down has to take the agent with it, not just the shell
     /// that started it — the shell is a process-group leader precisely so this
     /// can reach through it.
-    #[cfg(unix)]
     #[test]
     fn stopping_a_lane_kills_the_turn_under_it() {
         let f = Fixture::new("stop");
@@ -1496,7 +1307,6 @@ mod tests {
 
     /// No keyboard reaches a running headless turn, so `interrupt_lane` ends
     /// it exactly as `stop_lane` would — see the doc comment on the impl.
-    #[cfg(unix)]
     #[test]
     fn interrupting_a_lane_kills_the_turn_the_same_as_stopping_it() {
         let f = Fixture::new("interrupt");
@@ -1520,7 +1330,6 @@ mod tests {
     /// that ignores `SIGTERM` is what actually exercises the escalation,
     /// rather than leaving it dead code every other test happens not to
     /// reach because a plain `sleep` already dies on the first signal.
-    #[cfg(unix)]
     #[test]
     fn kill_group_escalates_to_sigkill_when_sigterm_is_ignored() {
         let dir = crate::scratch::root("kill-group-escalate");
@@ -1550,7 +1359,6 @@ mod tests {
     /// checks. A shell that backgrounds a child and exits immediately
     /// reproduces exactly that: the child inherits the leader's pgid under
     /// `setsid` and outlives it.
-    #[cfg(unix)]
     #[test]
     fn kill_group_reaches_a_leaderless_group() {
         let dir = crate::scratch::root("kill-group-leaderless");
@@ -1631,7 +1439,6 @@ mod tests {
 
     /// The lane's environment is what `spoolway report` reads to know which task
     /// it belongs to, so a lane that loses it is a lane that cannot report.
-    #[cfg(unix)]
     #[test]
     fn a_lanes_environment_reaches_its_turn() {
         let f = Fixture::new("env");
@@ -1662,7 +1469,6 @@ mod tests {
 
     /// A value with a quote in it has to arrive as one argument with nothing
     /// executed — the prompt is model-written text and reaches a shell.
-    #[cfg(unix)]
     #[test]
     fn a_prompt_containing_shell_metacharacters_is_one_argument() {
         let f = Fixture::new("quoting");
@@ -1747,7 +1553,6 @@ mod tests {
 
     /// This process must never be the one holding a turn alive: a dispatcher
     /// that exits mid-pass, or is restarted, must leave its lanes running.
-    #[cfg(unix)]
     #[test]
     fn a_turn_outlives_the_process_that_started_it() {
         let f = Fixture::new("detached");
@@ -1804,7 +1609,6 @@ mod tests {
     ///
     /// The fact is a nonce, so a model cannot pass by guessing, and it is not
     /// in the second prompt — only a session that carried over can answer.
-    #[cfg(unix)]
     fn resume_carries_context(kind: &str, model: &str, extra: &[&str]) {
         let nonce = format!("ZX{}", std::process::id());
         let f = Fixture::new(&format!("live-{kind}"));
@@ -1859,7 +1663,6 @@ mod tests {
     /// claude resumes only because its args are rewritten: `--session-id` twice
     /// is an error, so this also proves the swap is being applied to a real
     /// binary and not merely to a vector of strings.
-    #[cfg(unix)]
     #[test]
     #[ignore = "live: needs `claude` and spends tokens"]
     fn live_a_claude_lane_resumes_its_session() {
@@ -1867,7 +1670,6 @@ mod tests {
     }
 
     /// pi resumes on the args it started with. Needs a local model server.
-    #[cfg(unix)]
     #[test]
     #[ignore = "live: needs `pi` and a local model server"]
     fn live_a_pi_lane_resumes_its_session() {
@@ -1877,7 +1679,6 @@ mod tests {
     /// The session a pid belongs to, read the same careful way [`alive`] reads
     /// state: `comm` can contain spaces and parentheses, so the fields are
     /// counted from the last `)`.
-    #[cfg(unix)]
     fn session_of(pid: u32) -> Option<u32> {
         let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
         stat.rsplit_once(')')?

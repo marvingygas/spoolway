@@ -270,24 +270,18 @@ pub fn newer() -> Option<String> {
 /// Start a detached child to refresh the cache, and do not wait for it.
 ///
 /// The child is spoolway itself, on a hidden subcommand — the same trick npm's
-/// own update-notifier uses, and the only portable one: it needs a process that
-/// outlives this command, runs `npm view`, and writes a file, which is a shell
-/// script on Unix and something else on Windows unless the program doing it is
-/// this one.
+/// own update-notifier uses: it needs a process that outlives this command,
+/// runs `npm view`, and writes a file, which this binary already knows how to
+/// do without shelling out to a script of its own.
 ///
-/// Through `libc::setsid()` on Unix, called in the child between fork and
-/// exec, for the reason [`crate::headless`] detaches lanes the same way: a
-/// child that merely has no terminal on its file descriptors is still in this
-/// session, and gets `SIGHUP` when the terminal closes. `spoolway queue list`
-/// in a window somebody shuts a second later is exactly the case — the lookup
+/// Through `libc::setsid()`, called in the child between fork and exec, for
+/// the reason [`crate::headless`] detaches lanes the same way: a child that
+/// merely has no terminal on its file descriptors is still in this session,
+/// and gets `SIGHUP` when the terminal closes. `spoolway queue list` in a
+/// window somebody shuts a second later is exactly the case — the lookup
 /// takes seconds and the window does not wait for it. Without a session of
 /// its own the cache would never fill on such a machine, and the notice would
 /// never appear.
-///
-/// On Windows there is no such syscall, and none of this module's other
-/// Windows work needs one: a plain child is better than no child, and still
-/// refreshes the cache whenever this command was not the last thing a
-/// terminal did.
 ///
 /// Nothing is waited on, so the child is reaped by init once this process
 /// exits. A failure to spawn at all is the same as a failure to look up:
@@ -380,7 +374,7 @@ fn published() -> Option<String> {
 
 /// Run npm, and hand back stdout when it succeeded.
 fn npm(args: &[&str]) -> Option<String> {
-    let out = Command::new(npm_program())
+    let out = Command::new("npm")
         .args(args)
         .stdin(Stdio::null())
         .output()
@@ -388,15 +382,6 @@ fn npm(args: &[&str]) -> Option<String> {
     match out.status.success() {
         true => Some(String::from_utf8_lossy(&out.stdout).into_owned()),
         false => None,
-    }
-}
-
-/// `npm` is a shell script on Unix and a `.cmd` on Windows, and the `.cmd` is
-/// not something `CreateProcess` will run directly.
-fn npm_program() -> &'static str {
-    match cfg!(windows) {
-        true => "npm.cmd",
-        false => "npm",
     }
 }
 
@@ -850,8 +835,7 @@ mod tests {
     ///
     /// Exercised against [`decide_upgrade`] rather than [`upgrade`] itself,
     /// and with no process environment touched at all: no cache file to
-    /// seed, no fake `npm` to place on `PATH` and keep in step with
-    /// `npm_program()`'s own Windows/Unix split, and nothing to race against
+    /// seed, no fake `npm` to place on `PATH`, and nothing to race against
     /// another test's own use of the same ambient variables — the class of
     /// problem a stubbed lookup exists to avoid.
     /// A version this binary can never be, whatever it is bumped to: its own

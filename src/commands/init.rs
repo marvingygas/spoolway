@@ -359,8 +359,7 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
             // A hook is invoked as a bare command line — see
             // `crate::tracking::hook_path` — so it needs the execute bit
             // itself; nothing else `init` writes is ever run rather than
-            // read. No-op on Windows, where a `.ps1` is handed to
-            // `powershell -EncodedCommand` rather than executed directly.
+            // read.
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -466,15 +465,8 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     }
     // The hook scripts every project gets, whichever tracker it answered —
     // switching later is a `spoolway config set issue_tracking.hook` away,
-    // not a second `init`. Only this platform's own pair: `.sh` wherever
-    // `crate::platform::shell_command` reaches for `sh -c`, `.ps1` wherever
-    // it reaches for PowerShell instead — the other pair could never run
-    // here.
-    let hook_ext = if cfg!(windows) { "ps1" } else { "sh" };
-    for (name, body) in assets::HOOK_SCRIPTS
-        .iter()
-        .filter(|(name, _)| name.ends_with(hook_ext))
-    {
+    // not a second `init`.
+    for (name, body) in assets::HOOK_SCRIPTS {
         place(
             root.join(".spoolway/hooks").join(name),
             body.as_bytes(),
@@ -647,7 +639,6 @@ mod tests {
     /// directory itself is read-only — must be refused for that reason, not
     /// reported as "no git repository behind it", which would be a lie about
     /// a project that is a real, ordinary git repository.
-    #[cfg(unix)]
     #[test]
     fn init_names_a_real_write_failure_rather_than_claiming_no_git_repository() {
         use std::os::unix::fs::PermissionsExt;
@@ -1102,7 +1093,6 @@ mod tests {
 
         let hook = root.join(".spoolway/hooks").join(&github);
         assert!(hook.is_file());
-        #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let mode = std::fs::metadata(&hook).unwrap().permissions().mode();

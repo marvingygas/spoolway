@@ -13,7 +13,7 @@ on:
         type: boolean
         default: false
 
-# Never interrupt publication halfway through the seven registry writes.
+# Never interrupt publication halfway through the six registry writes.
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
@@ -69,14 +69,12 @@ jobs:
 
       - run: cargo build --release --locked --target ${{ matrix.target.triple }}
 
-      # Windows is the one target whose binary carries an extension, and
-      # build-npm.mjs looks for it by that name. `if-no-files-found: error`
-      # means a wrong guess fails here rather than silently shipping a
-      # platform package with no binary in it.
+      # `if-no-files-found: error` means a missing binary fails here rather
+      # than silently shipping a platform package with nothing in it.
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target.triple }}
-          path: target/${{ matrix.target.triple }}/release/spoolway${{ matrix.target.os == 'win32' && '.exe' || '' }}
+          path: target/${{ matrix.target.triple }}/release/spoolway
           if-no-files-found: error
           retention-days: 7
 
@@ -86,7 +84,7 @@ jobs:
   # disagree about what a version shipped. Extracting the section in its own
   # job ahead of `publish` is what makes a missing, duplicated, or mistyped
   # heading fail before the first irreversible npm publish rather than after
-  # six packages are already on the registry.
+  # five packages are already on the registry.
   notes:
     runs-on: ubuntu-latest
     steps:
@@ -201,7 +199,7 @@ jobs:
             echo "::notice::repository is private; publishing without provenance"
           fi
 
-          # Publishing is seven separate calls to a registry that keeps whatever
+          # Publishing is six separate calls to a registry that keeps whatever
           # each one lands, so a failure half way through is a published state
           # nobody chose -- and it happened on the first real release, where the
           # token could write @spoolway/* but not the unscoped wrapper. Skipping
@@ -255,14 +253,10 @@ jobs:
       - name: Package
         run: |
           mkdir -p dist
-          while read -r triple os; do
-            if [ "$os" = "win32" ]; then
-              ( cd "artifacts/$triple" && python3 -m zipfile -c "$GITHUB_WORKSPACE/dist/spoolway-$triple.zip" spoolway.exe )
-            else
-              chmod 0755 "artifacts/$triple/spoolway"
-              tar -czf "dist/spoolway-$triple.tar.gz" -C "artifacts/$triple" spoolway
-            fi
-          done < <(jq -r '.targets[] | "\(.triple) \(.os)"' npm/targets.json)
+          while read -r triple; do
+            chmod 0755 "artifacts/$triple/spoolway"
+            tar -czf "dist/spoolway-$triple.tar.gz" -C "artifacts/$triple" spoolway
+          done < <(jq -r '.targets[].triple' npm/targets.json)
           ( cd dist && sha256sum ./* > SHA256SUMS )
           cat dist/SHA256SUMS
 

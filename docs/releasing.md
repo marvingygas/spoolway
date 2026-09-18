@@ -19,7 +19,7 @@ flowchart LR
 | `preflight` | Checks `main` is clean and green. Lists every change since the last tag. Proposes the version. |
 | `notes` | Writes one changelog section. Stops at a gate until you approve it. |
 | `publish` | Commits the version bump and the section, rehearses the workflow, tags, and checks what npm and GitHub received. |
-| `released` | `scripts/release-verify.sh`. Proves the tag, the seven packages, the archives and the published body exist. A command step, so nothing can be credited with it — see below. |
+| `released` | `scripts/release-verify.sh`. Proves the tag, the six packages, the archives and the published body exist. A command step, so nothing can be credited with it — see below. |
 
 `fix` does not merge. `main` is protected and every pull request is gated on `ci`, so a
 repair lands the way any other change does — you merge it. The step parks on `paused` with
@@ -44,8 +44,8 @@ The routine is `.spoolway/routines/release-spoolway/release-spoolway.md`. The pr
 
 ## What ships
 
-- Six platform binaries, packed into six npm platform packages plus the `spoolway` wrapper.
-- A GitHub release with six archives and `SHA256SUMS`.
+- Five platform binaries, packed into five npm platform packages plus the `spoolway` wrapper.
+- A GitHub release with five archives and `SHA256SUMS`.
 - The changelog section, as the release body and inside every binary (`spoolway whats-new`).
 
 `Cargo.toml` is the only version source. `CHANGELOG.md` holds one section per version and its
@@ -65,7 +65,6 @@ cargo fmt --check
 cargo deny check advisories
 cargo clippy --all-targets --locked -- -D warnings
 cargo test --all-targets --locked
-cargo check --target x86_64-pc-windows-gnu --all-targets --locked
 cargo build --release --locked
 ./target/release/spoolway pipeline check
 ```

@@ -982,7 +982,6 @@ mod tests {
     /// Losing read permission changes neither a file's contents nor the
     /// modification timestamp used by the old cache. Resolution still has to
     /// notice that the optional layer is no longer readable and fall back.
-    #[cfg(unix)]
     #[test]
     fn a_cached_refreshed_file_that_becomes_unreadable_is_not_served() {
         use std::os::unix::fs::PermissionsExt;

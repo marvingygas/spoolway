@@ -30,21 +30,13 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-
-use crate::platform::Shell;
 
 /// Where a run's pid, exit code and log live, under the project's home
 /// directory — see [`crate::repo::Repo::commands_dir`].
 pub(crate) const RUN_DIR: &str = "commands";
-
-/// The dialect the wrapper is written in: `sh` on Unix, PowerShell on
-/// Windows — the same choice [`Shell::CURRENT`] makes for a hook or a pane's
-/// own environment, and for the same reason. What the *command itself* runs
-/// under is the environment's own shell, which is this one either way.
-const SH: Shell = Shell::CURRENT;
 
 /// What a command step's run is doing right now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -207,119 +199,44 @@ impl Runs {
         Ok(())
     }
 
-    /// Move the last run's log out of the way, waiting out a writer that has
-    /// not finished letting go of it.
+    /// Move the last run's log out of the way.
     ///
-    /// One `rename` was enough on Unix, where a file renames whoever has it
-    /// open. Windows refuses to rename a file with an open handle, and the
-    /// previous run reliably still has one here: the wrapper writes its exit
-    /// marker from inside the group that is *piped* to `Out-File`, so the run
-    /// reads as over while the wrapper process, and the handle it holds on
-    /// the log, are still there for a few milliseconds more.
-    ///
-    /// Leaving that rename to fail silently did more than lose one previous
-    /// log. The fresh run's `Out-File` then opened the very path the old
-    /// writer was still holding, was refused it, and took the `run:` line's
-    /// stdout down with it — so a command that had done nothing wrong
-    /// reported exit 1, about one run in three under load. Renaming the file
-    /// out from under the old writer is what stops that, because the new run
-    /// then gets a path nobody else has open at all.
-    ///
-    /// So retry, briefly. The old writer is already on its way out by the
-    /// time this runs, so this waits milliseconds in the case it exists for
-    /// and not at all in any other. The bound is there so a log held open by
-    /// something that is *not* leaving costs a moment rather than the whole
-    /// dispatch pass, and giving up leaves exactly the old behaviour.
+    /// One `rename` is enough: a file renames whoever has it open, and the
+    /// wrapper closes its own log the moment the group behind the pipe ends,
+    /// so nothing is still writing to `from` by the time a fresh `start` or
+    /// `script_for_pane` gets here. Silent about a failure — including no log
+    /// to roll aside at all, the first arrival at this step — because nothing
+    /// downstream needs the old log to have moved; `prev_log_path` reading
+    /// stale or absent is exactly the answer a caller with no prior run gets.
     fn roll_log_aside(&self, key: &str) {
         let from = self.log_path(key);
         let to = self.prev_log_path(key);
-        let deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            match std::fs::rename(&from, &to) {
-                Ok(()) => return,
-                // No log to roll aside: the first arrival at this step.
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
-                Err(_) if Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(25));
-                }
-                Err(_) => return,
-            }
-        }
+        let _ = std::fs::rename(&from, &to);
     }
 
     /// The pid write, the environment, the `run:` line itself, and the exit
     /// report every wrapper closes with — shared by [`Runs::start`]'s
     /// detached wrapper and [`Runs::script_for_pane`]'s piped one.
-    ///
-    /// Takes the dialect as an argument rather than reading `SH` itself, so
-    /// both arms are checked from a single build — see `platform`'s own
-    /// module doc for why a fork like this one is written so it can be.
-    fn wrapper_body(
-        &self,
-        sh: Shell,
-        key: &str,
-        run: &str,
-        env: &BTreeMap<String, String>,
-    ) -> String {
-        let pid_path = sh.quote(&self.pid_path(key).display().to_string());
-        let exit_path = sh.quote(&self.exit_path(key).display().to_string());
+    fn wrapper_body(&self, key: &str, run: &str, env: &BTreeMap<String, String>) -> String {
+        let pid_path = crate::platform::quote(&self.pid_path(key).display().to_string());
+        let exit_path = crate::platform::quote(&self.exit_path(key).display().to_string());
         let mut body = String::new();
-        match sh {
-            Shell::Posix => {
-                body.push_str(&format!("echo $$ >{pid_path}\n"));
-                // The exit code is written from a trap rather than by a line
-                // after the command, because `run: ./deploy.sh || exit 1` —
-                // or anything else that ends the shell itself — would never
-                // reach that line, and the run would read as one that died
-                // without a code. The trap fires on every way out. The path
-                // goes through a variable so the two quoting styles never
-                // have to nest.
-                body.push_str(&format!(
-                    "__spoolway_exit={exit_path}\ntrap 'echo $? >\"$__spoolway_exit\"' EXIT\n"
-                ));
-                if !env.is_empty() {
-                    body.push_str(&sh.env_export(env));
-                    body.push('\n');
-                }
-                body.push_str(run);
-                body.push('\n');
-            }
-            Shell::PowerShell => {
-                body.push_str(&format!(
-                    "Set-Content -LiteralPath {pid_path} -NoNewline -Value $PID\n"
-                ));
-                if !env.is_empty() {
-                    body.push_str(&sh.env_export(env));
-                    body.push('\n');
-                }
-                // The `run:` line goes to a child engine of its own — the
-                // same exe this wrapper runs under, so the dialect never
-                // shifts — rather than inline in a `try`/`finally`. The
-                // `finally` was this arm's first shape, and it reported 0 for
-                // every scripted `exit N`: `exit` unwinds past a `finally`
-                // without setting `$LASTEXITCODE`, which only a *native*
-                // command sets. Run as a native command, the child turns
-                // every way a `run:` line can end — an `exit N`, an uncaught
-                // error, its last command's own code — into the one reading
-                // `$LASTEXITCODE` is defined to carry. The trailing
-                // `exit $LASTEXITCODE` inside the child is what forwards a
-                // native command's code out of it (`exit` on the unset
-                // variable is 0, the POSIX arm's own empty-run answer), and
-                // `-EncodedCommand` is base64 for the reason
-                // `platform::shell_command` gives: no quoting layer left to
-                // disagree about.
-                let child = crate::platform::encoded_command(&format!("{run}\nexit $LASTEXITCODE"));
-                body.push_str(&format!(
-                    "& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -EncodedCommand {child}\n"
-                ));
-                body.push_str(
-                    "$__spoolway_code = if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } else { 0 }\n",
-                );
-                body.push_str(&format!(
-                    "Set-Content -LiteralPath {exit_path} -NoNewline -Value $__spoolway_code\n"
-                ));
-            }
+        body.push_str(&format!("echo $$ >{pid_path}\n"));
+        // The exit code is written from a trap rather than by a line after
+        // the command, because `run: ./deploy.sh || exit 1` — or anything
+        // else that ends the shell itself — would never reach that line, and
+        // the run would read as one that died without a code. The trap fires
+        // on every way out. The path goes through a variable so the two
+        // quoting styles never have to nest.
+        body.push_str(&format!(
+            "__spoolway_exit={exit_path}\ntrap 'echo $? >\"$__spoolway_exit\"' EXIT\n"
+        ));
+        if !env.is_empty() {
+            body.push_str(&crate::platform::env_export(env));
+            body.push('\n');
         }
+        body.push_str(run);
+        body.push('\n');
         body
     }
 
@@ -337,28 +254,12 @@ impl Runs {
         // The `run:` line as written, not as parsed: it goes to the shell whole,
         // so a pipe, an `&&`, a redirect and a glob all mean what they mean at a
         // prompt. That is the whole contract of the key.
-        let body = self.wrapper_body(SH, key, run, env);
-        let log_path = SH.quote(&self.log_path(key).display().to_string());
-        let script = match SH {
-            // stdin from /dev/null: a command step is non-interactive by
-            // construction, and one that reads stdin should find end-of-file
-            // rather than block forever on a terminal nobody is attached to.
-            Shell::Posix => format!("exec </dev/null >>{log_path} 2>&1\n{body}"),
-            // `*>&1` merges every stream — success, error, warning, verbose,
-            // debug, information — into the one the pipe carries, the way
-            // `>>…2>&1` merges the two POSIX ones. `Out-File -Encoding utf8`
-            // rather than the plain `>>` operator: that operator's default
-            // encoding is UTF-16LE on Windows PowerShell 5.1, which the log
-            // reader on the far end of every one of these files expects to
-            // be plain UTF-8. Stdin is already null at the process level
-            // below, which this dialect has no in-script redirect for
-            // anyway.
-            Shell::PowerShell => {
-                format!(
-                    "& {{\n{body}}} *>&1 | Out-File -Append -Encoding utf8 -FilePath {log_path}\n"
-                )
-            }
-        };
+        let body = self.wrapper_body(key, run, env);
+        let log_path = crate::platform::quote(&self.log_path(key).display().to_string());
+        // stdin from /dev/null: a command step is non-interactive by
+        // construction, and one that reads stdin should find end-of-file
+        // rather than block forever on a terminal nobody is attached to.
+        let script = format!("exec </dev/null >>{log_path} 2>&1\n{body}");
 
         let spawned = spawn_wrapper(&script, cwd)?;
         crate::headless::reap_when_it_ends(spawned);
@@ -386,36 +287,14 @@ impl Runs {
     ) -> Result<String> {
         self.prepare(key)?;
 
-        let body = self.wrapper_body(SH, key, run, env);
-        let log_path = SH.quote(&self.log_path(key).display().to_string());
-        let script = match SH {
-            // stdin from /dev/null, same as the detached wrapper: a command
-            // step is non-interactive by construction. Nothing to redirect
-            // stdout or stderr to here — the whole group is piped to `tee`
-            // below instead.
-            Shell::Posix => format!("{{\nexec </dev/null\n{body}}} 2>&1 | tee -a {log_path}\n"),
-            // `*>&1` merges every stream into the success stream so the whole
-            // group can flow through the pipe, the way `2>&1` does for the
-            // detached wrapper's two POSIX streams. There is no dialect
-            // equivalent of `exec </dev/null` here, so a command run from a
-            // pane on this platform still reads the pane's own stdin — a
-            // narrower version of the gap the module doc already names for
-            // panes generally, and how a pane backend spawns one is not this
-            // module's question to answer.
-            //
-            // Not `Tee-Object -FilePath`: it has no `-Encoding` parameter
-            // before PowerShell 6, so on Windows PowerShell 5.1 it would
-            // write this file in UTF-16LE while the detached wrapper's own
-            // `Out-File -Encoding utf8` four lines up writes UTF-8 — the same
-            // key's log reading as two different encodings depending on
-            // which arm wrote it. `$_` re-emits every line so the pane still
-            // sees it, and `Add-Content -Encoding utf8` gives the file the
-            // encoding every reader of it already expects.
-            Shell::PowerShell => format!(
-                "& {{\n{body}}} *>&1 | ForEach-Object {{ $_; Add-Content -LiteralPath {log_path} -Value $_ -Encoding utf8 }}\n"
-            ),
-        };
-        Ok(script)
+        let body = self.wrapper_body(key, run, env);
+        let log_path = crate::platform::quote(&self.log_path(key).display().to_string());
+        // stdin from /dev/null, same as the detached wrapper: a command step
+        // is non-interactive by construction. Nothing to redirect stdout or
+        // stderr to here — the whole group is piped to `tee` below instead.
+        Ok(format!(
+            "{{\nexec </dev/null\n{body}}} 2>&1 | tee -a {log_path}\n"
+        ))
     }
 
     /// Wait for the wrapper's pid file to appear — the one thing that says a
@@ -458,10 +337,18 @@ impl Runs {
 
     /// End a run and everything under it. Silent about a run that is already
     /// over, which is the ordinary case.
+    ///
+    /// Signals unconditionally, including a run that has already finished.
+    /// A pid here addresses a process *group*, [`crate::headless::kill_group`]
+    /// refuses a group with nothing left in it, and reaching a group whose
+    /// leader has already exited is the reason that function exists — a
+    /// `run:` line that backgrounded a server and then returned leaves
+    /// exactly that shape behind, and it is the leader's own exit that makes
+    /// it invisible to every other check. Membership is the guard, and it is
+    /// also what makes a recycled pid safe: a reused number is only a group
+    /// again if something new leads one.
     pub fn stop(&self, key: &str) {
-        if let Some(pid) = self.read_pid(key)
-            && may_signal(cfg!(windows), self.state(key))
-        {
+        if let Some(pid) = self.read_pid(key) {
             crate::headless::kill_group(pid);
         }
         // Nowhere to report a clearing that failed, and nothing that needs it
@@ -550,52 +437,12 @@ impl Runs {
     }
 }
 
-/// Whether [`Runs::stop`] may signal the pid a run wrote down, given what
-/// that run is doing now.
-///
-/// Always, on Unix, including a run that has already finished. A pid there
-/// addresses a process *group*, [`crate::headless::kill_group`] refuses a
-/// group with nothing left in it, and reaching a group whose leader has
-/// already exited is the reason that function exists — a `run:` line that
-/// backgrounded a server and then returned leaves exactly that shape behind,
-/// and it is the leader's own exit that makes it invisible to every other
-/// check. Membership is the guard, and it is also what makes a recycled pid
-/// safe: a reused number is only a group again if something new leads one.
-///
-/// Only while it is running, on Windows, because none of that holds. A pid
-/// there is one process, and `kill_group` falls back to `taskkill /T /F` on
-/// the bare number whenever it cannot open the run's job object by name —
-/// which is every call from a later dispatch pass, since a job's name lives
-/// only as long as the process that created it. Windows also hands pids out
-/// again within seconds. So signalling a run that has already written its
-/// exit code ends whatever process now holds that number, which may be
-/// nothing to do with spoolway at all.
-///
-/// The platform is an argument rather than a `#[cfg]`, the same way
-/// [`Runs::wrapper_body`] takes its dialect: both answers are then checked
-/// from a single build, on whichever machine runs the suite. The caller
-/// passes `cfg!(windows)`, which is the same question
-/// [`crate::headless::kill_group`]'s own fork is compiled against.
-///
-/// What is lost on Windows is the backgrounded-server case above. Leaving a
-/// process running is the smaller harm of the two, and the platform gives
-/// nothing to tell the two situations apart.
-fn may_signal(windows: bool, state: RunState) -> bool {
-    !windows || state == RunState::Running
-}
-
 /// Spawn a wrapper script detached, so it outlives the pass that started it.
 ///
-/// `libc::setsid()`, called in the child between fork and exec, on Unix —
-/// that is what `setsid(1)` itself does, and calling the syscall directly
-/// means this no longer depends on that binary being on PATH, which macOS
-/// does not ship and Homebrew's keg-only `util-linux` does not fix. On
-/// Windows there is no `setsid`: the process group and the named job
-/// [`crate::headless::spawn_detached`] puts it in are that platform's answer
-/// to the same problem, and `is_running` off `crate::lock` is its answer to
-/// `/proc` — both already exist for [`crate::headless::alive`] to read
-/// liveness through.
-#[cfg(unix)]
+/// `libc::setsid()`, called in the child between fork and exec — that is
+/// what `setsid(1)` itself does, and calling the syscall directly means this
+/// does not depend on that binary being on PATH, which macOS does not ship
+/// and Homebrew's keg-only `util-linux` does not fix.
 fn spawn_wrapper(script: &str, cwd: &Path) -> Result<std::process::Child> {
     use std::os::unix::process::CommandExt;
 
@@ -619,48 +466,22 @@ fn spawn_wrapper(script: &str, cwd: &Path) -> Result<std::process::Child> {
         .context("could not start a command step")
 }
 
-/// See the Unix arm's doc — same contract, this platform's mechanism.
-#[cfg(windows)]
-fn spawn_wrapper(script: &str, cwd: &Path) -> Result<std::process::Child> {
-    let mut command = crate::platform::shell_command(script);
-    command
-        .current_dir(cwd)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    crate::headless::spawn_detached(command).context("could not start a command step")
-}
-
-// Every test below starts a real run: `sh -c` under `libc::setsid()` on
-// Unix, a detached PowerShell wrapper in a named job on Windows — see
-// `spawn_wrapper` and `Runs::wrapper_body`. Both are exercised here, each on
-// its own platform.
+// Every test below starts a real run: `sh -c` under `libc::setsid()` — see
+// `spawn_wrapper` and `Runs::wrapper_body`.
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A `run:` line that writes `msg` to stderr and exits with `code` — sh's
-    /// `>&2` redirect has no PowerShell equivalent, so this picks the
-    /// dialect's own way to reach the same stream.
+    /// A `run:` line that writes `msg` to stderr and exits with `code`.
     fn write_stderr_then_exit(msg: &str, code: i32) -> String {
-        if cfg!(windows) {
-            format!("Write-Error '{msg}'; exit {code}")
-        } else {
-            format!("echo {msg} >&2; exit {code}")
-        }
+        format!("echo {msg} >&2; exit {code}")
     }
 
     /// A `run:` line that takes the `both` branch of a conditional and never
     /// reaches `neither` — proof the whole line reached the shell as syntax,
-    /// not as an argv. `&&`/`||` are Windows PowerShell 5.1's own gap, not
-    /// this dialect's: pwsh has them, but `if`/`else` needs neither and is
-    /// what every PowerShell ships.
+    /// not as an argv.
     fn conditional_taking_the_first_branch() -> String {
-        if cfg!(windows) {
-            "if ($true) { Write-Output both } else { Write-Output neither }".to_string()
-        } else {
-            "true && echo both || echo neither".to_string()
-        }
+        "true && echo both || echo neither".to_string()
     }
 
     struct Fixture {
@@ -906,14 +727,7 @@ mod tests {
             ("SPOOLWAY_TASK".to_string(), "add-endpoint".to_string()),
             ("SPOOLWAY_STEP".to_string(), "build".to_string()),
         ]);
-        // An environment variable is not a plain shell variable in
-        // PowerShell — it lives under the `env:` drive — so the two dialects
-        // read it back differently.
-        let echo_env = if cfg!(windows) {
-            r#"Write-Output "TASK=$env:SPOOLWAY_TASK STEP=$env:SPOOLWAY_STEP""#
-        } else {
-            r#"echo "TASK=$SPOOLWAY_TASK STEP=$SPOOLWAY_STEP""#
-        };
+        let echo_env = r#"echo "TASK=$SPOOLWAY_TASK STEP=$SPOOLWAY_STEP""#;
         f.runs.start("build-demo", echo_env, &f.root, &env).unwrap();
         assert_eq!(f.settle("build-demo"), RunState::Exited(0));
         assert!(
@@ -955,14 +769,13 @@ mod tests {
         );
         // Wait for the first run's own line to land before rolling it aside.
         // `settle` waits on the `.exit` marker the wrapper's exec group
-        // writes, and the stage that actually writes the log sits downstream
-        // of a pipe from that group — `tee` on Unix, `Out-File` under
-        // PowerShell — so the line can still be in flight here, and the
-        // assertion below is about that line being in the *kept* log.
-        // The handle that stage is still holding is a separate problem, and
-        // one this test deliberately leaves to the product: re-running the
-        // instant a step exits is what a lane really does, and
-        // [`Runs::roll_log_aside`] is what has to survive it.
+        // writes, which the trap fires before the shell's own redirect onto
+        // the log is necessarily flushed and closed, so the line can still be
+        // in flight here, and the assertion below is about that line being
+        // in the *kept* log. The handle that redirect is still holding is a
+        // separate problem, and one this test deliberately leaves to the
+        // product: re-running the instant a step exits is what a lane really
+        // does, and [`Runs::roll_log_aside`] is what has to survive it.
         f.log_containing("build-demo", "first-run-said-this");
         f.runs.forget("build-demo").unwrap();
 
@@ -1043,21 +856,39 @@ mod tests {
         assert_eq!(f.runs.state("bench-demo"), RunState::Fresh);
     }
 
-    /// Both arms of [`may_signal`], from whichever platform runs the suite —
-    /// read its doc for why the two differ, and for what Windows gives up.
+    /// A `run:` line that backgrounds a server and returns leaves that server
+    /// running in the group under a leader that has already exited — exactly
+    /// the shape [`crate::headless::kill_group`]'s membership check exists to
+    /// reach. `Runs::stop` must signal the group whether or not its own
+    /// wrapper is still the one running, so a person who calls `stop` after
+    /// the run has already finished still takes the backgrounded child down
+    /// with it.
     #[test]
-    fn a_finished_runs_pid_is_only_unixs_to_signal() {
-        for state in [
-            RunState::Exited(0),
-            RunState::Exited(7),
-            RunState::Interrupted,
-            RunState::Fresh,
-        ] {
-            assert!(may_signal(false, state), "unix, {state:?}");
-            assert!(!may_signal(true, state), "windows, {state:?}");
-        }
-        assert!(may_signal(false, RunState::Running));
-        assert!(may_signal(true, RunState::Running));
+    fn stop_reaches_a_backgrounded_child_even_after_the_run_has_finished() {
+        let f = Fixture::new("stop-finished");
+        let child_pid_path = f.root.join("child.pid");
+        f.start(
+            "build-demo",
+            &format!("sleep 60 & echo $! >{}", child_pid_path.display()),
+        );
+        assert_eq!(f.settle("build-demo"), RunState::Exited(0));
+
+        let child_pid: u32 = std::fs::read_to_string(&child_pid_path)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(
+            crate::headless::alive(child_pid),
+            "the background child is still running"
+        );
+
+        f.runs.stop("build-demo");
+        assert!(
+            !crate::headless::alive(child_pid),
+            "stop must reach a backgrounded child even though the run's own \
+             wrapper had already exited"
+        );
     }
 
     /// A run whose process is gone without an exit code — killed, or the machine
@@ -1085,46 +916,16 @@ mod tests {
         assert_eq!(f.runs.state("bench-demo"), RunState::Interrupted);
     }
 
-    /// `wrapper_body` takes the dialect as an argument precisely so its
-    /// PowerShell arm can be checked here, on whatever platform runs the
-    /// suite — the Windows dialect otherwise has nothing exercising it on
-    /// this machine at all. Byte-exact, the way `platform`'s own shell tests
-    /// are: this text is a script, and a stray space in it is a bug.
+    /// The environment is exported before the `run:` line itself, in the
+    /// same one-line form a lane's own environment uses — see
+    /// `platform::env_export` — so the command inherits it.
     #[test]
-    fn the_powershell_wrapper_writes_the_pid_wraps_the_run_and_reports_its_exit() {
-        let f = Fixture::new("wrapper-body-ps");
-        let body = f.runs.wrapper_body(
-            Shell::PowerShell,
-            "build-demo",
-            "Write-Output built",
-            &BTreeMap::new(),
-        );
-        let pid = f.runs.pid_path("build-demo").display().to_string();
-        let exit = f.runs.exit_path("build-demo").display().to_string();
-        let child = crate::platform::encoded_command("Write-Output built\nexit $LASTEXITCODE");
-        assert_eq!(
-            body,
-            format!(
-                "Set-Content -LiteralPath '{pid}' -NoNewline -Value $PID\n\
-                 & (Get-Process -Id $PID).Path -NoProfile -NonInteractive -EncodedCommand {child}\n\
-                 $__spoolway_code = if ($null -ne $LASTEXITCODE) {{ $LASTEXITCODE }} else {{ 0 }}\n\
-                 Set-Content -LiteralPath '{exit}' -NoNewline -Value $__spoolway_code\n"
-            )
-        );
-    }
-
-    /// The environment is exported before the child engine is invoked, in the
-    /// same one-line form every other dialect uses — see
-    /// `platform::Shell::env_export` — so the `run:` line inherits it there.
-    #[test]
-    fn the_powershell_wrapper_exports_the_environment_before_the_run() {
-        let f = Fixture::new("wrapper-body-ps-env");
+    fn the_wrapper_exports_the_environment_before_the_run() {
+        let f = Fixture::new("wrapper-body-env");
         let env = BTreeMap::from([("SPOOLWAY_TASK".to_string(), "add-endpoint".to_string())]);
-        let body = f
-            .runs
-            .wrapper_body(Shell::PowerShell, "build-demo", "true", &env);
+        let body = f.runs.wrapper_body("build-demo", "true", &env);
         assert!(
-            body.contains("$env:SPOOLWAY_TASK='add-endpoint'\n& (Get-Process -Id $PID).Path"),
+            body.contains("export SPOOLWAY_TASK='add-endpoint'\ntrue\n"),
             "{body}"
         );
     }

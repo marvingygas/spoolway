@@ -23,7 +23,6 @@ program runs underneath.
 | Linux arm64 | `@spoolway/linux-arm64` | Supported |
 | macOS Apple Silicon | `@spoolway/darwin-arm64` | Supported |
 | macOS Intel | `@spoolway/darwin-x64` | Supported |
-| Windows x64 | `@spoolway/win32-x64` | Experimental, see [Windows](#windows) |
 
 From source, in a clone of this repository:
 
@@ -84,7 +83,7 @@ flowchart LR
 | `.spoolway/prompts/archivist/assets/` | The document skeletons the archivist fills. |
 | `.spoolway/templates/tasks/` | One task skeleton per shipped pipeline. |
 | `.spoolway/templates/tracking/` | The `epic.md` and `ticket.md` bodies a tracker hook renders. |
-| `.spoolway/hooks/` | `github.sh` and `jira.sh`. On native Windows, `github.ps1` and `jira.ps1`. See [`[issue_tracking]`](configuration.md#issue_tracking--a-hook-fired-on-four-task-events). |
+| `.spoolway/hooks/` | `github.sh` and `jira.sh`. See [`[issue_tracking]`](configuration.md#issue_tracking--a-hook-fired-on-four-task-events). |
 | `~/.spoolway/<label>-<id>/project.toml` | Records the id and the checkout this home belongs to. |
 | The provider's skills directory | The five pipeline skills. See [The pipeline skills](#the-pipeline-skills). |
 
@@ -282,14 +281,5 @@ The same as Linux. The headless backend reads a lane's liveness from a lock file
 
 ### Windows
 
-Experimental. It builds, the tests run, and lanes start, but it has had far less use than the
-Linux build.
-
-| Difference | What it means |
-|---|---|
-| Panes run PowerShell | spoolway types a lane's environment at the pane's prompt in PowerShell syntax. A multiplexer whose default shell is `cmd.exe` or Git Bash starts lanes with no environment. |
-| Hooks are `.ps1` | `init` writes `github.ps1` and `jira.ps1`. |
-| No headless backend | Run lanes through a multiplexer, or use WSL for the Linux build. |
-| Command steps run | A `run:` line runs as PowerShell. `handover` and `checks` work. |
-
-Under WSL you get the Linux build, including the headless backend.
+Not supported. The last release carrying a Windows binary is 0.3.x. Under WSL you get the
+Linux build, including the headless backend.

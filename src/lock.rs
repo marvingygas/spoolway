@@ -475,38 +475,6 @@ fn started_at(pid: u32) -> Option<String> {
     after_name.split_whitespace().nth(19).map(str::to_string)
 }
 
-#[cfg(windows)]
-fn started_at(pid: u32) -> Option<String> {
-    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
-    use windows_sys::Win32::System::Threading::{
-        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-    };
-
-    // SAFETY: a failed open returns null and is checked; the handle is closed
-    // on every path out, and the four FILETIMEs are owned by this frame.
-    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-    if handle.is_null() {
-        // Same reasoning as `is_running`: a process owned by another user
-        // exists but will not open. Without a start time the pid stands alone,
-        // which is the conservative answer for a lock.
-        return None;
-    }
-
-    let mut created = FILETIME::default();
-    let mut exited = FILETIME::default();
-    let mut kernel = FILETIME::default();
-    let mut user = FILETIME::default();
-    let ok = unsafe { GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user) };
-    unsafe { CloseHandle(handle) };
-
-    (ok != 0).then(|| {
-        format!(
-            "{}",
-            (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime)
-        )
-    })
-}
-
 /// No portable way to ask, so the pid stands alone — exactly as it did before.
 #[cfg(all(unix, not(target_os = "linux")))]
 fn started_at(_pid: u32) -> Option<String> {
@@ -557,63 +525,6 @@ pub(crate) fn is_running(pid: u32) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
-}
-
-/// Windows has neither `/proc` nor `kill`.
-///
-/// This used to fall through to the `kill -0` arm, where the missing binary
-/// made `.status()` an error and `unwrap_or(false)` reported *every* holder as
-/// dead. A lock that always reads stale is not a lock: two dispatchers would
-/// both take it and both drive lanes into the same worktrees, which is the
-/// concurrent-write corruption this module exists to make impossible.
-#[cfg(windows)]
-pub(crate) fn is_running(pid: u32) -> bool {
-    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, WAIT_TIMEOUT};
-    use windows_sys::Win32::System::Threading::{
-        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, WaitForSingleObject,
-    };
-
-    // One of the standard access rights every kernel object shares, and a
-    // fixed part of the Win32 ABI. Written out because windows-sys re-exports
-    // it only as a `FILE_ACCESS_RIGHTS` under `Win32::Storage::FileSystem`,
-    // and pulling in a filesystem module to name a right being asked for on a
-    // *process* would be the more confusing of the two.
-    const SYNCHRONIZE: u32 = 0x0010_0000;
-
-    // Pid 0 is the System Idle Process, never a dispatcher. Windows is
-    // inconsistent about which error `OpenProcess` reports for it, and one of
-    // the candidates is the access-denied that means "exists" below — so it is
-    // settled here rather than left to the platform. `/proc/0` does not exist,
-    // so this is also what Linux already answers.
-    if pid == 0 {
-        return false;
-    }
-
-    // SYNCHRONIZE is not optional: without it the handle opens fine and the
-    // wait below fails with WAIT_FAILED, which reads as "not running" and
-    // makes every lock look stale — the exact bug this function was written to
-    // fix, reintroduced one access right further down.
-    //
-    // SAFETY: a failed open returns null and is checked; the handle is closed
-    // on every path out.
-    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, 0, pid) };
-    if handle.is_null() {
-        // A process owned by another user exists but will not open. Reporting
-        // it as running is the conservative direction for a lock — it refuses
-        // to start a second dispatcher rather than allowing one — and it
-        // matches Linux, where `/proc/<pid>` is visible whoever owns it.
-        return unsafe { windows_sys::Win32::Foundation::GetLastError() } == ERROR_ACCESS_DENIED;
-    }
-
-    // Windows keeps a pid alive for as long as anything holds a handle to it,
-    // so an open handle does not by itself mean the process still runs. The
-    // wait distinguishes them: a live process never signals, an exited one
-    // signals immediately. `GetExitCodeProcess` would be the usual reflex and
-    // is ambiguous — a process that genuinely exits with 259 is
-    // indistinguishable from STILL_ACTIVE.
-    let alive = unsafe { WaitForSingleObject(handle, 0) } == WAIT_TIMEOUT;
-    unsafe { CloseHandle(handle) };
-    alive
 }
 
 #[cfg(test)]
