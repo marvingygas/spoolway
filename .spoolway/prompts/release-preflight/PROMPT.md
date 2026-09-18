@@ -35,14 +35,23 @@ publish anything.
    section will need.
 7. Recommend a semver bump using the runbook's rule for major zero: changed user-facing shape
    means minor, while fixes and internals alone mean patch. Name each fact that controls the choice.
-8. Check that the release workflow still describes six platform binaries, seven npm packages, the
+8. Prove the version itself before the notes gate, not after it. Readiness tested `main`, where
+   `Cargo.toml` still holds the *old* version, so nothing it ran has seen the number you just
+   recommended. In a scratch copy of the checkout, write that version into `Cargo.toml` and
+   `Cargo.lock`, run the runbook's local gate and `scripts/e2e/run.sh --suite upgrade`, and then
+   throw the copy away. Anything that only goes red once the version moves — a test coupled to
+   the manifest, a suite demanding `scripts/e2e/fixtures/<version>/` — is a `fail` for the fixer
+   now. Reaching `publish` before it is found costs a full lap and an owner's merge; three of the
+   four releases before this one paid it. Report the commands, the exit codes and the version you
+   ran them at. Never leave the bump behind in the real checkout.
+9. Check that the release workflow still describes six platform binaries, seven npm packages, the
    dry-run rehearsal, tag/version agreement, provenance, and creation of the GitHub release. Confirm
    its `notes` job still extracts the tagged changelog section and that the release is still created
    with `--notes-file` rather than generated prose. Rehearsal must extract the section too.
    Confirm release calls the shared verification workflow with the nightly tier and tests enabled,
    every checkout uses the run's SHA, and both npm publication and GitHub release creation depend
    on successful verification and are disabled in rehearsal. Report drift instead of editing it.
-9. Give the main commit, readiness run id, current version, previous tag, proposed version and reason, categorized
+10. Give the main commit, readiness run id, current version, previous tag, proposed version and reason, categorized
    changes with pull-request numbers, breaking changes and migrations, the changelog contract
    findings from step 6, and all local and hosted verification results with
    their SHAs. If this is a return from publishing because main moved, say exactly what changed
@@ -51,7 +60,9 @@ publish anything.
 
 ## Never
 
-- Never edit a version, commit, push, tag, dispatch a workflow, publish a package, or create a release.
+- Never edit a version, commit, push, tag, dispatch a workflow, publish a package, or create a
+  release. The throwaway copy step 8 bumps is the one exception, and it is an exception only
+  because nothing in it is ever committed, pushed or left on disk.
 - Never write, edit, or reorder a `CHANGELOG.md` section; you report on the record, the notes lane
   drafts it, and the publisher commits it.
 - Never let a missing or archived task file stand in for the diff and the merged pull requests.

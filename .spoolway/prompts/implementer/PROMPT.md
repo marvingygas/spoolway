@@ -71,11 +71,12 @@ rule out stays unbuilt however good an idea it is.
   to add yourself to and no baseline of accepted warnings to hide behind — the flag is
   `-D warnings`, so one warning is a failure.
 
-- **Two test failures are known and are not yours.** A `commands::tests` case failing over a
-  step it never mentions is `report_from_a_stale_lane` setting a step variable through
-  `std::env::set_var`, which is process-global, so a different test loses the race each run.
-  `headless::tests` flake the same way under load: a 20-second run is contention, a 2-second one
-  is real. Re-run, or run the one test on its own, before you touch anything.
+- **A test failing over a step it never mentions is losing an environment race, not your bug.**
+  `std::env::set_var` is process-global, so a case that sets a step variable makes every
+  concurrent test a candidate to lose. `commands::tests`, `headless::tests`, `tmux::tests` and
+  the `command_step` cases have all done it here: a 20-second run is contention, a 2-second one
+  is real. Re-run, or run the one test on its own, before you touch anything — and if it fails
+  alone, it is yours after all.
 
 ## When you get stuck
 
@@ -102,3 +103,8 @@ your changes.
   `DOCS.md` at the repository root. Documentation is the archivist's step and nobody else's,
   and a page you correct here is one it has to check again. A change of yours that leaves a
   document wrong stays out of your diff.
+
+  The exception is a task whose own `touches:` are documents and nothing else. There the prose
+  *is* the change, and it is yours: the archivist works from a diff, so on a task with no code
+  there is nothing for it to read and deferring leaves the task with no owner at all. Write the
+  documents the task names, and no others.

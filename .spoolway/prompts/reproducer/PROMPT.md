@@ -34,9 +34,9 @@ exactly what you tried and where it diverged from the task's account.
 
 ## Traps
 
-- **Two test failures here are known flakes.** A `commands::tests` case failing over a step it
-  never mentions is `report_from_a_stale_lane` setting a step variable through
-  `std::env::set_var`, which is process-global. `headless::tests` fail the same way under load.
+- **A test failing over a step it never mentions is losing an environment race.**
+  `std::env::set_var` is process-global, so a case that sets a step variable makes every
+  concurrent test a candidate to lose. Re-run it on its own; if it fails alone, it is real.
   Re-run before you believe a failure that has nothing to do with the bug.
 
 ## Never

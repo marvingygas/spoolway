@@ -25,7 +25,9 @@ You review one task's diff and deliver a verdict. You fix nothing.
 - Prose under `docs/`, `README.md` or `DOCS.md` left wrong by this change is a finding that does
   not hold up this change. The `document` step runs before handover and its whole job is those
   files, so it will not survive into main. Name the file and the sentence so that step has it.
-  Comments inside `src/` are not covered by that step and do hold it up.
+  Comments inside `src/` are not covered by that step and do hold it up. On a task whose own
+  `touches:` are documents and nothing else, the documents are the change: judge them as you
+  would any other diff, and a wrong sentence there does hold it up.
 - Never invent a requirement the task did not ask for. Scope creep in a review costs as much as
   scope creep in an implementation.
 
@@ -79,11 +81,6 @@ installation under `.spoolway/`. The rule is directional, not merely prohibitive
   under `assets/`. A change that edited the right *kind* of file in the wrong tree is a finding
   even though it looks correct in isolation.
 - The two never sync. A change that "helpfully" copies one to the other is a finding.
-
-### Release
-
-This project is deliberately unreleased: no npm publish, no tag, no version bump, and `origin`
-is private. A change adding any of those is a finding whatever the task said.
 
 ### Style
 

@@ -85,11 +85,12 @@ with no such test is not met.
 - **The tree is kept clippy-clean, so any warning you see is your own.** There is no allow list
   and no baseline of accepted warnings — the flag is `-D warnings`, so one warning is a failure.
 
-- **Two test failures are known and are not yours.** A `commands::tests` case failing over a
-  step it never mentions is `report_from_a_stale_lane` setting a step variable through
-  `std::env::set_var`, which is process-global, so a different test loses the race each run.
-  `headless::tests` flake the same way under load: a 20-second run is contention, a 2-second one
-  is real. Re-run, or run the one test on its own, before you touch anything.
+- **A test failing over a step it never mentions is losing an environment race, not your bug.**
+  `std::env::set_var` is process-global, so a case that sets a step variable makes every
+  concurrent test a candidate to lose. `commands::tests`, `headless::tests`, `tmux::tests` and
+  the `command_step` cases have all done it here: a 20-second run is contention, a 2-second one
+  is real. Re-run, or run the one test on its own, before you touch anything — and if it fails
+  alone, it is yours after all.
 
 - **Some behaviour has no cheap unit test, and forcing one is worse than saying so.** Where the
   honest test is an end-to-end one, write it there and name which criterion it covers. Where no

@@ -32,11 +32,18 @@ an edit parses; reach for it rarely, and never for the full tier.
    asserted there, assert it there and add no suite.
 4. **When you are sent back here by `suite`, diagnose before you touch.** The command wrote
    everything it did to `.spoolway/commands/<task> · suite.log`, and the failure is in there.
-   Which of the two it is decides everything:
+   Which of the three it is decides everything:
    - **The suite is stale** — it asserts what the system used to do, and this task deliberately
      changed it. Update the assertion to the new truth.
    - **The code is wrong** — the suite asks for something the task promised and did not deliver.
      Fix the code. You may; this is not somebody else's step to defer to.
+   - **Neither — the gate is red for something your diff never touched**, a pre-existing `cargo
+     fmt` drift or a missing tool on the machine. Clear it anyway. Being outside your `touches:`
+     makes it nobody's, not somebody else's: the gate leads with `cargo fmt --check`, so the task
+     behind you and every other task on this pipeline stop at the same line until one lane fixes
+     it. Put the repair in its own commit, name the file and say why it sits outside the task's
+     scope, and carry on. Do not block, and do not revert it and hand the same wall to the next
+     lap — four tasks in one day blocked on the same two whitespace re-wraps.
 5. **Say what you added or updated, and why it needed a suite** rather than a unit test.
 
 ## The upgrade suite
