@@ -37,8 +37,8 @@
 #                                        Absent: the task stays put.
 #   on_fail           <step id>          Where a failure goes.
 #                     blocked <default>  The task parks for a person.
-#   loop              <n>                Laps allowed, per arriving step.
-#                     <step>: <n>        The same limit, one arriving step at a time.
+#   loop              <n>                Laps allowed, per step sent back to.
+#                     <step>: <n>        The same limit, one destination at a time.
 #                                        Absent: unbounded.
 #   on_loop_max       <step id>          Where a spent loop sends the task.
 #                     on_pass <default>  It carries on, findings and all.
@@ -105,7 +105,7 @@ steps:
     effort: ""
     session: true
     loop:
-      review: 2
+      fix: 2
     on_pass: document
     on_fail: fix
 

@@ -131,11 +131,12 @@ pub struct Row {
     /// thing `queue conflicts` reasons from.
     pub parallel: bool,
     pub stage: String,
-    /// How many laps of this route the task has taken against the route's
-    /// own budget, `(laps, limit)` — read off the step it is on now and the
-    /// route named in `arrived_from`, the same pair `apply_loop_budget`
-    /// compares before it lets a lap through. `None` wherever the step
-    /// declares no `loop:` for that route, which draws as a bare step id.
+    /// How many times the step a task is on has sent it back, against that
+    /// route's own budget, `(laps, limit)` — read off the step it is on now
+    /// and the routes that step's own `loop:` bounds, the same pair
+    /// `apply_loop_budget` compares before it lets a move through. `None`
+    /// wherever the step bounds no route it can reach, which draws as a bare
+    /// step id; the furthest-spent route wins where a step bounds two.
     /// Shown on the STEP column from the first arrival: unlike the old NEXT
     /// suffix this replaced, there is no floor here, since a step's own row
     /// is where a reader would look to ask "is this looping" in the first
@@ -1353,7 +1354,7 @@ pub(crate) fn carry_to_pending(repo: &Repo, task: &crate::task::Task) -> Result<
 /// Goes through [`crate::task::Task::set_stage_unbanked`] rather than
 /// `set_stage`: the task never left `implement` (or wherever it was), so
 /// arriving at `paused` and leaving it again are not laps of anything, and
-/// counting them would let a `loop:` budget see two arrivals nothing routed.
+/// counting them would let a `loop:` budget see two moves nothing routed.
 ///
 /// `pub(crate)`, and taking `message` rather than hard-coding one, so
 /// `dispatch::Dispatcher` can write the same two fields the same way for a
@@ -2006,17 +2007,24 @@ fn build_rows(
     for task in tasks {
         let pipeline = pipelines.for_task(task)?;
         let step = pipeline.step(task.stage());
-        // `(N/M)`: how many laps of *this* route the task has taken against
-        // the route's own budget, read off the step it is on right now and
-        // the route it arrived by — the same pair `apply_loop_budget`
-        // compares before it lets a lap through. Computed once, ahead of the
-        // match below, because it is a fact about the step a task sits on
-        // and not about any one of the states that match branches out into.
+        // `(N/M)`: how many times this step has sent the task back, against
+        // that route's own budget — read off the step it is on right now and
+        // the routes out of it that its own `loop:` bounds, the same pair
+        // `apply_loop_budget` compares before it lets a move through. Not
+        // `arrived_from`: a budget is spent by the step making the move, so
+        // the route it arrived *on* is somebody else's counter. Computed
+        // once, ahead of the match below, because it is a fact about the step
+        // a task sits on and not about any one of the states that match
+        // branches out into.
         let step_loop = step.and_then(|step| {
-            task.front.arrived_from.as_deref().and_then(|from| {
-                step.round_limit(from)
-                    .map(|limit| (task.rounds_via(from, &step.id), limit))
-            })
+            pipeline
+                .destinations(step)
+                .into_iter()
+                .filter_map(|to| {
+                    step.round_limit(to)
+                        .map(|limit| (task.rounds_via(&step.id, to), limit))
+                })
+                .max_by_key(|(laps, _)| *laps)
         });
         let lane = crate::mux::lane_name(task.stage(), task.id());
         // By name alone: a task's lane runs in its own worktree, so the
@@ -3008,16 +3016,16 @@ mod tests {
         ship.set_stage(crate::pipeline::PAUSED, None);
         ship.save().unwrap();
 
-        // A second lap of `implement -> review`: the shipped default
-        // pipeline bounds that route at 2, so the third round would spend
-        // it — this is the last lap before the route escalates.
+        // A second lap of `review -> implement`: the shipped default
+        // pipeline bounds `review`'s own move back at 2, so a third failure
+        // would spend it — this is the last lap before the route escalates.
         add(&repo, "spinner", &[], Some("review"));
         let mut spinner = repo.task("spinner").unwrap();
         spinner.front.arrived_from = Some("implement".into());
         spinner
             .front
             .rounds
-            .insert(crate::task::route_key("implement", "review"), 2);
+            .insert(crate::task::route_key("review", "implement"), 2);
         spinner.save().unwrap();
 
         let rows = rows(&repo, &pipelines).unwrap();
@@ -3155,17 +3163,17 @@ mod tests {
         );
     }
 
-    /// The STEP counter shows from the first arrival — there is no floor any
-    /// more, unlike the NEXT suffix it replaced — but only where the step
-    /// itself declares a `loop:` for the route named in `arrived_from`. A
-    /// route nothing bounds has no ceiling to read a lap count against,
+    /// The STEP counter shows from the first move back — there is no floor
+    /// any more, unlike the NEXT suffix it replaced — but only where the step
+    /// the task is on declares a `loop:` for a route out of itself. A step
+    /// that bounds nothing has no ceiling to read a lap count against,
     /// however many rounds are on file, so it stays a bare step id.
     #[test]
-    fn the_step_counter_shows_from_first_arrival_and_is_omitted_on_an_unbounded_route() {
+    fn the_step_counter_shows_from_the_first_move_back_and_is_omitted_where_nothing_is_bounded() {
         let repo = fixture("loop-suffix-floor");
         let pipelines = Pipelines::builtin();
 
-        // One lap of a bounded route: shown, unlike the old NEXT suffix,
+        // One move down a bounded route: shown, unlike the old NEXT suffix,
         // which said nothing below two laps.
         add(&repo, "first-lap", &[], Some("review"));
         let mut first_lap = repo.task("first-lap").unwrap();
@@ -3173,13 +3181,12 @@ mod tests {
         first_lap
             .front
             .rounds
-            .insert(crate::task::route_key("implement", "review"), 1);
+            .insert(crate::task::route_key("review", "implement"), 1);
         first_lap.save().unwrap();
 
-        // Arrived at `implement` from `review` — a route the shipped
-        // pipeline's `implement` step names no `loop:` limit for — so there
-        // is no budget to read a lap count against, however many rounds are
-        // on file.
+        // Sitting on `implement`, which the shipped pipeline gives no `loop:`
+        // of its own — so there is no budget to read a count against, however
+        // many rounds are on file for the routes either side of it.
         add(&repo, "unbounded", &[], Some("implement"));
         let mut unbounded = repo.task("unbounded").unwrap();
         unbounded.front.arrived_from = Some("review".into());

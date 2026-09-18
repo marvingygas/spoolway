@@ -37,8 +37,8 @@
 #                                        Absent: the task stays put.
 #   on_fail           <step id>          Where a failure goes.
 #                     blocked <default>  The task parks for a person.
-#   loop              <n>                Laps allowed, per arriving step.
-#                     <step>: <n>        The same limit, one arriving step at a time.
+#   loop              <n>                Laps allowed, per step sent back to.
+#                     <step>: <n>        The same limit, one destination at a time.
 #                                        Absent: unbounded.
 #   on_loop_max       <step id>          Where a spent loop sends the task.
 #                     on_pass <default>  It carries on, findings and all.
@@ -92,16 +92,15 @@ steps:
     prompt: e2e
     model: claude-sonnet-5
     effort: medium
-    loop:
-      test: 2
-      suite: 2
-    on_loop_max: blocked
     on_pass: test
 
   - id: test
     description: The mechanical verdict on this change, as an exit code.
     run: scripts/gate.sh
     timeout: 45m
+    loop:
+      e2e: 2
+    on_loop_max: blocked
     on_pass: suite
     on_fail: e2e
 
@@ -110,6 +109,9 @@ steps:
     last: true
     run: scripts/e2e-pr.sh
     timeout: 45m
+    loop:
+      e2e: 2
+    on_loop_max: blocked
     on_pass: document
     on_fail: e2e
 

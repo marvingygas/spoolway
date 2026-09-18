@@ -441,8 +441,8 @@ pub struct Step {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_fail: Option<String>,
 
-    /// Most times a task may arrive at this step *from a given step* — one lap
-    /// of the loop — before it is escalated instead of going round again.
+    /// Most times this step may send a task on *to a given step* — one lap of
+    /// the loop — before it is escalated instead of going round again.
     ///
     /// A round is a lap, not a conversation. Counting conversations charged for
     /// the expensive event, a cold start, but a loop that keeps its session
@@ -615,25 +615,34 @@ pub struct Step {
     pub(crate) blocked_on_write: Vec<String>,
 }
 
-/// How many laps of a loop a step allows, by the route the task arrives on.
+/// How many times a step may send a task backwards, by the route it sends it
+/// on.
+///
+/// Keyed by where the task is sent, not by where it arrived from: a budget is
+/// spent by the step making the move, so `loop: { implement: 2 }` on `review`
+/// reads as "`review` may send this back to `implement` twice". The third
+/// failure at `review` takes [`Step::loop_exit`] instead. Bounding arrivals
+/// was the other way round and cost the pipeline a step: a *passing*
+/// `implement` was redirected before `review` ever saw the work it had just
+/// fixed.
 ///
 /// The two forms say the same kind of thing at different resolutions, so a
 /// pipeline that wants one number writes one number:
 ///
 /// ```yaml
-/// loop: 3      # three laps on every route in
+/// loop: 3      # three moves on every route out
 /// loop:        # or one route at a time
-///   review: 3
-///   e2e: 5
+///   implement: 3
+///   fix: 5
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Loop {
-    /// One limit, applied to each route in separately. Zero means no limit,
+    /// One limit, applied to each route out separately. Zero means no limit,
     /// which is what a step that says nothing gets.
     Every(u32),
-    /// A limit per step the task arrives from. A route not named here is
-    /// unbounded — and a name that routes nowhere near this step is refused by
+    /// A limit per step the task is sent to. A route not named here is
+    /// unbounded — and a name this step never routes to is refused by
     /// [`Pipeline::validate`], so a typo cannot quietly unbound a loop.
     PerRoute(BTreeMap<String, u32>),
 }
@@ -645,12 +654,12 @@ impl Default for Loop {
 }
 
 impl Loop {
-    /// The limit on arriving from `from`, or `None` for no limit.
-    pub fn limit(&self, from: &str) -> Option<u32> {
+    /// The limit on sending a task to `to`, or `None` for no limit.
+    pub fn limit(&self, to: &str) -> Option<u32> {
         match self {
             Loop::Every(0) => None,
             Loop::Every(n) => Some(*n),
-            Loop::PerRoute(by_route) => by_route.get(from).copied().filter(|n| *n > 0),
+            Loop::PerRoute(by_route) => by_route.get(to).copied().filter(|n| *n > 0),
         }
     }
 
@@ -670,7 +679,7 @@ impl Loop {
             Loop::PerRoute(by_route) => by_route
                 .iter()
                 .filter(|(_, n)| **n > 0)
-                .map(|(from, n)| format!("{from}:{n}"))
+                .map(|(to, n)| format!("{to}:{n}"))
                 .collect::<Vec<_>>()
                 .join(","),
         }
@@ -692,8 +701,8 @@ fn deserialize_retired_max_new_sessions<'de, D: serde::Deserializer<'de>>(
 ) -> std::result::Result<Option<serde_norway::Value>, D::Error> {
     let _ = serde_norway::Value::deserialize(d)?;
     Err(serde::de::Error::custom(
-        "`max_new_sessions:` is now `loop:` — it bounds how many times a task may arrive at \
-         this step from a given one, a lap of the loop, not how many fresh conversations that \
+        "`max_new_sessions:` is now `loop:` — it bounds how many times this step may send a \
+         task on to a given one, a lap of the loop, not how many fresh conversations that \
          cost. A step with `session: true` may re-prompt a live session as often as it needs; \
          what may bound a conversation's own size is `session_reuse_ctx` on the agent \
          profile, entirely separate from this. Rename the key, and consider raising the \
@@ -709,8 +718,8 @@ fn deserialize_max_rounds<'de, D: serde::Deserializer<'de>>(
 ) -> std::result::Result<Option<serde_norway::Value>, D::Error> {
     let _ = serde_norway::Value::deserialize(d)?;
     Err(serde::de::Error::custom(
-        "`max_rounds:` is now `loop:` — it bounds how many times a task may arrive at this \
-         step from a given one. Rename the key, and consider raising the number: what it \
+        "`max_rounds:` is now `loop:` — it bounds how many times this step may send a task \
+         on to a given one. Rename the key, and consider raising the number: what it \
          counts has changed twice since",
     ))
 }
@@ -823,10 +832,12 @@ impl Step {
         self.prompt.as_deref().unwrap_or(&self.id)
     }
 
-    /// How many times a task may arrive here from `from` before escalating —
-    /// or `None` if that route is unbounded.
-    pub fn round_limit(&self, from: &str) -> Option<u32> {
-        self.r#loop.limit(from)
+    /// How many times this step may send a task on to `to` before escalating
+    /// instead — or `None` if that route is unbounded. Counted against
+    /// [`crate::task::Task::rounds_via`] for the same `self.id -> to` route,
+    /// which is where `set_stage` banks a move the moment it is made.
+    pub fn round_limit(&self, to: &str) -> Option<u32> {
+        self.r#loop.limit(to)
     }
 
     /// Where a spent loop sends a task from this step: `on_loop_max` if the
@@ -1356,16 +1367,16 @@ impl Pipeline {
             }
         }
 
-        // A `loop:` map names the steps a task can arrive from, so a name that
-        // routes nowhere near this step is a typo — and a typo here reads as a
-        // bounded loop while bounding nothing.
+        // A `loop:` map names the steps this one sends a task to, so a name it
+        // never routes to is a typo — and a typo here reads as a bounded loop
+        // while bounding nothing.
         for step in &self.steps {
             if let Loop::PerRoute(by_route) = &step.r#loop {
-                for from in by_route.keys() {
-                    if !self.routes_to(from, &step.id) {
+                for to in by_route.keys() {
+                    if !self.routes_to(&step.id, to) {
                         bail!(
-                            "step `{}` sets `loop` for arrivals from `{from}`, but `{from}` \
-                             never routes to it",
+                            "step `{}` sets `loop` for moves to `{to}`, but it never routes \
+                             to `{to}`",
                             step.id
                         );
                     }
@@ -1510,6 +1521,12 @@ impl Pipeline {
     /// be acyclic. A bounded route whose exit re-enters the very cycle it was
     /// meant to break bounds nothing — the task just goes round again, however
     /// it got there.
+    ///
+    /// A route is bounded by the step it *leaves*, not the one it reaches:
+    /// `loop: { implement: 2 }` on `review` bounds `review → implement`, and
+    /// `review`'s own `loop_exit()` is where that budget sends the task. So
+    /// the edge this walk redirects is the one the budget actually stops
+    /// being taken — see [`Loop`].
     fn check_bounded_loops(&self) -> Result<()> {
         // Grey while on the current path, black once explored. A route back to
         // something grey closes a cycle, and the path holds its steps.
@@ -1520,10 +1537,11 @@ impl Pipeline {
             if let Some(cycle) = self.find_unbounded_cycle(&step.id, &mut state, &mut path) {
                 let suggestion = self
                     .suggest_loop_step(&cycle)
-                    .map(|id| {
+                    .map(|(id, back)| {
                         format!(
-                            " Move `loop:` to `{id}` — what follows `{id}` is `{}`, which \
-                             leaves the loop.",
+                            " Move `loop:` to `{id}`, keyed on `{back}` — that is the move \
+                             `{id}` makes back into the loop, and what follows `{id}` is \
+                             `{}`, which leaves it.",
                             self.step(id).map(Step::loop_exit).unwrap_or(BLOCKED)
                         )
                     })
@@ -1569,8 +1587,7 @@ impl Pipeline {
         path.push(&step.id);
 
         for next in self.destinations(step) {
-            let mut redirects: Vec<&str> = Vec::new();
-            if let Some(cycle) = self.walk_edge(&step.id, next, state, path, &mut redirects) {
+            if let Some(cycle) = self.walk_edge(&step.id, next, state, path) {
                 return Some(cycle);
             }
         }
@@ -1580,50 +1597,43 @@ impl Pipeline {
         None
     }
 
-    /// Walk one edge, `from` → `next`, in the bounded-loop check: if `next`
-    /// escalates on arrivals from `from`, that edge cannot be what holds a
-    /// loop open, so the walk is redirected to `next`'s exit instead of
-    /// following the route as an ordinary one — and the exit is walked the
-    /// same way in turn, since a chain of spent budgets ending back inside
-    /// the loop is exactly as open as one link of it would be.
+    /// Walk one edge, `from` → `next`, in the bounded-loop check: once `from`
+    /// has spent its budget for that move it stops making it, so the edge
+    /// cannot be what holds a loop open and the walk follows `from`'s own exit
+    /// instead of the route as written.
     ///
-    /// `redirects` is this chain's own history, distinct from `path`: a
-    /// redirect never visits `next` the way an ordinary route would, so it is
-    /// never pushed onto `path` or coloured — and without some other memory,
-    /// a ring of steps that only ever escalate into one another would recurse
-    /// forever rather than being reported as the loop that it is.
+    /// Exactly one redirect, never a chain, because that is what
+    /// [`crate::commands::apply_loop_budget`] does — it returns `loop_exit()`
+    /// without asking the budget a second question, so a task really does
+    /// arrive there. The exit is therefore walked as an ordinary arrival, and
+    /// `next` is not walked at all: the task never reaches it, so colouring it
+    /// here would mark a step visited on a route nothing takes.
     ///
-    /// A separate function from [`Pipeline::find_unbounded_cycle`] because a
-    /// redirected exit is evaluated as *its own* edge, out of `next` rather
-    /// than out of `from` — `next`'s budget answers for `next`, not for
-    /// whoever happened to route into it — and re-entering
-    /// `find_unbounded_cycle` directly would check the wrong route, missing
-    /// a bounded step chained right behind an unbounded-looking exit.
+    /// An exit that *is* `next` bounds nothing — the task lands there either
+    /// way — so that edge falls through and is walked as the ordinary route it
+    /// has turned out to be, which is how a budget pointed back at the very
+    /// move it refuses gets reported as the open loop it leaves behind.
     fn walk_edge<'a>(
         &'a self,
         from: &'a str,
         next: &'a str,
         state: &mut BTreeMap<&'a str, u8>,
         path: &mut Vec<&'a str>,
-        redirects: &mut Vec<&'a str>,
     ) -> Option<Vec<&'a str>> {
-        if let Some(target) = self.step(next)
-            && target.round_limit(from).is_some()
+        if let Some(source) = self.step(from)
+            && source.round_limit(next).is_some()
         {
-            if let Some(start) = redirects.iter().position(|seen| *seen == next) {
-                let mut cycle: Vec<&str> = redirects[start..].to_vec();
-                cycle.push(next);
-                return Some(cycle);
+            let exit = source.loop_exit();
+            if exit != next {
+                return self.find_unbounded_cycle(exit, state, path);
             }
-            redirects.push(next);
-            return self.walk_edge(next, target.loop_exit(), state, path, redirects);
         }
         self.find_unbounded_cycle(next, state, path)
     }
 
-    /// A step in `cycle` to move `loop:` to instead: a member of the cycle
-    /// itself whose own `on_pass` already leaves it, rather than re-entering
-    /// it.
+    /// A step in `cycle` to move `loop:` to instead, and the route out of it
+    /// to key that `loop:` on: a member of the cycle whose own `on_pass`
+    /// already leaves it, paired with the destination that keeps it in.
     ///
     /// The graph does not know which step the author meant to ask "has this
     /// gone round too many times" — only that wherever it is now, the answer
@@ -1631,15 +1641,28 @@ impl Pipeline {
     /// exits the cycle is where a loop bound would carry the same task the
     /// same way on the round where it gives up, which is the property a
     /// bound placed anywhere else in the cycle cannot have.
-    fn suggest_loop_step<'a>(&'a self, cycle: &[&'a str]) -> Option<&'a str> {
+    ///
+    /// The key comes back with it because a budget now names where the task
+    /// is *sent*: a `loop:` on the right step keyed on the wrong route is the
+    /// same unbounded cycle with a number written beside it.
+    fn suggest_loop_step<'a>(&'a self, cycle: &[&'a str]) -> Option<(&'a str, &'a str)> {
         for step in &self.steps {
             if !cycle.contains(&step.id.as_str()) {
                 continue;
             }
-            if let Some(target) = step.on_pass.as_deref()
-                && !cycle.contains(&target)
+            let leaves = step
+                .on_pass
+                .as_deref()
+                .is_some_and(|target| !cycle.contains(&target));
+            if !leaves {
+                continue;
+            }
+            if let Some(back) = self
+                .destinations(step)
+                .into_iter()
+                .find(|next| cycle.contains(next))
             {
-                return Some(step.id.as_str());
+                return Some((step.id.as_str(), back));
             }
         }
         None
@@ -3212,9 +3235,9 @@ mod tests {
     }
 
     /// A bounded route only breaks a cycle if its exit actually leaves. One
-    /// that carries straight back inside — `fix`'s own `on_pass`, which is
-    /// `build`, is exactly where the route in came from — bounds nothing: the
-    /// task just goes round again however it got there.
+    /// that carries straight back inside bounds nothing: `fix` bounds its move
+    /// to `build`, and gives up to `build` — the very move it just refused —
+    /// so the task goes round again however it got there.
     #[test]
     fn rejects_a_bounded_route_whose_exit_re_enters_the_loop() {
         let err = parse(
@@ -3229,17 +3252,18 @@ mod tests {
         );
     }
 
-    /// The plan's own canonical mistake: the loop is on `fix`, which counts
-    /// arrivals from `review` but always exits through `build` — still inside
-    /// — so the walk never even names `fix`, only the closed ring behind it.
-    /// The fix is to move `loop:` to `review`, the one member of that ring
-    /// whose own `on_pass` already leaves it, and the message has to say so.
+    /// The plan's own canonical mistake: the loop is on `fix`, which bounds
+    /// the one move `fix` makes and then gives up straight back into it — its
+    /// exit *is* `build` — so the walk never even names `fix`, only the closed
+    /// ring behind it. The fix is to move `loop:` to `review`, the one member
+    /// of that ring whose own `on_pass` already leaves it, keyed on the move
+    /// that keeps it in — and the message has to say both.
     #[test]
     fn a_refused_loop_names_the_cycle_member_whose_own_pass_leaves_it() {
         let err = parse(
             "steps:\n  \
              - id: review\n    agent: pi\n    on_pass: checkpoint\n    on_fail: fix\n  \
-             - id: fix\n    agent: pi\n    loop:\n      review: 3\n    on_pass: build\n    \
+             - id: fix\n    agent: pi\n    loop:\n      build: 3\n    on_pass: build\n    \
              on_fail: blocked\n  \
              - id: build\n    agent: pi\n    on_pass: verify\n    on_fail: blocked\n  \
              - id: verify\n    agent: pi\n    on_pass: review\n    on_fail: blocked\n  \
@@ -3252,8 +3276,9 @@ mod tests {
             "{message}"
         );
         assert!(
-            message.contains("Move `loop:` to `review`"),
-            "the only ring member whose own pass leaves is `review`: {message}"
+            message.contains("Move `loop:` to `review`, keyed on `fix`"),
+            "the only ring member whose own pass leaves is `review`, and `fix` is the move \
+             that keeps it in: {message}"
         );
         assert!(
             message.contains("what follows `review` is `checkpoint`"),
@@ -3263,14 +3288,19 @@ mod tests {
 
     /// A limit for a route that does not exist bounds nothing while looking
     /// like it bounds something, so the loop check would pass and the loop
-    /// would still be open.
+    /// would still be open. `b` never sends a task to `z` — only `a` does —
+    /// so a budget `b` keeps for `z` is a typo with a number beside it.
     #[test]
     fn rejects_a_loop_map_naming_a_step_that_routes_elsewhere() {
         let err = parse(
-            "steps:\n  - id: a\n    agent: pi\n    on_pass: z\n    on_fail: b\n  - id: b\n    agent: pi\n    loop:\n      z: 2\n    on_pass: z\n    on_fail: a\n  - id: z\n    end: true\n",
+            "steps:\n  - id: a\n    agent: pi\n    on_pass: z\n    on_fail: b\n  - id: b\n    agent: pi\n    loop:\n      z: 2\n    on_pass: a\n    on_fail: a\n  - id: z\n    end: true\n",
         )
         .unwrap_err();
-        assert!(err.to_string().contains("never routes to it"), "{err}");
+        assert!(
+            err.to_string()
+                .contains("sets `loop` for moves to `z`, but it never routes to `z`"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -3357,17 +3387,22 @@ mod tests {
         assert_eq!(a.loop_exit(), "b");
     }
 
-    /// The whole point of counting per route: `review` is entered from
-    /// several places in the shipped pipeline, and each of them is its own
-    /// loop.
+    /// The whole point of counting per route: a step may send work back to
+    /// more than one place, and each of those is its own loop with its own
+    /// budget.
     #[test]
-    fn the_shipped_review_step_bounds_the_loop_that_comes_back_through_it() {
+    fn the_shipped_review_step_bounds_the_loop_it_sends_work_back_down() {
         let pipeline = Pipelines::builtin().get("default").unwrap().clone();
         let review = pipeline.step("review").unwrap();
         assert_eq!(
             review.round_limit("implement"),
             Some(2),
-            "`implement` always returns through `review`, so that is where the budget lives"
+            "`review` is what sends the work back, so that is where the budget lives"
+        );
+        assert_eq!(
+            pipeline.step("implement").unwrap().round_limit("review"),
+            None,
+            "and a passing `implement` is bounded by nothing: it always reaches `review`"
         );
     }
 

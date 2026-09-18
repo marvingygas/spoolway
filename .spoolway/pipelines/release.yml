@@ -43,7 +43,7 @@ steps:
     effort: high
     session: true
     loop:
-      publish: 1
+      fix: 3
     on_loop_max: blocked
     on_pass: notes
     on_fail: fix
@@ -68,6 +68,9 @@ steps:
     prompt: release-publisher
     model: gpt-5.6-sol
     effort: high
+    loop:
+      preflight: 1
+    on_loop_max: blocked
     on_pass: released
     on_fail: preflight
 

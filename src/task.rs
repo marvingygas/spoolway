@@ -485,9 +485,11 @@ pub struct Frontmatter {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub prompts: BTreeMap<String, u32>,
 
-    /// How many times a task has *arrived* at each step, keyed the same way —
-    /// one lap of the loop per arrival, whatever a lane there went on to do.
-    /// This is what a step's `loop:` bounds.
+    /// How many times a task has taken each route, keyed the same way — one
+    /// lap of the loop per move, whatever a lane at either end went on to do.
+    /// This is what a step's `loop:` bounds, read off the step the move
+    /// *leaves*: `loop: { implement: 2 }` on `review` is a budget for the
+    /// `review->implement` entry here.
     ///
     /// Banked by [`Task::set_stage`], not [`Task::bank_launch`]: a lap is a
     /// transition, and a retried launch at a step the task never left is a
@@ -601,8 +603,9 @@ impl Task {
             .sum()
     }
 
-    /// How many times this task has arrived at `to` from `from` — laps of
-    /// that route through the loop. This is what a step's `loop:` bounds.
+    /// How many times this task has moved from `from` to `to` — laps of that
+    /// route through the loop. This is what `from`'s own `loop:` bounds, the
+    /// budget being spent by whichever step makes the move.
     pub fn rounds_via(&self, from: &str, to: &str) -> u32 {
         self.front
             .rounds
