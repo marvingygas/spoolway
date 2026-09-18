@@ -449,6 +449,15 @@ pub struct Dispatcher<'a> {
     /// pass's stale in-memory copy over it. Rebuilt at the top of every
     /// [`Dispatcher::run_pass`]. See review finding 2.
     report_seen: HashMap<String, i64>,
+    /// The command run [`Dispatcher::run_command`]'s `Exited` arm most
+    /// recently read a destination off, set there and taken by its caller
+    /// right after — never inferred by re-reading [`command_step::Runs::state`]
+    /// afterwards, which a background step's own near-instant exit can race:
+    /// its destination comes from *starting* the run, in the `Fresh` arm,
+    /// not from reading it finished, and by the time a caller looked again
+    /// the run could easily have finished on its own in the background.
+    /// Only the arm that actually consumed a code for routing may set this.
+    pending_command_forget: Option<String>,
 }
 
 /// What one session has banked to the usage ledger so far — the running
@@ -483,6 +492,14 @@ struct Candidate {
     /// Tasks this one is holding up. More is more urgent.
     dependents: usize,
     pipeline: String,
+    /// The command run this candidate's destination was read off, if it was
+    /// a command step's `Exited` arm — the key to forget once this
+    /// candidate's move is actually placed and persisted, never before. A
+    /// candidate skipped this pass for want of a slot must leave this run
+    /// alone: its exit code is the only thing that will let a later pass
+    /// route on it without running the command again. See the ordering
+    /// note in `run_command`'s own `Exited` arm.
+    command_forget: Option<String>,
 }
 
 impl Candidate {
@@ -615,6 +632,7 @@ impl<'a> Dispatcher<'a> {
             usage_banked: None,
             ledger: None,
             report_seen: HashMap::new(),
+            pending_command_forget: None,
         }
     }
 
@@ -1071,6 +1089,19 @@ impl<'a> Dispatcher<'a> {
                     else {
                         continue;
                     };
+                    // Still on disk if `run_command` just read this
+                    // destination off an `Exited` run — that arm leaves its
+                    // pid and exit files alone on purpose, for whichever arm
+                    // below actually persists this destination to forget
+                    // once it has. `None` means `run_command` answered from
+                    // something other than a finished run it consumed for
+                    // routing (a launch failure, a background start), which
+                    // left nothing here to forget in the first place — see
+                    // `Dispatcher::pending_command_forget`'s own doc for why
+                    // this is read off that field rather than re-derived by
+                    // reading the run's state again here: a background run
+                    // can finish on its own between the two.
+                    let command_forget = self.pending_command_forget.take();
                     // A launch-failure ceiling is the one road here
                     // `run_command` never narrates for itself — see
                     // `Dispatcher::note_launch_failure`, which cannot say
@@ -1131,10 +1162,24 @@ impl<'a> Dispatcher<'a> {
                             group_open: graph.group_open(&id),
                             dependents: graph.dependents(&id),
                             pipeline: pipeline.name.clone(),
+                            command_forget,
                         }),
                         false => {
                             tasks[index].set_stage(&destination, None);
-                            self.persist(&mut tasks[index])?;
+                            // `persist` answers `false` when a `spoolway
+                            // report` landed mid-pass and dropped this
+                            // write — the same discipline `reap_stale_runs`'
+                            // own caller keeps, a few dozen lines above.
+                            // Forgetting anyway on that path is the exact
+                            // failure this fix exists to close: the move
+                            // never reached the task document, so the code
+                            // must stay on disk for the next pass to read.
+                            if self.persist(&mut tasks[index])?
+                                && let Some(key) = command_forget
+                            {
+                                crate::command_step::Runs::new(&self.repo.commands_dir())
+                                    .forget(&key)?;
+                            }
                         }
                     }
                 }
@@ -1366,6 +1411,7 @@ impl<'a> Dispatcher<'a> {
                                 group_open: graph.group_open(&id),
                                 dependents: graph.dependents(&id),
                                 pipeline: pipeline.name.clone(),
+                                command_forget: None,
                             })
                         }
                     }
@@ -1488,6 +1534,7 @@ impl<'a> Dispatcher<'a> {
                         group_open: graph.group_open(&id),
                         dependents: graph.dependents(&id),
                         pipeline: pipeline.name.clone(),
+                        command_forget: None,
                     }),
                     // A lane's dry run is `start_lanes`' to report;
                     // this is the other kind, and it has to be said
@@ -3451,8 +3498,34 @@ impl<'a> Dispatcher<'a> {
                         resident_exclusive.get_or_insert(model_name);
                     }
                     report.actions.push(action);
+                    // `Ok(Started)` alone does not say the stage move
+                    // landed — `start_one`'s own `persist_task` answers
+                    // `false`, not an error, when a `spoolway report`
+                    // landed mid-pass and dropped it. `started.persisted`
+                    // is that answer, carried out for exactly this: a
+                    // command run's exit code is only safe to clear once
+                    // the move it produced is actually on disk. See the
+                    // note on `Candidate::command_forget`.
+                    if started.persisted
+                        && let Some(key) = candidate.command_forget
+                    {
+                        crate::command_step::Runs::new(&self.repo.commands_dir()).forget(&key)?;
+                    }
                 }
                 Err(err) => {
+                    // `start_one` can fail after its own stage move already
+                    // landed on disk — see [`StageMovedBeforeFailure`]: a
+                    // `mux.prompt` refusal is the one error it returns once
+                    // that write has happened, and every earlier failure
+                    // returns before it. When that write really landed, the
+                    // command run this candidate carries must be forgotten
+                    // here whatever this arm goes on to decide about the
+                    // launch — the task has already left the command step on
+                    // disk either way, and a later arrival back at it must
+                    // not read this run's code as its own.
+                    let moved_and_persisted = err
+                        .downcast_ref::<StageMovedBeforeFailure>()
+                        .is_some_and(|marker| marker.persisted);
                     // A launch that never got going at all — see
                     // [`Dispatcher::note_launch_failure`] — unless the pane it
                     // was asked to start in was merely busy for a moment, see
@@ -3484,8 +3557,34 @@ impl<'a> Dispatcher<'a> {
                             crate::commands::set_blocked_from(task, &step.id);
                         }
                         task.set_stage(&destination, None);
+                        // Gated on `persist`'s own answer, not assumed from
+                        // reaching this line — same reasoning as the `Ok`
+                        // arm above and the immediate-destination branch in
+                        // the `StepKind::Command` match: a dropped write
+                        // here is the agent lane never having started *and*
+                        // the move never landing, so the exit code must
+                        // stay on disk for the next pass to find.
+                        if self.persist(task)?
+                            && let Some(key) = candidate.command_forget
+                        {
+                            crate::command_step::Runs::new(&self.repo.commands_dir())
+                                .forget(&key)?;
+                        }
+                    } else {
+                        // Ordinarily transient — the task never left the
+                        // command step, so its exit code must stay right
+                        // where it is for the next pass to route on. Except
+                        // when `start_one` already moved it before its
+                        // prompt failed: that move is on disk regardless of
+                        // whether this attempt earned a retry or a strike,
+                        // so the run it came from must be forgotten here
+                        // too.
+                        self.persist(task)?;
+                        if moved_and_persisted && let Some(key) = candidate.command_forget {
+                            crate::command_step::Runs::new(&self.repo.commands_dir())
+                                .forget(&key)?;
+                        }
                     }
-                    self.persist(task)?;
                 }
             }
         }
@@ -3527,6 +3626,11 @@ impl<'a> Dispatcher<'a> {
         step: &Step,
         report: &mut Report,
     ) -> Result<Option<String>> {
+        // Only the `Exited` arm below ever sets this — see the field's own
+        // doc. Cleared on every call so a stale value from a task this
+        // dispatcher visited earlier in the same pass can never leak onto
+        // one it did not just read a code from.
+        self.pending_command_forget = None;
         let id = task.id().to_string();
         let Some(run) = step.run.clone() else {
             // Refused at load, so reaching this means a pipeline was rewritten
@@ -3580,10 +3684,22 @@ impl<'a> Dispatcher<'a> {
             }
 
             crate::command_step::RunState::Exited(code) => {
-                // Read once and cleared, so a task that comes back round to this
-                // step runs the command again instead of routing on the code the
-                // last arrival left behind.
-                runs.forget(&key)?;
+                // Left on disk here, not cleared — the caller forgets this
+                // key itself, once the destination below has actually been
+                // written to the task document. `reap_stale_runs`, in this
+                // same file, keeps the identical discipline for its own
+                // path and says why: an exit code forgotten before the move
+                // that depends on it is persisted is a failure nothing will
+                // ever route on again — the task looks `Fresh` here on the
+                // very next pass and the command runs a second time for an
+                // answer that was already sitting on disk. That is exactly
+                // what happens to a destination this pass could not place
+                // (no free slot at its agent step) were the code cleared
+                // here instead. `pending_command_forget` is what tells the
+                // caller this key is theirs to clear once that landing
+                // happens — see the field's own doc.
+                self.pending_command_forget = Some(key.clone());
+                //
                 // A command's pane has nothing left to show the instant its
                 // exit code is judged, pass or fail alike — closed here rather
                 // than left standing for whatever later arrival happens to
@@ -3608,9 +3724,9 @@ impl<'a> Dispatcher<'a> {
                 // failure here used to leave the task file saying only that
                 // it moved to `blocked`, with the reason living solely in a
                 // pass report nobody clearing the block reads. `Runs::forget`
-                // above keeps the log on disk on purpose, so the step, the
-                // code and that path are what the lane sent in to clear the
-                // block needs to see what actually broke.
+                // keeps the log on disk on purpose whenever it does run, so
+                // the step, the code and that path are what the lane sent
+                // in to clear the block needs to see what actually broke.
                 if code != 0 {
                     task.log_status(&format!(
                         "`{}` exited {code} — see {}",
@@ -5000,7 +5116,12 @@ fn start_one(
     if let Some(note) = &session_miss {
         task.log_status(&format!("`{}`: {note}", step.id));
     }
-    persist_task(repo, task, report_seen)?;
+    // Answers `false` rather than erroring when a `spoolway report` landed
+    // mid-pass and this write was dropped in its favour — see `persist_task`'s
+    // own doc. Carried out to `Started` rather than swallowed by a bare `?`
+    // here: a caller that forgets a command run's exit code on the strength
+    // of this stage move having landed needs to know whether it actually did.
+    let persisted = persist_task(repo, task, report_seen)?;
 
     // `parked` takes the match before `via_session` gets a say: `resuming` is
     // always true for a park (see the note beside it above), so without this
@@ -5034,7 +5155,10 @@ fn start_one(
     // was working.
     if let Err(err) = mux.prompt(&name, &prompt) {
         let _ = mux.stop_lane(&name, &pane_id);
-        return Err(err);
+        // The one `start_one` failure that can happen after its own stage
+        // move already landed — see `StageMovedBeforeFailure`'s own doc.
+        // Every earlier `return Err` above this point is before that write.
+        return Err(anyhow::Error::new(StageMovedBeforeFailure { persisted }).context(err));
     }
     Ok(Started {
         name,
@@ -5044,8 +5168,35 @@ fn start_one(
         // Only worth a word when `session:` tried and missed — an ordinary
         // step, and a hit either way, need nothing said about it.
         note: session_miss,
+        persisted,
     })
 }
+
+/// Marks a `start_one` `Err` as the one failure that can happen after its own
+/// stage move already landed: `mux.prompt` refusing the briefing, the one
+/// return past `persist_task`'s call above. Every earlier `start_one` failure
+/// returns before that write, so only this one needs to say so.
+///
+/// The dispatcher asks for this by downcasting the `anyhow::Error`, the same
+/// way it already does for [`crate::mux::PaneBusy`] — a second return type
+/// for one caller's one question is not worth `start_one` growing a
+/// different shape than every other launch path. Carries whether that write
+/// actually reached disk, not just whether it was attempted:
+/// [`Dispatcher::persist`] can drop a write the same as `persist_task` can,
+/// so a caller forgetting a command run's exit code on the strength of this
+/// move needs the real answer, not the fact that `set_stage` ran in memory.
+#[derive(Debug)]
+struct StageMovedBeforeFailure {
+    persisted: bool,
+}
+
+impl std::fmt::Display for StageMovedBeforeFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the lane's stage move landed before its prompt failed")
+    }
+}
+
+impl std::error::Error for StageMovedBeforeFailure {}
 
 /// What a successful lane start hands back: its name, and what the ledger needs
 /// to find its transcript afterwards.
@@ -5061,6 +5212,12 @@ struct Started {
     /// conversation over — `None` on an ordinary step, and on a hit either
     /// way, because neither is worth a person's attention.
     note: Option<String>,
+    /// Whether `start_one`'s own stage-move write actually landed, or was
+    /// dropped in favour of a `spoolway report` that beat it to the task
+    /// document — see `persist_task`. A caller cannot tell an `Ok(Started)`
+    /// apart from a dropped write any other way, since `persist_task`
+    /// answering `false` is not an error.
+    persisted: bool,
 }
 
 /// A step's model: exactly what it names, and nothing else.
@@ -13838,6 +13995,188 @@ mod tests {
             !mux.did("start").iter().any(|s| s.contains("implement")),
             "a command step started a lane: {:?}",
             mux.did("start")
+        );
+    }
+
+    /// A command step's exit code is read once and its run files forgotten
+    /// before the destination it computed is ever placed. When that
+    /// destination is an agent step and every one of the model's slots is
+    /// already held, `start_lanes` skips the candidate and leaves the task's
+    /// stage on the command step — but the run files are already gone, so the
+    /// very next pass reads `Fresh` and starts the command over. See
+    /// `run_command`'s `Exited` arm and the candidate loop's slot refusal in
+    /// `start_lanes`.
+    #[test]
+    fn a_command_step_whose_destination_has_no_slot_does_not_rerun() {
+        let mut repo = fixture("command-rerun");
+        // `review` is the only step `Pipelines::builtin` gives a real model
+        // name (`claude-opus-5`), so capping that model's own slots is what
+        // makes the destination un-placeable without touching anything else
+        // about the pipeline.
+        repo.config.models.insert(
+            "claude-opus-5".to_string(),
+            crate::usage::ModelPrice {
+                slots: 1,
+                ..Default::default()
+            },
+        );
+
+        // A task already sitting on `review`, holding the model's one slot —
+        // idle counts, same as any other live lane; see
+        // `a_lane_that_has_not_started_working_yet_still_holds_its_models_slot`.
+        add_task_with_worktree(&repo, "occupant", "review");
+        let occupant_lanes = idle_lanes(&repo, "review");
+
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(occupant_lanes);
+        let pipelines = pipelines_running("echo ran >> count.txt", false);
+
+        let worktree = reload(&path).front.worktree_path.unwrap();
+        let count_file = worktree.join("count.txt");
+        let count = |file: &Path| std::fs::read_to_string(file).unwrap_or_default();
+        let key = crate::command_step::Runs::key("implement", "demo");
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+
+        // The positive condition — the command has actually exited — is what
+        // this loop waits for, the same convention `drive` above and
+        // `a_pass_does_not_wait_for_a_running_command` below keep: the
+        // deadline is a failure bound, not the thing that is supposed to
+        // fire. A tight loop here also keeps this test's own wall-clock
+        // budget well clear of `fixture`'s 10s `lane_quiet`, so `occupant`'s
+        // idle lane never ages into a reminder over a clock this test has
+        // nothing to do with.
+        let started = std::time::Instant::now();
+        while runs.state(&key) != crate::command_step::RunState::Exited(0) {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the command never exited"
+            );
+            Dispatcher::new(&repo, &pipelines, &mux, false)
+                .pass()
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        // A handful more passes is plenty to catch a rerun: the bug reruns
+        // the command on the very next pass that reads the exited code, and
+        // every pass after that, since the destination never gets a slot to
+        // move on to.
+        for _ in 0..5 {
+            Dispatcher::new(&repo, &pipelines, &mux, false)
+                .pass()
+                .unwrap();
+        }
+
+        assert_eq!(
+            reload(&path).stage(),
+            "implement",
+            "the occupied slot must leave the task on the command step, not move it"
+        );
+        assert_eq!(
+            count(&count_file).lines().count(),
+            1,
+            "the command ran more than once while its destination waited for a slot: {:?}",
+            count(&count_file)
+        );
+    }
+
+    /// The other half of the ordering: once a command step's destination
+    /// *does* get a slot and the move actually lands, the run it came from
+    /// must be forgotten — not left on disk to be misread as a fresh code
+    /// the next time this task's pipeline sends it back through `implement`.
+    /// Exercises the `Ok(started)` arm in `start_lanes`, which
+    /// `a_command_step_whose_destination_has_no_slot_does_not_rerun` above
+    /// never reaches: that test's destination never gets a slot at all.
+    #[test]
+    fn a_command_steps_run_is_forgotten_once_its_destination_lands() {
+        let repo = fixture("command-rerun-forgets-on-landing");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]);
+        let pipelines = pipelines_running("echo ran >> count.txt", false);
+
+        // Nothing here caps `review`'s model or occupies its slot, so the
+        // candidate this command step routes into is placed the very same
+        // pass it is read — the `Ok(started)` arm, not the skipped-candidate
+        // one.
+        drive(&repo, &pipelines, &mux, &path, "review");
+
+        let key = crate::command_step::Runs::key("implement", "demo");
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        assert_eq!(
+            runs.state(&key),
+            crate::command_step::RunState::Fresh,
+            "a run whose destination landed must be forgotten, not left for the next \
+             arrival to misread"
+        );
+
+        // Sent back to `implement` by hand, the way clearing a block would —
+        // proving the forgotten run does not leave a stale code behind for
+        // this fresh arrival to route on without running anything.
+        let mut reloaded = reload(&path);
+        reloaded.set_stage("implement", None);
+        reloaded.save().unwrap();
+
+        let worktree = reloaded.front.worktree_path.clone().unwrap();
+        let count_file = worktree.join("count.txt");
+        let count = |file: &Path| std::fs::read_to_string(file).unwrap_or_default();
+        assert_eq!(count(&count_file).lines().count(), 1);
+
+        drive(&repo, &pipelines, &mux, &path, "review");
+
+        assert_eq!(
+            count(&count_file).lines().count(),
+            2,
+            "a fresh arrival at `implement` must run the command again rather than route \
+             off the first arrival's forgotten code: {:?}",
+            count(&count_file)
+        );
+    }
+
+    /// A third way a destination can "land": `start_one` writes its own
+    /// stage move and persists it before ever prompting the lane it just
+    /// started — so a `mux.prompt` refusal past that point is a launch that
+    /// failed with the move already on disk, not a task that never left the
+    /// command step. See `StageMovedBeforeFailure`.
+    #[test]
+    fn a_command_steps_run_is_forgotten_even_when_its_destination_fails_to_prompt() {
+        let repo = fixture("command-rerun-forgets-on-prompt-failure");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]).refusing_to_prompt();
+        let pipelines = pipelines_running("echo ran >> count.txt", false);
+
+        let key = crate::command_step::Runs::key("implement", "demo");
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let started = std::time::Instant::now();
+        while runs.state(&key) != crate::command_step::RunState::Exited(0) {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the command never exited"
+            );
+            Dispatcher::new(&repo, &pipelines, &mux, false)
+                .pass()
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        // One more pass: `review` has a free slot, so `start_one` gets far
+        // enough to write and persist the task's move onto it before
+        // `mux.prompt` refuses the briefing — attempt 1 of `MAX_LAUNCH_
+        // FAILURES`, well below the ceiling that would make this arm move
+        // the stage a second time itself.
+        Dispatcher::new(&repo, &pipelines, &mux, false)
+            .pass()
+            .unwrap();
+
+        assert_eq!(
+            reload(&path).stage(),
+            "review",
+            "start_one's own stage move lands even though the prompt that follows it fails"
+        );
+        assert_eq!(
+            runs.state(&key),
+            crate::command_step::RunState::Fresh,
+            "a run whose destination's stage move landed must be forgotten even though \
+             the launch itself went on to fail"
         );
     }
 

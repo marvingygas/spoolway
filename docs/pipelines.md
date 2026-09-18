@@ -247,6 +247,10 @@ A build, a test suite, a formatter or a deploy script is a command step.
 - `prompt`, `model`, `effort`, `session` and `gate` are refused. The step takes no slot.
 - Output goes to `<task> · <step>.log` under the project's home.
 - Other tasks keep moving while the command runs.
+- The exit code stays on disk until the pass that read it has written the task's move to the
+  destination step. A pass that cannot place that destination, for want of a free slot, leaves
+  the task on the command step and routes on the same code next time, instead of running the
+  command again.
 
 ### Background and headless
 
