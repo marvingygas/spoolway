@@ -140,20 +140,7 @@ pub fn run(repo: &Repo, args: &SyncArgs, json: bool) -> Result<()> {
     // under a project) has to read as removed, not as a file this pass
     // wrote, or the person reading it would think a deletion was a rewrite.
     let outcomes = scan(repo, args)?;
-    let mut wrote: Vec<&str> = Vec::new();
-    let mut removed: Vec<(&str, &str)> = Vec::new();
-    for outcome in &outcomes {
-        match outcome {
-            Outcome::Wrote { path, .. } if !wrote.contains(&path.as_str()) => wrote.push(path),
-            Outcome::Removed { path, why } if !removed.iter().any(|(p, _)| *p == path) => {
-                removed.push((path, why))
-            }
-            Outcome::Wrote { .. }
-            | Outcome::Removed { .. }
-            | Outcome::Kept
-            | Outcome::Blocked { .. } => {}
-        }
-    }
+    let (wrote, removed) = dedup_paths(&outcomes);
     // A dry run reports the same paths in the conditional: "wrote" over a
     // tree nothing touched reads as a lie the moment `git status` is run.
     let (wrote_word, removed_word) = match args.dry_run {
@@ -180,6 +167,29 @@ pub fn run(repo: &Repo, args: &SyncArgs, json: bool) -> Result<()> {
         write_stamp(&repo.home, &repo.checkout)?;
     }
     Ok(())
+}
+
+/// The paths worth naming out of a scan, deduplicated: one file can be
+/// behind for several reasons at once — a config gains a setting and drops a
+/// retired one in the same rewrite — and a path printed twice reads as two
+/// files. Shared by [`run`]'s own report and `confirm-dialog`'s gate, which
+/// draws the same two lists in a panel before either has run for real.
+pub(crate) fn dedup_paths(outcomes: &[Outcome]) -> (Vec<&str>, Vec<(&str, &str)>) {
+    let mut wrote: Vec<&str> = Vec::new();
+    let mut removed: Vec<(&str, &str)> = Vec::new();
+    for outcome in outcomes {
+        match outcome {
+            Outcome::Wrote { path, .. } if !wrote.contains(&path.as_str()) => wrote.push(path),
+            Outcome::Removed { path, why } if !removed.iter().any(|(p, _)| *p == path) => {
+                removed.push((path, why))
+            }
+            Outcome::Wrote { .. }
+            | Outcome::Removed { .. }
+            | Outcome::Kept
+            | Outcome::Blocked { .. } => {}
+        }
+    }
+    (wrote, removed)
 }
 
 /// Every file spoolway owns here, and what would happen to it.
@@ -933,11 +943,9 @@ fn write_stamp_line(home: &Path, checkout: &Path, version: &str, fingerprint: &s
 
 /// What the stamp says for `checkout`, if anything — `(version, fingerprint)`.
 ///
-/// Nothing in this binary calls this outside a test yet — comparing what it
-/// reads back against what this binary would write now, to say a checkout is
-/// behind, is `confirm-dialog`'s job, which depends on this stamp existing
-/// and being re-readable but does not exist yet itself.
-#[allow(dead_code)]
+/// [`stamp_behind`] is the one caller outside this module's own tests:
+/// comparing what this reads back against what this binary would write now
+/// is exactly what says a checkout is behind.
 pub fn read_stamp(home: &Path, checkout: &Path) -> Option<(String, String)> {
     let text = std::fs::read_to_string(stamp_path(home)).ok()?;
     let shown = checkout.display().to_string();
@@ -989,6 +997,25 @@ fn text_fingerprint(checkout: &Path) -> String {
 pub fn write_stamp(home: &Path, checkout: &Path) -> Result<()> {
     let fingerprint = text_fingerprint(checkout);
     write_stamp_line(home, checkout, crate::release::current(), &fingerprint)
+}
+
+/// Whether `checkout`'s stamp — what `sync` or `init` last recorded there —
+/// no longer matches what this binary would write now: a newer release, or
+/// a config whose own values have changed since. `confirm-dialog`'s gate
+/// reads this before paying for a full [`scan`], so an up-to-date project
+/// pays nothing beyond one file read and a few hashes per command.
+///
+/// No stamp at all reads as "not behind": a project this stamp predates, or
+/// a fixture that never ran `init` or `sync`, has nothing recorded to
+/// compare against, and guessing behind would nag a project this stamp has
+/// simply never reached yet.
+pub fn stamp_behind(home: &Path, checkout: &Path) -> bool {
+    match read_stamp(home, checkout) {
+        Some((version, fingerprint)) => {
+            version != crate::release::current() || fingerprint != text_fingerprint(checkout)
+        }
+        None => false,
+    }
 }
 
 #[cfg(test)]

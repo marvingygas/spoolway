@@ -760,6 +760,16 @@ On success, `sync` writes a stamp under the project's home recording this binary
 a fingerprint of the text it would write, one line per checkout. `spoolway init` writes the
 same stamp for a freshly scaffolded project.
 
+Every other command that needs a project reads that stamp back. When it no longer matches and
+a scan finds files to change, the command stops and draws a confirm panel titled "new version
+installed, apply updates" before running. Enter runs `sync` for real, rewrites the stamp, and
+runs the command. Ctrl-c writes nothing, runs nothing, and restores the terminal.
+
+Where stdin or stdout is not a terminal, under `--json`, or inside a lane, no panel is drawn.
+One line goes to stderr instead and the command runs anyway; inside a lane the line omits the
+trailing "Run `spoolway sync`." sentence. `init`, `doctor`, `whats-new`, `update`,
+`config edit`, `config override` and `sync` itself never draw the panel or print the line.
+
 ### `spoolway whats-new`
 
 Print the release notes embedded in the installed binary. Works offline from any directory.

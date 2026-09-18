@@ -286,12 +286,17 @@ refuses "so --replace has nothing left to hand back" \
 # directory gained a file, only this can.
 command -v jq >/dev/null || { echo "commands.sh needs jq" >&2; exit 2; }
 
-CHECK_JSON=$("$SPOOLWAY" task contract 2>&1)
+# Stdout only, not `2>&1`: the confirm-dialog gate's own notice, when this
+# checkout is behind, is a line on stderr ahead of the JSON — merging the
+# two would hand `jq` that line as its first byte and fail every parse on a
+# behind checkout, which is not what either check below is about.
+CHECK_JSON=$("$SPOOLWAY" task contract 2>"$LIVE/task-contract.err")
 if jq -e '.pipelines.default.id_budget' <<<"$CHECK_JSON" >/dev/null 2>&1; then
   ok "bare task contract prints the contract as parseable JSON"
 else
   bad "bare task contract prints the contract as parseable JSON"
   echo "$CHECK_JSON" | sed 's/^/        /'
+  sed 's/^/        /' "$LIVE/task-contract.err"
 fi
 
 # There is no project default any more — `dispatch.default_pipeline` is
@@ -473,13 +478,15 @@ says "and the task is cut from the document's own branch, not the flag's" \
 refuses "pipeline default is no longer a subcommand" \
   "unrecognized subcommand" "$SPOOLWAY" pipeline default
 
-PIPELINE_JSON=$("$SPOOLWAY" pipeline contract 2>&1)
+# Stdout only — see the same note above `CHECK_JSON`.
+PIPELINE_JSON=$("$SPOOLWAY" pipeline contract 2>"$LIVE/pipeline-contract.err")
 if jq -e '(.keys.step | index("agent")) and (.keys.step | index("loop"))' \
     <<<"$PIPELINE_JSON" >/dev/null 2>&1; then
   ok "bare pipeline contract prints the step keys as parseable JSON"
 else
   bad "bare pipeline contract prints the step keys as parseable JSON"
   echo "$PIPELINE_JSON" | sed 's/^/        /'
+  sed 's/^/        /' "$LIVE/pipeline-contract.err"
 fi
 
 if jq -e '
@@ -2251,5 +2258,217 @@ works "the aged queue entry did not — queue/ is never swept, whatever its age"
 
 must "retention restored to its default" "$SPOOLWAY" config set housekeeping.retention_days 30
 rm -f "$OLD_QUEUED"
+
+# ------------------------------------------------------- confirm-dialog's gate
+# `new version installed, apply updates`: the panel `main.rs` draws in front
+# of a project command once this checkout's stamp no longer matches what
+# this binary would write — `spoolway update` already having installed a
+# newer release is the scenario, forced here by hand since only one binary
+# is on `PATH` for a suite to run. Driven both ways, per the task: piped,
+# where the one-line notice on stderr takes over and the command still
+# runs, and keyed, where a real terminal answers Enter and gets the
+# command's own output straight after the report `sync` printed for real.
+#
+# `override list` is the command under test: it is routed through the same
+# catch-all in `main.rs` every project command passes through, and its own
+# output ("no overrides") is fixed regardless of anything this suite queued
+# earlier, unlike `queue list` or `group list`.
+STALE_SKILL=.claude/skills/spoolway-config/SKILL.md
+PROJECT_STAMP="$SPOOLWAY_PROJECT_HOME/sync-stamp"
+
+# One real file for a scan to find, and a stamp claiming a release that never
+# shipped — `stamp_behind` reads true on the version alone, whatever the
+# fingerprint says. Both conditions the acceptance criteria name, not either
+# alone: `src/gate.rs`'s own unit tests already cover a stale stamp with
+# nothing for a scan to do proceeding silently, so this suite only has to
+# prove the shape where both fire, on the real binary.
+behind_checkout() {
+  rm -f "$STALE_SKILL"
+  echo "0.0.0-behind-e2e deadbeef $(pwd)" > "$PROJECT_STAMP"
+}
+
+behind_checkout
+silent_about "a piped command with a behind checkout never touches the cursor" \
+  $'\x1b' \
+  "$SPOOLWAY" override list
+says "and prints the one-line notice" \
+  "spoolway wants to update:" \
+  "$SPOOLWAY" override list
+says "naming a file count, whatever configure_project's own fixture leaves behind" \
+  "file(s) in this checkout." \
+  "$SPOOLWAY" override list
+says "naming the command that clears it" \
+  'Run `spoolway sync`.' \
+  "$SPOOLWAY" override list
+says "the command itself still ran, piped or not" \
+  "no overrides" \
+  "$SPOOLWAY" override list
+works "and the piped path never wrote anything back" \
+  test ! -e "$STALE_SKILL"
+
+# The panel only ever draws with both ends a real terminal, which none of the
+# above ever were — every suite invocation runs under `$(...)`. A plain pipe
+# cannot stand in for one either: `queue`'s own screen reads keys off a pipe
+# fine because it never asks whether anyone is watching, but this dialog
+# does, on purpose (`ask::interactive()`), so stdin has to be a terminal a
+# `read` can block on, not just a descriptor bytes happen to arrive on.
+#
+# `python3`'s `pty` module opens one without needing a real terminal behind
+# this suite's own process — already how `warmth.sh`, `jobs.sh` and
+# `disaster.sh` drive a check no shell built-in reaches, and no new tool this
+# harness does not already depend on. `pty.fork()` specifically, not a plain
+# pty pair handed to `subprocess.Popen`: only `pty.fork()`'s child calls
+# `setsid()` and makes the slave its controlling terminal, which is what a
+# real ctrl-c needs to turn into a real `SIGINT` at all — a slave fd merely
+# `dup2`'d onto a child's stdio carries bytes fine but is nobody's
+# controlling terminal, so the kernel never raises anything on it. Byte
+# `\x03` (ctrl-c) sent down a pty missing that step is silently swallowed as
+# ordinary input instead, which would make the ctrl-c case below pass for
+# the wrong reason — proceeding on EOF, not on the interrupt.
+PTY_DRIVER="$LIVE/confirm-dialog-pty.py"
+cat >"$PTY_DRIVER" <<'PY'
+import os, pty, select, sys, time
+
+key = bytes([int(sys.argv[1])])
+argv = sys.argv[2:]
+
+pid, master = pty.fork()
+if pid == 0:
+    os.execvp(argv[0], argv)
+    os._exit(127)
+
+# The panel is drawn before the process ever reads a key, but there is no
+# signal back to this driver that says so — the read it is about to make is
+# exactly what blocks on the answer. A short, fixed wait is what every other
+# scripted-keystroke case in this harness already accepts (`records`' own
+# 0.1s poll), and this dialog's panel is a handful of `write` calls, not a
+# search.
+time.sleep(0.3)
+os.write(master, key)
+
+out = b""
+status = None
+deadline = time.time() + 10
+while time.time() < deadline:
+    ready, _, _ = select.select([master], [], [], 0.2)
+    if master in ready:
+        try:
+            chunk = os.read(master, 4096)
+        except OSError:
+            chunk = b""
+        if not chunk:
+            break
+        out += chunk
+    wpid, status = os.waitpid(pid, os.WNOHANG)
+    if wpid != 0:
+        break
+    status = None
+
+if status is None:
+    # The process has exited (or the pty closed) but a last chunk may still
+    # be sitting in the kernel buffer — drained briefly rather than trusted
+    # to have already arrived in the loop above.
+    end = time.time() + 1
+    while time.time() < end:
+        ready, _, _ = select.select([master], [], [], 0.1)
+        if master not in ready:
+            break
+        try:
+            chunk = os.read(master, 4096)
+        except OSError:
+            break
+        if not chunk:
+            break
+        out += chunk
+    # `WNOHANG` on a child that has not exited yet returns `(0, 0)`, not
+    # `(0, None)` — trusting `status` straight off that call is exactly the
+    # bug review found: a `status` of `0` reads as `WIFEXITED` true and
+    # `WEXITSTATUS` 0, so a genuinely hung child reported a clean exit and
+    # every assertion the ctrl-c case makes about something NOT happening
+    # passed against a process that was still sitting there. `wpid` is what
+    # actually says whether the child exited; `status` from the same call is
+    # only trustworthy once `wpid` says so.
+    #
+    # One `WNOHANG` is not enough to ask, though: the loop above leaves here
+    # on the pty reaching EOF, and the kernel closes a dying process's fds
+    # before it makes the process reapable, so on a loaded machine the child
+    # is regularly still running at this instant — measured at 236 false
+    # timeouts in 400 runs with every core busy, against 0 on an idle one.
+    # Asked once, that reads back as a hang and kills a process that had
+    # already finished. So it is asked repeatedly until the same deadline
+    # the loop above used, which leaves the timeout branch reachable for a
+    # child that really never exits while costing a genuine exit only the
+    # sleep below.
+    reaped = None
+    while True:
+        wpid, st = os.waitpid(pid, os.WNOHANG)
+        if wpid != 0:
+            reaped = st
+            break
+        if time.time() >= deadline:
+            break
+        time.sleep(0.02)
+    status = reaped
+
+sys.stdout.buffer.write(out)
+if status is None:
+    print("confirm-dialog-pty.py: timed out waiting for the process", file=sys.stderr)
+    os.kill(pid, 9)
+    sys.exit(124)
+sys.exit(os.WEXITSTATUS(status) if os.WIFEXITED(status) else 128 + os.WTERMSIG(status))
+PY
+
+behind_checkout
+KEYED_OUT=$(python3 "$PTY_DRIVER" 13 "$SPOOLWAY" override list 2>&1)
+KEYED_STATUS=$?
+if [ "$KEYED_STATUS" -eq 0 ]; then
+  ok "a keyed run confirms and exits zero"
+else
+  bad "a keyed run confirms and exits zero (exit $KEYED_STATUS)"
+  sed 's/^/        /' <<<"$KEYED_OUT"
+fi
+if grep -qF "new version installed, apply updates" <<<"$KEYED_OUT"; then
+  ok "the panel drew"
+else
+  bad "the panel drew"; sed 's/^/        /' <<<"$KEYED_OUT"
+fi
+if grep -qF "no overrides" <<<"$KEYED_OUT"; then
+  ok "and the command's own output followed, after the panel and its report"
+else
+  bad "and the command's own output followed, after the panel and its report"
+  sed 's/^/        /' <<<"$KEYED_OUT"
+fi
+works "confirming wrote the missing file back for real" \
+  test -f "$STALE_SKILL"
+
+# Ctrl-c, over the same real pty — the acceptance criterion the injectable
+# unit tests cannot reach on their own: those inject "was this interrupted"
+# directly, so nothing in this repository until now has proven that a real
+# ctrl-c over a real terminal actually gets there. Review's own finding: a
+# first attempt at this caught the interrupt with `libc::signal`, which
+# glibc installs with `SA_RESTART`, so the blocked `read` underneath
+# `screen::read_key` silently resumed instead of failing with `EINTR` — the
+# process hung at the panel forever, and only a second ctrl-c (through the
+# kernel's now-restored default disposition) killed it, leaving the
+# terminal in raw mode. `src/gate.rs`'s own `SigintGuard` installs without
+# `SA_RESTART` for exactly this reason; this is what proves it against the
+# real kernel rather than the docs it was fixed against.
+behind_checkout
+CTRLC_OUT=$(python3 "$PTY_DRIVER" 3 "$SPOOLWAY" override list 2>&1)
+CTRLC_STATUS=$?
+if [ "$CTRLC_STATUS" -eq 0 ]; then
+  ok "ctrl-c at the panel exits zero rather than hanging or being killed"
+else
+  bad "ctrl-c at the panel exits zero rather than hanging or being killed (exit $CTRLC_STATUS)"
+  sed 's/^/        /' <<<"$CTRLC_OUT"
+fi
+if grep -qF "no overrides" <<<"$CTRLC_OUT"; then
+  bad "ctrl-c must not run the command it interrupted"
+  sed 's/^/        /' <<<"$CTRLC_OUT"
+else
+  ok "and the command it interrupted never ran"
+fi
+works "ctrl-c wrote nothing back" \
+  test ! -e "$STALE_SKILL"
 
 finish

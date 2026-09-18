@@ -19,6 +19,7 @@ mod cron;
 mod dispatch;
 mod eval;
 mod fmt;
+mod gate;
 mod gitignore;
 mod globs;
 mod graph;
@@ -252,6 +253,25 @@ fn run() -> Result<()> {
         }
         command => {
             let repo = Repo::discover(&cwd)?;
+
+            // Whether this checkout has fallen behind a `spoolway update`
+            // that already ran, before anything else here reads a file:
+            // `sync` is the one command this must never draw in front of —
+            // it *is* the thing the panel offers to run — so it is the one
+            // exclusion named here rather than left to fall out of the
+            // match below. Every other excluded command (`init`, `doctor`,
+            // `whats-new`, `update`, `config edit`, `config override`) is
+            // answered in an earlier arm of the outer match and never
+            // reaches this one at all.
+            if !matches!(command, Command::Sync(_))
+                && !gate::confirm_sync_gate(
+                    &repo,
+                    std::env::var_os(dispatch::ENV_STEP).is_some(),
+                    cli.json,
+                )?
+            {
+                return Ok(());
+            }
 
             // Byproducts older than `housekeeping.retention_days` go, once per process —
             // see `retain` for the fixed split between those and the

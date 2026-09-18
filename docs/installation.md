@@ -279,6 +279,37 @@ On success, `sync` records this binary's version and a fingerprint of the text i
 in a stamp under the project's home, one line per checkout. `spoolway init` writes the same
 stamp for a freshly scaffolded project.
 
+Every other command that needs a project reads that stamp back first. When it no longer
+matches and a scan finds files to change, the command stops and draws a confirm panel titled
+"new version installed, apply updates", listing each write and removal:
+
+```
+┌─ new version installed, apply updates ───────────────────────┐
+│                                                                │
+│  write   .spoolway/config.toml                                │
+│  remove  .spoolway/templates/task-log.md                      │
+│          (no longer written to a task file)                   │
+│                                                                │
+│  Your config values, prompts and task skeletons are kept.     │
+│                                                                │
+│  [enter] confirm                                               │
+└─────────────────────────────────────────────────────────────┘
+```
+
+Enter runs `sync` for real, rewrites the stamp, and then runs the command. Ctrl-c writes
+nothing, runs nothing, and restores the terminal. No other key does anything.
+
+Where stdin or stdout is not a terminal, under `--json`, or inside a lane, the panel is never
+drawn. Instead one line goes to stderr and the command runs anyway:
+
+```
+spoolway wants to update: 1 file(s) in this checkout. Run `spoolway sync`.
+```
+
+Inside a lane the line omits the trailing "Run `spoolway sync`." sentence. `init`, `doctor`,
+`whats-new`, `update`, `config edit`, `config override` and `sync` itself never draw the panel
+or print the line.
+
 ## Platform notes
 
 ### Linux
