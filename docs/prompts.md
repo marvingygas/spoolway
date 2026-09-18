@@ -101,7 +101,7 @@ It prints seven sections:
 | 4 | The environment every lane has | The table below |
 | 5 | What a lane may reach | Whatever the person running the dispatcher can |
 | 6 | How a lane finishes | `--pass`, `--fail`, `--block`, and where each one routes. On `blocked`: `--pass` and `--pause` |
-| 7 | The shape to write | The headings below |
+| 7 | The shape to write | The headings below, then what a prompt may never restate, the ban on examples, and the ban on sentences defending a rule |
 
 | Variable | What it is |
 |---|---|
@@ -156,7 +156,9 @@ The step says where the role sits. The prompt says what the role does.
 spoolway pipeline check             # reads every prompt against the steps that run it
 ```
 
-It refuses a prompt that names a `spoolway` command or flag this release does not have.
+It refuses a prompt that names a `spoolway` command or flag this release does not have. It
+warns, without refusing, on a prompt that names `spoolway report` or one of its flags — the
+report contract spoolway already injects at launch.
 
 The `spoolway-config` skill writes the prompt and the step together. To turn a whole workflow
 into steps and prompts, see

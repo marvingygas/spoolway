@@ -850,16 +850,28 @@ pub fn pipeline_check(repo: &Repo, pipelines: Result<Pipelines>, json: bool) -> 
         }
     }
 
-    // Read the prompts against the steps that run them: the one rule left in
-    // this lint is a fact, not an opinion — a prompt naming a `spoolway …`
-    // command this binary does not have, checked against clap's own command
-    // tree. Nothing regenerates a prompt on upgrade any more, so this is the
-    // only place left that catches the drift, and it fails the check rather
-    // than printing beneath a green result — the alternative is a lane
-    // running a command that no longer exists, twenty minutes in, in a pane
-    // nobody is watching.
+    // Read the prompts against the steps that run them: this rule is a fact,
+    // not an opinion — a prompt naming a `spoolway …` command this binary
+    // does not have, checked against clap's own command tree. Nothing
+    // regenerates a prompt on upgrade any more, so this is the only place
+    // left that catches the drift, and it fails the check rather than
+    // printing beneath a green result — the alternative is a lane running a
+    // command that no longer exists, twenty minutes in, in a pane nobody is
+    // watching. The lint's other rule, below, reads the same prompts for a
+    // restated report contract, and warns instead.
     for finding in crate::prompt::lint(repo, pipelines)? {
         problems.push(finding.render());
+    }
+
+    // A prompt naming `spoolway report` or one of its flags is a second
+    // report contract shipped inside the prompt, which can contradict the
+    // one spoolway injects at launch — but a prompt whose role is writing
+    // *about* spoolway has a real reason to name it, and reading prose
+    // cannot tell that reason from a careless restatement. Warned rather
+    // than failed, on the same channel as the gate and description
+    // warnings above.
+    for finding in crate::prompt::lint_warnings(repo, pipelines)? {
+        gate_warnings.push(finding.render());
     }
 
     if problems.is_empty() {
@@ -1550,6 +1562,46 @@ mod tests {
 
         pipeline_check(&repo, Ok(pipelines), false)
             .expect("a gate with no on_fail is legal — only worth a warning");
+    }
+
+    /// A prompt naming `spoolway report` (or one of its flags) must never
+    /// turn a clean `pipeline check` into a failing one — `Ok` here is the
+    /// proof, since `pipeline_check` bails whenever `problems` is
+    /// non-empty, and the restated-report-contract rule is warnings-only.
+    #[test]
+    fn pipeline_check_warns_but_passes_a_prompt_restating_the_report_contract() {
+        let root = crate::scratch::root("commands-restated-report-check-passes");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        crate::scratch::git_init(&root, &["-b", "plan/demo"]);
+        init_at(&root);
+
+        let repo = Repo {
+            home: root.join(".home"),
+            checkout: root.clone(),
+            root,
+            config: Config::default(),
+        };
+
+        std::fs::write(
+            crate::prompt::path_for(&repo, "implementer"),
+            "# implementer\n\nFinish with `spoolway report --pass -m \"<verdict>\"`.\n",
+        )
+        .unwrap();
+
+        let pipeline = Pipeline::parse(
+            "solo",
+            "steps:\n  - id: a\n    agent: claude\n    prompt: implementer\n    \
+             model: m\n    on_pass: z\n  - id: z\n    end: true\n",
+        )
+        .unwrap();
+        let pipelines = Pipelines {
+            default: "solo".into(),
+            pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
+        };
+
+        pipeline_check(&repo, Ok(pipelines), false)
+            .expect("naming `spoolway report` is a warning, never a problem");
     }
 
     /// A command step starts no lane, so `skills:` on one is a key written
