@@ -109,7 +109,7 @@ exclusive = true
 local = true
 
 [issue_tracking]
-hook = ""
-project_key = ""
-on_fail = ""
+hook = "github.sh"
+project_key = "marvingygas/spoolway"
+on_fail = "ignore"
 key_in_names = false

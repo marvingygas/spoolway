@@ -1,8 +1,10 @@
-Opened automatically for task `${SPOOLWAY_TASK}`.
+Mirrors Spoolway task `${SPOOLWAY_TASK}` in group `${SPOOLWAY_GROUP}`.
 
-Blocked by: ${SPOOLWAY_DEPENDS_TICKETS}
+- Source: `${SPOOLWAY_SOURCE}`
+- Branch: `${SPOOLWAY_BRANCH}`
+- Blocked by: `${SPOOLWAY_DEPENDS_TICKETS}`
 
-A comment lands here when this task blocks or pauses, carrying
-the task file with it. Nothing fires per step.
-
-Plan: ${SPOOLWAY_SOURCE}
+The shell hook appends the task document below when this issue opens. Later
+blocked or paused events add the current task document as a comment. Spoolway
+does not emit an event for every pipeline step. Reaching `done` means the pull
+request is ready for review; GitHub closes this issue only after that PR merges.

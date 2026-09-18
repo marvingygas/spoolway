@@ -1,6 +1,8 @@
-Opened automatically for group `${SPOOLWAY_GROUP}`.
+Mirrors Spoolway group `${SPOOLWAY_GROUP}`.
 
-One issue per task, hung under this one as the group is queued.
-Progress arrives as comments on the children, not here.
+- Source: `${SPOOLWAY_SOURCE}`
+- Tasks queued together: `${SPOOLWAY_GROUP_SIZE}`
 
-Plan: ${SPOOLWAY_SOURCE}
+Each task is a sub-issue. GitHub rolls their progress up here; detailed status
+and task snapshots stay on the child issues. This parent stays open until
+GitHub has closed every child after its pull request merges.

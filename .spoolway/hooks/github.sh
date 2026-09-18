@@ -4,32 +4,64 @@
 # someone runs `spoolway issue show`, then on queued, blocked, paused and
 # done.
 #
-# Every command here was run against a real repository with gh 2.97.0.
-# `gh` has no sub-issue command, so the parent link goes through the REST
-# endpoint, which wants the issue's integer id — not the node id that
-# `gh issue view --json id` returns.
+# Every command here was checked against gh 2.97.0. The hook treats GitHub as
+# a mirror: issue failures are reported back to spoolway, while config decides
+# whether they should pause delivery.
 
 repo=$SPOOLWAY_PROJECT_KEY                # `[issue_tracking] project_key`
 
-# Hangs `$2` (an issue this hook just created — the URL `gh issue create`
-# printed) as a GitHub sub-issue under `$1`, doing nothing at all unless `$1`
-# ends in `/<repo>/issues/<n>` for this same `$repo`. `$1` is `SPOOLWAY_SOURCE`
-# most of the time, and spoolway never parses that field — most of the time
-# it names a plan page's path, not an issue, and this is what lets it fall
-# straight through untouched. Matched by the tail of the URL rather than a
-# fixed `github.com` host, so this reads a GitHub Enterprise Server issue the
-# same way. Reuses the `sub_issues` REST call the epic and ticket already use
-# each other for, above: a second call from one already proven, not a new
-# capability.
-hang_under() {
+# Whether a source is an issue in this repository. A matching source becomes
+# the parent of the group issue (or of the lone task issue for a group of one).
+same_repo_issue() {
   case "$1" in
-    *"/$repo/issues/"[0-9]*) ;;
-    *) return 0 ;;
+    *"/$repo/issues/"[0-9]*) return 0 ;;
+    *) return 1 ;;
   esac
-  [ -z "$2" ] && return 0
-  parent=${1##*/}
-  gh api -X POST "repos/$repo/issues/$parent/sub_issues" \
-    -F sub_issue_id="$(gh api "repos/$repo/issues/${2##*/}" -q .id)"
+}
+
+# GitHub issues only have open/closed as native states. This label means the
+# task has entered spoolway; blocked and paused are comments instead of state
+# labels because spoolway has no matching event when either condition clears.
+mark_in_progress() {
+  gh issue edit "$SPOOLWAY_TICKET" -R "$repo" \
+    --add-label spoolway:in-progress
+}
+
+# `done` means spoolway handed the task to a pull request, not that the change
+# merged. Leave closure to GitHub's merge event: mark the issue for review and
+# put a machine-readable issue marker on the PR for the repository workflow.
+hand_off_for_review() {
+  pr=$(gh pr view "$SPOOLWAY_BRANCH" -R "$repo" --json url --jq .url) || exit $?
+  [ -n "$pr" ] || {
+    echo "github.sh: no pull request found for $SPOOLWAY_BRANCH" >&2
+    exit 1
+  }
+
+  # Write the merge marker first: if a later cosmetic update fails under the
+  # mirror's non-blocking `on_fail`, GitHub can still close the issue safely.
+  gh pr comment "$pr" -R "$repo" --body \
+    "**spoolway:** tracks $SPOOLWAY_TICKET
+
+<!-- spoolway-issue: $SPOOLWAY_TICKET -->" || exit $?
+
+  gh issue edit "$SPOOLWAY_TICKET" -R "$repo" \
+    --remove-label spoolway:in-progress \
+    --add-label spoolway:review || exit $?
+
+  gh issue comment "$SPOOLWAY_TICKET" -R "$repo" --body \
+    "**spoolway** — \`$SPOOLWAY_TASK\` is ready for review in $pr. GitHub will close this issue after the pull request merges."
+}
+
+comment_snapshot() {
+  {
+    echo "**spoolway** — \`$SPOOLWAY_TASK\` is **$SPOOLWAY_EVENT** at \`$SPOOLWAY_FROM\`"
+    echo
+    echo '<details><summary>Current task document</summary>'
+    echo
+    head -c 50000 "$SPOOLWAY_TASK_FILE"
+    echo
+    echo '</details>'
+  } | gh issue comment "$SPOOLWAY_TICKET" -R "$repo" --body-file -
 }
 
 if [ "$SPOOLWAY_EVENT" = fetch ]; then
@@ -43,20 +75,62 @@ if [ "$SPOOLWAY_EVENT" = fetch ]; then
 fi
 
 if [ "$SPOOLWAY_EVENT" = open ]; then
+  # A state file makes a retried synchronous open idempotent even when GitHub
+  # accepted an issue immediately before a later request failed.
+  state="$SPOOLWAY_OUT.state"
   epic=$SPOOLWAY_EPIC                       # set when the group already names one
+  ticket=
+  if [ -f "$state" ]; then
+    while IFS= read -r line; do
+      case "$line" in
+        epic=*) epic=${line#epic=} ;;
+        ticket=*) ticket=${line#ticket=} ;;
+      esac
+    done < "$state"
+  fi
+
+  save_state() {
+    { echo "epic=$epic"; echo "ticket=$ticket"; } > "$state"
+  }
+
   if [ -z "$epic" ] && [ "$SPOOLWAY_GROUP_SIZE" -gt 1 ]; then
-    epic=$(gh issue create -R "$repo" -t "$SPOOLWAY_GROUP" \
-                           -F "$SPOOLWAY_EPIC_BODY")
-    hang_under "$SPOOLWAY_SOURCE" "$epic"
+    set -- gh issue create -R "$repo" -t "$SPOOLWAY_GROUP" \
+      -F "$SPOOLWAY_EPIC_BODY" --label spoolway:group
+    if same_repo_issue "$SPOOLWAY_SOURCE"; then
+      set -- "$@" --parent "$SPOOLWAY_SOURCE"
+    fi
+    epic=$("$@") || exit $?
+    save_state
   fi
-  ticket=$(gh issue create -R "$repo" -t "$SPOOLWAY_TITLE" \
-                           -F "$SPOOLWAY_TICKET_BODY")
-  if [ -n "$epic" ]; then                    # gh has no sub-issue command
-    gh api -X POST "repos/$repo/issues/${epic##*/}/sub_issues" \
-      -F sub_issue_id="$(gh api "repos/$repo/issues/${ticket##*/}" -q .id)"
-  else
-    hang_under "$SPOOLWAY_SOURCE" "$ticket"  # a group of one has no epic to hang under
+
+  body="$SPOOLWAY_OUT.ticket-body.md"
+  {
+    cat "$SPOOLWAY_TICKET_BODY"
+    echo
+    echo '<details><summary>Task document at queue time</summary>'
+    echo
+    head -c 50000 "$SPOOLWAY_TASK_FILE"
+    echo
+    echo '</details>'
+  } > "$body"
+
+  if [ -z "$ticket" ]; then
+    parent=$epic
+    if [ -z "$parent" ] && same_repo_issue "$SPOOLWAY_SOURCE"; then
+      parent=$SPOOLWAY_SOURCE
+    fi
+    deps=
+    for dep in $SPOOLWAY_DEPENDS_TICKETS; do
+      deps="${deps}${deps:+,}$dep"
+    done
+    set -- gh issue create -R "$repo" -t "$SPOOLWAY_TITLE" \
+      -F "$body" --label spoolway:task
+    [ -n "$parent" ] && set -- "$@" --parent "$parent"
+    [ -n "$deps" ] && set -- "$@" --blocked-by "$deps"
+    ticket=$("$@") || exit $?
+    save_state
   fi
+
   # The short handle spoolway puts in generated names, and the issue's web
   # address kept on the task for later use — spoolway stores and validates
   # `url=` but shows it nowhere yet. `$epic`/`$ticket` are already URLs here:
@@ -69,19 +143,19 @@ if [ "$SPOOLWAY_EVENT" = open ]; then
   exit 0
 fi
 
-if [ "$SPOOLWAY_EVENT$SPOOLWAY_GROUP_LAST" = done1 ] && [ -n "$SPOOLWAY_EPIC" ]; then
-  gh issue close "$SPOOLWAY_EPIC" -c "spoolway: every task here is done."
-fi
+[ -n "$SPOOLWAY_TICKET" ] || exit 0
 
-case "$SPOOLWAY_EVENT" in blocked|paused) ;; *) exit 0 ;; esac
-
-{
-  echo "**spoolway** — \`$SPOOLWAY_TASK\` is **$SPOOLWAY_EVENT** at \`$SPOOLWAY_FROM\`"
-  echo
-  echo '<details><summary>Task file</summary>'
-  echo
-  echo '```markdown'
-  head -c 50000 "$SPOOLWAY_TASK_FILE"   # room under the comment body cap
-  echo '```'
-  echo '</details>'
-} | gh issue comment "$SPOOLWAY_TICKET" --body-file -
+case "$SPOOLWAY_EVENT" in
+  queued)
+    mark_in_progress
+    ;;
+  blocked)
+    comment_snapshot
+    ;;
+  paused)
+    comment_snapshot
+    ;;
+  done)
+    hand_off_for_review
+    ;;
+esac

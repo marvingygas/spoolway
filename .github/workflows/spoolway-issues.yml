@@ -1,0 +1,114 @@
+name: close merged spoolway issues
+
+# Spoolway's `done` event means the task reached its pull request. The hook
+# leaves a trusted marker in a PR comment; delivery completes here, only after
+# GitHub says that pull request actually merged.
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  close-issue:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: close the task issue and any completed group
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const pull = context.payload.pull_request;
+            const trusted = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
+            const marker = /<!--\s*spoolway-issue:\s*https:\/\/github\.com\/([^/\s]+)\/([^/\s]+)\/issues\/(\d+)\s*-->/i;
+
+            const comments = await github.paginate(
+              github.rest.issues.listComments,
+              {owner, repo, issue_number: pull.number, per_page: 100}
+            );
+            let issueNumber;
+            for (const comment of comments.reverse()) {
+              if (!trusted.has(comment.author_association)) continue;
+              const match = comment.body?.match(marker);
+              if (!match) continue;
+              if (match[1].toLowerCase() !== owner.toLowerCase() ||
+                  match[2].toLowerCase() !== repo.toLowerCase()) continue;
+              issueNumber = Number(match[3]);
+              break;
+            }
+            if (!issueNumber) {
+              core.notice(`PR #${pull.number} has no trusted spoolway issue marker`);
+              return;
+            }
+
+            const task = await github.rest.issues.get({owner, repo, issue_number: issueNumber});
+            const taskLabels = task.data.labels.map(label =>
+              typeof label === 'string' ? label : label.name
+            );
+            if (!taskLabels.includes('spoolway:task')) {
+              core.warning(`#${issueNumber} is not labelled spoolway:task; leaving it open`);
+              return;
+            }
+
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: issueNumber,
+              body: `**spoolway:** merged in #${pull.number}.`
+            });
+            await github.rest.issues.update({
+              owner,
+              repo,
+              issue_number: issueNumber,
+              state: 'closed',
+              state_reason: 'completed'
+            });
+            for (const label of ['spoolway:in-progress', 'spoolway:review']) {
+              try {
+                await github.rest.issues.removeLabel({
+                  owner, repo, issue_number: issueNumber, name: label
+                });
+              } catch (error) {
+                if (error.status !== 404) throw error;
+              }
+            }
+
+            let parent;
+            try {
+              parent = await github.request(
+                'GET /repos/{owner}/{repo}/issues/{issue_number}/parent',
+                {owner, repo, issue_number: issueNumber}
+              );
+            } catch (error) {
+              if (error.status === 404) return;
+              throw error;
+            }
+            const parentLabels = parent.data.labels.map(label =>
+              typeof label === 'string' ? label : label.name
+            );
+            if (!parentLabels.includes('spoolway:group')) return;
+
+            const children = await github.paginate(
+              'GET /repos/{owner}/{repo}/issues/{issue_number}/sub_issues',
+              {owner, repo, issue_number: parent.data.number, per_page: 100}
+            );
+            if (!children.length || children.some(child => child.state !== 'closed')) return;
+
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: parent.data.number,
+              body: '**spoolway:** every task in this group has merged.'
+            });
+            await github.rest.issues.update({
+              owner,
+              repo,
+              issue_number: parent.data.number,
+              state: 'closed',
+              state_reason: 'completed'
+            });
