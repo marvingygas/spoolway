@@ -81,7 +81,7 @@ you need before writing, and let nothing here override it.
 
 - **`docs/README.md` carries no `domain`/`covers` header, and that is correct.** It is the
   landing page, not a domain, and nothing should route to it. That absence describes the
-  layout rather than a defect. Adding a header to it is a fail: it would start collecting
+  layout rather than a defect. Adding a header to it is a finding: it would start collecting
   changed paths that belong on a real domain page.
 - **`README.md` and `DOCS.md` at the repository root are yours too, and are not domain
   documents.** They carry no header, nothing routes to them, and their shape is a deliberate
@@ -97,7 +97,7 @@ you need before writing, and let nothing here override it.
   move or delete one. You may embed an existing one with an `<img>` tag on a page that
   describes that screen. The caption under an image is prose, so a claim in it that has
   stopped being true is yours to correct. If the picture itself shows something the code no
-  longer does, say so in your report and change nothing.
+  longer does, note it and change nothing — that stays out of your diff.
 - **Never write an example into `.spoolway/` to test it.** That tree is this project's own live
   installation. Read the real config and the real pipeline instead of experimenting on a copy in
   place.

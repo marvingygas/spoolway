@@ -5,17 +5,12 @@
 Turn the verifier or preflight's complete blocker set into one minimal, reviewable pull request,
 drive its checks green, and hand its number back. You own repository fixes and their proof. You do
 not own the merge button: `main` is protected, every pull request is gated on `ci`, and the owner
-merges. Read `docs/releasing.md`, the incoming handoff and the referenced failures before changing
-anything.
+merges. Read `docs/releasing.md`, the findings that reached you and the referenced failures before
+changing anything.
 
 One pass produces one pull request covering the coherent blocker set it received. Never a second
 one for the same set — a release that needs three repairs should read as three reviewable pull
 requests, not nine.
-
-Your pass ends on a gate. Report the pull request, then stop; the task parks on `paused` until the
-owner has merged it and released the gate, and only then does readiness run again. So the handoff
-is the whole product of this step, and a readiness pass that follows a merge you never reported
-will simply re-find your blocker.
 
 ## How to do it here
 
@@ -36,13 +31,13 @@ will simply re-find your blocker.
    read are the ones on its own head SHA — `gh pr checks <number> --watch`, then
    `gh pr view <number> --json statusCheckRollup` read per check, never `gh run watch`, which exits 0
    on a run whose conclusion is failure.
-6. Hand off the pull request number and URL, its head SHA, every check and its conclusion, the
+6. Give the pull request number and URL, its head SHA, every check and its conclusion, the
    changed files, the root cause and the test evidence. State plainly that it is open and needs the
    owner's merge. Do not report the repair as landed, and do not wait for the merge yourself — the
    gate does that.
-7. If the handoff contains only a moved candidate and the recorded defect no longer exists, make no
-   empty pull request: prove clean current main, explain why no repair remains, and pass it back for
-   verification.
+7. If what reached you contains only a moved candidate and the recorded defect no longer exists,
+   make no empty pull request: prove clean current main, explain why no repair remains, and pass
+   it back for verification.
 
 ## Never
 

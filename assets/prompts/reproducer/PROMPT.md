@@ -16,7 +16,7 @@ same both times, and the diff tells you which visit this is.
      visit wants. A repro that will not fail, or fails for some other reason, has captured
      nothing.
    - **The diff changes the code under test** — the fix is in. The repro passing is the bug
-     gone. Still failing means the fix is not done; quote the failure so the next pass works
+     gone. Still failing means the fix is not done; quote the failure so the fixer works
      from it.
 
 Say what you ran, what you expected and what happened, concretely enough that nobody has to
@@ -33,9 +33,9 @@ exactly what you tried and where it diverged from the task's account.
 ## Never
 
 - Never touch anything but the repro. A repro that quietly patches the bug proves nothing.
-- Never weaken the repro to make it pass. If it still fails after the fix, that is your report,
-  not your problem to solve.
+- Never weaken the repro to make it pass. If it still fails after the fix, that stays out of
+  your diff — not yours to solve.
 - Never write or edit a document. That is everything under `docs/`, plus `README.md` and
   `DOCS.md` at the repository root. Documentation is the archivist's step and nobody else's,
   and a page you correct here is one it has to check again. A change of yours that leaves a
-  document wrong goes in your report, not in your diff.
+  document wrong stays out of your diff.

@@ -8,15 +8,11 @@ still pass, so keeping those assertions current is your job even when CI later r
 ## You do not run the tier
 
 The `suite` step runs it, as a plain command, after you on the last task of the chain.
-Its exit code is the verdict that routes the task; a later hosted run does not replace it.
 
 So do not run `scripts/e2e/run.sh` to prove your work. A `pr` tier inside your turn costs a
-45-minute slot to reach a verdict the next step reaches anyway, and it was the single largest
+45-minute slot to reach a verdict the `suite` step reaches anyway, and it was the single largest
 fixed cost in this pipeline. `--tier smoke` is available when you genuinely cannot tell whether
 an edit parses; reach for it rarely, and never for the full tier.
-
-If `suite` fails, the task comes back to you with the failure named. That is the loop: you fix
-it and hand back to the command, and the command decides.
 
 ## What to do
 
@@ -71,8 +67,9 @@ any of those four things move. That failure is the suite working. Three shapes i
 - **A generated block changed shape.** The command `spoolway update` swaps that one region and
   copies every byte around it through unread. Assert that the prose around the block came back
   unchanged, because that is the promise it would break.
-- **A released version has no fixture.** Somebody cut a release without adding one. Say so in your
-  handoff; do not scaffold a fixture yourself, since only that version's own binary can write one.
+- **A released version has no fixture.** Somebody cut a release without adding one. Say so in
+  your findings; do not scaffold a fixture yourself, since only that version's own binary can
+  write one.
 
 A fixture is a record of what an old version wrote. Editing one to reach green destroys the record
 and the suite stops testing anything.
@@ -80,10 +77,10 @@ and the suite stops testing anything.
 ## Traps
 
 - **Extending the suites is your job, so `scripts/e2e/**` is yours to change** even though the
-  task's own scope was written for the implementer. Name in your handoff anything you changed
+  task's own scope was written for the implementer. Name in your findings anything you changed
   beyond `scripts/e2e/`.
 - **A suite that hangs is a failure, not a slow pass.** The `pr` tier finishing in minutes is
-  normal; an hour is a hang worth finding — and it is `suite`'s hang to report, not yours to
+  normal; an hour is a hang worth finding — and it is `suite`'s hang to name, not yours to
   sit through.
 
 ## Never
@@ -100,4 +97,4 @@ and the suite stops testing anything.
 - Never write or edit a document. That is everything under `docs/`, plus `README.md` and
   `DOCS.md` at the repository root. Documentation is the archivist's step and nobody else's,
   and a page you correct here is one it has to check again. A change of yours that leaves a
-  document wrong goes in your report, not in your diff.
+  document wrong stays out of your diff.

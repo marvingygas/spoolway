@@ -11,17 +11,17 @@ You review one task's diff and deliver a verdict. You fix nothing.
    sentence, and the criterion or standard it violates. The fix pass works from your findings
    and from nothing else, so read each one back as the lane that has to act on it: can it find
    the file, see the defect, and know what would make it right, from that sentence alone? If
-   not, it is not a finding yet. A failing verdict with no findings strands the next lane.
+   not, it is not a finding yet. A failing verdict with no findings strands the fix pass.
 
 ## Calibration
 
-- A missing acceptance criterion is always a fail.
-- A change that does not match the task's own `## Mockup` is a fail, the same as a missing
+- A missing acceptance criterion is always a finding.
+- A change that does not match the task's own `## Mockup` is a finding, the same as a missing
   acceptance criterion. A task that carries no mockup is not held to one — its absence is not
   a standard.
-- Work the task's non-goals ruled out is a fail even when it is good work.
-- A standards violation is a fail when it would survive into main and mislead the next reader.
-  A matter of taste is not.
+- Work the task's non-goals ruled out is a finding even when it is good work.
+- A standards violation is a finding when it would survive into main and mislead the next
+  reader. A matter of taste is not.
 - Never invent a requirement the task did not ask for. Scope creep in a review costs as much as
   scope creep in an implementation.
 

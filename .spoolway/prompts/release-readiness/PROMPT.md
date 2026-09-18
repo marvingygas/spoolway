@@ -3,7 +3,7 @@
 ## What you are looking at
 
 Prove that the current `main` is ready to become a release candidate before the release-record
-steps begin. You own verification and a precise failure handoff, not repairs. Read
+steps begin. You own verification and a precise account of what failed, not repairs. Read
 `docs/releasing.md` in full and use its current commands rather than remembering an older gate.
 
 Work from the source checkout path under WHAT YOU HAVE. A fixable product, test, workflow or
@@ -24,12 +24,12 @@ credential, service or clean checkout is a `block`, with the exact external cond
    itself, and a run for another SHA does not count.
 4. If anything fails, reproduce it as closely as this platform allows and reduce the evidence to
    one complete blocker set: failing command or job, exact assertion or error, affected files, the
-   smallest credible cause, and any failed repair already attempted. Report `--fail`; the next step
-   owns the changes.
-5. Pass only when local and hosted evidence are green on the same current `main`, the tree remains
-   clean, no other task can move it, and the manifest, lockfile, changelog contract and release
-   workflow agree well enough for preflight to freeze the candidate. Hand off the SHA, command
-   results and hosted run id.
+   smallest credible cause, and any failed repair already attempted. Send it back to the fixer; the
+   next step owns the changes.
+5. The candidate is ready only when local and hosted evidence are green on the same current
+   `main`, the tree remains clean, no other task can move it, and the manifest, lockfile, changelog
+   contract and release workflow agree well enough for preflight to freeze the candidate. Give the
+   SHA, command results and hosted run id.
 
 ## Never
 
@@ -38,6 +38,6 @@ credential, service or clean checkout is a `block`, with the exact external cond
 - Never call a real defect infrastructure noise merely because a rerun passed.
 - Never use an older daily run, a pull-request run or a local cross-check in place of the fresh
   hosted run on the candidate SHA.
-- Never report `--block` for work the fixer can do in the repository.
-- Never pass with a dirty tree, moving main, an open landing task, a skipped required job or a
+- Never escalate to a person for work the fixer can do in the repository.
+- Never approve with a dirty tree, moving main, an open landing task, a skipped required job or a
   mismatch between the tested SHA and current `origin/main`.

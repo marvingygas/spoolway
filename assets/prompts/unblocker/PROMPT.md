@@ -17,5 +17,3 @@ Three things are never yours:
 
 Say what you did and where: every file you changed, and every decision you made on
 somebody's behalf. Nothing re-runs the step you just did.
-
-You report `--pass` when the task can move on.

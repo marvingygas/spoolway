@@ -19,13 +19,13 @@ rule out stays unbuilt however good an idea it is.
 4. **Change what the task asks for, and leave the rest.** A refactor you were not asked for, a
    rename sweeping files the task never named, a dependency bump you noticed on the way — each
    is a second change hiding inside the first, and the review pays for it. Something genuinely
-   wrong outside your scope goes in your report, not in your diff.
+   wrong outside your scope stays out of your diff.
 5. **Handle what actually goes wrong.** The interesting inputs are the empty one, the absent
    one, the one that arrives twice and the wrong type — not the example in the task. Errors go
    up the way the surrounding module already sends them.
 6. **A mockup in the task is the specification, not an illustration.** Build what it draws.
-   If it cannot be built as drawn, that is a block, and what stopped it belongs in your
-   report — not a nearby thing you improvised instead.
+   If it cannot be built as drawn, that is not yours to repair, and what stopped it stays out of
+   your diff — not a nearby thing you improvised instead.
 7. **Explain the non-obvious in prose.** Every module opens with a `//!` block saying why it
    exists. A magic number, a carve-out, a re-ordered call or a defensive branch carries the
    failure it prevents, in a comment. This project's reviews fail a change that drops that
@@ -42,15 +42,15 @@ rule out stays unbuilt however good an idea it is.
    After a failure, diagnose it, fix it, and rerun the affected tests. Check the traps below
    before concluding the failure is yours.
 
-   Run `cargo fmt` before handoff. The downstream `test` step owns full tests, Clippy and the
+   Run `cargo fmt` before you stop. The downstream `test` step owns full tests, Clippy and the
    other mechanical checks; do not repeat that gate routinely. Broaden your checks when a
    shared interface, dependency, build change or unexplained failure makes the impact wider
    than the focused tests can establish. For changes with no executable behaviour, run the
    relevant format or contract check and explain why no behaviour test applies.
-   Record the exact commands, results and coverage limits in the handoff; distinguish your
+   Record the exact commands, results and coverage limits in your findings; distinguish your
    focused checks from the full gate that has yet to run.
-9. **Know what "done" means before you report it.** Re-read the acceptance criteria against what
-   you built, one at a time. A criterion you cannot point at a line for is not met.
+9. **Know what "done" means before you call it done.** Re-read the acceptance criteria against
+   what you built, one at a time. A criterion you cannot point at a line for is not met.
 
 ## Traps
 
@@ -82,9 +82,9 @@ rule out stays unbuilt however good an idea it is.
 Stuck has a shape: the same failure twice, a fix that moves the error rather than removing it, a
 theory that has stopped predicting what happens. When you notice it, stop adding code. Undo back
 to the last thing that worked, write down what you know as against what you assumed, and test
-the cheapest assumption first. Three rounds of that without a working theory is a report — say
-what you tried and what it did, so the next pass starts from your findings rather than your
-changes.
+the cheapest assumption first. Three rounds of that without a working theory is a stop — say
+what you tried and what it did, so whoever tries this next starts from your findings rather than
+your changes.
 
 ## Never
 
@@ -92,8 +92,8 @@ changes.
   `cargo test` in your worktree as much as you like, but `cargo install` or copying your build
   over the running dispatcher's own binary overwrites the process that started you and that
   every other lane reports through. Installing is a person's decision, taken between runs.
-- Never restart, reconfigure, or kill a server or service. Broken infrastructure is a block, not
-  a failure of this change.
+- Never restart, reconfigure, or kill a server or service. Broken infrastructure is not yours to
+  repair.
 - Never weaken a test, skip it, or loosen an assertion to get a green run. A test that is wrong
   is a finding to report; a test that is inconvenient is the point of having it.
 - Never leave debug output, commented-out code, or a half-finished path behind. What you used to
@@ -101,4 +101,4 @@ changes.
 - Never write or edit a document. That is everything under `docs/`, plus `README.md` and
   `DOCS.md` at the repository root. Documentation is the archivist's step and nobody else's,
   and a page you correct here is one it has to check again. A change of yours that leaves a
-  document wrong goes in your report, not in your diff.
+  document wrong stays out of your diff.
