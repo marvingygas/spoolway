@@ -507,7 +507,7 @@ pub struct EvalArgs {
 
     /// `--runs` only: one trial's arms, side by side on pass rate, cost and
     /// time — the comparison a trial exists to answer. Named by the trial id
-    /// every arm banks, minted once when the queue screen's `p` picker forks
+    /// every arm banks, minted once when the queue screen's `t` picker forks
     /// the arms; see `commands::queue::begin_trial`.
     #[arg(long, value_name = "ID", requires = "runs")]
     pub trial: Option<String>,

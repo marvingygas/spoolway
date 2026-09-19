@@ -78,8 +78,8 @@ with a `// covers:` line.
 | `forge` | The `gh` test double, and a hand-off with nothing to hand over |
 | `disaster` | A hard kill with lanes live, a stale lock, a restart over a running lane, a stop with live lanes, retention, a dead multiplexer |
 | `lock` | A second `--tier pr` run waits for the first |
-| `trials` | The `p` picker on the queue screen, the arms it queues, and their cleanup |
-| `routines` | The `r` pane and `s` panel on the queue screen |
+| `trials` | The `t` picker on the queue screen, the arms it queues, and their cleanup |
+| `routines` | The routines pane and the `s` save panel on the queue screen |
 | `jobs` | A cron job fired by a real dispatcher pass, and what `spoolway doctor` says about a bad job |
 | `jobs-screen` | The `spoolway jobs` screen writing, pausing and deleting a job |
 | `board-pause` | The board's confirm panels: `p`, `P`, `U` over a live lane |

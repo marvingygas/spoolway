@@ -82,7 +82,7 @@ pub(crate) enum GroupState {
     /// archived and half still queued folds to this, the same as a group
     /// wholly in the queue.
     Queued,
-    /// Every task has reached [`Repo::archive_dir`]. `s` and `p` are the only
+    /// Every task has reached [`Repo::archive_dir`]. `s` and `t` are the only
     /// doors out — see `queue::selectable`.
     Done,
 }

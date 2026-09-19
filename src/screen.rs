@@ -211,10 +211,9 @@ pub(crate) fn pad_to(s: &str, width: usize) -> String {
 /// and [`crate::status::GUTTER`] rather than writing either out again, so a
 /// screen that switches over stops deciding its own spelling.
 ///
-/// No caller yet: the board, the queue screen and the jobs screen keep their
-/// own literals until the tasks that follow move them over — this one only
-/// adds the builder, proved by the unit test below.
-#[allow(dead_code)]
+/// The queue screen's own `footer` is the first caller; the board and the
+/// jobs screen keep their own literals until a task of their own moves them
+/// over.
 pub(crate) fn key_hint(pairs: &[(&str, &str)]) -> String {
     let mut line = String::new();
     for (i, (key, label)) in pairs.iter().enumerate() {
