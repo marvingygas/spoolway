@@ -175,38 +175,34 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     refuse(check_index_lock(repo)).context("refusing to start")?;
     refuse(check_backend_checkout(repo, mux.as_ref())).context("refusing to start")?;
 
-    // A layer changes what runs without `git status` ever hinting that it
-    // is on, so this is the one place a person sees it before the run using
-    // it starts — before the lock is taken and the mode is written into it,
-    // so `esc` can back out having done nothing at all.
-    if !overrides_gate(repo)? {
-        return Ok(0);
+    // The last three things a person sees before anything is spawned or
+    // written: the overview, naming every task the run is about to touch;
+    // the overrides gate, since a layer changes what runs without `git
+    // status` ever hinting that it is on; and doctor's own cheap findings,
+    // read as a warning rather than discovered mid-run. All three run here,
+    // before the lock is taken and the mode is written into it, so `esc` off
+    // any of them can back out having done nothing at all. `args.confirmed`
+    // skips all three: the queue screen's own `enter` already walked a
+    // person through this same trio, reusing its own `TermGuard` rather than
+    // nesting a second one — see `commands::queue::confirm_start`, which
+    // builds its own copy of `unattended_lines` rather than reading this
+    // one, since it never runs this block at all.
+    if !args.confirmed {
+        if !overview_gate(repo)? {
+            return Ok(0);
+        }
+        if !overrides_gate(repo)? {
+            return Ok(0);
+        }
+        let unattended_lines = unattended_block_lines(unattended, &repo.config);
+        if !warnings_gate(repo, pipelines, &unattended_lines)? {
+            return Ok(0);
+        }
     }
 
     // Taken for the whole run. Two dispatchers would both see the same task at
     // the same step and both spawn a lane into its worktree.
     let _lock = crate::lock::Lock::acquire(&repo.lock_file(), unattended)?;
-
-    if unattended {
-        println!(
-            "unattended: blocks resume where they happened, and a `loop` that gives up into \
-             `blocked` does not apply. A gated step still parks on `paused` for you."
-        );
-        match repo.config.unattended.max_output_tokens {
-            0 => println!(
-                "  no unattended.max_output_tokens is set, so nothing bounds this run in \
-                 tokens."
-            ),
-            ceiling => println!("  stopping once this run has spent {ceiling} output tokens."),
-        }
-        match repo.config.unattended.max_cost_usd {
-            ceiling if ceiling <= 0.0 => println!(
-                "  no unattended.max_cost_usd is set, so nothing bounds this run in dollars — \
-                 an empty queue or ctrl-c is what ends it if neither ceiling is."
-            ),
-            ceiling => println!("  stopping once this run has spent ${ceiling:.2}."),
-        }
-    }
 
     // Note this project once per run, so `spoolway eval --by --all` can find
     // its ledger later. A project that is dispatched in is a project that spends.
@@ -231,11 +227,12 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // It is tmux that still needs this: this is where it moves the caller's
     // own window into the run's shared session.
     //
-    // Never for `--dry-run`, which opens nothing and closes nothing. Failure is
-    // said out loud and stepped over: a run whose pane could not be moved is
-    // still a run, drawing where it was started, and its stop closes the
-    // tab behind it as it did before — the sweep asks where this pane
-    // actually is rather than assuming the move landed.
+    // Never for `--dry-run`, which opens nothing and closes nothing. A
+    // failure here is held for `workspace_move_notice`, just below, rather
+    // than printed on the spot — this is the one notice `warnings_gate`,
+    // above, could not carry: the move is only attempted once the lock is
+    // held, past the point `esc` could still mean "nothing happened yet".
+    let mut workspace_move_error = None;
     if !args.dry_run {
         match mux
             .dispatch_workspace(&repo.root, true)
@@ -261,8 +258,21 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
                 None => Ok(()),
             }) {
             Ok(()) => {}
-            Err(err) => println!("  ! could not move this run into its own workspace: {err:#}"),
+            Err(err) => {
+                workspace_move_error = Some(format!(
+                    "could not move this run into its own workspace: {err:#}"
+                ));
+            }
         }
+    }
+
+    // The one notice `warnings_gate` ran too early to carry — see just
+    // above. Held on screen the same way, but with only `[enter]` to
+    // dismiss it: by now the lock is held and, under tmux, this process's
+    // own pane may already have moved, so there is no earlier screen left
+    // for `esc` to mean "back to" — see `workspace_move_notice`'s own doc.
+    if let Some(err) = &workspace_move_error {
+        workspace_move_notice(err)?;
     }
 
     // The run watches itself. A resident dispatcher spends almost all of its
@@ -533,6 +543,213 @@ fn commit_reason(pipelines: &Pipelines, config: &Config) -> Option<String> {
         .then(|| "`dispatch.auto_commit` is on".to_string())
 }
 
+/// The queue overview: every task `Repo::tasks()` holds right now, grouped
+/// by `group:` — the mockup on task `overview-and-gates`. `Ok(true)` to go
+/// on to the overrides gate, `Ok(false)` only for `esc`.
+///
+/// A thin wrapper over [`overview_gate_with`] — see [`overrides_gate`]'s own
+/// doc comment for why this split exists at all; the two gates share it for
+/// the same reason.
+fn overview_gate(repo: &Repo) -> Result<bool> {
+    overview_gate_with(
+        repo,
+        crate::ask::interactive(),
+        &mut crate::screen::RawStdin,
+        &mut std::io::stdout(),
+        Some(crate::platform::TermGuard::new as fn() -> _),
+    )
+}
+
+/// [`overview_gate`]'s own logic. Never printed for a non-interactive run:
+/// unlike the overrides notice, there is no record this needs to leave in a
+/// log nobody is watching — it is a person's own screen, or nothing.
+///
+/// `term: None` for a caller that already holds a [`crate::platform::TermGuard`]
+/// of its own — `commands::queue::confirm_start`, reusing the one
+/// `run_screen` holds for its whole session — and `Some` for one that does
+/// not, taken only just before the first blocking read: see
+/// `commands::queue::tool_requirements_gate_with`'s own doc on why a second,
+/// nested guard is a bug rather than merely redundant.
+pub(crate) fn overview_gate_with(
+    repo: &Repo,
+    interactive: bool,
+    input: &mut impl PollableRead,
+    out: &mut impl std::io::Write,
+    term: Option<impl FnOnce() -> crate::platform::TermGuard>,
+) -> Result<bool> {
+    if !interactive {
+        return Ok(true);
+    }
+
+    let tasks = repo.tasks()?;
+    let _term = term.map(|term| term());
+    let _ = write!(out, "\x1b[2J\x1b[H");
+    for line in overview_lines(&tasks, None) {
+        writeln!(out, "{line}")?;
+    }
+    loop {
+        match crate::screen::read_key(input) {
+            Some(crate::screen::Key::Enter) => return Ok(true),
+            Some(crate::screen::Key::Esc) => return Ok(false),
+            // The tty went away mid-question, or — reached through
+            // `commands::queue::confirm_start` — the script driving the
+            // queue screen simply ran out of keys, exactly the way it ends
+            // every other mode: see `queue_screen`'s own doc comment on why
+            // an exhausted pipe reads as `esc` rather than as a leftover
+            // key nobody typed. `overrides_gate_with`'s own copy of this
+            // match proceeds instead on the same read — this is a new
+            // screen weighing a new decision, so it takes the more
+            // conservative of the two rather than inheriting that one's.
+            None => return Ok(false),
+            _ => {}
+        }
+    }
+}
+
+/// The same overview, drawn for the one thing left to do with it once
+/// `commands::queue::after_write` finds the queue's lock already held: join
+/// the run that is already going rather than start one that cannot. `Ok(true)`
+/// for `enter`, meaning the caller should now focus that dispatcher's
+/// workspace and let this screen end; `Ok(false)` for `esc`, back to
+/// browsing, and for the tty going away mid-question — the same
+/// conservative reading [`overview_gate_with`] gives that case.
+///
+/// Always interactive and always `term: None`: the only caller is
+/// `commands::queue::begin_submission`, reached from `run_screen`, which
+/// already holds its own `TermGuard` — see [`overview_gate_with`]'s own doc
+/// comment on why a second one here would be a bug rather than merely
+/// redundant.
+pub(crate) fn dispatcher_running_gate_with(
+    repo: &Repo,
+    pid: u32,
+    input: &mut impl PollableRead,
+    out: &mut impl std::io::Write,
+) -> Result<bool> {
+    let tasks = repo.tasks()?;
+    let _ = write!(out, "\x1b[2J\x1b[H");
+    for line in overview_lines(&tasks, Some(pid)) {
+        writeln!(out, "{line}")?;
+    }
+    loop {
+        match crate::screen::read_key(input) {
+            Some(crate::screen::Key::Enter) => return Ok(true),
+            Some(crate::screen::Key::Esc) => return Ok(false),
+            None => return Ok(false),
+            _ => {}
+        }
+    }
+}
+
+/// The overview's own column widths, sized to the mockup's own longest
+/// example row: the task id, pipeline and step columns are fixed, and
+/// `OVERVIEW_BASE_W` is whatever is left of 80 columns once the two-space
+/// indent and the other three have taken their share — the one column with
+/// no ceiling of its own otherwise, since a base names a branch and nothing
+/// stops a branch running long.
+const OVERVIEW_NAME_W: usize = 20;
+const OVERVIEW_PIPELINE_W: usize = 12;
+const OVERVIEW_STEP_W: usize = 10;
+const OVERVIEW_BASE_W: usize = 80 - 2 - OVERVIEW_NAME_W - OVERVIEW_PIPELINE_W - OVERVIEW_STEP_W;
+
+/// One cell of the overview's table: `queue::clip`'s own ellipsis-cut, then
+/// padded out to `width` — the same combination the trial picker's own id
+/// column already uses (`assign_pipelines_panel`), so a task id, pipeline
+/// name or step id too long for its column is cut rather than pushing every
+/// column after it out past 80 (review finding 1). Clips to `width - 1`
+/// rather than `width`: `assign_pipelines_panel` clips to a width derived
+/// from the longest id and then writes its own explicit separator after it,
+/// so its cells never touch, but this table has no separate separator —
+/// clipping to the full column width let a cell exactly as long as its
+/// column run straight into the next one with no gap (review finding 1,
+/// still open after the first fix). Reserving one column of the budget for
+/// the gap keeps every row at exactly 80 columns while leaving at least one
+/// space before the next column, matching the mockup's own gapped layout.
+fn overview_cell(text: &str, width: usize) -> String {
+    crate::screen::pad_to(&super::queue::clip(text.to_string(), width - 1), width)
+}
+
+/// The overview's own lines, grouped by `group:` and sorted by group name —
+/// a task naming none is a group of one, keyed by its own id, the same
+/// reading [`crate::status::Row::group`] gives it. Pure, so a caller never
+/// has to reach past `repo.tasks()` to draw the exact screen the mockup
+/// draws — every task the queue directory holds, never the archive, since
+/// `Repo::tasks` never reads that directory at all.
+///
+/// `held_pid` is `None` for the ordinary "about to start one" draw, and the
+/// running dispatcher's own pid once `commands::queue::after_write` finds
+/// the lock already held — see the `focus-live-run` mockup, which draws
+/// both the pid line under the header and the swapped footer this same
+/// table then carries, rather than a screen of its own: nothing about the
+/// board changes, only what a person can do once they are looking at it.
+fn overview_lines(tasks: &[Task], held_pid: Option<u32>) -> Vec<String> {
+    let mut by_group: std::collections::BTreeMap<&str, Vec<&Task>> = Default::default();
+    for task in tasks {
+        let key = task.front.group.as_deref().unwrap_or(task.id());
+        by_group.entry(key).or_default().push(task);
+    }
+
+    let mut lines = vec![format!(
+        "queued  {} · {}",
+        plural(by_group.len(), "group"),
+        plural(tasks.len(), "task")
+    )];
+    if let Some(pid) = held_pid {
+        lines.push(format!(
+            "a dispatcher is already running (pid {pid}) — it takes these on its next pass"
+        ));
+    }
+    lines.push(String::new());
+    lines.push(format!(
+        "  {}{}{}{}",
+        overview_cell("TASK", OVERVIEW_NAME_W),
+        overview_cell("PIPELINE", OVERVIEW_PIPELINE_W),
+        overview_cell("STEP", OVERVIEW_STEP_W),
+        "BASE"
+    ));
+    for group_tasks in by_group.values() {
+        let name = group_tasks[0]
+            .front
+            .group
+            .as_deref()
+            .unwrap_or(group_tasks[0].id());
+        lines.push(String::new());
+        lines.push(super::queue::clip(name.to_string(), 80));
+        for task in group_tasks {
+            lines.push(format!(
+                "  {}{}{}{}",
+                overview_cell(task.id(), OVERVIEW_NAME_W),
+                overview_cell(
+                    task.front.pipeline.as_deref().unwrap_or("—"),
+                    OVERVIEW_PIPELINE_W
+                ),
+                overview_cell(task.stage(), OVERVIEW_STEP_W),
+                super::queue::clip(
+                    task.front.base.as_deref().unwrap_or("—").to_string(),
+                    OVERVIEW_BASE_W
+                ),
+            ));
+        }
+    }
+    lines.push(String::new());
+    lines.push(if held_pid.is_some() {
+        "[enter] go to the dispatcher   [esc] back".to_string()
+    } else {
+        "[enter] start a dispatcher   [esc] back".to_string()
+    });
+    lines
+}
+
+/// `n` with its noun, singular where that is what `n` is — [`overview_lines`]'s
+/// own copy of the same rule `commands::queue::plural` already applies to the
+/// pending screen, kept local rather than shared across the two: neither
+/// module is the other's to reach into for one line of pluralization.
+fn plural(n: usize, noun: &str) -> String {
+    match n {
+        1 => format!("1 {noun}"),
+        _ => format!("{n} {noun}s"),
+    }
+}
+
 /// The standing consent gate for a patch layer (see [`crate::overrides`]):
 /// `Ok(true)` to go on and start the run, `Ok(false)` only for `esc`, the one
 /// path that must reach the caller before `Lock::acquire` runs at all.
@@ -555,7 +772,7 @@ fn overrides_gate(repo: &Repo) -> Result<bool> {
         crate::ask::interactive(),
         &mut crate::screen::RawStdin,
         &mut std::io::stdout(),
-        crate::platform::TermGuard::new,
+        Some(crate::platform::TermGuard::new as fn() -> _),
     )
 }
 
@@ -572,12 +789,17 @@ fn overrides_gate(repo: &Repo) -> Result<bool> {
 /// the run proceeds without waiting on an answer nobody can give. With a
 /// layer already acknowledged and unmoved since, this says nothing at all —
 /// "don't ask again until this changes" means exactly that.
-fn overrides_gate_with(
+///
+/// `term: None` for a caller that already holds a [`crate::platform::TermGuard`]
+/// of its own — see [`overview_gate_with`]'s own doc comment on the pair, and
+/// `commands::queue::tool_requirements_gate_with` on why a second, nested
+/// guard is a bug rather than merely redundant.
+pub(crate) fn overrides_gate_with(
     repo: &Repo,
     interactive: bool,
     input: &mut impl PollableRead,
     out: &mut impl std::io::Write,
-    term: impl FnOnce() -> crate::platform::TermGuard,
+    term: Option<impl FnOnce() -> crate::platform::TermGuard>,
 ) -> Result<bool> {
     let rows = collect_override_rows(&repo.overrides_dir())?;
     if rows.is_empty() {
@@ -600,16 +822,17 @@ fn overrides_gate_with(
         return Ok(true);
     }
 
+    // Taken only now, right before the first read that can actually block —
+    // every early return above constructs no guard at all, so a dispatch
+    // with no layer, or one already acknowledged, hides and shows nothing.
+    let _term = term.map(|term| term());
+    let _ = write!(out, "\x1b[2J\x1b[H");
     print_overrides_notice(out, &rows)?;
     writeln!(
         out,
         "  [enter] start the run   [esc] back   [x] don't ask again until this changes"
     )?;
 
-    // Taken only now, right before the first read that can actually block —
-    // every early return above constructs no guard at all, so a dispatch
-    // with no layer, or one already acknowledged, hides and shows nothing.
-    let _term = term();
     loop {
         match crate::screen::read_key(input) {
             Some(crate::screen::Key::Enter) => return Ok(true),
@@ -659,6 +882,285 @@ fn overrides_gate_kind(row: &OverrideRow) -> String {
     }
     let n = row.overrides.split(", ").filter(|k| !k.is_empty()).count();
     format!("{n} key{}", if n == 1 { "" } else { "s" })
+}
+
+/// `dispatch`'s own summary of what an unattended run does and does not
+/// bound, held as lines for [`warnings_gate_with`] rather than printed on
+/// the spot — see that function's own call site in [`dispatch`].
+///
+/// `unattended` is the merged flag `dispatch` itself already computed
+/// (`--unattended` or `unattended.enabled`), not `config.unattended.enabled`
+/// alone: a run made unattended by the command line reports on itself the
+/// same way one made unattended by config does.
+pub(crate) fn unattended_block_lines(unattended: bool, config: &Config) -> Vec<String> {
+    if !unattended {
+        return Vec::new();
+    }
+    vec![
+        "unattended: blocks resume where they happened, and a `loop` that gives up into \
+         `blocked` does not apply. A gated step still parks on `paused` for you."
+            .to_string(),
+        match config.unattended.max_output_tokens {
+            0 => "no unattended.max_output_tokens is set, so nothing bounds this run in \
+                  tokens."
+                .to_string(),
+            ceiling => format!("stopping once this run has spent {ceiling} output tokens."),
+        },
+        match config.unattended.max_cost_usd {
+            ceiling if ceiling <= 0.0 => "no unattended.max_cost_usd is set, so nothing bounds \
+                                           this run in dollars — an empty queue or ctrl-c is \
+                                           what ends it if neither ceiling is."
+                .to_string(),
+            ceiling => format!("stopping once this run has spent ${ceiling:.2}."),
+        },
+    ]
+}
+
+/// The screen between the overrides gate and the run itself: doctor's cheap
+/// findings (see [`crate::commands::doctor::cheap_findings`]) under the
+/// mockup's own three headings, plus the unattended block — one of the two
+/// notices [`dispatch`] used to print with a bare `println!` and lose to
+/// `Board::draw`'s own clear screen a moment later (task `warnings-screen`).
+///
+/// `Ok(true)` to go on and start the run, `Ok(false)` only for `esc`.
+/// Alongside [`overview_gate`] and [`overrides_gate`], and — like both —
+/// before `Lock::acquire`: `esc` here must still mean "nothing has happened
+/// yet", which is only true ahead of the lock. The other notice this task
+/// exists to fix, a workspace-move failure, cannot join this screen for
+/// exactly that reason — the move is only attempted once the lock is held —
+/// so it gets its own, smaller one instead; see [`workspace_move_notice`],
+/// which is why this takes only `unattended` and no workspace-move error of
+/// its own.
+fn warnings_gate(repo: &Repo, pipelines: &Pipelines, unattended: &[String]) -> Result<bool> {
+    warnings_gate_with(
+        repo,
+        pipelines,
+        crate::ask::interactive(),
+        unattended,
+        &mut crate::screen::RawStdin,
+        &mut std::io::stdout(),
+        Some(crate::platform::TermGuard::new as fn() -> _),
+    )
+}
+
+/// [`warnings_gate`]'s own logic, against an injected reader, writer and
+/// terminal guard — see [`overrides_gate_with`]'s own doc comment on why the
+/// split exists and what `term: None` means to a caller that already holds
+/// a guard.
+///
+/// Skipped entirely — no draw, no fingerprint, `Ok(true)` at once — when
+/// none of the three sections has anything in it. With something to say but
+/// no tty on either end, the notice is still printed, once, so an unattended
+/// run leaves the same record in its log that `overrides_gate_with` leaves
+/// for its own notice; nothing here may then block on a keypress nobody can
+/// answer.
+pub(crate) fn warnings_gate_with(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    interactive: bool,
+    unattended: &[String],
+    input: &mut impl PollableRead,
+    out: &mut impl std::io::Write,
+    term: Option<impl FnOnce() -> crate::platform::TermGuard>,
+) -> Result<bool> {
+    use crate::commands::doctor::Warning;
+
+    let cheap = crate::commands::doctor::cheap_findings(repo, pipelines, &repo.config);
+    let settings: Vec<String> = unattended
+        .iter()
+        .cloned()
+        .chain(cheap.iter().filter_map(|w| match w {
+            Warning::Setting(text) => Some(text.clone()),
+            _ => None,
+        }))
+        .collect();
+    let files: Vec<String> = cheap
+        .iter()
+        .filter_map(|w| match w {
+            Warning::File(text) => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    let problems: Vec<String> = cheap
+        .iter()
+        .filter_map(|w| match w {
+            Warning::Problem(text) => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+
+    if settings.is_empty() && files.is_empty() && problems.is_empty() {
+        return Ok(true);
+    }
+
+    if !interactive {
+        print_warnings_notice(out, &settings, &files, &problems)?;
+        return Ok(true);
+    }
+
+    // Fingerprinted on the body alone — never the header or the footer, both
+    // of which are this screen's own wording rather than a fact about the
+    // project — so a person who has hidden this exact set of lines is not
+    // asked again merely because a later spoolway rewords the prompt beneath
+    // them.
+    let rendered = warnings_lines(&settings, &files, &problems).join("\n");
+    let fingerprint = crate::skeleton::fingerprint(&rendered);
+    if !crate::overrides::warnings_ack_needed(&repo.home, &fingerprint) {
+        return Ok(true);
+    }
+
+    let _term = term.map(|term| term());
+    let _ = write!(out, "\x1b[2J\x1b[H");
+    print_warnings_notice(out, &settings, &files, &problems)?;
+    // Flush left, in the same column as the headings above it — the
+    // mockup's own footer, unlike the overrides gate's, sits under a body
+    // that is not itself indented two columns.
+    writeln!(
+        out,
+        "[enter] start the run   [esc] back   [x] hide until these change"
+    )?;
+
+    loop {
+        match crate::screen::read_key(input) {
+            Some(crate::screen::Key::Enter) => return Ok(true),
+            Some(crate::screen::Key::Esc) => return Ok(false),
+            Some(crate::screen::Key::Char('x' | 'X')) => {
+                crate::overrides::warnings_ack_write(&repo.home, &fingerprint)?;
+                return Ok(true);
+            }
+            // The tty went away mid-question. Nothing here may hang waiting
+            // for an answer that can no longer come — see
+            // `overrides_gate_with`'s own copy of this same reasoning.
+            None => return Ok(true),
+            _ => {}
+        }
+    }
+}
+
+/// The one screen [`warnings_gate`] cannot show: a failure to move this
+/// run's own pane into its workspace, only known once `dispatch` has
+/// already taken the lock and attempted the move — see that call site's own
+/// comment. Unlike `warnings_gate`, there is no earlier screen left to
+/// decline back to here, so `[enter]` is the only key this reads, and
+/// nothing is fingerprinted: a pane move either works or it does not, once,
+/// this run — there is no standing state worth hiding until it changes.
+fn workspace_move_notice(err: &str) -> Result<()> {
+    workspace_move_notice_with(
+        err,
+        crate::ask::interactive(),
+        &mut crate::screen::RawStdin,
+        &mut std::io::stdout(),
+        Some(crate::platform::TermGuard::new as fn() -> _),
+    )
+}
+
+/// [`workspace_move_notice`]'s own logic, against an injected reader, writer
+/// and terminal guard — see [`overrides_gate_with`]'s own doc comment on the
+/// pattern. With no tty on either end the notice is still printed, once, so
+/// it is on record; nothing here may then block on a keypress nobody can
+/// answer.
+pub(crate) fn workspace_move_notice_with(
+    err: &str,
+    interactive: bool,
+    input: &mut impl PollableRead,
+    out: &mut impl std::io::Write,
+    term: Option<impl FnOnce() -> crate::platform::TermGuard>,
+) -> Result<()> {
+    let problems = [err.to_string()];
+    if !interactive {
+        print_warnings_notice(out, &[], &[], &problems)?;
+        return Ok(());
+    }
+
+    let _term = term.map(|term| term());
+    let _ = write!(out, "\x1b[2J\x1b[H");
+    print_warnings_notice(out, &[], &[], &problems)?;
+    writeln!(out, "[enter] continue")?;
+
+    loop {
+        match crate::screen::read_key(input) {
+            Some(crate::screen::Key::Enter) | None => return Ok(()),
+            _ => {}
+        }
+    }
+}
+
+/// The warnings screen's own body: the mockup's heading, then whichever of
+/// `settings`/`files`/`problems` has anything to say, in that order, each
+/// under its own heading and skipped entirely when empty — the whole reason
+/// the screen it backs is skipped too when all three are.
+fn print_warnings_notice(
+    out: &mut impl std::io::Write,
+    settings: &[String],
+    files: &[String],
+    problems: &[String],
+) -> Result<()> {
+    writeln!(out, "before this run starts")?;
+    writeln!(out)?;
+    for line in warnings_lines(settings, files, problems) {
+        writeln!(out, "{line}")?;
+    }
+    writeln!(out)?;
+    Ok(())
+}
+
+/// [`print_warnings_notice`]'s own lines, without the leading title or the
+/// trailing blank line, pulled out on its own so the fingerprint gate reads
+/// exactly the text a person was shown — never the title, which never
+/// changes, and never the footer, which is this screen's prompt rather than
+/// a fact about the project.
+fn warnings_lines(settings: &[String], files: &[String], problems: &[String]) -> Vec<String> {
+    let mut lines = Vec::new();
+    for (heading, texts) in [
+        ("settings", settings),
+        ("files", files),
+        ("problems", problems),
+    ] {
+        if texts.is_empty() {
+            continue;
+        }
+        lines.push(heading.to_string());
+        for (i, text) in texts.iter().enumerate() {
+            if i > 0 {
+                lines.push(String::new());
+            }
+            lines.extend(wrap_indent(text, "  ", 80));
+        }
+        lines.push(String::new());
+    }
+    // The loop above leaves one trailing blank line behind its last
+    // section — wanted between sections, not after all of them, where
+    // `print_warnings_notice` already puts its own blank line before the
+    // footer.
+    if lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+    lines
+}
+
+/// `text`, word-wrapped to `width` columns with `indent` at the start of
+/// every line it produces. A local copy of the same wrapping
+/// `commands::queue`'s own `wrapped` does for a labeled row, rather than a
+/// reach into a sibling module for one small utility this screen has no
+/// label to sit beside — every line here carries the same indent, not only
+/// the continuation lines a label would leave bare.
+fn wrap_indent(text: &str, indent: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current = indent.to_string();
+    let mut bare = true;
+    for word in text.split_whitespace() {
+        if !bare && current.chars().count() + 1 + word.chars().count() > width {
+            lines.push(std::mem::replace(&mut current, indent.to_string()));
+            bare = true;
+        }
+        if !bare {
+            current.push(' ');
+        }
+        current.push_str(word);
+        bare = false;
+    }
+    lines.push(current);
+    lines
 }
 
 /// One of the three things [`check_git_identity`], [`check_index_lock`] and
@@ -1738,7 +2240,7 @@ mod tests {
             false,
             &mut input,
             &mut out,
-            crate::platform::TermGuard::inert,
+            Some(crate::platform::TermGuard::inert),
         )
         .unwrap();
         assert!(proceed);
@@ -1760,7 +2262,7 @@ mod tests {
                 true,
                 &mut input,
                 &mut out,
-                crate::platform::TermGuard::inert,
+                Some(crate::platform::TermGuard::inert),
             )
             .unwrap()
         );
@@ -1787,7 +2289,7 @@ mod tests {
                 true,
                 &mut input,
                 &mut out,
-                crate::platform::TermGuard::inert,
+                Some(crate::platform::TermGuard::inert),
             )
             .unwrap()
         );
@@ -1814,7 +2316,7 @@ mod tests {
                 true,
                 &mut input,
                 &mut out,
-                crate::platform::TermGuard::inert,
+                Some(crate::platform::TermGuard::inert),
             )
             .unwrap()
         );
@@ -1828,7 +2330,7 @@ mod tests {
                 true,
                 &mut no_input,
                 &mut out,
-                crate::platform::TermGuard::inert,
+                Some(crate::platform::TermGuard::inert),
             )
             .unwrap()
         );
@@ -1862,5 +2364,568 @@ mod tests {
             overrides: "—".into(),
         };
         assert_eq!(overrides_gate_kind(&prompt), "whole file");
+    }
+
+    /// A task for [`overview_lines`]'s own tests — `extra` carries whatever
+    /// of `group:`, `pipeline:`, `base:` and `stage:` a case wants; `stage:`
+    /// has no default here the way [`crate::pipeline::QUEUED`] gives a real
+    /// queued task one, since a case testing the STEP column has to be free
+    /// to name something other than `queued`.
+    fn overview_task(id: &str, extra: &str) -> Task {
+        crate::task::Task::parse(
+            std::path::PathBuf::from(format!("{id}.md")),
+            &format!("---\nid: {id}\n{extra}---\nbody\n"),
+        )
+        .unwrap()
+    }
+
+    /// Groups sort by name, alphabetically — `alpha` before `zebra` — and a
+    /// task naming no `group:` is a group of one, keyed by its own id, the
+    /// same reading `crate::status::Row::group` gives it.
+    #[test]
+    fn overview_lines_groups_by_group_sorted_by_name_falling_back_to_the_task_id() {
+        let tasks = [
+            overview_task(
+                "a",
+                "group: zebra\npipeline: default\nstage: queued\nbase: main\n",
+            ),
+            overview_task(
+                "b",
+                "group: alpha\npipeline: default\nstage: queued\nbase: main\n",
+            ),
+            overview_task("c", "pipeline: default\nstage: queued\nbase: main\n"),
+        ];
+        let lines = overview_lines(&tasks, None);
+        assert_eq!(lines[0], "queued  3 groups · 3 tasks", "{lines:?}");
+
+        let alpha = lines.iter().position(|l| l == "alpha").unwrap();
+        let c = lines.iter().position(|l| l == "c").unwrap();
+        let zebra = lines.iter().position(|l| l == "zebra").unwrap();
+        assert!(
+            alpha < c && c < zebra,
+            "groups must sort alphabetically, `c` (task `c`'s own group of one) included: \
+             {lines:?}"
+        );
+    }
+
+    /// A task naming no `pipeline:` or no `base:` — a legacy or hand-edited
+    /// document, since `queue add` always stamps both — draws an em dash in
+    /// that cell rather than an empty one a person could mistake for a
+    /// column that slipped out of alignment.
+    #[test]
+    fn overview_lines_draws_an_em_dash_for_a_missing_pipeline_or_base() {
+        let tasks = [overview_task("solo", "group: solo-group\nstage: queued\n")];
+        let lines = overview_lines(&tasks, None);
+        // Skip the group header line itself ("solo-group") — the row is the
+        // one starting with two spaces, indented under it.
+        let row = lines.iter().find(|l| l.starts_with("  solo")).unwrap();
+        assert_eq!(
+            row,
+            &format!(
+                "  {}{}{}{}",
+                overview_cell("solo", OVERVIEW_NAME_W),
+                overview_cell("—", OVERVIEW_PIPELINE_W),
+                overview_cell("queued", OVERVIEW_STEP_W),
+                "—"
+            )
+        );
+    }
+
+    /// Review finding 1's own repro: a task id, pipeline, step or base too
+    /// long for its column is cut with an ellipsis rather than pushing every
+    /// column after it — and the row overall never runs past 80 columns.
+    #[test]
+    fn overview_lines_cuts_a_long_id_pipeline_step_or_base_rather_than_overflowing() {
+        let tasks = [overview_task(
+            "a-task-id-much-longer-than-the-twenty-column-budget",
+            "group: over\n\
+             pipeline: a-pipeline-name-far-too-long-for-its-own-column\n\
+             stage: an-implausibly-long-step-name-for-its-column\n\
+             base: feature/rework-the-dispatcher-lock-handling-end-to-end\n",
+        )];
+        let lines = overview_lines(&tasks, None);
+        let row = lines
+            .iter()
+            .find(|l| l.trim_start().starts_with("a-task-id"))
+            .unwrap();
+        assert!(
+            row.chars().count() <= 80,
+            "a row must never run past 80 columns: {} ({})",
+            row.chars().count(),
+            row
+        );
+        assert!(row.contains('…'), "{row:?}");
+        // Review finding 1's second half: a cell clipped to its full column
+        // width ran edge to edge into the next column with no separating
+        // space, unlike the mockup's own gapped columns. The last character
+        // of each of the first three (fixed-width) cells must be the space
+        // `overview_cell` now reserves out of its own budget.
+        let chars: Vec<char> = row.chars().collect();
+        for boundary in [
+            2 + OVERVIEW_NAME_W - 1,
+            2 + OVERVIEW_NAME_W + OVERVIEW_PIPELINE_W - 1,
+            2 + OVERVIEW_NAME_W + OVERVIEW_PIPELINE_W + OVERVIEW_STEP_W - 1,
+        ] {
+            assert_eq!(
+                chars[boundary], ' ',
+                "column must end in a gap, not run into the next one: {row:?}"
+            );
+        }
+    }
+
+    /// A project with nothing queued at all still draws — an empty overview
+    /// rather than a screen with nothing between the header and the footer
+    /// line a person could mistake for a stalled draw.
+    #[test]
+    fn overview_lines_with_no_tasks_still_draws_the_header_and_footer() {
+        let lines = overview_lines(&[], None);
+        assert_eq!(lines[0], "queued  0 groups · 0 tasks", "{lines:?}");
+        assert_eq!(
+            lines.last(),
+            Some(&"[enter] start a dispatcher   [esc] back".to_string()),
+            "{lines:?}"
+        );
+    }
+
+    /// `held_pid: Some` — the `focus-live-run` mockup — swaps the footer for
+    /// one describing what `enter` now does and inserts the pid line right
+    /// under the header, ahead of the blank line separating it from the
+    /// table.
+    #[test]
+    fn overview_lines_with_a_held_pid_draws_the_notice_and_swaps_the_footer() {
+        let lines = overview_lines(&[], Some(250));
+        assert_eq!(lines[0], "queued  0 groups · 0 tasks", "{lines:?}");
+        assert_eq!(
+            lines[1], "a dispatcher is already running (pid 250) — it takes these on its next pass",
+            "{lines:?}"
+        );
+        assert_eq!(lines[2], "", "{lines:?}");
+        assert_eq!(
+            lines.last(),
+            Some(&"[enter] go to the dispatcher   [esc] back".to_string()),
+            "{lines:?}"
+        );
+    }
+
+    /// Never drawn with nobody there to answer: unlike the overrides
+    /// notice, this has no record to leave in a log nobody is watching, so
+    /// a non-interactive dispatch prints nothing about it at all and never
+    /// reads a key.
+    #[test]
+    fn overview_gate_with_non_interactive_is_never_drawn() {
+        let repo = fixture("overview-gate-non-interactive");
+        let mut input = keys("");
+        let mut out = Vec::new();
+        let proceed = overview_gate_with(
+            &repo,
+            false,
+            &mut input,
+            &mut out,
+            Some(crate::platform::TermGuard::inert),
+        )
+        .unwrap();
+        assert!(proceed);
+        assert!(out.is_empty(), "{out:?}");
+    }
+
+    /// `enter` proceeds to the overrides gate — the whole of what the
+    /// overview's own `[enter]` promises.
+    #[test]
+    fn overview_gate_with_enter_proceeds() {
+        let repo = fixture("overview-gate-enter");
+        let mut input = keys("\r");
+        let mut out = Vec::new();
+        assert!(
+            overview_gate_with(
+                &repo,
+                true,
+                &mut input,
+                &mut out,
+                Some(crate::platform::TermGuard::inert)
+            )
+            .unwrap()
+        );
+        let drawn = String::from_utf8(out).unwrap();
+        assert!(drawn.contains("queued  0 groups · 0 tasks"), "{drawn}");
+    }
+
+    /// `esc` is the one path that must reach the caller as `false`, the
+    /// same as `overrides_gate_with`'s own.
+    #[test]
+    fn overview_gate_with_esc_declines() {
+        let repo = fixture("overview-gate-esc");
+        let mut input = keys("\x1b");
+        let mut out = Vec::new();
+        assert!(
+            !overview_gate_with(
+                &repo,
+                true,
+                &mut input,
+                &mut out,
+                Some(crate::platform::TermGuard::inert)
+            )
+            .unwrap()
+        );
+    }
+
+    /// The tty going away mid-question declines here, unlike
+    /// `overrides_gate_with`'s own copy of the same read, which proceeds —
+    /// see that function's own doc comment on why the two differ: this
+    /// screen is also reached through `commands::queue::confirm_start`,
+    /// where an exhausted pipe is the ordinary way a script ends the queue
+    /// screen, not a real terminal dying mid-answer.
+    #[test]
+    fn overview_gate_with_none_declines() {
+        let repo = fixture("overview-gate-none");
+        let mut input = keys("");
+        let mut out = Vec::new();
+        assert!(
+            !overview_gate_with(
+                &repo,
+                true,
+                &mut input,
+                &mut out,
+                Some(crate::platform::TermGuard::inert)
+            )
+            .unwrap()
+        );
+    }
+
+    /// `enter` on the held-lock draw — task `focus-live-run`'s own mockup —
+    /// says `true`: there is somewhere to go now, not a run to start, but
+    /// the gate's shape is the same "proceed or not" either way.
+    #[test]
+    fn dispatcher_running_gate_with_enter_proceeds() {
+        let repo = fixture("dispatcher-running-gate-enter");
+        let mut input = keys("\r");
+        let mut out = Vec::new();
+        assert!(dispatcher_running_gate_with(&repo, 250, &mut input, &mut out).unwrap());
+        let drawn = String::from_utf8(out).unwrap();
+        assert!(
+            drawn.contains(
+                "a dispatcher is already running (pid 250) — it takes these on its next pass"
+            ),
+            "{drawn}"
+        );
+        assert!(
+            drawn.contains("[enter] go to the dispatcher   [esc] back"),
+            "{drawn}"
+        );
+    }
+
+    /// `esc` declines, back to browsing — the same reading every other gate
+    /// in this file gives it.
+    #[test]
+    fn dispatcher_running_gate_with_esc_declines() {
+        let repo = fixture("dispatcher-running-gate-esc");
+        let mut input = keys("\x1b");
+        let mut out = Vec::new();
+        assert!(!dispatcher_running_gate_with(&repo, 250, &mut input, &mut out).unwrap());
+    }
+
+    /// The tty going away mid-question declines here too — the same
+    /// conservative reading [`overview_gate_with_none_declines`] gives its
+    /// own copy of this case, since this screen is likewise reached only
+    /// through the queue screen, where an exhausted pipe is the ordinary
+    /// way a script ends it.
+    #[test]
+    fn dispatcher_running_gate_with_none_declines() {
+        let repo = fixture("dispatcher-running-gate-none");
+        let mut input = keys("");
+        let mut out = Vec::new();
+        assert!(!dispatcher_running_gate_with(&repo, 250, &mut input, &mut out).unwrap());
+    }
+
+    /// `unattended_block_lines` says nothing at all for an attended run —
+    /// the block is the one thing on this screen that exists only because a
+    /// run is unattended.
+    #[test]
+    fn unattended_block_lines_is_empty_when_attended() {
+        assert!(unattended_block_lines(false, &Config::default()).is_empty());
+    }
+
+    /// Both ceilings unset is the shape the mockup itself draws: three lines,
+    /// the last two both saying nothing bounds the run.
+    #[test]
+    fn unattended_block_lines_names_both_unset_ceilings() {
+        let lines = unattended_block_lines(true, &Config::default());
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert!(lines[0].starts_with("unattended:"), "{lines:?}");
+        assert!(
+            lines[1].contains("no unattended.max_output_tokens is set"),
+            "{lines:?}"
+        );
+        assert!(
+            lines[2].contains("no unattended.max_cost_usd is set"),
+            "{lines:?}"
+        );
+    }
+
+    /// A ceiling that is actually set is reported as a fact rather than a
+    /// gap — the branch the mockup itself never draws, but the one every
+    /// bounded unattended run actually takes.
+    #[test]
+    fn unattended_block_lines_names_a_set_ceiling() {
+        let mut config = Config::default();
+        config.unattended.max_output_tokens = 500_000;
+        config.unattended.max_cost_usd = 12.5;
+        let lines = unattended_block_lines(true, &config);
+        assert!(
+            lines[1].contains("stopping once this run has spent 500000 output tokens."),
+            "{lines:?}"
+        );
+        assert!(
+            lines[2].contains("stopping once this run has spent $12.50."),
+            "{lines:?}"
+        );
+    }
+
+    /// The mockup's own three headings, in order, each skipped when its
+    /// section is empty — [`print_warnings_notice`] and
+    /// [`warnings_gate_with`]'s own fingerprint both build on this.
+    #[test]
+    fn warnings_lines_draws_only_the_sections_with_something_in_them() {
+        assert!(
+            warnings_lines(&[], &[], &[]).is_empty(),
+            "nothing to say is nothing drawn"
+        );
+
+        let settings_only = warnings_lines(&["a setting".to_string()], &[], &[]);
+        assert_eq!(settings_only[0], "settings");
+        assert!(!settings_only.contains(&"files".to_string()));
+        assert!(!settings_only.contains(&"problems".to_string()));
+
+        let all_three = warnings_lines(
+            &["a setting".to_string()],
+            &["a file".to_string()],
+            &["a problem".to_string()],
+        );
+        let heading_order: Vec<&str> = all_three
+            .iter()
+            .filter(|l| ["settings", "files", "problems"].contains(&l.as_str()))
+            .map(String::as_str)
+            .collect();
+        assert_eq!(heading_order, vec!["settings", "files", "problems"]);
+    }
+
+    /// A section's text wraps at 80 columns with the mockup's own two-space
+    /// hang on every line, not only the continuation ones.
+    #[test]
+    fn warnings_lines_wraps_a_long_line_with_a_two_space_hang() {
+        let long = "word ".repeat(30);
+        let lines = warnings_lines(&[long], &[], &[]);
+        for line in &lines[1..] {
+            if line.is_empty() {
+                continue;
+            }
+            assert!(line.starts_with("  "), "{lines:?}");
+            assert!(line.chars().count() <= 80, "{lines:?}");
+        }
+    }
+
+    /// A fresh project has never been initialised, so `doctor_sync`'s own
+    /// notes fire and land under "files" — enough, with no unattended lines,
+    /// to prove this screen has something to say without a tty, and prints
+    /// it without ever reading a key (`input` is left empty; a `read_key`
+    /// call here would hang the test).
+    #[test]
+    fn warnings_gate_with_no_tty_prints_and_proceeds() {
+        let repo = fixture("warnings-gate-no-tty");
+        let pipelines = Pipelines::builtin();
+        let mut input = keys("");
+        let mut out = Vec::new();
+        let proceed = warnings_gate_with(
+            &repo,
+            &pipelines,
+            false,
+            &[],
+            &mut input,
+            &mut out,
+            Some(crate::platform::TermGuard::inert),
+        )
+        .unwrap();
+        assert!(proceed);
+        let printed = String::from_utf8(out).unwrap();
+        assert!(printed.contains("before this run starts"), "{printed}");
+        assert!(printed.contains("files"), "{printed}");
+    }
+
+    /// `enter` starts the run without writing an acknowledgement — the
+    /// mockup reserves that for `x` alone, the same rule
+    /// `overrides_gate_with` follows.
+    #[test]
+    fn warnings_gate_enter_proceeds_without_acknowledging() {
+        let repo = fixture("warnings-gate-enter");
+        let pipelines = Pipelines::builtin();
+        let unattended = ["a setting worth reading".to_string()];
+        let mut input = keys("\r");
+        let mut out = Vec::new();
+        assert!(
+            warnings_gate_with(
+                &repo,
+                &pipelines,
+                true,
+                &unattended,
+                &mut input,
+                &mut out,
+                Some(crate::platform::TermGuard::inert),
+            )
+            .unwrap()
+        );
+    }
+
+    /// `esc` is the one path that must reach the caller as `false`, before
+    /// anything below it in `dispatch` ever spawns a lane.
+    #[test]
+    fn warnings_gate_esc_declines() {
+        let repo = fixture("warnings-gate-esc");
+        let pipelines = Pipelines::builtin();
+        let unattended = ["a setting worth reading".to_string()];
+        let mut input = keys("\x1b");
+        let mut out = Vec::new();
+        assert!(
+            !warnings_gate_with(
+                &repo,
+                &pipelines,
+                true,
+                &unattended,
+                &mut input,
+                &mut out,
+                Some(crate::platform::TermGuard::inert),
+            )
+            .unwrap()
+        );
+    }
+
+    /// `x` starts the run and records a fingerprint of the rendered lines —
+    /// and once recorded, the same unchanged lines never ask again: the
+    /// second call needs no input at all, or it would hang rather than pass,
+    /// and it draws nothing.
+    #[test]
+    fn warnings_gate_x_acknowledges_and_is_not_asked_again() {
+        let repo = fixture("warnings-gate-x");
+        let pipelines = Pipelines::builtin();
+        let unattended = ["a setting worth reading".to_string()];
+
+        let mut input = keys("x");
+        let mut out = Vec::new();
+        assert!(
+            warnings_gate_with(
+                &repo,
+                &pipelines,
+                true,
+                &unattended,
+                &mut input,
+                &mut out,
+                Some(crate::platform::TermGuard::inert),
+            )
+            .unwrap()
+        );
+
+        let mut no_input = keys("");
+        let mut out = Vec::new();
+        assert!(
+            warnings_gate_with(
+                &repo,
+                &pipelines,
+                true,
+                &unattended,
+                &mut no_input,
+                &mut out,
+                Some(crate::platform::TermGuard::inert),
+            )
+            .unwrap()
+        );
+        assert!(
+            out.is_empty(),
+            "unchanged, acknowledged lines must say nothing at all: {out:?}"
+        );
+    }
+
+    /// Review finding 2: the footer sits flush left, in the same column as
+    /// the headings above it — unlike the overrides gate's own footer, whose
+    /// indent matches a body that is itself indented two columns, this
+    /// screen's headings are not.
+    #[test]
+    fn warnings_gate_footer_is_flush_left() {
+        let repo = fixture("warnings-gate-footer");
+        let pipelines = Pipelines::builtin();
+        let unattended = ["a setting worth reading".to_string()];
+        let mut input = keys("\x1b");
+        let mut out = Vec::new();
+        warnings_gate_with(
+            &repo,
+            &pipelines,
+            true,
+            &unattended,
+            &mut input,
+            &mut out,
+            Some(crate::platform::TermGuard::inert),
+        )
+        .unwrap();
+        let printed = String::from_utf8(out).unwrap();
+        assert!(
+            printed.contains("\n[enter] start the run"),
+            "footer must not be indented: {printed:?}"
+        );
+    }
+
+    /// `workspace_move_notice_with`'s own case: no tty, so the failure is
+    /// printed once, on record, and nothing here blocks on a key nobody can
+    /// answer — `input` is left empty, or a `read_key` call would hang the
+    /// test.
+    #[test]
+    fn workspace_move_notice_with_no_tty_prints_and_returns() {
+        let mut input = keys("");
+        let mut out = Vec::new();
+        workspace_move_notice_with(
+            "could not move this run into its own workspace: nope",
+            false,
+            &mut input,
+            &mut out,
+            Some(crate::platform::TermGuard::inert),
+        )
+        .unwrap();
+        let printed = String::from_utf8(out).unwrap();
+        assert!(printed.contains("problems"), "{printed}");
+        assert!(printed.contains("nope"), "{printed}");
+    }
+
+    /// `[enter]` is the only key this reads — there is no earlier screen
+    /// left to decline back to by the time this notice can show, so unlike
+    /// `warnings_gate_with` there is no `esc` branch to exercise here at
+    /// all.
+    #[test]
+    fn workspace_move_notice_with_enter_dismisses() {
+        let mut input = keys("\r");
+        let mut out = Vec::new();
+        workspace_move_notice_with(
+            "could not move this run into its own workspace: nope",
+            true,
+            &mut input,
+            &mut out,
+            Some(crate::platform::TermGuard::inert),
+        )
+        .unwrap();
+        let printed = String::from_utf8(out).unwrap();
+        assert!(printed.contains("[enter] continue"), "{printed}");
+    }
+
+    /// The tty going away mid-question dismisses rather than hangs — the
+    /// same reasoning `warnings_gate_with`'s own `None` branch gives, and for
+    /// the same reason: nothing here may wait forever for an answer that can
+    /// no longer come.
+    #[test]
+    fn workspace_move_notice_with_none_dismisses() {
+        let mut input = keys("");
+        let mut out = Vec::new();
+        workspace_move_notice_with(
+            "could not move this run into its own workspace: nope",
+            true,
+            &mut input,
+            &mut out,
+            Some(crate::platform::TermGuard::inert),
+        )
+        .unwrap();
     }
 }

@@ -44,8 +44,9 @@ task_doc .spoolway/routines/maintenance/weekly/prune.md prune "$BODY" "group: ma
 
 # `r` swaps the pending screen for the folder tree; `j` moves the cursor off
 # `maintenance` (alphabetically first) onto `nightly`; `space` ticks it;
-# `enter` queues both its documents as one batch; `n` declines the
-# dispatcher offer, the same way `trials.sh` does.
+# `enter` queues both its documents as one batch and reaches the overview;
+# the trailing `n` is noise it ignores, and the pipe running dry after it
+# declines, the same way `trials.sh` does.
 printf 'rj \rn' | "$SPOOLWAY" queue >/dev/null 2>&1
 
 works "the first document reaches the queue under a minted id" \
@@ -74,7 +75,8 @@ has "unminted, unmodified" "id: audit-deps" \
 # A second, solo pick: `→` opens `maintenance` (it holds a subfolder, so this
 # descends rather than focusing its own tasks pane, which it has none of
 # directly); `→` again opens `weekly`, a leaf, which focuses its one task;
-# `space` queues it alone; `n` declines the dispatcher offer again.
+# `space` queues it alone and reaches the overview again; the trailing `n`
+# is noise it ignores, and the pipe running dry after it declines.
 printf 'r\x1b[C\x1b[C n' | "$SPOOLWAY" queue >/dev/null 2>&1
 
 works "a solo pick under a nested folder reaches the queue too" \

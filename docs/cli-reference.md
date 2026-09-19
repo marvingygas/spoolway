@@ -50,7 +50,7 @@ archive directories. The right pane lists the highlighted group's tasks.
 |---|---|
 | `↑` `↓` / `j` `k` | Move the cursor |
 | `space` | Select a group. A group is queued whole |
-| `enter` | Check the selection, queue it, and offer to start a dispatcher |
+| `enter` | Check the selection, queue it, and offer to start a dispatcher, or to go to one already running |
 | `g` | Set or clear a `gate_at` on the highlighted task |
 | `o` | Open the highlighted task's document in your editor |
 | `f` | Filter groups by name, task id and title. `enter` keeps the filter, `esc` clears it |
@@ -60,7 +60,7 @@ archive directories. The right pane lists the highlighted group's tasks.
 | `s` | Save the highlighted group into `.spoolway/routines/<name>/` |
 
 Queueing deletes the group's pending documents from the pending directory. A sibling task
-already in the queue or the archive is left where it is, and the report names it. A group that
+already in the queue or the archive is left where it is. A group that
 fails validation is refused and nothing is deleted. See [Queueing a
 plan](planning.md#queueing-a-plan).
 
@@ -207,8 +207,51 @@ dispatcher`.
 The restart guard refuses the fifth start in 30 seconds when the four before it could not
 run. See [Restarting into a repo that cannot run](dispatcher.md#restarting-into-a-repo-that-cannot-run).
 
-When an [overrides layer](configuration.md#the-overrides-layer) is active, the run first shows
-what is patched and waits for a key:
+Before it starts, it shows the whole queue and waits for a key:
+
+```
+  queued  3 groups · 6 tasks
+
+    TASK                PIPELINE    STEP      BASE
+
+  cart
+    cart-empty-state    impl_fast   review    main
+    cart-totals         impl        queued    main
+    cart-discounts      impl        queued    main
+
+  checkout
+    auth-verify         impl        implement main
+    checkout-charge     impl_tdd    queued    main
+
+  search
+    search-facets       impl        queued    release-2
+
+  [enter] start a dispatcher   [esc] back
+```
+
+If another dispatcher already holds the lock, the same overview carries a pid line under the
+header and its own footer instead:
+
+```
+  queued  3 groups · 6 tasks
+  a dispatcher is already running (pid 250) — it takes these on its next pass
+
+    TASK                PIPELINE    STEP      BASE
+
+  cart
+    cart-empty-state    impl_fast   review    main
+    cart-totals         impl        queued    main
+    cart-discounts      impl        queued    main
+
+  [enter] go to the dispatcher   [esc] back
+```
+
+`enter` there brings the running dispatcher's workspace to the front and ends the command. No
+task document is written, moved or re-queued; the batch was already saved, and the running
+dispatcher picks it up on its own next pass.
+
+When an [overrides layer](configuration.md#the-overrides-layer) is active, `enter` there then
+shows what is patched and waits for a key:
 
 ```
   overrides are active for this project
@@ -219,6 +262,38 @@ what is patched and waits for a key:
 
   [enter] start the run   [esc] back   [x] don't ask again until this changes
 ```
+
+`enter` there then shows a warnings screen, built from `spoolway doctor`'s own cheap checks
+plus an unattended run's own notice, and waits for a key:
+
+```
+  before this run starts
+
+  settings
+    unattended mode is on with no ceiling in tokens or dollars,
+    so nothing stops a run that will not settle.
+
+  files
+    .spoolway/config.toml was written by an older spoolway version
+    and no longer matches this one — `spoolway update` takes it.
+
+  problems
+    the `archivist` prompt is missing, so the document step will
+    fail on every task that reaches it.
+
+  [enter] start the run   [esc] back   [x] hide until these change
+```
+
+Each section is skipped when it has nothing to say, and the whole screen is skipped, with
+nothing drawn, when all three are empty. `x` stores its own fingerprint of the rendered lines,
+separate from the overrides screen's, and the screen returns as soon as any line differs from
+it.
+
+`esc` on any of the three screens ends the command. From the queue screen's own `enter`, `esc`
+on any of the three screens returns to browsing instead.
+
+A failure to move this run into its own workspace is shown afterward, once the run has already
+taken the lock, on its own notice with only `[enter] continue` to press.
 
 | Exit code | Meaning |
 |---|---|

@@ -567,6 +567,21 @@ pub trait Mux {
     /// and that session is still in its pane, in a workspace nobody is looking
     /// at. Focusing is the whole gesture; the pane is left alone otherwise.
     fn focus_lane(&self, name: &str) -> Result<()>;
+    /// Bring a running dispatcher's own workspace — named by
+    /// [`Mux::dispatch_workspace`] — to the front, for a person who tried to
+    /// start a second one and found the queue's lock already held. There is
+    /// no lane to resolve here the way [`Mux::focus_lane`] does: the
+    /// dispatcher's own pane is not an agent, so it has to be reached by
+    /// workspace id instead.
+    ///
+    /// The default does nothing and never fails, which is the right answer
+    /// for both backends that never override it: tmux is on its way out and
+    /// needs nothing built for this, and headless has no workspace for
+    /// [`Mux::dispatch_workspace`] to ever name, so this is never even
+    /// reached with an id worth acting on. Only herdr overrides it.
+    fn focus_workspace(&self, _workspace_id: &str) -> Result<()> {
+        Ok(())
+    }
     /// Unused by the dispatcher itself now that a row's label is fixed at
     /// creation and never changed underneath it — a task's tab and workspace
     /// are named once, either `spoolway/<task>` under `split` or the
@@ -2071,6 +2086,10 @@ impl Mux for Herdr {
         // being focused somewhere off-screen and it being what you are looking
         // at.
         self.call_ignoring_result(&["agent", "focus", name])
+    }
+
+    fn focus_workspace(&self, workspace_id: &str) -> Result<()> {
+        self.call_ignoring_result(&["workspace", "focus", workspace_id])
     }
 
     fn rename_tab(&self, tab_id: &str, label: &str) -> Result<()> {

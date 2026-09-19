@@ -40,6 +40,13 @@ const PROMPTS_SUBDIR: &str = "prompts";
 /// the layer being emptied and refilled with byte-identical content.
 const ACK_FILE: &str = "override-ack";
 
+/// The same "don't ask again until this changes" gate the override layer
+/// uses, kept for `commands::dispatch`'s own warnings screen — see
+/// `commands::dispatch::warnings_gate_with` — but under its own file, since
+/// the two gates ack two unrelated fingerprints and one must not silence the
+/// other.
+const WARNINGS_ACK_FILE: &str = "warnings-ack";
+
 /// Where a project's patch layer lives, given any path already inside its
 /// tracked control plane: `repo.checkout` (most callers' `root` — a linked
 /// worktree's own checkout when a lane runs in one) or `repo.root` (always
@@ -239,20 +246,27 @@ pub(crate) fn prompt_override(overrides: &Path, name: &str) -> Option<PathBuf> {
 // layer changes underneath it.
 // ---------------------------------------------------------------------------
 
-/// Where the acknowledgement lives, given a project's home directory.
-fn ack_path(home: &Path) -> PathBuf {
-    home.join(ACK_FILE)
-}
-
-/// Whether `dispatch`'s gate still owes a person a question about the layer
-/// at `fingerprint`. `false` once the stored acknowledgement already names
-/// this exact fingerprint — an unreadable or missing file reads the same as
-/// one that names something else, since either way nobody has said yes to
-/// *this* layer yet.
-pub(crate) fn ack_needed(home: &Path, fingerprint: &str) -> bool {
-    std::fs::read_to_string(ack_path(home))
+/// Whether a gate keyed on the acknowledgement file at `home.join(file)`
+/// still owes a person a question about `fingerprint`. `true` (still owed)
+/// once the stored acknowledgement names anything else — an unreadable or
+/// missing file reads the same as one that names something else, since
+/// either way nobody has said yes to *this* fingerprint yet.
+fn ack_needed_at(home: &Path, file: &str, fingerprint: &str) -> bool {
+    std::fs::read_to_string(home.join(file))
         .map(|stored| stored.trim() != fingerprint)
         .unwrap_or(true)
+}
+
+/// Record that a person has agreed to `fingerprint`, under the gate keyed on
+/// `home.join(file)`.
+fn ack_write_at(home: &Path, file: &str, fingerprint: &str) -> Result<()> {
+    crate::task::write_atomic(&home.join(file), fingerprint)
+}
+
+/// Whether `dispatch`'s override gate still owes a person a question about
+/// the layer at `fingerprint`. See [`ack_needed_at`].
+pub(crate) fn ack_needed(home: &Path, fingerprint: &str) -> bool {
+    ack_needed_at(home, ACK_FILE, fingerprint)
 }
 
 /// Record that a person has agreed to run under `fingerprint` — the layer's
@@ -260,7 +274,20 @@ pub(crate) fn ack_needed(home: &Path, fingerprint: &str) -> bool {
 /// one: a tracked-file edit alone must not reopen a gate the layer itself
 /// has not moved.
 pub(crate) fn ack_write(home: &Path, fingerprint: &str) -> Result<()> {
-    crate::task::write_atomic(&ack_path(home), fingerprint)
+    ack_write_at(home, ACK_FILE, fingerprint)
+}
+
+/// Whether `dispatch`'s warnings screen still owes a person a question about
+/// the rendered lines hashed as `fingerprint` — see
+/// `crate::skeleton::fingerprint`. See [`ack_needed_at`].
+pub(crate) fn warnings_ack_needed(home: &Path, fingerprint: &str) -> bool {
+    ack_needed_at(home, WARNINGS_ACK_FILE, fingerprint)
+}
+
+/// Record that a person has hidden the warnings screen until its rendered
+/// lines change from `fingerprint`.
+pub(crate) fn warnings_ack_write(home: &Path, fingerprint: &str) -> Result<()> {
+    ack_write_at(home, WARNINGS_ACK_FILE, fingerprint)
 }
 
 // ---------------------------------------------------------------------------
@@ -742,6 +769,28 @@ mod tests {
         assert!(
             ack_needed(&home, "abcd1234"),
             "the old fingerprint no longer satisfies the gate"
+        );
+    }
+
+    /// The warnings screen's own gate is a second, independent instance of
+    /// the same mechanism — acknowledging one must never silence the other,
+    /// since they ask about two unrelated fingerprints.
+    #[test]
+    fn warnings_ack_is_independent_of_the_override_ack() {
+        let home = crate::scratch::root("overrides-ack-warnings-independence");
+        let _ = std::fs::remove_dir_all(&home);
+
+        ack_write(&home, "abcd1234").unwrap();
+        assert!(
+            warnings_ack_needed(&home, "abcd1234"),
+            "the override layer's own ack must not also satisfy the warnings screen"
+        );
+
+        warnings_ack_write(&home, "abcd1234").unwrap();
+        assert!(!warnings_ack_needed(&home, "abcd1234"));
+        assert!(
+            !ack_needed(&home, "abcd1234"),
+            "and the reverse: the warnings ack must not clear the override gate either"
         );
     }
 
