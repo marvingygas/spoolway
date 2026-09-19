@@ -481,8 +481,9 @@ fn arrived_by_fail_paragraph(task: &Task, pipeline: &Pipeline, step: &Step) -> S
 /// each other. `blocked` is the fixed case — [`crate::pipeline::Step::
 /// destination`] never actually asks it for a `Fail` or a `Block`, since
 /// `commands::report` reads either the same way it reads a `--pause` before
-/// the question reaches the graph — so it keeps its own two forms, `--pass`
-/// and `--pause`. Every other step compares `destination(Fail)` against
+/// the question reaches the graph — so it keeps its own three forms,
+/// `--pass`, `--pass --stage <step>` and `--pause`. Every other step
+/// compares `destination(Fail)` against
 /// `destination(Block)`: equal, and a `--fail` would park the task exactly
 /// where a `--block` already does, so it is withheld; distinct, and both are
 /// offered. `--block` is the one kept on a collision rather than `--fail`,
@@ -512,6 +513,7 @@ pub(crate) fn report_contract(task: &Task, step: &Step) -> String {
 
     let forms = if blocked {
         "    spoolway report --pass  -m \"<one line on what happened>\"\n    \
+              spoolway report --pass  --stage <step> -m \"<one line on what happened>\"\n    \
               spoolway report --pause -m \"<what needs a person, and why>\"\n    \
               --handoff \"<what the next step should know>\"   repeatable"
     } else if fail_redundant {
@@ -525,12 +527,22 @@ pub(crate) fn report_contract(task: &Task, step: &Step) -> String {
               --handoff \"<what the next step should know>\"   repeatable"
     };
 
+    // `--stage` only ever means anything alongside `--pass` on `blocked`
+    // itself — see `commands::report`'s own refusal by name. Unlike
+    // `--pause`, which is simply never offered off `blocked` (there is
+    // nothing there to withhold: no other step's contract has ever printed
+    // it), `--stage` is a flag every step's own report line could plausibly
+    // reach for once it exists at all, so it is named under the refusal
+    // wording here rather than left for a lane to discover by trying it.
     let withheld: &[&str] = if blocked {
         &["spoolway report --fail", "spoolway report --block"]
     } else if fail_redundant {
-        &["spoolway report --fail"]
+        &[
+            "spoolway report --fail",
+            "spoolway report --pass --stage <step>",
+        ]
     } else {
-        &[]
+        &["spoolway report --pass --stage <step>"]
     };
 
     let mut contract = format!("Your last action is one `spoolway report` command:\n\n{forms}");

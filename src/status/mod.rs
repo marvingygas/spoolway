@@ -4842,7 +4842,7 @@ mod tests {
     }
 
     /// `p` then `R` parks a task and puts it straight back — the round trip
-    /// the board leaves nothing behind for: `prompts`, `rounds` and
+    /// the board leaves nothing behind for: `steps`, `rounds` and
     /// `arrived_from` come back byte-for-byte, `rounds_via("implement",
     /// "paused")` stays zero, and the row's own NEXT column carries no loop
     /// counter across it.
@@ -4855,7 +4855,7 @@ mod tests {
 
         let before = repo.task("login").unwrap();
         let rounds_before = before.front.rounds.clone();
-        let prompts_before = before.front.prompts.clone();
+        let prompts_before = before.front.steps.clone();
         let arrived_from_before = before.front.arrived_from.clone();
 
         let (_mux, _name) = live_headless_lane(&repo);
@@ -4880,7 +4880,7 @@ mod tests {
         let after = repo.task("login").unwrap();
         assert_eq!(after.stage(), "implement");
         assert_eq!(after.front.rounds, rounds_before);
-        assert_eq!(after.front.prompts, prompts_before);
+        assert_eq!(after.front.steps, prompts_before);
         assert_eq!(after.front.arrived_from, arrived_from_before);
         assert_eq!(after.rounds_via("implement", crate::pipeline::PAUSED), 0);
         assert_eq!(after.rounds_via(crate::pipeline::PAUSED, "implement"), 0);

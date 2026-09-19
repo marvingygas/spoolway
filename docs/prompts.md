@@ -102,7 +102,7 @@ It prints seven sections:
 | 3 | The message typed into its pane | One sentence naming the task file, after any `skills:` invocations |
 | 4 | The environment every lane has | The table below |
 | 5 | What a lane may reach | Whatever the person running the dispatcher can |
-| 6 | How a lane finishes | The forms this step may use, and where each one routes. `--fail` is left out when it would route where `--block` already does. On `blocked`: `--pass` and `--pause`. A form left out is named under a refusal, so the lane knows it exists and may not use it. A step held in front of a person adds one line saying so: a step's own `gate:` holds a pass, for whoever opens the pane; a task's own `gate_at:` holds the report whatever it is |
+| 6 | How a lane finishes | The forms this step may use, and where each one routes. `--fail` is left out when it would route where `--block` already does. On `blocked`: `--pass`, `--pass --stage <step>` and `--pause`. A form left out is named under a refusal, so the lane knows it exists and may not use it. A step held in front of a person adds one line saying so: a step's own `gate:` holds a pass, for whoever opens the pane; a task's own `gate_at:` holds the report whatever it is |
 | 7 | The shape to write | The headings below, then what a prompt may never restate, the ban on examples, and the ban on sentences defending a rule |
 
 | Variable | What it is |

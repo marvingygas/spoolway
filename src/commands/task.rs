@@ -70,7 +70,7 @@ const IGNORED_KEYS: &[&str] = &[
     "paused_at",
     "paused_by",
     "launched_at",
-    "prompts",
+    "steps",
     "rounds",
     "launch_failures",
     "launch_busy_since",

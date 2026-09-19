@@ -2278,7 +2278,7 @@ impl<'a> Dispatcher<'a> {
             kind: record.kind.clone(),
             model,
             session: record.session.clone(),
-            round: task.map(|t| t.prompts_at(step_id)).unwrap_or(0),
+            round: task.map(|t| t.steps_at(step_id)).unwrap_or(0),
             wall_s: (now_secs() - record.started_at).max(0),
             turns: harvest.turns.saturating_sub(banked_turns),
             tokens,
@@ -3823,9 +3823,21 @@ impl<'a> Dispatcher<'a> {
                     Ok(_) => {
                         // The launch actually started — see the matching
                         // comment in `start_lanes`'s own `Ok` arm.
-                        if task.clear_launch_failures(&step.id) {
-                            self.persist(task)?;
-                        }
+                        //
+                        // Banked here too, not only for an agent lane's own
+                        // `start_one`: without this a command step never
+                        // appeared in `steps:` at all, so a `--stage` bounded
+                        // by that record could never name `test`, `suite` or
+                        // `handover` even after they had genuinely run — see
+                        // `Task::bank_launch`.
+                        let from = task
+                            .front
+                            .arrived_from
+                            .clone()
+                            .unwrap_or_else(|| crate::pipeline::QUEUED.to_string());
+                        task.bank_launch(&from, &step.id);
+                        task.clear_launch_failures(&step.id);
+                        self.persist(task)?;
                     }
                     Err(err) => {
                         // A launch that never got going at all — see
@@ -5077,7 +5089,7 @@ fn start_one(
         task.front.parked_from = None;
         task.front.escalated = false;
     }
-    // `prompts` is banked here, unconditionally — a prompt is a launch, so a
+    // `steps` is banked here, unconditionally — a prompt is a launch, so a
     // retry banks a second one, it was a second prompt and it was paid for —
     // except for a park whose session was actually carried: that lane never
     // stopped being the one already counted, so continuing it costs nothing
@@ -6560,7 +6572,7 @@ mod tests {
             paused_at: None,
             paused_by: None,
             launched_at: None,
-            prompts: Default::default(),
+            steps: Default::default(),
             rounds: Default::default(),
             launch_failures: Default::default(),
             launch_busy_since: Default::default(),
@@ -6633,7 +6645,7 @@ mod tests {
         assert_eq!(task.front.base.as_deref(), Some("work"));
         assert_eq!(task.front.workspace_id.as_deref(), Some("w9"));
         assert_eq!(task.front.pane_id.as_deref(), Some("w9:p1"));
-        assert_eq!(task.prompts_at("implement"), 1);
+        assert_eq!(task.steps_at("implement"), 1);
     }
 
     /// A task with no `base:` — queued before the rule held, or edited by
@@ -9751,6 +9763,7 @@ mod tests {
                 &pipelines,
                 &crate::cli::ReportArgs {
                     task: Some("demo".into()),
+                    stage: None,
                     pass: true,
                     fail: false,
                     block: false,
@@ -14001,6 +14014,27 @@ mod tests {
         );
     }
 
+    /// A command step banks a launch the same way an agent lane's own
+    /// `start_one` does — see the `Ok(_)` arm of `run_command`'s `Fresh`
+    /// case. Without this a task that only ever ran command steps had an
+    /// empty `steps:`, so `--stage`'s bound (`report::steps_run`) could
+    /// never name one of them even after it genuinely ran.
+    #[test]
+    fn a_command_step_banks_a_launch_the_way_an_agent_lane_does() {
+        let repo = fixture("command-banks-launch");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]);
+        let pipelines = pipelines_running("true", false);
+
+        drive(&repo, &pipelines, &mux, &path, "review");
+
+        assert_eq!(
+            reload(&path).steps_at("implement"),
+            1,
+            "the command step's run never landed in `steps:`"
+        );
+    }
+
     /// A command step's exit code is read once and its run files forgotten
     /// before the destination it computed is ever placed. When that
     /// destination is an agent step and every one of the model's slots is
@@ -15492,8 +15526,10 @@ mod tests {
     /// policy, and names `--handoff` — `--finding` is gone entirely. The
     /// builtin `default` pipeline's `implement` declares no `on_fail` of its
     /// own, so `--fail` lands on `blocked` exactly where `--block` does and
-    /// the contract withholds it — the system prompt's true final line is
-    /// therefore the refusal naming it, not `--handoff`.
+    /// the contract withholds it, alongside `--stage` (which only ever
+    /// means anything on a `--pass` from `blocked` itself) — the system
+    /// prompt's true final line is therefore the second of those two
+    /// refusals, not `--handoff`.
     #[test]
     fn the_system_prompt_ends_with_the_report_contract() {
         let repo = fixture("prompt-contract");
@@ -15505,7 +15541,9 @@ mod tests {
         let prompt =
             crate::compose::system_prompt(&repo, &task, pipeline, step, "[prompt]").unwrap();
         assert!(
-            prompt.trim_end().ends_with("spoolway report --fail"),
+            prompt
+                .trim_end()
+                .ends_with("spoolway report --pass --stage <step>"),
             "got: {prompt}"
         );
         assert!(
@@ -15671,8 +15709,11 @@ mod tests {
 
     /// A step whose fail and block routes actually differ — `default`'s
     /// `review`, `on_fail: implement`, `on_pass: document` — offers `--fail`
-    /// as a real form and names no refusal at all: withholding it is a
-    /// per-step decision, not a blanket ban on the flag.
+    /// as a real form and refuses no *outcome* flag: withholding one of
+    /// those is a per-step decision, not a blanket ban. `--stage` is still
+    /// named under the refusal wording here, the same as on every step but
+    /// `blocked` itself — it only ever means anything alongside a `--pass`
+    /// from there.
     #[test]
     fn a_step_whose_fail_and_block_routes_differ_offers_fail_with_no_refusal() {
         let repo = fixture("prompt-contract-fail-offered");
@@ -15690,8 +15731,13 @@ mod tests {
             crate::compose::system_prompt(&repo, &task, pipeline, step, "[prompt]").unwrap();
         assert!(prompt.contains("--fail  -m"), "got: {prompt}");
         assert!(
-            !prompt.contains("These commands are not available to you"),
-            "no form should be refused here: got: {prompt}"
+            !prompt.contains("spoolway report --fail\n")
+                && !prompt.contains("spoolway report --block\n"),
+            "neither outcome flag should be refused here: got: {prompt}"
+        );
+        assert!(
+            prompt.contains("spoolway report --pass --stage <step>"),
+            "`--stage` is still refused by name off `blocked`: got: {prompt}"
         );
     }
 

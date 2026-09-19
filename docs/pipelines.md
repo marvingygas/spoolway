@@ -209,7 +209,8 @@ step. Any other key is refused. Keys left out fall back to the config.
 ```
 
 - A `--pass` carries the task past the blocked step to that step's `on_pass` for an agent step,
-  and back to itself for a command step.
+  and back to itself for a command step. `--pass --stage <step>` sends it to `<step>` instead,
+  bounded by the steps this task has already run.
 - A `--pause`, `--fail` or `--block` parks the task on `paused`. `spoolway resume` then hands it
   back to the step it blocked on.
 - `spoolway dispatch` refuses an unattended run with a blank `blocked_model`.

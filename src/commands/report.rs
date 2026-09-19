@@ -112,6 +112,35 @@ pub fn report(
         );
     }
 
+    // `--stage` names where a pass from `blocked` lands, in place of
+    // `cleared_block_target`'s own answer — refused the same way `--pause`
+    // is, by name, on every step but `blocked`, and only for a `--pass`:
+    // naming a destination for `--fail`, `--block` or `--pause` off
+    // `blocked` would be asking a report that already has nowhere to go
+    // (see `paused_from_blocked` in [`route`]) to pick one anyway.
+    //
+    // Two distinct ways to trip this, told apart so neither refusal reads
+    // as contradicting itself: off `blocked` entirely, naming the step this
+    // report actually is at gives a lane somewhere to go from here (a plain
+    // `--pass`, same as `--pause`'s own refusal above); on `blocked` itself
+    // with anything but a `--pass`, naming the step again would read as
+    // "you are at blocked, but --stage only works from blocked" — so this
+    // one names the *outcome* that is wrong instead.
+    if args.stage.is_some() && current != crate::pipeline::BLOCKED {
+        bail!(
+            "--stage only means anything on a `--pass` from `{blocked}` — task `{id}` is at \
+             `{current}`, which has no `--stage` to give: report a plain `--pass` instead",
+            blocked = crate::pipeline::BLOCKED,
+        );
+    }
+    if args.stage.is_some() && current == crate::pipeline::BLOCKED && outcome != Outcome::Pass {
+        bail!(
+            "--stage only means anything on a `--pass` from `{blocked}` — this report is a \
+             `--{outcome}`, not a `--pass`",
+            blocked = crate::pipeline::BLOCKED,
+        );
+    }
+
     // What this step wants the next one to know, credited to the step that
     // said it — written whatever the outcome, since a lane that blocked can
     // still have learned something worth leaving behind. Appended one line
@@ -134,7 +163,14 @@ pub fn report(
     // `docs/concepts.md`'s Reach section.
     let unattended = repo.unattended();
 
-    let routed = route(&mut task, pipeline, &current, outcome, unattended)?;
+    let routed = route(
+        &mut task,
+        pipeline,
+        &current,
+        outcome,
+        unattended,
+        args.stage.as_deref(),
+    )?;
     let mut destination = routed.destination;
     let gated = routed.gated;
     let pause_note = routed.pause_note;
@@ -288,6 +324,7 @@ pub fn route(
     current: &str,
     outcome: Outcome,
     unattended: bool,
+    stage: Option<&str>,
 ) -> Result<Routed> {
     let step = pipeline.require_step(current).with_context(|| {
         format!(
@@ -323,7 +360,30 @@ pub fn route(
         // does share is the mark: the lane that originally hit the block —
         // which had often already read the tree and done most of the work —
         // is continued rather than replaced by a cold one.
-        let target = cleared_block_target(task, pipeline, true);
+        //
+        // `stage` overrides `cleared_block_target`'s own answer when the
+        // unblocker names one — bounded by `steps_run`, the steps this task
+        // has actually run a lane at, so a `--stage` can send it back onto
+        // ground already covered but never somewhere it was never staffed.
+        let target = match stage {
+            Some(named) => {
+                let run = steps_run(task, pipeline);
+                if !run.iter().any(|s| s == named) {
+                    bail!(
+                        "task `{}` has never been at `{named}` - a pass from `{blocked}` may \
+                         name a step this task has already run: {}",
+                        task.id(),
+                        run.iter()
+                            .map(|s| format!("`{s}`"))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        blocked = crate::pipeline::BLOCKED,
+                    );
+                }
+                named.to_string()
+            }
+            None => cleared_block_target(task, pipeline, true),
+        };
         resume_at(task, pipeline, &target, false);
         target
     } else if paused_from_blocked {
@@ -913,6 +973,38 @@ pub fn gate_hold(task: &Task, step: &Step, outcome: Outcome, destination: &str) 
     None
 }
 
+/// The steps this task has ever launched a lane or a command run at, in the
+/// pipeline's own order — what a `--stage` naming a step the task has never
+/// been at is bounded by, and what its refusal names back.
+///
+/// Read off `steps:` (see [`Task::steps_at`]), the launch record — not
+/// `rounds`, which forgets a bound `spoolway resume` already gave back, and
+/// not the task's current stage alone, which says nothing about a step it
+/// visited earlier and has since left. Pipeline order rather than the map's
+/// own key order so the answer reads as the shape of the run, not an
+/// alphabetised list of steps that happen to share no relation to each other.
+///
+/// `blocked` itself is excluded, whatever `steps:` says. A staffed
+/// `blocked` bank a launch under its own arrival route the instant an
+/// unblocker's lane starts (`start_one`, the same as any other step), so
+/// `blocked` is in that record on every real run this flag exists for — the
+/// one where a lane is actually sitting on `blocked` to type `--stage` at
+/// all. Left in the bound, `--stage blocked` would be accepted:
+/// `resume_at` clears `blocked_from`, and the next plain `--pass` from
+/// `blocked` falls through `resume_target` all the way to the pipeline's
+/// own entry, restarting a task that may already have pushed a branch or
+/// opened a pull request. `blocked` is also not a destination a `--stage`
+/// makes any sense naming — clearing a block by sending it back to the
+/// block is not a target this flag exists to reach.
+fn steps_run(task: &Task, pipeline: &Pipeline) -> Vec<String> {
+    pipeline
+        .steps
+        .iter()
+        .filter(|step| step.id != crate::pipeline::BLOCKED && task.steps_at(&step.id) > 0)
+        .map(|step| step.id.clone())
+        .collect()
+}
+
 /// Where clearing a block takes the task, which is not the same question as
 /// where it stopped.
 ///
@@ -1057,7 +1149,7 @@ pub fn caught_at(task: &Task, gated: &str) -> Option<Caught> {
 /// to it, so nothing changes for them.
 ///
 /// Only `rounds` is handed back: that is what a budget is spent from.
-/// `prompts` is the record of what this task has cost, and returning it would
+/// `steps` is the record of what this task has cost, and returning it would
 /// rewrite history rather than extend a licence.
 ///
 /// And the lane that stopped is marked to be *continued* rather than replaced,
@@ -1562,6 +1654,7 @@ mod tests {
                 &Pipelines::builtin(),
                 &ReportArgs {
                     task: Some("task-1".into()),
+                    stage: None,
                     pass: true,
                     fail: false,
                     block: false,
@@ -1657,6 +1750,7 @@ mod tests {
             &Pipelines::builtin(),
             &ReportArgs {
                 task: Some("login".into()),
+                stage: None,
                 pass: false,
                 fail: true,
                 block: false,
@@ -1704,6 +1798,7 @@ mod tests {
             &Pipelines::builtin(),
             &ReportArgs {
                 task: Some("login".into()),
+                stage: None,
                 pass: true,
                 fail: false,
                 block: false,
@@ -1758,6 +1853,7 @@ mod tests {
             &Pipelines::builtin(),
             &ReportArgs {
                 task: Some("stuck".into()),
+                stage: None,
                 pass: false,
                 fail: false,
                 block: true,
@@ -1838,6 +1934,7 @@ mod tests {
             pipelines,
             &ReportArgs {
                 task: Some(id.into()),
+                stage: None,
                 pass: outcome == Outcome::Pass,
                 fail: outcome == Outcome::Fail,
                 block: outcome == Outcome::Block,
@@ -1890,6 +1987,7 @@ mod tests {
             &pipelines,
             &ReportArgs {
                 task: Some("stale".into()),
+                stage: None,
                 pass: true,
                 fail: false,
                 block: false,
@@ -1947,6 +2045,7 @@ mod tests {
                 &pipelines,
                 &ReportArgs {
                     task: Some("dirtywork".into()),
+                    stage: None,
                     pass: true,
                     fail: false,
                     block: false,
@@ -2074,6 +2173,225 @@ mod tests {
             "a command step is handed back to itself, never past it: {task:?}"
         );
         assert_eq!(task.front.blocked_from, None, "nothing is blocked any more");
+    }
+
+    /// A three-step forward chain, each step reached by exactly one hop, plus
+    /// a staffed `blocked` — enough steps for a `--stage` naming an
+    /// already-run one to land somewhere other than where it started.
+    fn three_step_staffed_pipelines() -> Pipelines {
+        let yaml = "steps:\n  \
+                     - id: implement\n    agent: pi\n    on_pass: review\n  \
+                     - id: review\n    agent: pi\n    on_pass: look\n  \
+                     - id: look\n    agent: pi\n    on_pass: done\n  \
+                     - id: blocked\n    agent: pi\n    session: true\n";
+        let pipeline = crate::pipeline::Pipeline::parse("default", yaml).unwrap();
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert("default".into(), pipeline);
+        pipelines
+    }
+
+    /// The mockup itself: a `--pass --stage implement` off `blocked` lands
+    /// exactly on `implement`, one of the steps this task's own `steps:`
+    /// says it has already run — not carried one step past it the way a
+    /// plain `--pass` would be, since naming a step by hand is the
+    /// unblocker choosing where this goes, not vouching for its work.
+    #[test]
+    fn a_staged_pass_from_blocked_lands_on_the_named_step_the_task_has_run() {
+        let repo = unattended_fixture("staged-pass-lands");
+        let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+        add(&repo, "confirm-dialog", &[]);
+        let pipelines = three_step_staffed_pipelines();
+
+        let mut task = queued(&repo, "confirm-dialog");
+        task.bank_launch(crate::pipeline::QUEUED, "implement");
+        task.bank_launch("implement", "review");
+        task.bank_launch("review", "look");
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        task.front.blocked_from = Some("look".into());
+        task.save().unwrap();
+
+        clear_lane_env();
+        report(
+            &repo,
+            &pipelines,
+            &ReportArgs {
+                task: Some("confirm-dialog".into()),
+                stage: Some("implement".into()),
+                pass: true,
+                fail: false,
+                block: false,
+                pause: false,
+                message: Some("the finding is real; the fix belongs to the implementer".into()),
+                handoff: vec![],
+            },
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(queued(&repo, "confirm-dialog").stage(), "implement");
+    }
+
+    /// The other half of the mockup: naming a step this task has never run a
+    /// lane at is refused, and the refusal names exactly the steps `steps:`
+    /// says it has — in pipeline order, not the map's own key order.
+    #[test]
+    fn a_staged_pass_naming_a_step_never_run_is_refused() {
+        let repo = unattended_fixture("staged-pass-refused");
+        let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+        add(&repo, "confirm-dialog", &[]);
+        let pipelines = three_step_staffed_pipelines();
+
+        let mut task = queued(&repo, "confirm-dialog");
+        task.bank_launch(crate::pipeline::QUEUED, "implement");
+        task.bank_launch("implement", "review");
+        task.bank_launch("review", "look");
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        task.front.blocked_from = Some("look".into());
+        task.save().unwrap();
+
+        clear_lane_env();
+        let err = report(
+            &repo,
+            &pipelines,
+            &ReportArgs {
+                task: Some("confirm-dialog".into()),
+                stage: Some("handover".into()),
+                pass: true,
+                fail: false,
+                block: false,
+                pause: false,
+                message: Some("done".into()),
+                handoff: vec![],
+            },
+            None,
+        )
+        .unwrap_err();
+        let err = format!("{err:#}");
+        assert!(
+            err.contains("has never been at `handover`")
+                && err.contains("`implement`, `review`, `look`"),
+            "{err}"
+        );
+
+        // Refused outright: the task never moved off `blocked`.
+        assert_eq!(
+            queued(&repo, "confirm-dialog").stage(),
+            crate::pipeline::BLOCKED
+        );
+    }
+
+    /// `--stage` is bounded to `--pass` off `blocked` itself, the same as
+    /// `--pause` — named and refused rather than silently ignored off any
+    /// other step.
+    #[test]
+    fn a_staged_pass_is_refused_off_blocked() {
+        let repo = unattended_fixture("staged-pass-off-blocked");
+        let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+        add(&repo, "confirm-dialog", &[]);
+        let pipelines = three_step_staffed_pipelines();
+
+        let mut task = queued(&repo, "confirm-dialog");
+        task.set_stage("implement", None);
+        task.save().unwrap();
+
+        clear_lane_env();
+        let err = report(
+            &repo,
+            &pipelines,
+            &ReportArgs {
+                task: Some("confirm-dialog".into()),
+                stage: Some("review".into()),
+                pass: true,
+                fail: false,
+                block: false,
+                pause: false,
+                message: Some("done".into()),
+                handoff: vec![],
+            },
+            None,
+        )
+        .unwrap_err();
+        let err = format!("{err:#}");
+        assert!(
+            err.contains("--stage only means anything on a `--pass` from `blocked`"),
+            "{err}"
+        );
+        assert_eq!(queued(&repo, "confirm-dialog").stage(), "implement");
+    }
+
+    /// A staffed `blocked` banks its own arrival route the moment an
+    /// unblocker's lane starts, the same as any other step — so on a real
+    /// unattended run, `blocked` itself sits in `steps:` by the time
+    /// `--stage` could ever be typed at all. `steps_run` excludes it
+    /// anyway: naming `blocked` is refused, never accepted as a step this
+    /// task has run, because a `--stage blocked` would clear `blocked_from`
+    /// and leave the *next* plain `--pass` from `blocked` with nothing to
+    /// carry it but the pipeline's own entry — restarting a task that may
+    /// already have pushed a branch or opened a pull request.
+    #[test]
+    fn a_staged_pass_naming_blocked_itself_is_refused_even_though_blocked_banked_its_own_launch() {
+        let repo = unattended_fixture("staged-pass-excludes-blocked");
+        let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+        add(&repo, "confirm-dialog", &[]);
+        let pipelines = three_step_staffed_pipelines();
+
+        let mut task = queued(&repo, "confirm-dialog");
+        task.bank_launch(crate::pipeline::QUEUED, "implement");
+        task.bank_launch("implement", "review");
+        task.bank_launch("review", "look");
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        task.front.blocked_from = Some("look".into());
+        // The staffed unblocker's own lane banking its own arrival — exactly
+        // what `start_one` does for any staffed step, `blocked` included.
+        task.bank_launch("look", crate::pipeline::BLOCKED);
+        task.save().unwrap();
+
+        clear_lane_env();
+        let err = report(
+            &repo,
+            &pipelines,
+            &ReportArgs {
+                task: Some("confirm-dialog".into()),
+                stage: Some(crate::pipeline::BLOCKED.into()),
+                pass: true,
+                fail: false,
+                block: false,
+                pause: false,
+                message: Some("done".into()),
+                handoff: vec![],
+            },
+            None,
+        )
+        .unwrap_err();
+        let err = format!("{err:#}");
+        assert!(
+            err.contains("has never been at `blocked`"),
+            "`blocked` must be refused as a `--stage` target even though it is in `steps:`: {err}"
+        );
+        assert!(
+            !err.contains("`blocked`,") && !err.contains(", `blocked`"),
+            "`blocked` must not be named among the steps this task has run: {err}"
+        );
+        assert!(
+            err.contains("`implement`, `review`, `look`"),
+            "the three real steps should still be named: {err}"
+        );
+        assert_eq!(
+            queued(&repo, "confirm-dialog").stage(),
+            crate::pipeline::BLOCKED
+        );
     }
 
     /// A `--block` reported from `blocked` parks on `paused` first (see
@@ -2388,6 +2706,7 @@ mod tests {
             &Pipelines::builtin(),
             &ReportArgs {
                 task: Some("stuck".into()),
+                stage: None,
                 pass: false,
                 fail: false,
                 block: false,
@@ -2860,7 +3179,7 @@ mod tests {
         let mut task = queued(&repo, "stuck");
         task.set_stage("work", None);
         // Six lanes on the `work->retry` route, but only one move down it.
-        task.front.prompts.insert("work->retry".into(), 6);
+        task.front.steps.insert("work->retry".into(), 6);
         task.front.rounds.insert("work->retry".into(), 1);
         task.save().unwrap();
 
@@ -3091,6 +3410,7 @@ mod tests {
             &pipelines,
             &ReportArgs {
                 task: Some("ship".into()),
+                stage: None,
                 pass: true,
                 fail: false,
                 block: false,
@@ -3147,6 +3467,7 @@ mod tests {
             &pipelines,
             &ReportArgs {
                 task: Some("ship".into()),
+                stage: None,
                 pass: true,
                 fail: false,
                 block: false,
@@ -3233,6 +3554,7 @@ mod tests {
             &pipelines,
             &ReportArgs {
                 task: Some("ship".into()),
+                stage: None,
                 pass: true,
                 fail: false,
                 block: false,
@@ -3278,6 +3600,7 @@ mod tests {
             &pipelines,
             &ReportArgs {
                 task: Some("ship".into()),
+                stage: None,
                 pass: false,
                 fail: true,
                 block: false,
@@ -3295,6 +3618,7 @@ mod tests {
             &pipelines,
             &ReportArgs {
                 task: Some("ship".into()),
+                stage: None,
                 pass: true,
                 fail: false,
                 block: false,
@@ -3339,6 +3663,7 @@ mod tests {
             &pipelines,
             &ReportArgs {
                 task: Some("ship".into()),
+                stage: None,
                 pass: false,
                 fail: true,
                 block: false,
@@ -3401,6 +3726,7 @@ mod tests {
             &pipelines,
             &ReportArgs {
                 task: Some("ship".into()),
+                stage: None,
                 pass: false,
                 fail: true,
                 block: false,
@@ -3451,6 +3777,7 @@ mod tests {
             &pipelines,
             &ReportArgs {
                 task: Some("ship".into()),
+                stage: None,
                 pass: false,
                 fail: false,
                 block: true,
@@ -3512,6 +3839,7 @@ mod tests {
             &pipelines,
             &ReportArgs {
                 task: Some("ship".into()),
+                stage: None,
                 pass: false,
                 fail: false,
                 block: true,
@@ -3575,6 +3903,7 @@ mod tests {
             &pipelines,
             &ReportArgs {
                 task: Some("ship".into()),
+                stage: None,
                 pass: false,
                 fail: false,
                 block: true,
@@ -3611,6 +3940,7 @@ mod tests {
             &pipelines,
             &ReportArgs {
                 task: Some("ship".into()),
+                stage: None,
                 pass: true,
                 fail: false,
                 block: false,
@@ -3767,6 +4097,7 @@ mod tests {
             &pipelines,
             &ReportArgs {
                 task: Some("ship".into()),
+                stage: None,
                 pass: true,
                 fail: false,
                 block: false,
@@ -4000,7 +4331,7 @@ mod tests {
         let mut task = queued(&repo, "stuck");
         task.set_stage("implement", None);
         let rounds_before = task.front.rounds.clone();
-        let prompts_before = task.front.prompts.clone();
+        let prompts_before = task.front.steps.clone();
         let arrived_from_before = task.front.arrived_from.clone();
         task.front.parked_from = Some("implement".into());
         task.set_stage_unbanked(crate::pipeline::PAUSED, "paused from the board");
@@ -4022,7 +4353,7 @@ mod tests {
         let task = queued(&repo, "stuck");
         assert_eq!(task.stage(), "implement");
         assert_eq!(task.front.rounds, rounds_before);
-        assert_eq!(task.front.prompts, prompts_before);
+        assert_eq!(task.front.steps, prompts_before);
         assert_eq!(task.front.arrived_from, arrived_from_before);
         assert_eq!(task.front.blocked_from, None);
         assert_eq!(task.front.resume.as_deref(), Some("implement"));

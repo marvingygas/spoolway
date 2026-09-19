@@ -390,8 +390,15 @@ mod tests {
             branch.front.gate_at
         );
         let before = branch.front.rounds.clone();
-        let routed = route(&mut branch, ctx.pipeline, current, outcome, ctx.unattended)
-            .map_err(|e| format!("route() itself refused `{current}` --{outcome}-->: {e:#}"))?;
+        let routed = route(
+            &mut branch,
+            ctx.pipeline,
+            current,
+            outcome,
+            ctx.unattended,
+            None,
+        )
+        .map_err(|e| format!("route() itself refused `{current}` --{outcome}-->: {e:#}"))?;
         branch.set_stage(&routed.destination, None);
         path.push(format!("{current} --{outcome}--> {}", routed.destination));
 

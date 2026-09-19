@@ -919,6 +919,15 @@ pub struct ReportArgs {
     #[arg(long, group = "outcome")]
     pub pass: bool,
 
+    /// Where a `--pass` from `blocked` lands, in place of the step its own
+    /// `on_pass` would carry it to. Only means anything on `blocked`;
+    /// refused by name on every other step, the same as `--pause`. Bounded
+    /// by the steps this task has actually run — named from `steps:`, the
+    /// launch record — so a task can only be sent back onto ground it has
+    /// already covered, never routed somewhere a lane never touched it.
+    #[arg(long, value_name = "STEP")]
+    pub stage: Option<String>,
+
     /// The step failed; route along `on_fail`.
     #[arg(long, group = "outcome")]
     pub fail: bool,

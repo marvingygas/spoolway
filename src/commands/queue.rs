@@ -784,7 +784,7 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Res
     front.paused_at = None;
     front.paused_by = None;
     front.launched_at = None;
-    front.prompts = Default::default();
+    front.steps = Default::default();
     front.rounds = Default::default();
     front.launch_failures = Default::default();
     front.launch_busy_since = Default::default();

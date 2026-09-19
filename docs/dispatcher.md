@@ -271,9 +271,10 @@ the `[unattended]` `blocked_*` settings.
 
 A staffed `blocked` lane answers with `--pass` when it cleared the way, or `--pause` when it
 cannot. A `--fail` or `--block` from it is read as `--pause`. A `--pass` carries the task past
-the blocked step to that step's `on_pass`, or back to itself for a command step. A `--pause`,
-`--fail` or `--block` puts the task on `paused`, and `spoolway resume` then hands it back to the
-step it blocked on.
+the blocked step to that step's `on_pass`, or back to itself for a command step. `--pass --stage
+<step>` sends it to `<step>` instead, bounded by the steps this task has already run. A
+`--pause`, `--fail` or `--block` puts the task on `paused`, and `spoolway resume` then hands it
+back to the step it blocked on.
 
 A blocked task keeps its pane open until it is resumed.
 
