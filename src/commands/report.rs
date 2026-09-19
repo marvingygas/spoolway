@@ -158,13 +158,15 @@ pub fn report(
         // to itself.
         //
         // Either way this goes through the same `resume_at` that
-        // `spoolway resume` performs by hand: the loop budgets out of the step
-        // the task lands on are handed back, and the lane that originally hit
-        // the block — which had often already read the tree and done most of
-        // the work — is marked to be continued rather than replaced by a cold
-        // one.
+        // `spoolway resume` performs by hand, minus the one thing only a
+        // person may do: the loop budgets out of the step the task stopped on
+        // stay spent (`by_hand: false`), because this is the run clearing its
+        // own block and a budget it refunds to itself bounds nothing. What it
+        // does share is the mark: the lane that originally hit the block —
+        // which had often already read the tree and done most of the work —
+        // is continued rather than replaced by a cold one.
         let target = cleared_block_target(&task, pipeline, true);
-        resume_at(&mut task, pipeline, &target);
+        resume_at(&mut task, pipeline, &target, false);
         target
     } else if paused_from_blocked {
         // No second destination once the lane on `blocked` cannot clear the
@@ -307,7 +309,12 @@ pub fn report(
         && !pipeline.blocked_is_staffed(unattended)
     {
         let target = resume_target(&task, pipeline);
-        resume_at(&mut task, pipeline, &target);
+        // The run resuming itself, so the budgets stay spent — see
+        // `resume_at`. A spent budget never arrives here in the first place:
+        // `apply_loop_budget` skips a limit whose exit is `blocked` in exactly
+        // this configuration, rather than handing the task a wall it can only
+        // walk into again.
+        resume_at(&mut task, pipeline, &target, false);
         destination = target.clone();
         resumed = Some(target);
     }
@@ -425,6 +432,16 @@ pub fn report(
 /// whether progress is being made — and it counts this route in, so a task
 /// that spent its review-fix budget still gets its e2e-fix one.
 ///
+/// The budget belongs to the step making the move, not the one receiving it:
+/// `loop: { implement: 2 }` on `review` is read here as "`review` may send
+/// this back to `implement` twice", so it is `review`'s third *failure* that
+/// takes `review`'s own `loop_exit()`. Bounding the arrival instead — which
+/// is what this did — spent the budget one edge too early: the third passing
+/// `implement` was redirected before `review` had seen the fix it was
+/// reporting, and `on_loop_max` then answered for a step that never ran.
+/// Nothing about a pipeline file changed; the same `from -> to` counter in
+/// [`Task::rounds_via`] is read off the other end of it.
+///
 /// Shared by [`report`], where a lane's own account of itself proposes
 /// `destination`, and the dispatcher's command-step routing, where a `run:`
 /// step's exit code does — a spent loop stops circling the same way whichever
@@ -440,11 +457,14 @@ pub fn report(
 /// default carries the task on to `on_pass` with its findings attached, which
 /// is a destination rather than a request for a person, and `on_loop_max:
 /// handover` reads the same way. The one reading that does need one is an
-/// exit resolving to `blocked` — and there the limit has nothing left to
-/// mean, because a later resume would hand the budget straight back, and a
-/// counter spent and immediately refunded bounds nothing. So that one reading
-/// is skipped here rather than refunded there, and the task file does not
-/// fill with rounds it never really spent.
+/// exit resolving to `blocked` — and in a run with nobody staffing `blocked`,
+/// that exit is answered by the run itself, which sends the task straight
+/// back to the step it stopped on. The budget would then be spent again on
+/// the very next transition, and every one after it, with nobody to clear it:
+/// the same loop, one lane more expensive per lap. So that one reading is
+/// skipped here, and the task file does not fill with rounds bought by a
+/// wall the run can only walk into. [`resume_at`] no longer refunds anything
+/// for either self-resume, so this is the whole of the carve-out.
 pub fn apply_loop_budget(
     pipeline: &Pipeline,
     task: &mut Task,
@@ -452,23 +472,39 @@ pub fn apply_loop_budget(
     destination: String,
     unattended: bool,
 ) -> String {
-    let Some(next) = pipeline.step(&destination) else {
+    let Some(step) = pipeline.step(current) else {
         return destination;
     };
-    let exit = next.loop_exit().to_string();
-    let limit = next.round_limit(current).filter(|_| {
+    let exit = step.loop_exit().to_string();
+    let limit = step.round_limit(&destination).filter(|_| {
         !unattended || exit != crate::pipeline::BLOCKED || pipeline.blocked_is_staffed(unattended)
     });
-    if limit.is_some_and(|limit| task.rounds_via(current, &next.id) >= limit) {
+    if limit.is_some_and(|limit| task.rounds_via(current, &destination) >= limit) {
+        // The move it is not making, counted the way a reader counts: the
+        // budget is spent, so the one being refused is the next one after it.
         let note = format!(
-            "`{current}` → `{}` spent its {} rounds without a pass — carrying on to `{exit}`",
-            next.id,
-            limit.unwrap_or(0)
+            "`{current}` may not send this back to `{destination}` a {} time — carrying on to \
+             `{exit}`",
+            ordinal(limit.unwrap_or(0) + 1)
         );
         task.log_status(&note);
         return exit;
     }
     destination
+}
+
+/// `3` → `3rd`, for the one sentence that counts the move a spent budget is
+/// refusing. The teens are the carve-out every English ordinal has: 11, 12
+/// and 13 take `th` however they end.
+fn ordinal(n: u32) -> String {
+    let suffix = match (n % 100, n % 10) {
+        (11..=13, _) => "th",
+        (_, 1) => "st",
+        (_, 2) => "nd",
+        (_, 3) => "rd",
+        _ => "th",
+    };
+    format!("{n}{suffix}")
 }
 
 /// Record where a task stopped, guarded so a block reported *from* `blocked`
@@ -924,22 +960,31 @@ pub fn caught_at(task: &Task, gated: &str) -> Option<Caught> {
 /// Set a stopped task up to carry on from `target`, and say which loop budgets
 /// that cost.
 ///
-/// The whole of what resuming *is*, in one place, because there are now three
-/// callers who must agree to the letter: `spoolway resume` by hand, a lane's
-/// own report in an unattended run, and the dispatcher's own escalation in one.
-/// A version of this that drifted between them would be a task that resumes and
-/// then stops again on the next transition, or one whose second lane starts
-/// cold on work the first had already finished.
+/// The whole of what resuming *is*, in one place, because there are now four
+/// callers who must agree to the letter: `spoolway resume` by hand, a pass
+/// reported from `blocked`, a lane's own report in an unattended run, and the
+/// dispatcher's own escalation in one. A version of this that drifted between
+/// them would be a task that resumes and then stops again on the next
+/// transition, or one whose second lane starts cold on work the first had
+/// already finished.
 ///
 /// Two things happen, and both are about not repeating work:
 ///
-/// The loop budgets out of the step the task *stopped on* are handed back, or
-/// resuming a task that ran out of rounds buys it one attempt and then stops it
-/// again on the very next transition — not a resume, the same wall one step
-/// further along. Only the routes out of that step, and only the ones something
-/// bounds: a stuck review loop being let go says nothing about the rebase loop
-/// at the other end of the pipeline, and the counters it never spent are worth
-/// keeping.
+/// The loop budgets out of the step the task *stopped on* are handed back —
+/// but only when `by_hand`, which is to say only when a person asked. Resuming
+/// a task that ran out of rounds otherwise buys it one attempt and then stops
+/// it again on the very next transition — not a resume, the same wall one step
+/// further along. Only the routes out of that step, and only the ones the step
+/// itself bounds: a stuck review loop being let go says nothing about the
+/// rebase loop at the other end of the pipeline, and the counters it never
+/// spent are worth keeping.
+///
+/// The other two callers are the run resuming *itself* — a pass reported from
+/// `blocked`, and the unattended self-resume for an unstaffed `blocked` — and
+/// they hand nothing back. A licence a run extends to itself is not a licence:
+/// a budget refunded on every block is a budget that never runs out, which is
+/// exactly the unbounded loop `loop:` exists to close. Only a person deciding
+/// that this loop deserves another go extends it.
 ///
 /// The step it stopped on, rather than `target`, because a `--pass` from
 /// `blocked` on an agent step carries `target` one step past there — see
@@ -963,19 +1008,19 @@ pub fn caught_at(task: &Task, gated: &str) -> Option<Caught> {
 /// the lane at the far end has nothing to say about why it stopped — which is
 /// the case a take-over lands in every time, and correctly: the step it is
 /// carried to has a prompt of its own that was never in the room.
-pub fn resume_at(task: &mut Task, pipeline: &Pipeline, target: &str) -> Vec<String> {
+pub fn resume_at(task: &mut Task, pipeline: &Pipeline, target: &str, by_hand: bool) -> Vec<String> {
     let origin = task
         .front
         .blocked_from
         .clone()
         .unwrap_or(target.to_string());
     let mut returned: Vec<String> = Vec::new();
-    if let Some(step) = pipeline.step(&origin) {
+    if by_hand && let Some(step) = pipeline.step(&origin) {
+        // The step's own `loop:`, not the destination's: a budget is spent by
+        // whoever makes the move, so the counter to hand back is the one
+        // `apply_loop_budget` read on the way out of this very step.
         for next in pipeline.destinations(step) {
-            let bounded = pipeline
-                .step(next)
-                .is_some_and(|d| d.round_limit(&origin).is_some());
-            if bounded
+            if step.round_limit(next).is_some()
                 && task
                     .front
                     .rounds
@@ -1093,7 +1138,7 @@ fn back_onto_its_step(
         .message
         .clone()
         .unwrap_or_else(|| "unblocked by hand".to_string());
-    let returned = resume_at(&mut task, pipeline, &target);
+    let returned = resume_at(&mut task, pipeline, &target, true);
     // Whatever gate it was waiting on, it is not waiting on it here any more.
     task.front.paused_at = None;
     task.front.paused_by = None;
@@ -1235,7 +1280,7 @@ fn past_the_gate(pipelines: &Pipelines, mut task: Task, args: &ResumeArgs) -> Re
     };
     let destination = if cleared_block {
         let target = cleared_block_target(&task, pipeline, false);
-        resume_at(&mut task, pipeline, &target);
+        resume_at(&mut task, pipeline, &target, true);
         target
     } else if caught == Some(Caught::Blocked) && !args.reject {
         // What `set_blocked_from` already ran for on the way here — a
@@ -2330,10 +2375,11 @@ mod tests {
     /// `document`, not `blocked` — so this test gives it `on_loop_max:
     /// blocked` by hand, the one case worth testing here. It also strips the
     /// shipped `blocked` step so that exit is unstaffed. Unattended there is
-    /// no person to hand either of those to, and the resume would hand the
-    /// budget straight back — so the bound is skipped outright rather than
-    /// spent and refunded, and the task file does not fill up with rounds it
-    /// never really spent.
+    /// no person to hand either of those to, only the run's own resume
+    /// straight back onto `review` — which hands nothing back, so the same
+    /// wall would be hit on every transition after this one. The bound is
+    /// skipped outright instead, and the task file does not fill up with
+    /// rounds bought against a wall nothing can clear.
     #[test]
     fn a_budget_bound_for_a_person_does_not_bind_an_unattended_run_with_no_staffed_blocked_step() {
         let repo = unattended_fixture("unattended-rounds");
@@ -2361,24 +2407,24 @@ mod tests {
         }
 
         // Spent right up to `review`'s limit on the route back to `implement`:
-        // attended, the next pass is where the task stops.
+        // attended, the next failure is where the task stops.
         let spent = review_limit(&pipelines);
         let mut task = queued(&repo, "stuck");
-        task.set_stage("implement", None);
-        task.front.rounds.insert("implement->review".into(), spent);
+        task.set_stage("review", None);
+        task.front.rounds.insert("review->implement".into(), spent);
         task.save().unwrap();
 
-        report_outcome(&repo, &pipelines, "stuck", Outcome::Pass);
+        report_outcome(&repo, &pipelines, "stuck", Outcome::Fail);
         let task = queued(&repo, "stuck");
         assert_eq!(
             task.stage(),
-            "review",
+            "implement",
             "the loop goes round rather than stopping"
         );
         assert_eq!(
-            task.rounds_via("implement", "review"),
+            task.rounds_via("review", "implement"),
             spent + 1,
-            "the bound is skipped outright, not spent and refunded, so this arrival banks a \
+            "the bound is skipped outright, not spent and refunded, so this move banks a \
              round exactly as an unbounded one would"
         );
     }
@@ -2411,11 +2457,11 @@ mod tests {
 
         let spent = review_limit(&pipelines);
         let mut task = queued(&repo, "stuck");
-        task.set_stage("implement", None);
-        task.front.rounds.insert("implement->review".into(), spent);
+        task.set_stage("review", None);
+        task.front.rounds.insert("review->implement".into(), spent);
         task.save().unwrap();
 
-        report_outcome(&repo, &pipelines, "stuck", Outcome::Pass);
+        report_outcome(&repo, &pipelines, "stuck", Outcome::Fail);
         let task = queued(&repo, "stuck");
         assert_eq!(
             task.stage(),
@@ -2447,14 +2493,160 @@ mod tests {
         }
 
         let mut task = queued(&repo, "stuck");
-        task.set_stage("implement", None);
+        task.set_stage("review", None);
         task.front
             .rounds
-            .insert("implement->review".into(), review_limit(&pipelines));
+            .insert("review->implement".into(), review_limit(&pipelines));
+        task.save().unwrap();
+
+        report_outcome(&repo, &pipelines, "stuck", Outcome::Fail);
+        assert_eq!(queued(&repo, "stuck").stage(), "blocked");
+    }
+
+    /// The whole of what a budget counts, walked end to end on the pipeline
+    /// that ships: `review` carries `loop: { implement: 2 }`, so it may send
+    /// this back twice, and it is the *third failure* that takes the exit.
+    /// The third arrival is not it, and that is the point — a judging step
+    /// has to see the fix it asked for, and bounding arrivals redirected the
+    /// third passing `implement` before `review` ever read the work.
+    #[test]
+    fn the_third_failure_takes_the_exit_and_the_third_arrival_still_lands() {
+        let repo = fixture("three-arrivals");
+        let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+        add(&repo, "spinner", &[]);
+
+        let pipelines = Pipelines::builtin();
+        assert_eq!(
+            review_limit(&pipelines),
+            2,
+            "the shipped budget this walks lap by lap"
+        );
+
+        let mut task = queued(&repo, "spinner");
+        task.set_stage("implement", None);
+        task.save().unwrap();
+
+        for lap in 1..=2 {
+            report_outcome(&repo, &pipelines, "spinner", Outcome::Pass);
+            assert_eq!(
+                queued(&repo, "spinner").stage(),
+                "review",
+                "arrival {lap} at `review` is not what the budget bounds"
+            );
+            report_outcome(&repo, &pipelines, "spinner", Outcome::Fail);
+            assert_eq!(
+                queued(&repo, "spinner").stage(),
+                "implement",
+                "`review` may still make backward move {lap}"
+            );
+        }
+
+        // The third arrival, with the budget already spent: it still lands.
+        report_outcome(&repo, &pipelines, "spinner", Outcome::Pass);
+        let task = queued(&repo, "spinner");
+        assert_eq!(
+            task.stage(),
+            "review",
+            "a passing `implement` reaches `review` however spent the budget is"
+        );
+        assert_eq!(task.rounds_via("review", "implement"), 2);
+
+        // And the third failure is the one over.
+        report_outcome(&repo, &pipelines, "spinner", Outcome::Fail);
+        let task = queued(&repo, "spinner");
+        assert_eq!(
+            task.stage(),
+            "document",
+            "`review`'s own exit, which with no `on_loop_max:` is its `on_pass`"
+        );
+        let log = task.section("## Status Log").unwrap_or_default();
+        assert!(
+            log.contains("`review` may not send this back to `implement` a 3rd time"),
+            "{log}"
+        );
+    }
+
+    /// A pass reported from `blocked` is the run clearing its own block, and
+    /// it hands no budget back. A counter refunded every time the run stops
+    /// itself is a counter that never runs out, which is the unbounded loop
+    /// `loop:` exists to close — extending the licence is a person's call,
+    /// and `resuming_hands_back_the_rounds_of_the_loop_it_resumes_into` is
+    /// where that half is pinned.
+    #[test]
+    fn a_pass_reported_from_blocked_leaves_the_rounds_spent() {
+        let repo = fixture("blocked-pass-keeps-rounds");
+        let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+        add(&repo, "stuck", &[]);
+        let pipelines = Pipelines::builtin();
+        let spent = review_limit(&pipelines);
+
+        let mut task = queued(&repo, "stuck");
+        task.set_stage("review", None);
+        task.front.rounds.insert("review->implement".into(), spent);
+        task.front.blocked_from = Some("review".into());
+        task.set_stage(crate::pipeline::BLOCKED, None);
         task.save().unwrap();
 
         report_outcome(&repo, &pipelines, "stuck", Outcome::Pass);
-        assert_eq!(queued(&repo, "stuck").stage(), "blocked");
+
+        let task = queued(&repo, "stuck");
+        assert_eq!(
+            task.stage(),
+            "document",
+            "the pass takes `review`'s own `on_pass`, past the step that blocked"
+        );
+        assert_eq!(
+            task.rounds_via("review", "implement"),
+            spent,
+            "the run cleared its own block, so the budget it spent stays spent"
+        );
+    }
+
+    /// And the same for the other self-resume: an unattended run with nobody
+    /// staffing `blocked` sends the task straight back to the step it stopped
+    /// on, and that road hands nothing back either. Blocked below the limit
+    /// here on purpose — a *spent* budget never reaches this road at all, by
+    /// `apply_loop_budget`'s own carve-out — so what is under test is the
+    /// refund, not the escalation.
+    #[test]
+    fn the_unattended_self_resume_leaves_the_rounds_spent() {
+        let repo = unattended_fixture("unattended-resume-keeps-rounds");
+        let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+        add(&repo, "stuck", &[]);
+
+        // Unstaffed, so the block is answered by the run itself.
+        let mut pipelines = Pipelines::builtin();
+        for pipeline in pipelines.pipelines.values_mut() {
+            pipeline.steps.retain(|s| s.id != crate::pipeline::BLOCKED);
+        }
+
+        let mut task = queued(&repo, "stuck");
+        task.set_stage("review", None);
+        task.front.rounds.insert("review->implement".into(), 1);
+        task.save().unwrap();
+
+        report_outcome(&repo, &pipelines, "stuck", Outcome::Block);
+
+        let task = queued(&repo, "stuck");
+        assert_eq!(
+            task.stage(),
+            "review",
+            "the run resumed it where it stopped"
+        );
+        assert_eq!(
+            task.rounds_via("review", "implement"),
+            1,
+            "nobody decided this loop deserved another go, so its one spent round stands"
+        );
     }
 
     /// `gate:` only turns a *pass* into `paused` — a `--block` from a gated
@@ -2515,13 +2707,15 @@ mod tests {
     }
 
     /// A pipeline for one bounded loop — `work` fails to `retry`, `retry`
-    /// passes back — with `retry`'s budget and its exit both spelled out.
+    /// passes back — with `work`'s budget for that failure and its exit both
+    /// spelled out. The budget sits on `work` because `work` is what sends
+    /// the task to `retry`; the counter it reads is still `work->retry`.
     fn looping_pipelines(limit: u32, on_loop_max: &str) -> Pipelines {
         let yaml = format!(
             "steps:\n  \
-             - id: work\n    agent: pi\n    on_pass: ship\n    on_fail: retry\n  \
-             - id: retry\n    agent: pi\n    loop:\n      work: {limit}\n    \
-             on_loop_max: {on_loop_max}\n    on_pass: work\n  \
+             - id: work\n    agent: pi\n    loop:\n      retry: {limit}\n    \
+             on_loop_max: {on_loop_max}\n    on_pass: ship\n    on_fail: retry\n  \
+             - id: retry\n    agent: pi\n    on_pass: work\n  \
              - id: ship\n    end: true\n"
         );
         let mut pipelines = Pipelines::builtin();
@@ -2551,10 +2745,11 @@ mod tests {
         let task = queued(&repo, "stuck");
         assert_eq!(task.stage(), "ship");
         assert!(
-            task.section("## Status Log")
-                .unwrap_or_default()
-                .contains("spent its"),
-            "the round it spent, and what carried it on, have to travel with it"
+            task.section("## Status Log").unwrap_or_default().contains(
+                "`work` may not send this back to `retry` a 2nd time — carrying on \
+                           to `ship`"
+            ),
+            "the move it refused, and what carried it on, have to travel with it"
         );
     }
 
@@ -2564,12 +2759,13 @@ mod tests {
     fn a_default_spent_budget_carries_on_to_on_pass() {
         let repo = fixture("default-loop-max");
         add(&repo, "stuck", &[]);
-        // `retry`'s own `on_pass` is `ship` — the same destination the other
+        // `work`'s own `on_pass` is `ship` — the same destination the other
         // `looping_pipelines` tests name explicitly with `on_loop_max:` — so
         // leaving it out here checks that the default really does take it.
         let yaml = "steps:\n  \
-             - id: work\n    agent: pi\n    on_pass: ship\n    on_fail: retry\n  \
-             - id: retry\n    agent: pi\n    loop:\n      work: 1\n    on_pass: ship\n  \
+             - id: work\n    agent: pi\n    loop:\n      retry: 1\n    on_pass: ship\n    \
+             on_fail: retry\n  \
+             - id: retry\n    agent: pi\n    on_pass: work\n  \
              - id: ship\n    end: true\n";
         let mut pipelines = Pipelines::builtin();
         pipelines.pipelines.insert(
@@ -2587,22 +2783,23 @@ mod tests {
         assert_eq!(
             queued(&repo, "stuck").stage(),
             "ship",
-            "`retry`'s own `on_pass` is `ship`, and that is where the default carries on to"
+            "`work`'s own `on_pass` is `ship`, and that is where the default carries on to"
         );
     }
 
-    /// A resumed lane is still a prompt, but arriving is what a lap costs now
-    /// — so a loop on a `session:` step is bounded by how many times it is
-    /// entered, not by how many of those entries opened a conversation.
+    /// A resumed lane is still a prompt, but sending the task back is what a
+    /// lap costs now — so a loop on a `session:` step is bounded by how many
+    /// times it sends work back, not by how many of the lanes that did so
+    /// opened a conversation.
     #[test]
-    fn arrivals_not_conversations_spend_the_budget() {
+    fn backward_moves_not_conversations_spend_the_budget() {
         let repo = fixture("warm-loop");
         add(&repo, "stuck", &[]);
         let pipelines = looping_pipelines(2, "blocked");
 
         let mut task = queued(&repo, "stuck");
         task.set_stage("work", None);
-        // Six lanes at `retry`, but only one lap of the loop.
+        // Six lanes on the `work->retry` route, but only one move down it.
         task.front.prompts.insert("work->retry".into(), 6);
         task.front.rounds.insert("work->retry".into(), 1);
         task.save().unwrap();
@@ -2641,8 +2838,9 @@ mod tests {
     }
 
     /// And the other half of that: an `on_loop_max` that resolves to `blocked`
-    /// is a request for a person, so unattended the budget is skipped
-    /// outright rather than spent and immediately refunded by the resume.
+    /// is a request for a person, so unattended the budget is skipped outright
+    /// rather than spent against a wall the run's own resume can only walk
+    /// back into — it hands nothing back now.
     #[test]
     fn an_unattended_run_skips_a_budget_whose_exit_is_a_person() {
         let repo = unattended_fixture("unattended-on-max-blocked");
@@ -2669,7 +2867,7 @@ mod tests {
         assert_eq!(
             task.rounds_via("work", "retry"),
             2,
-            "the bound is skipped outright, not spent and refunded, so this arrival still \
+            "the bound is skipped outright, not spent and refunded, so this move still \
              banks a round exactly as an unbounded one would"
         );
     }
@@ -3390,9 +3588,9 @@ mod tests {
     }
 
     /// A destination `apply_loop_budget` turns into `blocked` is caught the
-    /// same way as a raw `--block`: the schedule holds the pass that spent the
-    /// budget on `paused` rather than letting it land on `blocked` at once,
-    /// and a plain `resume` sends it on to `blocked` all the same.
+    /// same way as a raw `--block`: the schedule holds the failure that spent
+    /// the budget on `paused` rather than letting it land on `blocked` at
+    /// once, and a plain `resume` sends it on to `blocked` all the same.
     #[test]
     fn a_tasks_own_gate_at_catches_a_spent_loop_headed_for_blocked() {
         clear_lane_env();
@@ -3420,22 +3618,22 @@ mod tests {
 
         let spent = review_limit(&pipelines);
         let mut task = queued(&repo, "stuck");
-        task.front.gate_at = Some("implement".into());
-        task.set_stage("implement", None);
-        task.front.rounds.insert("implement->review".into(), spent);
+        task.front.gate_at = Some("review".into());
+        task.set_stage("review", None);
+        task.front.rounds.insert("review->implement".into(), spent);
         task.save().unwrap();
 
-        report_outcome(&repo, &pipelines, "stuck", Outcome::Pass);
+        report_outcome(&repo, &pipelines, "stuck", Outcome::Fail);
         let task = queued(&repo, "stuck");
         assert_eq!(
             task.stage(),
             crate::pipeline::PAUSED,
             "the schedule catches the spent loop's own `blocked` exit"
         );
-        assert_eq!(task.front.paused_at.as_deref(), Some("implement"));
+        assert_eq!(task.front.paused_at.as_deref(), Some("review"));
         assert_eq!(
             task.front.blocked_from.as_deref(),
-            Some("implement"),
+            Some("review"),
             "set_blocked_from ran for the loop's own `blocked` exit before the catch"
         );
         assert_eq!(task.front.gate_at, None);
@@ -3621,13 +3819,13 @@ mod tests {
         // one round into a loop at the other end of the pipeline that nobody
         // has looked at.
         let mut task = queued(&repo, "stuck");
-        task.set_stage("implement", None);
+        task.set_stage("review", None);
         task.front.rounds.insert(
-            "implement->review".into(),
+            "review->implement".into(),
             review_limit(&Pipelines::builtin()),
         );
         task.front.rounds.insert("awaiting->refresh".into(), 1);
-        task.front.blocked_from = Some("implement".into());
+        task.front.blocked_from = Some("review".into());
         task.set_stage("blocked", None);
         task.save().unwrap();
 
@@ -3645,12 +3843,12 @@ mod tests {
         .unwrap();
 
         let task = queued(&repo, "stuck");
-        assert_eq!(task.stage(), "implement");
+        assert_eq!(task.stage(), "review");
         assert_eq!(
-            task.rounds_via("implement", "review"),
+            task.rounds_via("review", "implement"),
             0,
             "the loop it is resuming into must have its budget back, or the \
-             next pass blocks it again"
+             next failure blocks it again"
         );
         assert_eq!(
             task.rounds_via("awaiting", "refresh"),

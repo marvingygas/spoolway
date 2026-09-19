@@ -1116,9 +1116,9 @@ impl<'a> Dispatcher<'a> {
 
                     // A command step's own `on_fail` is a route like any
                     // other, and a mechanical gate's whole point is to fail
-                    // back to the step behind it — so its arrival is bound by
-                    // that step's `loop:` exactly as an agent's report would
-                    // be, or a gate that never turns green never stops.
+                    // back to the step behind it — so that move is bound by
+                    // this step's own `loop:` exactly as an agent's report
+                    // would be, or a gate that never turns green never stops.
                     let destination = crate::commands::apply_loop_budget(
                         &pipeline,
                         &mut tasks[index],
@@ -4126,7 +4126,9 @@ impl<'a> Dispatcher<'a> {
 
         if self.unattended && !pipeline.blocked_is_staffed(self.unattended) {
             let target = crate::commands::resume_target(task, pipeline);
-            crate::commands::resume_at(task, pipeline, &target);
+            // The run resuming itself, not a person: the loop budgets out of
+            // the step it stopped on stay spent — see `commands::resume_at`.
+            crate::commands::resume_at(task, pipeline, &target, false);
             task.set_stage(&target, Some(reason));
             self.persist(task)?;
             return Ok(());
@@ -14645,8 +14647,8 @@ mod tests {
         let path = add_task_with_worktree(&repo, "demo", "implement");
         let mux = FakeMux::new(vec![]);
 
-        // `implement` fails back to `review`, and `review` allows one lap in
-        // from `implement` before giving up to `blocked`.
+        // `implement` fails back to `review`, and allows itself one such move
+        // before giving up to `blocked` instead.
         let mut pipelines = pipelines_running("exit 1", false);
         let name = "default".to_string();
         let pipeline = pipelines.pipelines.get_mut(&name).unwrap();
@@ -14656,16 +14658,11 @@ mod tests {
             .find(|s| s.id == "implement")
             .unwrap();
         implement.on_fail = Some("review".to_string());
-        let review = pipeline
-            .steps
-            .iter_mut()
-            .find(|s| s.id == "review")
-            .unwrap();
-        review.r#loop = crate::pipeline::Loop::PerRoute(std::collections::BTreeMap::from([(
-            "implement".to_string(),
+        implement.r#loop = crate::pipeline::Loop::PerRoute(std::collections::BTreeMap::from([(
+            "review".to_string(),
             1,
         )]));
-        review.on_loop_max = Some(crate::pipeline::BLOCKED.to_string());
+        implement.on_loop_max = Some(crate::pipeline::BLOCKED.to_string());
 
         // That one lap already taken, so the failure below is the one over.
         let mut task = reload(&path);

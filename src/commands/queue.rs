@@ -89,10 +89,10 @@ struct QueueRowJson {
     stage: String,
     pipeline: String,
     state: &'static str,
-    /// How many laps of its route this task has taken, and the route's own
-    /// budget — `None` wherever the step declares no `loop:` for the route
-    /// it arrived by. Mirrors `Row::step_loop`, which the board draws inline
-    /// on the STEP column as `(round n)`.
+    /// How many times the step this task is on has sent it back, and that
+    /// route's own budget — `None` wherever the step declares no `loop:` for
+    /// any route out of it. Mirrors `Row::step_loop`, which the board draws
+    /// inline on the STEP column as `(round n)`.
     laps: Option<u32>,
     lap_limit: Option<u32>,
     next: String,

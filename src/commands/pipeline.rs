@@ -200,10 +200,11 @@ const FIELD_SENTENCES: &[(&str, &str)] = &[
     ),
     (
         "loop",
-        "Laps allowed per route in — arrivals, not conversations. A bare number \
-         bounds every route; the map form bounds one at a time. Three is the \
-         ceiling worth reaching for; a flow that needs more is welcome to say so, \
-         and nothing refuses it.",
+        "Laps allowed per route out — backward moves this step makes, not \
+         arrivals at it. A bare number bounds every route; the map form bounds \
+         one at a time, keyed by where the task is sent. Three is the ceiling \
+         worth reaching for; a flow that needs more is welcome to say so, and \
+         nothing refuses it.",
     ),
     (
         "on_loop_max",
