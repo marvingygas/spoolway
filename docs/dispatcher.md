@@ -391,6 +391,10 @@ Each task gets a git worktree at `dispatch.worktree_root`, which is
 branch checked out, the lane borrows that checkout and cleanup leaves it alone. See
 [Whose worktree](pipelines.md#whose-worktree).
 
+Every worktree's `target/debug` is a symlink into `.cargo-target/debug`, a directory beside
+the worktree root that every lane shares. `target/release` stays a real, private directory
+in each worktree. Tearing a worktree down removes the symlink, not the shared directory.
+
 When a task reaches `done`:
 
 1. Leftover work is committed as `wip(<task>): <step>`. If that fails, the task is held on

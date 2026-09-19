@@ -3,8 +3,9 @@
 #
 #   scripts/e2e/run.sh                the pr tier, what every push and every
 #                                     pull request runs
-#   scripts/e2e/run.sh --tier smoke   the fast signal, for a person running it
-#                                     by hand
+#   scripts/e2e/run.sh --tier smoke   the fast signal — for a person running it
+#                                     by hand, and what `impl_lite`'s `suite`
+#                                     step buys through `scripts/e2e-smoke.sh`
 #   scripts/e2e/run.sh --suite flow   one suite
 #   scripts/e2e/run.sh --list         what there is, and which setting each case is about
 #
@@ -276,14 +277,71 @@ if [ "$TIER" = pr ]; then
   [ -n "${E2E_LOCK_HOLD:-}" ] && sleep "$E2E_LOCK_HOLD"
 fi
 
-ROOT=$(mktemp -d)
+# --------------------------------------------------------- stale scratch roots
+#
+# The common kill path is SIGTERM, a full second before SIGKILL escalates
+# (`crate::headless::kill_group`, src/headless.rs) — this whole process
+# group, this script included. Bash already runs the EXIT trap on SIGTERM,
+# so TERM and INT are trapped explicitly below only to exit with the
+# conventional 143/130 rather than however bash's own re-raise would end
+# it, and a person's own Ctrl-C gets the same clean stop. SIGKILL cannot be
+# trapped at all, and is the one case nothing in *this* run can survive
+# being the target of: 54 roots holding 165 MB piled up in /tmp this way,
+# and every run now sweeps whatever an earlier, SIGKILLed one left behind
+# before it starts, as the backstop that case still needs.
+#
+# The pid is embedded in the root's own name — right after the fixed
+# prefix, before `mktemp`'s own random suffix — so staleness is decidable
+# without a lock: a directory whose pid no longer exists belonged to a run
+# that is over, one way or another, and is safe to remove. A `.keep` marker
+# — written below, by a run that finished and was asked to keep its tree —
+# is the one root a sweep leaves alone even though its process has since
+# exited normally. The random suffix is what keeps that promise on a reused
+# pid: without it, a later run drawing the same pid would `rm -rf` an
+# earlier one's kept tree outright on the very next line.
+sweep_stale_roots() {
+  local dir base pid
+  for dir in "${TMPDIR:-/tmp}"/spoolway-e2e-run.*; do
+    [ -d "$dir" ] || continue
+    [ -e "$dir/.keep" ] && continue
+    base=${dir##*/}
+    pid=${base#spoolway-e2e-run.}
+    pid=${pid%%.*}
+    case "$pid" in '' | *[!0-9]*) continue ;; esac
+    kill -0 "$pid" 2>/dev/null && continue
+    rm -rf "$dir"
+  done
+}
+sweep_stale_roots
+
+# `mktemp -d` still does the two things it always did — created with mode
+# 0700, and a name nothing else on the machine could have pre-created to
+# race — the pid prefix rides along on top of its own random suffix rather
+# than replacing it.
+ROOT=$(mktemp -d "${TMPDIR:-/tmp}/spoolway-e2e-run.$$.XXXXXX")
 RESULTS="$ROOT/results"
 : > "$RESULTS"
 # Half the live scenarios end with detached lanes on purpose, so a teardown is
 # the default and KEEP=1 is the postmortem. Set it whenever you are going to
 # want to know why, because a failure nobody can reproduce is a failure nobody
-# fixes.
-trap 'if [ -n "${KEEP:-}" ]; then echo "kept: $ROOT"; else rm -rf "$ROOT"; fi' EXIT
+# fixes. The marker is what tells the next run's sweep above this tree was
+# kept on purpose, not left behind by a kill.
+cleanup() {
+  if [ -n "${KEEP:-}" ]; then
+    touch "$ROOT/.keep" 2>/dev/null
+    echo "kept: $ROOT"
+  else
+    rm -rf "$ROOT"
+  fi
+}
+trap cleanup EXIT
+# TERM and INT run the same cleanup, then clear the EXIT trap and exit
+# explicitly — an untrapped signal terminates on its own, but trapping one
+# suppresses that default, so a handler that never calls `exit` would leave
+# this script running past the kill it was just sent. Clearing EXIT first
+# stops `cleanup` from running a second time on the way out.
+trap 'cleanup; trap - EXIT; exit 143' TERM
+trap 'cleanup; trap - EXIT; exit 130' INT
 
 echo "spoolway e2e — $("$SPOOLWAY" --version) — tier ${TIER}"
 

@@ -1,6 +1,6 @@
 ---
 domain: testing
-covers: ["scripts/e2e/**", "scripts/e2e-*.sh", "scripts/gate.sh", ".github/workflows/**", "src/scratch.rs"]
+covers: ["scripts/e2e/**", "scripts/e2e-*.sh", "scripts/gate.sh", "scripts/gate-quick.sh", ".github/workflows/**", "src/scratch.rs"]
 ---
 
 # Testing
@@ -41,6 +41,9 @@ SPOOLWAY="$PWD/target/release/spoolway" scripts/e2e/run.sh --tier nightly
 
 Every lane runs a stand-in agent script from `scripts/e2e/agents/`. The harness needs `git`,
 `bash`, `curl`, `setsid` and `flock`. Only the `cloud` and `live` tiers run a real agent binary.
+
+Each run's scratch root lives under `/tmp` and is removed on exit. A kept tree carries a
+`.keep` marker, and the next run sweeps any other run's root whose process is gone.
 
 ### Coverage
 
@@ -150,7 +153,7 @@ flowchart LR
   C -- fail --> A
 ```
 
-`test` runs `scripts/gate.sh` for every task:
+`impl`'s `test` step runs `scripts/gate.sh` for every task:
 
 ```sh
 cargo fmt --check
@@ -161,11 +164,27 @@ cargo build --release
 ./target/release/spoolway pipeline check
 ```
 
-`suite` runs `scripts/e2e-pr.sh` on the last task of a chain, through `last:` (see
-[`last:`](pipelines.md#last--a-step-the-chain-runs-once)):
+`impl`'s `suite` step runs `scripts/e2e-pr.sh` on the last task of a chain, through `last:`
+(see [`last:`](pipelines.md#last--a-step-the-chain-runs-once)):
 
 ```sh
 SPOOLWAY="$PWD/target/release/spoolway" scripts/e2e/run.sh --tier pr
+```
+
+`impl_lite` runs the same two steps against lighter scripts:
+
+```mermaid
+flowchart LR
+  R[review] --> B[test: scripts/gate-quick.sh] --> C[suite: scripts/e2e-smoke.sh<br/>last task only] --> D[document]
+  B -- fail --> R
+  C -- fail --> R
+```
+
+`test` runs `scripts/gate-quick.sh`, `scripts/gate.sh`'s six commands minus `cargo deny check
+advisories`. `suite` runs `scripts/e2e-smoke.sh`, which runs the `smoke` tier instead of `pr`:
+
+```sh
+SPOOLWAY="$PWD/target/release/spoolway" scripts/e2e/run.sh --tier smoke
 ```
 
 A failure sends the task back to the step before `test` (`e2e` in `impl`, `reproduce-again`

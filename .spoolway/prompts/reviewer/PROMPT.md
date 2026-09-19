@@ -92,4 +92,8 @@ installation under `.spoolway/`. The rule is directional, not merely prohibitive
 
 ## Never
 
+- Never run `scripts/e2e/run.sh` to prove your work. A `pr` tier inside your turn costs a
+  45-minute slot to reach a verdict the `suite` step reaches anyway, and it was the single
+  largest fixed cost in this pipeline. `--tier smoke` is available when you genuinely cannot
+  tell whether an edit parses; reach for it rarely, and never for the full tier.
 - Never edit source files or documents, never commit, never push.

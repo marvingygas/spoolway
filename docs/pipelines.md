@@ -380,6 +380,10 @@ This repository's own `.spoolway/pipelines/impl.yml` adds an end-to-end step, a 
 step and a `suite` step with `last: true`. It has no `checks` step, because this repository
 has no per-pull-request CI. See [Local gates and daily CI](testing.md#local-gates-and-daily-ci).
 
+`.spoolway/pipelines/impl_lite.yml` sits between `impl` and `impl_fast`: it keeps `review`,
+`test` and `suite`, but `test` runs `scripts/gate-quick.sh` instead of `scripts/gate.sh`, and
+`suite` runs the `smoke` tier instead of `pr`.
+
 ## The shipped `bugfix` pipeline
 
 ```mermaid
