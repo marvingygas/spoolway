@@ -172,12 +172,13 @@ PROFILE
   # How long a lane may be quiet before the watchdog reminds it to report.
   # It ships at fifteen minutes, which is patience for a real lane waiting on
   # a real test run — and far longer than any suite here is willing to sit.
-  # Cut to the harness's own poll rate, so a stand-in that exits without
-  # reporting is nudged on the very next pass. This used to need no line at
-  # all: the watchdog read its patience off `dispatch.interval`, which the
-  # harness already sets to a second. `dispatch.lane_quiet` split the two
-  # apart, and the suites that force the reminder loop need the short one.
-  must "the lane patience" "$SPOOLWAY" config set dispatch.lane_quiet "${E2E_INTERVAL:-1s}"
+  # Cut well under the probe's own fixed ten-second `PROBE_INTERVAL` — the
+  # reminder loop needs a pane capture, which only the probe takes, never
+  # the cheap tick — so a stand-in that exits without reporting is already
+  # overdue the moment the next probe looks. `dispatch.lane_quiet` is its
+  # own setting, split apart from the poll rate, and the suites that force
+  # the reminder loop need it this short.
+  must "the lane patience" "$SPOOLWAY" config set dispatch.lane_quiet 1s
   [ -n "$worktrees" ] && must "the worktree root" \
     "$SPOOLWAY" config set dispatch.worktree_root "$worktrees"
   agent_sandbox

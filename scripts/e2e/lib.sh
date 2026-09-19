@@ -304,11 +304,6 @@ lane_on_record() {
 # scenarios one after another — so the supervisor restarts it, and "there is a
 # dispatcher" holds for the whole suite rather than only while there is work.
 
-# One second is the shortest a duration can express, and the interval only
-# bounds how long an *idle* pass waits: a pass with work to do is followed by
-# the next one as fast as the queue empties and the supervisor restarts it.
-E2E_INTERVAL=${E2E_INTERVAL:-1s}
-
 # How many rounds the supervisor below will run before giving up on its own,
 # whatever `spoolway dispatch` keeps exiting. Not a guard against the restart
 # storm `spoolway`'s own restart guard now refuses on its own account — this
@@ -361,7 +356,7 @@ dispatcher_start() {
   # `spoolway dispatch` inside goes with it. `setsid` may or may not fork, so
   # the group leader writes its own pid rather than the shell guessing at `$!`.
   setsid bash -c '
-    spoolway=$1 interval=$2 pidfile=$3 log=$4 max_rounds=$5
+    spoolway=$1 pidfile=$2 log=$3 max_rounds=$4
     echo $$ > "$pidfile"
     wait=0.5
     round=0
@@ -383,7 +378,7 @@ dispatcher_start() {
       if [ "$round" -gt 1 ]; then
         echo "round $round: previous exit $status, waited ${wait}s" >> "$log"
       fi
-      "$spoolway" dispatch --plain --interval "$interval" >> "$log" 2>&1
+      "$spoolway" dispatch --plain >> "$log" 2>&1
       status=$?
       case $status in
         # A clean end (the queue emptied, an empty queue to begin with, or
@@ -400,7 +395,26 @@ dispatcher_start() {
         # which is a literal pattern an exit code can never equal — so every
         # refusal fell through to the restart below and the suite hung until
         # its timeout instead of failing with the reason on the very next line.
-        *) echo "E2E-DISPATCH-REFUSED (exit $status)" >> "$log"; exit 0 ;;
+        #
+        # A status above 128 is not an exit code at all, it is a signal, and
+        # it says the opposite of what this arm is for: the dispatcher ran,
+        # and something outside shot it. `dispatcher_stop` sends `TERM` (143,
+        # above) and only reaches for `KILL` against a group that is already
+        # going, so a bare `137` arriving mid-scenario is somebody else — the
+        # OOM killer taking `spoolway`, the largest process on a box running
+        # two e2e tiers at once, and leaving this supervisor standing to
+        # report it. Coming back is what a resident dispatcher does, and the
+        # lanes it started are still running (`disaster.sh` asserts exactly
+        # that), so round again. The round cap above is still the backstop if
+        # whatever did the shooting keeps doing it.
+        *)
+          if [ "$status" -gt 128 ]; then
+            echo "round $round: killed by signal $((status - 128)) — rounding again" >> "$log"
+          else
+            echo "E2E-DISPATCH-REFUSED (exit $status)" >> "$log"
+            exit 0
+          fi
+          ;;
       esac
       # A round that did real work resets the wait: more is probably coming.
       # One that found nothing to do doubles it, capped at four seconds, so a
@@ -413,7 +427,7 @@ dispatcher_start() {
       fi
       sleep "$wait"
     done
-  ' _ "$SPOOLWAY" "$E2E_INTERVAL" "$pidfile" "$E2E_DISPATCH_LOG" "$E2E_DISPATCH_MAX_ROUNDS" &
+  ' _ "$SPOOLWAY" "$pidfile" "$E2E_DISPATCH_LOG" "$E2E_DISPATCH_MAX_ROUNDS" &
   # Untrack it right away. A case that SIGKILLs this group (the disaster suite
   # does, on purpose) would otherwise get a bash job-status notification that
   # dumps the whole supervisor body above into the suite's own output — five
@@ -486,7 +500,7 @@ _still_in_group() {
 # same number in both modes would be a suite that gives up on a lane
 # mid-sentence and calls it stuck — which is exactly what the first real run did.
 drive() {
-  local task=$1 want=$2 secs=${3:-40} stage i from
+  local task=$1 want=$2 secs=${3:-150} stage i from
   [ "${E2E_AGENTS:-mock}" = real ] && secs=$((secs * 10))
   if [ -n "${E2E_DISPATCHER_PID:-}" ] && [ "$(_config_stamp)" != "$E2E_CONFIG_STAMP" ]; then
     dispatcher_restart

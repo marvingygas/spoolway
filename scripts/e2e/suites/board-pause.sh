@@ -94,8 +94,8 @@ board_start() {
   exec 9<>"$BOARD_FIFO"
   local pidfile="$LIVE/board.pid"
   rm -f "$pidfile"
-  setsid bash -c 'echo $$ >"$1"; exec "$2" dispatch --interval "$3" <"$4"' \
-    _ "$pidfile" "$SPOOLWAY" "${E2E_INTERVAL:-1s}" "$BOARD_FIFO" \
+  setsid bash -c 'echo $$ >"$1"; exec "$2" dispatch <"$3"' \
+    _ "$pidfile" "$SPOOLWAY" "$BOARD_FIFO" \
     >>"$BOARD_LOG" 2>&1 &
   disown
   poll_until 10 test -s "$pidfile" || {

@@ -32,6 +32,21 @@ use crate::task::Task;
 
 pub(crate) const LANES_FILE: &str = "lanes.json";
 
+/// The fixed rate a full probe repeats at — [`Dispatcher::pass`], the slow
+/// half `commands::dispatch`'s wait loop spends [`crate::status::POLL`]-sized
+/// ticks waiting out. The tick's own rate needs no constant of its own here:
+/// it already has one, [`crate::status::POLL`], which [`Dispatcher::tick`]
+/// names directly.
+///
+/// Ten seconds — what `dispatch.interval` defaulted to before this task
+/// removed it. Kept at that size on purpose: c7b80f8 split a pass into this
+/// probe and the cheap tick precisely so the number of multiplexer calls and
+/// full task rereads per unit of wall-clock time would stay where it was —
+/// fixing this at the tick's own one-second rate instead would run every one
+/// of those ten times as often, which is the cost that split existed to
+/// avoid, not reintroduce.
+pub const PROBE_INTERVAL: Duration = Duration::from_secs(10);
+
 /// How many times a task's lane may be *launched* at the step it is on
 /// before a person is asked instead.
 ///
@@ -124,10 +139,9 @@ pub const RESTART_WINDOW: Duration = Duration::from_secs(30);
 /// reporting progress and never settle, and a task whose one pane is waited on
 /// for ever would never run another step.
 ///
-/// Two minutes, against a `dispatch.interval` of ten seconds: a dozen passes,
-/// which is far more than the second or two a lane spends finishing its
-/// sentence, and short enough that a lane that is never coming back does not
-/// hold its task up for long. A constant rather than a config key for the same
+/// Two minutes: far longer than the second or two a lane spends finishing
+/// its sentence, and short enough that a lane that is never coming back does
+/// not hold its task up for long. A constant rather than a config key for the same
 /// reason [`MAX_REMINDERS`] is one — nothing has needed to tune it, and the
 /// figure only has to be bigger than "a moment" and smaller than "for ever".
 ///
@@ -147,17 +161,39 @@ const HANDOVER_WAIT: Duration = Duration::from_secs(120);
 /// to prevent, and one that tries again in twenty minutes costs nothing and
 /// picks the work straight back up when the install is repaired.
 ///
-/// Doubling from the pass interval, capped: an hour is long enough that a
+/// Doubling from [`RELAUNCH_SEED`], capped: an hour is long enough that a
 /// wedged install is nearly free, and short enough that a run left going over a
 /// weekend still recovers on its own.
-pub fn relaunch_backoff(interval: Duration, attempts: u32) -> Duration {
+pub fn relaunch_backoff(attempts: u32) -> Duration {
     const CAP: Duration = Duration::from_secs(3600);
     let doublings = attempts.saturating_sub(MAX_LAUNCHES).min(12);
-    interval
+    RELAUNCH_SEED
         .saturating_mul(1u32 << doublings)
         .min(CAP)
-        .max(interval)
+        .max(RELAUNCH_SEED)
 }
+
+/// The seed [`relaunch_backoff`] doubles from.
+///
+/// Ten seconds — what `dispatch.interval` defaulted to before this task
+/// removed it, and the same figure [`PROBE_INTERVAL`] fixes the poll rate at
+/// now. A named constant of its own rather than a reference to that one:
+/// this ladder doubling from the poll rate is a coincidence of today's
+/// numbers agreeing, not a fact about what a relaunch wait is for, and the
+/// two must not start moving together just because one of them is read from
+/// somewhere.
+const RELAUNCH_SEED: Duration = Duration::from_secs(10);
+
+/// How long a launch this dispatcher never watched happen is given before
+/// the silence is read as proof of death — see the comment on
+/// [`LaneRecord::launch_grace_since`]'s own read site in `start_lanes`.
+///
+/// Ten seconds — the same figure `RELAUNCH_SEED` and [`PROBE_INTERVAL`]
+/// carry, for the same reason `RELAUNCH_SEED` is its own constant rather
+/// than a reference to either: it used to fall out of `dispatch.interval`
+/// for free ("one pass" cost about that long by default), and is now sized
+/// on its own so nothing here depends on how often a pass actually runs.
+const LAUNCH_GRACE: Duration = Duration::from_secs(10);
 
 /// What one pass did, for printing and for the loop's own decisions.
 #[derive(Debug, Default)]
@@ -281,6 +317,15 @@ pub(crate) struct LaneRecord {
     /// ceiling's full hour, not whatever was left of an old one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     child_since: Option<i64>,
+    /// When this dispatcher first found no record of a launch it did not
+    /// itself watch — `None` for a record made by an actual launch, which is
+    /// what tells [`LAUNCH_GRACE`] apart from a lane this dispatcher watched
+    /// die outright. Durable across a restart, the same as the rest of this
+    /// record: written to `lanes.json` the pass it is first set, and read
+    /// back from there by whichever dispatcher looks next, however long
+    /// that takes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    launch_grace_since: Option<i64>,
 }
 
 /// A pane [`Dispatcher::retire`] left behind for its own lane name to inherit,
@@ -318,6 +363,7 @@ impl LaneRecord {
             handing_over_since: None,
             retired_pane: None,
             child_since: None,
+            launch_grace_since: None,
         }
     }
 
@@ -3350,12 +3396,14 @@ impl<'a> Dispatcher<'a> {
                 // dying agent again with a clean counter, which is the busy loop
                 // this guard exists to prevent, now unbounded.
                 //
-                // The backoff is measured from the last launch and paced off the
-                // configured interval rather than a `--interval` override: what
-                // it wants is a sense of how often this run looks at anything,
-                // and the project's own figure is that within a doubling.
+                // The backoff is measured from the last launch and doubles from
+                // its own named `RELAUNCH_SEED` rather than the poll rate,
+                // whatever that is fixed at: what it wants is a ladder that
+                // climbs to an hour over a handful of tries regardless, not
+                // one that re-launches a dying agent as often as a pass runs
+                // if that rate ever moves.
                 if self.unattended {
-                    let wait = relaunch_backoff(self.repo.config.dispatch.interval, attempts);
+                    let wait = relaunch_backoff(attempts);
                     let since = tasks[candidate.task_index]
                         .front
                         .launched_at
@@ -3399,20 +3447,25 @@ impl<'a> Dispatcher<'a> {
                     // A wall-clock window measured against `launched_at`
                     // used to stand here instead, and it was wrong: a real
                     // restart lands whenever a person or an init system
-                    // notices, which is almost never inside one
-                    // `dispatch.interval` of the launch, so the grace never
-                    // actually fired for the case it exists for. What
-                    // distinguishes "interrupted" from "failed" is not how
-                    // long ago the launch was — it is whether *this*
-                    // dispatcher has had even one pass to look. So the grace
-                    // is durable rather than timed: the first pass to find
-                    // no record marks this name seen, in `self.lanes`, which
-                    // `Dispatcher::pass` writes back to `lanes.json` same as
-                    // any other lane record — surviving `prune_stale_lane_records`,
-                    // since the task is still queued — so the very next pass,
-                    // whenever it lands, reads it as witnessed and escalates
-                    // like any ordinary dead launch if the lane is still gone.
-                    // Exactly one pass of grace, never more.
+                    // notices, which is almost never inside any short window
+                    // of the launch, so a grace timed from the launch itself
+                    // never actually fired for the case it exists for — true
+                    // whatever the poll rate is set to, since a restart's own
+                    // timing has nothing to do with how often a pass runs.
+                    // What distinguishes "interrupted" from "failed" is not
+                    // how long ago the launch was — it is whether *this*
+                    // dispatcher has had a chance to look at all. So the mark
+                    // is durable rather than the timing: the first pass to
+                    // find no record marks this name seen, with its own
+                    // clock, in `self.lanes` — which `Dispatcher::pass`
+                    // writes back to `lanes.json` same as any other lane
+                    // record, surviving `prune_stale_lane_records` since the
+                    // task is still queued — so however long it takes the
+                    // next pass to land, whatever dispatcher runs it, that
+                    // mark is still there to read. [`LAUNCH_GRACE`] is timed
+                    // from *that* clock, not from the launch: a restart
+                    // finds the mark already waiting and picks the countdown
+                    // back up rather than restarting it or skipping it.
                     //
                     // Gated on `launched_at` being set at all: `start_one`
                     // never bumps `attempts` without setting it in the same
@@ -3424,22 +3477,34 @@ impl<'a> Dispatcher<'a> {
                     // never wrote the field — would get a free pass with
                     // nothing behind it to be graceful about.
                     let lane = lane_name(&step.id, tasks[candidate.task_index].id());
+                    let marked_at = self.lanes.get(&lane).and_then(|r| r.launch_grace_since);
                     if tasks[candidate.task_index].front.launched_at.is_some()
-                        && !self.lanes.contains_key(&lane)
+                        && (!self.lanes.contains_key(&lane) || marked_at.is_some())
                     {
-                        let ledger = self.ledger();
-                        self.lanes.insert(
-                            lane.clone(),
-                            LaneRecord::readopted(&lane, now_secs(), &ledger),
-                        );
-                        report.actions.push(format!(
-                            "{}: `{}` has been started {attempts} time(s) and left \
-                             nothing behind — this dispatcher never saw it launch, so \
-                             giving it one more pass before asking a person",
-                            tasks[candidate.task_index].id(),
-                            step.id,
-                        ));
-                        continue;
+                        let since = marked_at.unwrap_or_else(now_secs);
+                        if now_secs().saturating_sub(since) < LAUNCH_GRACE.as_secs() as i64 {
+                            if marked_at.is_none() {
+                                let ledger = self.ledger();
+                                self.lanes.insert(
+                                    lane.clone(),
+                                    LaneRecord {
+                                        launch_grace_since: Some(since),
+                                        ..LaneRecord::readopted(&lane, since, &ledger)
+                                    },
+                                );
+                            }
+                            report.actions.push(format!(
+                                "{}: `{}` has been started {attempts} time(s) and left \
+                                 nothing behind — this dispatcher never saw it launch, so \
+                                 giving it {} before asking a person",
+                                tasks[candidate.task_index].id(),
+                                step.id,
+                                crate::config::human_duration::format(LAUNCH_GRACE),
+                            ));
+                            continue;
+                        }
+                        // Past the grace: fall through and escalate below,
+                        // same as a launch this dispatcher watched die.
                     }
                     let reason = format!(
                         "`{}` was started {attempts} time(s) and the task never left it — an \
@@ -3632,6 +3697,7 @@ impl<'a> Dispatcher<'a> {
                             handing_over_since: None,
                             retired_pane: None,
                             child_since: None,
+                            launch_grace_since: None,
                         },
                     );
                     *in_flight.entry(agent_name).or_insert(0) += 1;
@@ -9480,16 +9546,16 @@ mod tests {
     /// to recover on its own rather than settle into a wait measured in days.
     #[test]
     fn the_relaunch_wait_doubles_and_then_holds() {
-        let interval = Duration::from_secs(10);
-        assert_eq!(relaunch_backoff(interval, MAX_LAUNCHES), interval);
-        assert_eq!(relaunch_backoff(interval, MAX_LAUNCHES + 1), interval * 2);
-        assert_eq!(relaunch_backoff(interval, MAX_LAUNCHES + 3), interval * 8);
+        let seed = RELAUNCH_SEED;
+        assert_eq!(relaunch_backoff(MAX_LAUNCHES), seed);
+        assert_eq!(relaunch_backoff(MAX_LAUNCHES + 1), seed * 2);
+        assert_eq!(relaunch_backoff(MAX_LAUNCHES + 3), seed * 8);
         assert_eq!(
-            relaunch_backoff(interval, MAX_LAUNCHES + 40),
+            relaunch_backoff(MAX_LAUNCHES + 40),
             Duration::from_secs(3600)
         );
-        // Never shorter than a pass, whatever the arithmetic says.
-        assert_eq!(relaunch_backoff(interval, 0), interval);
+        // Never shorter than the seed, whatever the arithmetic says.
+        assert_eq!(relaunch_backoff(0), seed);
     }
 
     #[test]
@@ -10331,10 +10397,10 @@ mod tests {
     fn the_shipped_patience_outlasts_a_lane_waiting_on_its_test_run() {
         let shipped = Config::default().dispatch;
         assert!(
-            shipped.lane_quiet > shipped.interval,
+            shipped.lane_quiet > PROBE_INTERVAL,
             "patience is not the poll rate: {:?} vs {:?}",
             shipped.lane_quiet,
-            shipped.interval
+            PROBE_INTERVAL
         );
         // Four of these is what it takes to escalate — three reminders and the
         // due one that replaces the fourth — so the round trip has to outlast
@@ -10958,6 +11024,9 @@ mod tests {
         if let Some(at) = &mut record.reminded_at {
             *at -= how_long.as_secs() as i64;
         }
+        if let Some(at) = &mut record.launch_grace_since {
+            *at -= how_long.as_secs() as i64;
+        }
         save_lane_records(repo, &records).unwrap();
     }
 
@@ -11124,10 +11193,10 @@ mod tests {
     /// dispatcher merely never watched happen. `lanes.json` is where that
     /// watching lives — a dispatcher that dies between launching a lane and
     /// finishing that pass never writes it — so a restarted dispatcher
-    /// reaching a launch with no record of it at all gets a pass's grace
+    /// reaching a launch with no record of it at all gets `LAUNCH_GRACE`
     /// rather than reading the silence as proof of death on the spot.
     #[test]
-    fn a_launch_this_dispatcher_never_witnessed_gets_one_pass_before_a_person_is_asked() {
+    fn a_launch_this_dispatcher_never_witnessed_gets_a_grace_before_a_person_is_asked() {
         let repo = fixture("unwitnessed-dead-launch");
         let path = add_task_with(&repo, "demo", "implement", |f| {
             f.workspace_id = Some("w1".into());
@@ -11166,10 +11235,10 @@ mod tests {
             report.actions
         );
 
-        // The grace is durable, not timed: it marked the lane seen in
-        // `lanes.json`, which the pass above wrote back — so the very next
-        // pass, whenever it lands, reads it as witnessed and escalates like
-        // any ordinary dead launch, exactly once past the one pass of grace.
+        // The mark is durable, not the timing: it marked the lane seen in
+        // `lanes.json`, which the pass above wrote back — so a second pass
+        // landing well inside `LAUNCH_GRACE` still waits, reading the same
+        // mark rather than starting a fresh one.
         assert!(
             !load_lane_records(&repo).is_empty(),
             "the grace pass has to leave a record behind, or every pass would grace it again"
@@ -11179,8 +11248,21 @@ mod tests {
         let task = reload(&path);
         assert_eq!(
             task.stage(),
+            "implement",
+            "well inside the grace, a second pass still waits"
+        );
+
+        // Past `LAUNCH_GRACE`, whichever dispatcher looks — this one or a
+        // fresh one after a restart, `age_lane` standing in for either —
+        // the same silence finally means what it says.
+        age_lane(&repo, &lane_name("implement", "demo"), LAUNCH_GRACE);
+        let mux = FakeMux::new(vec![]);
+        run_pass(&repo, &mux);
+        let task = reload(&path);
+        assert_eq!(
+            task.stage(),
             "blocked",
-            "the second pass finds the same silence and this time it means what it says"
+            "past the grace the same silence means what it says"
         );
     }
 

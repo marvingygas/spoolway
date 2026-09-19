@@ -13,7 +13,6 @@ lookup in a task file or in the list of live lanes.
 ```
 spoolway dispatch                 # runs until the queue is empty
 spoolway dispatch --dry-run       # print what one pass would do, and do nothing
-spoolway dispatch --interval 5m   # override the configured interval between passes
 spoolway dispatch --force         # start past the restart guard
 spoolway dispatch --plain         # print the board once as a plain table, for scripts
 ```
@@ -60,7 +59,7 @@ flowchart TD
   B1 & B2 & B3 --> C[Sort the ready tasks]
   C --> D[Start lanes while slots are free]
   D --> E[Fire issue-tracking hooks for tasks that arrived at queued, blocked, paused or done]
-  E --> F[Draw the board, wait one interval]
+  E --> F[Draw the board, wait for the next pass]
   F --> A
 ```
 
@@ -99,8 +98,8 @@ file's path. `spoolway prompt contract` prints the system prompt for a sample ta
 
 ## Reading the state
 
-The dispatcher draws the board in the terminal it runs in and runs a pass every
-`dispatch.interval` (10 seconds by default), with a one-second tick between passes.
+The dispatcher draws the board in the terminal it runs in and runs a pass every ten
+seconds, with a one-second tick between passes. Neither rate is configurable.
 
 <img src="screenshots/dispatch.png" alt="the dispatcher board">
 

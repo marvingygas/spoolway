@@ -34,7 +34,7 @@ use crate::mux::{
 /// How long a pane's screen must sit unchanged before its lane counts as
 /// settled. Long enough that an agent quietly reading a big file between two
 /// prints is not declared done mid-turn; short enough that a finished lane is
-/// picked up on the next dispatch pass or the one after.
+/// picked up within a handful of passes at the dispatcher's fixed poll rate.
 const QUIESCENCE: Duration = Duration::from_secs(12);
 
 /// How long a freshly started TUI is given to draw anything at all before a

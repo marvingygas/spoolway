@@ -282,6 +282,21 @@ refuses "so --replace has nothing left to hand back" \
   "not a file spoolway ships" \
   env -C "$INITDIR/unasked" "$SPOOLWAY" sync --replace .spoolway/templates/lane-prompts.md
 
+# ------------------------------------------------------- dispatch.interval
+# `dispatch.interval` is retired hard: `DispatchConfig` denies unknown
+# fields, so a config that still names it is a parse error rather than a
+# quietly-dropped setting, everywhere except `sync`, which is the one place
+# meant to bring such a file forward.
+CONFIG="$INITDIR/unasked/.spoolway/config.toml"
+sed -i '/^\[dispatch\]$/a interval = "10s"' "$CONFIG"
+refuses "a config still naming dispatch.interval is refused" \
+  "unknown field" \
+  env -C "$INITDIR/unasked" "$SPOOLWAY" config get dispatch.lane_quiet
+must "sync runs over the project anyway" env -C "$INITDIR/unasked" "$SPOOLWAY" sync
+lacks "dispatch.interval is gone from the rewritten config" "interval" "$CONFIG"
+works "and the config is accepted again" \
+  env -C "$INITDIR/unasked" "$SPOOLWAY" config get dispatch.lane_quiet
+
 # --------------------------------------------------------------- task contract
 # `task contract` never touches `.spoolway/` in either mode — bare, it only
 # ever reads pipelines already loaded in memory; `--from`, it runs the very
@@ -656,7 +671,7 @@ task_doc "$LIVE/archived-row.md" archived-row "$BODY" \
   "group: arch-row" "touches: [notes/archived-row.md]"
 must "a task queued for the archive-cycling case" \
   "$SPOOLWAY" queue add --from "$LIVE/archived-row.md"
-if drive archived-row gone 60; then
+if drive archived-row gone 180; then
   ok "it ran to completion and left the queue"
 else
   bad "it ran to completion and left the queue (at \`$(stage_of archived-row)\`)"
@@ -757,7 +772,7 @@ says "and the task itself" "land" "$SPOOLWAY" group list
 records "the command's own record says it ran" "built land" \
   "$SPOOLWAY_PROJECT_HOME/commands/land · build.log" land
 
-if drive land gone 60; then ok "a task runs straight through its command step"
+if drive land gone 180; then ok "a task runs straight through its command step"
 else bad "a task runs straight through its command step (stuck at \`$(stage_of land)\`)"; fi
 # What it wrote landed in the task's worktree and was committed with the work,
 # which is the whole claim about where a command step runs. Read off the branch
@@ -805,7 +820,7 @@ fi
 records "the entry command ran, before any lane existed" "primed opener" \
   "$SPOOLWAY_PROJECT_HOME/commands/opener · prime.log" opener
 
-if drive opener gone 60; then ok "a task whose entry is a command step does not sit in \`queued\`"
+if drive opener gone 180; then ok "a task whose entry is a command step does not sit in \`queued\`"
 else bad "a task whose entry is a command step does not sit in \`queued\` (at \`$(stage_of opener)\`)"; fi
 has "and the task went on to the step behind it" "→ \`implement\`" \
   $SPOOLWAY_PROJECT_HOME/archive/opener.md
@@ -875,7 +890,7 @@ must "a task whose build fails" "$SPOOLWAY" queue add --from "$LIVE/broken.md"
 records "what the command printed is on the record" "the build is broken" \
   "$SPOOLWAY_PROJECT_HOME/commands/broken · build.log" broken
 
-if drive broken gone 60; then ok "a task whose command fails still reaches the end"
+if drive broken gone 180; then ok "a task whose command fails still reaches the end"
 else bad "a task whose command fails still reaches the end (at \`$(stage_of broken)\`)"; fi
 # Counted rather than matched: every task arrives at `implement` once on its
 # way in, so the presence of that line says nothing. What the failing exit
@@ -924,7 +939,7 @@ works "a pipeline whose gate loops back to the agent step before it checks out" 
 
 task_doc "$LIVE/gated.md" gated "$BODY" "group: live" "touches: [notes/gated.md]"
 must "a task whose gate never turns green" "$SPOOLWAY" queue add --from "$LIVE/gated.md"
-if drive gated blocked 90; then
+if drive gated blocked 150; then
   ok "a gate that never passes stops the task rather than circling forever"
 else
   bad "a gate that never passes stops the task rather than circling forever (at \`$(stage_of gated)\`)"
@@ -960,7 +975,7 @@ works "a pipeline whose gate loops back to the agent step, bounded at 2" \
 task_doc "$LIVE/gated-twice.md" gated-twice "$BODY" "group: live" "touches: [notes/gated-twice.md]"
 must "a task whose gate never turns green, on a loop of 2" \
   "$SPOOLWAY" queue add --from "$LIVE/gated-twice.md"
-if drive gated-twice blocked 90; then
+if drive gated-twice blocked 150; then
   ok "a loop of 2 still stops the task rather than circling forever"
 else
   bad "a loop of 2 still stops the task rather than circling forever \
@@ -1014,7 +1029,7 @@ task_doc "$LIVE/cant-launch.md" cant-launch "$BODY" "group: live" \
 must "a task whose command step can never even start" \
   "$SPOOLWAY" queue add --from "$LIVE/cant-launch.md"
 
-if drive cant-launch blocked 60; then
+if drive cant-launch blocked 120; then
   ok "three failed launches in a row park the task rather than retrying forever"
 else
   bad "three failed launches in a row park the task rather than retrying forever \
@@ -1068,7 +1083,7 @@ fi
 # it has moved on.
 cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
 add_command_step default bench \
-  "sleep 20; echo 'never finishes in time' > \"\$SPOOLWAY_REPO/bench-done.txt\"" \
+  "sleep 240; echo 'never finishes in time' > \"\$SPOOLWAY_REPO/bench-done.txt\"" \
   review --background
 works "a background command step checks out" "$SPOOLWAY" pipeline check
 says "and show says it does not wait" "bench      command   background" \
@@ -1080,9 +1095,12 @@ must "a task with a background step" "$SPOOLWAY" queue add --from "$LIVE/quick.m
 
 # Watched by hand rather than with `drive`, for one reason: the pid has to be
 # read while the run is still going, and the whole claim under test is that the
-# task does not stop there long enough to be caught waiting.
+# task does not stop there long enough to be caught waiting. The rest of the
+# pipeline (review, document, handover, checks) has no --interval knob left to
+# speed it up, so each of its transitions costs up to a real PROBE_INTERVAL —
+# the budget below has to clear that whole walk, not the old sub-second one.
 BENCH_PID=""
-for _ in $(seq 1 300); do
+for _ in $(seq 1 1500); do
   if [ -z "$BENCH_PID" ] && [ -s "$SPOOLWAY_PROJECT_HOME/commands/quick · bench.pid" ]; then
     BENCH_PID=$(cat "$SPOOLWAY_PROJECT_HOME/commands/quick · bench.pid")
   fi
@@ -1097,8 +1115,9 @@ if [ -z "$(stage_of quick)" ]; then
 else
   bad "the task ran the whole pipeline without waiting for it (at \`$(stage_of quick)\`)"
 fi
-# The command sleeps for twenty seconds and the pipeline is done in under one.
-# If this file exists, something waited.
+# The command sleeps for four minutes — comfortably longer than the rest of
+# the pipeline takes to reach `done` even at one PROBE_INTERVAL per
+# transition — so if this file exists, something waited.
 if [ -f "$LIVE/proj/bench-done.txt" ]; then
   bad "nothing waited for it — that is what background means"
 else
@@ -1152,7 +1171,7 @@ task_doc "$LIVE/scratch-fail.md" scratch-fail "$BODY" "group: live" \
 must "a task behind a background step that will later fail" \
   "$SPOOLWAY" queue add --from "$LIVE/scratch-fail.md"
 
-if drive scratch-fail hold 60; then
+if drive scratch-fail hold 120; then
   ok "the task moved on past the background step while its command was still running"
 else
   bad "the task moved on past the background step while its command was still running \
@@ -1160,7 +1179,7 @@ else
 fi
 
 touch "$SCRATCH_FAIL"
-if drive scratch-fail blocked 60; then
+if drive scratch-fail blocked 120; then
   ok "the background command's failure still reached the task, at the step it moved on to"
 else
   bad "the background command's failure still reached the task, at the step it moved on to \
@@ -1225,7 +1244,7 @@ chmod +x "$NO_SETSID_SPOOLWAY"
 
 cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
 add_command_step default nosetsid \
-  "sleep 20; echo 'no-setsid done' > \"\$SPOOLWAY_REPO/no-setsid-done.txt\"" \
+  "sleep 240; echo 'no-setsid done' > \"\$SPOOLWAY_REPO/no-setsid-done.txt\"" \
   review --background
 must "marking it headless: true" \
   sed -i 's|^    background: true$|    background: true\n    headless: true|' \
@@ -1269,8 +1288,10 @@ else
   bad "and it outlives the pass that started it (pid $NOSETSID_PID)"
 fi
 # Cleaned up the same way `bench` is, rather than left running into whatever
-# this suite does next.
-if [ -n "$NOSETSID_PID" ] && poll_while 10 test -d "/proc/$NOSETSID_PID"; then
+# this suite does next. The task still has to walk review, document, handover
+# and checks to reach `done` first — no --interval knob left to speed that
+# up, so this needs the same wide budget `bench`'s own wait does.
+if [ -n "$NOSETSID_PID" ] && poll_while 300 test -d "/proc/$NOSETSID_PID"; then
   ok "and cleanup stops it once the task is done, same as any other background run"
 else
   bad "and cleanup stops it once the task is done, same as any other background run (pid $NOSETSID_PID)"
@@ -1295,7 +1316,7 @@ says "and show resolves it" "timeout=3s" "$SPOOLWAY" pipeline show
 
 task_doc "$LIVE/hung.md" hung "$BODY" "group: live" "touches: [notes/hung.md]"
 must "a task whose command hangs" "$SPOOLWAY" queue add --from "$LIVE/hung.md"
-if drive hung gone 90; then ok "a hung command does not park its task forever"
+if drive hung gone 200; then ok "a hung command does not park its task forever"
 else bad "a hung command does not park its task forever (at \`$(stage_of hung)\`)"; fi
 has "and the timeout routed it like any other failure" "→ \`implement\`" \
   $SPOOLWAY_PROJECT_HOME/archive/hung.md
@@ -1326,7 +1347,7 @@ task_doc "$LIVE/unconfined.md" unconfined "$BODY" "group: live" \
   "touches: [notes/unconfined.md]"
 must "a task whose command writes outside its worktree" \
   "$SPOOLWAY" queue add --from "$LIVE/unconfined.md"
-if drive unconfined gone 60; then ok "a command step is not confined to its worktree"
+if drive unconfined gone 180; then ok "a command step is not confined to its worktree"
 else bad "a command step is not confined to its worktree (at \`$(stage_of unconfined)\`)"; fi
 works "and it really did write where no lane could" test -f "$OUTSIDE"
 
@@ -1370,8 +1391,15 @@ else
   must "a task through a paned command step" \
     "$SPOOLWAY" queue add --from "$LIVE/paned.md"
 
+  # Ten seconds was enough when E2E_INTERVAL drove the dispatcher at one
+  # second: the task reached `visible` almost as fast as it was queued. The
+  # rate is fixed now, so the walk from `queued` through `implement` to this
+  # step costs a real PROBE_INTERVAL per transition, and the pane itself only
+  # stands for the two seconds its command sleeps — the budget has to cover
+  # the walk, while the tenth-of-a-second pace is what catches the pane
+  # inside it.
   FOUND_PANE=""
-  for _ in $(seq 1 100); do
+  for _ in $(seq 1 1200); do
     FOUND_PANE=$(tmux -S "$SOCK" list-panes -a -F '#{pane_title}' 2>/dev/null \
       | grep -F "paned · visible" || true)
     [ -n "$FOUND_PANE" ] && break
@@ -1392,7 +1420,7 @@ else
     "env:from-the-dispatchers-own-environment" \
     "$SPOOLWAY_PROJECT_HOME/commands/paned · visible.log.kept"
 
-  if drive paned gone 60; then ok "the task carries on once the command has passed"
+  if drive paned gone 180; then ok "the task carries on once the command has passed"
   else bad "the task carries on once the command has passed (at \`$(stage_of paned)\`)"; fi
   unset SPOOLWAY_E2E_PANE_ENV_MARKER
   if tmux -S "$SOCK" list-panes -a -F '#{pane_title}' 2>/dev/null \
@@ -1421,7 +1449,7 @@ else
   records "and its output is on the record just the same" "hidden-command-marker" \
     "$SPOOLWAY_PROJECT_HOME/commands/hiddenc · hidden.log" hiddenc
 
-  if drive hiddenc gone 60; then ok "a headless command step still routes on its exit code"
+  if drive hiddenc gone 180; then ok "a headless command step still routes on its exit code"
   else bad "a headless command step still routes on its exit code (at \`$(stage_of hiddenc)\`)"; fi
   if tmux -S "$SOCK" list-panes -a -F '#{pane_title}' 2>/dev/null \
       | grep -qF "hiddenc · hidden"; then
@@ -1441,7 +1469,7 @@ else
     "touches: [notes/panedfail.md]"
   must "a task whose paned step fails" \
     "$SPOOLWAY" queue add --from "$LIVE/panedfail.md"
-  if drive panedfail blocked 60; then ok "a failing paned command still routes on its exit code"
+  if drive panedfail blocked 120; then ok "a failing paned command still routes on its exit code"
   else bad "a failing paned command still routes on its exit code (at \`$(stage_of panedfail)\`)"; fi
   if tmux -S "$SOCK" list-panes -a -F '#{pane_title}' 2>/dev/null \
       | grep -qF "panedfail · flaky"; then
@@ -1560,7 +1588,7 @@ else
   bad "the recorded pane id is one the multiplexer itself lists (recorded \"$RECORDED\")"
 fi
 
-if drive carried gone 60; then ok "the task carries on once the paned command has passed"
+if drive carried gone 180; then ok "the task carries on once the paned command has passed"
 else bad "the task carries on once the paned command has passed (at \`$(stage_of carried)\`)"; fi
 
 unset SPOOLWAY_E2E_PANE_ENV_MARKER SPOOLWAY_E2E_PANE_BULK
@@ -1777,7 +1805,7 @@ task_doc "$LIVE/tracked-b.md" tracked-b "$BODY" "group: tracked-pair" \
 must "the first of a dependent pair queues" "$SPOOLWAY" queue add --from "$LIVE/tracked-a.md"
 must "the second, depending on it, queues too" "$SPOOLWAY" queue add --from "$LIVE/tracked-b.md"
 
-if drive tracked-a gone 60 && drive tracked-b gone 60; then
+if drive tracked-a gone 180 && drive tracked-b gone 180; then
   ok "both tasks of the dependent pair reach done"
 else
   bad "both tasks of the dependent pair reach done (at \`$(stage_of tracked-a)\`/\`$(stage_of tracked-b)\`)"
@@ -1996,7 +2024,7 @@ task_doc "$LIVE/hook-queued.md" hook-queued "$BODY" "group: live" \
 must "a task queues under an always-failing hook" \
   "$SPOOLWAY" queue add --from "$LIVE/hook-queued.md"
 
-if drive hook-queued paused 30; then
+if drive hook-queued paused 60; then
   ok "a failing queued hook under on_fail=pause lands the task on paused"
 else
   bad "a failing queued hook under on_fail=pause lands the task on paused \
@@ -2104,16 +2132,28 @@ else
   bad "the failing done hook ran once, right away (ran $FIRST_COUNT times)"
 fi
 
+# Well inside the ladder's own ten seconds, so the retry cannot have come due
+# yet however many passes have gone by. It used to be worth saying "at a
+# one-second pass rate" here, because four seconds then held four passes and a
+# per-pass retry would already have shown; a fixed ten-second probe may hold
+# none at all, so what this pins now is only that the ladder is not skipped.
+# The count settling at exactly two below is what still says "one retry, not
+# one per pass".
 sleep 4
 COUNT_AFTER_4S=$(wc -l < "$LADDER_COUNT" 2>/dev/null || echo 0)
 if [ "$COUNT_AFTER_4S" = "1" ]; then
-  ok "four seconds later, at a one-second pass rate, it still has not retried"
+  ok "four seconds in, inside the ladder's own ten, it still has not retried"
 else
-  bad "four seconds later, at a one-second pass rate, it still has not retried \
-(ran $COUNT_AFTER_4S times — a per-pass retry would already show more)"
+  bad "four seconds in, inside the ladder's own ten, it still has not retried \
+(ran $COUNT_AFTER_4S times — a retry before the ladder is due)"
 fi
 
-for _ in $(seq 1 60); do
+# The retry fires on the first pass *after* the ladder comes due, and the
+# ladder's ten seconds and the probe's ten are unrelated clocks that do not
+# line up — so the wait has to cover the ladder plus a whole
+# `dispatch::PROBE_INTERVAL` behind it, not the twelve seconds that sufficed
+# when a pass came round every second.
+for _ in $(seq 1 300); do
   COUNT=$(wc -l < "$LADDER_COUNT" 2>/dev/null || echo 0)
   [ "$COUNT" -ge 2 ] && break
   sleep 0.2
@@ -2128,11 +2168,12 @@ fi
 
 # --------------------------------------------------- the tick: acted on fast
 # The split this task makes: a background step's own `.exit` file is read by
-# the cheap tick — fixed at `status::POLL`'s own one second — not only by the
-# slower probe, which still owns starting a lane and asking the multiplexer
-# anything. Proven by driving this scenario at a *ten*-second probe interval
-# and still reaching `blocked` well under the thirty seconds a probe with no
-# tick at all would routinely need — see the timing comment below.
+# the cheap tick — `status::POLL`'s own one second — not only by the slower
+# probe (`dispatch::PROBE_INTERVAL`, ten seconds, fixed rather than
+# `dispatch.interval` now but no faster than it ever was), which still owns
+# starting a lane and asking the multiplexer anything. Proven by reaching
+# `blocked` well under the thirty seconds a probe with no tick at all would
+# routinely need — see the timing comment below.
 cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
 {
   printf '\n  - id: tick-check\n'
@@ -2150,9 +2191,6 @@ works "a background step for the tick check checks out" "$SPOOLWAY" pipeline che
 
 must "the hook is put back so it stops holding tasks" \
   "$SPOOLWAY" config set issue_tracking.hook ""
-SAVED_INTERVAL=$E2E_INTERVAL
-E2E_INTERVAL=10s
-dispatcher_restart   # the probe now runs once every ten seconds, on purpose
 
 task_doc "$LIVE/tick-check.md" tick-check "$BODY" "group: live" \
   "touches: [notes/tick-check.md]"
@@ -2163,14 +2201,14 @@ must "a task behind the tick-check step queues" \
 # Timed from the moment the task queues to the moment it lands on `blocked`
 # — everything in between (settling `implement`'s own lane, starting the
 # background command, the reap that reads its exit) has to happen inside
-# that one span. The worst-case alignment against a ten-second probe still
+# that one span. The worst-case alignment against the ten-second probe still
 # needs two of its passes to get `tick-check` started at all — settling
 # `implement`, then starting the background run and moving on to the dead
 # end — so this cannot be timed against zero. What it is timed against is
 # the *third* pass a probe with no tick would need, to notice the
 # meanwhile-finished exit code on its own: thirty seconds, worst case,
 # against this cap's twenty-five.
-if drive tick-check blocked 90; then
+if drive tick-check blocked 150; then
   ELAPSED=$(( $(date +%s) - START_TS ))
   if [ "$ELAPSED" -lt 25 ]; then
     ok "a tick alone reroutes the finished background step, well inside the ten-second probe \
@@ -2185,8 +2223,6 @@ else
 fi
 
 cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
-E2E_INTERVAL=$SAVED_INTERVAL
-dispatcher_restart   # back to whatever pace this run started at, for every suite after this
 
 # ----------------------------------------------------------- github.sh, real
 # The shipped script itself, not a hand-written stand-in — `configure_project`

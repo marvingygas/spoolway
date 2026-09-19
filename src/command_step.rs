@@ -138,12 +138,37 @@ impl Runs {
         }
         match self.read_pid(key) {
             None => RunState::Fresh,
-            // Gone without writing an exit code: killed, or the machine went
-            // down under it. Either way it is not running, and there is no code
-            // to route on — which is a different thing from a code that says
-            // the command failed. See [`RunState::Interrupted`].
-            Some(pid) if !crate::headless::alive(pid) => RunState::Interrupted,
+            Some(pid) if !crate::headless::alive(pid) => self.what_a_dead_wrapper_left(key),
             Some(_) => RunState::Running,
+        }
+    }
+
+    /// Read the exit file a second time, now that the wrapper is known to be
+    /// gone, and only call the run interrupted if it is still not there.
+    ///
+    /// The two reads above are two separate moments, and the run goes on
+    /// living between them. The wrapper writes its code and *then* dies — the
+    /// trap fires before the shell is gone — so a wrapper that has died has
+    /// already written whatever it was going to write. A single read that
+    /// arrived a moment too early therefore proves nothing on its own: the
+    /// code can land, and the process go away, entirely inside the gap
+    /// between the read of the exit file and the read of `/proc`, which is
+    /// what a loaded machine widens. `a_kept_log_is_not_mistaken_for_a_run`
+    /// caught exactly that, reading `Interrupted` off a run that had exited
+    /// 0, and the cost in the product is worse than a red test: the dispatcher
+    /// answers `Interrupted` by forgetting the run and starting the command
+    /// over — so a command step that had passed was silently re-run, and its
+    /// log rolled aside, at random and only under load.
+    ///
+    /// Re-reading settles it, because after death the file no longer changes.
+    /// Nothing there still means what it always meant: killed, or the machine
+    /// went down under it, with no code to route on — which is a different
+    /// thing from a code that says the command failed. See
+    /// [`RunState::Interrupted`].
+    fn what_a_dead_wrapper_left(&self, key: &str) -> RunState {
+        match self.files.read_exit_code(key) {
+            Some(code) => RunState::Exited(code),
+            None => RunState::Interrupted,
         }
     }
 
@@ -993,6 +1018,42 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
         assert_eq!(f.runs.state("bench-demo"), RunState::Interrupted);
+    }
+
+    /// The read of the exit file and the read of the wrapper's liveness are
+    /// two separate moments, and a run that finished between them used to read
+    /// as `Interrupted` — which the dispatcher answers by forgetting the run
+    /// and starting the command over, so a command step that had passed was
+    /// silently re-run and its log rolled aside. Rare, and only under load:
+    /// `a_kept_log_is_not_mistaken_for_a_run` hit it once, reading
+    /// `Interrupted` off `exit 0`.
+    ///
+    /// Asserted against the second read itself rather than through `state`,
+    /// because the window it closes is a scheduling accident with no portable
+    /// way to arrange on demand. What it pins is the reasoning: once the
+    /// wrapper is gone the exit file no longer changes, so the answer comes
+    /// from reading it again rather than from whichever moment the first read
+    /// happened to catch.
+    #[test]
+    fn a_code_that_landed_before_the_wrapper_died_is_not_an_interruption() {
+        let f = Fixture::new("late-exit-read");
+        f.start("demo · gate", "exit 0");
+        assert_eq!(f.settle("demo · gate"), RunState::Exited(0));
+
+        assert_eq!(
+            f.runs.what_a_dead_wrapper_left("demo · gate"),
+            RunState::Exited(0),
+            "a wrapper writes its code before it dies, so a dead one that \
+             wrote a code has a code"
+        );
+
+        // With nothing there, the reading it always had: killed, or the
+        // machine went down under it, and no code to route on.
+        std::fs::remove_file(f.runs.exit_path("demo · gate")).unwrap();
+        assert_eq!(
+            f.runs.what_a_dead_wrapper_left("demo · gate"),
+            RunState::Interrupted
+        );
     }
 
     /// The pid `script_for_pane` records has to belong to the run itself, not

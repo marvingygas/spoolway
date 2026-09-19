@@ -92,7 +92,7 @@ one_shot_start() {
   local pidfile="$LIVE/one-shot.pid"
   rm -f "$pidfile"
   setsid bash -c 'echo $$ >"$1"; shift; exec "$@"' \
-    _ "$pidfile" "$SPOOLWAY" dispatch --plain --interval "${E2E_INTERVAL:-1s}" \
+    _ "$pidfile" "$SPOOLWAY" dispatch --plain \
     >>"$E2E_DISPATCH_LOG" 2>&1 &
   poll_until 10 test -s "$pidfile" || {
     printf '  \033[31mSETUP\033[0m the one-shot dispatcher never started\n' >&2
@@ -112,7 +112,7 @@ one_shot_start_board() {
   local pidfile="$LIVE/one-shot-board.pid"
   rm -f "$pidfile"
   setsid bash -c 'echo $$ >"$1"; shift; exec "$@"' \
-    _ "$pidfile" "$SPOOLWAY" dispatch --interval "${E2E_INTERVAL:-1s}" \
+    _ "$pidfile" "$SPOOLWAY" dispatch \
     >>"$E2E_DISPATCH_LOG" 2>&1 </dev/null &
   poll_until 10 test -s "$pidfile" || {
     printf '  \033[31mSETUP\033[0m the one-shot board dispatcher never started\n' >&2
@@ -212,7 +212,9 @@ fi
 # from the very first case still alive and unreported. Its own reconciliation
 # — matching a task's step against `Mux::list_lanes` — is what has to notice
 # that and leave it alone; nothing here is asked to hold that promise, only
-# to watch it kept over several passes rather than one.
+# to watch it kept over several passes rather than one. Two passes cost a
+# real PROBE_INTERVAL each now — no --interval knob left to shrink it — so
+# the wait has to clear twenty seconds of dispatcher time, not fifteen.
 STARTS_BEFORE=$(grep -c 'started hang · implement' "$E2E_DISPATCH_LOG" 2>/dev/null || true)
 PASSES_BEFORE=$(grep -c 'lanes still working\|nothing to do' "$E2E_DISPATCH_LOG" 2>/dev/null || true)
 passed_twice_more() {
@@ -220,7 +222,7 @@ passed_twice_more() {
   now=$(grep -c 'lanes still working\|nothing to do' "$E2E_DISPATCH_LOG" 2>/dev/null || true)
   [ "${now:-0}" -ge "$(( ${PASSES_BEFORE:-0} + 2 ))" ]
 }
-if poll_until 15 passed_twice_more; then
+if poll_until 30 passed_twice_more; then
   STARTS_AFTER=$(grep -c 'started hang · implement' "$E2E_DISPATCH_LOG" 2>/dev/null || true)
   PID_NOW=$(cat "$SPOOLWAY_PROJECT_HOME/headless/hang · implement.pid" 2>/dev/null || true)
   if [ "$STARTS_AFTER" = "$STARTS_BEFORE" ] && [ "$PID_NOW" = "$PID1" ] && kill -0 "$PID1" 2>/dev/null; then
@@ -243,28 +245,23 @@ forget hang
 
 # ------------------------------------------------ a report, nobody listening
 # `orphan` is an ordinary fast task: its implement lane reports in
-# milliseconds. A sixty-second interval on the dispatcher that starts it
-# turns the race between "the report lands" and "the next pass would read
-# it" into a minute of slack — plenty to kill the dispatcher in between and
-# still be certain the report happened with nobody running.
-SAVED_INTERVAL=$E2E_INTERVAL
-E2E_INTERVAL=60s
+# milliseconds, well ahead of the probe's own ten-second `PROBE_INTERVAL` —
+# plenty of slack to kill the dispatcher, the instant `drive` observes the
+# report on disk, before that probe would have read it on its own.
 dispatcher_start
 task_doc "$LIVE/orphan.md" orphan "$BODY" "group: disaster" "touches: [notes/orphan.md]"
 must "orphan queues" "$SPOOLWAY" queue add --from "$LIVE/orphan.md"
-if drive orphan review 20; then
+if drive orphan review 60; then
   kill_dispatcher KILL
   STAGE_ORPHANED=$(stage_of orphan)
-  E2E_INTERVAL=$SAVED_INTERVAL
   dispatcher_start
-  if [ "$STAGE_ORPHANED" = review ] && drive orphan document 20; then
+  if [ "$STAGE_ORPHANED" = review ] && drive orphan document 60; then
     ok "a lane that reported with no dispatcher up is picked up on the next pass"
   else
     bad "a lane that reported with no dispatcher up is picked up on the next pass"
     printf '        stage while orphaned: %s, stage now: %s\n' "$STAGE_ORPHANED" "$(stage_of orphan)"
   fi
 else
-  E2E_INTERVAL=$SAVED_INTERVAL
   bad "a lane that reported with no dispatcher up is picked up on the next pass (never reached review)"
 fi
 sweep
@@ -347,7 +344,7 @@ else
   task_doc "$LIVE/tmux-heal.md" tmux-heal "$BODY" "group: disaster" "touches: [notes/tmux-heal.md]"
   must "tmux-heal queues" "$SPOOLWAY" queue add --from "$LIVE/tmux-heal.md"
   dispatcher_restart
-  if drive tmux-heal review 20; then
+  if drive tmux-heal review 60; then
     WT7=$(worktree_of tmux-heal)
     tmux -S "$SOCK" kill-server 2>/dev/null
     # `document` rather than watching for `review`'s own pane: the mock
@@ -358,7 +355,7 @@ else
     # workspace and nothing else — opened a fresh pane rather than failing;
     # `handover` and `checks` need a real forge this suite has none of, so
     # `document` is as far as an unrelated limitation leaves provable.
-    if [ -n "$WT7" ] && drive tmux-heal document 30 && [ -d "$WT7" ]; then
+    if [ -n "$WT7" ] && drive tmux-heal document 90 && [ -d "$WT7" ]; then
       ok "a killed multiplexer clears the ids on file and the next launch opens new ones"
     else
       bad "a killed multiplexer clears the ids on file and the next launch opens new ones"
