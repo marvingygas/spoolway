@@ -5035,11 +5035,11 @@ fn after_write(repo: &Repo) -> SubmitOutcome {
 /// they only ever ran after `run_screen` had already returned and this
 /// screen's own `TermGuard` had already dropped.
 ///
-/// The warnings screen sees no workspace-move error here — nothing has
-/// tried the move yet, since that only happens inside `dispatch` itself,
-/// well after this function has returned — so `dispatch` still holds a
-/// second, narrower notice of its own for that one failure; see
-/// `dispatch::workspace_move_notice`.
+/// The warnings screen sees no workspace-open error here — nothing has
+/// tried opening the workspace yet, since that only happens inside
+/// `dispatch` itself, well after this function has returned — so
+/// `dispatch` still holds a second, narrower notice of its own for that one
+/// failure; see `dispatch::workspace_open_notice`.
 ///
 /// `term: None` throughout all three calls: `run_screen` already holds its
 /// own `TermGuard` for the whole of this loop, so nothing here may

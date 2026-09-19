@@ -3888,7 +3888,7 @@ impl<'a> Dispatcher<'a> {
     /// same key wins to the named value. Under `headless` this whole question
     /// answers itself: `runs.start` below is a child of this process, so it
     /// inherits everything the dispatcher was started with, `SPOOLWAY_GH`
-    /// among it, with no forwarding to write. A herdr or tmux pane has no
+    /// among it, with no forwarding to write. A herdr pane has no
     /// such thing — the multiplexer server spawned it, from *its* own
     /// environment, which the dispatcher's exports never reached — so
     /// without handing this layer across explicitly a command step loses
@@ -4345,8 +4345,8 @@ fn ensure_workspace(
     }
 
     // The directory can survive a restart of the multiplexer fronting it even
-    // though every id it ever handed out did not — a reboot, a `tmux
-    // kill-server`, herdr restarted. Believing `workspace_id` and `tab_id`
+    // though every id it ever handed out did not — a reboot, herdr
+    // restarted. Believing `workspace_id` and `tab_id`
     // then means `start_one` splits into a tab nothing answers to, on this
     // pass and on every pass after it, so they are checked against the live
     // multiplexer rather than trusted outright.
@@ -4380,13 +4380,13 @@ fn ensure_workspace(
             .context("workspace went stale but the task has no worktree to reopen a pane on")?;
         // `reopen_owned_pane`, never the plain `create_pane`, for a checkout
         // this task cut for itself: a backend that marks ownership on the
-        // session rather than asking the multiplexer directly (tmux's
-        // `@spoolway_checkout`) stamps only through that call, and a pane
-        // opened without it answers to `remove_workspace` as though the
-        // checkout were borrowed — cleanup then refuses to take it back and
-        // the worktree leaks. A genuinely borrowed checkout gets the
-        // unstamped pane it always did: it is not this task's to remove
-        // either way.
+        // session rather than asking the multiplexer directly stamps only
+        // through that call, and a pane opened without it answers to
+        // `remove_workspace` as though the checkout were borrowed — cleanup
+        // then refuses to take it back and the worktree leaks. See
+        // `Mux::reopen_owned_pane`'s own doc for why no backend does this
+        // any more. A genuinely borrowed checkout gets the unstamped pane it
+        // always did: it is not this task's to remove either way.
         match mux.task_owns_workspace() {
             true if task.front.borrowed => {
                 let workspace = mux.create_pane(&checkout, &format!("spoolway/{}", task.id()))?;
@@ -5325,9 +5325,8 @@ pub fn our_checkouts(repo: &Repo, tasks: &[Task]) -> HashSet<PathBuf> {
     {
         // Both spellings: the path as recorded, and its canonical form. A
         // backend that resolves symlinks when it reports a lane's `cwd`
-        // (herdr, or tmux's `pane_current_path`) hands back the same
-        // directory under a different name, and [`owns_cwd`] checks against
-        // whichever this set happens to hold.
+        // (herdr) hands back the same directory under a different name, and
+        // [`owns_cwd`] checks against whichever this set happens to hold.
         if let Ok(canon) = path.canonical() {
             out.insert(canon);
         }
@@ -5340,10 +5339,9 @@ pub fn our_checkouts(repo: &Repo, tasks: &[Task]) -> HashSet<PathBuf> {
 /// reported it — is one of `mine`.
 ///
 /// A plain set membership first, then the same test on the canonicalised
-/// path. tmux stamps [`crate::tmux`]'s `OPT_CWD` with the exact string the
-/// dispatcher recorded, so the first test is normally enough; the fallback
-/// is for a backend that canonicalises, where byte-equality alone dropped
-/// every lane and escalated every task. See review finding 38.
+/// path. The dispatcher's own recorded string is normally enough; the
+/// fallback is for a backend that canonicalises, where byte-equality alone
+/// dropped every lane and escalated every task. See review finding 38.
 pub fn owns_cwd(mine: &HashSet<PathBuf>, cwd: &std::path::Path) -> bool {
     mine.contains(cwd)
         || cwd
@@ -5595,7 +5593,7 @@ mod tests {
         /// call takes the checkout and the row together.
         unbound_workspace: bool,
         /// Whether this backend actually offers a pane to
-        /// [`crate::mux::Mux::run_in_pane`], the way herdr and tmux do. False
+        /// [`crate::mux::Mux::run_in_pane`], the way herdr does. False
         /// is every other test's backend, headless included: `run_in_pane`
         /// answers `None`, exactly the trait's own default, and a command
         /// step falls back to the detached run it always used.
@@ -5675,8 +5673,8 @@ mod tests {
             self.unbound_workspace = true;
             self
         }
-        /// A backend that actually offers a command step a pane — herdr or
-        /// tmux, rather than every other test's fake, which declines exactly
+        /// A backend that actually offers a command step a pane — herdr,
+        /// rather than every other test's fake, which declines exactly
         /// as headless does.
         fn offering_panes(mut self) -> FakeMux {
             self.run_commands_in_pane = true;
@@ -5810,11 +5808,6 @@ mod tests {
                 .borrow()
                 .get(label)
                 .and_then(|tab| tab.tab_id.clone()))
-        }
-
-        fn move_self_into(&self, workspace_id: &str) -> Result<()> {
-            self.log(format!("move_self_into {workspace_id}"));
-            Ok(())
         }
 
         fn task_owns_workspace(&self) -> bool {
@@ -6008,14 +6001,6 @@ mod tests {
         }
         fn focus_lane(&self, name: &str) -> Result<()> {
             self.log(format!("focus {name}"));
-            Ok(())
-        }
-        fn rename_tab(&self, _tab: &str, label: &str) -> Result<()> {
-            self.log(format!("tab {label}"));
-            Ok(())
-        }
-        fn rename_workspace(&self, _workspace: &str, label: &str) -> Result<()> {
-            self.log(format!("workspace {label}"));
             Ok(())
         }
         fn rename_pane(&self, _pane: &str, label: &str) -> Result<()> {
@@ -13976,7 +13961,7 @@ mod tests {
         );
     }
 
-    /// A herdr or tmux pane is spawned from the multiplexer server's own
+    /// A herdr pane is spawned from the multiplexer server's own
     /// environment, not the dispatcher's — the dispatcher's own exports never
     /// reach it any other way. `start_command_in_pane` hands `run_in_pane`
     /// the dispatcher's own process environment as the layer the step's named

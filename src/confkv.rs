@@ -46,7 +46,7 @@ pub struct Reference {
 pub const REFERENCE: &[Reference] = &[
     Reference {
         key: "dispatch.backend",
-        values: "herdr, tmux, headless",
+        values: "herdr, headless",
         default: "herdr",
         sentence: "Where lanes run: a real pane you can watch, or no multiplexer at all.",
     },
@@ -56,13 +56,6 @@ pub const REFERENCE: &[Reference] = &[
         default: "split",
         sentence: "How a herdr run is laid out: a pane per task in its project's shared \
                     tab, or a row of its own per task.",
-    },
-    Reference {
-        key: "dispatch.tmux_mode",
-        values: "grouped, split",
-        default: "grouped",
-        sentence: "How a tmux run is laid out: one session for the whole run, or a \
-                    session per task.",
     },
     Reference {
         key: "dispatch.worktree_root",
@@ -1030,6 +1023,17 @@ mod tests {
     #[test]
     fn tear_lanes_on_stop_is_refused_rather_than_resolved() {
         let err = get(&Config::default(), "dispatch.tear_lanes_on_stop").unwrap_err();
+        assert!(err.to_string().contains("no config key"), "{err}");
+    }
+
+    /// `dispatch.tmux_mode` retired with the tmux backend itself. The field
+    /// stays on `DispatchConfig` so a config still holding it parses — see
+    /// [`crate::config::DispatchConfig`] — but it left `REFERENCE`, so
+    /// `get`/`set` never resolve it and a person naming it is told so rather
+    /// than handed a value nothing reads.
+    #[test]
+    fn tmux_mode_is_refused_rather_than_resolved() {
+        let err = get(&Config::default(), "dispatch.tmux_mode").unwrap_err();
         assert!(err.to_string().contains("no config key"), "{err}");
     }
 

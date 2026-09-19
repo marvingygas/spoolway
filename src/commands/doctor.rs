@@ -2883,7 +2883,7 @@ mod tests {
     /// Unix only, because `Headless` is the one backend with no real pane and
     /// it reports itself unavailable off Unix — on Windows `live_check` never
     /// reaches the branch under test, and answers with the unavailable note
-    /// instead. There is no other backend to stand in: tmux is Unix-only too.
+    /// instead.
     #[test]
     fn a_backend_with_no_real_pane_is_a_note_not_a_check() {
         let mux = headless_mux("no-real-pane");

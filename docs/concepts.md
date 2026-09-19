@@ -103,7 +103,7 @@ A lane is one running agent on one task at one step. It is named `<task> · <ste
 
 | Backend | What a lane is |
 |---|---|
-| herdr, tmux | A terminal pane. You can watch it, type into it and take over. |
+| herdr | A terminal pane. You can watch it, type into it and take over. |
 | headless | A detached process writing to a log file. |
 
 A lane takes one turn. When it reports an outcome, the task moves on. A lane that stops
