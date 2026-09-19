@@ -1112,6 +1112,75 @@ pub fn load_dir(dir: &Path) -> Result<(Vec<Task>, Vec<LoadProblem>)> {
     Ok((tasks, problems))
 }
 
+/// [`load_dir_cached`]'s own memory, one entry per task file it has parsed
+/// — the file's own mtime when that parse happened, and the [`Task`] it
+/// produced. Kept by the caller (a [`crate::dispatch::Dispatcher`], across
+/// however many ticks it runs between probes) and handed back in on every
+/// call, so a file whose mtime has not moved since is never read twice.
+pub type TaskCache = std::collections::HashMap<PathBuf, (std::time::SystemTime, Task)>;
+
+/// [`load_dir`], reparsing only what changed. A tick runs once a second and
+/// a queue's own task files change far less often than that — a person
+/// editing one by hand, a lane's own `spoolway report`, a pass's `persist`
+/// — so reparsing every file on every call is work a fast tick cannot
+/// afford to repeat for nothing.
+///
+/// `cache` is trusted for its mtime, not its content: a file whose mtime
+/// has moved is always reparsed, whatever the cache says it used to be, so
+/// a hand-edit or a concurrent write is never missed. A path the directory
+/// no longer lists is dropped from the cache here, so a task file removed
+/// or archived between calls does not linger in memory forever.
+pub fn load_dir_cached(dir: &Path, cache: &mut TaskCache) -> Result<(Vec<Task>, Vec<LoadProblem>)> {
+    let mut tasks = Vec::new();
+    let mut problems = Vec::new();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            cache.clear();
+            return Ok((tasks, problems));
+        }
+        Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
+    };
+
+    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        seen.insert(path.clone());
+        let mtime = std::fs::metadata(&path)
+            .and_then(|meta| meta.modified())
+            .ok();
+        if let (Some(mtime), Some((cached_mtime, cached_task))) = (mtime, cache.get(&path))
+            && mtime == *cached_mtime
+        {
+            tasks.push(cached_task.clone());
+            continue;
+        }
+        match Task::load(&path) {
+            Ok(task) => {
+                if let Some(mtime) = mtime {
+                    cache.insert(path.clone(), (mtime, task.clone()));
+                }
+                tasks.push(task);
+            }
+            Err(e) => {
+                cache.remove(&path);
+                problems.push(LoadProblem {
+                    path,
+                    error: format!("{e:#}"),
+                });
+            }
+        }
+    }
+    cache.retain(|path, _| seen.contains(path));
+
+    tasks.sort_by(|a, b| a.front.id.cmp(&b.front.id));
+    problems.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok((tasks, problems))
+}
+
 /// The unprefixed branch name for a task: `task/<id>`. The one place this
 /// shape is written outside `queue add` itself, so a caller that needs the
 /// branch of a task whose file records none — a file hand-dropped in `queue/`
@@ -1684,6 +1753,70 @@ mod tests {
         assert_eq!(tasks[0].id(), "good");
         assert_eq!(problems.len(), 1);
         assert!(problems[0].path.ends_with("broken.md"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `load_dir_cached`'s whole point: a file whose mtime has not moved
+    /// since the last call is answered from the cache rather than reparsed
+    /// — proven here by poisoning the cached copy with a value the file on
+    /// disk does not actually hold, and reading it straight back — and a
+    /// file whose mtime *has* moved is always reparsed, whatever the cache
+    /// says.
+    #[test]
+    fn load_dir_cached_skips_a_file_whose_mtime_has_not_moved() {
+        let dir = crate::scratch::root("load-dir-cached");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("demo.md");
+        std::fs::write(&path, "---\nid: demo\nstage: queued\n---\n## Goal\nok\n").unwrap();
+
+        let mut cache = TaskCache::new();
+        let (tasks, problems) = load_dir_cached(&dir, &mut cache).unwrap();
+        assert!(problems.is_empty());
+        assert_eq!(tasks[0].stage(), "queued");
+        assert_eq!(cache.len(), 1);
+
+        // Poison the cached copy — a value the file on disk was never
+        // written with — so the next call can only read it back if the
+        // cache, not the file, is where it came from.
+        let (mtime, cached) = cache.get_mut(&path).unwrap();
+        cached.front.stage = "poisoned-from-cache".into();
+        let mtime = *mtime;
+
+        let (tasks, _) = load_dir_cached(&dir, &mut cache).unwrap();
+        assert_eq!(
+            tasks[0].stage(),
+            "poisoned-from-cache",
+            "an unmoved mtime must answer from the cache, not reparse the file"
+        );
+
+        // Now actually change the file, and move its mtime forward so the
+        // change is unambiguous whatever the filesystem's own timestamp
+        // resolution is — the next call must reparse it rather than trust
+        // the cache it just proved it will use when nothing changed.
+        std::fs::write(&path, "---\nid: demo\nstage: review\n---\n## Goal\nok\n").unwrap();
+        let bumped = mtime + std::time::Duration::from_secs(2);
+        std::fs::File::open(&path)
+            .unwrap()
+            .set_modified(bumped)
+            .unwrap();
+
+        let (tasks, _) = load_dir_cached(&dir, &mut cache).unwrap();
+        assert_eq!(
+            tasks[0].stage(),
+            "review",
+            "a moved mtime must always be reparsed, whatever the cache held"
+        );
+
+        // A file the directory no longer lists drops out of the cache too.
+        std::fs::remove_file(&path).unwrap();
+        let (tasks, _) = load_dir_cached(&dir, &mut cache).unwrap();
+        assert!(tasks.is_empty());
+        assert!(
+            cache.is_empty(),
+            "a removed file must not linger in the cache"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

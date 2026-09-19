@@ -312,7 +312,9 @@ names a tracker.
 | `on_fail` | `ignore` | What a failing hook does to its task. `ignore` records the failure. `pause` also holds the task: on `queued` it lands on `paused`, on `done` it stays out of the archive. |
 | `key_in_names` | `false` | Prefix the `group:`, the branch (`task/<slug>-<id>`) and the worktree directory with the slug the `open` hook returns. |
 
-The script is called once per task per event.
+The script is called once per task per event. A failing hook retries on a doubling delay
+from ten seconds, capped at an hour, and the count and next retry time survive a dispatcher
+restart.
 
 | Event | When it fires | Waits for the script |
 |---|---|---|
