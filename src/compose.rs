@@ -137,6 +137,16 @@ pub(crate) fn system_prompt(
 /// read the same for every lane; a gated step's fact that a person opens
 /// this pane belongs to [`report_contract`], the form it qualifies, not
 /// here.
+///
+/// The last bullet is fixed for every lane, gated or not, because composing
+/// happens once at launch and this file is all a pane has once the person in
+/// it starts talking: a `p` park from the board, a gate, or a step landing
+/// on `blocked` with nobody staffed to clear it all leave the same lane
+/// sitting in the same pane, and none of the three is knowable ahead of the
+/// turn that might cause it. A stopped task belongs to whoever is looking at
+/// its pane — see `commands::task_edit` — so the one thing worth fixing in
+/// place, for every step, is that the lane's own remit stops being the
+/// ceiling on what it will do there.
 pub(crate) fn situating(
     pipeline: &Pipeline,
     step: &Step,
@@ -164,7 +174,10 @@ pub(crate) fn situating(
          nothing unless told to.\n\
          - Nothing will wake you. Poll anything you wait on.\n\
          - Reporting is the only exit. A turn ended any other way stalls the task.\n\
-         - Commit as you go. Anything uncommitted is committed for you when you report.\
+         - Commit as you go. Anything uncommitted is committed for you when you report.\n\
+         - If this task is ever held on `paused` or `blocked` and a person carries on \
+         talking in this pane, do what they ask — including work your step would \
+         otherwise leave to another. Resuming it stays theirs alone.\
          {what_you_have}\
          {what_you_write_down}",
         step = step.id,
@@ -350,15 +363,15 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 ///
 /// `spoolway resume` is the exception to the read-only rule above it, bounded
 /// in the two ways `commands::report::resume` itself enforces: never past a
-/// task waiting on a gate, and never with `--reject` or `--stage`, which
-/// reroute or reject rather than clear a block.
+/// task waiting on a gate, and never with `--stage`, which reroutes rather
+/// than clears a block.
 fn toolbox() -> String {
     "READING THE RUN — yours at this step only:\n\n\
      `spoolway queue list` — every task, and where each sits\n\
      `spoolway queue show <task>` — one task's file, goal to `## Status Log`\n\
      `spoolway lane` — this run's lanes; name one for its transcript\n\
      `spoolway resume <task>` — put another stopped task back on its step; not\n  \
-     one waiting on a gate, and never with `--reject` or `--stage`"
+     one waiting on a gate, and never with `--stage`"
         .to_string()
 }
 
@@ -481,8 +494,9 @@ fn arrived_by_fail_paragraph(task: &Task, pipeline: &Pipeline, step: &Step) -> S
 /// each other. `blocked` is the fixed case — [`crate::pipeline::Step::
 /// destination`] never actually asks it for a `Fail` or a `Block`, since
 /// `commands::report` reads either the same way it reads a `--pause` before
-/// the question reaches the graph — so it keeps its own two forms, `--pass`
-/// and `--pause`. Every other step compares `destination(Fail)` against
+/// the question reaches the graph — so it keeps its own three forms,
+/// `--pass`, `--pass --stage <step>` and `--pause`. Every other step
+/// compares `destination(Fail)` against
 /// `destination(Block)`: equal, and a `--fail` would park the task exactly
 /// where a `--block` already does, so it is withheld; distinct, and both are
 /// offered. `--block` is the one kept on a collision rather than `--fail`,
@@ -512,6 +526,7 @@ pub(crate) fn report_contract(task: &Task, step: &Step) -> String {
 
     let forms = if blocked {
         "    spoolway report --pass  -m \"<one line on what happened>\"\n    \
+              spoolway report --pass  --stage <step> -m \"<one line on what happened>\"\n    \
               spoolway report --pause -m \"<what needs a person, and why>\"\n    \
               --handoff \"<what the next step should know>\"   repeatable"
     } else if fail_redundant {
@@ -525,12 +540,22 @@ pub(crate) fn report_contract(task: &Task, step: &Step) -> String {
               --handoff \"<what the next step should know>\"   repeatable"
     };
 
+    // `--stage` only ever means anything alongside `--pass` on `blocked`
+    // itself — see `commands::report`'s own refusal by name. Unlike
+    // `--pause`, which is simply never offered off `blocked` (there is
+    // nothing there to withhold: no other step's contract has ever printed
+    // it), `--stage` is a flag every step's own report line could plausibly
+    // reach for once it exists at all, so it is named under the refusal
+    // wording here rather than left for a lane to discover by trying it.
     let withheld: &[&str] = if blocked {
         &["spoolway report --fail", "spoolway report --block"]
     } else if fail_redundant {
-        &["spoolway report --fail"]
+        &[
+            "spoolway report --fail",
+            "spoolway report --pass --stage <step>",
+        ]
     } else {
-        &[]
+        &["spoolway report --pass --stage <step>"]
     };
 
     let mut contract = format!("Your last action is one `spoolway report` command:\n\n{forms}");

@@ -121,9 +121,9 @@ spoolway dispatch      # watch the board, and step in only where you are needed
 <img src="docs/screenshots/dispatch.png" alt="the dispatcher board">
 
 *One row per task, grouped by `group:`. The board shows what each lane is spending, what
-every queued task waits on, and which tasks are paused for you. NEXT tells a lane holding a
-question apart from a task waiting at a gate. The bottom line shows the slots in use and
-every scheduled job with its next firing.*
+every queued task waits on, and which tasks are paused for you. NEXT prints the key that acts
+on a row before the command it runs. The bottom line shows the slots in use and every
+scheduled job with its next firing.*
 
 Every task on the board is in one of a few states:
 
@@ -131,7 +131,8 @@ Every task on the board is in one of a few states:
 |---|---|
 | `queued` | Waiting for its dependencies and a free slot. |
 | `running` | An agent is working the task's current step, or it has just moved there and a lane is starting. |
-| `paused` | Waiting for you on purpose: a gate, a question in its pane, or a park. `r` on the board resumes it. |
+| `prompt` | A lane's pane is holding a permission prompt. Press a key in the pane. |
+| `paused` | Waiting for you on purpose: a gate, or a park. `r` on the board resumes it. |
 | `blocked` | A step reported a block, or ran out of loops. Read the task's `## Blocker`, then `spoolway resume`. An unattended run hands it to the unblocker prompt instead. |
 | `unreachable` | A task it depends on is blocked, so it cannot start until you clear that one. |
 | `done` | Finished: the branch is handed over, the worktree removed, the task archived. |
@@ -276,7 +277,7 @@ Event hooks sync tasks with an issue tracker. Sample scripts for GitHub and Jira
 | `open` | `spoolway queue add` opens a ticket per document |
 | `queued` | A task arrives in the queue |
 | `blocked` | A task comes to rest on `blocked` |
-| `paused` | A task arrives on the persisted `paused` stage; a live-step row whose public state is `paused` does not fire it |
+| `paused` | A task arrives on the persisted `paused` stage |
 | `done` | A task finishes |
 
 **The two shipped scripts are samples.** `spoolway init` writes `github.sh` and `jira.sh` into

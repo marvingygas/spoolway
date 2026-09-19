@@ -481,22 +481,35 @@ pub struct Frontmatter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launched_at: Option<i64>,
 
-    /// How many lanes this task has started on each route, keyed `from->to`.
+    /// How many launches this task has started on each route, keyed
+    /// `from->to` — an agent lane's own conversation, and, since this
+    /// change, a command step's `run:` process too (see
+    /// [`Task::bank_launch`]'s own doc for the second writer that adds).
+    /// Neither is a "prompt" in the model sense any more, which is why this
+    /// is named `steps:` on disk rather than `prompts:` — see that field
+    /// name's own note just below.
     ///
-    /// What a person reads: "prompt 6" is six lanes launched at that step,
-    /// however they got there and whether or not each one opened a
-    /// conversation of its own. Retries count, because a retried lane is a
-    /// second prompt and was paid for like one; [`Frontmatter::attempts`] goes
-    /// on counting them separately.
+    /// What a person reads: "6 at that step" is six launches there, however
+    /// they got there and whichever kind of step it is. Retries count,
+    /// because a retried lane or a rerun command is a second launch and was
+    /// paid for like one; [`Frontmatter::attempts`] goes on counting agent
+    /// retries separately.
     ///
     /// Per route rather than per step because a step two loops come back to is
     /// two loops. Banked at launch, in [`Task::bank_launch`], unlike
     /// [`Frontmatter::rounds`] beside it — that one is banked once per
     /// arrival, in [`Task::set_stage`], because a lap is a transition and a
-    /// relaunch after a lane died before saying anything is a second prompt
+    /// relaunch after a lane died before saying anything is a second launch
     /// on the same lap rather than a second lap.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub prompts: BTreeMap<String, u32>,
+    ///
+    /// Named `steps:` on disk, not `prompts:` — a command step banks a
+    /// launch here too (see `dispatch::run_command`'s `Fresh` arm), and
+    /// nothing about running a `run:` command is a prompt. `alias =
+    /// "prompts"` reads a task file an older spoolway already wrote, or one
+    /// mid-flight when this shipped, unchanged; every save from here on
+    /// writes `steps:` instead, and nothing ever writes `prompts:` again.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty", alias = "prompts")]
+    pub steps: BTreeMap<String, u32>,
 
     /// How many times a task has taken each route, keyed the same way — one
     /// lap of the loop per move, whatever a lane at either end went on to do.
@@ -508,7 +521,7 @@ pub struct Frontmatter {
     /// transition, and a retried launch at a step the task never left is a
     /// second prompt on the same lap rather than a second one. Whether a lane
     /// opened a fresh conversation or resumed one used to matter here and no
-    /// longer does — see [`Frontmatter::prompts`] for what still counts that.
+    /// longer does — see [`Frontmatter::steps`] for what still counts that.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub rounds: BTreeMap<String, u32>,
 
@@ -516,7 +529,7 @@ pub struct Frontmatter {
     /// never a lane or a command process that ran and failed, only one that
     /// [`crate::mux::Mux::start_lane`], [`crate::command_step::Runs::start`]
     /// or `start_command_in_pane` refused outright. Keyed by step rather than
-    /// by route, unlike [`Self::rounds`] and [`Self::prompts`] beside it: a
+    /// by route, unlike [`Self::rounds`] and [`Self::steps`] beside it: a
     /// launch that never started never had a route to be counted against.
     ///
     /// Bumped by `Dispatcher::note_launch_failure` in `src/dispatch.rs`,
@@ -601,15 +614,17 @@ impl Task {
         &self.front.stage
     }
 
-    /// How many lanes this task has started at `step`, by any route.
+    /// How many launches this task has started at `step`, by any route —
+    /// an agent lane's own conversation or a command step's `run:` process,
+    /// whichever this step is.
     ///
-    /// What a person reads and what the ledger records — "prompt 3 of review"
-    /// is about the step, however it got there. The limit is a route's
-    /// business; see [`Task::rounds_via`].
-    pub fn prompts_at(&self, step: &str) -> u32 {
+    /// What a person reads and what the ledger records — "3 launches of
+    /// review" is about the step, however it got there. The limit is a
+    /// route's business; see [`Task::rounds_via`].
+    pub fn steps_at(&self, step: &str) -> u32 {
         let suffix = format!("->{step}");
         self.front
-            .prompts
+            .steps
             .iter()
             .filter(|(key, _)| key.as_str() == step || key.ends_with(&suffix))
             .map(|(_, n)| *n)
@@ -627,11 +642,17 @@ impl Task {
             .unwrap_or(0)
     }
 
-    /// Bank one lane launch at `to`, arriving from `from`.
+    /// Bank one launch at `to`, arriving from `from` — an agent lane's own
+    /// conversation, or a command step's `run:` process starting.
     ///
-    /// The dispatcher calls this at launch. Nothing else may: a counter
-    /// banked from two places is one that double-counts the moment the two
-    /// disagree about what a launch is.
+    /// The dispatcher calls this at launch, from exactly two places: an
+    /// agent lane's own `start_one`, and a command step's `Fresh` arm in
+    /// `run_command`. Nothing else may — a counter banked from a third
+    /// place is one that can double-count the moment it disagrees with
+    /// these two about what a launch is — and the two that do call it
+    /// cannot disagree with each other: an agent step and a command step
+    /// are never the same step, so at most one of them ever calls this for
+    /// a given `to` on a given arrival.
     ///
     /// Whether the lane opened a conversation of its own or resumed one used
     /// to matter here and no longer does — see [`Frontmatter::rounds`], which
@@ -639,7 +660,7 @@ impl Task {
     /// [`Task::set_stage`] instead, once per lap rather than once per launch.
     pub fn bank_launch(&mut self, from: &str, to: &str) {
         let key = route_key(from, to);
-        *self.front.prompts.entry(key).or_insert(0) += 1;
+        *self.front.steps.entry(key).or_insert(0) += 1;
     }
 
     /// Count one more launch of `step` that could not even start, and return
@@ -754,7 +775,7 @@ impl Task {
     ///
     /// A lap is a transition, so this is where it is banked — once per
     /// arrival, whatever a lane at the destination goes on to do there.
-    /// [`Task::bank_launch`] banks `prompts` separately, once per launch: a
+    /// [`Task::bank_launch`] banks `steps` separately, once per launch: a
     /// relaunch after a lane died before saying anything calls that again
     /// without calling this again, and costs a prompt rather than a round.
     pub fn set_stage(&mut self, stage: &str, message: Option<&str>) {
@@ -903,6 +924,36 @@ impl Task {
                 self.body.push_str(text);
             }
         }
+    }
+
+    /// Replace a section's whole content with `text` — the road `spoolway
+    /// task edit` uses to hand a stopped task's document to whoever is
+    /// reading its pane.
+    ///
+    /// Unlike [`Task::append_to_section`], which creates a heading it does
+    /// not find, this refuses one the body does not already have: an edit
+    /// names a section the task's own template put there, not an author
+    /// free to invent a heading that will read as ordinary spoolway output.
+    ///
+    /// `text` is trimmed and re-wrapped in the one blank line every other
+    /// section already carries above its own content and below it, rather
+    /// than spliced in as given: a `--from` file with no trailing newline —
+    /// the ordinary shape a person's own editor leaves — would otherwise glue
+    /// the next heading onto its last line, and `## Non-goals` stops being a
+    /// heading `find_section` can see at all. The trailing blank line is
+    /// dropped for the body's own last section, matching the single newline
+    /// [`Task::render`] already ends every document with.
+    pub fn replace_section(&mut self, heading: &str, text: &str) -> Result<()> {
+        let (start, end) = self
+            .find_section(heading)
+            .with_context(|| format!("no `{heading}` section in this task's body"))?;
+        let trimmed = text.trim();
+        let replacement = match end == self.body.len() {
+            true => format!("\n{trimmed}\n"),
+            false => format!("\n{trimmed}\n\n"),
+        };
+        self.body.replace_range(start..end, &replacement);
+        Ok(())
     }
 
     /// Byte range of a section's content (after the heading line, up to the
@@ -1183,6 +1234,21 @@ mod tests {
         assert_eq!(reparsed.body, task.body);
     }
 
+    /// A task file already on disk carrying the old `prompts:` key — written
+    /// before this field was renamed — is read unchanged, and every save
+    /// from here on writes `steps:` instead: nothing ever writes `prompts:`
+    /// again.
+    #[test]
+    fn an_old_prompts_key_is_read_unchanged_and_saved_as_steps() {
+        let raw = "---\nid: demo\nstage: queued\nprompts:\n  queued->implement: 2\n---\n## Goal\nDo a thing.\n";
+        let task = Task::parse(PathBuf::from("demo.md"), raw).unwrap();
+        assert_eq!(task.steps_at("implement"), 2);
+
+        let rendered = task.render().unwrap();
+        assert!(rendered.contains("steps:"), "{rendered}");
+        assert!(!rendered.contains("prompts:"), "{rendered}");
+    }
+
     #[test]
     fn set_stage_appends_to_existing_status_log() {
         let mut task = Task::parse(PathBuf::from("demo.md"), SAMPLE).unwrap();
@@ -1239,14 +1305,14 @@ mod tests {
     }
 
     /// A park-and-resume round trip through `set_stage_unbanked` banks
-    /// nothing: `prompts`, `rounds` and `arrived_from` come out byte-for-byte
+    /// nothing: `steps`, `rounds` and `arrived_from` come out byte-for-byte
     /// as they went in, which is exactly what a person interrupting a turn
     /// and putting it back must look like — the task never left the step.
     #[test]
     fn set_stage_unbanked_round_trip_banks_nothing() {
         let mut task = Task::parse(PathBuf::from("demo.md"), SAMPLE).unwrap();
         task.set_stage("implement", Some("moved on"));
-        let prompts_before = task.front.prompts.clone();
+        let prompts_before = task.front.steps.clone();
         let rounds_before = task.front.rounds.clone();
         let arrived_from_before = task.front.arrived_from.clone();
 
@@ -1254,7 +1320,7 @@ mod tests {
         task.set_stage_unbanked("implement", "put back from the board");
 
         assert_eq!(task.stage(), "implement");
-        assert_eq!(task.front.prompts, prompts_before);
+        assert_eq!(task.front.steps, prompts_before);
         assert_eq!(task.front.rounds, rounds_before);
         assert_eq!(task.front.arrived_from, arrived_from_before);
         let log = task.section("## Status Log").unwrap();
@@ -1364,7 +1430,7 @@ mod tests {
         task.set_stage("fix", None);
         task.set_stage("review", None);
 
-        assert_eq!(task.prompts_at("fix"), 0);
+        assert_eq!(task.steps_at("fix"), 0);
         assert_eq!(task.rounds_via("queued", "fix"), 1);
         assert_eq!(task.rounds_via("fix", "review"), 1);
         // But the route is recorded, which is what a launch banks against.
@@ -1382,7 +1448,7 @@ mod tests {
         task.bank_launch("review", "fix");
         task.bank_launch("review", "fix");
 
-        assert_eq!(task.prompts_at("fix"), 3);
+        assert_eq!(task.steps_at("fix"), 3);
         assert_eq!(
             task.rounds_via("review", "fix"),
             0,
@@ -1431,6 +1497,50 @@ mod tests {
         );
         // The pre-existing section is untouched.
         assert!(task.section("## Status Log").unwrap().contains("earlier"));
+    }
+
+    /// `--from` content with no trailing newline — the ordinary shape a
+    /// person's own editor leaves a file in — must not glue the next
+    /// heading onto the replacement's last line. Review finding: an earlier
+    /// version spliced `text` in verbatim and left `## Non-goals` unreadable
+    /// as a heading at all.
+    #[test]
+    fn replace_section_normalises_a_replacement_with_no_trailing_newline() {
+        let mut task = Task::parse(PathBuf::from("demo.md"), SAMPLE).unwrap();
+        task.replace_section("## Goal", "line one\nline two")
+            .unwrap();
+
+        assert_eq!(task.section("## Goal").unwrap(), "line one\nline two");
+        // The next heading must still read as a heading, with the blank
+        // line every other section carries above its own content.
+        assert!(
+            task.body.contains("line two\n\n## Status Log\n"),
+            "{}",
+            task.body
+        );
+        assert_eq!(
+            task.section("## Status Log").unwrap(),
+            "- earlier entry",
+            "a section this edit did not name is untouched"
+        );
+    }
+
+    /// The body's own last section gets no trailing blank line — just the
+    /// one newline [`Task::render`] already ends every document with — so a
+    /// repeated edit never grows a longer and longer gap at the end of the
+    /// file.
+    #[test]
+    fn replace_section_on_the_last_section_adds_no_trailing_blank_line() {
+        let mut task = Task::parse(PathBuf::from("demo.md"), SAMPLE).unwrap();
+        task.replace_section("## Status Log", "- rewritten\n\n\n")
+            .unwrap();
+
+        assert!(task.body.ends_with("- rewritten\n"), "{:?}", task.body);
+        assert!(
+            !task.body.ends_with("- rewritten\n\n"),
+            "no trailing blank line on the last section: {:?}",
+            task.body
+        );
     }
 
     #[test]

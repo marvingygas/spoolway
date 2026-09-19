@@ -607,7 +607,7 @@ mod tests {
                 paused_at: None,
                 paused_by: None,
                 launched_at: None,
-                prompts: Default::default(),
+                steps: Default::default(),
                 rounds: Default::default(),
                 launch_failures: Default::default(),
                 launch_busy_since: Default::default(),

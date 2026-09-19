@@ -66,7 +66,7 @@ sits on. `WHAT YOU WRITE DOWN` lists the task-file headings spoolway appends to:
 
 ## What every lane is told about spoolway
 
-The system prompt opens with the step and the task, then five rules:
+The system prompt opens with the step and the task, then six rules:
 
 - One step's worth of the job, and nothing enforces it. The role below is the whole of what is
   the lane's.
@@ -75,6 +75,9 @@ The system prompt opens with the step and the task, then five rules:
 - Nothing will wake you. Poll anything you wait on.
 - Reporting is the only exit. A turn ended any other way stalls the task.
 - Commit as you go. Uncommitted work is committed for you when the lane reports.
+- If the task is ever held on `paused` or `blocked` and a person carries on talking in the
+  lane's pane, it does what they ask, including work its own step would otherwise leave to
+  another. Resuming it stays theirs alone.
 
 A `blocked` step gets a different first rule — its remit is the run, not one task's step — and a
 `READING THE RUN` block naming `spoolway queue list`, `spoolway queue show`, `spoolway lane` and
@@ -102,7 +105,7 @@ It prints seven sections:
 | 3 | The message typed into its pane | One sentence naming the task file, after any `skills:` invocations |
 | 4 | The environment every lane has | The table below |
 | 5 | What a lane may reach | Whatever the person running the dispatcher can |
-| 6 | How a lane finishes | The forms this step may use, and where each one routes. `--fail` is left out when it would route where `--block` already does. On `blocked`: `--pass` and `--pause`. A form left out is named under a refusal, so the lane knows it exists and may not use it. A step held in front of a person adds one line saying so: a step's own `gate:` holds a pass, for whoever opens the pane; a task's own `gate_at:` holds the report whatever it is |
+| 6 | How a lane finishes | The forms this step may use, and where each one routes. `--fail` is left out when it would route where `--block` already does. On `blocked`: `--pass`, `--pass --stage <step>` and `--pause`. A form left out is named under a refusal, so the lane knows it exists and may not use it. A step held in front of a person adds one line saying so: a step's own `gate:` holds a pass, for whoever opens the pane; a task's own `gate_at:` holds the report whatever it is |
 | 7 | The shape to write | The headings below, then what a prompt may never restate, the ban on examples, and the ban on sentences defending a rule |
 
 | Variable | What it is |

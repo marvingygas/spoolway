@@ -70,7 +70,7 @@ const IGNORED_KEYS: &[&str] = &[
     "paused_at",
     "paused_by",
     "launched_at",
-    "prompts",
+    "steps",
     "rounds",
     "launch_failures",
     "launch_busy_since",
@@ -439,6 +439,80 @@ pub fn task_contract(
     print_check_report(&tasks, repo, pipelines)
 }
 
+/// `spoolway task edit`: rewrite one section of a stopped task's document,
+/// under its task lock.
+///
+/// A stopped task belongs to whoever is looking at its pane — see
+/// `compose::situating`'s own bullet to that effect — and this is the tool
+/// that makes good on it: nothing else in spoolway lets a lane, or a person
+/// working alongside one, rewrite a queued task's body. Refused outright
+/// against anything still moving, so a lane cannot use it to edit around
+/// `spoolway report`'s own contract; a task on `paused` or `blocked` is not
+/// moving until somebody who has read it says so.
+///
+/// Locked the same best-effort way [`super::report`] takes the lock for a
+/// report: a lock a live process still holds after the wait is logged, and
+/// the edit proceeds unlocked rather than being refused outright — the
+/// person reading a stopped pane is exactly the reader this exists for, and
+/// making them retry a benign race is a worse failure than the rare lost
+/// update this guards against.
+pub fn task_edit(repo: &Repo, args: &TaskEditArgs) -> Result<()> {
+    crate::config::check_id("task id", &args.task)?;
+
+    let task_lock = crate::lock::TaskLock::acquire(&repo.task_lock_file(&args.task));
+    if task_lock.is_err() {
+        crate::problem_log::append(
+            repo,
+            &format!("{}: task lock still held, editing without it", args.task),
+        );
+    }
+
+    let mut task = repo.task(&args.task)?;
+    let stage = task.stage();
+    if stage != crate::pipeline::PAUSED && stage != crate::pipeline::BLOCKED {
+        bail!(
+            "task `{}` is at `{stage}`, not `{}` or `{}` — only a stopped task's document may \
+             be rewritten this way.",
+            args.task,
+            crate::pipeline::PAUSED,
+            crate::pipeline::BLOCKED
+        );
+    }
+
+    let heading = format!("## {}", args.section);
+    let content = read_section_content(&args.from)?;
+    task.replace_section(&heading, &content)?;
+    task.save()?;
+
+    // The one action left once an edit lands: resuming, and only resuming —
+    // `refuse_from_lane` still means a lane cannot type this itself, but the
+    // person reading this pane can, and it is named key first, then the
+    // command, exactly as every other choice a stop offers is now — see
+    // `commands::report::stop_choices`, printed at the moment a report first
+    // parks a task here rather than every time its document changes.
+    println!(
+        "{}: `{heading}` rewritten, {} lines\n\n  resuming it is still a person's:\n  resume   \
+         [r]   spoolway resume {}",
+        args.task,
+        content.lines().count(),
+        args.task
+    );
+    Ok(())
+}
+
+/// `--from`'s content: a file, or `-` for standard input — the same two
+/// shapes `queue add --from` reads a document from, minus the directory and
+/// stream-of-documents cases neither makes sense for one section.
+fn read_section_content(from: &str) -> Result<String> {
+    if from == "-" {
+        let mut body = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut body)
+            .context("reading the new section from standard input")?;
+        return Ok(body);
+    }
+    std::fs::read_to_string(from).with_context(|| format!("reading {from}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -783,5 +857,117 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(format!("{check_err:#}"), format!("{add_err:#}"));
+    }
+
+    /// The whole point: a stopped task's document is rewritten in place, and
+    /// the rest of the file — frontmatter, every other section — survives
+    /// untouched.
+    #[test]
+    fn task_edit_rewrites_a_paused_tasks_named_section() {
+        let repo = fixture("edit-paused");
+        add(&repo, "ship", &[]);
+        let mut task = queued(&repo, "ship");
+        task.front.paused_at = Some("implement".into());
+        task.set_stage(crate::pipeline::PAUSED, None);
+        task.append_to_section("## Handoff", "keep me\n");
+        task.save().unwrap();
+
+        let from = write_doc(&repo, "mockup.txt", "line one\nline two\nline three\n");
+        task_edit(
+            &repo,
+            &TaskEditArgs {
+                task: "ship".into(),
+                section: "Goal".into(),
+                from,
+            },
+        )
+        .unwrap();
+
+        let task = queued(&repo, "ship");
+        assert_eq!(
+            task.section("## Goal").unwrap(),
+            "line one\nline two\nline three"
+        );
+        assert_eq!(
+            task.section("## Handoff").unwrap(),
+            "keep me",
+            "a section this edit did not name is untouched"
+        );
+        assert_eq!(task.stage(), crate::pipeline::PAUSED, "still paused");
+    }
+
+    /// Nothing still moving may be rewritten this way — the boundary the
+    /// acceptance criteria draw between a lane's own report and a person (or
+    /// a lane speaking for one) editing the document out from under it.
+    #[test]
+    fn task_edit_refuses_a_task_that_is_neither_paused_nor_blocked() {
+        let repo = fixture("edit-not-stopped");
+        add(&repo, "ship", &[]);
+
+        let from = write_doc(&repo, "mockup.txt", "new goal\n");
+        let err = task_edit(
+            &repo,
+            &TaskEditArgs {
+                task: "ship".into(),
+                section: "Goal".into(),
+                from,
+            },
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("queued"), "{err:#}");
+
+        let task = queued(&repo, "ship");
+        assert_eq!(
+            task.section("## Goal").unwrap(),
+            "Do the thing.",
+            "refused, so the document is untouched"
+        );
+    }
+
+    /// A `blocked` task is stopped exactly the same as a `paused` one.
+    #[test]
+    fn task_edit_accepts_a_blocked_task_too() {
+        let repo = fixture("edit-blocked");
+        add(&repo, "ship", &[]);
+        let mut task = queued(&repo, "ship");
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        task.save().unwrap();
+
+        let from = write_doc(&repo, "mockup.txt", "fixed\n");
+        task_edit(
+            &repo,
+            &TaskEditArgs {
+                task: "ship".into(),
+                section: "Goal".into(),
+                from,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(queued(&repo, "ship").section("## Goal").unwrap(), "fixed");
+    }
+
+    /// A heading the body does not have is refused by name, rather than
+    /// silently appended where `append_to_section` would have put it — an
+    /// edit names a section the task's own template already put there.
+    #[test]
+    fn task_edit_refuses_a_heading_the_body_does_not_have() {
+        let repo = fixture("edit-no-such-section");
+        add(&repo, "ship", &[]);
+        let mut task = queued(&repo, "ship");
+        task.set_stage(crate::pipeline::PAUSED, None);
+        task.save().unwrap();
+
+        let from = write_doc(&repo, "mockup.txt", "text\n");
+        let err = task_edit(
+            &repo,
+            &TaskEditArgs {
+                task: "ship".into(),
+                section: "Mockup".into(),
+                from,
+            },
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("## Mockup"), "{err:#}");
     }
 }

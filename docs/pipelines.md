@@ -1,6 +1,6 @@
 ---
 domain: pipelines
-covers: ["src/pipeline.rs", "src/command_step.rs", "assets/pipelines/**"]
+covers: ["src/pipeline.rs", "src/command_step.rs", "assets/pipelines/**", "src/route_sim.rs"]
 ---
 
 # Pipelines
@@ -158,6 +158,15 @@ back. In the shipped pipeline `review` fails back to `implement`, so `review` ca
 - Every cycle needs a `loop` whose exit leaves the cycle. `spoolway pipeline check` refuses the
   file otherwise.
 
+### Proving the loops
+
+`spoolway pipeline check` proves a pipeline's graph has a way out. A `cargo test` in
+`src/route_sim.rs` proves the counters that walk that graph agree with it. It routes every
+outcome at every step, to a bounded depth, over the shipped pipelines, the tracked
+`.spoolway/pipelines` files, and pipelines it generates that pass `spoolway pipeline check`.
+Each path it walks must reach a terminal step, keep every `loop` count rising except where a
+person resumes a blocked task, and start no more lanes than a stated bound.
+
 ## Unattended runs
 
 Set `enabled = true` under `[unattended]` in `config.toml`, or pass `--unattended` to
@@ -200,7 +209,8 @@ step. Any other key is refused. Keys left out fall back to the config.
 ```
 
 - A `--pass` carries the task past the blocked step to that step's `on_pass` for an agent step,
-  and back to itself for a command step.
+  and back to itself for a command step. `--pass --stage <step>` sends it to `<step>` instead,
+  bounded by the steps this task has already run.
 - A `--pause`, `--fail` or `--block` parks the task on `paused`. `spoolway resume` then hands it
   back to the step it blocked on.
 - `spoolway dispatch` refuses an unattended run with a blank `blocked_model`.
@@ -325,14 +335,17 @@ The lane runs and reports as usual. On its pass the task lands on `paused` and i
 open.
 
 ```
-spoolway resume <task>                     # let it past: the on_pass route
-spoolway resume <task> --reject -m "why"   # send it back: the on_fail route
+spoolway resume <task>                            # let it past: the on_pass route
+spoolway resume <task> --stage implement -m "why"  # send it back to a step you name
 ```
 
-- A rejection message is written to `## Handoff`.
-- A gated step with no `on_fail` parks a rejected task on `blocked`. `spoolway pipeline check`
+- `on_pass` is the only road a plain resume ever takes past a gate, whatever `on_fail` a step
+  declares or does not.
+- `--stage <step>` reroutes the task to that step, whatever the gate would otherwise have done.
+- A gated step with no `on_fail` still parks a *failed report* on `blocked` — that is about
+  `spoolway report --fail` at the step itself, not about resuming it. `spoolway pipeline check`
   warns about it. Writing `on_fail: blocked` outright silences that warning without changing
-  where the rejection goes, so `pipeline check` warns about the redundant key instead.
+  where the fail goes, so `pipeline check` warns about the redundant key instead.
 - A gate waits for a person in an unattended run too.
 - No shipped step is gated. A pull request is already a checkpoint. Gate a step that changes
   something without leaving a pull request behind, such as a deploy.

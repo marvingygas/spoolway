@@ -124,7 +124,7 @@ task id marks `parallel: true`.
 | OUT | Output tokens this step has produced. |
 | COST | What this step has cost. |
 | TIME | How long the lane has been on this step. |
-| NEXT | For a running task, the step it goes to on pass. For one with a scheduled pause, `→ paused after <step>`. For a queued task, what it waits on. For a paused task, the outcome the pause caught and where a resume sends it, such as `review failed → e2e — [r] resumes it`; a caught pass reads `→ e2e — [r] resumes it`. |
+| NEXT | For a running task, the step it goes to on pass. For one with a scheduled pause, `→ paused after <step>`. For a queued task, what it waits on. For a paused task, the outcome the pause caught and where a resume sends it, key first: `[r] review failed → e2e — \`spoolway resume <task>\``; a caught pass reads `[r] → e2e — \`spoolway resume <task>\``. A task parked before it ever started reads `→ queued — [r] resumes it`. For a lane holding a permission prompt, `press a key in pane \`<task> · <step>\``. |
 
 `spoolway spend task` gives the task's whole bill.
 
@@ -137,7 +137,9 @@ stateDiagram-v2
   queued --> unreachable: a dependency is blocked
   unreachable --> queued: that dependency is resumed
   running --> running: step passes or fails, next step starts
-  running --> paused: gate, permission prompt, or p on the board
+  running --> prompt: a permission prompt in its pane
+  prompt --> running: the prompt is answered
+  running --> paused: gate, or p on the board
   running --> blocked: a step reports a block or a budget runs out
   paused --> running: spoolway resume
   blocked --> running: spoolway resume
@@ -149,7 +151,8 @@ stateDiagram-v2
 |---|---|
 | `queued` | Waiting for its dependencies and a free slot. |
 | `running` | A lane is working the current step, or the next lane is about to start. |
-| `paused` | Waiting for you: a gate, a permission prompt in its pane, or a park from `p`. |
+| `prompt` | A live lane's pane is holding a permission prompt. Read fresh off the lane list every redraw, and gone the instant the prompt is answered. Not resumable: the task has not stopped. |
+| `paused` | The task's own stage is `paused`: a gate, or a park from `p`. |
 | `blocked` | A step reported a block, a launch failed, or a loop budget ran out. Read `## Blocker` in the task file. |
 | `unreachable` | A task it depends on is blocked. |
 | `done` | Finished and archived. The row stays, dimmed, until the whole group is done. |
@@ -164,7 +167,7 @@ Lowercase acts on the row under the `▸` cursor. Uppercase acts on the whole ru
 |---|---|
 | `↑` `↓` | Move the cursor. It starts on the first row of the first group and walks every row the board draws, done ones included. |
 | `o` | Open the task file in `$VISUAL`, else `$EDITOR`, in a new pane. Works on a `done` row too. |
-| `r` | Resume a paused or blocked row whose dependencies are done. Same as `spoolway resume <task>`. |
+| `r` | Resume a paused or blocked row whose dependencies are done. A row parked before it ever started resumes straight back to `queued`, whatever its dependencies read. Same as `spoolway resume <task>`. |
 | `R` | Resume every paused task. Asks first if any of them is at a real gate. |
 | `p` | Pause the row, including a `blocked` one. Asks first if it would interrupt a running agent turn or command. |
 | `P` | Pause every task in the run, including any `blocked`. Asks first, listing what it would interrupt. |
@@ -203,7 +206,7 @@ for you to read.
 
 ```
 spoolway resume deploy-login                            # let it past
-spoolway resume deploy-login --reject -m "not tonight"  # send it back round
+spoolway resume deploy-login --stage implement -m "not tonight"  # send it back round
 ```
 
 A paused task holds no slot. You can type into its pane. When that turn ends, the dispatcher
@@ -234,9 +237,10 @@ A lane can end its turn without calling `spoolway report`. Then:
 A lane that still holds a process it started, such as a long build, is excused from reminders
 until `dispatch.lane_child_ceiling` (one hour by default), then escalated.
 
-A lane whose multiplexer reports it `blocked` is on a permission prompt. It is marked `paused`
-at once, with the pane named in NEXT, and nothing is sent to it. Answer the prompt and the mark
-comes off on the next pass.
+A lane whose multiplexer reports it `blocked` is on a permission prompt. The board reads this
+live off the lane list every redraw: the row draws `● prompt` with the pane named in NEXT, and
+nothing is sent to it. The task's own stage does not move. Answer the prompt and the row reads
+`running` again on the next redraw.
 
 ## A step that carries its own session
 
@@ -281,9 +285,10 @@ the `[unattended]` `blocked_*` settings.
 
 A staffed `blocked` lane answers with `--pass` when it cleared the way, or `--pause` when it
 cannot. A `--fail` or `--block` from it is read as `--pause`. A `--pass` carries the task past
-the blocked step to that step's `on_pass`, or back to itself for a command step. A `--pause`,
-`--fail` or `--block` puts the task on `paused`, and `spoolway resume` then hands it back to the
-step it blocked on.
+the blocked step to that step's `on_pass`, or back to itself for a command step. `--pass --stage
+<step>` sends it to `<step>` instead, bounded by the steps this task has already run. A
+`--pause`, `--fail` or `--block` puts the task on `paused`, and `spoolway resume` then hands it
+back to the step it blocked on.
 
 A blocked task keeps its pane open until it is resumed.
 

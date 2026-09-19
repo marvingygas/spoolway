@@ -65,7 +65,7 @@ as JSON.
 | `run` | the dispatcher | The run id. `spoolway eval --runs` groups ledger lines by it. |
 | `patch` | the dispatcher | Files, insertions and deletions of the branch, measured at cleanup. |
 | `worktree_path`, `workspace_id`, `pane_id`, `tab_id` | the dispatcher | Where the work happens on this machine. |
-| `attempts`, `launched_at`, `prompts`, `rounds`, `arrived_from`, `launch_failures` | the dispatcher | Launch and loop counters. The board and the ledger read them. |
+| `attempts`, `launched_at`, `steps`, `rounds`, `arrived_from`, `launch_failures` | the dispatcher | Launch and loop counters. The board and the ledger read them. |
 | `last_report` | `spoolway report` | The last outcome a lane reported. |
 | `blocked_from`, `parked_from`, `escalated`, `paused_at`, `paused_by`, `resume` | the dispatcher | Where a stopped task continues from, and for a pause which road caught it — `gate` for a step's own `gate:`, `schedule` for the task's own `gate_at:`, absent for a `--pause` raised from `blocked`. `spoolway resume` reads them. |
 | `skip`, `trial` | the queue screen's `t` picker | Steps to pass without a lane, and the trial this task is an arm of. See [Trials](planning.md#trials). |
@@ -246,7 +246,7 @@ Nothing went wrong. You decide whether it goes on.
 
 ```
 spoolway resume <task>                                    # on, by the step's on_pass
-spoolway resume <task> --reject -m "the migration has not run yet"   # back, by on_fail
+spoolway resume <task> --stage review -m "send it back round"   # on, at a step you name
 ```
 
 A `gate_at` that caught a block, or a loop-max bound for `blocked`, sends a plain resume to
@@ -254,8 +254,32 @@ A `gate_at` that caught a block, or a loop-max bound for `blocked`, sends a plai
 column names the outcome a scheduled pause caught, such as `review failed → e2e`, when it was
 not a plain pass.
 
-`--reject` writes your message into `## Handoff` for the next lane. A gated step with no
-`on_fail` sends a rejected task to `blocked`.
+### The stop is yours to work in
+
+The pane a stop left open is still there. Type into it, and the lane does what you ask,
+including work its own step would otherwise leave to another. Only resuming stays a person's:
+a lane cannot call `spoolway resume` on its own task.
+
+`spoolway task edit` rewrites one section of the task's document while it sits on `paused` or
+`blocked`, under the same task lock `spoolway report` takes.
+
+```
+spoolway task edit <task> --section Mockup --from mockup.md
+spoolway task edit <task> --section Mockup --from -   # read the new content from stdin
+```
+
+`--section` names a `##` heading without its `##`. The heading must already exist in the body.
+The whole section's content is replaced, the way editing the file by hand would. Run against a
+task that is neither `paused` nor `blocked`, it is refused.
+
+Every choice a stop offers is printed key first, then the command that does the same thing:
+
+```
+demo-gate2: `## Mockup` rewritten, 14 lines
+
+  resuming it is still a person's:
+  resume   [r]   spoolway resume demo-gate2
+```
 
 ## Reporting an outcome
 
@@ -266,7 +290,11 @@ spoolway report --pass -m "implemented and tests pass"
 spoolway report --fail -m "acceptance criterion 2 is not met"
 spoolway report --block -m "needs a credential I do not have"
 spoolway report --pause -m "only a person can clear this"   # only on `blocked`
+spoolway report --pass --stage implement -m "done"           # only on `blocked`
 ```
+
+`--stage <step>` sends a pass from `blocked` to a named step instead of the step's own default.
+It only works on `blocked`, and only names a step this task has already run.
 
 The task id defaults to `$SPOOLWAY_TASK`, which every lane has set.
 

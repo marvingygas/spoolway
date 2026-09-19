@@ -438,17 +438,32 @@ it goes to `blocked`.
 
 ```
 spoolway resume <task>
-spoolway resume <task> --reject -m "the migration is missing"
-spoolway resume <task> --stage review
+spoolway resume <task> --stage review -m "send it back round"
 ```
 
 | Flag | Default | What it does |
 |---|---|---|
 | `--stage <STEP>` | | Resume at this step instead |
-| `--reject` | | Send a paused task back along the gated step's `on_fail`, or to `blocked` when it has none |
-| `-m`, `--message <TEXT>` | | Note for the status log. With `--reject`, also written into `## Handoff` |
+| `-m`, `--message <TEXT>` | | Note for the status log |
 
 See [Gates](pipelines.md#gates).
+
+### `spoolway task edit <task>`
+
+Rewrite one section of a `paused` or `blocked` task's document, under its task lock. Refused
+against a task that is neither.
+
+```
+spoolway task edit <task> --section Mockup --from mockup.md
+spoolway task edit <task> --section Mockup --from -
+```
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--section <NAME>` | | The `##` heading to rewrite, named without its `##` |
+| `--from <PATH>` | | The section's new content: a file path, or `-` for standard input |
+
+See [The stop is yours to work in](tasks.md#the-stop-is-yours-to-work-in).
 
 ## Shaping the project
 
@@ -892,6 +907,7 @@ spoolway report --fail -m "review found a missing migration" --handoff "add the 
 | Flag | Default | What it does |
 |---|---|---|
 | `--pass` | | The step succeeded. Route along `on_pass` |
+| `--stage <STEP>` | | Only with `--pass` on `blocked`: land on `<STEP>` instead of the default. `<STEP>` must be one this task has already run |
 | `--fail` | | The step failed. Route along `on_fail` |
 | `--block` | | Something outside the step is in the way. Escalate |
 | `--pause` | | Only on `blocked`: park the task on `paused` for a person |

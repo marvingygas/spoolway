@@ -171,7 +171,7 @@ records() {
 
 # what map route want file
 #
-# Assert one route's count inside one of a task's two counter maps. `prompts`
+# Assert one route's count inside one of a task's two counter maps. `steps`
 # and `rounds` are keyed identically, so a plain `has` for "review->fix: 3"
 # cannot say which of them it found — and telling them apart is the entire
 # point of there being two. An absent route reads as 0, which is what the task

@@ -1072,6 +1072,60 @@ else
   bad "nor does the problem log grow while it sits blocked (found $PROBLEM_HITS_AFTER)"
 fi
 
+# --------------------------------------------------- report --pass --stage, off blocked
+# `spoolway report --pass --stage <step>` names where a cleared block lands,
+# bounded by the steps this task has actually run — its own `steps:`, the
+# launch record a command step now banks into exactly the way an agent lane
+# does (see `add_command_step` above). A real mock-agent `implement` lane
+# and a real failing command step give this task two entries in that record
+# before it ever reaches `blocked`, so both halves of the flag below are
+# proved against a run that actually happened, not a hand-placed fixture.
+cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
+add_command_step default failstep "exit 1" review ""
+works "a pipeline with a command step that blocks on failure checks out" \
+  "$SPOOLWAY" pipeline check
+
+task_doc "$LIVE/stage-flag.md" stage-flag "$BODY" "group: live" \
+  "touches: [notes/stage-flag.md]"
+must "a task that will run implement, then block on a failing command step" \
+  "$SPOOLWAY" queue add --from "$LIVE/stage-flag.md"
+if drive stage-flag blocked 60; then
+  ok "the task ran implement, then blocked on the failing command step"
+else
+  bad "the task ran implement, then blocked on the failing command step \
+(at \`$(stage_of stage-flag)\`)"
+fi
+has "the mock agent's lane at implement landed in the launch record" \
+  "queued->implement: 1" $SPOOLWAY_PROJECT_HOME/queue/stage-flag.md
+has "and so did the command step's own run, now that it banks one too" \
+  "implement->failstep: 1" $SPOOLWAY_PROJECT_HOME/queue/stage-flag.md
+
+OUT=$("$SPOOLWAY" report stage-flag --pass --stage review -m "done" 2>&1)
+STATUS=$?
+if [ "$STATUS" -ne 0 ] && grep -qF "has never been at \`review\`" <<<"$OUT" \
+  && grep -qF "\`implement\`, \`failstep\`" <<<"$OUT"; then
+  ok "naming a step this task has never been at is refused, naming the steps it has run"
+else
+  bad "naming a step this task has never been at is refused, naming the steps it has run \
+(exit $STATUS)"
+  sed 's/^/        /' <<<"$OUT"
+fi
+if [ "$(stage_of stage-flag)" = blocked ]; then
+  ok "and the refused report left the task exactly where it was"
+else
+  bad "and the refused report left the task exactly where it was \
+(at \`$(stage_of stage-flag)\`)"
+fi
+
+works "naming a step this task has run moves it there" \
+  "$SPOOLWAY" report stage-flag --pass --stage implement -m "the fix belongs to the implementer"
+if [ "$(stage_of stage-flag)" = implement ]; then
+  ok "and it lands exactly on the named step, not carried past it"
+else
+  bad "and it lands exactly on the named step, not carried past it \
+(at \`$(stage_of stage-flag)\`)"
+fi
+
 # ------------------------------------------------------------------- background
 # The other half: the task does not wait, and the command is still going after
 # it has moved on.

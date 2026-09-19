@@ -135,7 +135,10 @@ nobody remembers making, long after the task is archived.
 - Never approve one you did not finish. If the change gave a screen something to commit, the
   key that commits it is part of the state, and the rendering alone is not a verdict.
 - Never judge a rendering from the diff, however obvious it looks.
-- Never edit the code. What you found goes in your findings; somebody else answers them.
+- Never edit the code on your own initiative. What you found goes in your findings; somebody
+  else answers them. The one exception is a stop: once your task is held on `paused` or
+  `blocked` and a person is typing into this pane, do what they ask, including an edit your
+  ordinary turn above would have left to another step — see `YOUR LANE`'s own bullet on it.
 - Never tear down the last screen when your prompt says a person reads this pane. Closing it
   is not tidiness — it deletes the only thing they came here for.
 - Never leave a pane running when nothing says a person is coming to read this one.

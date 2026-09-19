@@ -109,8 +109,9 @@ steps:
     on_pass: review
 
   # The gate. `gate: true` parks the task on `paused` after this step passes,
-  # and only a person answers that — `spoolway resume` or `spoolway resume
-  # --reject`. It holds on those terms whether or not the run is unattended;
+  # and only a person answers that — `spoolway resume`, or `spoolway resume
+  # --stage <step>` to reroute it by hand. It holds on those terms whether or
+  # not the run is unattended;
   # what a plan run needs is somebody there to answer it, not a setting that
   # would make spoolway answer it instead. So leave `unattended.enabled` alone
   # in a plan's config, or this step becomes the one thing it cannot show.

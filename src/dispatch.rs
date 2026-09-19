@@ -12,7 +12,7 @@
 //! A pass is safe to interrupt at any point: it derives all its state fresh
 //! from task files and the multiplexer, and never remembers anything.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -181,16 +181,6 @@ pub(crate) struct LaneRecord {
     started_at: i64,
     last_progress: i64,
     output_hash: u64,
-    /// Whether this lane's pane is holding a question for a person. Set once
-    /// when the lane settles on its step, so a lane waiting overnight is
-    /// marked one time rather than once per pass.
-    ///
-    /// Cleared again the moment the lane is seen working, because a lane
-    /// mid-turn is holding nothing anybody can answer — and cleared when its
-    /// pane is held for a block, where what waits is the task rather than the
-    /// pane.
-    #[serde(default)]
-    notified: bool,
     /// When this lane was last sent the report contract again, in
     /// `last_progress`'s own clock. `None` until the first reminder.
     ///
@@ -305,7 +295,6 @@ impl LaneRecord {
             started_at: now,
             last_progress: now,
             output_hash: 0,
-            notified: false,
             reminded_at: None,
             reminders: 0,
             session: String::new(),
@@ -1271,7 +1260,6 @@ impl<'a> Dispatcher<'a> {
                         // mid-turn is not holding a question, so the mark that
                         // says it is comes off.
                         Some(lane) if lane.status.is_busy() => {
-                            self.withdraw_waiting(&lane.name);
                             // A parked task whose lane is busy again is not
                             // waiting on a launch — a person typed straight
                             // into the pane `spoolway resume` just put back on
@@ -1286,37 +1274,32 @@ impl<'a> Dispatcher<'a> {
                             self.unpark_quietly(&mut tasks[index], &step, report)?;
                         }
 
-                        // The new arm the four-way branch adds. `Blocked`
-                        // means one thing: a modal is on screen waiting for a
-                        // keystroke, read off herdr's own rule manifest, not
-                        // inferred from silence — so it earns the mark on the
-                        // very pass that sees it, bypassing the `lane_quiet`
-                        // wait `announce_waiting` makes a merely-settled lane
-                        // sit through.
+                        // `Blocked` means one thing: a modal is on screen
+                        // waiting for a keystroke, read off herdr's own rule
+                        // manifest, not inferred from silence — and the board
+                        // reads that live off the same lane list on every
+                        // redraw, so nothing here needs to mark it.
                         //
-                        // The mark is the only thing this arm adds. A blocked
-                        // lane is alive and holding its pane, so everything
-                        // the busy arm does for a live lane still has to
-                        // happen: the launch counter twenty-five lines above
-                        // already forgives `attempts` for it (`running` spells
-                        // out `Working | Blocked` for exactly this case), and
-                        // `unpark_quietly` is called here for exactly the
-                        // reason it is called there — a parked task whose lane
-                        // is alive is not waiting on a launch, and leaving
-                        // `parked_from` and the one-shot `resume` unspent
-                        // would strand them on a lane that goes `Blocked`
-                        // straight to settled without ever being seen
-                        // `Working`, where the next launch reads `parked_from`
-                        // to tell a person's own interrupt from a real block
-                        // and would call that launch a park.
+                        // A blocked lane is alive and holding its pane, so
+                        // everything the busy arm does for a live lane still
+                        // has to happen: the launch counter twenty-five lines
+                        // above already forgives `attempts` for it (`running`
+                        // spells out `Working | Blocked` for exactly this
+                        // case), and `unpark_quietly` is called here for
+                        // exactly the reason it is called there — a parked
+                        // task whose lane is alive is not waiting on a
+                        // launch, and leaving `parked_from` and the one-shot
+                        // `resume` unspent would strand them on a lane that
+                        // goes `Blocked` straight to settled without ever
+                        // being seen `Working`, where the next launch reads
+                        // `parked_from` to tell a person's own interrupt from
+                        // a real block and would call that launch a park.
                         //
                         // What the arm deliberately does not do is anything
                         // about the turn itself: the pass leaves the lane
-                        // alone until it is next seen `Working` (which
-                        // withdraws the mark) or gone (settles or vanishes
-                        // like any other lane).
+                        // alone until it is next seen `Working` or gone
+                        // (settles or vanishes like any other lane).
                         Some(lane) if lane.status == LaneStatus::Blocked => {
-                            self.mark_blocked(&lane.name);
                             self.unpark_quietly(&mut tasks[index], &step, report)?;
                         }
 
@@ -1332,11 +1315,14 @@ impl<'a> Dispatcher<'a> {
                         // lane that already reported for one still holding a
                         // question.
                         //
-                        // Either way the board is marked once, naming the pane to
-                        // go and look at.
+                        // Either way this pass no longer marks anything for
+                        // the board to read back: `paused` means the stage
+                        // and nothing else now, and a settled-but-unreported
+                        // lane has not moved its task's stage at all. The
+                        // reminder-and-escalation loop below is what still
+                        // notices this lane and, in time, parks the task for
+                        // real — see `check_unreported` and `escalate_clock`.
                         Some(lane) if lane.status.is_settled() => {
-                            self.announce_waiting(&lane.name);
-
                             let started_at = self.lanes.get(&lane.name).map(|r| r.started_at);
                             if started_at.is_some_and(|since| tasks[index].reported_since(since)) {
                                 self.retire(&tasks[index], &pipeline, &step, lane, report)?;
@@ -2063,10 +2049,6 @@ impl<'a> Dispatcher<'a> {
             .entry(lane.name.clone())
             .or_insert_with(|| LaneRecord::readopted(&lane.name, now_secs(), &ledger));
         record.held_for_block = true;
-        // Not a lane holding a question any more: answering this pane does
-        // nothing, and the board must stop offering it as somewhere to go and
-        // reply. What is waiting now is the task, and its stage says so.
-        record.notified = false;
         let record = record.clone();
         let pipeline = task
             .and_then(|t| self.pipelines.for_task(t).ok())
@@ -2278,7 +2260,7 @@ impl<'a> Dispatcher<'a> {
             kind: record.kind.clone(),
             model,
             session: record.session.clone(),
-            round: task.map(|t| t.prompts_at(step_id)).unwrap_or(0),
+            round: task.map(|t| t.steps_at(step_id)).unwrap_or(0),
             wall_s: (now_secs() - record.started_at).max(0),
             turns: harvest.turns.saturating_sub(banked_turns),
             tokens,
@@ -2871,9 +2853,6 @@ impl<'a> Dispatcher<'a> {
                     .entry(lane.name.clone())
                     .or_insert_with(|| LaneRecord::readopted(&lane.name, now_secs(), &ledger));
                 record.held_for_block = true;
-                // See `hold_for_block`: a pane kept to be read is not a lane
-                // anybody can answer.
-                record.notified = false;
                 Some(record.clone())
             }
             false => Some(
@@ -3477,7 +3456,6 @@ impl<'a> Dispatcher<'a> {
                             started_at: now_secs(),
                             last_progress: now_secs(),
                             output_hash: 0,
-                            notified: false,
                             reminded_at: None,
                             reminders: 0,
                             session: started.session,
@@ -3823,9 +3801,21 @@ impl<'a> Dispatcher<'a> {
                     Ok(_) => {
                         // The launch actually started — see the matching
                         // comment in `start_lanes`'s own `Ok` arm.
-                        if task.clear_launch_failures(&step.id) {
-                            self.persist(task)?;
-                        }
+                        //
+                        // Banked here too, not only for an agent lane's own
+                        // `start_one`: without this a command step never
+                        // appeared in `steps:` at all, so a `--stage` bounded
+                        // by that record could never name `test`, `suite` or
+                        // `handover` even after they had genuinely run — see
+                        // `Task::bank_launch`.
+                        let from = task
+                            .front
+                            .arrived_from
+                            .clone()
+                            .unwrap_or_else(|| crate::pipeline::QUEUED.to_string());
+                        task.bank_launch(&from, &step.id);
+                        task.clear_launch_failures(&step.id);
+                        self.persist(task)?;
                     }
                     Err(err) => {
                         // A launch that never got going at all — see
@@ -4234,96 +4224,6 @@ impl<'a> Dispatcher<'a> {
              nothing further. Lanes still open will finish, and the queue keeps its place for \
              the next run"
         ))
-    }
-
-    /// Mark, once, that a lane is waiting on an answer in its pane — read back
-    /// by [`lanes_awaiting_a_person`] for the board.
-    ///
-    /// The flag lives on the lane record rather than on the task, so a lane
-    /// that waits overnight is marked once and not once per pass. A lane this
-    /// dispatcher did not start has no record yet — an interrupted pass
-    /// picking up where it left off — and gets one here.
-    ///
-    /// **Not on the first settled reading.** The caller cannot tell a lane
-    /// holding a question from one that ended its turn on a background job it
-    /// started, and the second is what the `e2e` prompt does every time: it
-    /// starts a suite run allowed 45 minutes and stops talking. Marking that
-    /// immediately put `● paused — look at pane …` on the board against a
-    /// pane where nobody had asked anything, and sent a person to go and
-    /// look at it.
-    ///
-    /// So a lane earns the mark the same way it earns a reminder, by being
-    /// quiet for `dispatch.lane_quiet` — the patience `b00bb5c` gave the
-    /// watchdog and never gave this. Silence is read off `last_progress`,
-    /// which is the transcript's own write time rather than this pass noticing
-    /// anything, so a lane that is typing is never quiet.
-    ///
-    /// A lane with no record is one this dispatcher did not start. It gets a
-    /// record and no mark: nothing knows yet how long it has been quiet, and
-    /// the next pass will.
-    fn announce_waiting(&mut self, lane_name: &str) {
-        if self.dry_run {
-            return;
-        }
-
-        let now = now_secs();
-        let quiet = self.repo.config.dispatch.lane_quiet;
-        let ledger = self.ledger();
-        let record = self
-            .lanes
-            .entry(lane_name.to_string())
-            .or_insert_with(|| LaneRecord::readopted(lane_name, now, &ledger));
-        let silent_for =
-            Duration::from_secs(now.saturating_sub(record.last_progress).max(0) as u64);
-        if silent_for >= quiet {
-            record.notified = true;
-        }
-    }
-
-    /// Mark, immediately, that a `Blocked` lane's pane is holding a question —
-    /// read back by [`lanes_awaiting_a_person`] the same as [`Self::announce_waiting`]'s
-    /// mark.
-    ///
-    /// No `lane_quiet` wait, unlike `announce_waiting`: that gate exists
-    /// because a *settled* lane might have just ended its turn on a
-    /// background job rather than a question, and only silence tells the two
-    /// apart. `Blocked` carries no such ambiguity — it is herdr reading a
-    /// named rule off the pane (`bash_permission_prompt` and the rest of its
-    /// manifest), not this dispatcher inferring one from quiet — so the first
-    /// pass that sees it is the only wait a person should have to sit
-    /// through.
-    fn mark_blocked(&mut self, lane_name: &str) {
-        if self.dry_run {
-            return;
-        }
-        let now = now_secs();
-        let ledger = self.ledger();
-        let record = self
-            .lanes
-            .entry(lane_name.to_string())
-            .or_insert_with(|| LaneRecord::readopted(lane_name, now, &ledger));
-        record.notified = true;
-    }
-
-    /// Take the mark back off a lane that has gone back to work.
-    ///
-    /// The mark is read as "this pane is holding a question", and a lane
-    /// mid-turn is not: the question was answered, or the lane only looked
-    /// settled for a moment between turns. Leaving it set is what had the
-    /// board reading `● paused` at a pane the agent was visibly still
-    /// working in, for the rest of the lane's life — the mark used to be
-    /// cleared by the watchdog that ran here, and nothing took that over when
-    /// the clocks were retired.
-    ///
-    /// Only ever clears an existing record. A busy lane with no record is one
-    /// this dispatcher did not start, and there is nothing to take back.
-    fn withdraw_waiting(&mut self, lane_name: &str) {
-        if self.dry_run {
-            return;
-        }
-        if let Some(record) = self.lanes.get_mut(lane_name) {
-            record.notified = false;
-        }
     }
 }
 
@@ -5077,7 +4977,7 @@ fn start_one(
         task.front.parked_from = None;
         task.front.escalated = false;
     }
-    // `prompts` is banked here, unconditionally — a prompt is a launch, so a
+    // `steps` is banked here, unconditionally — a prompt is a launch, so a
     // retry banks a second one, it was a second prompt and it was paid for —
     // except for a park whose session was actually carried: that lane never
     // stopped being the one already counted, so continuing it costs nothing
@@ -5531,21 +5431,6 @@ pub(crate) fn group_gate_holds(
         return false;
     };
     !graph.group_is_open(group)
-}
-
-/// Lanes whose pane is holding a question for a person, by lane name.
-///
-/// Read straight out of the bookkeeping the dispatcher already dedups its
-/// notification with, so the board and the notification that woke you say
-/// the same thing without the two having to agree on anything else. A dispatcher
-/// that is not running leaves the last pass's answer behind, which is exactly
-/// what it was: those panes are still open and still waiting.
-pub fn lanes_awaiting_a_person(repo: &Repo) -> BTreeSet<String> {
-    load_lane_records(repo)
-        .into_iter()
-        .filter(|(_, record)| record.notified)
-        .map(|(name, _)| name)
-        .collect()
 }
 
 fn lanes_path(repo: &Repo) -> PathBuf {
@@ -6560,7 +6445,7 @@ mod tests {
             paused_at: None,
             paused_by: None,
             launched_at: None,
-            prompts: Default::default(),
+            steps: Default::default(),
             rounds: Default::default(),
             launch_failures: Default::default(),
             launch_busy_since: Default::default(),
@@ -6633,7 +6518,7 @@ mod tests {
         assert_eq!(task.front.base.as_deref(), Some("work"));
         assert_eq!(task.front.workspace_id.as_deref(), Some("w9"));
         assert_eq!(task.front.pane_id.as_deref(), Some("w9:p1"));
-        assert_eq!(task.prompts_at("implement"), 1);
+        assert_eq!(task.steps_at("implement"), 1);
     }
 
     /// A task with no `base:` — queued before the rule held, or edited by
@@ -9456,103 +9341,6 @@ mod tests {
         assert_eq!(reload(&path).stage(), "implement");
     }
 
-    /// A pane nothing tears down is a pane nobody looks at, unless something
-    /// says it is there — a row on the board naming the pane, marked once
-    /// however many passes it waits.
-    ///
-    /// And unmarked again the moment the lane is working, because then it is
-    /// holding no question: either somebody answered it, or the lane was only
-    /// quiet between turns for long enough to look settled. A mark that stayed
-    /// put had the board reading `● paused` at a pane with an agent
-    /// visibly mid-turn in it, for the rest of that lane's life.
-    ///
-    /// The mark is earned by `dispatch.lane_quiet` of silence, not by one
-    /// settled reading — so the lane is aged past it here, the same way a lane
-    /// earning a reminder is.
-    #[test]
-    fn a_waiting_lane_is_announced_once_and_unmarked_when_it_works_again() {
-        let repo = fixture("waiting-announced");
-        add_task_with(&repo, "demo", "implement", |f| {
-            f.workspace_id = Some("w1".into());
-            f.pane_id = Some("w1:p1".into());
-        });
-
-        // The first pass adopts the lane; there is no record to age before it,
-        // and a lane that has only just settled is holding nothing yet.
-        run_pass(
-            &repo,
-            &FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]),
-        );
-        assert!(lanes_awaiting_a_person(&repo).is_empty());
-
-        // One `lane_quiet` of silence later it is. Aged passes are counted
-        // against `MAX_REMINDERS`, so this spends as few of them as the point
-        // needs — a fourth would escalate the task off this step entirely and
-        // take the lane being asserted on with it.
-        age_lane(&repo, "demo · implement", Duration::from_secs(15));
-        run_pass(
-            &repo,
-            &FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]),
-        );
-        assert!(lanes_awaiting_a_person(&repo).contains("demo · implement"));
-
-        // Answered: the lane is working again, and the board stops offering
-        // its pane as somewhere to go and reply.
-        run_pass(
-            &repo,
-            &FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Working)]),
-        );
-        assert!(lanes_awaiting_a_person(&repo).is_empty());
-
-        // Settled again, and quiet for less than `lane_quiet`: the mark does
-        // not come straight back either. A lane between turns looks exactly
-        // like this, and it is not asking anybody anything.
-        //
-        // The test stops here rather than aging once more to watch the mark
-        // return. By this point the lane has spent a reminder and never
-        // reported, so further passes are the escalation path's to decide, and
-        // asserting on a lane that may be on its way to `blocked` would be
-        // testing two things at once. That the mark returns is the same line
-        // of code as the first time it was set.
-        run_pass(
-            &repo,
-            &FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]),
-        );
-        assert!(
-            lanes_awaiting_a_person(&repo).is_empty(),
-            "a lane that only just stopped working is not asking anything yet"
-        );
-    }
-
-    /// `LaneStatus::Blocked` earns the mark on the very pass that sees it —
-    /// no `lane_quiet` wait, unlike a merely-settled lane in
-    /// `a_waiting_lane_is_announced_once_and_unmarked_when_it_works_again`
-    /// above — and loses it the moment the lane is `Working` again.
-    #[test]
-    fn a_blocked_lane_is_marked_immediately_and_unmarked_when_it_works_again() {
-        let repo = fixture("blocked-marked-immediately");
-        add_task_with(&repo, "demo", "implement", |f| {
-            f.workspace_id = Some("w1".into());
-            f.pane_id = Some("w1:p1".into());
-        });
-
-        // First pass, no aging at all: a settled lane would need
-        // `lane_quiet` of silence first, but `Blocked` is an observation, not
-        // an inference from quiet.
-        run_pass(
-            &repo,
-            &FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Blocked)]),
-        );
-        assert!(lanes_awaiting_a_person(&repo).contains("demo · implement"));
-
-        // Answered: the lane is working again, and the mark comes off.
-        run_pass(
-            &repo,
-            &FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Working)]),
-        );
-        assert!(lanes_awaiting_a_person(&repo).is_empty());
-    }
-
     /// The `Blocked` arm's other half. A lane sitting on a permission prompt
     /// is as alive as a working one, so a park resumed straight into its pane
     /// is spent here exactly as the busy arm spends it — otherwise
@@ -9560,7 +9348,7 @@ mod tests {
     /// settled without ever being seen `Working`, and the next launch reads
     /// it as a person's own interrupt.
     #[test]
-    fn a_blocked_lane_is_marked_and_un_parked_in_the_same_pass() {
+    fn a_blocked_lane_is_un_parked_in_the_same_pass() {
         let repo = fixture("blocked-unparks");
         let path = add_task_with(&repo, "demo", "implement", |f| {
             f.workspace_id = Some("w1".into());
@@ -9586,7 +9374,6 @@ mod tests {
             mux.did("prompt").is_empty(),
             "and never sent a prompt on top of the modal it is holding"
         );
-        assert!(lanes_awaiting_a_person(&repo).contains("demo · implement"));
         let task = reload(&path);
         assert_eq!(task.front.parked_from, None, "un-parked all the same");
         assert_eq!(task.front.resume, None);
@@ -9751,6 +9538,7 @@ mod tests {
                 &pipelines,
                 &crate::cli::ReportArgs {
                     task: Some("demo".into()),
+                    stage: None,
                     pass: true,
                     fail: false,
                     block: false,
@@ -9775,7 +9563,7 @@ mod tests {
     /// rest of the day with a live session billing for nothing. Now it is sent
     /// the report contract again — as often as it takes — and only a lane that
     /// goes fully quiet *after* a reminder ever reaches `paused`.
-    // covers: dispatch.lane_quiet — how long a lane may say nothing before it is reminded, and marked as waiting
+    // covers: dispatch.lane_quiet — how long a lane may say nothing before it is reminded
     #[test]
     fn a_lane_that_settles_without_reporting_is_reminded_then_paused_once_it_goes_dead() {
         let repo = fixture("unreported");
@@ -9794,20 +9582,14 @@ mod tests {
         // looks like too, and it is also what a lane that started a background
         // job and stopped talking looks like. Nothing can tell them apart this
         // early, so nothing happens — no reminder, which waits a full pass so
-        // as not to race a report that may already be landing, and no mark on
-        // the board either.
+        // as not to race a report that may already be landing.
         run_pass(&repo, &mux);
         assert_eq!(reload(&path).stage(), "implement");
         assert!(mux.did("prompt").is_empty());
         assert!(mux.did("stop").is_empty());
-        assert!(
-            lanes_awaiting_a_person(&repo).is_empty(),
-            "a lane settled for a moment is not yet holding a question"
-        );
         mux.clear_calls();
 
-        // A pass later, still settled: it is sent the report contract again,
-        // and now it is quiet enough to be worth a person's attention too.
+        // A pass later, still settled: it is sent the report contract again.
         age_lane(&repo, "demo · implement", Duration::from_secs(15));
         let report = run_pass(&repo, &mux);
         assert_eq!(
@@ -9817,20 +9599,12 @@ mod tests {
         );
         assert_eq!(mux.did("prompt"), vec!["prompt demo · implement"]);
         assert!(
-            lanes_awaiting_a_person(&repo).contains("demo · implement"),
-            "quiet for `lane_quiet` is what earns the mark, the same bar a reminder clears"
-        );
-        assert!(
             report
                 .actions
                 .iter()
                 .any(|line| line.contains("reminded") && line.contains("implement")),
             "got {:?}",
             report.actions
-        );
-        assert!(
-            lanes_awaiting_a_person(&repo).contains("demo · implement"),
-            "still a pane worth a look, reminder or not"
         );
         mux.clear_calls();
 
@@ -9862,10 +9636,6 @@ mod tests {
             mux.did("focus"),
             vec!["focus demo · implement"],
             "and it must be what they are looking at"
-        );
-        assert!(
-            lanes_awaiting_a_person(&repo).is_empty(),
-            "a blocked task is not a pane anybody is waiting on"
         );
         assert!(
             report.actions.iter().any(|line| line.contains("stuck at")),
@@ -10835,30 +10605,6 @@ mod tests {
         );
     }
 
-    /// A `gate:` says a step is *expected* to stop and ask. It is not what makes
-    /// a stopped lane a conversation: no shipped step gates, and a handover lane
-    /// that ends its turn with the task still on its step is still one.
-    #[test]
-    fn a_settled_lane_waits_whether_or_not_its_step_declares_a_gate() {
-        let repo = fixture("gate-off");
-        let path = add_task_with(&repo, "demo", "document", |f| {
-            f.workspace_id = Some("w1".into());
-            f.pane_id = Some("w1:p1".into());
-        });
-
-        let mux = FakeMux::new(vec![lane(&repo, "demo · document", LaneStatus::Done)]);
-        run_pass(&repo, &mux);
-
-        assert!(mux.did("stop").is_empty(), "the question was torn down");
-        assert_eq!(reload(&path).front.attempts, 0);
-
-        // Quiet for `lane_quiet` is what puts it on the board, gate or no gate
-        // — which is the point of the test: the gate changes nothing here.
-        age_lane(&repo, "demo · document", Duration::from_secs(15));
-        run_pass(&repo, &mux);
-        assert!(lanes_awaiting_a_person(&repo).contains("demo · document"));
-    }
-
     /// Every waiting lane gives its slot back, and a paused one gives it back
     /// too.
     ///
@@ -11064,7 +10810,6 @@ mod tests {
             &crate::cli::ResumeArgs {
                 task: "demo".into(),
                 stage: None,
-                reject: false,
                 message: None,
             },
             None,
@@ -11134,7 +10879,6 @@ mod tests {
             &crate::cli::ResumeArgs {
                 task: "demo".into(),
                 stage: None,
-                reject: false,
                 message: None,
             },
             None,
@@ -14001,6 +13745,27 @@ mod tests {
         );
     }
 
+    /// A command step banks a launch the same way an agent lane's own
+    /// `start_one` does — see the `Ok(_)` arm of `run_command`'s `Fresh`
+    /// case. Without this a task that only ever ran command steps had an
+    /// empty `steps:`, so `--stage`'s bound (`report::steps_run`) could
+    /// never name one of them even after it genuinely ran.
+    #[test]
+    fn a_command_step_banks_a_launch_the_way_an_agent_lane_does() {
+        let repo = fixture("command-banks-launch");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]);
+        let pipelines = pipelines_running("true", false);
+
+        drive(&repo, &pipelines, &mux, &path, "review");
+
+        assert_eq!(
+            reload(&path).steps_at("implement"),
+            1,
+            "the command step's run never landed in `steps:`"
+        );
+    }
+
     /// A command step's exit code is read once and its run files forgotten
     /// before the destination it computed is ever placed. When that
     /// destination is an agent step and every one of the model's slots is
@@ -15492,8 +15257,10 @@ mod tests {
     /// policy, and names `--handoff` — `--finding` is gone entirely. The
     /// builtin `default` pipeline's `implement` declares no `on_fail` of its
     /// own, so `--fail` lands on `blocked` exactly where `--block` does and
-    /// the contract withholds it — the system prompt's true final line is
-    /// therefore the refusal naming it, not `--handoff`.
+    /// the contract withholds it, alongside `--stage` (which only ever
+    /// means anything on a `--pass` from `blocked` itself) — the system
+    /// prompt's true final line is therefore the second of those two
+    /// refusals, not `--handoff`.
     #[test]
     fn the_system_prompt_ends_with_the_report_contract() {
         let repo = fixture("prompt-contract");
@@ -15505,7 +15272,9 @@ mod tests {
         let prompt =
             crate::compose::system_prompt(&repo, &task, pipeline, step, "[prompt]").unwrap();
         assert!(
-            prompt.trim_end().ends_with("spoolway report --fail"),
+            prompt
+                .trim_end()
+                .ends_with("spoolway report --pass --stage <step>"),
             "got: {prompt}"
         );
         assert!(
@@ -15671,8 +15440,11 @@ mod tests {
 
     /// A step whose fail and block routes actually differ — `default`'s
     /// `review`, `on_fail: implement`, `on_pass: document` — offers `--fail`
-    /// as a real form and names no refusal at all: withholding it is a
-    /// per-step decision, not a blanket ban on the flag.
+    /// as a real form and refuses no *outcome* flag: withholding one of
+    /// those is a per-step decision, not a blanket ban. `--stage` is still
+    /// named under the refusal wording here, the same as on every step but
+    /// `blocked` itself — it only ever means anything alongside a `--pass`
+    /// from there.
     #[test]
     fn a_step_whose_fail_and_block_routes_differ_offers_fail_with_no_refusal() {
         let repo = fixture("prompt-contract-fail-offered");
@@ -15690,8 +15462,13 @@ mod tests {
             crate::compose::system_prompt(&repo, &task, pipeline, step, "[prompt]").unwrap();
         assert!(prompt.contains("--fail  -m"), "got: {prompt}");
         assert!(
-            !prompt.contains("These commands are not available to you"),
-            "no form should be refused here: got: {prompt}"
+            !prompt.contains("spoolway report --fail\n")
+                && !prompt.contains("spoolway report --block\n"),
+            "neither outcome flag should be refused here: got: {prompt}"
+        );
+        assert!(
+            prompt.contains("spoolway report --pass --stage <step>"),
+            "`--stage` is still refused by name off `blocked`: got: {prompt}"
         );
     }
 
