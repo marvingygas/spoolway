@@ -90,7 +90,7 @@ steps:
       while the suites are still cheap to read and fix.
     agent: claude
     prompt: e2e
-    model: claude-sonnet-5
+    model: claude-opus-5
     effort: medium
     on_pass: test
 
@@ -99,7 +99,7 @@ steps:
     run: scripts/gate.sh
     timeout: 45m
     loop:
-      e2e: 2
+      e2e: 1
     on_loop_max: blocked
     on_pass: suite
     on_fail: e2e
@@ -110,7 +110,7 @@ steps:
     run: scripts/e2e-pr.sh
     timeout: 45m
     loop:
-      e2e: 2
+      e2e: 1
     on_loop_max: blocked
     on_pass: document
     on_fail: e2e
