@@ -110,4 +110,4 @@ local = true
 hook = "github.sh"
 project_key = "marvingygas/spoolway"
 on_fail = "ignore"
-key_in_names = false
+key_in_names = true
