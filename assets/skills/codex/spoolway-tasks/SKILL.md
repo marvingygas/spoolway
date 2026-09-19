@@ -142,6 +142,13 @@ reading the file whole.
    a test reached, or "none, and why". Never write an instruction to *run* anything — a lane
    reading it will try to.
 
+   **Write every line of it in plain English.** One thing per sentence, in the shortest words
+   that carry it — no story, no build-up, no buzzwords, and no reaching verbs: "reads",
+   "writes", "moves", never "orchestrates", "leverages", "unlocks". Jargon costs more here
+   than on a plan page, because the reader is a lane holding nothing but this document: name
+   a thing the way the code names it, and spell out anything the repo has not already named.
+   Complete is the bar rather than terse — but a sentence that adds no fact is still cut.
+
 4. **Verify the shape.** Walk the `depends_on` of the documents you just wrote: a line —
    exactly one task with no dependency, one with no dependent — except where two are
    `parallel: true`, a chosen gap. **A join has to be fixed before you go on**: re-run step 2
