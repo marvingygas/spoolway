@@ -425,6 +425,46 @@ impl Runs {
         keys.into_iter().collect()
     }
 
+    /// [`Runs::keys_for_task`], for every task at once, off one directory
+    /// read rather than one per task.
+    ///
+    /// A pass used to call `keys_for_task` in a loop over the whole queue —
+    /// [`crate::dispatch::Dispatcher::sweep_anchor_tabs`] and the reap done
+    /// ahead of routing both did — which cost one `read_dir` per task on
+    /// every pass, and every tick once ticks ran independently of a probe's
+    /// own clock. This reads the directory exactly once and hands back each
+    /// task's own keys, so a caller wanting more than one task's worth pays
+    /// for the walk a single time.
+    pub fn keys_by_task(&self) -> std::collections::HashMap<String, Vec<String>> {
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+            return std::collections::HashMap::new();
+        };
+        let mut by_task: std::collections::HashMap<String, std::collections::BTreeSet<String>> =
+            std::collections::HashMap::new();
+        for entry in entries.filter_map(|entry| entry.ok()) {
+            let path = entry.path();
+            if !path.extension().is_some_and(|e| e == "pid" || e == "pane") {
+                continue;
+            }
+            let Some(key) = path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().to_string())
+            else {
+                continue;
+            };
+            // A key is `<task> · <step>` — see `Runs::key` — so the task it
+            // belongs to is everything before the first separator.
+            let Some((task, _)) = key.split_once(" · ") else {
+                continue;
+            };
+            by_task.entry(task.to_string()).or_default().insert(key);
+        }
+        by_task
+            .into_iter()
+            .map(|(task, keys)| (task, keys.into_iter().collect()))
+            .collect()
+    }
+
     /// Delete every run file this directory holds for `task`, across every
     /// step and whatever extension — logs, pids, exit codes, pane records and
     /// a hook's `.out`/`.failed` markers alike.
@@ -849,6 +889,33 @@ mod tests {
             f.runs.stop(&key);
         }
         f.runs.stop("other · build");
+    }
+
+    /// The batch form: the same split by task, off one directory read
+    /// rather than one per task.
+    #[test]
+    fn keys_by_task_splits_one_directory_read_by_task() {
+        let f = Fixture::new("by-task-batch");
+        f.start("demo · bench", "sleep 30");
+        f.start("demo · build", "sleep 30");
+        f.start("other · build", "sleep 30");
+
+        let by_task = f.runs.keys_by_task();
+        assert_eq!(
+            by_task.get("demo").cloned().unwrap_or_default(),
+            vec!["demo · bench".to_string(), "demo · build".to_string()],
+            "grouped exactly as keys_for_task would answer for this one task"
+        );
+        assert_eq!(
+            by_task.get("other").cloned().unwrap_or_default(),
+            vec!["other · build".to_string()]
+        );
+
+        for keys in by_task.into_values() {
+            for key in keys {
+                f.runs.stop(&key);
+            }
+        }
     }
 
     /// Stopping a run has to take the command with it, not just the wrapper that
