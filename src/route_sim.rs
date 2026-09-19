@@ -601,9 +601,18 @@ mod tests {
             }
         }
 
+        // A blowup guard, not a benchmark. The walk is linear in shapes x
+        // paths, so a routing change that makes it super-linear shows up as
+        // multiples rather than as a few percent — and the budget has to
+        // clear the slowest machine that runs it, not the fastest. Measured:
+        // ~2.0s on a developer box against 5.0-5.6s on this project's CI
+        // runner, which is why a 5s budget failed on every branch of a
+        // five-deep stack while passing locally every time. Twenty seconds is
+        // about four times the slowest run yet observed and still leaves this
+        // a `cargo test`-sized proof.
         let elapsed = start.elapsed();
         assert!(
-            elapsed.as_secs() < 5,
+            elapsed.as_secs() < 20,
             "the walk took {elapsed:?} — either shrink {GENERATED_SHAPES} generated shapes or \
              `lane_bound`'s own multiplier, or this has stopped being a `cargo test`-sized proof"
         );
