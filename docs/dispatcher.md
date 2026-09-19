@@ -22,6 +22,10 @@ One dispatcher serves the whole project. Every pass re-reads the queue, so a tas
 while it runs is picked up on the next pass. A second `spoolway dispatch` on the same project
 draws the same board in read-only mode, headed `watching dispatcher`.
 
+Queueing a batch from the queue screen while another dispatcher holds the lock works the same
+way: the batch is written, and `enter` on the overview brings that dispatcher's workspace to
+the front instead of starting a second one. See [`spoolway queue`](cli-reference.md#spoolway-queue).
+
 Before the first pass, `enter` on the queue screen and an [overrides
 layer](configuration.md#the-overrides-layer) screen, in turn, a warnings screen holds `spoolway
 doctor`'s cheap findings and, for an unattended run, its own notice, until a key answers it. See

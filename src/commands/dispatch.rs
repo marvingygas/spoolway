@@ -584,7 +584,7 @@ pub(crate) fn overview_gate_with(
     let tasks = repo.tasks()?;
     let _term = term.map(|term| term());
     let _ = write!(out, "\x1b[2J\x1b[H");
-    for line in overview_lines(&tasks) {
+    for line in overview_lines(&tasks, None) {
         writeln!(out, "{line}")?;
     }
     loop {
@@ -600,6 +600,40 @@ pub(crate) fn overview_gate_with(
             // match proceeds instead on the same read — this is a new
             // screen weighing a new decision, so it takes the more
             // conservative of the two rather than inheriting that one's.
+            None => return Ok(false),
+            _ => {}
+        }
+    }
+}
+
+/// The same overview, drawn for the one thing left to do with it once
+/// `commands::queue::after_write` finds the queue's lock already held: join
+/// the run that is already going rather than start one that cannot. `Ok(true)`
+/// for `enter`, meaning the caller should now focus that dispatcher's
+/// workspace and let this screen end; `Ok(false)` for `esc`, back to
+/// browsing, and for the tty going away mid-question — the same
+/// conservative reading [`overview_gate_with`] gives that case.
+///
+/// Always interactive and always `term: None`: the only caller is
+/// `commands::queue::begin_submission`, reached from `run_screen`, which
+/// already holds its own `TermGuard` — see [`overview_gate_with`]'s own doc
+/// comment on why a second one here would be a bug rather than merely
+/// redundant.
+pub(crate) fn dispatcher_running_gate_with(
+    repo: &Repo,
+    pid: u32,
+    input: &mut impl PollableRead,
+    out: &mut impl std::io::Write,
+) -> Result<bool> {
+    let tasks = repo.tasks()?;
+    let _ = write!(out, "\x1b[2J\x1b[H");
+    for line in overview_lines(&tasks, Some(pid)) {
+        writeln!(out, "{line}")?;
+    }
+    loop {
+        match crate::screen::read_key(input) {
+            Some(crate::screen::Key::Enter) => return Ok(true),
+            Some(crate::screen::Key::Esc) => return Ok(false),
             None => return Ok(false),
             _ => {}
         }
@@ -640,28 +674,38 @@ fn overview_cell(text: &str, width: usize) -> String {
 /// has to reach past `repo.tasks()` to draw the exact screen the mockup
 /// draws — every task the queue directory holds, never the archive, since
 /// `Repo::tasks` never reads that directory at all.
-fn overview_lines(tasks: &[Task]) -> Vec<String> {
+///
+/// `held_pid` is `None` for the ordinary "about to start one" draw, and the
+/// running dispatcher's own pid once `commands::queue::after_write` finds
+/// the lock already held — see the `focus-live-run` mockup, which draws
+/// both the pid line under the header and the swapped footer this same
+/// table then carries, rather than a screen of its own: nothing about the
+/// board changes, only what a person can do once they are looking at it.
+fn overview_lines(tasks: &[Task], held_pid: Option<u32>) -> Vec<String> {
     let mut by_group: std::collections::BTreeMap<&str, Vec<&Task>> = Default::default();
     for task in tasks {
         let key = task.front.group.as_deref().unwrap_or(task.id());
         by_group.entry(key).or_default().push(task);
     }
 
-    let mut lines = vec![
-        format!(
-            "queued  {} · {}",
-            plural(by_group.len(), "group"),
-            plural(tasks.len(), "task")
-        ),
-        String::new(),
-        format!(
-            "  {}{}{}{}",
-            overview_cell("TASK", OVERVIEW_NAME_W),
-            overview_cell("PIPELINE", OVERVIEW_PIPELINE_W),
-            overview_cell("STEP", OVERVIEW_STEP_W),
-            "BASE"
-        ),
-    ];
+    let mut lines = vec![format!(
+        "queued  {} · {}",
+        plural(by_group.len(), "group"),
+        plural(tasks.len(), "task")
+    )];
+    if let Some(pid) = held_pid {
+        lines.push(format!(
+            "a dispatcher is already running (pid {pid}) — it takes these on its next pass"
+        ));
+    }
+    lines.push(String::new());
+    lines.push(format!(
+        "  {}{}{}{}",
+        overview_cell("TASK", OVERVIEW_NAME_W),
+        overview_cell("PIPELINE", OVERVIEW_PIPELINE_W),
+        overview_cell("STEP", OVERVIEW_STEP_W),
+        "BASE"
+    ));
     for group_tasks in by_group.values() {
         let name = group_tasks[0]
             .front
@@ -687,7 +731,11 @@ fn overview_lines(tasks: &[Task]) -> Vec<String> {
         }
     }
     lines.push(String::new());
-    lines.push("[enter] start a dispatcher   [esc] back".to_string());
+    lines.push(if held_pid.is_some() {
+        "[enter] go to the dispatcher   [esc] back".to_string()
+    } else {
+        "[enter] start a dispatcher   [esc] back".to_string()
+    });
     lines
 }
 
@@ -2347,7 +2395,7 @@ mod tests {
             ),
             overview_task("c", "pipeline: default\nstage: queued\nbase: main\n"),
         ];
-        let lines = overview_lines(&tasks);
+        let lines = overview_lines(&tasks, None);
         assert_eq!(lines[0], "queued  3 groups · 3 tasks", "{lines:?}");
 
         let alpha = lines.iter().position(|l| l == "alpha").unwrap();
@@ -2367,7 +2415,7 @@ mod tests {
     #[test]
     fn overview_lines_draws_an_em_dash_for_a_missing_pipeline_or_base() {
         let tasks = [overview_task("solo", "group: solo-group\nstage: queued\n")];
-        let lines = overview_lines(&tasks);
+        let lines = overview_lines(&tasks, None);
         // Skip the group header line itself ("solo-group") — the row is the
         // one starting with two spaces, indented under it.
         let row = lines.iter().find(|l| l.starts_with("  solo")).unwrap();
@@ -2395,7 +2443,7 @@ mod tests {
              stage: an-implausibly-long-step-name-for-its-column\n\
              base: feature/rework-the-dispatcher-lock-handling-end-to-end\n",
         )];
-        let lines = overview_lines(&tasks);
+        let lines = overview_lines(&tasks, None);
         let row = lines
             .iter()
             .find(|l| l.trim_start().starts_with("a-task-id"))
@@ -2430,11 +2478,31 @@ mod tests {
     /// line a person could mistake for a stalled draw.
     #[test]
     fn overview_lines_with_no_tasks_still_draws_the_header_and_footer() {
-        let lines = overview_lines(&[]);
+        let lines = overview_lines(&[], None);
         assert_eq!(lines[0], "queued  0 groups · 0 tasks", "{lines:?}");
         assert_eq!(
             lines.last(),
             Some(&"[enter] start a dispatcher   [esc] back".to_string()),
+            "{lines:?}"
+        );
+    }
+
+    /// `held_pid: Some` — the `focus-live-run` mockup — swaps the footer for
+    /// one describing what `enter` now does and inserts the pid line right
+    /// under the header, ahead of the blank line separating it from the
+    /// table.
+    #[test]
+    fn overview_lines_with_a_held_pid_draws_the_notice_and_swaps_the_footer() {
+        let lines = overview_lines(&[], Some(250));
+        assert_eq!(lines[0], "queued  0 groups · 0 tasks", "{lines:?}");
+        assert_eq!(
+            lines[1], "a dispatcher is already running (pid 250) — it takes these on its next pass",
+            "{lines:?}"
+        );
+        assert_eq!(lines[2], "", "{lines:?}");
+        assert_eq!(
+            lines.last(),
+            Some(&"[enter] go to the dispatcher   [esc] back".to_string()),
             "{lines:?}"
         );
     }
@@ -2521,6 +2589,51 @@ mod tests {
             )
             .unwrap()
         );
+    }
+
+    /// `enter` on the held-lock draw — task `focus-live-run`'s own mockup —
+    /// says `true`: there is somewhere to go now, not a run to start, but
+    /// the gate's shape is the same "proceed or not" either way.
+    #[test]
+    fn dispatcher_running_gate_with_enter_proceeds() {
+        let repo = fixture("dispatcher-running-gate-enter");
+        let mut input = keys("\r");
+        let mut out = Vec::new();
+        assert!(dispatcher_running_gate_with(&repo, 250, &mut input, &mut out).unwrap());
+        let drawn = String::from_utf8(out).unwrap();
+        assert!(
+            drawn.contains(
+                "a dispatcher is already running (pid 250) — it takes these on its next pass"
+            ),
+            "{drawn}"
+        );
+        assert!(
+            drawn.contains("[enter] go to the dispatcher   [esc] back"),
+            "{drawn}"
+        );
+    }
+
+    /// `esc` declines, back to browsing — the same reading every other gate
+    /// in this file gives it.
+    #[test]
+    fn dispatcher_running_gate_with_esc_declines() {
+        let repo = fixture("dispatcher-running-gate-esc");
+        let mut input = keys("\x1b");
+        let mut out = Vec::new();
+        assert!(!dispatcher_running_gate_with(&repo, 250, &mut input, &mut out).unwrap());
+    }
+
+    /// The tty going away mid-question declines here too — the same
+    /// conservative reading [`overview_gate_with_none_declines`] gives its
+    /// own copy of this case, since this screen is likewise reached only
+    /// through the queue screen, where an exhausted pipe is the ordinary
+    /// way a script ends it.
+    #[test]
+    fn dispatcher_running_gate_with_none_declines() {
+        let repo = fixture("dispatcher-running-gate-none");
+        let mut input = keys("");
+        let mut out = Vec::new();
+        assert!(!dispatcher_running_gate_with(&repo, 250, &mut input, &mut out).unwrap());
     }
 
     /// `unattended_block_lines` says nothing at all for an attended run —

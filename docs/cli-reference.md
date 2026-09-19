@@ -50,7 +50,7 @@ archive directories. The right pane lists the highlighted group's tasks.
 |---|---|
 | `↑` `↓` / `j` `k` | Move the cursor |
 | `space` | Select a group. A group is queued whole |
-| `enter` | Check the selection, queue it, and offer to start a dispatcher |
+| `enter` | Check the selection, queue it, and offer to start a dispatcher, or to go to one already running |
 | `g` | Set or clear a `gate_at` on the highlighted task |
 | `o` | Open the highlighted task's document in your editor |
 | `f` | Filter groups by name, task id and title. `enter` keeps the filter, `esc` clears it |
@@ -229,6 +229,27 @@ Before it starts, it shows the whole queue and waits for a key:
 
   [enter] start a dispatcher   [esc] back
 ```
+
+If another dispatcher already holds the lock, the same overview carries a pid line under the
+header and its own footer instead:
+
+```
+  queued  3 groups · 6 tasks
+  a dispatcher is already running (pid 250) — it takes these on its next pass
+
+    TASK                PIPELINE    STEP      BASE
+
+  cart
+    cart-empty-state    impl_fast   review    main
+    cart-totals         impl        queued    main
+    cart-discounts      impl        queued    main
+
+  [enter] go to the dispatcher   [esc] back
+```
+
+`enter` there brings the running dispatcher's workspace to the front and ends the command. No
+task document is written, moved or re-queued; the batch was already saved, and the running
+dispatcher picks it up on its own next pass.
 
 When an [overrides layer](configuration.md#the-overrides-layer) is active, `enter` there then
 shows what is patched and waits for a key:

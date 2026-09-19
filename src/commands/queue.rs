@@ -4865,22 +4865,26 @@ fn plural(n: usize, noun: &str) -> String {
 }
 
 /// What [`begin_submission`] comes back with: either an ordinary [`Mode`] to
-/// show — a refusal, or the "already running" notice — or word that a clean
-/// batch landed and the caller still has the overview, the overrides gate
-/// and the warnings screen of its own to run, which need `input`/`out` and
-/// can end the whole loop, none of which `begin_submission` has any business
-/// holding.
+/// show — a refusal — or word that a clean batch landed, either onto an idle
+/// queue, where the caller still has the overview, the overrides gate and
+/// the warnings screen of its own to run, or onto one a dispatcher already
+/// holds the lock on, where there is nothing left to run but the "go to the
+/// dispatcher" screen instead. All three need `input`/`out` and can end the
+/// whole loop, none of which `begin_submission` has any business holding.
 #[derive(Debug)]
 enum SubmitOutcome {
     Mode(Mode),
     Confirmed,
+    DispatcherRunning(u32),
 }
 
 /// The common tail every batch-writing key in [`run_screen`] shares once it
 /// has its [`SubmitOutcome`]: an ordinary [`Mode`] goes straight onto
-/// `state.mode`, and a landed batch runs the overview, the overrides gate
-/// and the warnings screen — [`Some`] to leave `run_screen` for good, `None`
-/// (back to [`Mode::Browsing`]) for `esc` off any of the three.
+/// `state.mode`; a landed batch onto an idle queue runs the overview, the
+/// overrides gate and the warnings screen; a landed batch onto one a
+/// dispatcher already holds runs [`join_running_dispatcher`] instead —
+/// [`Some`] to leave `run_screen` for good, in either landed case, `None`
+/// (back to [`Mode::Browsing`]) for `esc` off any of them.
 fn apply_submit_outcome(
     repo: &Repo,
     pipelines: &Pipelines,
@@ -4897,6 +4901,13 @@ fn apply_submit_outcome(
         SubmitOutcome::Confirmed => {
             if confirm_start(repo, pipelines, input, out)? {
                 return Ok(Some(ScreenExit::StartDispatcher));
+            }
+            state.mode = Mode::Browsing;
+            Ok(None)
+        }
+        SubmitOutcome::DispatcherRunning(pid) => {
+            if join_running_dispatcher(repo, pid, input, out)? {
+                return Ok(Some(ScreenExit::Quit));
             }
             state.mode = Mode::Browsing;
             Ok(None)
@@ -4933,11 +4944,11 @@ fn begin_submission(
     match finish_submit(
         repo, pipelines, groups, pending, &documents, base, &selected,
     ) {
-        Ok(msg) => {
+        Ok(_msg) => {
             state.selected.clear();
             state.gates.clear();
             clamp_cursors(groups, state);
-            after_write(repo, msg)
+            after_write(repo)
         }
         Err(err) => SubmitOutcome::Mode(refusal_mode("submission refused", err)),
     }
@@ -4946,20 +4957,27 @@ fn begin_submission(
 /// What a landed write becomes: [`SubmitOutcome::Confirmed`], sending the
 /// caller on to the overview, the overrides gate and the warnings screen —
 /// unless a dispatcher already holds the queue's own lock, in which case
-/// starting a second one would only be refused once `commands::dispatch`
-/// actually ran (see `Lock::acquire`'s own bail), so this shows the report
-/// as an ordinary [`Mode::Outcome`] instead of ever reaching any of them.
+/// there is nothing left to start (`commands::dispatch` would only refuse
+/// it, see `Lock::acquire`'s own bail) and this becomes
+/// [`SubmitOutcome::DispatcherRunning`] instead, so the batch that was just
+/// written is joined rather than offered a second start it cannot have.
+///
+/// Takes no report of what was just written: every caller's own batch is
+/// already saved by the time this runs, and the screen that comes next —
+/// [`confirm_start`]'s overview on the lock-free path,
+/// [`dispatcher_running_gate_with`] on the held-lock one — draws the queue
+/// fresh from disk rather than echoing back what a caller wrote to it. A
+/// caller that builds its own per-task report anyway, the way
+/// [`finish_submit`] still does, has that report read back by a test
+/// directly rather than shown on any screen.
 ///
 /// A lock file `Lock::holder` could not even read falls back to the
 /// ordinary path: an unreadable file is closer to "no answer" than to "a
 /// dispatcher is running", and this must never claim a live pid it did not
 /// actually see.
-fn after_write(repo: &Repo, msg: String) -> SubmitOutcome {
+fn after_write(repo: &Repo) -> SubmitOutcome {
     match crate::lock::Lock::holder(&repo.lock_file()) {
-        Ok(Some(pid)) => SubmitOutcome::Mode(Mode::Outcome(format!(
-            "{msg}\n\na dispatcher is already running (pid {pid}) — it picks these up on its \
-             next pass"
-        ))),
+        Ok(Some(pid)) => SubmitOutcome::DispatcherRunning(pid),
         _ => SubmitOutcome::Confirmed,
     }
 }
@@ -5030,9 +5048,64 @@ fn confirm_start(
     )
 }
 
+/// The one thing left to do once [`after_write`] finds the queue's lock
+/// already held: draw [`super::dispatch::dispatcher_running_gate_with`]'s
+/// own overview and, on `enter`, bring the running dispatcher's workspace to
+/// the front and let this screen end. The batch was already written and
+/// saved by [`finish_submit`] before `after_write` ever ran — nothing here
+/// writes, moves or re-queues a task document; the running dispatcher picks
+/// it up on its own next pass, exactly as the drawn notice says.
+///
+/// `Ok(true)` only for `enter`, so [`apply_submit_outcome`] knows to end
+/// `run_screen`; `Ok(false)` for `esc`, back to browsing. A focus that fails
+/// — no workspace [`crate::mux::Mux::dispatch_workspace`] can find (headless
+/// has none to find at all), or herdr refusing the call — is folded into
+/// the same `Ok(true)` rather than trapping a person on a screen that
+/// cannot help them either way: it is reported to `out` first, so the
+/// failure is not silent, but there is still nothing left here to start or
+/// retry.
+fn join_running_dispatcher(
+    repo: &Repo,
+    pid: u32,
+    input: &mut impl PollableRead,
+    out: &mut impl std::io::Write,
+) -> Result<bool> {
+    if !super::dispatch::dispatcher_running_gate_with(repo, pid, input, out)? {
+        return Ok(false);
+    }
+    match crate::mux::backend(repo) {
+        Ok(mux) => match mux.dispatch_workspace(&repo.root, false) {
+            Ok(Some(workspace_id)) => {
+                if let Err(err) = mux.focus_workspace(&workspace_id) {
+                    let _ = writeln!(out, "could not focus the running dispatcher: {err:#}");
+                }
+            }
+            // Headless names no workspace at all, and a backend that names
+            // one but cannot find it right now has nothing this screen can
+            // do about it either — the pid line already drawn is where the
+            // run is, and this screen's job ends the same way regardless.
+            Ok(None) => {}
+            Err(err) => {
+                let _ = writeln!(
+                    out,
+                    "could not find the running dispatcher's workspace: {err:#}"
+                );
+            }
+        },
+        Err(err) => {
+            let _ = writeln!(out, "could not focus the running dispatcher: {err:#}");
+        }
+    }
+    Ok(true)
+}
+
 /// Open the batch's tickets and name it, save it, clear the documents it
-/// came from out of the pending directory, and build the message
-/// [`after_write`]'s own "already running" outcome shows.
+/// came from out of the pending directory, and build the per-task report
+/// this function's own return value carries — read back by a test directly
+/// rather than by any caller here: neither outcome [`after_write`] can now
+/// reach, [`SubmitOutcome::Confirmed`] or [`SubmitOutcome::DispatcherRunning`],
+/// shows it, since the screen either one goes on to draws the queue fresh
+/// from disk instead of echoing back what this just wrote to it.
 ///
 /// The order is the whole guarantee behind "a submission that fails
 /// validation removes nothing". Nothing is deleted until every task file has
@@ -5362,7 +5435,6 @@ fn begin_trial(
     let mut minted: std::collections::BTreeSet<String> = Default::default();
     let mut id_map: std::collections::BTreeMap<String, String> = Default::default();
     let mut arms = Vec::with_capacity(group.tasks.len());
-    let mut summary = Vec::with_capacity(group.tasks.len());
 
     // `group.tasks` lists dependencies before dependents (see `Group`'s own
     // doc comment), so by the time a dependent task is minted here, every
@@ -5431,12 +5503,11 @@ fn begin_trial(
             .collect();
 
         arm.path = repo.queue_dir().join(format!("{id}.md"));
-        summary.push((task.id.clone(), pipeline_name, skip));
         arms.push(arm);
     }
 
     match finish_trial(repo, pipelines, arms) {
-        Ok(()) => after_write(repo, trial_report(&trial_id, &group.name, base, &summary)),
+        Ok(()) => after_write(repo),
         Err(err) => SubmitOutcome::Mode(Mode::Outcome(format!("trial refused: {err:#}"))),
     }
 }
@@ -5451,44 +5522,6 @@ fn finish_trial(repo: &Repo, pipelines: &Pipelines, mut arms: Vec<Task>) -> Resu
         arm.save()?;
     }
     Ok(())
-}
-
-/// The report `enter` leaves on screen once a trial's arms have all landed:
-/// the batch's own shared id, the group it forked, and — one row per task,
-/// in the same order the two screens showed it — the pipeline it runs and
-/// the steps it skips, so a person can read the whole batch without opening
-/// any one arm's document. Ends the same way every other write this screen
-/// makes does, naming the branch every arm was cut from.
-fn trial_report(
-    trial_id: &str,
-    group_name: &str,
-    base: &str,
-    rows: &[(String, String, std::collections::BTreeSet<String>)],
-) -> String {
-    let id_width = rows
-        .iter()
-        .map(|(id, _, _)| id.chars().count())
-        .max()
-        .unwrap_or(0);
-    let pipeline_width = rows
-        .iter()
-        .map(|(_, pipeline, _)| pipeline.chars().count())
-        .max()
-        .unwrap_or(0);
-
-    let mut msg = format!("trial {trial_id} queued from {group_name}\n\n");
-    for (id, pipeline, skip) in rows {
-        let skip = if skip.is_empty() {
-            "-".to_string()
-        } else {
-            skip.iter().cloned().collect::<Vec<_>>().join(", ")
-        };
-        msg.push_str(&format!(
-            "  {id:<id_width$}   {pipeline:<pipeline_width$}   skip {skip}\n"
-        ));
-    }
-    msg.push_str(&format!("\n  dependencies preserved\n  based on `{base}`"));
-    msg
 }
 
 // ============================= The routines pane ===========================
@@ -5701,22 +5734,17 @@ pub(crate) fn queue_routine_target(
     Ok(tasks)
 }
 
-/// Open the batch's tickets and name it, save every task `validate_batch`
-/// handed back, and build the same per-task report [`finish_submit`] builds
-/// for its own batch — [`finish_trial`] no longer builds this shape itself;
-/// see [`trial_report`] for what a trial reports instead. The source
-/// documents under `.spoolway/routines/` are never touched — a routine is
-/// meant to be queued again, not consumed by being queued once — which is
-/// why nothing is handed to [`open_and_prefix`] to write ids back into.
+/// Open the batch's tickets, save every task `validate_batch` handed back
+/// — the whole of what queuing a routine does, now that [`after_write`]
+/// takes no report from any caller to show it: `finish_trial` never built
+/// one either, and this no longer does. The source documents under
+/// `.spoolway/routines/` are never touched — a routine is meant to be
+/// queued again, not consumed by being queued once — which is why nothing
+/// is handed to [`open_and_prefix`] to write ids back into.
 /// `task_files` still names each one's real path, for a hook's own
 /// `SPOOLWAY_TASK_FILE` to point at — see [`open_and_prefix`]'s own doc
 /// comment on why that is a different list from the empty `documents`.
-fn finish_routine(
-    repo: &Repo,
-    tasks: &mut [Task],
-    task_files: &[String],
-    base: &str,
-) -> Result<String> {
+fn finish_routine(repo: &Repo, tasks: &mut [Task], task_files: &[String]) -> Result<()> {
     // `interactive: true`, `own_terminal: false` — driven from the queue
     // screen's own routines pane, which already holds the terminal for the
     // whole of `run_screen`; see `open_and_prefix`'s own doc comment.
@@ -5724,18 +5752,7 @@ fn finish_routine(
     for task in tasks.iter() {
         task.save()?;
     }
-
-    let mut msg = String::new();
-    for task in tasks.iter() {
-        msg.push_str(&format!(
-            "queued {} at `{}`\n  {}\n",
-            task.id(),
-            crate::pipeline::QUEUED,
-            task.path.display()
-        ));
-    }
-    msg.push_str(&based_on_note(tasks, base));
-    Ok(msg)
+    Ok(())
 }
 
 /// `enter` over the routines pane's folders: mint every ticked folder's
@@ -5755,8 +5772,8 @@ fn begin_routine_queue(
     }
     let task_files = readable_task_files(&documents);
     match validate_batch(repo, pipelines, Some(base), &documents) {
-        Ok(mut tasks) => match finish_routine(repo, &mut tasks, &task_files, base) {
-            Ok(msg) => after_write(repo, msg),
+        Ok(mut tasks) => match finish_routine(repo, &mut tasks, &task_files) {
+            Ok(()) => after_write(repo),
             Err(err) => SubmitOutcome::Mode(refusal_mode("queue refused", err)),
         },
         Err(err) => SubmitOutcome::Mode(Mode::Outcome(format!("queue refused: {err:#}"))),
@@ -5791,8 +5808,8 @@ fn begin_routine_solo(
     let task_files = readable_task_files(&documents);
 
     match validate_batch(repo, pipelines, Some(base), &documents) {
-        Ok(mut tasks) => match finish_routine(repo, &mut tasks, &task_files, base) {
-            Ok(msg) => after_write(repo, msg),
+        Ok(mut tasks) => match finish_routine(repo, &mut tasks, &task_files) {
+            Ok(()) => after_write(repo),
             Err(err) => SubmitOutcome::Mode(refusal_mode("queue refused", err)),
         },
         Err(err) => SubmitOutcome::Mode(Mode::Outcome(format!("queue refused: {err:#}"))),
@@ -9007,15 +9024,23 @@ mod tests {
 
     /// With a dispatcher already holding the queue's lock, a clean submission
     /// still writes — the task reaches the queue exactly as it would with no
-    /// dispatcher running — but the screen shows the report rather than the
-    /// overview: `confirm_start` is never reached, since starting a second
-    /// dispatcher would only be refused once `commands::dispatch` actually
-    /// ran. Takes a real `Lock::acquire` rather than writing the lock file's
-    /// bytes by hand, so this exercises the same holder check every other
-    /// caller of `Lock::holder` does.
+    /// dispatcher running — but `enter` lands on the "go to the dispatcher"
+    /// draw rather than `confirm_start`'s own overview, since starting a
+    /// second dispatcher would only be refused once `commands::dispatch`
+    /// actually ran. Takes a real `Lock::acquire` rather than writing the
+    /// lock file's bytes by hand, so this exercises the same holder check
+    /// every other caller of `Lock::holder` does.
+    ///
+    /// `Backend::Headless` rather than the fixture's default herdr: headless
+    /// names no workspace at all (`Mux::dispatch_workspace`'s own default),
+    /// so `join_running_dispatcher` has nothing to focus and this passes
+    /// without a real multiplexer to talk to — see
+    /// `pressing_o_with_no_multiplexer_surfaces_the_refusal`'s own doc
+    /// comment for the same reasoning applied to `o`.
     #[test]
-    fn a_dispatcher_already_holding_the_lock_gets_the_report_not_the_offer() {
-        let repo = fixture("gate-clean-locked");
+    fn a_dispatcher_already_holding_the_lock_is_joined_on_enter() {
+        let mut repo = fixture("gate-clean-locked");
+        repo.config.dispatch.backend = crate::config::Backend::Headless;
         write_pending(
             &repo,
             "wire",
@@ -9026,35 +9051,58 @@ mod tests {
         let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false).unwrap();
         let pid = std::process::id();
 
-        let (exit, drawn) = screen_exit(&repo, groups, "\t \r");
+        // `\t \r` selects and submits; the extra `\r` answers the "go to
+        // the dispatcher" draw `after_write` now lands on instead of the
+        // old `Mode::Outcome` report.
+        let (exit, drawn) = screen_exit(&repo, groups, "\t \r\r");
 
-        // The write landed whether or not the overview follows it.
+        // The write landed whether or not the dispatcher-running draw
+        // follows it.
         assert!(repo.queue_dir().join("wire.md").exists());
-        // No `enter` was ever offered to answer, so end of input is the same
-        // dismissal any key gives `Mode::Outcome` — the screen just quits.
         assert_eq!(exit, ScreenExit::Quit);
 
-        let last = last_frame(&drawn);
-        // Anchored on the overview's own footer line rather than its
-        // header: the ordinary browsing footer's own "h show queued  q
-        // quit" already contains "queued  " coincidentally, which made this
-        // check pass whether or not the overview ever drew.
         assert!(
             !drawn.contains("[enter] start a dispatcher"),
-            "the overview must never appear while a dispatcher already holds the lock:\n{drawn}"
-        );
-        let lines: Vec<&str> = last.lines().collect();
-        assert_eq!(
-            lines.last().copied(),
-            Some("press any key to continue"),
-            "{lines:?}"
+            "the ordinary overview must never appear while a dispatcher already holds the lock:\n{drawn}"
         );
         assert!(
-            last.contains(&format!(
-                "a dispatcher is already running (pid {pid}) — it picks these up on its \
-                 next pass"
+            drawn.contains(&format!(
+                "a dispatcher is already running (pid {pid}) — it takes these on its next pass"
             )),
-            "{last}"
+            "{drawn}"
+        );
+        assert!(
+            drawn.contains("[enter] go to the dispatcher   [esc] back"),
+            "{drawn}"
+        );
+    }
+
+    /// `esc` off the "go to the dispatcher" draw is the one path back to
+    /// browsing — the write already landed and stays landed, the same as
+    /// `enter`'s own path; only where the screen goes next differs.
+    #[test]
+    fn esc_off_the_dispatcher_running_draw_returns_to_browsing() {
+        let mut repo = fixture("gate-clean-locked-esc");
+        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        write_pending(
+            &repo,
+            "wire",
+            &document("wire", "group: one\ntouches: [src/wire.rs]\n", BODY),
+        );
+        let groups = listed(&repo);
+
+        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false).unwrap();
+
+        // `\t \r` selects and submits; `\x1b` declines the "go to the
+        // dispatcher" draw, and the trailing `q` quits the browsing screen
+        // it lands back on, rather than relying on end-of-input to do it.
+        let (exit, drawn) = screen_exit(&repo, groups, "\t \r\x1bq");
+
+        assert!(repo.queue_dir().join("wire.md").exists());
+        assert_eq!(exit, ScreenExit::Quit);
+        assert!(
+            drawn.contains("[enter] go to the dispatcher   [esc] back"),
+            "{drawn}"
         );
     }
 
