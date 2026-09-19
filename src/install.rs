@@ -123,8 +123,10 @@ const SKILLS: &[Skill] = &[
     // issue-tracking hooks. One skill rather than several, because a step and
     // the value that runs it (a model, an effort, a timeout, a concurrency)
     // are the same territory at different sizes. It carries no
-    // `disable-model-invocation` either: `spoolway pipeline gen` reaches it
-    // from another procedure. It ships no assets: every format it routes to is
+    // `disable-model-invocation` either — that stayed exempt so `spoolway
+    // pipeline gen` could reach it from another procedure; that command is
+    // gone now, and nothing currently reaches this skill from another
+    // procedure's own turn. It ships no assets: every format it routes to is
     // printed by the binary itself — `spoolway pipeline contract`, `prompt
     // contract`, `config contract`, `override contract`, `template contract`
     // and `hook contract` — fetched at runtime instead of a copy that can
@@ -535,11 +537,13 @@ mod tests {
                     "{name}'s {provider} copy has a frontmatter name that does not match its file"
                 );
                 // Every skill here is human-triggered, except spoolway-tasks
-                // and spoolway-config: both are called from inside another
-                // procedure (spoolway-plan's step 7 and `spoolway pipeline
-                // gen` for spoolway-config),
-                // and `disable-model-invocation: true` would make a skill
-                // unreachable from there.
+                // and spoolway-config: `disable-model-invocation: true` would
+                // make a skill unreachable from inside another procedure, and
+                // spoolway-plan's step 7 still calls into spoolway-tasks that
+                // way. Nothing currently calls into spoolway-config the same
+                // way — that used to be `spoolway pipeline gen`, now
+                // retired — but the exemption stays alongside it rather than
+                // this test deciding a skill's own reachability policy.
                 if matches!(name, "spoolway-tasks" | "spoolway-config") {
                     assert!(
                         !skill_md.contains("disable-model-invocation"),

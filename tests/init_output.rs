@@ -84,10 +84,6 @@ fn assert_scaffold(project: &Project, agent: &str) {
         config.contains(&format!("blocked_agent = \"{agent}\"")),
         "{config}"
     );
-    assert!(
-        config.contains(&format!("pipeline_agent = \"{agent}\"")),
-        "{config}"
-    );
     assert!(config.contains("blocked_model = \"\""), "{config}");
     assert!(config.contains("blocked_effort = \"\""), "{config}");
 

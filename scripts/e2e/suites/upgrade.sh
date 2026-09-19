@@ -265,6 +265,8 @@ has "the value set under the retired [retention] table reached [housekeeping]" \
 lacks "the retired [retention] table itself is gone" "[retention]" .spoolway/config.toml
 lacks "the retired [update] table itself is gone" "[update]" .spoolway/config.toml
 lacks "the retired [calibrate] table itself is gone" "[calibrate]" .spoolway/config.toml
+lacks "the retired [pipeline_gen] table and its header rows are both gone" \
+  "pipeline_gen" .spoolway/config.toml
 lacks "the stale key block's retired \`cleanup\` line is gone, not left alone" \
   "cleanup           true" "$PIPELINE"
 has "the key block now reads the way this binary ships it" \
@@ -281,11 +283,14 @@ works "the 0.1.0 fixture's dead lane-prompts template is swept" \
 
 # ------------------------------------------------------------- 0.2.0: no-op
 #
-# By 0.2.0 the fold had already happened — `[housekeeping]` is the only table
-# there is — and its pipeline key block already reads the way this binary
-# ships it (`git diff v0.2.0..HEAD -- assets/pipelines/default.yml` is
-# empty), so an update over it should carry its `retention_days` forward
-# unchanged rather than migrate or rewrite anything.
+# By 0.2.0 the fold had already happened — `[housekeeping]` is the table
+# `retention_days` already lives under — and its pipeline key block already
+# reads the way this binary ships it (`git diff v0.2.0..HEAD --
+# assets/pipelines/default.yml` is empty), so an update over it should carry
+# its `retention_days` forward unchanged rather than migrate it. The one
+# thing here that is rewritten is `[pipeline_gen]`, retired after 0.3.0 and
+# still written by every fixture: a table dropped from the binary has to
+# leave the file of every release that wrote it, not only the oldest.
 stage 0.2.0
 assert_init_reused_everything 0.2.0
 PIPELINE=".spoolway/pipelines/default.yml"
@@ -295,6 +300,8 @@ must "spoolway sync runs against the 0.2.0 project" "$SPOOLWAY" sync
 
 has "the housekeeping value already in place survives the sync" \
   "retention_days = 45" .spoolway/config.toml
+lacks "the retired [pipeline_gen] table and its header rows are both gone" \
+  "pipeline_gen" .spoolway/config.toml
 byte_for_byte_outside_block "the prose around the already-current block is untouched" \
   "$WORK/0.2.0/before-default.yml" "$PIPELINE"
 
@@ -317,6 +324,9 @@ stage 0.3.0
 assert_init_reused_everything 0.3.0
 
 must "spoolway sync runs against the 0.3.0 project" "$SPOOLWAY" sync
+
+lacks "the retired [pipeline_gen] table and its header rows are both gone" \
+  "pipeline_gen" .spoolway/config.toml
 
 works "the 0.3.0 fixture's dead task-log template is swept" \
   test ! -e .spoolway/templates/task-log.md

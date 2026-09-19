@@ -177,24 +177,6 @@ price_max_age_days = 30
 Archiving a task removes its files under `tracking/`, `commands/` and its session home at
 once. `queue add` cannot name a `depends_on` that was swept out of `archive/`.
 
-## `[pipeline_gen]` — generating a pipeline
-
-```toml
-[pipeline_gen]
-pipeline_agent = "claude"
-pipeline_model = ""
-pipeline_effort = ""
-```
-
-What `spoolway pipeline gen` opens its session as. See
-[`spoolway pipeline gen`](cli-reference.md#spoolway-pipeline-gen---plan-path).
-
-| Key | Default | What it controls |
-|---|---|---|
-| `pipeline_agent` | `claude` | The `[agents.*]` profile the session runs as. |
-| `pipeline_model` | blank | The model it runs. Blank refuses the command. |
-| `pipeline_effort` | blank | The effort passed to that profile. Blank uses the kind's default. |
-
 ## `[watch]` — directories whose own sessions count as this project's spend
 
 ```toml
@@ -449,7 +431,7 @@ These keys still parse in an older `config.toml` and are dropped on the next sav
 | `[sandbox]`, `blocked_on_write`, `blocked_on_overreach` | Nothing. See [What confines a profile](agents.md#what-confines-a-profile). |
 | `[paths]`, `[docs]`, `[plans]` | Fixed locations. See [Runtime state](#runtime-state). |
 | `dispatch.max_launches`, `open_on_escalation`, `open`, `protected_branches`, `notify`, `default_pipeline` | Nothing |
-| `pipeline_gen.pipeline_auto`, `pipeline_loop_default`, `pipeline_local_models` | Nothing |
+| `[pipeline_gen]` | Nothing |
 | `agents.<profile>.model`, `context_window`, `args`, `env`, `session_reuse_uncached` | `model:` on the step, `[models]`, and `models.<glob>.session_reuse_idle` |
 
 ## When the config will not parse

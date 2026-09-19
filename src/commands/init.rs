@@ -373,7 +373,6 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     // that makes the first answer sufficient to understand every agent name
     // written below. The defaults contain this profile by construction.
     config.agents.retain(|name, _| name == profile);
-    config.pipeline_gen.pipeline_agent = profile.to_string();
     config.unattended.blocked_agent = profile.to_string();
     // An unblocker is an agent step too. Leaving both knobs blank avoids
     // silently choosing more for it than init chooses for declared steps.
@@ -690,7 +689,6 @@ mod tests {
         let config = Config::load(&root).unwrap();
         assert_eq!(config.agents.len(), 1);
         assert_eq!(config.agents["claude"].kind, "claude");
-        assert_eq!(config.pipeline_gen.pipeline_agent, "claude");
         assert_eq!(config.unattended.blocked_agent, "claude");
         assert!(config.unattended.blocked_model.is_empty());
 
@@ -801,7 +799,6 @@ mod tests {
         let config = Config::load(&root).unwrap();
         assert_eq!(config.agents.len(), 1);
         assert!(config.agents.contains_key("codex"));
-        assert_eq!(config.pipeline_gen.pipeline_agent, "codex");
         assert_eq!(config.unattended.blocked_agent, "codex");
         assert!(config.unattended.blocked_model.is_empty());
         assert!(config.unattended.blocked_effort.is_empty());

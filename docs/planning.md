@@ -65,7 +65,7 @@ that block; `/spoolway-tasks` reads it instead of the page around it.
 | Reference paths | Point at files and examples. Do not paste prose that will go stale. |
 | Mockups from real output | Draw a panel from a real screenshot or real command output. A panel for something that does not exist yet names the bound it was drawn to. |
 | Exact globs | The `document` step resolves `touches` against every document's `covers`. Vague globs produce stale documentation. |
-| Pipeline per task | A bug wants `bugfix`, a feature wants `default`. `spoolway pipeline show` prints each pipeline's description. If none fits, the skill offers `spoolway pipeline gen`. See [Generating a pipeline](pipelines.md#generating-a-pipeline). |
+| Pipeline per task | A bug wants `bugfix`, a feature wants `default`. `spoolway pipeline show` prints each pipeline's description. |
 | Disjoint, or ordered | Two tasks with overlapping globs need a `depends_on` between them. Two tasks that run side by side are both marked `parallel: true`. |
 
 ## Queueing a plan

@@ -58,10 +58,10 @@ off an existing one:
 - Write the pipeline from the contract's own template, and a prompt for
   every step the project does not already have one for.
 - Every pipeline gets a `description:` — the sentence a reader chooses
-  between pipelines by. Take it from the human's own words, or from the plan
-  `pipeline gen` handed you, verbatim except for the one narrow rewrite this
-  skill ever makes to a human's prose: compressing it to a single sentence
-  when it runs longer, per the exception below.
+  between pipelines by. Take it from the human's own words, verbatim except
+  for the one narrow rewrite this skill ever makes to a human's prose:
+  compressing it to a single sentence when it runs longer, per the exception
+  below.
 - Check it clean: `spoolway pipeline check`, which reads every prompt
   against the steps that run it too.
 
@@ -84,11 +84,6 @@ whole prompt, or any key `spoolway config contract` lists:
 
 - Say what changed: the paths touched, and `spoolway pipeline show` where a
   step moved.
-
-## Started by `spoolway pipeline gen`
-
-Same procedure, the flow-building half. The command hands you a plan path
-to read; nothing else is answered for you.
 
 ## Never
 

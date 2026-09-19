@@ -534,31 +534,6 @@ $ spoolway pipeline list --json
 
 A pipeline with no `description:` carries `"description": null`.
 
-### `spoolway pipeline gen [--plan <path>]`
-
-Open an agent session in a new pane to write a new pipeline. The session runs the
-`[pipeline_gen]` profile and the `spoolway-config` skill. The command itself writes nothing.
-
-```
-$ spoolway pipeline gen --plan ~/.spoolway/myproject/plans/my-plan.html
-
-agent         claude · claude-opus-5 · effort high
-plan          ~/.spoolway/myproject/plans/my-plan.html
-
-opened a pane on this checkout
-prompted `spoolway-config`
-
-Nothing is written yet. Answer it in that pane.
-```
-
-| Flag | Default | What it does |
-|---|---|---|
-| `--plan <PLAN>` | | What the pipeline is for: an issue URL, a page path, a ticket. Passed through as typed |
-
-Refused when `pipeline_gen.pipeline_model` is blank, when `pipeline_gen.pipeline_agent` names
-no profile, or when `dispatch.backend` is `headless`. See
-[`[pipeline_gen]`](configuration.md#pipeline_gen--generating-a-pipeline).
-
 ### `spoolway pipeline override <name> --set <step>.<key>=<value>`
 
 Patch one step's key in the [overrides layer](configuration.md#the-overrides-layer). The
