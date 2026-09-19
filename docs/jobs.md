@@ -66,7 +66,7 @@ pipeline, scope, next firing, last firing, and the documents it queues.
 | `space` | Pause or resume it. |
 | `x` | Delete it, after `y`/`n`. |
 | `r` | Fire it now. |
-| `q` | Quit. |
+| `ctrl-c` | Leave the screen. |
 
 ### The three choices
 
@@ -74,6 +74,7 @@ pipeline, scope, next firing, last firing, and the documents it queues.
 
 1. The routine. This is the same routines browser as the queue screen's `r` pane. `space`
    ticks a folder and `enter` picks it. `space` over a single document picks that document.
+   `o` opens the highlighted document, once the documents pane has focus.
 2. The schedule. The field states the expression in words and shows its next three firings as
    you type. `enter` is refused until the expression parses.
 3. The pipeline. The picker lists every pipeline the repo defines and narrows as you type.

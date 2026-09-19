@@ -152,8 +152,8 @@ Lowercase acts on the row under the `▸` cursor. Uppercase acts on the whole ru
 
 | Key | What it does |
 |---|---|
-| `↑` `↓` | Move the cursor. |
-| `o` | Open the task file in `$VISUAL`, else `$EDITOR`, in a new pane. |
+| `↑` `↓` | Move the cursor. It starts on the first row of the first group and walks every row the board draws, done ones included. |
+| `o` | Open the task file in `$VISUAL`, else `$EDITOR`, in a new pane. Works on a `done` row too. |
 | `r` | Resume a paused or blocked row whose dependencies are done. Same as `spoolway resume <task>`. |
 | `R` | Resume every paused task. Asks first if any of them is at a real gate. |
 | `p` | Pause the row, including a `blocked` one. Asks first if it would interrupt a running agent turn or command. |

@@ -13,7 +13,7 @@ use super::*;
 /// Three, not two: every column already sizes itself to the widest value
 /// among the rows it is drawing, so the only thing that ever made two
 /// columns read as one was the gutter between them.
-pub(super) const GUTTER: &str = "   ";
+pub(crate) const GUTTER: &str = "   ";
 
 /// The table's own left margin — the same one column the masthead, the
 /// ticker, the footer and the key line already use, so the block lines up
@@ -106,11 +106,11 @@ const LOCKUP: [[&str; 5]; 2] = [
     ],
 ];
 
-pub(super) const RESET: &str = "\x1b[0m";
+pub(crate) const RESET: &str = "\x1b[0m";
 
 const BOLD: &str = "\x1b[1m";
 
-pub(super) const DIM: &str = "\x1b[2m";
+pub(crate) const DIM: &str = "\x1b[2m";
 
 const GREEN: &str = "\x1b[32m";
 

@@ -109,7 +109,7 @@ spoolway queue
 
 *The queue screen lists groups on the left and the selected group's tasks on the right.
 Each task names its own pipeline. `enter` queues what is checked and offers to start
-dispatching. `g` gates a task, `p` forks a group into a trial, `s` saves a group as a
+dispatching. `g` gates a task, `t` forks a group into a trial, `s` saves a group as a
 routine, and `r` opens the routines in `.spoolway/routines/`.*
 
 ### 4. Dispatch
@@ -260,7 +260,7 @@ never changed.
 
 ### Trials
 
-A trial answers one question: which pipeline does this task best? Press `p` on a group in the
+A trial answers one question: which pipeline does this task best? Press `t` on a group in the
 queue screen, pick a pipeline per task, and tick any steps to skip. Every task becomes one arm
 under its chosen pipeline, and all arms share one trial id. Compare them with
 `spoolway eval --runs --trial <id>`. An arm never pushes a branch or opens a pull request. When

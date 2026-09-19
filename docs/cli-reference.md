@@ -55,10 +55,9 @@ archive directories. The right pane lists the highlighted group's tasks.
 | `o` | Open the highlighted task's document in your editor |
 | `f` | Filter groups by name, task id and title. `enter` keeps the filter, `esc` clears it |
 | `h` | Show hidden groups: first the queued ones, then the finished ones |
-| `p` | Fork the group into a trial. See [Trials](planning.md#trials) |
+| `t` | Fork the group into a trial. See [Trials](planning.md#trials) |
 | `r` | Switch to the routines pane. See [Routines](planning.md#routines) |
 | `s` | Save the highlighted group into `.spoolway/routines/<name>/` |
-| `q` | Quit |
 
 Queueing deletes the group's pending documents from the pending directory. A sibling task
 already in the queue or the archive is left where it is, and the report names it. A group that
@@ -255,7 +254,6 @@ Open the jobs screen. It is the only place that writes a cron job.
 | `space` | Pause or resume the highlighted job |
 | `x` | Delete the highlighted job, after confirming |
 | `r` | Fire the highlighted job now |
-| `q` | Quit |
 
 See [Jobs](jobs.md).
 

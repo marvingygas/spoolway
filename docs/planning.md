@@ -86,11 +86,11 @@ directory. The right pane lists the highlighted group's tasks and what each wait
 | `g` | Set or clear a gate on the highlighted task. |
 | `o` | Open the highlighted document in your editor. |
 | `f` | Filter the group list. `enter` keeps the filter, `esc` clears it. |
-| `p` | Fork the group as a trial. See [Trials](#trials). |
+| `t` | Fork the group as a trial. See [Trials](#trials). |
 | `r` | Show the routines pane. See [Routines](#routines). |
 | `s` | Save the highlighted group as a routine. |
 | `h` | Show hidden groups, such as ones already queued. |
-| `q` | Quit. |
+| `ctrl-c` | Leave the screen. |
 
 Queueing deletes the group's pending documents from the pending directory. A sibling task
 already in the queue or the archive is left exactly where it is, and the report names it. A
@@ -110,7 +110,7 @@ spoolway group list         # every group with open tasks, and which tasks are o
 
 ### Trials
 
-A trial runs one group under several pipelines to compare them. Press `p` on a group.
+A trial runs one group under several pipelines to compare them. Press `t` on a group.
 
 1. The first screen assigns a pipeline to each task. `←` and `→` cycle through the project's
    pipelines. `enter` continues.
@@ -135,9 +135,10 @@ Press `r` on the queue screen to browse routines.
 | Key | What it does |
 |---|---|
 | `→` / `←` | Open or leave a folder. |
+| `o` | Open the highlighted document in your editor. |
 | `space` | Tick a folder. Over a single document on the right, queue that one task alone. |
 | `enter` | Queue every document under every ticked folder as one batch. |
-| `r` | Return to the pending pane. |
+| `esc` | Return to the pending pane. |
 
 Every queued copy gets a fresh id, so a routine can run again. A `depends_on` on a sibling in
 the same batch is rewritten to the sibling's new id. The saved files are never changed.

@@ -9,13 +9,13 @@ use std::path::{Path, PathBuf};
 use chrono::Local;
 
 use super::queue::{
-    Focus, RoutineNav, handle_routine_key, highlighted_routine_folder, labeled_row, layout,
-    render_routines, two_pane_frame, window,
+    Focus, RoutineNav, handle_routine_key, highlighted_routine_folder, highlighted_routine_task,
+    labeled_row, layout, render_routines, two_pane_frame, window,
 };
 use super::routines::RoutineFolder;
 use super::*;
 use crate::jobs::{self, Job, JobSpec, Scope};
-use crate::screen::{Key, PollableRead, RawStdin, overlay, pad_to, panel, read_key};
+use crate::screen::{Key, PollableRead, RawStdin, key_hint, overlay, pad_to, panel, read_key};
 use crate::task::Task;
 
 /// `spoolway jobs list` — every job across both stores, with when it fires
@@ -359,6 +359,9 @@ pub fn jobs_screen(repo: &Repo, pipelines: &Pipelines, cwd: &Path) -> Result<()>
 
     let mut stdin = RawStdin;
     let mut stdout = std::io::stdout();
+    // Installed before the guard takes the terminal — see `queue_screen`'s
+    // own call for why the order matters.
+    crate::platform::stop::catch_interrupt();
     // Scoped so raw mode is restored before anything else wants the terminal.
     let _term = crate::platform::TermGuard::new();
     run_jobs_screen(
@@ -408,8 +411,9 @@ fn run_jobs_screen(
         draw_jobs(&ctx, &jobs, &state, &mut last, out);
         let Some(key) = jobs_wait_for_key(&ctx, &mut jobs, &mut state, &mut last, input, out)
         else {
-            // No terminal, or a scripted input ran dry: stop the same way `q`
-            // does.
+            // No terminal, a scripted input ran dry, or `ctrl-c` was caught
+            // and noticed by `jobs_wait_for_key`: all three end the screen
+            // the same way.
             break;
         };
 
@@ -436,11 +440,7 @@ fn run_jobs_screen(
                 _ => state.mode = JobMode::List,
             },
 
-            JobMode::List => {
-                if handle_list_key(repo, pipelines, cwd, &mut jobs, &mut state, key)? {
-                    break;
-                }
-            }
+            JobMode::List => handle_list_key(repo, pipelines, cwd, &mut jobs, &mut state, key)?,
 
             JobMode::PickRoutine { draft, nav } => match key {
                 Key::Esc => state.mode = JobMode::List,
@@ -457,6 +457,18 @@ fn run_jobs_screen(
                         draft.routine = rel;
                         state.mode = JobMode::Schedule { draft };
                     }
+                }
+                // `o` over the documents pane: open the highlighted document
+                // in an editor pane, exactly the shape the queue screen's own
+                // routines pane gives it — see
+                // `open_highlighted_job_routine`. Gated the same way: live
+                // only with a document actually under the cursor.
+                Key::Char('o')
+                    if nav.focus == Focus::Tasks
+                        && highlighted_routine_task(&routines, nav).is_some() =>
+                {
+                    let draft = draft.clone();
+                    state.mode = open_highlighted_job_routine(repo, &routines, nav, draft);
                 }
                 _ => {
                     let (mut nav, draft) = (nav.clone(), draft.clone());
@@ -572,11 +584,13 @@ fn clamp_cursor(jobs: &[Job], state: &mut JobsState) {
     state.cursor = state.cursor.min(jobs.len().saturating_sub(1));
 }
 
-/// One key over the resting list. `Ok(true)` means quit.
+/// One key over the resting list.
 ///
 /// The cursor only ever addresses a real job — the `(new)` row belongs to the
 /// walk, not this state — so `e`, `space`, `x` and `r` are gated on the list
 /// not being empty and always act on `jobs[cursor]`. `n` starts the walk.
+/// Quitting is not among these keys any more — `ctrl-c` is the only way out,
+/// caught above `run_jobs_screen` rather than read as a key at all.
 fn handle_list_key(
     repo: &Repo,
     pipelines: &Pipelines,
@@ -584,10 +598,9 @@ fn handle_list_key(
     jobs: &mut Vec<Job>,
     state: &mut JobsState,
     key: Key,
-) -> Result<bool> {
+) -> Result<()> {
     let has_jobs = !jobs.is_empty();
     match key {
-        Key::Char('q') => return Ok(true),
         Key::Up | Key::Char('k') => state.cursor = state.cursor.saturating_sub(1),
         Key::Down | Key::Char('j') => {
             state.cursor = (state.cursor + 1).min(jobs.len().saturating_sub(1));
@@ -647,7 +660,7 @@ fn handle_list_key(
         }
         _ => {}
     }
-    Ok(false)
+    Ok(())
 }
 
 /// `resume`/`pause` for the message the pause toggle prints on failure — the
@@ -745,6 +758,40 @@ fn picked_document(
     relative_routine(&task.path, routines_dir)
 }
 
+/// `o` over the routine picker's own tasks pane: open the highlighted
+/// document in an editor pane, the same shape [`crate::commands::queue`]'s
+/// own `open_highlighted_routine` gives the queue screen's routines pane,
+/// including the same [`JobMode::Outcome`] a backend with no pane to open
+/// one in is surfaced through. Returns to [`JobMode::PickRoutine`] with
+/// `nav` and `draft` exactly as they were rather than [`JobMode::List`],
+/// since this key never leaves the walk the way the queue screen's `o` has
+/// nothing of its own to stay in.
+fn open_highlighted_job_routine(
+    repo: &Repo,
+    routines: &[RoutineFolder],
+    nav: &RoutineNav,
+    draft: Draft,
+) -> JobMode {
+    let Some(task) = highlighted_routine_task(routines, nav) else {
+        return JobMode::PickRoutine {
+            draft,
+            nav: nav.clone(),
+        };
+    };
+    let command = crate::status::editor_command(&task.path);
+    let mux = match crate::mux::backend(repo) {
+        Ok(mux) => mux,
+        Err(err) => return JobMode::Outcome(format!("o: {err:#}")),
+    };
+    match mux.open_command(&repo.root, &format!("{} · edit", task.id), &command) {
+        Ok(()) => JobMode::PickRoutine {
+            draft,
+            nav: nav.clone(),
+        },
+        Err(err) => JobMode::Outcome(format!("o: {err:#}")),
+    }
+}
+
 fn relative_routine(path: &Path, routines_dir: &Path) -> Option<String> {
     Some(
         path.strip_prefix(routines_dir)
@@ -813,6 +860,11 @@ fn draw_jobs(
 /// waiting (see `RawStdin`), and is read straight away instead: blocking on
 /// the line the terminal will deliver is what this loop is for, where
 /// spinning on that answer would never read a key at all.
+///
+/// `stop::asked()` is checked on every slice too, so a caught `ctrl-c` ends
+/// the screen the same way a drained pipe already does — see `queue`'s own
+/// `wait_for_key` for why this is safe to poll rather than needing the
+/// signal handler itself to unwind anything.
 fn jobs_wait_for_key(
     ctx: &Ctx,
     jobs: &mut Vec<Job>,
@@ -822,6 +874,9 @@ fn jobs_wait_for_key(
     out: &mut impl std::io::Write,
 ) -> Option<Key> {
     loop {
+        if crate::platform::stop::asked() {
+            return None;
+        }
         if !cfg!(unix) || input.byte_pending(crate::status::POLL) {
             return read_key(input);
         }
@@ -915,19 +970,37 @@ fn render_jobs(ctx: &Ctx, jobs: &[Job], state: &JobsState) -> Vec<String> {
     frame
 }
 
+/// The keys, under the frame — built by [`key_hint`] rather than a
+/// hand-spelled literal, the same way `queue`'s own `footer` is, so a jobs
+/// line reads exactly the way the panels it shares wording with do. Never
+/// names `↑↓`, which every screen in this project reads the same way
+/// regardless, or `q`, which no mode reads specially at all any more — see
+/// `queue`'s own `footer` for why.
 fn jobs_footer(mode: &JobMode) -> String {
     match mode {
-        JobMode::List => {
-            "  ↑↓ move  n new  e edit  space pause  x delete  r run now  q quit".to_string()
-        }
-        JobMode::PickRoutine { .. } => {
-            "  ↑↓ move  → open  ← up  space select  enter use it  esc cancel".to_string()
-        }
-        JobMode::Schedule { .. } => "  type to edit   enter accept   esc cancel".to_string(),
-        JobMode::PickPipeline { .. } => {
-            "  type to narrow   ↑↓ move   enter choose   esc cancel".to_string()
-        }
-        JobMode::ConfirmDelete(_) => "  y delete   n keep".to_string(),
+        JobMode::List => key_hint(&[
+            ("n", "new"),
+            ("e", "edit"),
+            ("space", "pause"),
+            ("x", "delete"),
+            ("r", "run now"),
+        ]),
+        // Names exactly the keys `run_jobs_screen`'s own `PickRoutine` arm
+        // and `handle_routine_key` read, the same set the queue screen's own
+        // routines pane names — `o` included, gated the same way there.
+        JobMode::PickRoutine { .. } => key_hint(&[
+            ("o", "open task"),
+            ("space", "select"),
+            ("enter", "use it"),
+            ("esc", "cancel"),
+        ]),
+        JobMode::Schedule { .. } => key_hint(&[("enter", "accept"), ("esc", "cancel")]),
+        JobMode::PickPipeline { .. } => key_hint(&[("enter", "choose"), ("esc", "cancel")]),
+        JobMode::ConfirmDelete(_) => key_hint(&[("y", "delete"), ("n", "keep")]),
+        // Never drawn: `render_jobs`'s own `JobMode::Outcome` arm returns its
+        // frame before `jobs_footer` is ever called for it. Kept rather than
+        // dropped so this match stays exhaustive without a wildcard hiding a
+        // mode a later variant might add.
         JobMode::Outcome(_) => "  press any key".to_string(),
     }
 }
@@ -1293,8 +1366,14 @@ mod tests {
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(
                 dir.join(format!("{id}.md")),
+                // The title is quoted: an unquoted `chore(id): text` reads as
+                // a YAML mapping value past its own colon, which used to
+                // leave `read_task` silently parsing nothing — every folder
+                // one own task short — for anything that reads the document
+                // itself rather than just the folder it sits in.
                 format!(
-                    "---\nid: {id}\ntitle: chore({id}): do the {id}\ngroup: demo\n---\n## Goal\n\nDo it.\n"
+                    "---\nid: {id}\ntitle: \"chore({id}): do the {id}\"\ngroup: demo\n---\n\
+                     ## Goal\n\nDo it.\n"
                 ),
             )
             .unwrap();
@@ -1358,11 +1437,31 @@ mod tests {
         assert!(jobs::load(&repo).unwrap().is_empty());
     }
 
+    /// `q` has no arm of its own left in `handle_list_key`: it falls to the
+    /// catch-all and does nothing, the same as any other key the list does
+    /// not recognise. `ctrl-c` is the only way out of the screen now — see
+    /// `queue`'s own `q_does_nothing_while_browsing` for why that half is
+    /// not exercised here.
+    #[test]
+    fn q_does_nothing_over_the_resting_list() {
+        let repo = fixture("jobs-screen-q-inert");
+        seed_routines(&repo);
+
+        // `q` first, then a real walk that writes a job — see
+        // `the_walk_writes_a_job_to_the_user_store_named_after_its_routine`
+        // for what each key after it does. If `q` still quit, none of it
+        // would ever run.
+        drive(&repo, "qn \r0 3 * * 1-5\r\r");
+
+        assert_eq!(jobs::load(&repo).unwrap().len(), 1);
+    }
+
     #[test]
     fn the_schedule_field_refuses_enter_until_the_expression_parses() {
         let repo = fixture("jobs-screen-badexpr");
         seed_routines(&repo);
-        // A broken expression, then enter (refused), then esc, then quit.
+        // A broken expression, then enter (refused), then esc back to the
+        // list, then a trailing key that does nothing before input runs out.
         let drawn = drive(&repo, "n \r99 3 * * *\r\x1bq");
         assert!(jobs::load(&repo).unwrap().is_empty(), "enter was refused");
         assert!(
@@ -1496,6 +1595,33 @@ mod tests {
         );
     }
 
+    /// `jobs_footer`'s own lines, pinned the same way the queue screen pins
+    /// its own (`src/commands/queue.rs`) and the board pins its
+    /// (`src/status/mod.rs`) — the mockup draws both of these, and nothing
+    /// short of the rendered frame proves `key_hint` produced them byte for
+    /// byte rather than some near miss.
+    #[test]
+    fn the_list_and_routine_picker_key_lines_read_as_the_mockup_draws_them() {
+        let repo = fixture("jobs-screen-footer-list");
+        seed_routines(&repo);
+
+        let resting = drive(&repo, "q").to_string();
+        assert!(
+            last_frame(&resting)
+                .contains("[n] new   [e] edit   [space] pause   [x] delete   [r] run now"),
+            "{}",
+            last_frame(&resting)
+        );
+
+        let walking = drive(&repo, "n").to_string();
+        assert!(
+            last_frame(&walking)
+                .contains("[o] open task   [space] select   [enter] use it   [esc] cancel"),
+            "{}",
+            last_frame(&walking)
+        );
+    }
+
     #[test]
     fn enter_saves_the_ticked_folder_under_the_cursor_not_the_first_one() {
         let repo = fixture("jobs-screen-multitick");
@@ -1515,12 +1641,50 @@ mod tests {
         let repo = fixture("jobs-screen-unticked");
         seed_routines(&repo);
         // Tick `nightly` (folder 0), move the cursor down to `weekly` — which
-        // is not ticked — press enter, then esc out and quit.
+        // is not ticked — press enter, then esc back to the list; the
+        // trailing key does nothing before input runs out.
         drive(&repo, "n \x1b[B\r\x1bq");
         assert!(
             jobs::load(&repo).unwrap().is_empty(),
             "enter over an unticked folder must not advance the walk"
         );
+    }
+
+    /// `o` does nothing while the folders pane has focus — a folder has no
+    /// document of its own to open — the same gate the queue screen's own
+    /// routines pane gives it.
+    #[test]
+    fn o_does_nothing_while_the_folders_pane_has_focus_in_the_routine_picker() {
+        let repo = fixture("jobs-screen-open-folders-focus");
+        seed_routines(&repo);
+
+        let drawn = drive(&repo, "no\x1bq");
+
+        assert!(
+            !drawn.contains("press any key to continue"),
+            "`o` with the folders pane focused must never reach `JobMode::Outcome`:\n{drawn}"
+        );
+        assert!(jobs::load(&repo).unwrap().is_empty());
+    }
+
+    /// `o` on a headless run has no pane to open an editor in, in the routine
+    /// picker exactly as it does on the queue screen's own routines pane —
+    /// see `open_highlighted_job_routine`'s own doc comment. The refusal
+    /// surfaces as `JobMode::Outcome`, same as any other; staying on the
+    /// picker rather than falling back to `JobMode::List` is what its `Ok`
+    /// path does once a pane actually opens, not this one.
+    #[test]
+    fn pressing_o_in_the_routine_picker_with_no_multiplexer_surfaces_the_refusal() {
+        let mut repo = fixture("jobs-screen-open-headless");
+        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        seed_routines(&repo);
+
+        // `n` opens the routine picker, `→` focuses the tasks pane on
+        // `nightly`'s own `audit`, `o` tries to open it.
+        let drawn = drive(&repo, "n\x1b[Co");
+
+        let last = last_frame(&drawn);
+        assert!(last.contains("o:"), "{last}");
     }
 
     #[test]

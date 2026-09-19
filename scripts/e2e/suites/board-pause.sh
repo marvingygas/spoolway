@@ -180,9 +180,8 @@ if [ -n "$LANE_PID" ]; then ok "the lane is really mid-turn"
 else bad "the lane is really mid-turn"; fi
 draws "the board draws the run" "mid-turn"
 
-# One `down` puts the cursor on the first row, which is the only row here.
-press $'\x1b[B'
-sleep 2
+# The cursor starts on the first row on its own now — mid-turn is the only
+# row here — so `p` reaches it with no `down` needed first.
 press p
 
 draws "\`p\` over a live lane opens a panel naming the task" "pause mid-turn"
@@ -349,9 +348,9 @@ has "and so does the one that never ran" "id: never-run" "$SPOOLWAY_PROJECT_HOME
 # longer refuses outright — it lists the whole chain of unstarted tasks that
 # reach it through `depends_on` and carries every one of them back to
 # pending together. Restarted fresh, with its own group sorted ahead of
-# every other row's `board`, so the freshly restarted board's empty cursor
-# always lands somewhere in it first — the same trick the blocked-row
-# section below uses for the same reason.
+# every other row's `board`, so the freshly restarted board's own cursor
+# opens on it directly — the same trick the blocked-row section below uses
+# for the same reason.
 #
 # `chain-head` depends on `chain-gate`, a `hang`-mode lane of its own — a
 # dependency cannot cross a group (`queue add` refuses it), so gating
@@ -360,8 +359,10 @@ has "and so does the one that never ran" "id: never-run" "$SPOOLWAY_PROJECT_HOME
 # a fresh group of its own. A live lane that never returns is: with nothing
 # to make it `Done`, `chain-head` never becomes ready, and is still
 # genuinely `queued` — not already off running its own pipeline — when `u`
-# is pressed. `chain-gate` sorts above it in the group, so it takes two
-# `down`s rather than one to reach the row `u` is this section's own.
+# is pressed. The cursor already opens on `chain-gate`, the first row of its
+# own fresh group; `chain-gate` sorts above `chain-head` within it, so it
+# takes one `down` rather than two to reach the row `u` is this section's
+# own.
 board_stop
 mkdir -p "$CTL"
 echo hang > "$CTL/chain-gate"
@@ -381,8 +382,6 @@ if [ -n "$CHAIN_GATE_PID" ]; then ok "the gate lane is really mid-turn"
 else bad "the gate lane is really mid-turn"; fi
 draws "the board draws the chain" "chain-tail"
 
-press $'\x1b[B'
-sleep 2
 press $'\x1b[B'
 sleep 2
 press u
@@ -414,9 +413,9 @@ has "and so does the dependent's" "id: chain-tail" \
 # with `blocked_from` set the way a real block leaves it; `routines.sh` and
 # `trials.sh` write straight into the live queue directory with `task_doc`
 # the same way, for a fixture no dispatcher needs to walk there itself. Its
-# group sorts ahead of every other row's `board`, so a single
-# `down` from a freshly restarted board's empty cursor always lands on it,
-# whatever else in this run is still parked.
+# group sorts ahead of every other row's `board`, so the freshly restarted
+# board's own cursor opens directly on it, whatever else in this run is
+# still parked — no `down` needed to reach it.
 #
 # The unblocker is pointed at the `pi` profile rather than the shipped
 # `claude` one: the `hang` ctl mode this suite relies on everywhere else is
@@ -439,8 +438,6 @@ if [ -n "$STUCK_PID" ]; then ok "the unblocker is really mid-turn on the blocked
 else bad "the unblocker is really mid-turn on the blocked row"; fi
 draws "the board draws the staffed blocked row" "stuck"
 
-press $'\x1b[B'
-sleep 2
 press p
 
 draws "\`p\` over the blocked row opens a panel naming the task" "pause stuck"

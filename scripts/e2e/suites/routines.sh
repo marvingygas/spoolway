@@ -82,9 +82,10 @@ works "a solo pick under a nested folder reaches the queue too" \
 
 # A pending group, saved as a routine: `s` opens the panel over `release`,
 # already named after the group; `enter` accepts that name and copies its
-# one document into `.spoolway/routines/release/`, unchanged; `q` quits.
+# one document into `.spoolway/routines/release/`, unchanged; the screen
+# then ends as the pipe drains.
 pending_doc release-notes "$BODY" "group: release"
-printf 's\rq' | "$SPOOLWAY" queue >/dev/null 2>&1
+printf 's\r' | "$SPOOLWAY" queue >/dev/null 2>&1
 
 works "the saved routine landed in the checkout" \
   test -f .spoolway/routines/release/release-notes.md
@@ -101,14 +102,11 @@ has "and its own group" "group: release" \
 # by name, since `h` alone would still need this to be told apart from
 # `nightly` and `maintenance`, already queued too.
 #
-# The query is `archived-` rather than the whole group name, and that is not
-# cosmetic: `p` and `s` stay live while the filter box has focus — see
-# `run_screen`'s own `Mode::Filter` arm — so either letter inside a query
-# fires its action mid-word instead of narrowing. Typing the full
-# `archived-reuse` used to open the save panel on the `s` of `reuse`, leaving
-# the trailing `e` to land in the routine's *name* and saving the folder as
-# `archived-reusee`. `archived-` holds neither letter and still matches only
-# this group. `trials.sh` names its own fixtures around the same constraint.
+# The query is `archived-` rather than the whole group name — narrower than
+# it needs to be, but it still matches only this group, and every letter of
+# it reaches the filter as ordinary text: `s` no longer fires the save panel
+# mid-query the way it once did, so nothing here has to dodge a letter to
+# keep from triggering an action early.
 task_doc "$SPOOLWAY_PROJECT_HOME/queue/archived-reuse.md" archived-reuse "$BODY" \
   "group: archived-reuse" \
   "stage: done" \
@@ -125,7 +123,7 @@ task_doc "$SPOOLWAY_PROJECT_HOME/queue/archived-reuse.md" archived-reuse "$BODY"
   "epic: https://example.invalid/epic/9" \
   "ticket: https://example.invalid/ticket/9"
 
-printf 'farchived-\rs\rq' | "$SPOOLWAY" queue >/dev/null 2>&1
+printf 'farchived-\rs\r' | "$SPOOLWAY" queue >/dev/null 2>&1
 
 works "a document an earlier run already stamped still saves as a routine" \
   test -f .spoolway/routines/archived-reuse/archived-reuse.md

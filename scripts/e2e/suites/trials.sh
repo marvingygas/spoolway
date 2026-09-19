@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# The queue screen's `p` picker, driven end to end — the one path no unit
+# The queue screen's `t` picker, driven end to end — the one path no unit
 # test can drive, since `run_screen` is exercised headlessly in Rust
 # already, but never as the whole binary reading real keystrokes off a real
-# pipe. `p` forks a whole group: one pipeline assigned per task on the first
+# pipe. `t` forks a whole group: one pipeline assigned per task on the first
 # popup, one skip set per task on the second, one new arm per source task
 # under one freshly minted trial id.
 #
@@ -33,7 +33,7 @@ new_repo "$LIVE/proj"
 configure_project plan/live
 
 # Two pending documents sharing one group, `beta` depending on `alpha` — the
-# unit `p` now forks whole. `spoolway init` writes exactly the two built-in
+# unit `t` now forks whole. `spoolway init` writes exactly the two built-in
 # pipelines, `default` and `bugfix`, under `.spoolway/pipelines/`, and
 # `trial_pipeline_names` walks them in the same alphabetical order
 # (`bugfix`, `default`) the assign screen's `←`/`→` cycles through.
@@ -47,8 +47,8 @@ pending_doc beta "$BODY" "group: audits" "touches: [src/main.rs]" "pipeline:" \
   "depends_on: [alpha]"
 
 # `Tab` focuses the tasks pane on a task inside the group (`alpha`, first in
-# reading order since it is the dependency), proving `p` reaches the whole
-# group from a selected task too, not only from the groups pane. `p` opens
+# reading order since it is the dependency), proving `t` reaches the whole
+# group from a selected task too, not only from the groups pane. `t` opens
 # the assign-pipelines popup with every task unassigned — there is no
 # project default to seed it with any more, so `enter` on this screen
 # refuses to advance until every task has one. `←` on `alpha` lands on
@@ -61,7 +61,7 @@ pending_doc beta "$BODY" "group: audits" "touches: [src/main.rs]" "pipeline:" \
 # `alpha`'s own checkboxes onto `beta`'s third one, `document`, and `space`
 # ticks that too. `enter` mints and writes both arms; `n` declines the
 # dispatcher offer.
-printf '\tp\x1b[Dj\x1b[C\x1b[C\rj jjjjjjjjj \rn' | "$SPOOLWAY" queue >/dev/null 2>&1
+printf '\tt\x1b[Dj\x1b[C\x1b[C\rj jjjjjjjjj \rn' | "$SPOOLWAY" queue >/dev/null 2>&1
 
 works "the alpha arm reaches the queue" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/alpha-1.md"
@@ -113,12 +113,10 @@ works "both source documents are left exactly where they were" \
 # document lives in the queue directory, carrying every key spoolway stamped
 # on that run — `stage:` chief among them, which `parse_submission` refuses
 # outright. `list_groups` reads such a group's task straight out of `queue/`,
-# verbatim, so forking it is `p` over exactly the shape a task queued or
-# archived earlier has. Named clear of `p` and `s` on purpose: both are
-# reserved actions the instant a filter is open, so either letter inside the
-# query itself would fire the action early rather than narrow the list —
-# `f` narrows to it by name, `p` reaches it straight from the groups pane,
-# with no `Tab` needed. Two `→`s land it on `default` — one press to
+# verbatim, so forking it is `t` over exactly the shape a task queued or
+# archived earlier has. `f` narrows to it by name, `enter` leaves the search
+# box keeping the query, and `t` then reaches it straight from the groups
+# pane, with no `Tab` needed. Two `→`s land it on `default` — one press to
 # `bugfix`, the pipeline that sorts first with nothing assigned yet, a
 # second past it — since `enter` refuses to advance with it still
 # unassigned; `enter` then advances past the assign screen, and `enter`
@@ -135,7 +133,7 @@ task_doc "$SPOOLWAY_PROJECT_HOME/queue/old-run.md" old-run "$BODY" \
   "attempts: 2" \
   "pipeline:"
 
-printf 'fold-run\rp\x1b[C\x1b[C\r\rn' | "$SPOOLWAY" queue >/dev/null 2>&1
+printf 'fold-run\rt\x1b[C\x1b[C\r\rn' | "$SPOOLWAY" queue >/dev/null 2>&1
 
 works "the reset lets a stamped document reach \`finish_trial\` at all" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/old-run-1.md"
@@ -147,7 +145,7 @@ lacks "nor the run id the earlier run minted" "run: r00000000000000af" \
   "$SPOOLWAY_PROJECT_HOME/queue/old-run-1.md"
 
 # The source document goes now that the arm is forked off it, and it has to:
-# `p` leaves a source exactly where it found it, and this one was written
+# `t` leaves a source exactly where it found it, and this one was written
 # straight into `queue/` with no `pipeline:` on purpose. A routeless document
 # in the live queue is precisely what `check_task_routes` refuses a whole
 # start over — correctly — so leaving it here would refuse every dispatcher
@@ -199,7 +197,7 @@ must "and a project key" "$SPOOLWAY" config set issue_tracking.project_key acme/
 # waiting on or asserting over a third arm.
 #
 # One ordinary task beside them, queued the everyday way and never touched by
-# `p` — same pipeline, same shape of work, so the only thing that can explain
+# `t` — same pipeline, same shape of work, so the only thing that can explain
 # a difference in what happens to it and to `alpha-1`/`beta-1` is trial mode
 # itself.
 TRIAL_ID=$(grep '^trial:' "$SPOOLWAY_PROJECT_HOME/queue/alpha-1.md" | awk '{print $2}')
@@ -274,13 +272,12 @@ works "both arms' usage rows are still in the ledger, correlated by trial id" \
 # now, mid-flight, with nothing waiting on them to finish.
 #
 # A trial of its own group, so the discard below has nothing in common with
-# the two arms already settled. `p`'s minimal form: `f` narrows to the group
-# by name, `p` opens the picker, two `enter`s take both screens' defaults,
-# `n` declines the dispatcher offer. The group is named clear of `p` and `s`
-# for the reason the `old-run` block above gives: either letter inside the
-# query fires its own action rather than narrowing.
+# the two arms already settled. `t`'s minimal form: `f` narrows to the group
+# by name, `enter` leaves the search box keeping the query, `t` opens the
+# picker, two `enter`s take both screens' defaults, `n` declines the
+# dispatcher offer.
 pending_doc oneoff "$BODY" "group: oneoff" "touches: [notes/oneoff.md]"
-printf 'foneoff\rp\r\rn' | "$SPOOLWAY" queue >/dev/null 2>&1
+printf 'foneoff\rt\r\rn' | "$SPOOLWAY" queue >/dev/null 2>&1
 
 works "the one-task trial's arm reaches the queue" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/oneoff-1.md"
