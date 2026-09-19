@@ -32,11 +32,15 @@ mod view;
 pub(crate) use view::human_secs;
 pub use view::{banner, plain_table};
 
+// Re-exported, not just imported: `screen::key_hint` reads the same dim and
+// gutter the board paints its own key line with, rather than spelling either
+// out a second time — see `screen::key_hint`.
 use view::{
-    AMBER, DIM, GUTTER, RESET, RecentEvent, Style, Verdict, clamp_rows, footer, group_totals,
-    masthead, pane_height, pane_width, pause_confirm_panel, resume_confirm_panel, spool_frame,
-    strip_ansi, table, ticker, unqueue_all_confirm_panel, unqueue_confirm_panel,
+    AMBER, RecentEvent, Style, Verdict, clamp_rows, footer, group_totals, masthead, pane_height,
+    pane_width, pause_confirm_panel, resume_confirm_panel, spool_frame, strip_ansi, table, ticker,
+    unqueue_all_confirm_panel, unqueue_confirm_panel,
 };
+pub(crate) use view::{DIM, GUTTER, RESET};
 
 /// How often the board re-reads the state while it waits for the next pass.
 /// File reads and one multiplexer call — cheap enough that nothing needs to be

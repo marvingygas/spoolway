@@ -202,6 +202,34 @@ pub(crate) fn pad_to(s: &str, width: usize) -> String {
     }
 }
 
+/// The key line every full-screen view draws at its own foot: an ordered
+/// list of key/label pairs, dimmed the way the board dims its own.
+///
+/// The board at `src/status/mod.rs` spelled this first; the queue screen and
+/// the jobs screen each grew a second spelling of it as a string literal.
+/// This is the one place left to build it, reading [`crate::status::DIM`]
+/// and [`crate::status::GUTTER`] rather than writing either out again, so a
+/// screen that switches over stops deciding its own spelling.
+///
+/// No caller yet: the board, the queue screen and the jobs screen keep their
+/// own literals until the tasks that follow move them over — this one only
+/// adds the builder, proved by the unit test below.
+#[allow(dead_code)]
+pub(crate) fn key_hint(pairs: &[(&str, &str)]) -> String {
+    let mut line = String::new();
+    for (i, (key, label)) in pairs.iter().enumerate() {
+        if i > 0 {
+            line.push_str(crate::status::GUTTER);
+        }
+        line.push_str(&format!("[{key}] {label}"));
+    }
+    format!(
+        "{dim} {line}{reset}",
+        dim = crate::status::DIM,
+        reset = crate::status::RESET
+    )
+}
+
 /// A framed box — a title and whatever lines fill it — to be drawn over a
 /// screen's own frame.
 ///
@@ -268,6 +296,17 @@ pub(crate) fn overlay(frame: &mut [String], panel: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Pins the exact bytes the board's own key line already draws — see
+    // `src/status/mod.rs`'s hint — so a screen that switches over to
+    // `key_hint` gets that spelling byte for byte, not a close approximation.
+    #[test]
+    fn key_hint_wraps_a_leading_space_and_the_pairs_in_dim_and_reset() {
+        assert_eq!(
+            key_hint(&[("o", "open"), ("r", "routines")]),
+            "\x1b[2m [o] open   [r] routines\x1b[0m"
+        );
+    }
 
     /// A real OS pipe, so a test can control exactly when the reading end
     /// sees a byte — the one thing a `Cursor` can never simulate, since its
