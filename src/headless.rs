@@ -56,6 +56,18 @@ use crate::mux::{
 /// see [`crate::repo::Repo::headless_dir`].
 pub(crate) const LANE_DIR: &str = "headless";
 
+/// The environment variable that has to be set for `spoolway dispatch` to
+/// run this backend at all — see `commands::dispatch::check_dispatcher_visible`.
+///
+/// This backend runs no multiplexer, so nothing draws the board anywhere a
+/// person could see it; every end-to-end suite needs exactly that, since CI
+/// has no multiplexer to run herdr against, but a project config edited onto
+/// `headless` by mistake would otherwise start a run just as invisible as
+/// one begun outside a herdr pane. `fixture.sh` and `scaffold.sh` export
+/// this beside `dispatch.backend = "headless"`, which is the harness saying
+/// it means it.
+pub(crate) const TEST_BACKEND_ENV: &str = "SPOOLWAY_TEST_BACKEND";
+
 /// Marks a workspace that owns the checkout under it, and may therefore have it
 /// removed. The other kind borrows somebody else's checkout — a plan closeout
 /// running in place — and removing that would take a person's own worktree.

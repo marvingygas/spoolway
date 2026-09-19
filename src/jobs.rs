@@ -357,7 +357,7 @@ fn write_state(repo: &Repo, state: &State) -> Result<()> {
 /// Fire every enabled job whose expression matches the current local minute,
 /// recording the minute in machine home. Called at the top of a dispatcher
 /// pass, before it reads the queue, so a job's freshly queued documents are
-/// dispatched by the same pass. The caller skips this entirely on a dry run.
+/// dispatched by the same pass.
 ///
 /// Trouble with one job goes to `problems` and the rest still run. A job
 /// that fires, and one skipped because its previous run is still in the

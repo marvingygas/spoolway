@@ -112,25 +112,77 @@ task_body "$BODY"
 task_doc "$LIVE/gate.md" gate "$BODY" "group: live" "touches: [notes/gate.md]"
 must "a task to dispatch against" "$SPOOLWAY" queue add --from "$LIVE/gate.md"
 
+# How each case below runs its dispatch, and why it is no longer a one-liner.
+#
+# `spoolway dispatch --dry-run` used to be what made each of these a single
+# piped pass that printed the gate and stopped. The flag is gone, and there
+# is no early exit left anywhere between the three gates and
+# `Lock::acquire` — anything that reaches those lines goes on to hold the
+# lock and stay resident. So the only way left to ask a gate what it does
+# with no tty is to ask a real run: started in its own session with neither
+# stream a terminal, watched until its own log shows it past all three gates
+# and into the pass loop, then stopped along with every lane it launched.
+#
+# One run answers every question in its phase, which is why each phase here
+# captures once and asserts against that capture several times — three real
+# dispatches rather than the seven throwaway ones this file used to do.
+#
+# `--plain` is deliberate and is not an exemption from anything: the gates
+# and the pane check both sit ahead of it. It keeps the run a log instead of
+# the redrawing board, which is the only form a captured file can be read
+# back from.
+GATE_LOG="$LIVE/gate-run.log"
+GATE_PID="$LIVE/gate-run.pid"
+# Printed by the pass loop, so it is only ever reached past the lock — which
+# makes it both the signal to stop watching and the proof that nothing on
+# the way there stopped to ask.
+PAST_THE_GATES="next pass in"
+
+gate_run() {
+  : > "$GATE_LOG"
+  rm -f "$GATE_PID"
+  # Its own session, so one signal takes the dispatcher and its lanes
+  # together — the same shape as `dispatcher_start`, and for the same
+  # reason. `setsid` may or may not fork, so the group leader `exec`s the
+  # binary over itself after writing its own pid.
+  setsid bash -c 'echo $$ > "$2"; exec "$1" dispatch --plain --interval 1s' \
+    _ "$SPOOLWAY" "$GATE_PID" >"$GATE_LOG" 2>&1 &
+  disown
+  poll_until 10 test -s "$GATE_PID"
+  wait_for_text 60 "$GATE_LOG" "$PAST_THE_GATES"
+  local pid; pid=$(cat "$GATE_PID" 2>/dev/null)
+  [ -n "$pid" ] || return 0
+  kill -TERM -- "-$pid" 2>/dev/null
+  poll_while 5 kill -0 -- "-$pid"
+  kill -KILL -- "-$pid" 2>/dev/null
+  return 0
+}
+
 # The regression this guards: `overrides_gate`'s own `TermGuard` used to be
 # taken unconditionally, so a piped dispatch printed a hide/show-cursor
 # escape as its first bytes even with no layer at all. With nothing
 # overridden yet, this run must be byte-for-byte silent about the cursor.
-silent_about "a piped dispatch with no layer never touches the cursor" \
-  $'\x1b' \
-  "$SPOOLWAY" dispatch --dry-run
+#
+# It has to be a run that actually reaches `overrides_gate` to prove that,
+# which is the whole reason for the shape above: clap's own error text for a
+# flag that no longer exists contains no escape either, so a refused
+# invocation would report `ok` here having asked nothing.
+gate_run
+lacks "a piped dispatch with no layer never touches the cursor" \
+  $'\x1b' "$GATE_LOG"
+has "and that run really did get past the gate, rather than never reaching it" \
+  "$PAST_THE_GATES" "$GATE_LOG"
 
 must "forking a knob again, for the gate" \
   "$SPOOLWAY" pipeline override default --set implement.model=fake-opus
 
-says "dispatch prints the layer's notice with no tty to ask" \
-  "overrides are active for this project" \
-  "$SPOOLWAY" dispatch --dry-run
-says "naming the pipeline it touches" \
-  "pipelines/default.yml" \
-  "$SPOOLWAY" dispatch --dry-run
-works "and proceeds without anybody there to answer" \
-  timeout 10 "$SPOOLWAY" dispatch --dry-run
+gate_run
+has "dispatch prints the layer's notice with no tty to ask" \
+  "overrides are active for this project" "$GATE_LOG"
+has "naming the pipeline it touches" \
+  "pipelines/default.yml" "$GATE_LOG"
+has "and proceeds without anybody there to answer" \
+  "$PAST_THE_GATES" "$GATE_LOG"
 
 # ------------------------------------------------- the warnings screen, no tty
 # The gate task `warnings-screen` adds sits right beside `overrides_gate`
@@ -147,17 +199,24 @@ works "and proceeds without anybody there to answer" \
 must "unattended, with neither ceiling set — the mockup's own case" \
   "$SPOOLWAY" config set unattended.enabled true
 
-says "dispatch prints the warnings screen's own heading with no tty to ask" \
-  "before this run starts" \
-  "$SPOOLWAY" dispatch --dry-run
-says "and the unattended block the mockup draws" \
-  "no unattended.max_output_tokens is set" \
-  "$SPOOLWAY" dispatch --dry-run
-works "and proceeds without anybody there to answer, same as the overrides gate beside it" \
-  timeout 10 "$SPOOLWAY" dispatch --dry-run
+gate_run
+has "dispatch prints the warnings screen's own heading with no tty to ask" \
+  "before this run starts" "$GATE_LOG"
+has "and the unattended block the mockup draws" \
+  "no unattended.max_output_tokens is set" "$GATE_LOG"
+has "and proceeds without anybody there to answer, same as the overrides gate beside it" \
+  "$PAST_THE_GATES" "$GATE_LOG"
 
 must "unattended off again, so nothing later in this file inherits it" \
   "$SPOOLWAY" config set unattended.enabled false
+
+# Taken back out rather than left behind: the three runs above each started
+# a real lane on it and were stopped mid-turn, so it is sitting on
+# `implement` with a worktree of its own, and nothing below this line is
+# about it. `--force` because of exactly that — a plain `unqueue` refuses a
+# task that has left `queued`, and tearing the checkout down is the point.
+must "the dispatched-against task is taken back out" \
+  "$SPOOLWAY" queue unqueue gate --force
 
 # ------------------------------------------------- the four new contracts
 # Each one is a unit-tested render in src/commands/{config,override,template,

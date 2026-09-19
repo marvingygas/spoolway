@@ -114,6 +114,7 @@ routine, and `r` opens the routines in `.spoolway/routines/`.*
 ### 4. Dispatch
 
 ```
+herdr
 spoolway dispatch      # watch the board, and step in only where you are needed
 ```
 

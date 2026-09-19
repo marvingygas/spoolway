@@ -460,7 +460,7 @@ fn queue_unqueue_forced(
     }
 
     let mux_ref = mux.as_ref();
-    let mut dispatcher = crate::dispatch::Dispatcher::new(repo, pipelines, mux_ref, false);
+    let mut dispatcher = crate::dispatch::Dispatcher::new(repo, pipelines, mux_ref);
     let mut report = crate::dispatch::Report::default();
     let borrowed = task.front.borrowed;
     dispatcher.tear_down_checkout(&mut task, &mut report);

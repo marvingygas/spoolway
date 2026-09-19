@@ -462,6 +462,17 @@ say "checking what was installed"
 spoolway pipeline check
 spoolway doctor || true
 
+# `spoolway dispatch` refuses `backend = headless` outright unless this is
+# set — the backend draws nowhere a person can see, so only a harness with no
+# multiplexer to run herdr against may run it. `--headless` is exactly that
+# case here, so step 3 below exports it alongside `SPOOLWAY_GH`; an ordinary
+# herdr scaffold needs no such export and gets none.
+EXPORTS="export SPOOLWAY_GH=\"$FORGE/bin/gh\"  (so \`handover\`'s \`spoolway stack\` finds the local forge)"
+if [ "$HEADLESS" = 1 ]; then
+  EXPORTS="$EXPORTS
+     export SPOOLWAY_TEST_BACKEND=1"
+fi
+
 cat <<EOF
 
 Ready: $DIR (on $BRANCH)
@@ -472,8 +483,8 @@ Ready: $DIR (on $BRANCH)
 
   1. cd $DIR
   2. $HERE/queue-plan.sh $PLAN_FILE       (or: spoolway queue, to queue it from the screen)
-  3. export SPOOLWAY_GH="$FORGE/bin/gh"  (so \`handover\`'s \`spoolway stack\` finds the local forge)
-  4. spoolway dispatch
+  3. $EXPORTS
+  4. spoolway dispatch$([ "$HEADLESS" = 1 ] && echo "" || echo "  (from inside a herdr pane — it refuses anywhere else)")
   5. watch the panes; read observations.md as it fills
   6. $HERE/scaffold.sh --plan $PLAN --clean
 

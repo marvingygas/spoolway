@@ -195,6 +195,18 @@ pub trait Mux {
     /// Why it is not, phrased as the thing to go and do about it.
     fn unavailable(&self) -> String;
 
+    /// Is this process running in a pane the backend itself would recognise,
+    /// right now?
+    ///
+    /// Used only by `commands::dispatch`'s own pane gate, which refuses to
+    /// start a run this answers `false` for: a board with nowhere to draw is
+    /// a run nobody can see. `true` by default — the right answer for
+    /// headless, which has no pane concept at all and is gated on its own
+    /// test marker instead, never on this.
+    fn in_own_pane(&self) -> bool {
+        true
+    }
+
     /// Does a lane that is waiting on a person keep a *process* alive while it
     /// waits?
     ///
@@ -895,6 +907,20 @@ impl Herdr {
         Ok(path)
     }
 
+    /// Whether this process is running in a pane at all, right now.
+    ///
+    /// Asked of herdr rather than read out of `HERDR_PANE_ID`, because the
+    /// environment a pane's shell was started with is fixed at that moment,
+    /// and herdr's own bookkeeping is what stays current if a pane is ever
+    /// moved elsewhere.
+    ///
+    /// `false` when there is no pane to speak of: `dispatch` run from an
+    /// ordinary terminal that can still reach the server — the case
+    /// `commands::dispatch`'s own pane gate refuses on.
+    fn own_pane(&self) -> bool {
+        self.call::<serde_json::Value>(&["pane", "current"]).is_ok()
+    }
+
     /// git, in the repository this backend was built on.
     fn git(&self, args: &[&str]) -> Result<String> {
         run(&self.cwd, "git", args)
@@ -1406,13 +1432,16 @@ impl Mux for Herdr {
 
     fn unavailable(&self) -> String {
         "no herdr server is reachable — every lane runs in a pane, so start herdr first \
-         (`herdr`) and run this from inside it. With no multiplexer at all, set \
-         `dispatch.backend = \"headless\"`."
+         (`herdr`) and run this from inside it."
             .to_string()
     }
 
     fn resident_while_waiting(&self) -> bool {
         true
+    }
+
+    fn in_own_pane(&self) -> bool {
+        self.own_pane()
     }
 
     fn dispatch_workspace(&self, _root: &Path, create: bool) -> Result<Option<String>> {

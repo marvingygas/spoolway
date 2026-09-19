@@ -797,18 +797,15 @@ must "a pipeline that opens on a command step" \
   .spoolway/pipelines/default.yml
 works "a pipeline whose entry is a command step checks out" "$SPOOLWAY" pipeline check
 
-# Said with nothing running, so the only thing that could move the task is the
-# dry run itself — which may not.
-dispatcher_stop
+# `--dry-run` used to prove this position works with a throwaway pass that
+# said what it would start and wrote nothing — see `run.sh`'s own note on its
+# removal. The `records` call below already starts a real dispatcher (or
+# restarts the stale one this suite's earlier pipeline edit left running,
+# via its own config-stamp check) and catches the command in flight, which is
+# the stronger, real-pass version of the same claim: nothing here was fabricated
+# by a dry run.
 task_doc "$LIVE/opener.md" opener "$BODY" "group: live" "touches: [notes/opener.md]"
 must "a task queued on it" "$SPOOLWAY" queue add --from "$LIVE/opener.md"
-says "a dry run says it would start the entry command step" "would start \`prime\`" \
-  "$SPOOLWAY" dispatch --dry-run
-if [ "$(stage_of opener)" = queued ]; then
-  ok "and wrote nothing: the task is where it was"
-else
-  bad "and wrote nothing: the task is where it was (at \`$(stage_of opener)\`)"
-fi
 
 # Caught in flight, ahead of the archive step that reclaims this log.
 records "the entry command ran, before any lane existed" "primed opener" \
@@ -839,14 +836,15 @@ fi
 # dispatcher and left it running, and a `dispatch` that finds the lock held
 # does not refuse — it draws the read-only board instead, polling until
 # somebody stops it. That branch sits *above* the routing guard in `run`, so
-# with the lock held this dry run never reaches the refusal under test and
+# with the lock held this call never reaches the refusal under test and
 # never returns either; the suite hangs until the job's own timeout kills it
-# rather than failing on the line that is wrong. The dry run in the scenario
-# above only worked because it had its own `dispatcher_stop` in front of it.
+# rather than failing on the line that is wrong. No `--dry-run` needed to keep
+# this call to one pass that writes nothing: `check_task_routes` bails out
+# ahead of the lock and every write, real pass or not.
 dispatcher_stop
 task_doc "$SPOOLWAY_PROJECT_HOME/queue/routeless.md" routeless "$BODY" \
   "stage: queued" "group: live" "touches: [notes/routeless.md]" "pipeline:"
-OUT=$("$SPOOLWAY" dispatch --dry-run 2>&1)
+OUT=$("$SPOOLWAY" dispatch 2>&1)
 STATUS=$?
 if [ "$STATUS" -ne 0 ]; then ok "dispatch refuses the whole start over a routeless task"
 else bad "dispatch refuses the whole start over a routeless task"; fi
@@ -1413,6 +1411,74 @@ PATH="$HERDRBIN:$PATH"; export PATH
 must "the herdr backend" "$SPOOLWAY" config set dispatch.backend herdr
 must "herdr gives each task a workspace" "$SPOOLWAY" config set dispatch.herdr_mode split
 
+# The pane gate itself, proven end to end rather than only by the unit tests
+# in src/commands/dispatch.rs — those already know the answer they are
+# asking `Mux::in_own_pane` for; this asks the double for real. Stopped
+# first: a resident dispatcher left running from the headless section above
+# would find its own lock held and draw the read-only board instead of
+# refusing, the same hazard the routeless-task case earlier in this file
+# guards against. `HERDR_STUB_NO_PANE` is this one call's own — every other
+# `dispatch` in this suite runs without it, and the double answers "there is
+# a pane" by default for exactly that reason.
+dispatcher_stop
+task_doc "$LIVE/paneless.md" paneless "$BODY" "group: live" "touches: [notes/paneless.md]"
+must "a task queued ahead of the pane gate" "$SPOOLWAY" queue add --from "$LIVE/paneless.md"
+# The rest of what the refusal promises — no repo lock taken, nothing written
+# to the task file — read as "these two files are byte for byte what they
+# were", which is stronger than the stage line alone and survives a lock file
+# left behind by the `dispatcher_stop` above. `Lock::acquire` rewrites
+# `dispatch.pid` with the run's own pid, so a gate that let the run through
+# could not leave it untouched.
+PANE_LOCK_BEFORE="$LIVE/pane-lock.before"
+PANE_DOC_BEFORE="$LIVE/pane-doc.before"
+cp "$SPOOLWAY_PROJECT_HOME/dispatch.pid" "$PANE_LOCK_BEFORE" 2>/dev/null || : > "$PANE_LOCK_BEFORE"
+cp "$SPOOLWAY_PROJECT_HOME/queue/paneless.md" "$PANE_DOC_BEFORE"
+OUT=$(HERDR_STUB_NO_PANE=1 "$SPOOLWAY" dispatch 2>&1)
+STATUS=$?
+if [ "$STATUS" -ne 0 ]; then ok "dispatch refuses outside a herdr pane, herdr backend included"
+else bad "dispatch refuses outside a herdr pane, herdr backend included"; fi
+if grep -qF "a dispatcher has to be visible, and this is not a herdr pane." <<<"$OUT"; then
+  ok "and names why"
+else bad "and names why"; sed 's/^/        /' <<<"$OUT"; fi
+if grep -qF "herdr" <<<"$OUT" && grep -qF "spoolway dispatch" <<<"$OUT"; then
+  ok "and names both commands as the way in"
+else bad "and names both commands as the way in"; sed 's/^/        /' <<<"$OUT"; fi
+if [ "$(stage_of paneless)" = queued ]; then
+  ok "and the queued task never left queued"
+else
+  bad "and the queued task never left queued (at \`$(stage_of paneless)\`)"
+fi
+cp "$SPOOLWAY_PROJECT_HOME/dispatch.pid" "$LIVE/pane-lock.after" 2>/dev/null \
+  || : > "$LIVE/pane-lock.after"
+if cmp -s "$PANE_LOCK_BEFORE" "$LIVE/pane-lock.after"; then
+  ok "and took no repo lock on the way out"
+else bad "and took no repo lock on the way out"; fi
+if cmp -s "$PANE_DOC_BEFORE" "$SPOOLWAY_PROJECT_HOME/queue/paneless.md"; then
+  ok "and wrote nothing at all to the task file"
+else
+  bad "and wrote nothing at all to the task file"
+  diff "$PANE_DOC_BEFORE" "$SPOOLWAY_PROJECT_HOME/queue/paneless.md" | sed 's/^/        /'
+fi
+
+# `--plain` is the flag that would be an exemption if any flag were: it is
+# what every script here passes to keep a dispatch a log rather than the
+# redrawing board, and a gate read after the board was chosen would let it
+# through. Asked as its own invocation rather than reasoned about from the
+# gate's signature, since what is being denied is that any argv reaches the
+# run first.
+OUT=$(HERDR_STUB_NO_PANE=1 "$SPOOLWAY" dispatch --plain 2>&1)
+STATUS=$?
+if [ "$STATUS" -ne 0 ] \
+   && grep -qF "a dispatcher has to be visible, and this is not a herdr pane." <<<"$OUT"; then
+  ok "and --plain is refused identically, not exempted"
+else bad "and --plain is refused identically, not exempted"; sed 's/^/        /' <<<"$OUT"; fi
+
+# Taken back out rather than left to be picked up for real: its pipeline is
+# an ordinary agent-starting one, and this suite has no live agent to answer
+# `herdr-stub.sh`'s own missing `agent start` — the resident dispatcher the
+# next scenario starts would just find it stuck.
+must "the pane-gate task is taken back out" "$SPOOLWAY" queue unqueue paneless
+
 # A pane's shell starts life with the *stub server's* environment, never the
 # dispatcher's — unlike a headless run's child process, which inherits by
 # ordinary fork/exec. `Mux::run_in_pane` is handed the dispatcher's own
@@ -1549,6 +1615,21 @@ if [ -n "$FLAKY_RECORDED" ] && grep -q "^$FLAKY_RECORDED	" "$HSTATE/panes"; then
 else
   ok "and its pane closes behind the failure rather than standing"
 fi
+
+# `panedfail` landed on `blocked` and that was the point of it — but
+# `blocked` is a live stage, so it is still a task in this queue, and
+# `paneflaky` is about to be deleted out from under it. `check_task_routes`
+# reads every live task's `pipeline:` whole, ahead of the lock, and refuses
+# the whole run when one of them names a pipeline that is not there: left
+# queued, this one task refuses every `spoolway dispatch` for the rest of
+# the file. Taken out here rather than at the end of the suite, and with
+# `--force` because it has a worktree of its own by now, and
+# `dispatcher_stop` ahead of it because `unqueue` refuses outright while a
+# dispatcher is up that could be mid-turn on the task. The next scenario
+# starts its own with `dispatcher_restart`, so nothing is left without one.
+dispatcher_stop
+must "the failing-pane task is taken back out before its pipeline goes" \
+  "$SPOOLWAY" queue unqueue panedfail --force
 
 "$HERDRBIN/herdr" shutdown state >/dev/null 2>&1 || true
 unset HERDR_STUB_STATE

@@ -43,6 +43,37 @@
 # Uses whatever `spoolway` is on PATH; set SPOOLWAY to point at a build:
 #   SPOOLWAY=target/release/spoolway scripts/e2e/run.sh
 #
+# `--dry-run` is gone from `spoolway dispatch` — a run either draws where a
+# person can see it or it is refused outright, with no exemption left to
+# preview against. Nine cases across three suites used to prove something
+# with a throwaway pass, and each one is re-expressed or removed:
+#
+#   stacking.sh   "nothing starts `top` while `base` is unfinished" is
+#                 re-expressed against the real, resident dispatcher `drive`
+#                 already starts, read once `base` is demonstrably in flight.
+#   commands.sh   "a dry run says it would start the entry command step" is
+#                 removed outright — the real pass `records` already drives
+#                 right after it proves the same claim more strongly, and
+#                 the routeless-task refusal beside it needed no `--dry-run`
+#                 in the first place, since `check_task_routes` bails ahead
+#                 of the lock and every write whether or not the pass is
+#                 real.
+#   overrides.sh  the seven piped passes that asked the overrides gate and
+#                 the warnings screen what they do with no tty are
+#                 re-expressed as three real, resident runs — started in
+#                 their own session, watched until their log shows them past
+#                 all three gates, then stopped. See `gate_run` there: with
+#                 no `--dry-run` there is no early exit anywhere between the
+#                 gates and `Lock::acquire`, so a piped run that reaches a
+#                 gate is a run that goes on to hold the lock, and the case
+#                 has to stop it rather than wait for it to end.
+#
+# The cursor case in `overrides.sh` is the one worth knowing about: it
+# asserts a piped dispatch emits no hide/show-cursor escape, and clap's
+# error text for a flag that no longer exists contains none either — so left
+# calling `--dry-run` it would have gone on reporting `ok` while asking
+# nothing at all.
+#
 # KEEP=1 leaves every scratch tree behind for a postmortem.
 set -uo pipefail
 

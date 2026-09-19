@@ -185,11 +185,13 @@ Run the pipeline. It draws the live board and keeps running until the queue is e
 | Flag | Default | What it does |
 |---|---|---|
 | `--interval <DURATION>` | `dispatch.interval` | Time between passes, e.g. `5m` |
-| `--dry-run` | | Print what one pass would do, then exit. Nothing is started or written |
 | `--plain` | | Print one line per pass. The board is not drawn |
 | `--unattended` | `unattended.enabled` | Start a lane on `blocked` for every blocked task. Nothing waits for a person. See [Unattended runs](pipelines.md#unattended-runs) |
 | `--attended` | | Park blocked tasks for a person, whatever the config says |
 | `--force` | | Start past the restart guard |
+
+`spoolway dispatch` asks herdr which pane it is running in and refuses to start outside one.
+No flag exempts it, `--plain` included. See [The dispatcher](dispatcher.md#running-it).
 
 Before it starts, it checks every live task's `pipeline:` field. A missing or unknown pipeline
 refuses the whole start and dispatches nothing:

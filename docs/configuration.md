@@ -112,7 +112,7 @@ auto_commit = true
 
 | Key | Default | What it controls |
 |---|---|---|
-| `backend` | `herdr` | Where lanes run: `herdr` or `headless`. `herdr` puts each agent in a pane you can watch and take over. `headless` needs no multiplexer. |
+| `backend` | `herdr` | Where lanes run: `herdr` or `headless`. `herdr` puts each agent in a pane you can watch and take over. `headless` is spoolway's own test backend; `spoolway dispatch` refuses to run it unless `SPOOLWAY_TEST_BACKEND` is set in the environment. |
 | `herdr_mode` | `split` | Layout under `backend = "herdr"`. `split` gives each task its own workspace named `spoolway/<task>`. `grouped` puts every project in the shared `spoolway-dispatcher` workspace, one tab per project, one pane per task. See [the dispatcher](dispatcher.md#one-home-for-every-run-in-every-project). |
 | `worktree_root` | blank | Where a task's worktree is created. Blank means `~/.spoolway/<project>/worktrees`. The directory is `task-<id>`, or `task-<slug>-<id>` with a tracker slug. |
 | `interval` | `10s` | Time between dispatcher passes. |

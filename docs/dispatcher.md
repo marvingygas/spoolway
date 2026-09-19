@@ -12,11 +12,27 @@ lookup in a task file or in the list of live lanes.
 
 ```
 spoolway dispatch                 # runs until the queue is empty
-spoolway dispatch --dry-run       # print what one pass would do, and do nothing
 spoolway dispatch --interval 5m   # override the configured interval between passes
 spoolway dispatch --force         # start past the restart guard
 spoolway dispatch --plain         # print the board once as a plain table, for scripts
 ```
+
+`spoolway dispatch` asks herdr which pane it is running in and refuses to start outside one,
+whatever flags are given:
+
+```
+$ spoolway dispatch
+spoolway: a dispatcher has to be visible, and this is not a herdr pane.
+
+  Open one and run it there:
+
+    herdr
+    spoolway dispatch
+```
+
+`backend = headless` refuses the same way unless `SPOOLWAY_TEST_BACKEND` is set in the
+environment. Nothing draws a headless run, so only the end-to-end harness sets that marker.
+See [`dispatch.backend`](configuration.md#dispatch--the-run-loop).
 
 One dispatcher serves the whole project. Every pass re-reads the queue, so a task queued
 while it runs is picked up on the next pass. A second `spoolway dispatch` on the same project

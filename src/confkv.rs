@@ -48,7 +48,8 @@ pub const REFERENCE: &[Reference] = &[
         key: "dispatch.backend",
         values: "herdr, headless",
         default: "herdr",
-        sentence: "Where lanes run: a real pane you can watch, or no multiplexer at all.",
+        sentence: "Where lanes run: a real pane you can watch. `headless` is spoolway's own \
+                    test backend, refused unless SPOOLWAY_TEST_BACKEND is set.",
     },
     Reference {
         key: "dispatch.herdr_mode",

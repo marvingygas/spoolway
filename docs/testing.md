@@ -42,6 +42,10 @@ SPOOLWAY="$PWD/target/release/spoolway" scripts/e2e/run.sh --tier nightly
 Every lane runs a stand-in agent script from `scripts/e2e/agents/`. The harness needs `git`,
 `bash`, `curl`, `setsid` and `flock`. Only the `cloud` and `live` tiers run a real agent binary.
 
+`spoolway dispatch` refuses `backend = headless` unless `SPOOLWAY_TEST_BACKEND` is set in the
+environment. `fixture.sh` and `scaffold.sh` export it for every suite and scaffolded project
+that runs on that backend.
+
 ### Coverage
 
 `--list` reads every key in `.spoolway/config.toml` and in `assets/pipelines/default.yml`, and

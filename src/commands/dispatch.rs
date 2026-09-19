@@ -175,6 +175,15 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     refuse(check_index_lock(repo)).context("refusing to start")?;
     refuse(check_backend_checkout(repo, mux.as_ref())).context("refusing to start")?;
 
+    // There is one way to start a run and it is visible: refused here, in the
+    // same early group as the three checks above, so a run begun in a
+    // backgrounded shell or a `backend = headless` config edit outside the
+    // harness is stopped before it takes the lock or writes anywhere, not
+    // found and killed by hand once it is already spending. No exemption —
+    // not `--plain`, not an environment override, not a per-platform
+    // carve-out.
+    check_dispatcher_visible(mux.as_ref())?;
+
     // The last three things a person sees before anything is spawned or
     // written: the overview, naming every task the run is about to touch;
     // the overrides gate, since a layer changes what runs without `git
@@ -218,25 +227,18 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         None => repo.config.dispatch.interval,
     };
 
-    if args.dry_run {
-        println!("dry run: nothing will be started, torn down, or written\n");
-    }
-
     // The dispatcher's own pane stays wherever it was started, under both
     // `grouped` and `split` — herdr has nothing to move it into. This still
     // has to find or open the run's shared workspace, though, under
     // `grouped`: a task's lane joins that workspace's tab, and it must exist
     // before the first one starts.
     //
-    // Never for `--dry-run`, which opens nothing and closes nothing. A
-    // failure here is held for `workspace_open_notice`, just below, rather
+    // A failure here is held for `workspace_open_notice`, just below, rather
     // than printed on the spot — this is the one notice `warnings_gate`,
     // above, could not carry: this is only attempted once the lock is held,
     // past the point `esc` could still mean "nothing happened yet".
     let mut workspace_open_error = None;
-    if !args.dry_run
-        && let Err(err) = mux.dispatch_workspace(&repo.root, true)
-    {
+    if let Err(err) = mux.dispatch_workspace(&repo.root, true) {
         workspace_open_error = Some(format!("could not open this run's own workspace: {err:#}"));
     }
 
@@ -254,26 +256,22 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // costs the run nothing — where a scrolling log says only what the last
     // pass did, the board says what the whole queue is doing right now.
     //
-    // Not for `--dry-run`, which is a person already looking at one pass, and
-    // not for `--plain`, which is a person who would rather have the log — a
+    // Not for `--plain`, which is a person who would rather have the log — a
     // pipe, a CI job, a terminal that mangles the redraw.
     // From here the run holds live lanes, so an interrupted one's spend and
     // launch counter still have to be settled on the way out. Caught rather
     // than left to kill the process where it stands — see
     // `crate::dispatch::Dispatcher::sweep_on_stop`.
-    if !args.dry_run {
-        crate::platform::stop::catch_interrupt();
-    }
+    crate::platform::stop::catch_interrupt();
 
-    let mut board = match args.dry_run || args.plain {
+    let mut board = match args.plain {
         true => None,
         false => Some(crate::status::Board::new()),
     };
     let mut out = std::io::stdout();
 
     loop {
-        let mut dispatcher =
-            crate::dispatch::Dispatcher::new(repo, pipelines, mux.as_ref(), args.dry_run);
+        let mut dispatcher = crate::dispatch::Dispatcher::new(repo, pipelines, mux.as_ref());
 
         // Drawn before the pass rather than only after it, so a pass that takes
         // a while is a board saying "pass running" instead of a blank terminal.
@@ -335,26 +333,11 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
             }
         }
 
-        // A dry run is one pass. It archives nothing, so the empty-queue exit
-        // below can never fire and a looping dry run would keep reporting the
-        // same untouched queue — the second pass has nothing to add to the
-        // first.
-        if args.dry_run {
-            return Ok(0);
-        }
-
         // Spent, and nothing left running to spend more. The queue keeps its
         // place: every task is where its last lane left it, and the next run
         // picks them up from exactly there.
         if let Some(note) = spent_out {
-            stop(
-                repo,
-                pipelines,
-                mux.as_ref(),
-                board.as_mut(),
-                &mut out,
-                args,
-            )?;
+            stop(repo, pipelines, mux.as_ref(), board.as_mut(), &mut out)?;
             println!("  {note}");
             println!("  spoolway dispatch    # picks the queue back up where it stands");
             return Ok(0);
@@ -368,14 +351,7 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         // Asked for while the last pass was running. Unwound here rather than
         // in the handler, which may do nothing but set the flag.
         if crate::platform::stop::asked() {
-            stop(
-                repo,
-                pipelines,
-                mux.as_ref(),
-                board.as_mut(),
-                &mut out,
-                args,
-            )?;
+            stop(repo, pipelines, mux.as_ref(), board.as_mut(), &mut out)?;
             println!("  stopped.");
             return Ok(0);
         }
@@ -383,14 +359,7 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         match repo.tasks() {
             Ok(tasks) if tasks.is_empty() => {
                 if crate::jobs::enabled_count(repo) == 0 {
-                    stop(
-                        repo,
-                        pipelines,
-                        mux.as_ref(),
-                        board.as_mut(),
-                        &mut out,
-                        args,
-                    )?;
+                    stop(repo, pipelines, mux.as_ref(), board.as_mut(), &mut out)?;
                     println!("  queue is empty — every task is done. Stopping.");
                     return Ok(0);
                 }
@@ -1359,6 +1328,42 @@ pub(crate) fn check_backend_checkout(
     Ok(Some(format!("{} · main checkout", mux.name())))
 }
 
+/// Refuse a start nobody can see: a herdr run outside any pane, or a
+/// `backend = headless` run started without the end-to-end harness's own
+/// marker.
+///
+/// Not a third [`Refusal`]: neither half of this reads as a `doctor` row —
+/// there is no dispatcher yet for `doctor` to ask whether it is visible —
+/// and the herdr half's own message is the multi-line shape the task's
+/// mockup draws, not the single line [`refuse`] joins a reason and a fix
+/// into.
+///
+/// `headless` is checked by name rather than by a trait method the way the
+/// herdr half is: the marker gates the backend itself, not any property a
+/// `Mux` could answer for — a fake pane to ask about would be one more thing
+/// for a test double to get right for no reason a real backend needs.
+fn check_dispatcher_visible(mux: &dyn crate::mux::Mux) -> Result<()> {
+    if mux.name() == "headless" {
+        if crate::platform::env_var(crate::headless::TEST_BACKEND_ENV).is_err() {
+            bail!(
+                "backend = headless is spoolway's own test backend — nothing draws it \
+                 anywhere a person can see, so only the end-to-end harness runs it, with \
+                 {} exported.\n\n  Switch back:\n\n    spoolway config set dispatch.backend \
+                 herdr",
+                crate::headless::TEST_BACKEND_ENV
+            );
+        }
+        return Ok(());
+    }
+    if !mux.in_own_pane() {
+        bail!(
+            "a dispatcher has to be visible, and this is not a herdr pane.\n\n  Open one and \
+             run it there:\n\n    herdr\n    spoolway dispatch"
+        );
+    }
+    Ok(())
+}
+
 /// Refuse the whole start over any live task whose `pipeline:` does not
 /// resolve — absent, or naming a pipeline this project does not define.
 /// There is no project default any more, so a task that cannot route here
@@ -1442,19 +1447,16 @@ fn stop(
     mux: &dyn crate::mux::Mux,
     board: Option<&mut crate::status::Board>,
     out: &mut std::io::Stdout,
-    args: &DispatchArgs,
 ) -> Result<()> {
-    if !args.dry_run {
-        let mut dispatcher = crate::dispatch::Dispatcher::new(repo, pipelines, mux, args.dry_run);
-        let mut report = crate::dispatch::Report::default();
-        match dispatcher.sweep_on_stop(&mut report) {
-            Ok(()) => {
-                for action in &report.actions {
-                    println!("  {action}");
-                }
+    let mut dispatcher = crate::dispatch::Dispatcher::new(repo, pipelines, mux);
+    let mut report = crate::dispatch::Report::default();
+    match dispatcher.sweep_on_stop(&mut report) {
+        Ok(()) => {
+            for action in &report.actions {
+                println!("  {action}");
             }
-            Err(err) => println!("  ! could not settle this run's lanes: {err:#}"),
         }
+        Err(err) => println!("  ! could not settle this run's lanes: {err:#}"),
     }
 
     // The last frame stays where it is and the reason the run ended is printed
@@ -1956,6 +1958,9 @@ mod tests {
         /// sets it otherwise — see `backend_checkout_passes_herdr_under_grouped_mode`,
         /// the one case this matters for `check_backend_checkout`.
         owns_workspace: bool,
+        /// `Mux::in_own_pane`'s own default (`true`) unless a test sets it
+        /// otherwise — see `dispatcher_visible_refuses_herdr_outside_a_pane`.
+        in_own_pane: bool,
     }
 
     impl Mux for StubMux {
@@ -1970,6 +1975,9 @@ mod tests {
         }
         fn task_owns_workspace(&self) -> bool {
             self.owns_workspace
+        }
+        fn in_own_pane(&self) -> bool {
+            self.in_own_pane
         }
         fn resident_while_waiting(&self) -> bool {
             unimplemented!()
@@ -2040,6 +2048,7 @@ mod tests {
             name: "headless",
             available: true,
             owns_workspace: true,
+            in_own_pane: true,
         };
         assert!(check_backend_checkout(&repo, &mux).unwrap().is_some());
     }
@@ -2053,6 +2062,7 @@ mod tests {
             name: "herdr",
             available: true,
             owns_workspace: true,
+            in_own_pane: true,
         };
         assert!(check_backend_checkout(&repo, &mux).unwrap().is_some());
     }
@@ -2066,6 +2076,7 @@ mod tests {
             name: "herdr",
             available: true,
             owns_workspace: true,
+            in_own_pane: true,
         };
         let bare = format!("{:#}", check_backend_checkout(&repo, &mux).unwrap_err());
         assert!(bare.contains(&repo.root.display().to_string()), "{bare}");
@@ -2105,6 +2116,7 @@ mod tests {
             name: "herdr",
             available: true,
             owns_workspace: true,
+            in_own_pane: true,
         };
 
         let bare = format!("{:#}", check_backend_checkout(&repo, &mux).unwrap_err());
@@ -2154,6 +2166,7 @@ mod tests {
             name: "herdr",
             available: true,
             owns_workspace: false,
+            in_own_pane: true,
         };
 
         assert!(
@@ -2163,6 +2176,74 @@ mod tests {
         );
 
         cleanup();
+    }
+
+    /// A herdr run with no pane to draw in is refused, naming the way in —
+    /// `herdr` and `spoolway dispatch` — with no exemption.
+    #[test]
+    fn dispatcher_visible_refuses_herdr_outside_a_pane() {
+        let mux = StubMux {
+            name: "herdr",
+            available: true,
+            owns_workspace: true,
+            in_own_pane: false,
+        };
+        let err = format!("{:#}", check_dispatcher_visible(&mux).unwrap_err());
+        assert!(err.contains("has to be visible"), "{err}");
+        assert!(err.contains("herdr"), "{err}");
+        assert!(err.contains("spoolway dispatch"), "{err}");
+    }
+
+    /// A herdr run that is in a pane passes straight through.
+    #[test]
+    fn dispatcher_visible_passes_herdr_in_a_pane() {
+        let mux = StubMux {
+            name: "herdr",
+            available: true,
+            owns_workspace: true,
+            in_own_pane: true,
+        };
+        assert!(check_dispatcher_visible(&mux).is_ok());
+    }
+
+    /// `backend = headless` with no harness marker is refused, naming it as
+    /// the test backend and offering the way back to herdr.
+    ///
+    /// Read through [`crate::platform::env_var`] rather than `std::env::var`
+    /// so the marker can be set per-thread below without touching the real
+    /// process environment every other test shares.
+    #[test]
+    fn dispatcher_visible_refuses_headless_with_no_marker() {
+        let mux = StubMux {
+            name: "headless",
+            available: true,
+            owns_workspace: true,
+            in_own_pane: false,
+        };
+        let err = format!("{:#}", check_dispatcher_visible(&mux).unwrap_err());
+        assert!(err.contains("test backend"), "{err}");
+        assert!(
+            err.contains("spoolway config set dispatch.backend herdr"),
+            "{err}"
+        );
+    }
+
+    /// The same run passes once the end-to-end harness's own marker is set —
+    /// `in_own_pane: false` alongside it, to prove the marker is what gates
+    /// this backend rather than the pane check meant for herdr.
+    #[test]
+    fn dispatcher_visible_passes_headless_with_the_marker_set() {
+        let mux = StubMux {
+            name: "headless",
+            available: true,
+            owns_workspace: true,
+            in_own_pane: false,
+        };
+        let result =
+            crate::platform::test_env::with_env(crate::headless::TEST_BACKEND_ENV, "1", || {
+                check_dispatcher_visible(&mux)
+            });
+        assert!(result.is_ok());
     }
 
     /// A project with no layer at all is nothing to ask about — the gate

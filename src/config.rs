@@ -518,7 +518,9 @@ pub struct WatchConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DispatchConfig {
-    /// Where lanes run: a multiplexer, or no multiplexer at all.
+    /// Where lanes run: a real herdr pane. `headless` is spoolway's own
+    /// test backend — see [`Backend::Headless`] — refused outside the
+    /// harness that sets `SPOOLWAY_TEST_BACKEND`.
     pub backend: Backend,
 
     /// How a herdr run is laid out in the multiplexer. Read only under
@@ -939,6 +941,12 @@ pub enum Backend {
     /// is what a *person* can do: there is no pane to attach to, so watching a
     /// lane means reading its log and answering one means resuming its session.
     /// The dispatch run's own board narrates the run either way.
+    ///
+    /// Nothing here draws anywhere a person can see, so `spoolway dispatch`
+    /// refuses to start on this backend unless `SPOOLWAY_TEST_BACKEND` is set
+    /// in the environment — see `crate::headless::TEST_BACKEND_ENV` — which
+    /// only the end-to-end harness exports. A config edited onto `headless`
+    /// by hand is refused the same way a herdr run outside any pane is.
     Headless,
 }
 

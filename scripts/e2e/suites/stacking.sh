@@ -110,8 +110,26 @@ else
   sed 's/^/        /' <<<"$QUEUE_LIST"
 fi
 
-silent_about "and nothing starts it while the one below is unfinished" \
-  "would start \`implement\` for top" "$SPOOLWAY" dispatch --dry-run
+# `--dry-run` used to prove this with a single, throwaway pass — see
+# `run.sh`'s own note on its removal. Re-expressed against a real one: the
+# claim is not that `top` is queued the instant the dispatcher starts — that
+# is true of any task that has never had a pass look at it — it is that
+# `top` is *still* queued once `base` is demonstrably in flight. So this
+# waits for `base` to actually leave `queued` before reading `top` at all;
+# `base` takes several steps to reach `done`, so the window between it
+# starting and it finishing is wide open for this to catch `top` moving
+# early, if it ever did.
+base_left_queued() { [ "$(stage_of base)" != queued ]; }
+dispatcher_start
+if poll_until 60 base_left_queued; then
+  if [ "$(stage_of top)" = queued ]; then
+    ok "and nothing starts it while the one below is unfinished"
+  else
+    bad "and nothing starts it while the one below is unfinished (at \`$(stage_of top)\`)"
+  fi
+else
+  bad "and nothing starts it while the one below is unfinished (base never left queued)"
+fi
 
 # --------------------------------------------------------- the bottom lands first
 if drive base gone 90; then ok "the bottom of the chain runs and is archived"

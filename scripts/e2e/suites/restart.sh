@@ -35,6 +35,17 @@ agent_models
 # running the last scenario here is refused for the wrong reason. Headless
 # needs nothing to be running and changes none of the answers this suite
 # asserts.
+#
+# The marker with it: `spoolway dispatch` refuses `backend = headless`
+# outright unless this is set, since the backend draws nowhere a person can
+# see and only this harness may run it. Every other suite gets it from
+# `fixture.sh`'s `configure_project`, which this one does not call — it
+# builds its project by hand. Nothing here asserts on that refusal, and
+# nothing here reaches it either: every start below is answered by a check
+# that sits ahead of the pane gate. Exported anyway, so the day one of these
+# scenarios does reach it, it is answered by the guard this suite is about
+# rather than by a backend it only ever picked for being quiet.
+export SPOOLWAY_TEST_BACKEND=1
 must "the headless backend" "$SPOOLWAY" config set dispatch.backend headless
 must "the spoolway commit" git add -A
 must "the spoolway commit" git commit -qm "spoolway"

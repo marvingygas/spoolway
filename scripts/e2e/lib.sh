@@ -136,6 +136,18 @@ has() {
   else bad "$what (no \"$want\" in $file)"; sed 's/^/        /' "$file" 2>/dev/null | head -30; fi
 }
 
+# `has`, inverted — what `silent_about` is to `says`, for a command whose
+# output was captured to a file rather than read back from `$(...)`. A run
+# that has to be started, watched and then stopped cannot be a command
+# substitution, and the absence of something in what it printed is still
+# worth asserting.
+lacks() {
+  local what=$1 unwanted=$2 file=$3
+  if grep -qF -- "$unwanted" "$file" 2>/dev/null; then
+    bad "$what (it is in $file)"; sed 's/^/        /' "$file" 2>/dev/null | head -30
+  else ok "$what"; fi
+}
+
 # what want file task
 #
 # `has` for a command step's own log under `commands/`, which `teardown.rs`

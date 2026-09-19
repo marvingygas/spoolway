@@ -34,7 +34,7 @@ with its `depends_on` emptied. The same pass dispatches what it queued.
 
 The fired minute is written to `jobs.state.json`, so a job fires once per matching minute. A
 window that passes while no dispatcher runs is not caught up later. A job whose previous run
-is still in the queue skips its window. A `--dry-run` pass fires nothing.
+is still in the queue skips its window.
 
 ### The resident dispatcher
 

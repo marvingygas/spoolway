@@ -50,11 +50,6 @@ impl<'a> Dispatcher<'a> {
         owned: &[(String, String, &Lane)],
         report: &mut Report,
     ) -> Result<bool> {
-        if self.dry_run {
-            report.actions.push(format!("would clean up {}", task.id()));
-            return Ok(false);
-        }
-
         // Bank each owned lane's spend before its record goes, the way
         // `sweep_on_stop` does. A pipeline whose last agent step routes
         // `on_pass: done` has its lane still writing when the task reaches
@@ -528,9 +523,6 @@ impl<'a> Dispatcher<'a> {
     /// copy of the work it holds. Once it is pushed, this is what frees it —
     /// nothing re-visits an archived task's own cleanup to do it there.
     fn sweep_orphaned_branches(&mut self, tasks: &[Task]) {
-        if self.dry_run {
-            return;
-        }
         let Ok(listing) = self.repo.git(&[
             "for-each-ref",
             "--format=%(refname:short)",
@@ -667,10 +659,6 @@ impl<'a> Dispatcher<'a> {
     /// is running, so there is nothing here to bank or forgive; see
     /// [`Dispatcher::parked_for_a_person`].
     pub fn sweep_on_stop(&mut self, report: &mut Report) -> Result<()> {
-        if self.dry_run {
-            return Ok(());
-        }
-
         let mut tasks = self.repo.tasks()?;
         let mut left_standing = 0usize;
 
@@ -979,7 +967,7 @@ pub fn discard_trial(
         );
     }
 
-    let mut dispatcher = Dispatcher::new(repo, pipelines, mux, false);
+    let mut dispatcher = Dispatcher::new(repo, pipelines, mux);
     let mut report = Report::default();
     let mut removed = 0usize;
     // Named from whichever arm carries it: every arm of one trial forked the
