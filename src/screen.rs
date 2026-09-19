@@ -211,9 +211,11 @@ pub(crate) fn pad_to(s: &str, width: usize) -> String {
 /// and [`crate::status::GUTTER`] rather than writing either out again, so a
 /// screen that switches over stops deciding its own spelling.
 ///
-/// The queue screen's own `footer` is the first caller; the board and the
-/// jobs screen keep their own literals until a task of their own moves them
-/// over.
+/// Called by the queue screen's own `footer`, the jobs screen's own
+/// `jobs_footer`, and the board's own key line in `src/status/mod.rs`'s
+/// `render`. `spoolway eval`'s screen is the one full-screen view left with a
+/// literal of its own (`FOOTER` in `src/eval.rs`) — moving it over is not
+/// this caller's job, only the next one still to do it.
 pub(crate) fn key_hint(pairs: &[(&str, &str)]) -> String {
     let mut line = String::new();
     for (i, (key, label)) in pairs.iter().enumerate() {

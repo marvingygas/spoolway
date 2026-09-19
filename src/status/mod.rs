@@ -297,11 +297,18 @@ pub struct Board {
     /// the header: everything below it is read fresh from the same task
     /// files and the same live lane list regardless of who is watching.
     watching: bool,
-    /// The task id the cursor sits on, if it has been moved at all. By id
-    /// rather than a plain row index, so a state change that resorts the
-    /// board — a task passing its step, one landing on `paused` above it —
-    /// never leaves the cursor pointing at a different task than the one a
-    /// person last put it on.
+    /// The task id the cursor sits on. For a driving board, starts `None`
+    /// only until [`render`] draws its first frame, which lands it on the
+    /// first row of the first group straight away rather than leaving a
+    /// person's first `↑`/`↓` press go to discover that row — see the
+    /// seeding block inline in `render`'s own body. Left `None` forever on a
+    /// watching board instead: it reads no key, so a cursor mark on it would
+    /// claim it can act on a row it never will. By id rather than a plain row
+    /// index, so a state change
+    /// that resorts the board — a task passing its step, one landing on
+    /// `paused` above it — never leaves the cursor pointing at a different
+    /// task than the one a person last put it on. `None` again only once the
+    /// board has nothing left to show at all.
     cursor: Option<String>,
     /// What a `p`, `P` or `R` keypress is waiting on, if anything — see
     /// [`BoardMode`]. `Browsing` on every other key, including the plain
@@ -393,6 +400,9 @@ impl Board {
     /// One frame, built whole before anything is written so a slow read never
     /// leaves a half-drawn board on screen.
     fn frame(&mut self, repo: &Repo, pipelines: &Pipelines, phase: Phase) -> Result<String> {
+        // `render` seeds `self.cursor` itself, from the very rows it composes
+        // to draw the table — see the seeding block inline in its own body
+        // for why — rather than this reading the queue a second time first.
         let frame = render(
             repo,
             pipelines,
@@ -401,7 +411,7 @@ impl Board {
             &mut self.stages,
             &mut self.arrived,
             &mut self.recent,
-            self.cursor.as_deref(),
+            &mut self.cursor,
             &mut self.jobs_next,
         )?;
         if !self.adopted {
@@ -514,10 +524,12 @@ impl Board {
         use crate::screen::Key;
         match key {
             Key::Up => {
-                self.cursor = shift_cursor(&rows(repo, pipelines)?, self.cursor.as_deref(), -1)
+                self.cursor =
+                    shift_cursor(&cursor_rows(repo, pipelines)?, self.cursor.as_deref(), -1)
             }
             Key::Down => {
-                self.cursor = shift_cursor(&rows(repo, pipelines)?, self.cursor.as_deref(), 1)
+                self.cursor =
+                    shift_cursor(&cursor_rows(repo, pipelines)?, self.cursor.as_deref(), 1)
             }
             Key::Char('o') => self.open_cursor(repo)?,
             Key::Char('r') => self.resume_cursor(repo, pipelines)?,
@@ -531,9 +543,12 @@ impl Board {
         Ok(())
     }
 
-    /// `o`: open the cursor's queued task file in an editor, in a pane the
+    /// `o`: open the cursor's task file in an editor, in a pane the
     /// multiplexer opens — a no-op with no cursor or a cursor on a row the
-    /// queue no longer has. Never blocks: the pane runs the editor on its
+    /// board no longer draws. `repo.task` reads both the queue and the
+    /// archive, so this reaches a done row's document exactly as it does a
+    /// live one — [`cursor_rows`] is what lets the cursor land on that row
+    /// in the first place. Never blocks: the pane runs the editor on its
     /// own, and the board keeps redrawing and the pass loop keeps running
     /// while it is open, exactly as if nothing had happened.
     ///
@@ -1536,6 +1551,22 @@ pub fn rows(repo: &Repo, pipelines: &Pipelines) -> Result<Vec<Row>> {
     )
 }
 
+/// Every row the board actually draws: [`rows`]'s live queue plus whatever
+/// archived rows [`render`] appends alongside it, in the same order. The
+/// cursor walks this — not `rows()` alone — so `↑`/`↓` and the row it starts
+/// on reach a done task exactly as far as the table drawn under them does,
+/// letting `o` open its document too. `rows()` itself stays the live-queue
+/// list it always was, since `spoolway queue list` reads it too and archived
+/// tasks are not that command's business.
+fn cursor_rows(repo: &Repo, pipelines: &Pipelines) -> Result<Vec<Row>> {
+    let active = rows(repo, pipelines)?;
+    let active_groups: BTreeSet<String> = active.iter().filter_map(|r| r.group.clone()).collect();
+    let mut all = active;
+    all.extend(done_rows(repo, pipelines, &active_groups)?);
+    all.sort_by(|a, b| a.key().cmp(&b.key()));
+    Ok(all)
+}
+
 // Every argument is a distinct piece of the board's own state that `frame`
 // holds and this builds one frame from; bundling them into a struct just to
 // pass one reference would hide that. The same call the codebase's other
@@ -1549,7 +1580,7 @@ fn render(
     stages: &mut BTreeMap<String, String>,
     arrived: &mut BTreeMap<String, Instant>,
     recent: &mut VecDeque<RecentEvent>,
-    cursor: Option<&str>,
+    cursor: &mut Option<String>,
     jobs_next: &mut Option<crate::jobs::ActiveJobsMemo>,
 ) -> Result<String> {
     let (tasks, load_problems) = repo.tasks_and_problems()?;
@@ -1617,6 +1648,19 @@ fn render(
     let mut rows = active_rows;
     rows.extend(done_rows(repo, pipelines, &active_groups)?);
     rows.sort_by(|a, b| a.key().cmp(&b.key()));
+
+    // Lands the cursor on the first row of the first group before the very
+    // first frame a driving board draws is ever shown, rather than leaving a
+    // person's first `↑`/`↓` press go to discover it — see `Board::cursor`'s
+    // own doc comment. Seeded from `rows`, the same composed list `table`
+    // draws below, rather than a second read of the same task files, graph
+    // and lane list this function already just did. Never for a watching
+    // board: nothing here reads a key for it, so painting a cursor mark
+    // would claim it can act on a row it never will — see the key line's own
+    // watching gate a little further down.
+    if !watching && cursor.is_none() {
+        *cursor = rows.first().map(|row| row.id.clone());
+    }
     let totals = group_totals(&ledger, &rows);
 
     // Slots: how many live lanes each profile is paying for, against its cap
@@ -1696,7 +1740,12 @@ fn render(
             frame.push_str(&format!(" {DIM}nothing queued{RESET}\n"));
         }
     } else {
-        frame.push_str(&table(&rows, Style::board(pane), &totals, cursor));
+        frame.push_str(&table(
+            &rows,
+            Style::board(pane),
+            &totals,
+            cursor.as_deref(),
+        ));
     }
 
     // A queue file that would not parse is skipped rather than freezing the
@@ -1736,10 +1785,22 @@ fn render(
     // something here. Nothing about the hint depends on whether any row can
     // use it right now; it says what the board can do, not what it would do
     // this frame.
+    //
+    // Built by `crate::screen::key_hint` — see that function's own doc
+    // comment for why this is the one place left to build it, rather than
+    // spelling it out by hand — and, now that the cursor reaches the first
+    // row on its own, without naming `↑↓`: every screen this project draws
+    // leaves the arrows and `q` off its own key line, since a person reads
+    // those the same way everywhere.
     if !watching {
         tail.push_str(&format!(
-            "\n {DIM}[↑↓] row{GUTTER}[o] open{GUTTER}[r/R] resume / all{GUTTER}[p/P] pause / all{GUTTER}\
-             [u/U] unqueue / all{RESET}\n"
+            "\n{}\n",
+            crate::screen::key_hint(&[
+                ("o", "open task"),
+                ("r/R", "resume / all"),
+                ("p/P", "pause / all"),
+                ("u/U", "unqueue / all"),
+            ])
         ));
     }
 
@@ -3313,7 +3374,7 @@ mod tests {
         let frame = strip(&driving.frame(&repo, &pipelines, Phase::Waiting).unwrap());
         assert!(
             frame.contains(
-                "[↑↓] row   [o] open   [r/R] resume / all   [p/P] pause / all   [u/U] unqueue / all"
+                "[o] open task   [r/R] resume / all   [p/P] pause / all   [u/U] unqueue / all"
             ),
             "{frame}"
         );
@@ -4134,6 +4195,85 @@ mod tests {
     #[test]
     fn the_cursor_has_nowhere_to_go_on_an_empty_board() {
         assert_eq!(shift_cursor(&[], Some("a"), 1), None);
+    }
+
+    /// A fresh board already has its cursor on the first row before any key
+    /// is read at all — `o`, `p` and the rest all act on it from the very
+    /// first frame, rather than only after a first `↓` discovers it.
+    #[test]
+    fn a_fresh_board_starts_with_the_cursor_on_the_first_row() {
+        let repo = fixture("cursor-starts-on-first-row");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], Some("implement"));
+
+        let mut board = Board::for_test();
+        assert_eq!(board.cursor, None, "nothing has drawn a frame yet");
+        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
+        assert_eq!(board.cursor.as_deref(), Some("login"));
+    }
+
+    /// A watching board never seeds a cursor at all: it reads no key (the
+    /// dispatch loop that owns keys never calls `on_key` for one), so a
+    /// cursor mark on its first row would claim it can act on that row when
+    /// it never will — regression for review finding 1 on this task, which
+    /// caught `frame` seeding every board regardless of `watching`.
+    #[test]
+    fn a_watching_board_never_paints_a_cursor_mark() {
+        let repo = fixture("watching-board-no-cursor");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], Some("implement"));
+
+        let mut watching = Board::watching_for_test();
+        let frame = watching.frame(&repo, &pipelines, Phase::Waiting).unwrap();
+        assert_eq!(watching.cursor, None, "a watcher reads no key to act with");
+        assert!(
+            !strip(&frame).contains('▸'),
+            "no row may carry the cursor mark on a watching board:\n{}",
+            strip(&frame)
+        );
+    }
+
+    /// The cursor walks the archived rows the board draws too, not just the
+    /// live queue: with a group holding one live task and one done one, `↓`
+    /// from the live row reaches the done row, and `o` opens its document by
+    /// way of `repo.task`'s own archive lookup rather than refusing because
+    /// the queue no longer holds the file.
+    #[test]
+    fn the_cursor_reaches_a_done_row_and_o_opens_its_document() {
+        let mut repo = fixture("cursor-reaches-done-row");
+        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let pipelines = Pipelines::builtin();
+        add_to(&repo, "login", &[], Some("implement"), Some("auth"));
+        std::fs::create_dir_all(repo.archive_dir()).unwrap();
+        std::fs::write(
+            repo.archive_dir().join("signup.md"),
+            "---\nid: signup\nstage: done\ngroup: auth\n---\n",
+        )
+        .unwrap();
+
+        let mut board = Board::for_test();
+        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
+        assert_eq!(
+            board.cursor.as_deref(),
+            Some("login"),
+            "the live row still sorts first within the group"
+        );
+
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Down)
+            .unwrap();
+        assert_eq!(
+            board.cursor.as_deref(),
+            Some("signup"),
+            "`↓` walks onto the archived row"
+        );
+
+        // Headless refuses to open a pane at all, so this only proves `o`
+        // never bails out before that — the archived task resolves through
+        // `repo.task` rather than being treated as gone.
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Char('o'))
+            .unwrap();
     }
 
     /// A paused task offers the resume key only once its own dependencies
