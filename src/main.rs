@@ -38,6 +38,9 @@ mod release;
 mod release_notes;
 mod repo;
 mod retain;
+// The whole module is `#[cfg(test)]` inside — a walk over `commands::
+// report::route`, not anything production code calls.
+mod route_sim;
 mod runfiles;
 // Not test-only any more: `doctor`'s live pane check needs a scratch
 // directory to open one in, same as a test fixture does — see

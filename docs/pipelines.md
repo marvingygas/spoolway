@@ -1,6 +1,6 @@
 ---
 domain: pipelines
-covers: ["src/pipeline.rs", "src/command_step.rs", "assets/pipelines/**"]
+covers: ["src/pipeline.rs", "src/command_step.rs", "assets/pipelines/**", "src/route_sim.rs"]
 ---
 
 # Pipelines
@@ -157,6 +157,15 @@ back. In the shipped pipeline `review` fails back to `implement`, so `review` ca
   count is written to `## Status Log`.
 - Every cycle needs a `loop` whose exit leaves the cycle. `spoolway pipeline check` refuses the
   file otherwise.
+
+### Proving the loops
+
+`spoolway pipeline check` proves a pipeline's graph has a way out. A `cargo test` in
+`src/route_sim.rs` proves the counters that walk that graph agree with it. It routes every
+outcome at every step, to a bounded depth, over the shipped pipelines, the tracked
+`.spoolway/pipelines` files, and pipelines it generates that pass `spoolway pipeline check`.
+Each path it walks must reach a terminal step, keep every `loop` count rising except where a
+person resumes a blocked task, and start no more lanes than a stated bound.
 
 ## Unattended runs
 

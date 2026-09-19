@@ -125,10 +125,6 @@ pub fn report(
         );
     }
 
-    let step = pipeline
-        .require_step(&current)
-        .with_context(|| format!("task `{id}` is on a step that this pipeline does not define"))?;
-
     // Nothing here checks what a lane wrote against a path list any more —
     // `blocked_on_write` and `blocked_on_overreach` are retired: both only
     // ever matched this project's own tracked files, since
@@ -138,186 +134,12 @@ pub fn report(
     // `docs/concepts.md`'s Reach section.
     let unattended = repo.unattended();
 
-    // `blocked` itself is never reported on by the ordinary graph below: a
-    // pass is special-cased, and everything else — `--fail`, `--block`, and
-    // the new `--pause` — is "not a pass" here, and used to have nowhere else
-    // to go but back onto `blocked`, unbounded. There is nobody left to hand a
-    // repeat of that to but a person, so it borrows `gate:`'s own shape: see
-    // the branch below.
-    let paused_from_blocked = current == crate::pipeline::BLOCKED && outcome != Outcome::Pass;
-
-    let mut destination = if current == crate::pipeline::BLOCKED && outcome == Outcome::Pass {
-        // `blocked` declares no `on_pass` of its own — where its pass goes is
-        // read from the task's own record of where it stopped, by
-        // `cleared_block_target`. For an agent step, that is one step *past*
-        // there rather than back onto it: the unblocker did that step's work,
-        // so arriving back on it would pay for the work twice — a `--pass`
-        // from `blocked` is taken at its word, unconditionally, which is what
-        // the `true` below means. A command step has no such trade — see
-        // `cleared_block_target`'s own doc for why it is always handed back
-        // to itself.
-        //
-        // Either way this goes through the same `resume_at` that
-        // `spoolway resume` performs by hand, minus the one thing only a
-        // person may do: the loop budgets out of the step the task stopped on
-        // stay spent (`by_hand: false`), because this is the run clearing its
-        // own block and a budget it refunds to itself bounds nothing. What it
-        // does share is the mark: the lane that originally hit the block —
-        // which had often already read the tree and done most of the work —
-        // is continued rather than replaced by a cold one.
-        let target = cleared_block_target(&task, pipeline, true);
-        resume_at(&mut task, pipeline, &target, false);
-        target
-    } else if paused_from_blocked {
-        // No second destination once the lane on `blocked` cannot clear the
-        // task itself. `blocked` declares no `on_fail`, and `Outcome::Block`
-        // (and now `Outcome::Pause`) always resolve to `blocked` by
-        // definition — which is the loop this whole task exists to close, and
-        // an unbounded one: the archive holds a run where four tasks looped
-        // there twelve, seven, six and two times.
-        //
-        // So this parks on `paused` instead, exactly as a gated pass does,
-        // and — unlike an ordinary block, which calls `set_blocked_from`
-        // below — leaves `blocked_from` untouched rather than clearing it.
-        // `spoolway resume` needs it later to know which step to hand the
-        // task back to — through the same `cleared_block_target` above, but
-        // with `takes_over: false`, since nothing here claimed that step's
-        // work was done; clearing `blocked_from` here would leave that
-        // resume nothing to read and no better fallback than the pipeline's
-        // entry.
-        let origin = task
-            .front
-            .blocked_from
-            .clone()
-            .unwrap_or_else(|| resume_target(&task, pipeline));
-        task.front.paused_at = Some(origin);
-        crate::pipeline::PAUSED.to_string()
-    } else {
-        step.destination(outcome)
-            .unwrap_or(crate::pipeline::BLOCKED)
-            .to_string()
-    };
-
-    destination = apply_loop_budget(pipeline, &mut task, &current, destination, unattended);
-
-    // Record the step it stopped on, exactly as the dispatcher's own escalation
-    // does, whatever put it there — an explicit `--block`, an `on_fail` that
-    // routes to `blocked`, or the spent budget above. Both roads out of here
-    // read it: `spoolway resume` resumes from it, and so does the unattended
-    // resume below. Without it a task restarts at the pipeline's entry, and one
-    // that blocked at `pr` already has a branch pushed and a pull request open,
-    // so re-running the steps that did that opens a second one.
-    if destination == crate::pipeline::BLOCKED {
-        set_blocked_from(&mut task, &current);
-    }
-
-    // A gated step's pass is not spoolway's to act on. The work is done and it
-    // went well; whether the task goes past this step is the person's, which is
-    // the whole of what `gate:` says — so the task lands on `paused` and waits
-    // for `spoolway resume`.
-    //
-    // Held here rather than asked of the lane. The lane is told that a person
-    // will read its pane — see `dispatch::policy` and `dispatch::situating` —
-    // but told nothing it could act on to change this decision: it cannot
-    // approve its own work, so the only thing knowing changes is what it
-    // leaves running and what it writes for that person, not where the pass
-    // parks. The old arrangement asked it to stop and print a question
-    // instead, and that request was the entire enforcement — three plan runs
-    // against a small local model, three gates, and not one of them held. A
-    // mechanism that needs no cooperation cannot be argued with.
-    //
-    // `gate: true` only ever means this: a pass. A `--fail` goes round the loop
-    // the pipeline drew, which is not the thing a gate is protecting, and a
-    // `--block` already stops in front of a person with the reason attached —
-    // turning that into an approval would throw the blocker away and offer to
-    // let unfinished work past instead. A task's own `gate_at` — the `if
-    // scheduled` branch below — answers a different question and holds
-    // whatever this step reports: a person reaching for it mid-turn wants to
-    // see what actually came back, not only a pass.
-    //
-    // Holds in an unattended run too. `unattended` skips the checks that only
-    // exist to catch a *lane* going wrong without a person to escalate to —
-    // the launch ceiling becomes a backoff, and a `blocked` with nobody
-    // staffing it resumes the lane instead of parking. A gate is not one of
-    // those: it is a person's decision by design, and a run with nobody in it
-    // is not a reason to make that decision unattended — it is a reason to
-    // wait longer for the person who will.
-    // Two ways a step earns this, not one: the pipeline's own `gate: true`,
-    // which holds every task that reaches the step and only ever catches its
-    // pass, and a task's own `gate_at`, set by whoever wrote its document to
-    // hold this one task without giving it a pipeline of its own — and which
-    // catches this step's outcome whatever it was, `destination` already
-    // carrying whatever `apply_loop_budget` and the `blocked` check above made
-    // of it. `spoolway resume` is what tells a caught pass from a caught fail
-    // or block apart again, from `last_report` and `blocked_from` — see
-    // `past_the_gate`.
-    let hold = gate_hold(&task, step, outcome, &destination);
-    let gated = hold.is_some();
-    // What the status log says about this arrival, in place of the lane's own
-    // `-m` message — the Mockup draws the gate note alone, and this is that
-    // wording change. The lane's own account of the pass genuinely does not
-    // reach this log line any more: a lane leaving something for the person
-    // who answers the gate to read has `--handoff` for it, credited to
-    // `current` in `## Handoff` above, same as any other step — the `-m`
-    // message itself is not copied there automatically, so a lane that wants
-    // both has to say so with `--handoff` too.
-    let mut pause_note = None;
-    if let Some(kind) = hold {
-        task.front.paused_at = Some(current.clone());
-        task.front.paused_by = Some(kind.as_str().to_string());
-        destination = crate::pipeline::PAUSED.to_string();
-        pause_note = Some(match kind {
-            Gate::Schedule => "held by this task's own schedule".to_string(),
-            Gate::Step => "held by this step's own gate".to_string(),
-        });
-        // Spent, not standing, whoever wrote it — the board's `s` is the
-        // example, but a `gate_at` typed by hand into the document fires and
-        // clears exactly the same way. A step's own `gate: true` is the one
-        // that holds every task that ever reaches it. Left set, a later
-        // route that brought this task back onto the same step — a loop, a
-        // `--stage` reroute — would gate it a second time nobody asked for.
-        if kind == Gate::Schedule {
-            task.front.gate_at = None;
-        }
-    }
-
-    // And in an unattended run, that is as far towards `blocked` as it gets.
-    // There is nobody to park in front of, so the task goes back to the step it
-    // stopped on to have another go — the same lane, continued, with the
-    // blocker it wrote sitting in its own `## Blocker` for it to read.
-    //
-    // *Why* it stopped is deliberately not consulted. An explicit `--block`, a
-    // fail that fell through, a spent round limit: all three say this task is
-    // not moving without help, and in a run with nobody in it the only help
-    // there is is another go by the lane that knows what happened.
-    //
-    // A gated *pass* never reaches here: it is turned into `paused` above,
-    // before `destination` can equal `blocked`, and unattended does not
-    // change that — see `unattended.enabled`. A `--block` from a step whose
-    // only gate is `gate: true` is a different report, though, and does
-    // reach this resume like any other block; a `gate: true` only holds the
-    // work it approves, not the work that stopped short of it. A task's own
-    // `gate_at` is not that step: it holds a `--block` the same as a pass, so
-    // one caught by a schedule never reaches this resume at all — see the
-    // `if scheduled` branch above.
-    // Skipped whenever the pipeline stages `blocked` and staffs it in this
-    // run — see `Pipeline::blocked_is_staffed`. There, going to `blocked`
-    // starts an ordinary lane on it rather than resuming this one.
-    let mut resumed = None;
-    if unattended
-        && destination == crate::pipeline::BLOCKED
-        && !pipeline.blocked_is_staffed(unattended)
-    {
-        let target = resume_target(&task, pipeline);
-        // The run resuming itself, so the budgets stay spent — see
-        // `resume_at`. A spent budget never arrives here in the first place:
-        // `apply_loop_budget` skips a limit whose exit is `blocked` in exactly
-        // this configuration, rather than handing the task a wall it can only
-        // walk into again.
-        resume_at(&mut task, pipeline, &target, false);
-        destination = target.clone();
-        resumed = Some(target);
-    }
+    let routed = route(&mut task, pipeline, &current, outcome, unattended)?;
+    let mut destination = routed.destination;
+    let gated = routed.gated;
+    let pause_note = routed.pause_note;
+    let resumed = routed.resumed;
+    let paused_from_blocked = routed.paused_from_blocked;
 
     // Committing is deterministic, so it is not left to a model. Every lane
     // goes through this command — that is the pipeline's central contract,
@@ -424,6 +246,244 @@ pub fn report(
         None => println!("{id}: {current} --{outcome}--> {destination}"),
     }
     Ok(())
+}
+
+/// What [`route`] decided, for [`report`] to act on once it is back with a
+/// `Repo` and a clock to finish the turn with.
+pub struct Routed {
+    /// The step the task now sits on.
+    pub destination: String,
+    /// Whether a gate — the step's own `gate: true` or the task's own
+    /// `gate_at` — is what parked this at `paused` rather than the ordinary
+    /// graph. See [`gate_hold`].
+    pub gated: bool,
+    /// The status-log wording a gate wants in place of the lane's own `-m`
+    /// message, if one caught this report.
+    pub pause_note: Option<String>,
+    /// The step this run resumed itself onto, when nobody was staffing
+    /// `blocked` to park in front of. `None` on every other road out.
+    pub resumed: Option<String>,
+    /// Whether `current` was `blocked` itself and the outcome was anything
+    /// but a pass — the one case with no second destination, parked on
+    /// `paused` instead. [`report`]'s own final message tells this apart
+    /// from an ordinary park.
+    pub paused_from_blocked: bool,
+}
+
+/// The routing decision, lifted out of [`report`] so a test can walk every
+/// outcome at every step through the same function `spoolway report` itself
+/// calls — no `Repo`, no filesystem, no clock, so the walk that proves it
+/// bounded can run entirely in `cargo test`.
+///
+/// `task` is mutated in place: routing is not only a lookup, it is also
+/// where a cleared block gives a lane back its budgets (`resume_at`), where
+/// a spent loop logs why it gave up (`apply_loop_budget`), and where a gate
+/// stamps `paused_at`/`paused_by`. All of that belongs to the routing
+/// decision and moves with it — only the parts of [`report`] that need a
+/// real repository (committing the worktree, saving the file, firing the
+/// tracking hook) stay behind.
+pub fn route(
+    task: &mut Task,
+    pipeline: &Pipeline,
+    current: &str,
+    outcome: Outcome,
+    unattended: bool,
+) -> Result<Routed> {
+    let step = pipeline.require_step(current).with_context(|| {
+        format!(
+            "task `{}` is on a step that this pipeline does not define",
+            task.id()
+        )
+    })?;
+
+    // `blocked` itself is never reported on by the ordinary graph below: a
+    // pass is special-cased, and everything else — `--fail`, `--block`, and
+    // the new `--pause` — is "not a pass" here, and used to have nowhere else
+    // to go but back onto `blocked`, unbounded. There is nobody left to hand a
+    // repeat of that to but a person, so it borrows `gate:`'s own shape: see
+    // the branch below.
+    let paused_from_blocked = current == crate::pipeline::BLOCKED && outcome != Outcome::Pass;
+
+    let mut destination = if current == crate::pipeline::BLOCKED && outcome == Outcome::Pass {
+        // `blocked` declares no `on_pass` of its own — where its pass goes is
+        // read from the task's own record of where it stopped, by
+        // `cleared_block_target`. For an agent step, that is one step *past*
+        // there rather than back onto it: the unblocker did that step's work,
+        // so arriving back on it would pay for the work twice — a `--pass`
+        // from `blocked` is taken at its word, unconditionally, which is what
+        // the `true` below means. A command step has no such trade — see
+        // `cleared_block_target`'s own doc for why it is always handed back
+        // to itself.
+        //
+        // Either way this goes through the same `resume_at` that
+        // `spoolway resume` performs by hand, minus the one thing only a
+        // person may do: the loop budgets out of the step the task stopped on
+        // stay spent (`by_hand: false`), because this is the run clearing its
+        // own block and a budget it refunds to itself bounds nothing. What it
+        // does share is the mark: the lane that originally hit the block —
+        // which had often already read the tree and done most of the work —
+        // is continued rather than replaced by a cold one.
+        let target = cleared_block_target(task, pipeline, true);
+        resume_at(task, pipeline, &target, false);
+        target
+    } else if paused_from_blocked {
+        // No second destination once the lane on `blocked` cannot clear the
+        // task itself. `blocked` declares no `on_fail`, and `Outcome::Block`
+        // (and now `Outcome::Pause`) always resolve to `blocked` by
+        // definition — which is the loop this whole task exists to close, and
+        // an unbounded one: the archive holds a run where four tasks looped
+        // there twelve, seven, six and two times.
+        //
+        // So this parks on `paused` instead, exactly as a gated pass does,
+        // and — unlike an ordinary block, which calls `set_blocked_from`
+        // below — leaves `blocked_from` untouched rather than clearing it.
+        // `spoolway resume` needs it later to know which step to hand the
+        // task back to — through the same `cleared_block_target` above, but
+        // with `takes_over: false`, since nothing here claimed that step's
+        // work was done; clearing `blocked_from` here would leave that
+        // resume nothing to read and no better fallback than the pipeline's
+        // entry.
+        let origin = task
+            .front
+            .blocked_from
+            .clone()
+            .unwrap_or_else(|| resume_target(task, pipeline));
+        task.front.paused_at = Some(origin);
+        crate::pipeline::PAUSED.to_string()
+    } else {
+        step.destination(outcome)
+            .unwrap_or(crate::pipeline::BLOCKED)
+            .to_string()
+    };
+
+    destination = apply_loop_budget(pipeline, task, current, destination, unattended);
+
+    // Record the step it stopped on, exactly as the dispatcher's own escalation
+    // does, whatever put it there — an explicit `--block`, an `on_fail` that
+    // routes to `blocked`, or the spent budget above. Both roads out of here
+    // read it: `spoolway resume` resumes from it, and so does the unattended
+    // resume below. Without it a task restarts at the pipeline's entry, and one
+    // that blocked at `pr` already has a branch pushed and a pull request open,
+    // so re-running the steps that did that opens a second one.
+    if destination == crate::pipeline::BLOCKED {
+        set_blocked_from(task, current);
+    }
+
+    // A gated step's pass is not spoolway's to act on. The work is done and it
+    // went well; whether the task goes past this step is the person's, which is
+    // the whole of what `gate:` says — so the task lands on `paused` and waits
+    // for `spoolway resume`.
+    //
+    // Held here rather than asked of the lane. The lane is told that a person
+    // will read its pane — see `dispatch::policy` and `dispatch::situating` —
+    // but told nothing it could act on to change this decision: it cannot
+    // approve its own work, so the only thing knowing changes is what it
+    // leaves running and what it writes for that person, not where the pass
+    // parks. The old arrangement asked it to stop and print a question
+    // instead, and that request was the entire enforcement — three plan runs
+    // against a small local model, three gates, and not one of them held. A
+    // mechanism that needs no cooperation cannot be argued with.
+    //
+    // `gate: true` only ever means this: a pass. A `--fail` goes round the loop
+    // the pipeline drew, which is not the thing a gate is protecting, and a
+    // `--block` already stops in front of a person with the reason attached —
+    // turning that into an approval would throw the blocker away and offer to
+    // let unfinished work past instead. A task's own `gate_at` — the `if
+    // scheduled` branch below — answers a different question and holds
+    // whatever this step reports: a person reaching for it mid-turn wants to
+    // see what actually came back, not only a pass.
+    //
+    // Holds in an unattended run too. `unattended` skips the checks that only
+    // exist to catch a *lane* going wrong without a person to escalate to —
+    // the launch ceiling becomes a backoff, and a `blocked` with nobody
+    // staffing it resumes the lane instead of parking. A gate is not one of
+    // those: it is a person's decision by design, and a run with nobody in it
+    // is not a reason to make that decision unattended — it is a reason to
+    // wait longer for the person who will.
+    // Two ways a step earns this, not one: the pipeline's own `gate: true`,
+    // which holds every task that reaches the step and only ever catches its
+    // pass, and a task's own `gate_at`, set by whoever wrote its document to
+    // hold this one task without giving it a pipeline of its own — and which
+    // catches this step's outcome whatever it was, `destination` already
+    // carrying whatever `apply_loop_budget` and the `blocked` check above made
+    // of it. `spoolway resume` is what tells a caught pass from a caught fail
+    // or block apart again, from `last_report` and `blocked_from` — see
+    // `past_the_gate`.
+    let hold = gate_hold(task, step, outcome, &destination);
+    let gated = hold.is_some();
+    // What the status log says about this arrival, in place of the lane's own
+    // `-m` message — the Mockup draws the gate note alone, and this is that
+    // wording change. The lane's own account of the pass genuinely does not
+    // reach this log line any more: a lane leaving something for the person
+    // who answers the gate to read has `--handoff` for it, credited to
+    // `current` in `## Handoff` above, same as any other step — the `-m`
+    // message itself is not copied there automatically, so a lane that wants
+    // both has to say so with `--handoff` too.
+    let mut pause_note = None;
+    if let Some(kind) = hold {
+        task.front.paused_at = Some(current.to_string());
+        task.front.paused_by = Some(kind.as_str().to_string());
+        destination = crate::pipeline::PAUSED.to_string();
+        pause_note = Some(match kind {
+            Gate::Schedule => "held by this task's own schedule".to_string(),
+            Gate::Step => "held by this step's own gate".to_string(),
+        });
+        // Spent, not standing, whoever wrote it — the board's `s` is the
+        // example, but a `gate_at` typed by hand into the document fires and
+        // clears exactly the same way. A step's own `gate: true` is the one
+        // that holds every task that ever reaches it. Left set, a later
+        // route that brought this task back onto the same step — a loop, a
+        // `--stage` reroute — would gate it a second time nobody asked for.
+        if kind == Gate::Schedule {
+            task.front.gate_at = None;
+        }
+    }
+
+    // And in an unattended run, that is as far towards `blocked` as it gets.
+    // There is nobody to park in front of, so the task goes back to the step it
+    // stopped on to have another go — the same lane, continued, with the
+    // blocker it wrote sitting in its own `## Blocker` for it to read.
+    //
+    // *Why* it stopped is deliberately not consulted. An explicit `--block`, a
+    // fail that fell through, a spent round limit: all three say this task is
+    // not moving without help, and in a run with nobody in it the only help
+    // there is is another go by the lane that knows what happened.
+    //
+    // A gated *pass* never reaches here: it is turned into `paused` above,
+    // before `destination` can equal `blocked`, and unattended does not
+    // change that — see `unattended.enabled`. A `--block` from a step whose
+    // only gate is `gate: true` is a different report, though, and does
+    // reach this resume like any other block; a `gate: true` only holds the
+    // work it approves, not the work that stopped short of it. A task's own
+    // `gate_at` is not that step: it holds a `--block` the same as a pass, so
+    // one caught by a schedule never reaches this resume at all — see the
+    // `if scheduled` branch above.
+    // Skipped whenever the pipeline stages `blocked` and staffs it in this
+    // run — see `Pipeline::blocked_is_staffed`. There, going to `blocked`
+    // starts an ordinary lane on it rather than resuming this one.
+    let mut resumed = None;
+    if unattended
+        && destination == crate::pipeline::BLOCKED
+        && !pipeline.blocked_is_staffed(unattended)
+    {
+        let target = resume_target(task, pipeline);
+        // The run resuming itself, so the budgets stay spent — see
+        // `resume_at`. A spent budget never arrives here in the first place:
+        // `apply_loop_budget` skips a limit whose exit is `blocked` in exactly
+        // this configuration, rather than handing the task a wall it can only
+        // walk into again.
+        resume_at(task, pipeline, &target, false);
+        destination = target.clone();
+        resumed = Some(target);
+    }
+
+    Ok(Routed {
+        destination,
+        gated,
+        pause_note,
+        resumed,
+        paused_from_blocked,
+    })
 }
 
 /// A loop that has gone round too many times escalates instead of going round
