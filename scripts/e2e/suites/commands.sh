@@ -225,6 +225,44 @@ says "Pi remains available through standalone install for established projects" 
   "only once the project is trusted" \
   env -C "$INITDIR/asked" "$SPOOLWAY" install pi
 
+# ------------------------------------------------- restoring missing pipelines
+# What `spoolway-tasks` does now that it no longer offers to generate a
+# pipeline: a project whose `.spoolway/pipelines/` has gone missing is
+# repaired by a plain re-run of `init`, and the skill runs it without
+# asking. Only a real project on disk shows the whole of that claim — that
+# the re-run writes back the pipelines it finds absent, reports every file
+# the project already had as kept rather than rewriting it, and that
+# `task contract` answers again on the very next call.
+RESTORE="$INITDIR/restore"
+mkdir -p "$RESTORE" && (cd "$RESTORE" && git init -q -b main .)
+must "the project to repair scaffolds" env -C "$RESTORE" "$SPOOLWAY" init
+printf '\n# a line this project wrote itself\n' >> "$RESTORE/.spoolway/config.toml"
+
+rm -rf "$RESTORE/.spoolway/pipelines"
+refuses "a project whose pipelines went missing says so rather than borrowing" \
+  "no pipelines defined" env -C "$RESTORE" "$SPOOLWAY" task contract
+
+RESTORE_OUT=$(env -C "$RESTORE" "$SPOOLWAY" init 2>&1)
+if grep -qE '^[[:space:]]*wrote[[:space:]]+\.spoolway/pipelines/default\.yml' <<<"$RESTORE_OUT"; then
+  ok "the re-run writes the shipped pipelines back"
+else
+  bad "the re-run writes the shipped pipelines back"
+  sed 's/^/        /' <<<"$RESTORE_OUT"
+fi
+if grep -qE '^[[:space:]]*kept[[:space:]]+\.spoolway/config\.toml' <<<"$RESTORE_OUT"; then
+  ok "and reports the config it found as kept, not written"
+else
+  bad "and reports the config it found as kept, not written"
+  sed 's/^/        /' <<<"$RESTORE_OUT"
+fi
+works "both shipped pipelines are back" \
+  test -f "$RESTORE/.spoolway/pipelines/default.yml" -a \
+         -f "$RESTORE/.spoolway/pipelines/bugfix.yml"
+has "the line this project wrote itself is still there, byte for byte" \
+  "# a line this project wrote itself" "$RESTORE/.spoolway/config.toml"
+works "and task contract answers again on the next call" \
+  env -C "$RESTORE" "$SPOOLWAY" task contract
+
 # ------------------------------------------------------- tracker scaffolding
 # `--tracker` and `--project-key` answer the same two questions
 # `init`'s menu asks interactively, and land in `[issue_tracking]` — but
@@ -364,6 +402,26 @@ else
   bad "and leaves the queue directory exactly as it was"
   diff <(echo "$BEFORE_CHECK") <(echo "$AFTER_CHECK") | sed 's/^/        /'
 fi
+
+# ------------------------------------------------------ no pipelines/ at all
+# A missing `.spoolway/pipelines/` used to be answered from the pipelines
+# compiled into the binary; an empty one was already a hard `no pipelines
+# defined` error. Both now reach that same error, naming the directory, so
+# the broken state is visible where it happens rather than surfacing three
+# commands later at dispatch on a `PROMPT.md` that was never written.
+mv .spoolway/pipelines "$LIVE/pipelines.bak"
+refuses "task contract with no pipelines/ reports the shared error" \
+  ".spoolway/pipelines: no pipelines defined" "$SPOOLWAY" task contract
+
+DOCTOR_OUT=$("$SPOOLWAY" doctor 2>&1)
+if grep -qF "FAIL  pipelines load: in " <<<"$DOCTOR_OUT" \
+  && grep -qF ".spoolway/pipelines: no pipelines defined" <<<"$DOCTOR_OUT"; then
+  ok "doctor's own pipelines check fails the same way, naming the same directory"
+else
+  bad "doctor's own pipelines check fails the same way, naming the same directory"
+  sed 's/^/        /' <<<"$DOCTOR_OUT"
+fi
+mv "$LIVE/pipelines.bak" .spoolway/pipelines
 
 # ------------------------------------------------------- explicit pipeline
 # `pipeline:` is required now — there is no `dispatch.default_pipeline` to

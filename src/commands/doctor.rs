@@ -3101,10 +3101,17 @@ mod tests {
             "a checkout with no config.toml still loads its (default) tracked config: {:?}",
             find("config parses")
         );
+        let pipelines_err = find("pipelines are valid").as_ref().expect_err(
+            "a checkout with no pipelines/ now says so instead of borrowing the built-ins",
+        );
+        let pipelines_msg = format!("{pipelines_err:#}");
         assert!(
-            find("pipelines are valid").is_ok(),
-            "a checkout with no pipelines/ still loads the built-ins: {:?}",
-            find("pipelines are valid")
+            pipelines_msg.contains("no pipelines defined"),
+            "the tracked-only loader's own read, not a home-read failure cascading in: {pipelines_msg:?}"
+        );
+        assert!(
+            !pipelines_msg.contains("spoolway-id"),
+            "a broken home must not surface here as a pipeline failure: {pipelines_msg:?}"
         );
     }
 
