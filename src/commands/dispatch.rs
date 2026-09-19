@@ -222,57 +222,31 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         println!("dry run: nothing will be started, torn down, or written\n");
     }
 
-    // Under herdr this is a no-op: the dispatcher's own pane stays wherever it
-    // was started, under both `grouped` and `split` — see `Mux::move_self_into`.
-    // It is tmux that still needs this: this is where it moves the caller's
-    // own window into the run's shared session.
+    // The dispatcher's own pane stays wherever it was started, under both
+    // `grouped` and `split` — herdr has nothing to move it into. This still
+    // has to find or open the run's shared workspace, though, under
+    // `grouped`: a task's lane joins that workspace's tab, and it must exist
+    // before the first one starts.
     //
     // Never for `--dry-run`, which opens nothing and closes nothing. A
-    // failure here is held for `workspace_move_notice`, just below, rather
+    // failure here is held for `workspace_open_notice`, just below, rather
     // than printed on the spot — this is the one notice `warnings_gate`,
-    // above, could not carry: the move is only attempted once the lock is
-    // held, past the point `esc` could still mean "nothing happened yet".
-    let mut workspace_move_error = None;
-    if !args.dry_run {
-        match mux
-            .dispatch_workspace(&repo.root, true)
-            .and_then(|workspace| match workspace {
-                Some(id) => {
-                    mux.move_self_into(&id)?;
-                    // A run in a background tmux server is invisible until
-                    // attached to, and the person this backend is for may
-                    // never have typed a tmux command — the one they need is
-                    // handed over. Only when the board is not about to draw
-                    // in that session anyway: a dispatcher started inside
-                    // tmux moved there with its pane.
-                    if mux.name() == "tmux" && mux.own_workspace().as_deref() != Some(id.as_str()) {
-                        println!(
-                            "  the run's lanes live in tmux — watch them with: tmux attach -t '{}'",
-                            crate::tmux::session_name(&crate::mux::dispatch_workspace_label(
-                                &repo.root
-                            ))
-                        );
-                    }
-                    Ok(())
-                }
-                None => Ok(()),
-            }) {
-            Ok(()) => {}
-            Err(err) => {
-                workspace_move_error = Some(format!(
-                    "could not move this run into its own workspace: {err:#}"
-                ));
-            }
-        }
+    // above, could not carry: this is only attempted once the lock is held,
+    // past the point `esc` could still mean "nothing happened yet".
+    let mut workspace_open_error = None;
+    if !args.dry_run
+        && let Err(err) = mux.dispatch_workspace(&repo.root, true)
+    {
+        workspace_open_error = Some(format!("could not open this run's own workspace: {err:#}"));
     }
 
     // The one notice `warnings_gate` ran too early to carry — see just
     // above. Held on screen the same way, but with only `[enter]` to
-    // dismiss it: by now the lock is held and, under tmux, this process's
-    // own pane may already have moved, so there is no earlier screen left
-    // for `esc` to mean "back to" — see `workspace_move_notice`'s own doc.
-    if let Some(err) = &workspace_move_error {
-        workspace_move_notice(err)?;
+    // dismiss it: by now the lock is held, so there is no earlier screen
+    // left for `esc` to mean "back to" — see `workspace_open_notice`'s own
+    // doc.
+    if let Some(err) = &workspace_open_error {
+        workspace_open_notice(err)?;
     }
 
     // The run watches itself. A resident dispatcher spends almost all of its
@@ -926,11 +900,11 @@ pub(crate) fn unattended_block_lines(unattended: bool, config: &Config) -> Vec<S
 /// Alongside [`overview_gate`] and [`overrides_gate`], and — like both —
 /// before `Lock::acquire`: `esc` here must still mean "nothing has happened
 /// yet", which is only true ahead of the lock. The other notice this task
-/// exists to fix, a workspace-move failure, cannot join this screen for
-/// exactly that reason — the move is only attempted once the lock is held —
-/// so it gets its own, smaller one instead; see [`workspace_move_notice`],
-/// which is why this takes only `unattended` and no workspace-move error of
-/// its own.
+/// exists to fix, a failure to open the run's shared workspace, cannot join
+/// this screen for exactly that reason — it is only attempted once the lock
+/// is held — so it gets its own, smaller one instead; see
+/// [`workspace_open_notice`], which is why this takes only `unattended` and
+/// no workspace-open error of its own.
 fn warnings_gate(repo: &Repo, pipelines: &Pipelines, unattended: &[String]) -> Result<bool> {
     warnings_gate_with(
         repo,
@@ -1037,15 +1011,15 @@ pub(crate) fn warnings_gate_with(
     }
 }
 
-/// The one screen [`warnings_gate`] cannot show: a failure to move this
-/// run's own pane into its workspace, only known once `dispatch` has
-/// already taken the lock and attempted the move — see that call site's own
-/// comment. Unlike `warnings_gate`, there is no earlier screen left to
-/// decline back to here, so `[enter]` is the only key this reads, and
-/// nothing is fingerprinted: a pane move either works or it does not, once,
+/// The one screen [`warnings_gate`] cannot show: a failure to find or open
+/// this run's own shared workspace, only known once `dispatch` has already
+/// taken the lock and attempted it — see that call site's own comment.
+/// Unlike `warnings_gate`, there is no earlier screen left to decline back
+/// to here, so `[enter]` is the only key this reads, and nothing is
+/// fingerprinted: opening a workspace either works or it does not, once,
 /// this run — there is no standing state worth hiding until it changes.
-fn workspace_move_notice(err: &str) -> Result<()> {
-    workspace_move_notice_with(
+fn workspace_open_notice(err: &str) -> Result<()> {
+    workspace_open_notice_with(
         err,
         crate::ask::interactive(),
         &mut crate::screen::RawStdin,
@@ -1054,12 +1028,12 @@ fn workspace_move_notice(err: &str) -> Result<()> {
     )
 }
 
-/// [`workspace_move_notice`]'s own logic, against an injected reader, writer
+/// [`workspace_open_notice`]'s own logic, against an injected reader, writer
 /// and terminal guard — see [`overrides_gate_with`]'s own doc comment on the
 /// pattern. With no tty on either end the notice is still printed, once, so
 /// it is on record; nothing here may then block on a keypress nobody can
 /// answer.
-pub(crate) fn workspace_move_notice_with(
+pub(crate) fn workspace_open_notice_with(
     err: &str,
     interactive: bool,
     input: &mut impl PollableRead,
@@ -1338,7 +1312,7 @@ pub(crate) fn check_backend_checkout(
                     repo.root.display()
                 ),
                 fix: "a bare repository, say. Switch backends:\n\n  spoolway config set \
-                      dispatch.backend tmux"
+                      dispatch.backend headless"
                     .to_string(),
             }));
         }
@@ -2052,12 +2026,6 @@ mod tests {
         fn focus_lane(&self, _name: &str) -> Result<()> {
             unimplemented!()
         }
-        fn rename_tab(&self, _tab_id: &str, _label: &str) -> Result<()> {
-            unimplemented!()
-        }
-        fn rename_workspace(&self, _workspace_id: &str, _label: &str) -> Result<()> {
-            unimplemented!()
-        }
         fn rename_pane(&self, _pane_id: &str, _label: &str) -> Result<()> {
             unimplemented!()
         }
@@ -2069,7 +2037,7 @@ mod tests {
     fn backend_checkout_is_unconcerned_with_a_non_herdr_backend() {
         let repo = bare_repo("non-herdr");
         let mux = StubMux {
-            name: "tmux",
+            name: "headless",
             available: true,
             owns_workspace: true,
         };
@@ -2870,16 +2838,16 @@ mod tests {
         );
     }
 
-    /// `workspace_move_notice_with`'s own case: no tty, so the failure is
+    /// `workspace_open_notice_with`'s own case: no tty, so the failure is
     /// printed once, on record, and nothing here blocks on a key nobody can
     /// answer — `input` is left empty, or a `read_key` call would hang the
     /// test.
     #[test]
-    fn workspace_move_notice_with_no_tty_prints_and_returns() {
+    fn workspace_open_notice_with_no_tty_prints_and_returns() {
         let mut input = keys("");
         let mut out = Vec::new();
-        workspace_move_notice_with(
-            "could not move this run into its own workspace: nope",
+        workspace_open_notice_with(
+            "could not open this run's own workspace: nope",
             false,
             &mut input,
             &mut out,
@@ -2896,11 +2864,11 @@ mod tests {
     /// `warnings_gate_with` there is no `esc` branch to exercise here at
     /// all.
     #[test]
-    fn workspace_move_notice_with_enter_dismisses() {
+    fn workspace_open_notice_with_enter_dismisses() {
         let mut input = keys("\r");
         let mut out = Vec::new();
-        workspace_move_notice_with(
-            "could not move this run into its own workspace: nope",
+        workspace_open_notice_with(
+            "could not open this run's own workspace: nope",
             true,
             &mut input,
             &mut out,
@@ -2916,11 +2884,11 @@ mod tests {
     /// the same reason: nothing here may wait forever for an answer that can
     /// no longer come.
     #[test]
-    fn workspace_move_notice_with_none_dismisses() {
+    fn workspace_open_notice_with_none_dismisses() {
         let mut input = keys("");
         let mut out = Vec::new();
-        workspace_move_notice_with(
-            "could not move this run into its own workspace: nope",
+        workspace_open_notice_with(
+            "could not open this run's own workspace: nope",
             true,
             &mut input,
             &mut out,

@@ -116,11 +116,6 @@ pub fn attach(repo: &Repo, pipelines: &Pipelines, mux: &dyn Mux, args: &AttachAr
                      open there; type into it rather than opening it twice.",
             live.pane_id, live.workspace_id
         );
-        // The workspace id is a tmux session id, and `attach -t` on an id is
-        // the one gesture a person who knows no tmux needs handed to them.
-        if mux.name() == "tmux" {
-            println!("    tmux attach -t '{}'", live.workspace_id);
-        }
         return Ok(());
     }
 

@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # The ways a run ends badly, held against a real dispatcher and real detached
 # lanes — a hard kill with lanes live, the stale lock it leaves, a restart
-# over a still-running lane, a lane that reports with nobody listening, a
-# stop that leaves every lane running, and a multiplexer that dies under
-# worktrees that outlive it.
+# over a still-running lane, a lane that reports with nobody listening, and a
+# stop that leaves every lane running.
 #
 # `dispatch.backend = headless` makes every lane a real `setsid` process of
 # its own — see `fixture.sh` — which is what makes a kill of the
@@ -18,8 +17,7 @@
 # already has — it sleeps for five minutes and never reports on its own —
 # reached either by naming a task `hang` directly or, where a case wants a
 # name of its own, by seeding `$CTL/<task>` with `hang` before it queues: the
-# stand-in reads that file before it reads its own task id. The tmux case is
-# the one exception, and says why where it queues its own task.
+# stand-in reads that file before it reads its own task id.
 #
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -151,9 +149,7 @@ sweep() {
 #
 # This suite's own `hang`-mode tasks never report, so nothing ever moves them
 # on; left in the queue, every pass from here on would restart one for no
-# reason a later case is asking about — and under the tmux case, on the wrong
-# backend entirely, since a headless task's recorded workspace answers to
-# nothing a tmux `workspace_alive` check would recognise.
+# reason a later case is asking about.
 forget() {
   local id=$1 lane pid wt
   lane="$id · $(stage_of "$id")"
@@ -313,66 +309,6 @@ else
 fi
 sweep
 forget stop-live
-
-# --------------------------------------------------------- a multiplexer dies
-# `src/tmux.rs` drives the default server unless `SPOOLWAY_TMUX_SOCKET` names
-# one of its own, which is the whole of what lets this run a real tmux
-# without ever touching a person's own — see `Tmux::new`.
-if ! command -v tmux >/dev/null 2>&1; then
-  echo "  skipped — no \`tmux\` on PATH, and this case needs a real server"
-else
-  SOCK="$LIVE/tmux.sock"
-  export SPOOLWAY_TMUX_SOCKET="$SOCK"
-  must "the tmux backend" "$SPOOLWAY" config set dispatch.backend tmux
-  # Split, so this task cuts a session of its own — the shape
-  # `Mux::reopen_owned_pane`'s heal path is written against, and the one the
-  # unit test beside it already covers.
-  must "tmux runs split" "$SPOOLWAY" config set dispatch.tmux_mode split
-
-  # An ordinary fast task, not a `hang` one — and not for the reason `hang`
-  # is wrong everywhere else in this suite. `Mux::start_lane` respawns a
-  # pane as the agent itself, so the pane closes the moment that process
-  # does; `agents/pi`'s fast steps exit in milliseconds either way. What
-  # matters here is *which* lane the kill lands on. `implement`'s own launch
-  # counts against `attempts`, and a task's `MAX_LAUNCHES` is one — the same
-  # one bound `check_unreported` reads as "an agent that died at launch" — so
-  # a multiplexer killed under a lane already charged against that count
-  # reads as exactly that on the very next pass, whether or not a
-  # multiplexer had anything to do with it, and the task is handed to a
-  # person rather than healed. The heal this case is about runs on a fresh
-  # launch, one that has not spent its attempt yet — which for a real task is
-  # any step arriving after the one whose session went stale, so the kill
-  # lands between `implement` reporting and `review` starting, on a
-  # workspace `review` has not tried to use yet.
-  task_doc "$LIVE/tmux-heal.md" tmux-heal "$BODY" "group: disaster" "touches: [notes/tmux-heal.md]"
-  must "tmux-heal queues" "$SPOOLWAY" queue add --from "$LIVE/tmux-heal.md"
-  dispatcher_restart
-  if drive tmux-heal review 20; then
-    WT7=$(worktree_of tmux-heal)
-    tmux -S "$SOCK" kill-server 2>/dev/null
-    # `document` rather than watching for `review`'s own pane: the mock
-    # reports in milliseconds, so by the time anything here could poll for
-    # it the pane healed to run it is already closed again, same as
-    # `implement`'s was. Stage reaching past `review` at all is only
-    # possible if that launch — the one this kill left with a stale
-    # workspace and nothing else — opened a fresh pane rather than failing;
-    # `handover` and `checks` need a real forge this suite has none of, so
-    # `document` is as far as an unrelated limitation leaves provable.
-    if [ -n "$WT7" ] && drive tmux-heal document 30 && [ -d "$WT7" ]; then
-      ok "a killed multiplexer clears the ids on file and the next launch opens new ones"
-    else
-      bad "a killed multiplexer clears the ids on file and the next launch opens new ones"
-      printf '        worktree: %s, stage: %s\n' \
-        "$([ -d "$WT7" ] && echo present || echo gone)" "$(stage_of tmux-heal)"
-    fi
-  else
-    bad "a killed multiplexer clears the ids on file and the next launch opens new ones (never reached review)"
-  fi
-  sweep
-  tmux -S "$SOCK" kill-server 2>/dev/null || true
-  unset SPOOLWAY_TMUX_SOCKET
-  must "back to headless" "$SPOOLWAY" config set dispatch.backend headless
-fi
 
 # ------------------------- a pass problem reaches the project log, not the board
 # `sweep` first: the resident supervisor `dispatcher_start` keeps running is

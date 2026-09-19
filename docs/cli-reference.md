@@ -292,7 +292,7 @@ it.
 `esc` on any of the three screens ends the command. From the queue screen's own `enter`, `esc`
 on any of the three screens returns to browsing instead.
 
-A failure to move this run into its own workspace is shown afterward, once the run has already
+A failure to find or open this run's own workspace is shown afterward, once the run has already
 taken the lock, on its own notice with only `[enter] continue` to press.
 
 | Exit code | Meaning |

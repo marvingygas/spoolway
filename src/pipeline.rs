@@ -543,7 +543,7 @@ pub struct Step {
     /// command step used to run.
     ///
     /// `false`, the default, gives the command a pane of its own — split off
-    /// the task's own tab, under the herdr and tmux backends — so a suite or
+    /// the task's own tab, under the herdr backend — so a suite or
     /// a `gh pr checks --watch` is something a person can look at while it
     /// runs. A backend with no pane to offer, headless, runs it detached
     /// either way: this key only ever turns a pane *off*, never demands one

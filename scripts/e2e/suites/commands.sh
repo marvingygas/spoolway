@@ -1398,125 +1398,164 @@ works "and it really did write where no lane could" test -f "$OUTSIDE"
 # own, under a real multiplexer. `headless: true` is the escape hatch back to
 # today's silent, detached run. Neither half is provable against the headless
 # backend the rest of this suite runs on — a pane is the one thing only a real
-# tmux server can be asked whether it opened — so this switches to it for as
-# long as the case needs, the same way `disaster.sh`'s own tmux case does.
-if ! command -v tmux >/dev/null 2>&1; then
-  echo "  skipped — no \`tmux\` on PATH, and this case needs a real server"
+# pane can be asked whether it opened — so this switches to `herdr`, against
+# `scripts/e2e/herdr-stub.sh`, for as long as the case needs. Against the
+# double rather than a real server: its header says why there is no isolated
+# herdr to run this on.
+HSTATE="$LIVE/herdr-stub-pane"
+HERDRBIN="$LIVE/herdr-bin-pane"
+mkdir -p "$HSTATE" "$HERDRBIN"
+install -m 755 "$HERE/../herdr-stub.sh" "$HERDRBIN/herdr"
+export HERDR_STUB_STATE="$HSTATE"
+PATH_BEFORE_HERDR_STUB="$PATH"
+PATH="$HERDRBIN:$PATH"; export PATH
+
+must "the herdr backend" "$SPOOLWAY" config set dispatch.backend herdr
+must "herdr gives each task a workspace" "$SPOOLWAY" config set dispatch.herdr_mode split
+
+# A pane's shell starts life with the *stub server's* environment, never the
+# dispatcher's — unlike a headless run's child process, which inherits by
+# ordinary fork/exec. `Mux::run_in_pane` is handed the dispatcher's own
+# environment as an inherited layer for exactly this reason, and this is the
+# one variable set here specifically so nothing on the harness's own PATH
+# could already carry it: a false pass would mean nothing.
+export SPOOLWAY_E2E_PANE_ENV_MARKER="from-the-dispatchers-own-environment"
+
+# The visible half: no `headless:` key, so the command gets a pane of its
+# own — long enough that a poll can catch it standing while the command
+# runs, and short enough that the suite is not built around a sleep.
+#
+# A one-step pipeline of its own, like `herdrpane.yml` below — not the
+# `default` pipeline's `implement` → this step chain the tmux-backed version
+# of this case used, because that starts on an agent lane, and
+# `herdr-stub.sh` answers no `agent start` verb at all: it is here for the
+# handover, not for a full agent lifecycle. See its own header.
+cat > .spoolway/pipelines/panevisible.yml <<'YML'
+description: One paned command step, for whether it opens a pane at all.
+
+steps:
+  - id: visible
+    description: Run long enough for a poll to catch the pane standing.
+    run: 'sleep 2; echo visible-pane-marker; echo "env:$SPOOLWAY_E2E_PANE_ENV_MARKER"'
+    on_pass: done
+    on_fail: blocked
+YML
+works "a pipeline with a paned command step checks out" "$SPOOLWAY" pipeline check
+
+# Restarted after the export above, so the dispatcher this starts is the
+# one that inherited it — see `dispatcher_restart` a few lines up for why
+# that ordering matters.
+dispatcher_restart
+task_doc "$LIVE/paned.md" paned "$BODY" "group: live" \
+  "pipeline: panevisible" "touches: [notes/paned.md]"
+must "a task through a paned command step" \
+  "$SPOOLWAY" queue add --from "$LIVE/paned.md"
+
+# The pane id spoolway recorded for this step, checked against the double's
+# own `panes` file — the split's own reply is not enough to trust, and
+# `split_pane` refuses to record an id the multiplexer has never heard of.
+PANE_FILE="$SPOOLWAY_PROJECT_HOME/commands/paned · visible.pane"
+RECORDED=""
+for _ in $(seq 1 100); do
+  RECORDED=$(cat "$PANE_FILE" 2>/dev/null || true)
+  if [ -n "$RECORDED" ] && grep -q "^$RECORDED	" "$HSTATE/panes"; then
+    break
+  fi
+  RECORDED=""
+  sleep 0.1
+done
+if [ -n "$RECORDED" ]; then
+  ok "a command step with no headless: key runs in a pane of its own"
 else
-  SOCK="$LIVE/tmux-pane.sock"
-  export SPOOLWAY_TMUX_SOCKET="$SOCK"
-  must "the tmux backend" "$SPOOLWAY" config set dispatch.backend tmux
-  must "tmux runs split" "$SPOOLWAY" config set dispatch.tmux_mode split
-
-  # A tmux pane starts life with the *server's* environment, never the
-  # dispatcher's — unlike a headless run's child process, which inherits by
-  # ordinary fork/exec. `Mux::run_in_pane` is handed the dispatcher's own
-  # environment as an inherited layer for exactly this reason, and this is
-  # the one variable set here specifically so nothing on the harness's own
-  # PATH could already carry it: a false pass would mean nothing.
-  export SPOOLWAY_E2E_PANE_ENV_MARKER="from-the-dispatchers-own-environment"
-
-  # The visible half: no `headless:` key, so the command gets a pane of its
-  # own — long enough that a poll can catch it standing while the command
-  # runs, and short enough that the suite is not built around a sleep.
-  cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
-  add_command_step default visible \
-    "sleep 2; echo visible-pane-marker; echo \"env:\$SPOOLWAY_E2E_PANE_ENV_MARKER\"" \
-    review ""
-  works "a pipeline with a paned command step checks out" "$SPOOLWAY" pipeline check
-
-  # Restarted after the export above, so the dispatcher this starts is the
-  # one that inherited it — see `dispatcher_restart` a few lines up for why
-  # that ordering matters.
-  dispatcher_restart
-  task_doc "$LIVE/paned.md" paned "$BODY" "group: live" "touches: [notes/paned.md]"
-  must "a task through a paned command step" \
-    "$SPOOLWAY" queue add --from "$LIVE/paned.md"
-
-  FOUND_PANE=""
-  for _ in $(seq 1 100); do
-    FOUND_PANE=$(tmux -S "$SOCK" list-panes -a -F '#{pane_title}' 2>/dev/null \
-      | grep -F "paned · visible" || true)
-    [ -n "$FOUND_PANE" ] && break
-    sleep 0.1
-  done
-  if [ -n "$FOUND_PANE" ]; then
-    ok "a command step with no headless: key runs in a pane of its own"
-  else
-    bad "a command step with no headless: key runs in a pane of its own"
-  fi
-
-  # Read while the task is still moving — the archive step reclaims this log.
-  # `records` keeps a `.kept` copy so the env-marker check below still has a
-  # file to read after `drive paned gone` has deleted the original.
-  records "the pane's own output is on the record just the same" "visible-pane-marker" \
-    "$SPOOLWAY_PROJECT_HOME/commands/paned · visible.log" paned
-  has "a variable only the dispatcher's own environment carried reached the tmux pane" \
-    "env:from-the-dispatchers-own-environment" \
-    "$SPOOLWAY_PROJECT_HOME/commands/paned · visible.log.kept"
-
-  if drive paned gone 60; then ok "the task carries on once the command has passed"
-  else bad "the task carries on once the command has passed (at \`$(stage_of paned)\`)"; fi
-  unset SPOOLWAY_E2E_PANE_ENV_MARKER
-  if tmux -S "$SOCK" list-panes -a -F '#{pane_title}' 2>/dev/null \
-      | grep -qF "paned · visible"; then
-    bad "a passing command's pane closes behind it"
-  else
-    ok "a passing command's pane closes behind it"
-  fi
-
-  # The hidden half: the same shape, with `headless: true` added — today's
-  # silent, detached run, and no pane ever asked for.
-  cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
-  add_command_step default hidden "sleep 2; echo hidden-command-marker" review ""
-  must "adding headless: true to it" \
-    sed -i 's|^    run: sleep 2; echo hidden-command-marker$|    run: sleep 2; echo hidden-command-marker\n    headless: true|' \
-    .spoolway/pipelines/default.yml
-  works "a pipeline naming headless: true checks out" "$SPOOLWAY" pipeline check
-  says "and show marks it" "hidden     command   waits headless timeout=30m" \
-    "$SPOOLWAY" pipeline show
-
-  dispatcher_restart
-  task_doc "$LIVE/hiddenc.md" hiddenc "$BODY" "group: live" "touches: [notes/hiddenc.md]"
-  must "a task through a headless command step" \
-    "$SPOOLWAY" queue add --from "$LIVE/hiddenc.md"
-  # Caught in flight, ahead of the archive step that reclaims this log.
-  records "and its output is on the record just the same" "hidden-command-marker" \
-    "$SPOOLWAY_PROJECT_HOME/commands/hiddenc · hidden.log" hiddenc
-
-  if drive hiddenc gone 60; then ok "a headless command step still routes on its exit code"
-  else bad "a headless command step still routes on its exit code (at \`$(stage_of hiddenc)\`)"; fi
-  if tmux -S "$SOCK" list-panes -a -F '#{pane_title}' 2>/dev/null \
-      | grep -qF "hiddenc · hidden"; then
-    bad "headless: true never opened a pane at all"
-  else
-    ok "headless: true never opened a pane at all"
-  fi
-
-  # A failing, paned command closes its pane the moment the task leaves the
-  # step for `blocked` — nothing is left standing on the chance of a retry.
-  cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
-  add_command_step default flaky "echo flaky-pane-marker; exit 3" review ""
-  works "a pipeline with a failing paned step checks out" "$SPOOLWAY" pipeline check
-
-  dispatcher_restart
-  task_doc "$LIVE/panedfail.md" panedfail "$BODY" "group: live" \
-    "touches: [notes/panedfail.md]"
-  must "a task whose paned step fails" \
-    "$SPOOLWAY" queue add --from "$LIVE/panedfail.md"
-  if drive panedfail blocked 60; then ok "a failing paned command still routes on its exit code"
-  else bad "a failing paned command still routes on its exit code (at \`$(stage_of panedfail)\`)"; fi
-  if tmux -S "$SOCK" list-panes -a -F '#{pane_title}' 2>/dev/null \
-      | grep -qF "panedfail · flaky"; then
-    bad "and its pane closes behind the failure rather than standing"
-  else
-    ok "and its pane closes behind the failure rather than standing"
-  fi
-
-  tmux -S "$SOCK" kill-server 2>/dev/null || true
-  unset SPOOLWAY_TMUX_SOCKET
-  must "back to headless" "$SPOOLWAY" config set dispatch.backend headless
+  bad "a command step with no headless: key runs in a pane of its own"
 fi
+
+# Read while the task is still moving — the archive step reclaims this log.
+# `records` keeps a `.kept` copy so the env-marker check below still has a
+# file to read after `drive paned gone` has deleted the original.
+records "the pane's own output is on the record just the same" "visible-pane-marker" \
+  "$SPOOLWAY_PROJECT_HOME/commands/paned · visible.log" paned
+has "a variable only the dispatcher's own environment carried reached the herdr pane" \
+  "env:from-the-dispatchers-own-environment" \
+  "$SPOOLWAY_PROJECT_HOME/commands/paned · visible.log.kept"
+
+if drive paned gone 60; then ok "the task carries on once the command has passed"
+else bad "the task carries on once the command has passed (at \`$(stage_of paned)\`)"; fi
+unset SPOOLWAY_E2E_PANE_ENV_MARKER
+if [ -n "$RECORDED" ] && grep -q "^$RECORDED	" "$HSTATE/panes"; then
+  bad "a passing command's pane closes behind it"
+else
+  ok "a passing command's pane closes behind it"
+fi
+
+# The hidden half: the same shape, with `headless: true` added — today's
+# silent, detached run, and no pane ever asked for.
+cat > .spoolway/pipelines/panehidden.yml <<'YML'
+description: One headless command step, for whether it ever opens a pane.
+
+steps:
+  - id: hidden
+    description: Run detached, with no pane.
+    run: sleep 2; echo hidden-command-marker
+    headless: true
+    on_pass: done
+    on_fail: blocked
+YML
+works "a pipeline naming headless: true checks out" "$SPOOLWAY" pipeline check
+says "and show marks it" "hidden     command   waits headless timeout=30m" \
+  "$SPOOLWAY" pipeline show
+
+dispatcher_restart
+task_doc "$LIVE/hiddenc.md" hiddenc "$BODY" "group: live" \
+  "pipeline: panehidden" "touches: [notes/hiddenc.md]"
+must "a task through a headless command step" \
+  "$SPOOLWAY" queue add --from "$LIVE/hiddenc.md"
+# Caught in flight, ahead of the archive step that reclaims this log.
+records "and its output is on the record just the same" "hidden-command-marker" \
+  "$SPOOLWAY_PROJECT_HOME/commands/hiddenc · hidden.log" hiddenc
+
+if drive hiddenc gone 60; then ok "a headless command step still routes on its exit code"
+else bad "a headless command step still routes on its exit code (at \`$(stage_of hiddenc)\`)"; fi
+if [ -f "$SPOOLWAY_PROJECT_HOME/commands/hiddenc · hidden.pane" ]; then
+  bad "headless: true never opened a pane at all"
+else
+  ok "headless: true never opened a pane at all"
+fi
+
+# A failing, paned command closes its pane the moment the task leaves the
+# step for `blocked` — nothing is left standing on the chance of a retry.
+cat > .spoolway/pipelines/paneflaky.yml <<'YML'
+description: One failing paned command step, for whether its pane closes.
+
+steps:
+  - id: flaky
+    description: Fail every time, so the task lands on blocked.
+    run: echo flaky-pane-marker; exit 3
+    on_pass: done
+    on_fail: blocked
+YML
+works "a pipeline with a failing paned step checks out" "$SPOOLWAY" pipeline check
+
+dispatcher_restart
+task_doc "$LIVE/panedfail.md" panedfail "$BODY" "group: live" \
+  "pipeline: paneflaky" "touches: [notes/panedfail.md]"
+must "a task whose paned step fails" \
+  "$SPOOLWAY" queue add --from "$LIVE/panedfail.md"
+if drive panedfail blocked 60; then ok "a failing paned command still routes on its exit code"
+else bad "a failing paned command still routes on its exit code (at \`$(stage_of panedfail)\`)"; fi
+FLAKY_RECORDED=$(cat "$SPOOLWAY_PROJECT_HOME/commands/panedfail · flaky.pane" 2>/dev/null || true)
+if [ -n "$FLAKY_RECORDED" ] && grep -q "^$FLAKY_RECORDED	" "$HSTATE/panes"; then
+  bad "and its pane closes behind the failure rather than standing"
+else
+  ok "and its pane closes behind the failure rather than standing"
+fi
+
+"$HERDRBIN/herdr" shutdown state >/dev/null 2>&1 || true
+unset HERDR_STUB_STATE
+PATH="$PATH_BEFORE_HERDR_STUB"; export PATH
+must "back to headless" "$SPOOLWAY" config set dispatch.backend headless
+rm -f .spoolway/pipelines/panevisible.yml .spoolway/pipelines/panehidden.yml \
+  .spoolway/pipelines/paneflaky.yml
 
 # ---------------------------------------------- a big environment, handed over
 # A pane's shell does not inherit the dispatcher's environment: it belongs to

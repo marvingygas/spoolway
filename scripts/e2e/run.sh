@@ -63,12 +63,21 @@ REPO=$(cd "$E2E_DIR/../.." && pwd)
 #   backends    parity between `herdr` and `headless` needs a multiplexer, and
 #               these suites must run without one. The backend's own behaviour
 #               is unit-tested in src/headless.rs, and what a multiplexer
-#               actually does is scripts/e2e/plans/. Two things are the
-#               exception, because neither can be asked of anything but a real
-#               pane: `commands.sh` opens a real tmux server of its own for
-#               the question "did a command step get a pane at all", and runs
-#               the herdr handover against `herdr-stub.sh`, whose header says
-#               why there is no isolated herdr server to use instead.
+#               actually does is scripts/e2e/plans/. `commands.sh`'s
+#               herdr-stub cases are the exception, because they can be asked
+#               of nothing but a real pane: the paned-command-step case,
+#               which needs to watch a real pane open, carry an environment,
+#               and close, and the environment-handover case, which needs to
+#               watch an 8KB value actually reach one. Both run against
+#               `scripts/e2e/herdr-stub.sh` — herdr, the one backend left,
+#               chosen over a real server because it has no isolated
+#               instance a suite can spin up of its own; the double's own
+#               header says why. `disaster.sh` used to carry a third case
+#               here, killing a real tmux server under a live agent lane to
+#               prove the heal path that follows; it had no herdr equivalent
+#               — the double answers no `agent start` at all, so it can host
+#               a pane's own lifecycle but never a real lane — and is gone
+#               with the backend it needed.
 #   status      the board's *rendering* — every column, every row state, the
 #               read-only `--watch` board entire: unit tests cover it through
 #               a real pass, and an e2e version would re-assert the same

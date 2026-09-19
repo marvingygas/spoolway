@@ -54,7 +54,6 @@ mod sync;
 mod task;
 mod task_template;
 mod teardown;
-mod tmux;
 mod tracking;
 mod update;
 mod usage;

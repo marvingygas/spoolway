@@ -525,12 +525,6 @@ pub struct DispatchConfig {
     /// `backend = "herdr"`; headless has no workspaces to lay out.
     pub herdr_mode: MuxMode,
 
-    /// How a tmux run is laid out in the multiplexer. Read only under
-    /// `backend = "tmux"`. Same two answers as `herdr_mode`, and a setting of
-    /// its own because a machine can point the two multiplexers at different
-    /// layouts.
-    pub tmux_mode: MuxMode,
-
     /// Where a dispatched task's worktree is cut. Empty means
     /// `~/.spoolway/<project>/worktrees` — see [`crate::mux::worktree_root`].
     ///
@@ -539,7 +533,7 @@ pub struct DispatchConfig {
     /// the multiplexer a path that already exists — see
     /// [`crate::mux::cut_worktree`]. Nested under the project's own directory
     /// rather than under the shared dispatch workspace — see
-    /// [`crate::mux::dispatch_workspace_label`] — because a worktree cut
+    /// [`crate::mux::DISPATCH_WORKSPACE_LABEL`] — because a worktree cut
     /// anywhere inside that shared directory never registers as a workspace
     /// of its own the way one cut at a repository's root would, and the
     /// project's own directory holds no checkout of its own either.
@@ -615,6 +609,15 @@ pub struct DispatchConfig {
         skip_serializing_if = "is_default_lane_child_ceiling"
     )]
     pub lane_child_ceiling: Duration,
+
+    /// Retired: how a tmux run was laid out in the multiplexer. The tmux
+    /// backend is gone — see [`Backend::Herdr`]'s own note — so there is no
+    /// longer a second multiplexer for this to lay out differently from
+    /// `herdr_mode`. Kept only so an existing config still parses; dropped
+    /// unconditionally on the next save.
+    #[allow(dead_code)]
+    #[serde(default, skip_serializing)]
+    tmux_mode: MuxMode,
 
     /// Retired: which branches a task's base could not be. Which branch is
     /// safe to build on is a fact about this project's own git workflow, not
@@ -729,10 +732,8 @@ impl Default for DispatchConfig {
             backend: Backend::default(),
             // A row per task is the layout a fresh project starts on; `grouped`
             // stays `MuxMode`'s own `#[default]` for a config that omits the
-            // key entirely, which is not this. See `tmux_mode` below for why
-            // the two may still diverge on one project.
+            // key entirely, which is not this.
             herdr_mode: MuxMode::Split,
-            tmux_mode: MuxMode::default(),
             interval: Duration::from_secs(10),
             // Four of these (`MAX_REMINDERS` + 1) comfortably outlast the 45
             // minutes the shipped `checks` step waits on `gh pr checks
@@ -742,6 +743,7 @@ impl Default for DispatchConfig {
             lane_quiet: Duration::from_secs(15 * 60),
             lane_child_ceiling: Duration::from_secs(3600),
             worktree_root: String::new(),
+            tmux_mode: MuxMode::default(),
             protected_branches: Vec::new(),
             notify: String::new(),
             open_on_escalation: false,
@@ -919,7 +921,13 @@ impl Default for UnattendedConfig {
 pub enum Backend {
     /// A multiplexer, where every agent runs in a real pane and any lane can be
     /// watched, attached to, or taken over by hand.
+    ///
+    /// The old value `tmux` still parses, to this: the tmux backend is gone,
+    /// and a config that named it loads as herdr instead — see
+    /// [`Config::migrate`]'s own note on the switch. The next save rewrites
+    /// the key.
     #[default]
+    #[serde(alias = "tmux")]
     Herdr,
 
     /// No multiplexer at all: each turn is its own detached process, logging to
@@ -932,24 +940,17 @@ pub enum Backend {
     /// lane means reading its log and answering one means resuming its session.
     /// The dispatch run's own board narrates the run either way.
     Headless,
-
-    /// tmux, driven through its CLI against the default server. Sessions,
-    /// windows and panes stand where herdr's workspaces, tabs and panes do,
-    /// and every lane is likewise a real pane a person can attach to.
-    Tmux,
 }
 
 /// How a run is laid out in its multiplexer: one shared group for every run
-/// of every project, or one group per task. One vocabulary for both
-/// multiplexers — `herdr_mode` and `tmux_mode` each hold one of these —
-/// because the question is the same whichever is answering it.
+/// of every project, or one group per task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum MuxMode {
-    /// One workspace (tmux: session) shared by every project that dispatches
-    /// on this machine, named `spoolway-dispatcher` and holding no checkout
-    /// of its own — see [`crate::mux::dispatch_workspace_label`]. Each
-    /// project gets one tab (tmux: window) of its own inside it, carrying a
+    /// One workspace shared by every project that dispatches on this
+    /// machine, named `spoolway-dispatcher` and holding no checkout
+    /// of its own — see [`crate::mux::DISPATCH_WORKSPACE_LABEL`]. Each
+    /// project gets one tab of its own inside it, carrying a
     /// placeholder pane in the project root plus one pane per running task —
     /// no tab per task any more. Spoolway cuts every task's worktree itself,
     /// with git, which also means nothing a task owns ever appears in the
@@ -961,8 +962,8 @@ pub enum MuxMode {
     Grouped,
 
     /// No group for the run at all: every task is a top-level group of its
-    /// own, rows named `spoolway/<task>` — under herdr a workspace, under
-    /// tmux a session — and the dispatcher draws where it was started.
+    /// own, rows named `spoolway/<task>`, a herdr workspace — and the
+    /// dispatcher draws where it was started.
     ///
     /// The layout to pick when a row per task is what you want to look at.
     ///
@@ -1634,6 +1635,30 @@ impl Config {
                          edited as prose. Move them across and delete the table.",
                         path.display(),
                         crate::assets::PROMPT_FILE,
+                    ));
+                }
+                // The alias on `Backend::Herdr` already turned a `tmux` value
+                // into `Herdr` by the time `config` exists — this is only
+                // what tells a person it happened, since the typed value
+                // alone cannot be told apart from a file that always said
+                // `herdr`. Read off a second, untyped parse of the same
+                // `raw` text rather than the alias itself, which is exactly
+                // what [`Config::migrate`] cannot see either.
+                let named_tmux_backend = toml::from_str::<toml::Value>(&raw)
+                    .ok()
+                    .and_then(|v| {
+                        v.get("dispatch")?
+                            .get("backend")?
+                            .as_str()
+                            .map(str::to_string)
+                    })
+                    .as_deref()
+                    == Some("tmux");
+                if named_tmux_backend {
+                    notices.push(format!(
+                        "note: dispatch.backend = \"tmux\" in {} — the tmux backend is gone, \
+                         so this now loads as \"herdr\". The key is rewritten on the next save.",
+                        path.display(),
                     ));
                 }
                 // Said here for the same reason: a person who set it wanted
@@ -2692,7 +2717,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// An `[effort]` table, four retired `[dispatch]` keys, and the
+    /// An `[effort]` table, five retired `[dispatch]` keys, and the
     /// whole `[plans]` table — `store` included, the once-live key beside
     /// its two already-retired siblings — must all still parse, the way
     /// `[criteria]` does, and none of them come back out on the next save.
@@ -2709,6 +2734,7 @@ mod tests {
                     open_on_escalation = true\n\
                     open = \"kitty\"\n\
                     default_pipeline = \"impl\"\n\
+                    tmux_mode = \"grouped\"\n\
                     [effort]\n\
                     sensitive_paths = [\"src/auth/**\"]\n\
                     [effort.tier_models]\n\
@@ -2723,6 +2749,7 @@ mod tests {
         assert!(!rendered.contains("max_launches"));
         assert!(!rendered.contains("open_on_escalation"));
         assert!(!rendered.contains("default_pipeline"));
+        assert!(!rendered.contains("tmux_mode"));
         assert!(!rendered.contains("tier_models"));
         assert!(!rendered.contains("sensitive_paths"));
         assert!(!rendered.contains("[plans"));
@@ -2835,6 +2862,25 @@ mod tests {
             assert!(!rendered.contains("cleanup_on_stop"), "{rendered}");
         }
         assert!(Config::default().dispatch.tear_lanes_on_stop.is_none());
+    }
+
+    /// A config naming `backend = "tmux"` — the tmux backend is gone — still
+    /// parses, loads as `Backend::Herdr`, earns a notice saying so, and never
+    /// comes back out as `tmux` on the next save.
+    #[test]
+    fn a_backend_of_tmux_loads_as_herdr_with_a_notice() {
+        with_override_fixture("backend-tmux", "[dispatch]\nbackend = \"tmux\"\n", |root| {
+            let (config, notices) = Config::load_with_notices(root, None).unwrap();
+            assert_eq!(config.dispatch.backend, Backend::Herdr);
+            assert!(
+                notices.iter().any(|n| n.contains("dispatch.backend")
+                    && n.contains("tmux")
+                    && n.contains("herdr")),
+                "no notice explained the switch: {notices:?}"
+            );
+            let rendered = toml::to_string(&config).unwrap();
+            assert!(rendered.contains("backend = \"herdr\""), "{rendered}");
+        });
     }
 
     /// `lane_child_ceiling` stays out of a defaulted config so a lane running
