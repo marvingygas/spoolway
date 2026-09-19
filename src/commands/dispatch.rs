@@ -175,12 +175,22 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     refuse(check_index_lock(repo)).context("refusing to start")?;
     refuse(check_backend_checkout(repo, mux.as_ref())).context("refusing to start")?;
 
-    // A layer changes what runs without `git status` ever hinting that it
-    // is on, so this is the one place a person sees it before the run using
-    // it starts — before the lock is taken and the mode is written into it,
-    // so `esc` can back out having done nothing at all.
-    if !overrides_gate(repo)? {
-        return Ok(0);
+    // The last two things a person sees before anything is spawned or
+    // written: the overview, naming every task the run is about to touch,
+    // and — a layer changes what runs without `git status` ever hinting
+    // that it is on — the overrides gate. Both run here, before the lock is
+    // taken and the mode is written into it, so `esc` off either can back
+    // out having done nothing at all. `args.confirmed` skips both: the
+    // queue screen's own `enter` already walked a person through this same
+    // pair, reusing its own `TermGuard` rather than nesting a second one —
+    // see `commands::queue::confirm_start`.
+    if !args.confirmed {
+        if !overview_gate(repo)? {
+            return Ok(0);
+        }
+        if !overrides_gate(repo)? {
+            return Ok(0);
+        }
     }
 
     // Taken for the whole run. Two dispatchers would both see the same task at
@@ -533,6 +543,165 @@ fn commit_reason(pipelines: &Pipelines, config: &Config) -> Option<String> {
         .then(|| "`dispatch.auto_commit` is on".to_string())
 }
 
+/// The queue overview: every task `Repo::tasks()` holds right now, grouped
+/// by `group:` — the mockup on task `overview-and-gates`. `Ok(true)` to go
+/// on to the overrides gate, `Ok(false)` only for `esc`.
+///
+/// A thin wrapper over [`overview_gate_with`] — see [`overrides_gate`]'s own
+/// doc comment for why this split exists at all; the two gates share it for
+/// the same reason.
+fn overview_gate(repo: &Repo) -> Result<bool> {
+    overview_gate_with(
+        repo,
+        crate::ask::interactive(),
+        &mut crate::screen::RawStdin,
+        &mut std::io::stdout(),
+        Some(crate::platform::TermGuard::new as fn() -> _),
+    )
+}
+
+/// [`overview_gate`]'s own logic. Never printed for a non-interactive run:
+/// unlike the overrides notice, there is no record this needs to leave in a
+/// log nobody is watching — it is a person's own screen, or nothing.
+///
+/// `term: None` for a caller that already holds a [`crate::platform::TermGuard`]
+/// of its own — `commands::queue::confirm_start`, reusing the one
+/// `run_screen` holds for its whole session — and `Some` for one that does
+/// not, taken only just before the first blocking read: see
+/// `commands::queue::tool_requirements_gate_with`'s own doc on why a second,
+/// nested guard is a bug rather than merely redundant.
+pub(crate) fn overview_gate_with(
+    repo: &Repo,
+    interactive: bool,
+    input: &mut impl PollableRead,
+    out: &mut impl std::io::Write,
+    term: Option<impl FnOnce() -> crate::platform::TermGuard>,
+) -> Result<bool> {
+    if !interactive {
+        return Ok(true);
+    }
+
+    let tasks = repo.tasks()?;
+    let _term = term.map(|term| term());
+    let _ = write!(out, "\x1b[2J\x1b[H");
+    for line in overview_lines(&tasks) {
+        writeln!(out, "{line}")?;
+    }
+    loop {
+        match crate::screen::read_key(input) {
+            Some(crate::screen::Key::Enter) => return Ok(true),
+            Some(crate::screen::Key::Esc) => return Ok(false),
+            // The tty went away mid-question, or — reached through
+            // `commands::queue::confirm_start` — the script driving the
+            // queue screen simply ran out of keys, exactly the way it ends
+            // every other mode: see `queue_screen`'s own doc comment on why
+            // an exhausted pipe reads as `esc` rather than as a leftover
+            // key nobody typed. `overrides_gate_with`'s own copy of this
+            // match proceeds instead on the same read — this is a new
+            // screen weighing a new decision, so it takes the more
+            // conservative of the two rather than inheriting that one's.
+            None => return Ok(false),
+            _ => {}
+        }
+    }
+}
+
+/// The overview's own column widths, sized to the mockup's own longest
+/// example row: the task id, pipeline and step columns are fixed, and
+/// `OVERVIEW_BASE_W` is whatever is left of 80 columns once the two-space
+/// indent and the other three have taken their share — the one column with
+/// no ceiling of its own otherwise, since a base names a branch and nothing
+/// stops a branch running long.
+const OVERVIEW_NAME_W: usize = 20;
+const OVERVIEW_PIPELINE_W: usize = 12;
+const OVERVIEW_STEP_W: usize = 10;
+const OVERVIEW_BASE_W: usize = 80 - 2 - OVERVIEW_NAME_W - OVERVIEW_PIPELINE_W - OVERVIEW_STEP_W;
+
+/// One cell of the overview's table: `queue::clip`'s own ellipsis-cut, then
+/// padded out to `width` — the same combination the trial picker's own id
+/// column already uses (`assign_pipelines_panel`), so a task id, pipeline
+/// name or step id too long for its column is cut rather than pushing every
+/// column after it out past 80 (review finding 1). Clips to `width - 1`
+/// rather than `width`: `assign_pipelines_panel` clips to a width derived
+/// from the longest id and then writes its own explicit separator after it,
+/// so its cells never touch, but this table has no separate separator —
+/// clipping to the full column width let a cell exactly as long as its
+/// column run straight into the next one with no gap (review finding 1,
+/// still open after the first fix). Reserving one column of the budget for
+/// the gap keeps every row at exactly 80 columns while leaving at least one
+/// space before the next column, matching the mockup's own gapped layout.
+fn overview_cell(text: &str, width: usize) -> String {
+    crate::screen::pad_to(&super::queue::clip(text.to_string(), width - 1), width)
+}
+
+/// The overview's own lines, grouped by `group:` and sorted by group name —
+/// a task naming none is a group of one, keyed by its own id, the same
+/// reading [`crate::status::Row::group`] gives it. Pure, so a caller never
+/// has to reach past `repo.tasks()` to draw the exact screen the mockup
+/// draws — every task the queue directory holds, never the archive, since
+/// `Repo::tasks` never reads that directory at all.
+fn overview_lines(tasks: &[Task]) -> Vec<String> {
+    let mut by_group: std::collections::BTreeMap<&str, Vec<&Task>> = Default::default();
+    for task in tasks {
+        let key = task.front.group.as_deref().unwrap_or(task.id());
+        by_group.entry(key).or_default().push(task);
+    }
+
+    let mut lines = vec![
+        format!(
+            "queued  {} · {}",
+            plural(by_group.len(), "group"),
+            plural(tasks.len(), "task")
+        ),
+        String::new(),
+        format!(
+            "  {}{}{}{}",
+            overview_cell("TASK", OVERVIEW_NAME_W),
+            overview_cell("PIPELINE", OVERVIEW_PIPELINE_W),
+            overview_cell("STEP", OVERVIEW_STEP_W),
+            "BASE"
+        ),
+    ];
+    for group_tasks in by_group.values() {
+        let name = group_tasks[0]
+            .front
+            .group
+            .as_deref()
+            .unwrap_or(group_tasks[0].id());
+        lines.push(String::new());
+        lines.push(super::queue::clip(name.to_string(), 80));
+        for task in group_tasks {
+            lines.push(format!(
+                "  {}{}{}{}",
+                overview_cell(task.id(), OVERVIEW_NAME_W),
+                overview_cell(
+                    task.front.pipeline.as_deref().unwrap_or("—"),
+                    OVERVIEW_PIPELINE_W
+                ),
+                overview_cell(task.stage(), OVERVIEW_STEP_W),
+                super::queue::clip(
+                    task.front.base.as_deref().unwrap_or("—").to_string(),
+                    OVERVIEW_BASE_W
+                ),
+            ));
+        }
+    }
+    lines.push(String::new());
+    lines.push("[enter] start a dispatcher   [esc] back".to_string());
+    lines
+}
+
+/// `n` with its noun, singular where that is what `n` is — [`overview_lines`]'s
+/// own copy of the same rule `commands::queue::plural` already applies to the
+/// pending screen, kept local rather than shared across the two: neither
+/// module is the other's to reach into for one line of pluralization.
+fn plural(n: usize, noun: &str) -> String {
+    match n {
+        1 => format!("1 {noun}"),
+        _ => format!("{n} {noun}s"),
+    }
+}
+
 /// The standing consent gate for a patch layer (see [`crate::overrides`]):
 /// `Ok(true)` to go on and start the run, `Ok(false)` only for `esc`, the one
 /// path that must reach the caller before `Lock::acquire` runs at all.
@@ -555,7 +724,7 @@ fn overrides_gate(repo: &Repo) -> Result<bool> {
         crate::ask::interactive(),
         &mut crate::screen::RawStdin,
         &mut std::io::stdout(),
-        crate::platform::TermGuard::new,
+        Some(crate::platform::TermGuard::new as fn() -> _),
     )
 }
 
@@ -572,12 +741,17 @@ fn overrides_gate(repo: &Repo) -> Result<bool> {
 /// the run proceeds without waiting on an answer nobody can give. With a
 /// layer already acknowledged and unmoved since, this says nothing at all —
 /// "don't ask again until this changes" means exactly that.
-fn overrides_gate_with(
+///
+/// `term: None` for a caller that already holds a [`crate::platform::TermGuard`]
+/// of its own — see [`overview_gate_with`]'s own doc comment on the pair, and
+/// `commands::queue::tool_requirements_gate_with` on why a second, nested
+/// guard is a bug rather than merely redundant.
+pub(crate) fn overrides_gate_with(
     repo: &Repo,
     interactive: bool,
     input: &mut impl PollableRead,
     out: &mut impl std::io::Write,
-    term: impl FnOnce() -> crate::platform::TermGuard,
+    term: Option<impl FnOnce() -> crate::platform::TermGuard>,
 ) -> Result<bool> {
     let rows = collect_override_rows(&repo.overrides_dir())?;
     if rows.is_empty() {
@@ -600,16 +774,17 @@ fn overrides_gate_with(
         return Ok(true);
     }
 
+    // Taken only now, right before the first read that can actually block —
+    // every early return above constructs no guard at all, so a dispatch
+    // with no layer, or one already acknowledged, hides and shows nothing.
+    let _term = term.map(|term| term());
+    let _ = write!(out, "\x1b[2J\x1b[H");
     print_overrides_notice(out, &rows)?;
     writeln!(
         out,
         "  [enter] start the run   [esc] back   [x] don't ask again until this changes"
     )?;
 
-    // Taken only now, right before the first read that can actually block —
-    // every early return above constructs no guard at all, so a dispatch
-    // with no layer, or one already acknowledged, hides and shows nothing.
-    let _term = term();
     loop {
         match crate::screen::read_key(input) {
             Some(crate::screen::Key::Enter) => return Ok(true),
@@ -1738,7 +1913,7 @@ mod tests {
             false,
             &mut input,
             &mut out,
-            crate::platform::TermGuard::inert,
+            Some(crate::platform::TermGuard::inert),
         )
         .unwrap();
         assert!(proceed);
@@ -1760,7 +1935,7 @@ mod tests {
                 true,
                 &mut input,
                 &mut out,
-                crate::platform::TermGuard::inert,
+                Some(crate::platform::TermGuard::inert),
             )
             .unwrap()
         );
@@ -1787,7 +1962,7 @@ mod tests {
                 true,
                 &mut input,
                 &mut out,
-                crate::platform::TermGuard::inert,
+                Some(crate::platform::TermGuard::inert),
             )
             .unwrap()
         );
@@ -1814,7 +1989,7 @@ mod tests {
                 true,
                 &mut input,
                 &mut out,
-                crate::platform::TermGuard::inert,
+                Some(crate::platform::TermGuard::inert),
             )
             .unwrap()
         );
@@ -1828,7 +2003,7 @@ mod tests {
                 true,
                 &mut no_input,
                 &mut out,
-                crate::platform::TermGuard::inert,
+                Some(crate::platform::TermGuard::inert),
             )
             .unwrap()
         );
@@ -1862,5 +2037,210 @@ mod tests {
             overrides: "—".into(),
         };
         assert_eq!(overrides_gate_kind(&prompt), "whole file");
+    }
+
+    /// A task for [`overview_lines`]'s own tests — `extra` carries whatever
+    /// of `group:`, `pipeline:`, `base:` and `stage:` a case wants; `stage:`
+    /// has no default here the way [`crate::pipeline::QUEUED`] gives a real
+    /// queued task one, since a case testing the STEP column has to be free
+    /// to name something other than `queued`.
+    fn overview_task(id: &str, extra: &str) -> Task {
+        crate::task::Task::parse(
+            std::path::PathBuf::from(format!("{id}.md")),
+            &format!("---\nid: {id}\n{extra}---\nbody\n"),
+        )
+        .unwrap()
+    }
+
+    /// Groups sort by name, alphabetically — `alpha` before `zebra` — and a
+    /// task naming no `group:` is a group of one, keyed by its own id, the
+    /// same reading `crate::status::Row::group` gives it.
+    #[test]
+    fn overview_lines_groups_by_group_sorted_by_name_falling_back_to_the_task_id() {
+        let tasks = [
+            overview_task(
+                "a",
+                "group: zebra\npipeline: default\nstage: queued\nbase: main\n",
+            ),
+            overview_task(
+                "b",
+                "group: alpha\npipeline: default\nstage: queued\nbase: main\n",
+            ),
+            overview_task("c", "pipeline: default\nstage: queued\nbase: main\n"),
+        ];
+        let lines = overview_lines(&tasks);
+        assert_eq!(lines[0], "queued  3 groups · 3 tasks", "{lines:?}");
+
+        let alpha = lines.iter().position(|l| l == "alpha").unwrap();
+        let c = lines.iter().position(|l| l == "c").unwrap();
+        let zebra = lines.iter().position(|l| l == "zebra").unwrap();
+        assert!(
+            alpha < c && c < zebra,
+            "groups must sort alphabetically, `c` (task `c`'s own group of one) included: \
+             {lines:?}"
+        );
+    }
+
+    /// A task naming no `pipeline:` or no `base:` — a legacy or hand-edited
+    /// document, since `queue add` always stamps both — draws an em dash in
+    /// that cell rather than an empty one a person could mistake for a
+    /// column that slipped out of alignment.
+    #[test]
+    fn overview_lines_draws_an_em_dash_for_a_missing_pipeline_or_base() {
+        let tasks = [overview_task("solo", "group: solo-group\nstage: queued\n")];
+        let lines = overview_lines(&tasks);
+        // Skip the group header line itself ("solo-group") — the row is the
+        // one starting with two spaces, indented under it.
+        let row = lines.iter().find(|l| l.starts_with("  solo")).unwrap();
+        assert_eq!(
+            row,
+            &format!(
+                "  {}{}{}{}",
+                overview_cell("solo", OVERVIEW_NAME_W),
+                overview_cell("—", OVERVIEW_PIPELINE_W),
+                overview_cell("queued", OVERVIEW_STEP_W),
+                "—"
+            )
+        );
+    }
+
+    /// Review finding 1's own repro: a task id, pipeline, step or base too
+    /// long for its column is cut with an ellipsis rather than pushing every
+    /// column after it — and the row overall never runs past 80 columns.
+    #[test]
+    fn overview_lines_cuts_a_long_id_pipeline_step_or_base_rather_than_overflowing() {
+        let tasks = [overview_task(
+            "a-task-id-much-longer-than-the-twenty-column-budget",
+            "group: over\n\
+             pipeline: a-pipeline-name-far-too-long-for-its-own-column\n\
+             stage: an-implausibly-long-step-name-for-its-column\n\
+             base: feature/rework-the-dispatcher-lock-handling-end-to-end\n",
+        )];
+        let lines = overview_lines(&tasks);
+        let row = lines
+            .iter()
+            .find(|l| l.trim_start().starts_with("a-task-id"))
+            .unwrap();
+        assert!(
+            row.chars().count() <= 80,
+            "a row must never run past 80 columns: {} ({})",
+            row.chars().count(),
+            row
+        );
+        assert!(row.contains('…'), "{row:?}");
+        // Review finding 1's second half: a cell clipped to its full column
+        // width ran edge to edge into the next column with no separating
+        // space, unlike the mockup's own gapped columns. The last character
+        // of each of the first three (fixed-width) cells must be the space
+        // `overview_cell` now reserves out of its own budget.
+        let chars: Vec<char> = row.chars().collect();
+        for boundary in [
+            2 + OVERVIEW_NAME_W - 1,
+            2 + OVERVIEW_NAME_W + OVERVIEW_PIPELINE_W - 1,
+            2 + OVERVIEW_NAME_W + OVERVIEW_PIPELINE_W + OVERVIEW_STEP_W - 1,
+        ] {
+            assert_eq!(
+                chars[boundary], ' ',
+                "column must end in a gap, not run into the next one: {row:?}"
+            );
+        }
+    }
+
+    /// A project with nothing queued at all still draws — an empty overview
+    /// rather than a screen with nothing between the header and the footer
+    /// line a person could mistake for a stalled draw.
+    #[test]
+    fn overview_lines_with_no_tasks_still_draws_the_header_and_footer() {
+        let lines = overview_lines(&[]);
+        assert_eq!(lines[0], "queued  0 groups · 0 tasks", "{lines:?}");
+        assert_eq!(
+            lines.last(),
+            Some(&"[enter] start a dispatcher   [esc] back".to_string()),
+            "{lines:?}"
+        );
+    }
+
+    /// Never drawn with nobody there to answer: unlike the overrides
+    /// notice, this has no record to leave in a log nobody is watching, so
+    /// a non-interactive dispatch prints nothing about it at all and never
+    /// reads a key.
+    #[test]
+    fn overview_gate_with_non_interactive_is_never_drawn() {
+        let repo = fixture("overview-gate-non-interactive");
+        let mut input = keys("");
+        let mut out = Vec::new();
+        let proceed = overview_gate_with(
+            &repo,
+            false,
+            &mut input,
+            &mut out,
+            Some(crate::platform::TermGuard::inert),
+        )
+        .unwrap();
+        assert!(proceed);
+        assert!(out.is_empty(), "{out:?}");
+    }
+
+    /// `enter` proceeds to the overrides gate — the whole of what the
+    /// overview's own `[enter]` promises.
+    #[test]
+    fn overview_gate_with_enter_proceeds() {
+        let repo = fixture("overview-gate-enter");
+        let mut input = keys("\r");
+        let mut out = Vec::new();
+        assert!(
+            overview_gate_with(
+                &repo,
+                true,
+                &mut input,
+                &mut out,
+                Some(crate::platform::TermGuard::inert)
+            )
+            .unwrap()
+        );
+        let drawn = String::from_utf8(out).unwrap();
+        assert!(drawn.contains("queued  0 groups · 0 tasks"), "{drawn}");
+    }
+
+    /// `esc` is the one path that must reach the caller as `false`, the
+    /// same as `overrides_gate_with`'s own.
+    #[test]
+    fn overview_gate_with_esc_declines() {
+        let repo = fixture("overview-gate-esc");
+        let mut input = keys("\x1b");
+        let mut out = Vec::new();
+        assert!(
+            !overview_gate_with(
+                &repo,
+                true,
+                &mut input,
+                &mut out,
+                Some(crate::platform::TermGuard::inert)
+            )
+            .unwrap()
+        );
+    }
+
+    /// The tty going away mid-question declines here, unlike
+    /// `overrides_gate_with`'s own copy of the same read, which proceeds —
+    /// see that function's own doc comment on why the two differ: this
+    /// screen is also reached through `commands::queue::confirm_start`,
+    /// where an exhausted pipe is the ordinary way a script ends the queue
+    /// screen, not a real terminal dying mid-answer.
+    #[test]
+    fn overview_gate_with_none_declines() {
+        let repo = fixture("overview-gate-none");
+        let mut input = keys("");
+        let mut out = Vec::new();
+        assert!(
+            !overview_gate_with(
+                &repo,
+                true,
+                &mut input,
+                &mut out,
+                Some(crate::platform::TermGuard::inert)
+            )
+            .unwrap()
+        );
     }
 }

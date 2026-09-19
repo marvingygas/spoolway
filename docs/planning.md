@@ -82,7 +82,7 @@ directory. The right pane lists the highlighted group's tasks and what each wait
 | Key | What it does |
 |---|---|
 | `space` | Select a group. |
-| `enter` | Check the selection and queue it. Then it asks whether to start a dispatcher here. Only `y` starts one. |
+| `enter` | Check the selection and queue it. Then it shows the whole queue; `enter` there starts a dispatcher here. |
 | `g` | Set or clear a gate on the highlighted task. |
 | `o` | Open the highlighted document in your editor. |
 | `f` | Filter the group list. `enter` keeps the filter, `esc` clears it. |
@@ -93,9 +93,9 @@ directory. The right pane lists the highlighted group's tasks and what each wait
 | `q` | Quit. |
 
 Queueing deletes the group's pending documents from the pending directory. A sibling task
-already in the queue or the archive is left exactly where it is, and the report names it. A
+already in the queue or the archive is left exactly where it is. A
 group with a validation error is refused and nothing is deleted. If a dispatcher already holds
-the queue, the report names its pid and that dispatcher picks the tasks up on its next pass.
+the queue, that dispatcher picks the tasks up on its next pass.
 
 `spoolway queue add --from <dir>` queues every document in a directory without the screen. A
 document under this project's own pending directory is deleted once the batch is written. A

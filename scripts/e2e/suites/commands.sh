@@ -560,11 +560,11 @@ pending_doc screen-one "$BODY" "group: screen-batch" "touches: [notes/screen-one
 pending_doc screen-two "$BODY" "group: screen-batch" \
   "depends_on: [screen-one]" "touches: [notes/screen-two.md]"
 
-# space selects the highlighted group, enter submits it, `n` declines the
-# dispatcher the screen then offers. The screen ends on its own the moment the
+# space selects the highlighted group, enter submits it and reaches the
+# overview, `esc` declines it. The screen ends on its own the moment the
 # pipe runs dry — see `queue_screen`'s own doc comment on why a pipe is read
 # exactly as a terminal would be.
-printf ' \rn' | "$SPOOLWAY" queue >/dev/null 2>&1
+printf ' \r\x1b' | "$SPOOLWAY" queue >/dev/null 2>&1
 
 works "the screen queues the first task of the group it submitted" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/screen-one.md"
@@ -592,7 +592,7 @@ works "its document is back in the pending directory" \
 works "and gone from the queue" \
   test ! -e "$SPOOLWAY_PROJECT_HOME/queue/screen-two.md"
 
-printf ' \rn' | "$SPOOLWAY" queue >"$LIVE/screen-requeue.out" 2>&1
+printf ' \r\x1b' | "$SPOOLWAY" queue >"$LIVE/screen-requeue.out" 2>&1
 
 works "screen-two reaches the queue again" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/screen-two.md"
@@ -600,8 +600,17 @@ works "and is gone from pending once more" \
   test ! -e "$SPOOLWAY_PROJECT_HOME/pending/screen-two.md"
 works "screen-one, already queued, is left exactly where it was" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/screen-one.md"
-has "the report names the sibling left alone rather than dropping it" \
-  "already in the queue, left alone: screen-one" "$LIVE/screen-requeue.out"
+# The report `enter` used to leave on screen, naming the sibling left alone,
+# is gone — replaced by the overview, which lists the whole queue instead of
+# one submission's own report. See the mockup on task `overview-and-gates`.
+# Anchored on the table header rather than "screen-batch": the browsing
+# pane's own group row already prints that name on every frame, long before
+# `enter` ever reaches the overview, so a match on it alone would pass
+# whether or not the overview drew at all.
+has "the overview it reaches draws its own table header" \
+  "TASK                PIPELINE    STEP      BASE" "$LIVE/screen-requeue.out"
+lacks "and never a 'left alone' line for the sibling still sitting there" \
+  "left alone" "$LIVE/screen-requeue.out"
 
 # The other half of the same directory: `--from` pointed at it queues every
 # `.md` document there, with no screen involved at all.

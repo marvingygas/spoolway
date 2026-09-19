@@ -61,7 +61,7 @@ archive directories. The right pane lists the highlighted group's tasks.
 | `q` | Quit |
 
 Queueing deletes the group's pending documents from the pending directory. A sibling task
-already in the queue or the archive is left where it is, and the report names it. A group that
+already in the queue or the archive is left where it is. A group that
 fails validation is refused and nothing is deleted. See [Queueing a
 plan](planning.md#queueing-a-plan).
 
@@ -208,8 +208,30 @@ dispatcher`.
 The restart guard refuses the fifth start in 30 seconds when the four before it could not
 run. See [Restarting into a repo that cannot run](dispatcher.md#restarting-into-a-repo-that-cannot-run).
 
-When an [overrides layer](configuration.md#the-overrides-layer) is active, the run first shows
-what is patched and waits for a key:
+Before it starts, it shows the whole queue and waits for a key:
+
+```
+  queued  3 groups · 6 tasks
+
+    TASK                PIPELINE    STEP      BASE
+
+  cart
+    cart-empty-state    impl_fast   review    main
+    cart-totals         impl        queued    main
+    cart-discounts      impl        queued    main
+
+  checkout
+    auth-verify         impl        implement main
+    checkout-charge     impl_tdd    queued    main
+
+  search
+    search-facets       impl        queued    release-2
+
+  [enter] start a dispatcher   [esc] back
+```
+
+When an [overrides layer](configuration.md#the-overrides-layer) is active, `enter` there then
+shows what is patched and waits for a key:
 
 ```
   overrides are active for this project
@@ -220,6 +242,9 @@ what is patched and waits for a key:
 
   [enter] start the run   [esc] back   [x] don't ask again until this changes
 ```
+
+`esc` on either screen ends the command. From the queue screen's own `enter`, `esc` on either
+screen returns to browsing instead.
 
 | Exit code | Meaning |
 |---|---|

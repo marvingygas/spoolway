@@ -885,6 +885,15 @@ pub struct DispatchArgs {
     /// runs — whatever storm was building is over, one way or another.
     #[arg(long)]
     pub force: bool,
+
+    /// The overview and the overrides gate were already shown and answered
+    /// — never set from the CLI. `commands::queue::confirm_start` walks a
+    /// person through both from the queue screen's own `enter`, right
+    /// before this runs, so `dispatch` must not ask a second time; a bare
+    /// `spoolway dispatch` leaves this false, being the one caller nobody
+    /// has already asked.
+    #[arg(skip)]
+    pub confirmed: bool,
 }
 
 impl DispatchArgs {

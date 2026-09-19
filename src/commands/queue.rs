@@ -2437,11 +2437,6 @@ enum Mode {
     /// straight to `out` and then let the loop redraw over would never be
     /// read at all.
     Outcome(String),
-    /// A submission that landed: its report, and the offer to start a
-    /// dispatcher over what was just queued. Kept apart from [`Mode::Outcome`]
-    /// so a refusal can never reach the offer — a refusal queued nothing, and
-    /// there is nothing for a dispatcher to pick up.
-    Dispatch(String),
     /// `r`'s own screen: the left pane swapped for the folder tree under
     /// `.spoolway/routines/` — see [`RoutineNav`] for what it tracks between
     /// keys. The folders and documents themselves live in `run_screen`'s own
@@ -2866,9 +2861,20 @@ pub fn queue_screen(repo: &Repo, pipelines: &Pipelines, cwd: &std::path::Path) -
         // The exit code `dispatch` returns is for a process about to end —
         // this screen's own caller keeps running afterwards, so there is no
         // process exit to carry it into.
-        ScreenExit::StartDispatcher => {
-            super::dispatch(repo, pipelines, &crate::cli::DispatchArgs::default()).map(|_| ())
-        }
+        //
+        // `confirmed: true`: `run_screen`'s own `enter` already walked
+        // whoever is here through the overview and the overrides gate, via
+        // `confirm_start` — `dispatch` must not ask a second time now that
+        // its `TermGuard` is gone.
+        ScreenExit::StartDispatcher => super::dispatch(
+            repo,
+            pipelines,
+            &crate::cli::DispatchArgs {
+                confirmed: true,
+                ..Default::default()
+            },
+        )
+        .map(|_| ()),
     }
 }
 
@@ -2968,7 +2974,11 @@ fn run_screen(
                 Key::Enter if trial.stage == TrialStage::ChooseSkips => {
                     let trial = trial.clone();
                     let base = crate::repo::branch_at(cwd)?;
-                    state.mode = begin_trial(repo, pipelines, &base, &groups, &trial);
+                    let outcome = begin_trial(repo, pipelines, &base, &groups, &trial);
+                    if let Some(exit) = apply_submit_outcome(repo, outcome, &mut state, input, out)?
+                    {
+                        return Ok(exit);
+                    }
                 }
                 _ => {
                     let trial = trial.clone();
@@ -2984,15 +2994,6 @@ fn run_screen(
                 // on the draw that preceded this key — holding it in
                 // `state` rather than writing it straight to `out` is what
                 // let it survive that draw at all.
-                _ => state.mode = Mode::Browsing,
-            },
-            Mode::Dispatch(_) => match key {
-                // Only `y`. Every other key declines, because a stray `\r` an
-                // unattended script's input happens to carry must never start
-                // a dispatcher — the same care `q` alone quitting is taken
-                // with.
-                Key::Char('y') => return Ok(ScreenExit::StartDispatcher),
-                Key::Char('q') => break,
                 _ => state.mode = Mode::Browsing,
             },
             Mode::SaveRoutine { group, name } => match key {
@@ -3026,7 +3027,11 @@ fn run_screen(
                 Key::Enter if nav.focus == Focus::Groups && !nav.selected.is_empty() => {
                     let nav = nav.clone();
                     let base = crate::repo::branch_at(cwd)?;
-                    state.mode = begin_routine_queue(repo, pipelines, &base, &routines, &nav);
+                    let outcome = begin_routine_queue(repo, pipelines, &base, &routines, &nav);
+                    if let Some(exit) = apply_submit_outcome(repo, outcome, &mut state, input, out)?
+                    {
+                        return Ok(exit);
+                    }
                 }
                 // `space` over the tasks pane queues that one document alone
                 // — over the folders pane it is `handle_routine_key`'s own
@@ -3034,7 +3039,11 @@ fn run_screen(
                 Key::Char(' ') if nav.focus == Focus::Tasks => {
                     let nav = nav.clone();
                     let base = crate::repo::branch_at(cwd)?;
-                    state.mode = begin_routine_solo(repo, pipelines, &base, &routines, &nav);
+                    let outcome = begin_routine_solo(repo, pipelines, &base, &routines, &nav);
+                    if let Some(exit) = apply_submit_outcome(repo, outcome, &mut state, input, out)?
+                    {
+                        return Ok(exit);
+                    }
                 }
                 _ => {
                     let mut nav = nav.clone();
@@ -3047,11 +3056,16 @@ fn run_screen(
                 // `enter` validates the selection and writes it straight
                 // through — nothing is drawn in between any more. A
                 // validation failure hands back `Mode::Outcome`; a clean
-                // write goes on to `after_write`'s own dispatcher offer.
+                // write goes on to the overview and the overrides gate,
+                // reached the same way a bare `spoolway dispatch` reaches
+                // them — see `confirm_start`.
                 Key::Enter if !state.selected.is_empty() => {
                     let base = crate::repo::branch_at(cwd)?;
-                    let mode = begin_submission(repo, pipelines, &base, &mut groups, &mut state);
-                    state.mode = mode;
+                    let outcome = begin_submission(repo, pipelines, &base, &mut groups, &mut state);
+                    if let Some(exit) = apply_submit_outcome(repo, outcome, &mut state, input, out)?
+                    {
+                        return Ok(exit);
+                    }
                 }
                 // Gated exactly the way `g` is — see `handle_browse_key`'s
                 // own `g` arm — since a document only exists to open when
@@ -4357,15 +4371,6 @@ fn render(groups: &[Group], panes: &Panes, state: &ScreenState) -> Vec<String> {
                 "press any key to continue".to_string(),
             ];
         }
-        Mode::Dispatch(msg) => {
-            return vec![
-                msg.clone(),
-                String::new(),
-                "start a dispatcher here now?".to_string(),
-                String::new(),
-                "  y  yes, in this terminal    n  no, back to the screen    q  quit".to_string(),
-            ];
-        }
         Mode::Routines(nav) => {
             let mut frame =
                 render_routines(panes.routines, panes.routines_dir, panes.pipelines, nav);
@@ -4422,11 +4427,7 @@ fn render(groups: &[Group], panes: &Panes, state: &ScreenState) -> Vec<String> {
                 overlay(&mut frame, &picker);
             }
         }
-        Mode::Browsing
-        | Mode::Outcome(_)
-        | Mode::Dispatch(_)
-        | Mode::Filter
-        | Mode::Routines(_) => {}
+        Mode::Browsing | Mode::Outcome(_) | Mode::Filter | Mode::Routines(_) => {}
     }
 
     frame.push(footer(state));
@@ -4641,7 +4642,7 @@ const TRIAL_UNASSIGNED: &str = "(unset)";
 /// than the frame [`overlay`] paints it onto, because `overlay` answers an
 /// over-wide line by silently dropping the rest of it along with the
 /// popup's own right and bottom border.
-fn clip(line: String, width: usize) -> String {
+pub(crate) fn clip(line: String, width: usize) -> String {
     if line.chars().count() <= width {
         return line;
     }
@@ -4859,15 +4860,53 @@ fn plural(n: usize, noun: &str) -> String {
     }
 }
 
+/// What [`begin_submission`] comes back with: either an ordinary [`Mode`] to
+/// show — a refusal, or the "already running" notice — or word that a clean
+/// batch landed and the caller still has the overview and the overrides gate
+/// of its own to run, which need `input`/`out` and can end the whole loop,
+/// none of which `begin_submission` has any business holding.
+#[derive(Debug)]
+enum SubmitOutcome {
+    Mode(Mode),
+    Confirmed,
+}
+
+/// The common tail every batch-writing key in [`run_screen`] shares once it
+/// has its [`SubmitOutcome`]: an ordinary [`Mode`] goes straight onto
+/// `state.mode`, and a landed batch runs the overview and the overrides
+/// gate — [`Some`] to leave `run_screen` for good, `None` (back to
+/// [`Mode::Browsing`]) for `esc` off either screen.
+fn apply_submit_outcome(
+    repo: &Repo,
+    outcome: SubmitOutcome,
+    state: &mut ScreenState,
+    input: &mut impl PollableRead,
+    out: &mut impl std::io::Write,
+) -> Result<Option<ScreenExit>> {
+    match outcome {
+        SubmitOutcome::Mode(mode) => {
+            state.mode = mode;
+            Ok(None)
+        }
+        SubmitOutcome::Confirmed => {
+            if confirm_start(repo, input, out)? {
+                return Ok(Some(ScreenExit::StartDispatcher));
+            }
+            state.mode = Mode::Browsing;
+            Ok(None)
+        }
+    }
+}
+
 /// Validate the selection and write it — the whole of what pressing `enter`
 /// does. Nothing is drawn in between: a validation failure hands back
 /// [`Mode::Outcome`], the same refusal `queue_add_documents` used to hand
 /// straight back, and a clean batch goes on to [`finish_submit`] and then
-/// [`after_write`]'s own dispatcher offer.
+/// [`after_write`]'s own check for a dispatcher already running.
 ///
 /// Takes `state` mutably rather than by reference: `selected_documents` reads
 /// it to build the batch, and a landed write clears its selection and gates
-/// right here, before the caller ever sees the resulting `Mode` — see
+/// right here, before the caller ever sees the resulting outcome — see
 /// [`after_write`]'s own doc comment on why that can no longer be read back
 /// off it.
 fn begin_submission(
@@ -4876,11 +4915,13 @@ fn begin_submission(
     base: &str,
     groups: &mut Vec<Group>,
     state: &mut ScreenState,
-) -> Mode {
+) -> SubmitOutcome {
     let documents = selected_documents(groups, state);
     let pending = match validate_batch(repo, pipelines, Some(base), &documents) {
         Ok(pending) => pending,
-        Err(err) => return Mode::Outcome(format!("submission refused: {err:#}")),
+        Err(err) => {
+            return SubmitOutcome::Mode(Mode::Outcome(format!("submission refused: {err:#}")));
+        }
     };
     let selected = state.selected.clone();
     match finish_submit(
@@ -4892,34 +4933,72 @@ fn begin_submission(
             clamp_cursors(groups, state);
             after_write(repo, msg)
         }
-        Err(err) => refusal_mode("submission refused", err),
+        Err(err) => SubmitOutcome::Mode(refusal_mode("submission refused", err)),
     }
 }
 
-/// What a landed write becomes on screen: the dispatcher offer, unless a
-/// dispatcher already holds the queue's own lock. Starting a second one
-/// would only be refused once `commands::dispatch` actually ran — see
-/// `Lock::acquire`'s own bail — so the offer is dropped here, before it is
-/// ever shown, rather than sent through a `y` that would fail downstream
-/// with the whole screen already gone.
+/// What a landed write becomes: [`SubmitOutcome::Confirmed`], sending the
+/// caller on to the overview and the overrides gate — unless a dispatcher
+/// already holds the queue's own lock, in which case starting a second one
+/// would only be refused once `commands::dispatch` actually ran (see
+/// `Lock::acquire`'s own bail), so this shows the report as an ordinary
+/// [`Mode::Outcome`] instead of ever reaching either gate.
 ///
 /// A lock file `Lock::holder` could not even read falls back to the
-/// ordinary offer: an unreadable file is closer to "no answer" than to "a
-/// dispatcher is running", and this path must never claim a live pid it did
-/// not actually see.
-fn after_write(repo: &Repo, msg: String) -> Mode {
+/// ordinary path: an unreadable file is closer to "no answer" than to "a
+/// dispatcher is running", and this must never claim a live pid it did not
+/// actually see.
+fn after_write(repo: &Repo, msg: String) -> SubmitOutcome {
     match crate::lock::Lock::holder(&repo.lock_file()) {
-        Ok(Some(pid)) => Mode::Outcome(format!(
+        Ok(Some(pid)) => SubmitOutcome::Mode(Mode::Outcome(format!(
             "{msg}\n\na dispatcher is already running (pid {pid}) — it picks these up on its \
              next pass"
-        )),
-        _ => Mode::Dispatch(msg),
+        ))),
+        _ => SubmitOutcome::Confirmed,
     }
+}
+
+/// The overview, then the overrides gate — both reached by `enter`, once a
+/// submission has just landed. `Ok(true)` to leave the loop and start a
+/// dispatcher; `Ok(false)` for `esc` off either screen, back to
+/// [`Mode::Browsing`] rather than ending the whole command — the one thing
+/// `commands::dispatch`'s own copy of this pair could not do on its own
+/// before this task, since it only ever ran after `run_screen` had already
+/// returned and this screen's own `TermGuard` had already dropped.
+///
+/// `term: None` throughout both calls: `run_screen` already holds its own
+/// `TermGuard` for the whole of this loop, so nothing here may construct a
+/// second one — see `tool_requirements_gate_with`'s own doc on why that is a
+/// bug, not just redundant. `interactive: true` unconditionally, for the
+/// same reason `finish_submit` gives `open_and_prefix`: this screen already
+/// blocks on a key for every other prompt it draws, whether or not the
+/// process happens to have a real terminal.
+fn confirm_start(
+    repo: &Repo,
+    input: &mut impl PollableRead,
+    out: &mut impl std::io::Write,
+) -> Result<bool> {
+    if !super::dispatch::overview_gate_with(
+        repo,
+        true,
+        input,
+        out,
+        None::<fn() -> crate::platform::TermGuard>,
+    )? {
+        return Ok(false);
+    }
+    super::dispatch::overrides_gate_with(
+        repo,
+        true,
+        input,
+        out,
+        None::<fn() -> crate::platform::TermGuard>,
+    )
 }
 
 /// Open the batch's tickets and name it, save it, clear the documents it
 /// came from out of the pending directory, and build the message
-/// [`Mode::Dispatch`] shows.
+/// [`after_write`]'s own "already running" outcome shows.
 ///
 /// The order is the whole guarantee behind "a submission that fails
 /// validation removes nothing". Nothing is deleted until every task file has
@@ -4953,12 +5032,13 @@ fn finish_submit(
     // between it and disk.
     check_dependencies_set(repo, pipelines, &mut pending)?;
     // `interactive: true` unconditionally: the queue screen already blocks
-    // on a key for every other prompt it draws — `Mode::Dispatch`'s `y`/`n`,
-    // `Mode::SaveRoutine` — whether or not the process happens to have a
-    // real terminal, and relies on `read_key` answering `None` to end
-    // gracefully under a script or a closed pane. `own_terminal: false`
-    // since `queue_screen` already holds a `TermGuard` for the whole of
-    // `run_screen` — see `open_and_prefix`'s own doc comment.
+    // on a key for every other prompt it draws — `confirm_start`'s own
+    // overview and overrides gate, `Mode::SaveRoutine` — whether or not the
+    // process happens to have a real terminal, and relies on `read_key`
+    // answering `None` to end gracefully under a script or a closed pane.
+    // `own_terminal: false` since `queue_screen` already holds a `TermGuard`
+    // for the whole of `run_screen` — see `open_and_prefix`'s own doc
+    // comment.
     let task_files = readable_task_files(documents);
     open_and_prefix(repo, documents, &task_files, &mut pending, true, false)?;
 
@@ -5230,12 +5310,12 @@ fn begin_trial(
     base: &str,
     groups: &[Group],
     trial: &TrialState,
-) -> Mode {
+) -> SubmitOutcome {
     let Some(group) = trial_group(groups, trial) else {
-        return Mode::Browsing;
+        return SubmitOutcome::Mode(Mode::Browsing);
     };
     if group.tasks.is_empty() {
-        return Mode::Browsing;
+        return SubmitOutcome::Mode(Mode::Browsing);
     }
 
     // Minted fresh, not the group's own name or any one task's — two
@@ -5263,7 +5343,9 @@ fn begin_trial(
             .expect("the AssignPipelines screen's own `enter` refuses to advance until every task is assigned");
         let pipeline = match pipelines.get(&pipeline_name) {
             Ok(pipeline) => pipeline,
-            Err(err) => return Mode::Outcome(format!("trial refused: {err:#}")),
+            Err(err) => {
+                return SubmitOutcome::Mode(Mode::Outcome(format!("trial refused: {err:#}")));
+            }
         };
 
         // A task id becomes a lane name, a branch and a file name — the same
@@ -5271,7 +5353,7 @@ fn begin_trial(
         // pipeline this particular arm names rather than a document's own.
         let id = mint_id(repo, &task.id, &minted);
         if let Err(err) = crate::mux::check_task_id(&id, longest_agent_step(pipeline)) {
-            return Mode::Outcome(format!("trial refused: {err:#}"));
+            return SubmitOutcome::Mode(Mode::Outcome(format!("trial refused: {err:#}")));
         }
         minted.insert(id.clone());
         id_map.insert(task.id.clone(), id.clone());
@@ -5287,7 +5369,9 @@ fn begin_trial(
             &skip,
         ) {
             Ok(arm) => arm,
-            Err(err) => return Mode::Outcome(format!("trial refused: {err:#}")),
+            Err(err) => {
+                return SubmitOutcome::Mode(Mode::Outcome(format!("trial refused: {err:#}")));
+            }
         };
 
         // Every dependency this trial is also forking maps to that
@@ -5319,7 +5403,7 @@ fn begin_trial(
 
     match finish_trial(repo, pipelines, arms) {
         Ok(()) => after_write(repo, trial_report(&trial_id, &group.name, base, &summary)),
-        Err(err) => Mode::Outcome(format!("trial refused: {err:#}")),
+        Err(err) => SubmitOutcome::Mode(Mode::Outcome(format!("trial refused: {err:#}"))),
     }
 }
 
@@ -5630,18 +5714,18 @@ fn begin_routine_queue(
     base: &str,
     routines: &[RoutineFolder],
     nav: &RoutineNav,
-) -> Mode {
+) -> SubmitOutcome {
     let documents = routine_batch_documents(repo, routines, nav);
     if documents.is_empty() {
-        return Mode::Browsing;
+        return SubmitOutcome::Mode(Mode::Browsing);
     }
     let task_files = readable_task_files(&documents);
     match validate_batch(repo, pipelines, Some(base), &documents) {
         Ok(mut tasks) => match finish_routine(repo, &mut tasks, &task_files, base) {
             Ok(msg) => after_write(repo, msg),
-            Err(err) => refusal_mode("queue refused", err),
+            Err(err) => SubmitOutcome::Mode(refusal_mode("queue refused", err)),
         },
-        Err(err) => Mode::Outcome(format!("queue refused: {err:#}")),
+        Err(err) => SubmitOutcome::Mode(Mode::Outcome(format!("queue refused: {err:#}"))),
     }
 }
 
@@ -5658,12 +5742,12 @@ fn begin_routine_solo(
     base: &str,
     routines: &[RoutineFolder],
     nav: &RoutineNav,
-) -> Mode {
+) -> SubmitOutcome {
     let Some(folder) = highlighted_routine_folder(routines, nav) else {
-        return Mode::Browsing;
+        return SubmitOutcome::Mode(Mode::Browsing);
     };
     let Some(task) = folder.tasks.get(nav.task_cursor) else {
-        return Mode::Browsing;
+        return SubmitOutcome::Mode(Mode::Browsing);
     };
 
     let id = mint_id(repo, &task.id, &Default::default());
@@ -5675,9 +5759,9 @@ fn begin_routine_solo(
     match validate_batch(repo, pipelines, Some(base), &documents) {
         Ok(mut tasks) => match finish_routine(repo, &mut tasks, &task_files, base) {
             Ok(msg) => after_write(repo, msg),
-            Err(err) => refusal_mode("queue refused", err),
+            Err(err) => SubmitOutcome::Mode(refusal_mode("queue refused", err)),
         },
-        Err(err) => Mode::Outcome(format!("queue refused: {err:#}")),
+        Err(err) => SubmitOutcome::Mode(Mode::Outcome(format!("queue refused: {err:#}"))),
     }
 }
 
@@ -7366,9 +7450,9 @@ mod tests {
         );
         let groups = listed(&repo);
 
-        // One space on the group, enter to submit it, `n` to decline the
-        // dispatcher the screen then offers.
-        screen(&repo, groups, " \rn");
+        // One space on the group, enter to submit it, `esc` to decline the
+        // overview the screen then reaches.
+        screen(&repo, groups, " \r\x1b");
 
         assert!(repo.queue_dir().join("first.md").exists(), "first task");
         assert!(repo.queue_dir().join("second.md").exists(), "second task");
@@ -7656,10 +7740,10 @@ mod tests {
         handle_browse_key(&groups, &mut state, Key::Char(' '));
 
         let pipelines = Pipelines::builtin();
-        let mode = begin_submission(&repo, &pipelines, "plan/demo", &mut groups, &mut state);
+        let outcome = begin_submission(&repo, &pipelines, "plan/demo", &mut groups, &mut state);
         assert!(
-            matches!(mode, Mode::Dispatch(_)),
-            "expected a clean submission to reach Mode::Dispatch, got {mode:?}"
+            matches!(outcome, SubmitOutcome::Confirmed),
+            "expected a clean submission to reach SubmitOutcome::Confirmed, got {outcome:?}"
         );
 
         assert!(!path.exists(), "the document must be gone from pending");
@@ -7712,11 +7796,24 @@ mod tests {
         handle_browse_key(&groups, &mut state, Key::Char(' '));
 
         let pipelines = Pipelines::builtin();
-        let mode = begin_submission(&repo, &pipelines, "plan/demo", &mut groups, &mut state);
-        assert!(
-            matches!(mode, Mode::Dispatch(_)),
-            "expected beta to queue with alpha left alone, got {mode:?}"
-        );
+        // Driven straight through `finish_submit` rather than
+        // `begin_submission`: the "left alone" note it builds is no longer
+        // shown on any screen a clean submission reaches (see the mockup on
+        // task `overview-and-gates`), so this is the one place left that can
+        // still read it back.
+        let documents = selected_documents(&groups, &state);
+        let pending = validate_batch(&repo, &pipelines, Some("plan/demo"), &documents).unwrap();
+        let selected = state.selected.clone();
+        let msg = finish_submit(
+            &repo,
+            &pipelines,
+            &mut groups,
+            pending,
+            &documents,
+            "plan/demo",
+            &selected,
+        )
+        .unwrap();
 
         assert!(!beta_path.exists(), "beta's pending document must be gone");
         assert!(
@@ -7727,9 +7824,6 @@ mod tests {
             repo.queue_dir().join("beta.md").exists(),
             "beta must have landed in the queue"
         );
-        let Mode::Dispatch(msg) = mode else {
-            unreachable!("checked above");
-        };
         assert!(
             msg.contains("already in the queue, left alone: alpha"),
             "the report must name the sibling left alone, got {msg:?}"
@@ -7760,10 +7854,21 @@ mod tests {
         handle_browse_key(&groups, &mut state, Key::Char(' '));
 
         let pipelines = Pipelines::builtin();
-        let mode = begin_submission(&repo, &pipelines, "plan/demo", &mut groups, &mut state);
-        let Mode::Dispatch(msg) = mode else {
-            panic!("expected beta to queue with alpha left alone, got {mode:?}");
-        };
+        // See the sibling test above on why this reads `finish_submit`
+        // directly rather than `begin_submission`.
+        let documents = selected_documents(&groups, &state);
+        let pending = validate_batch(&repo, &pipelines, Some("plan/demo"), &documents).unwrap();
+        let selected = state.selected.clone();
+        let msg = finish_submit(
+            &repo,
+            &pipelines,
+            &mut groups,
+            pending,
+            &documents,
+            "plan/demo",
+            &selected,
+        )
+        .unwrap();
 
         assert!(!beta_path.exists(), "beta's pending document must be gone");
         assert!(
@@ -8808,8 +8913,8 @@ mod tests {
         let groups = listed(&repo);
 
         // Tab onto the tasks pane, space to select the one group, enter to
-        // submit it, `n` to decline the dispatcher.
-        screen(&repo, groups, "\t \rn");
+        // submit it, `esc` to decline the overview it lands on.
+        screen(&repo, groups, "\t \r\x1b");
 
         assert!(
             repo.queue_dir().join("wire.md").exists(),
@@ -8821,11 +8926,13 @@ mod tests {
         );
     }
 
-    /// `enter` submits straight through to the dispatcher offer — nothing
-    /// drawn in between, and no report text sitting above "start a
-    /// dispatcher here now?" the way the old post-write report used to.
+    /// `enter` submits straight through to the overview — nothing drawn in
+    /// between, and no per-submission report above it the way the old
+    /// dispatcher offer used to draw. The overview lists the whole queue by
+    /// `group:`, not just what this submission just wrote — see the mockup
+    /// on task `overview-and-gates`.
     #[test]
-    fn a_clean_submission_reaches_the_dispatcher_offer_with_nothing_drawn_first() {
+    fn a_clean_submission_reaches_the_overview_with_nothing_drawn_first() {
         let repo = fixture("gate-clean");
         write_pending(
             &repo,
@@ -8834,26 +8941,40 @@ mod tests {
         );
         let groups = listed(&repo);
 
-        let drawn = screen(&repo, groups, "\t \r");
+        // `esc` declines the overview afterward, so `last_frame` — the
+        // ordinary browsing screen `esc` returns to — is not what this
+        // checks; the overview is written straight to `out` rather than
+        // through `draw`, so it is found the same way `last_frame` finds
+        // any other frame: between two of `draw`'s own clear-screen writes.
+        let drawn = screen(&repo, groups, "\t \r\x1b");
 
         assert!(repo.queue_dir().join("wire.md").exists());
 
-        // The last frame drawn is the dispatcher offer, and above it the
-        // same report `queue add --from` prints for the same batch — one
-        // pair of lines per task, then the branch — and nothing else.
-        let last = last_frame(&drawn);
-        let lines: Vec<&str> = last.lines().collect();
-        assert_eq!(lines[0], "queued wire at `queued`", "{lines:?}");
-        assert!(lines[1].trim().ends_with("wire.md"), "{lines:?}");
-        assert!(lines[2].starts_with("  based on `"), "{lines:?}");
-        assert_eq!(lines[3], "", "{lines:?}");
-        assert_eq!(lines[4], "start a dispatcher here now?", "{lines:?}");
+        let overview = drawn
+            .split("\x1b[2J\x1b[H")
+            .find(|frame| frame.starts_with("queued  "))
+            .unwrap_or_else(|| panic!("no overview frame in {drawn:?}"));
+        let lines: Vec<&str> = overview.lines().collect();
+        assert_eq!(lines[0], "queued  1 group · 1 task", "{lines:?}");
+        assert_eq!(
+            lines[2], "  TASK                PIPELINE    STEP      BASE",
+            "{lines:?}"
+        );
+        assert_eq!(lines[4], "one", "{lines:?}");
+        assert_eq!(
+            lines[5], "  wire                default     queued    plan/demo",
+            "{lines:?}"
+        );
+        assert_eq!(
+            lines[7], "[enter] start a dispatcher   [esc] back",
+            "{lines:?}"
+        );
     }
 
     /// With a dispatcher already holding the queue's lock, a clean submission
     /// still writes — the task reaches the queue exactly as it would with no
     /// dispatcher running — but the screen shows the report rather than the
-    /// offer: `Mode::Dispatch` is never entered, since starting a second
+    /// overview: `confirm_start` is never reached, since starting a second
     /// dispatcher would only be refused once `commands::dispatch` actually
     /// ran. Takes a real `Lock::acquire` rather than writing the lock file's
     /// bytes by hand, so this exercises the same holder check every other
@@ -8873,16 +8994,20 @@ mod tests {
 
         let (exit, drawn) = screen_exit(&repo, groups, "\t \r");
 
-        // The write landed whether or not a dispatcher offer follows it.
+        // The write landed whether or not the overview follows it.
         assert!(repo.queue_dir().join("wire.md").exists());
-        // No `y` was ever offered to answer, so end of input is the same
+        // No `enter` was ever offered to answer, so end of input is the same
         // dismissal any key gives `Mode::Outcome` — the screen just quits.
         assert_eq!(exit, ScreenExit::Quit);
 
         let last = last_frame(&drawn);
+        // Anchored on the overview's own footer line rather than its
+        // header: the ordinary browsing footer's own "h show queued  q
+        // quit" already contains "queued  " coincidentally, which made this
+        // check pass whether or not the overview ever drew.
         assert!(
-            !last.contains("start a dispatcher here now?"),
-            "the dispatcher offer must never appear while one already holds the lock:\n{last}"
+            !drawn.contains("[enter] start a dispatcher"),
+            "the overview must never appear while a dispatcher already holds the lock:\n{drawn}"
         );
         let lines: Vec<&str> = last.lines().collect();
         assert_eq!(
@@ -8921,9 +9046,9 @@ mod tests {
         let groups = listed(&repo);
 
         // Space selects the highlighted group, `j` moves onto the other,
-        // space selects it too, `enter` submits both, `n` declines the
-        // dispatcher.
-        screen(&repo, groups, " j \rn");
+        // space selects it too, `enter` submits both, `esc` declines the
+        // overview.
+        screen(&repo, groups, " j \r\x1b");
 
         assert!(repo.queue_dir().join("left.md").exists());
         assert!(repo.queue_dir().join("right.md").exists());
@@ -8946,8 +9071,8 @@ mod tests {
 
         // Tab onto tasks, space to select, g to open the gate picker, down
         // onto the pipeline's second step (`review`), enter to pick it,
-        // enter to submit, `n` to decline the dispatcher.
-        screen(&repo, groups, "\t g\x1b[B\r\rn");
+        // enter to submit, `esc` to decline the overview.
+        screen(&repo, groups, "\t g\x1b[B\r\r\x1b");
 
         let saved = std::fs::read_to_string(repo.queue_dir().join("wire.md")).unwrap();
         assert!(saved.contains("gate_at: review"), "{saved}");
@@ -9039,8 +9164,8 @@ mod tests {
         // alone will not advance past. One `→` lands it on `bugfix` — the
         // pipeline that sorts first, there being no current position to
         // cycle away from — `enter` advances to the skips screen, `enter`
-        // launches with nothing ticked, and `n` declines the dispatcher.
-        screen(&repo, groups, "p\x1b[C\r\rn");
+        // launches with nothing ticked, and `esc` declines the overview.
+        screen(&repo, groups, "p\x1b[C\r\r\x1b");
 
         let arm = queued(&repo, "solo-1");
         assert_eq!(arm.front.pipeline.as_deref(), Some("bugfix"));
@@ -9064,8 +9189,8 @@ mod tests {
         let groups = listed(&repo);
 
         // `p`, `enter` twice past both screens (nothing changed — both tasks
-        // keep the project default), `n` declines the dispatcher.
-        screen(&repo, groups, "p\r\rn");
+        // keep the project default), `esc` declines the overview.
+        screen(&repo, groups, "p\r\r\x1b");
 
         let alpha = queued(&repo, "alpha-1");
         let beta = queued(&repo, "beta-1");
@@ -9094,13 +9219,13 @@ mod tests {
         let repo = fixture("screen-trial-two-launches-a");
         write_pending(&repo, "solo", &document("solo", "group: audits\n", BODY));
         let groups = listed(&repo);
-        screen(&repo, groups, "p\r\rn");
+        screen(&repo, groups, "p\r\r\x1b");
         let first_trial = queued(&repo, "solo-1").front.trial;
 
         let repo = fixture("screen-trial-two-launches-b");
         write_pending(&repo, "solo", &document("solo", "group: audits\n", BODY));
         let groups = listed(&repo);
-        screen(&repo, groups, "p\r\rn");
+        screen(&repo, groups, "p\r\r\x1b");
         let second_trial = queued(&repo, "solo-1").front.trial;
 
         assert!(first_trial.is_some() && second_trial.is_some());
@@ -9127,8 +9252,8 @@ mod tests {
         .unwrap();
         let groups = listed(&repo);
 
-        // `p`, `enter` twice past both screens, `n` declines the dispatcher.
-        screen(&repo, groups, "p\r\rn");
+        // `p`, `enter` twice past both screens, `esc` declines the overview.
+        screen(&repo, groups, "p\r\r\x1b");
 
         assert!(
             repo.queue_dir().join("solo-3.md").exists(),
@@ -9155,8 +9280,8 @@ mod tests {
 
         // `h` twice widens the scope all the way to `done`, where the
         // archived group actually lists; `p` opens the picker on it, `enter`
-        // twice past both screens, `n` declines the dispatcher.
-        screen(&repo, groups, "hhp\r\rn");
+        // twice past both screens, `esc` declines the overview.
+        screen(&repo, groups, "hhp\r\r\x1b");
 
         let arm = queued(&repo, "finished-1");
         assert_eq!(
@@ -9224,11 +9349,11 @@ mod tests {
 
         // space selects `two`, the highlighted (newest) group; j moves to
         // `one`; space selects it too; enter submits both and is refused — a
-        // refusal shows an outcome and never the dispatcher offer, which is
-        // half of what this test guards; any key (`x`) dismisses it; space
+        // refusal shows an outcome and never the overview, which is half of
+        // what this test guards; any key (`x`) dismisses it; space
         // deselects `one`, which is still highlighted; enter resubmits with
-        // `two` alone, and `n` declines the dispatcher that one does offer.
-        screen(&repo, groups, " j \rx \rn");
+        // `two` alone, and `esc` declines the overview that one does reach.
+        screen(&repo, groups, " j \rx \r\x1b");
 
         assert!(
             repo.queue_dir().join("good.md").exists(),
@@ -9265,7 +9390,11 @@ mod tests {
     /// fixes. The confirmation panel `enter` used to open swallowed the key
     /// through its own catch-all arm, dropping back to browsing instead of
     /// quitting, so a person who pressed enter and then `q` saw nothing
-    /// happen. `Mode::Dispatch` is where that same catch-all lives now.
+    /// happen. `Mode::Outcome`, reached here by a refused submission, is
+    /// where that same catch-all lives now that `Mode::Dispatch` is gone —
+    /// the overview and the overrides gate that replaced it read no `q` at
+    /// all (see the mockup on task `overview-and-gates`), so neither could
+    /// reintroduce the bug even silently.
     ///
     /// End of input ends the loop too, so a run that merely stops proves
     /// nothing. The frames are the evidence: `q` quitting means no further
@@ -9273,22 +9402,26 @@ mod tests {
     #[test]
     fn q_quits_from_a_mode_that_is_not_browsing() {
         let repo = fixture("screen-quit-report");
-        write_pending(&repo, "wire", &document("wire", "group: one\n", BODY));
+        write_pending(
+            &repo,
+            "bogus",
+            &document("bogus", "group: one\nstage: taken\n", BODY),
+        );
         let groups = listed(&repo);
         // Computed before `groups` moves into `run_screen`, but the
         // footer's own text does not change across these two frames either
         // way — no group here is queued yet, and `h` is never pressed.
         let ordinary_footer = footer(&ScreenState::new());
 
-        // Space selects, enter submits and puts the report up, `q` quits from
-        // under it.
+        // Space selects, enter submits and is refused for a reserved key,
+        // putting the outcome up; `q` quits from under it.
         let (exit, drawn) = screen_exit(&repo, groups, " \rq");
 
         assert_eq!(exit, ScreenExit::Quit);
 
         // Two browsing frames — one before the space, one before the enter —
-        // and then the report, which draws no footer. A third would mean `q`
-        // had dropped back to browsing rather than quitting.
+        // and then the outcome, which draws no footer. A third would mean
+        // `q` had dropped back to browsing rather than quitting.
         let frames = drawn.matches(&ordinary_footer).count();
         assert_eq!(
             frames, 2,
@@ -9296,31 +9429,35 @@ mod tests {
         );
     }
 
-    /// `y` on the report asks for a dispatcher. The screen only says so and
-    /// stops — starting one is `queue_screen`'s, once the `TermGuard` it holds
-    /// has come off — which is also why no test here can launch anything.
+    /// `enter` on the overview asks for a dispatcher. The screen only says so
+    /// and stops — starting one is `queue_screen`'s, once the `TermGuard` it
+    /// holds has come off — which is also why no test here can launch
+    /// anything.
     #[test]
-    fn answering_yes_asks_the_caller_to_start_a_dispatcher() {
+    fn confirming_the_overview_asks_the_caller_to_start_a_dispatcher() {
         let repo = fixture("screen-dispatch-yes");
         write_pending(&repo, "wire", &document("wire", "group: one\n", BODY));
         let groups = listed(&repo);
 
-        let (exit, _) = screen_exit(&repo, groups, " \ry");
+        // Space selects, enter submits, a second enter confirms the overview
+        // — this fixture carries no overrides layer, so nothing stands
+        // between the overview and the offer.
+        let (exit, _) = screen_exit(&repo, groups, " \r\r");
 
         assert_eq!(exit, ScreenExit::StartDispatcher);
         assert!(repo.queue_dir().join("wire.md").exists());
     }
 
-    /// Anything but `y` declines. A stray `\r` — the kind a scripted input
-    /// carries at the end of a line — must never be read as yes, or every
-    /// double-tap on enter would start a dispatcher.
+    /// A stray key on the overview — anything but `enter` or `esc` — does
+    /// nothing at all; only an explicit `esc` declines the dispatcher it
+    /// offers.
     #[test]
-    fn a_stray_key_on_the_report_declines_the_dispatcher() {
+    fn a_stray_key_on_the_overview_declines_only_on_esc() {
         let repo = fixture("screen-dispatch-stray");
         write_pending(&repo, "wire", &document("wire", "group: one\n", BODY));
         let groups = listed(&repo);
 
-        let (exit, _) = screen_exit(&repo, groups, " \r\r");
+        let (exit, _) = screen_exit(&repo, groups, " \rz\x1b");
 
         assert_eq!(exit, ScreenExit::Quit);
         assert!(
@@ -9925,8 +10062,9 @@ mod tests {
         let deps_text = std::fs::read_to_string(&deps).unwrap();
         let docs_text = std::fs::read_to_string(&docs).unwrap();
 
-        // r (open routines), space (select `nightly`), enter (queue it).
-        let (exit, _) = screen_exit(&repo, Vec::new(), "r \r");
+        // r (open routines), space (select `nightly`), enter (queue it),
+        // esc (decline the overview it reaches).
+        let (exit, _) = screen_exit(&repo, Vec::new(), "r \r\x1b");
         assert_eq!(exit, ScreenExit::Quit);
 
         assert!(
@@ -9981,7 +10119,7 @@ mod tests {
             ),
         );
 
-        let (exit, _) = screen_exit(&repo, Vec::new(), "r \r");
+        let (exit, _) = screen_exit(&repo, Vec::new(), "r \r\x1b");
         assert_eq!(exit, ScreenExit::Quit);
 
         let scan = queued(&repo, "scan-pending-1");
@@ -10014,8 +10152,9 @@ mod tests {
 
         // r (open routines), → (the folder has no subfolders, so this moves
         // focus onto its own tasks, already on `scan-pending` — the first
-        // one in filename order), space (queue it alone).
-        let (exit, drawn) = screen_exit(&repo, Vec::new(), "r\x1b[C ");
+        // one in filename order), space (queue it alone), esc (decline the
+        // overview it reaches).
+        let (exit, drawn) = screen_exit(&repo, Vec::new(), "r\x1b[C \x1b");
         assert_eq!(exit, ScreenExit::Quit);
         let last = last_frame(&drawn);
 
@@ -10850,14 +10989,14 @@ mod tests {
             let mut state = ScreenState::new();
             handle_browse_key(&groups, &mut state, Key::Char(' '));
 
-            let mode = begin_submission(
+            let outcome = begin_submission(
                 &repo,
                 &Pipelines::builtin(),
                 "plan/demo",
                 &mut groups,
                 &mut state,
             );
-            assert!(matches!(mode, Mode::Dispatch(_)), "{mode:?}");
+            assert!(matches!(outcome, SubmitOutcome::Confirmed), "{outcome:?}");
 
             let task = queued(&repo, "wire");
             assert_eq!(task.front.group.as_deref(), Some("proj-12-one"));

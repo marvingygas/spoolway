@@ -1136,8 +1136,8 @@ fn footer(
 //
 // One pane, not two: there is one thing to read here, a ledger, not a queue
 // to pick work out of — and nothing here offers to start a dispatcher, the
-// way the queue screen's own `Mode::Dispatch` does, because this reads a
-// ledger rather than queuing work.
+// way the queue screen's own overview does (see `commands::queue::confirm_start`),
+// because this reads a ledger rather than queuing work.
 //
 // Every view is a second look at rows this file already knows how to build:
 // the pipelines view is `pipeline_blocks` and `Metrics::for_row`, the runs

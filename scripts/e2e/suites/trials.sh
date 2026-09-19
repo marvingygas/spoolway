@@ -59,8 +59,9 @@ pending_doc beta "$BODY" "group: audits" "touches: [src/main.rs]" "pipeline:" \
 # cursor opens on `alpha`'s first checkbox: one `j` reaches its second,
 # `fix`, and `space` ticks it; nine more `j`s walk past the rest of
 # `alpha`'s own checkboxes onto `beta`'s third one, `document`, and `space`
-# ticks that too. `enter` mints and writes both arms; `n` declines the
-# dispatcher offer.
+# ticks that too. `enter` mints and writes both arms and reaches the
+# overview; the trailing `n` is noise the overview ignores, and the pipe
+# running dry after it declines the same way `esc` would.
 printf '\tp\x1b[Dj\x1b[C\x1b[C\rj jjjjjjjjj \rn' | "$SPOOLWAY" queue >/dev/null 2>&1
 
 works "the alpha arm reaches the queue" \
@@ -276,7 +277,8 @@ works "both arms' usage rows are still in the ledger, correlated by trial id" \
 # A trial of its own group, so the discard below has nothing in common with
 # the two arms already settled. `p`'s minimal form: `f` narrows to the group
 # by name, `p` opens the picker, two `enter`s take both screens' defaults,
-# `n` declines the dispatcher offer. The group is named clear of `p` and `s`
+# reaching the overview; the trailing `n` is noise it ignores, and the pipe
+# running dry after it declines. The group is named clear of `p` and `s`
 # for the reason the `old-run` block above gives: either letter inside the
 # query fires its own action rather than narrowing.
 pending_doc oneoff "$BODY" "group: oneoff" "touches: [notes/oneoff.md]"
