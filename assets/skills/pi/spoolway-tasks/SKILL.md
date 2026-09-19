@@ -126,7 +126,9 @@ reading the file whole.
      for on its own.
    - `group` — **the same string on every document of this breakdown**, read verbatim and
      never a path. It is what makes them one row on the queue screen, one selection, and one
-     tab at run time. The plan's own slug is the obvious value.
+     tab at run time. The plan's own slug is the obvious value — the slug alone, with the
+     `<YYYY-MM-DD>-` of the plan file's own name off it. A group carrying a date pins the
+     whole breakdown to the morning it was cut.
    - `source` — the issue's own URL, from `spoolway issue show`, when this breakdown started
      at one; the calling page's own absolute path otherwise, where one exists. The screen's
      `o` key opens a `source:` that is a URL; a path is carried for the reader rather than

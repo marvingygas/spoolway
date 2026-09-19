@@ -17,6 +17,10 @@ directory — see `SKILL.md`'s step 7 — never markup appended here.
 repo root, `<YYYY-MM-DD>` is the day the plan is cut, and `<slug>` folds the goal to lowercase,
 digits and hyphens.
 
+**The date belongs to the filename alone.** The slug is what is left once it comes off —
+`e2e-runtime`, never `2026-09-19-e2e-runtime`. That is the string the page carries and the string
+the breakdown's `group:` takes, so a plan cut twice in a week is one name, not two.
+
 **Never write a plan into the checkout.** Nothing resolves this path — it is a convention this
 skill holds, so it holds only as long as you follow it. A page under the repo's own
 `.spoolway/` is untracked, sits in everybody's `git status`, and rides along in a clone that was
@@ -86,7 +90,8 @@ the page that buys nothing.
 
 ## What each slot takes
 
-- `<title>` and `.slug` — the plan's own slug, the same string twice.
+- `<title>` and `.slug` — the plan's own slug, the same string twice. The file's stem is not
+  it: the leading `<YYYY-MM-DD>-` comes off first.
 - The rail's nested lists — one `<li>` per decision and mockup step, added or removed to
   match what the page actually has, each `href`/`id` pair using the same slug. The index
   scrolls on its own once it outgrows the viewport, so a long one costs the reader nothing
