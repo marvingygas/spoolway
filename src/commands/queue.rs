@@ -1485,7 +1485,10 @@ fn tool_requirements_gate_with(
 /// group's hook answered — `group: <slug>-<group>`, `branch:
 /// task/<slug>-<id>`. A no-op for any group with no slug, which is every group
 /// when `issue_tracking.key_in_names` is off, so with the flag off every
-/// generated name is byte-for-byte what it is today.
+/// generated name is byte-for-byte what it is today. The group is stripped
+/// of the slug before it is reapplied, so a document that comes back through
+/// the queue already carrying the prefix — `carry_to_pending` keeps `group:`
+/// as written — gets it exactly once, not stacked on again.
 ///
 /// Runs after [`open_tickets`] and before any task is saved. The `task/` ref
 /// namespace is kept, so `spoolway stack` and the orphaned-branch sweep still
@@ -1507,7 +1510,8 @@ fn prefix_generated_names(tasks: &mut [Task], group_slug: &BTreeMap<String, Stri
         let Some(slug) = group_slug.get(&group) else {
             continue;
         };
-        let prefixed_group = format!("{slug}-{group}");
+        let bare = strip_slug_prefix(&group, slug);
+        let prefixed_group = format!("{slug}-{bare}");
         task.front.branch = Some(format!("task/{slug}-{}", task.front.id));
         task.front.group = Some(prefixed_group.clone());
         if announced.insert((slug.clone(), prefixed_group.clone())) {
@@ -11111,6 +11115,48 @@ mod tests {
             assert_eq!(
                 queued(&repo, "auth-01").extra_str("url"),
                 "https://acme.atlassian.net/browse/PROJ-12"
+            );
+        }
+
+        /// A document that has already been through the queue once —
+        /// unqueued and re-submitted — carries its `group:` already
+        /// prefixed with the slug, and its own `slug:` alongside it (see
+        /// `carry_to_pending`, which drops `branch:` but keeps both). Queued
+        /// a second time, the group must come out with exactly one `proj-12-`
+        /// on it, not two.
+        #[test]
+        fn a_document_whose_group_already_carries_the_slug_is_not_prefixed_twice() {
+            let mut repo = fixture("open-prefix-twice");
+            repo.config.issue_tracking.key_in_names = true;
+            with_hook(&mut repo, "exit 1");
+
+            let text = document(
+                "auth-01",
+                "group: proj-12-auth-rework\ngroup_description: auth rework\n\
+                 slug: proj-12\nticket: PROJ-13\n",
+                BODY,
+            );
+            let path = write_doc(&repo, "auth-01.md", &text);
+
+            queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&[&path]),
+                &repo.root,
+                false,
+            )
+            .unwrap();
+
+            let task = queued(&repo, "auth-01");
+            assert_eq!(
+                task.front.group.as_deref(),
+                Some("proj-12-auth-rework"),
+                "the slug was stamped on again instead of recognised"
+            );
+            assert_eq!(
+                task.front.branch.as_deref(),
+                Some("task/proj-12-auth-01"),
+                "the branch still names the id, unaffected by the group bug"
             );
         }
 
