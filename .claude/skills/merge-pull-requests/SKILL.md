@@ -21,6 +21,17 @@ requests are merged, so a problem found on the way is this pass's problem. Diagn
 on the branch it belongs to, and carry on. A pull request handed back untouched with a note
 about what is wrong with it is the one outcome this skill exists to avoid.
 
+**Start nothing.** This pass reads the queue and it stops there. It never runs
+`spoolway dispatch`, never resumes a task, and never starts a lane. A dispatcher this pass
+starts is one nobody asked for and nobody is watching: it cuts worktrees, opens panes and
+puts real agents to work on a tree that is halfway through a merge. If a dispatcher is
+already running, step 1 has already told you — wait for it, do not restart it. Starting one
+is the human's call, after this pass is over and the binary is installed.
+
+That rule is worth more than it looks, because the way it gets broken is not by deciding to
+break it. See the heredoc entry under *What has bitten before*: a command can be run by
+writing about it.
+
 **Merging is local, not on the forge.** Nothing is merged through `gh pr merge`. You merge
 into `main` on this machine, verify the result compiles and passes, and push. GitHub then
 marks the pull requests merged on its own, because their head commits are on `main`.
@@ -311,6 +322,16 @@ open list whether they were missed or refused.
   `git diff --name-only` outputs — and check that every line each side added is still in the
   merged file. It is a one-line loop and it is the only thing standing between a silent drop
   and a push.
+- **A heredoc that ran the command it was describing.** Writing prose into a file with
+  `python3 - <<PY` — the delimiter unquoted — hands the whole body to the shell for
+  expansion first. Backticks around a command name in that prose are not decoration; they
+  are command substitution, and `` `spoolway dispatch` `` in a sentence *starts a
+  dispatcher*. It did: three lanes, three worktrees, three panes and three live agents, from
+  a call whose visible purpose was to add a description to a task document. The shell gave no
+  hint — the call simply hung, because the dispatcher it had started does not return.
+  Quote the delimiter, always: `<<'PY'`. Nothing inside then means anything to the shell.
+  The general form is that this pass writes a lot of text containing command names, and text
+  containing command names is dangerous in exactly one place, which is an unquoted heredoc.
 - **`spoolway sync` was skipped, so `doctor` complains for weeks.** The drift step 10 clears
   looks like something wrong with the project. It is the merge's own doing, and it appears on
   every pass that brings in a new default.
