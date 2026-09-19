@@ -317,9 +317,9 @@ const CATCH_UP_LIMIT: Duration = Duration::hours(1);
 /// most [`CATCH_UP_LIMIT`]. `None` when none of them matches.
 ///
 /// A pass samples the clock once at its top, and passes are as far apart as
-/// `dispatch.interval` plus however long a pass runs: `0 3 * * *` under a
-/// two-minute interval fell between two passes about every other night, and
-/// nothing said so (jobs review finding 2). The latest match rather than
+/// [`crate::dispatch::PROBE_INTERVAL`] plus however long a pass runs: `0 3 * * *`
+/// under a two-minute gap between passes fell between two of them about every
+/// other night, and nothing said so (jobs review finding 2). The latest match rather than
 /// all of them: one run per pass is what a job gets, and the previous run
 /// still being queued would skip the rest anyway.
 fn due_minute(cron: &Cron, checked: Option<&str>, now: NaiveDateTime) -> Option<NaiveDateTime> {

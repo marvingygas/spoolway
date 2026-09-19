@@ -822,10 +822,6 @@ impl Tracker {
         `--plain` keeps the loop but prints a line per pass instead of drawing. `--dry-run` \
         reports what one pass would do and changes nothing.")]
 pub struct DispatchArgs {
-    /// Override the configured interval between passes, e.g. `5m`.
-    #[arg(long, value_name = "DURATION")]
-    pub interval: Option<String>,
-
     /// Report what one pass would do without spawning anything or writing to
     /// task files.
     ///

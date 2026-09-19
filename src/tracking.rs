@@ -749,8 +749,8 @@ pub(crate) fn write_hook_retry(repo: &Repo, key: &str, retry: &HookRetry) {
 /// Ten seconds, doubling on every attempt, capped at an hour — the same
 /// shape [`crate::dispatch::relaunch_backoff`] gives a dying lane, but its
 /// own function rather than a shared one: a hook's ladder is pinned at ten
-/// seconds by this task's own acceptance criteria, unrelated to whatever
-/// `dispatch.interval` a project happens to run at.
+/// seconds by this task's own acceptance criteria, unrelated to the
+/// dispatcher's own fixed poll rate.
 fn hook_backoff(attempts: u32) -> Duration {
     const BASE_SECS: u64 = 10;
     const CAP: Duration = Duration::from_secs(3600);

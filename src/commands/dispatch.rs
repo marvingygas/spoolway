@@ -44,7 +44,7 @@ impl std::fmt::Display for RestartsRefused {
 
 impl std::error::Error for RestartsRefused {}
 
-/// Run the pipeline: one pass, or a loop on the configured interval.
+/// Run the pipeline: one pass, or a loop on the dispatcher's fixed poll rate.
 ///
 /// Returns the code the process should exit with, rather than `()`, so a
 /// caller restarting this in a tight loop against a repo that cannot run
@@ -217,10 +217,7 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // touches this file at all.
     crate::problem_log::open(repo);
 
-    let interval = match &args.interval {
-        Some(text) => crate::config::parse_duration(text).map_err(anyhow::Error::msg)?,
-        None => repo.config.dispatch.interval,
-    };
+    let interval = crate::dispatch::PROBE_INTERVAL;
 
     if args.dry_run {
         println!("dry run: nothing will be started, torn down, or written\n");

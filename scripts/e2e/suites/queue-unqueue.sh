@@ -82,7 +82,7 @@ echo hang > "$CTL/solo"
 task_doc "$LIVE/solo.md" solo "$BODY" "group: unq" "touches: [notes/solo.md]"
 must "a task whose lane will hang mid-turn" "$SPOOLWAY" queue add --from "$LIVE/solo.md"
 
-if drive solo implement 60; then ok "it reaches implement and sits there"
+if drive solo implement 120; then ok "it reaches implement and sits there"
 else bad "it reaches implement and sits there (at \`$(stage_of solo)\`)"; fi
 LANE_PID=$(lane_pid "solo · implement" 30)
 if [ -n "$LANE_PID" ]; then ok "the lane really is mid-turn"
@@ -122,11 +122,11 @@ task_doc "$LIVE/paused-route.md" paused-route "$BODY" "group: unq" \
   "touches: [notes/paused-route.md]"
 must "a second task, to prove the other route" \
   "$SPOOLWAY" queue add --from "$LIVE/paused-route.md"
-if drive paused-route implement 60; then ok "it reaches implement too"
+if drive paused-route implement 120; then ok "it reaches implement too"
 else bad "it reaches implement too (at \`$(stage_of paused-route)\`)"; fi
 must "the route the refusal names first actually works" \
   "$SPOOLWAY" queue pause paused-route
-if drive paused-route paused 30; then ok "and the task really does stop, checkout kept"
+if drive paused-route paused 60; then ok "and the task really does stop, checkout kept"
 else bad "and the task really does stop, checkout kept (at \`$(stage_of paused-route)\`)"; fi
 works "with its checkout still standing" \
   test -n "$(worktree_of paused-route)"

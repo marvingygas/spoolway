@@ -185,7 +185,6 @@ Run the pipeline. It draws the live board and keeps running until the queue is e
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--interval <DURATION>` | `dispatch.interval` | Time between passes, e.g. `5m` |
 | `--dry-run` | | Print what one pass would do, then exit. Nothing is started or written |
 | `--plain` | | Print one line per pass. The board is not drawn |
 | `--unattended` | `unattended.enabled` | Start a lane on `blocked` for every blocked task. Nothing waits for a person. See [Unattended runs](pipelines.md#unattended-runs) |

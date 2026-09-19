@@ -106,7 +106,6 @@ backend = "herdr"
 herdr_mode = "split"
 tmux_mode = "grouped"
 worktree_root = ""
-interval = "10s"
 lane_quiet = "15m"
 auto_commit = true
 ```
@@ -117,8 +116,7 @@ auto_commit = true
 | `herdr_mode` | `split` | Layout under `backend = "herdr"`. `split` gives each task its own workspace named `spoolway/<task>`. `grouped` puts every project in the shared `spoolway-dispatcher` workspace, one tab per project, one pane per task. See [the dispatcher](dispatcher.md#one-home-for-every-run-in-every-project). |
 | `tmux_mode` | `grouped` | Layout under `backend = "tmux"`. `grouped` shares the `spoolway-dispatcher` session, one window per project, one pane per task. `split` gives each task its own session named `spoolway/<task>`. See [tmux](dispatcher.md#tmux). |
 | `worktree_root` | blank | Where a task's worktree is created. Blank means `~/.spoolway/<project>/worktrees`. The directory is `task-<id>`, or `task-<slug>-<id>` with a tracker slug. |
-| `interval` | `10s` | Time between dispatcher passes. |
-| `lane_quiet` | `15m` | How long a lane may stay silent before the dispatcher reminds it to report. After three reminders the task is escalated. |
+| `lane_quiet` | `15m` | How long a lane may stay silent before the dispatcher reminds it to report. After three reminders the task is escalated. Not how often a pass looks — the dispatcher polls at a fixed rate nobody sets. |
 | `auto_commit` | `true` | Commit a lane's uncommitted work as `wip(<task>): <step>` when its step ends. A task with work spoolway could not commit stops at `blocked` instead of being archived. |
 | `priority` | `group` | Which ready task fills a free slot. `group` prefers a task whose group is already running. `any` weighs every ready task on steps left, group size and dependents. |
 | `lane_child_ceiling` | `1h` | How long a lane with a running child process is excused from the reminder loop. |

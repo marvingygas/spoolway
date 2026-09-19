@@ -296,7 +296,6 @@ backend = "herdr"            # herdr, tmux, or headless
 herdr_mode = "split"         # "split": a workspace per task; "grouped": one shared tab, a pane per task
 tmux_mode = "grouped"        # "grouped": one session for the run; "split": a session per task
 worktree_root = ""           # where a task's worktree is cut; blank is ~/.spoolway/<project>/worktrees
-interval = "10s"             # how long the dispatcher waits between passes
 lane_quiet = "15m"           # silence before a lane is reminded to report
 auto_commit = true           # commit a lane's leftover work when its step settles
 

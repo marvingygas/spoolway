@@ -133,7 +133,7 @@ task_doc selfsweep.md selfsweep "$SELFSWEEP_BODY" "group: demo" \
 must "a task queues behind the planted workspace" "$SPOOLWAY" queue add --from selfsweep.md
 
 exit_code "the run settles once its one step passes, with a workspace on the checkout already present" 0 \
-  "$SPOOLWAY" dispatch --plain --interval 1
+  "$SPOOLWAY" dispatch --plain
 
 # The planted rows by name, not the table's line count: the dispatcher's own
 # tab (`spoolway/selfsweep`) lands in the same table once the run starts, so

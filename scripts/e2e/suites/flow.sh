@@ -206,7 +206,7 @@ must "staging the slot change" git add .spoolway/config.toml
 git diff --cached --quiet .spoolway/config.toml \
   || must "committing the slot change" git commit -qm "e2e: back to two slots"
 
-if drive par-one gone 60 && drive par-two gone 60; then
+if drive par-one gone 180 && drive par-two gone 180; then
   ok "both parallel tasks land once the slot frees"
 else
   bad "both parallel tasks land once the slot frees"
@@ -265,8 +265,8 @@ git diff --cached --quiet .spoolway/config.toml \
 # suite's bare-repo forge, on the one call that needs a real github.com
 # remote. `blocked` is as far as this suite drives it; landing a stack all
 # the way is `stacking.sh`'s scenario, not this one's.
-if drive chain-a gone 60 && drive chain-b blocked 60 \
-  && drive gate-untouched-a gone 60 && drive gate-untouched-b gone 60; then
+if drive chain-a gone 180 && drive chain-b blocked 180 \
+  && drive gate-untouched-a gone 180 && drive gate-untouched-b gone 180; then
   ok "the chain runs to its real end and both never-run groups land"
 else
   bad "the chain runs to its real end and both never-run groups land"
