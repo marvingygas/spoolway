@@ -82,9 +82,10 @@ works "a solo pick under a nested folder reaches the queue too" \
 
 # A pending group, saved as a routine: `s` opens the panel over `release`,
 # already named after the group; `enter` accepts that name and copies its
-# one document into `.spoolway/routines/release/`, unchanged; `q` quits.
+# one document into `.spoolway/routines/release/`, unchanged; the screen
+# then ends as the pipe drains.
 pending_doc release-notes "$BODY" "group: release"
-printf 's\rq' | "$SPOOLWAY" queue >/dev/null 2>&1
+printf 's\r' | "$SPOOLWAY" queue >/dev/null 2>&1
 
 works "the saved routine landed in the checkout" \
   test -f .spoolway/routines/release/release-notes.md
@@ -122,7 +123,7 @@ task_doc "$SPOOLWAY_PROJECT_HOME/queue/archived-reuse.md" archived-reuse "$BODY"
   "epic: https://example.invalid/epic/9" \
   "ticket: https://example.invalid/ticket/9"
 
-printf 'farchived-\rs\rq' | "$SPOOLWAY" queue >/dev/null 2>&1
+printf 'farchived-\rs\r' | "$SPOOLWAY" queue >/dev/null 2>&1
 
 works "a document an earlier run already stamped still saves as a routine" \
   test -f .spoolway/routines/archived-reuse/archived-reuse.md

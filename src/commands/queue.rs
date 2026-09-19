@@ -2820,8 +2820,9 @@ fn opening_message(repo: &Repo, groups: &[Group]) -> Option<String> {
 /// Degrades rather than crashes with no terminal to drive: [`TermGuard`]
 /// only changes stdin's mode on a real tty, so a redirected or piped stdin
 /// is read exactly as written, and running out of it — `read_key` returning
-/// `None` — ends the screen the same way `q` does rather than blocking on a
-/// read that will never come. That is also what lets the end-to-end suite
+/// `None`, the same as `ctrl-c` caught and noticed by `wait_for_key` —
+/// ends the screen rather than blocking on a read that will never come.
+/// That is also what lets the end-to-end suite
 /// drive the submit path headlessly: a script's `printf '...' | spoolway
 /// queue` plays a key sequence in and the screen ends the moment the pipe is
 /// empty.
@@ -2840,6 +2841,12 @@ pub fn queue_screen(repo: &Repo, pipelines: &Pipelines, cwd: &std::path::Path) -
 
     let mut stdin = crate::screen::RawStdin;
     let mut stdout = std::io::stdout();
+
+    // Installed before the guard takes the terminal, the same order
+    // `commands::dispatch` uses for its own board: a `ctrl-c` between the two
+    // calls would otherwise kill the process with the terminal already raw
+    // and nothing left to restore it.
+    crate::platform::stop::catch_interrupt();
 
     let exit = {
         // Scoped so the guard is dropped before anything else can want the
@@ -2894,39 +2901,29 @@ fn run_screen(
         draw(&groups, &panes, &state, &mut last, out);
         let Some(key) = wait_for_key(repo, &mut groups, &panes, &mut state, &mut last, input, out)
         else {
-            // No terminal, or the script driving this run has finished
-            // handing over keys: the same graceful stop `q` gives, since
-            // nothing typed here can ever be a command a shell prompt would
-            // misread — TermGuard's own drop drains whatever is left.
+            // No terminal, a script driving this run has finished handing
+            // over keys, or `ctrl-c` was caught: `wait_for_key` returns
+            // `None` for all three, and the screen ends the same way for
+            // each — nothing typed here can ever be a command a shell prompt
+            // would misread, and `TermGuard`'s own drop drains whatever is
+            // left of stdin and restores the mode and the cursor.
             break;
         };
 
-        // `q` used to be intercepted here, once, for every mode at once —
-        // safe only as long as no mode read a literal character of its own.
-        // `Mode::Filter` is exactly that mode: `q` has to reach it as
-        // ordinary text, the same as any other letter. So `q` is now each
-        // mode's own business: it still quits from every one of them —
-        // browsing, the gate picker and a report still on screen — except
-        // `Mode::Filter`, which is the one mode this whole change exists to
-        // let read `q` as a letter.
+        // No mode reads a quit key of its own any more — `ctrl-c` is the one
+        // way out, caught above `run_screen` and noticed by `wait_for_key`
+        // — so every mode's match is just its own keys, with `q` falling to
+        // whatever an unrecognised character already does there. Only
+        // `Mode::Filter` gives that character any meaning of its own,
+        // appending it to the query the same as any other letter — see
+        // `handle_filter_key`'s own doc comment.
         match &state.mode {
-            // The filter box takes every character as text, `t`, `s`, `p`
-            // and `q` all included — see `handle_filter_key`'s own doc
-            // comment. Neither the trial picker nor the save panel are
-            // reachable while it has focus any more: `enter` leaves it
-            // first, keeping whatever query narrowed the list, and `t`/`s`
-            // read fresh off the cursor from `Mode::Browsing` the same as
-            // they always have.
             Mode::Filter => handle_filter_key(&groups, &mut state, key),
-            Mode::Gate(cursor) => match key {
-                Key::Char('q') => break,
-                _ => {
-                    let cursor = *cursor;
-                    handle_gate_key(&groups, pipelines, &mut state, cursor, key);
-                }
-            },
+            Mode::Gate(cursor) => {
+                let cursor = *cursor;
+                handle_gate_key(&groups, pipelines, &mut state, cursor, key);
+            }
             Mode::Trial(trial) => match key {
-                Key::Char('q') => break,
                 // The first screen's own `enter`: advance to the second
                 // rather than launch anything — but only once every task has
                 // an assignment. A legacy or hand-edited document names none
@@ -2965,28 +2962,23 @@ fn run_screen(
                     };
                 }
             },
-            Mode::Outcome(_) => match key {
-                Key::Char('q') => break,
-                // Any other key dismisses it. The message was already read
-                // on the draw that preceded this key — holding it in
-                // `state` rather than writing it straight to `out` is what
-                // let it survive that draw at all.
-                _ => state.mode = Mode::Browsing,
-            },
+            // Any key dismisses it. The message was already read on the draw
+            // that preceded this key — holding it in `state` rather than
+            // writing it straight to `out` is what let it survive that draw
+            // at all.
+            Mode::Outcome(_) => state.mode = Mode::Browsing,
             Mode::Dispatch(_) => match key {
                 // Only `y`. Every other key declines, because a stray `\r` an
                 // unattended script's input happens to carry must never start
-                // a dispatcher — the same care `q` alone quitting is taken
-                // with.
+                // a dispatcher.
                 Key::Char('y') => return Ok(ScreenExit::StartDispatcher),
-                Key::Char('q') => break,
                 _ => state.mode = Mode::Browsing,
             },
             Mode::SaveRoutine { group, name } => match key {
-                // No `q` arm: the name field reads every ordinary character
-                // it is typed, `q` included, the same way `Mode::Filter`'s
-                // query does — see that mode's own doc comment. `esc` is the
-                // only way out besides `enter`.
+                // The name field reads every ordinary character it is typed,
+                // `q` included, the same way `Mode::Filter`'s query does —
+                // see that mode's own doc comment. `esc` is the only way out
+                // besides `enter`.
                 Key::Esc => state.mode = Mode::Browsing,
                 Key::Enter if !name.trim().is_empty() => {
                     let (group, name) = (group.clone(), name.clone());
@@ -3005,7 +2997,6 @@ fn run_screen(
                 _ => {}
             },
             Mode::Routines(nav) => match key {
-                Key::Char('q') => break,
                 // `esc` is what leaves this pane now — `r` no longer does,
                 // since `r` inside `Mode::Browsing` is what opens it, and a
                 // key that both opens and closes the same pane is one key
@@ -3046,7 +3037,6 @@ fn run_screen(
                 }
             },
             Mode::Browsing => match key {
-                Key::Char('q') => break,
                 // `enter` validates the selection and writes it straight
                 // through — nothing is drawn in between any more. A
                 // validation failure hands back `Mode::Outcome`; a clean
@@ -3109,7 +3099,11 @@ fn clamp_cursors(groups: &[Group], state: &mut ScreenState) {
 /// Wait for the next keystroke, redrawing the screen on every poll slice —
 /// see [`draw`] — so a resized terminal or a pending document someone just
 /// edited reaches the screen without a key being typed at all. `None` once
-/// the input is exhausted, exactly what a direct [`read_key`] would report.
+/// the input is exhausted, exactly what a direct [`read_key`] would report —
+/// and also once `ctrl-c` has been pressed: `stop::asked()` is checked on
+/// every slice the same way the reload and redraw already are, so a caught
+/// interrupt ends the screen exactly the way a drained pipe already did,
+/// rather than needing a signal-unsafe read to short-circuit the loop.
 ///
 /// The same wait `commands::dispatch`'s own board takes over its pass
 /// interval: [`PollableRead::byte_pending`] stands in for a sleep, so a slice
@@ -3132,6 +3126,9 @@ fn wait_for_key(
     out: &mut impl std::io::Write,
 ) -> Option<Key> {
     loop {
+        if crate::platform::stop::asked() {
+            return None;
+        }
         if !cfg!(unix) || input.byte_pending(crate::status::POLL) {
             return read_key(input);
         }
@@ -3188,11 +3185,11 @@ fn trial_target<'a>(groups: &'a [Group], state: &ScreenState) -> Option<&'a Grou
 
 /// One key while browsing: moving, focus, selection and the gate picker.
 ///
-/// None of the keys that need the repo are handled here — `q` quits from
-/// every mode at once in [`run_screen`], `enter` needs the repo and the
-/// pipelines to submit, `o` needs the repo to open an editor, and `t` needs
-/// the pipelines to seed the trial picker's first screen — so nothing this
-/// reads can leave the screen or reach outside it.
+/// None of the keys that need the repo are handled here — `enter` needs the
+/// repo and the pipelines to submit, `o` needs the repo to open an editor,
+/// and `t` needs the pipelines to seed the trial picker's first screen — so
+/// nothing this reads can leave the screen or reach outside it. `q` reaches
+/// this function like any other unrecognised character and does nothing.
 fn handle_browse_key(groups: &[Group], state: &mut ScreenState, key: Key) {
     match key {
         Key::Char('h') => {
@@ -3304,11 +3301,12 @@ pub(super) fn highlighted_routine_task<'a>(
         .get(nav.task_cursor)
 }
 
-/// One key over the routines pane — everything but `q`, `esc`, `enter` on a
+/// One key over the routines pane — everything but `esc`, `enter` on a
 /// selected folder, `space` over the tasks pane and `o` over a highlighted
 /// document, which all need the repo to act on or leave this mode outright,
 /// so `run_screen` reads those first and only falls through to this for the
-/// rest, the same split it makes for `handle_browse_key`.
+/// rest, the same split it makes for `handle_browse_key`. `q` is part of
+/// that rest, and does nothing here either.
 pub(super) fn handle_routine_key(routines: &[RoutineFolder], nav: &mut RoutineNav, key: Key) {
     match key {
         Key::Up | Key::Char('k') => match nav.focus {
@@ -3396,10 +3394,10 @@ pub(super) fn handle_routine_key(routines: &[RoutineFolder], nav: &mut RoutineNa
 /// nothing here has to re-run the search itself — `enter` and `esc` are the
 /// only two ways out, and up/down still move the highlighted group the same
 /// as browsing does, over whatever `shown` narrowed the list to. Every other
-/// key, `q` chief among them, is not read specially at all: it falls to the
-/// `Key::Char(c)` arm and is appended like any other letter, which is what
-/// makes it "an ordinary character inside the filter" rather than the quit
-/// key it is everywhere else.
+/// key, `q` included, is not read specially at all: it falls to the
+/// `Key::Char(c)` arm and is appended like any other letter — no mode reads
+/// `q` as anything but ordinary text any more, but this is the one place
+/// that text actually shows up rather than being dropped on the floor.
 fn handle_filter_key(groups: &[Group], state: &mut ScreenState, key: Key) {
     match key {
         Key::Enter => state.mode = Mode::Browsing,
@@ -4321,10 +4319,13 @@ pub(super) fn two_pane_frame(
 /// second hand-spelled literal, so a key line here reads exactly the same
 /// way the board's own does — see that function's own doc comment.
 ///
-/// The arrows that move the cursor, and `q` that quits from every mode this
-/// draws for, are never named: naming every key a screen reads would crowd
-/// out the ones a person actually has to be told about, and `↑↓`/`q` are the
-/// two every screen in this project reads the same way regardless.
+/// The arrows that move the cursor are never named: naming every key a
+/// screen reads would crowd out the ones a person actually has to be told
+/// about, and `↑↓` are read the same way by every screen in this project
+/// regardless. `q` is not named for the opposite reason — no mode reads it
+/// as anything special any more, so there is nothing about it to say;
+/// `ctrl-c` is the way out, and a footer line has no key of its own to name
+/// for that either.
 ///
 /// While [`Mode::Filter`] is open the ordinary line makes no sense at all —
 /// none of `space select` through `enter queue` reads a key while the filter
@@ -4401,7 +4402,7 @@ fn render(groups: &[Group], panes: &Panes, state: &ScreenState) -> Vec<String> {
                 String::new(),
                 "start a dispatcher here now?".to_string(),
                 String::new(),
-                "  y  yes, in this terminal    n  no, back to the screen    q  quit".to_string(),
+                "  y  yes, in this terminal    n  no, back to the screen".to_string(),
             ];
         }
         Mode::Routines(nav) => {
@@ -4806,8 +4807,7 @@ fn save_routine_panel(groups: &[Group], group: &GroupKey, name: &str) -> Option<
 }
 
 /// One key over the trial picker — everything but `enter`, which needs the
-/// repo to either advance past the first screen or write the batch, and `q`,
-/// which is `run_screen`'s own business the same as every other mode. Pure
+/// repo to either advance past the first screen or write the batch. Pure
 /// given the group it targets, so it can be checked without a screen to
 /// drive: given a group, a state and a key, the next state.
 fn handle_trial_key(group: &Group, pipelines: &Pipelines, mut trial: TrialState, key: Key) -> Mode {
@@ -8628,8 +8628,9 @@ mod tests {
     }
 
     /// Selecting, moving focus and hiding queued groups — the browsing keys
-    /// that need no submission to observe. Quitting is not among them any
-    /// more: `q` is `run_screen`'s, so that it works from every mode.
+    /// that need no submission to observe. Quitting is not among them: no
+    /// mode reads a quit key any more, `ctrl-c` included, which is caught
+    /// above `run_screen` rather than read as a key at all.
     #[test]
     fn browsing_keys_select_move_focus_and_hide_queued_groups() {
         let repo = fixture("screen-browse");
@@ -9286,51 +9287,42 @@ mod tests {
         );
     }
 
-    /// `q` ends the screen before anything is submitted, whatever was
-    /// selected — cancelling is silent and writes nothing.
+    /// The screen ending with nothing selected and `enter` never pressed
+    /// writes nothing — cancelling by running out of input is silent.
     #[test]
-    fn quitting_queues_nothing() {
+    fn ending_the_screen_queues_nothing() {
         let repo = fixture("screen-quit");
         write_pending(&repo, "wire", &document("wire", "group: one\n", BODY));
         let groups = listed(&repo);
 
-        screen(&repo, groups, "\t q");
+        screen(&repo, groups, "\t ");
 
         assert!(!repo.queue_dir().join("wire.md").exists());
     }
 
-    /// `q` ends the screen from a mode that is not browsing — the bug this
-    /// fixes. The confirmation panel `enter` used to open swallowed the key
-    /// through its own catch-all arm, dropping back to browsing instead of
-    /// quitting, so a person who pressed enter and then `q` saw nothing
-    /// happen. `Mode::Dispatch` is where that same catch-all lives now.
-    ///
-    /// End of input ends the loop too, so a run that merely stops proves
-    /// nothing. The frames are the evidence: `q` quitting means no further
-    /// draw, and the footer is drawn once per browsing frame.
+    /// `q` has no arm of its own left in `run_screen`'s `Mode::Browsing`
+    /// match: it falls to `handle_browse_key`'s own catch-all, the same as
+    /// any other key nothing there recognises, and does nothing. `ctrl-c`
+    /// is the only way out of the screen now, caught above `run_screen` and
+    /// read back through `stop::asked()` in `wait_for_key` — not reachable
+    /// from this in-memory reader, so it is exercised at the platform
+    /// level instead. The dispatcher offer's own reply to `q` is covered by
+    /// `a_stray_key_on_the_report_declines_the_dispatcher`: it treats `q`
+    /// exactly like every other key that is not `y`.
     #[test]
-    fn q_quits_from_a_mode_that_is_not_browsing() {
-        let repo = fixture("screen-quit-report");
+    fn q_does_nothing_while_browsing() {
+        let repo = fixture("screen-q-inert");
         write_pending(&repo, "wire", &document("wire", "group: one\n", BODY));
         let groups = listed(&repo);
-        // Computed before `groups` moves into `run_screen`, but the
-        // footer's own text does not change across these two frames either
-        // way — no group here is queued yet, and `h` is never pressed.
-        let ordinary_footer = footer(&ScreenState::new());
 
-        // Space selects, enter submits and puts the report up, `q` quits from
-        // under it.
-        let (exit, drawn) = screen_exit(&repo, groups, " \rq");
+        // `q` first, then a real select-and-submit: if `q` still quit,
+        // neither the space nor the enter after it would ever run, and
+        // nothing would land in the queue.
+        screen(&repo, groups, "q \r");
 
-        assert_eq!(exit, ScreenExit::Quit);
-
-        // Two browsing frames — one before the space, one before the enter —
-        // and then the report, which draws no footer. A third would mean `q`
-        // had dropped back to browsing rather than quitting.
-        let frames = drawn.matches(&ordinary_footer).count();
-        assert_eq!(
-            frames, 2,
-            "`q` drew another browsing frame instead of quitting"
+        assert!(
+            repo.queue_dir().join("wire.md").exists(),
+            "`q` must not have quit before the submission that followed it"
         );
     }
 
@@ -9690,12 +9682,12 @@ mod tests {
     }
 
     /// `q` typed while the filter box has focus is kept as an ordinary
-    /// character rather than quitting the screen, but the same key still
-    /// ends the screen from browsing once the filter is closed — the two
-    /// halves of this task's own acceptance criterion on `q`, in one test so
-    /// neither can pass by accident while the other regresses.
+    /// character rather than doing anything special, and the same key does
+    /// nothing once the filter is closed and browsing resumes either — the
+    /// two halves of this task's own acceptance criterion on `q`, in one
+    /// test so neither can pass by accident while the other regresses.
     #[test]
-    fn q_is_a_letter_in_the_filter_but_still_quits_from_browsing() {
+    fn q_is_a_letter_in_the_filter_and_does_nothing_in_browsing() {
         let repo = fixture("screen-filter-q");
         write_pending(
             &repo,
@@ -9704,16 +9696,19 @@ mod tests {
         );
         let groups = listed(&repo);
 
-        // `fq` types `q` into the filter — it must not quit here — `\r`
-        // keeps that one-character filter and returns to browsing, and the
-        // second `q` is what actually ends the screen.
+        // `fq` types `q` into the filter — it must not do anything special
+        // there — `\r` keeps that one-character filter and returns to
+        // browsing, and the second `q` is a no-op: the screen only ends
+        // because the input ran out right behind it.
         let (exit, drawn) = screen_exit(&repo, groups, "fq\rq");
 
         assert_eq!(exit, ScreenExit::Quit);
         // Four frames: the first ordinary browsing draw, the empty filter
         // box `f` just opened, the filter box holding `q` after it was
-        // typed, and browsing again after `\r` — a fifth would mean `q` had
-        // quit while still inside the filter instead of being kept as text.
+        // typed, and browsing again after `\r`. No fifth: a `q` that did
+        // nothing draws the same frame browsing already had, which `draw`
+        // dedups away — a fifth here would mean `q` had reached the filter
+        // a second time, or changed browsing state, instead of being inert.
         let frames: Vec<&str> = drawn.split("\x1b[2J\x1b[H").skip(1).collect();
         assert_eq!(frames.len(), 4, "{frames:?}");
         assert!(frames[2].contains("find: q▏"), "{}", frames[2]);
@@ -10167,12 +10162,13 @@ mod tests {
     }
 
     /// A review round caught this: `q` used to quit the whole screen while
-    /// naming a routine, the same way it quits from browsing — so a name
-    /// like `quarterly` could never be typed. The save panel reads `q` as
-    /// an ordinary character instead, the same way `Mode::Filter`'s query
-    /// does, and only `esc` backs out of it.
+    /// naming a routine, the same way it quit from browsing — so a name like
+    /// `quarterly` could never be typed. No mode reads `q` as a quit key any
+    /// more, but the save panel's own reason for taking it as an ordinary
+    /// character stands regardless — the same way `Mode::Filter`'s query
+    /// does — and only `esc` backs out of it.
     #[test]
-    fn q_is_a_letter_in_the_save_name_not_a_quit() {
+    fn q_is_a_letter_in_the_save_name() {
         let repo = fixture("routines-save-q-is-a-letter");
         write_pending(
             &repo,
@@ -10181,17 +10177,12 @@ mod tests {
         );
         let groups = listed(&repo);
 
-        // The input runs out right after, so the screen ends either way —
-        // through `q` breaking the loop under the old bug, or through the
-        // pipe simply going empty under the fix. What tells the two apart
-        // is what the panel drew on its way out: `q` broke before a second
-        // draw could ever show it appended, and the fix draws it.
         let drawn = screen(&repo, groups, "sq");
         let last = last_frame(&drawn);
 
         assert!(
             last.contains(".spoolway/routines/nightlyq_"),
-            "`q` must be typed into the name, not read as quit:\n{last}"
+            "`q` must be typed into the name:\n{last}"
         );
     }
 

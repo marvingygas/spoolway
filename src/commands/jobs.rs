@@ -359,6 +359,9 @@ pub fn jobs_screen(repo: &Repo, pipelines: &Pipelines, cwd: &Path) -> Result<()>
 
     let mut stdin = RawStdin;
     let mut stdout = std::io::stdout();
+    // Installed before the guard takes the terminal — see `queue_screen`'s
+    // own call for why the order matters.
+    crate::platform::stop::catch_interrupt();
     // Scoped so raw mode is restored before anything else wants the terminal.
     let _term = crate::platform::TermGuard::new();
     run_jobs_screen(
@@ -408,8 +411,9 @@ fn run_jobs_screen(
         draw_jobs(&ctx, &jobs, &state, &mut last, out);
         let Some(key) = jobs_wait_for_key(&ctx, &mut jobs, &mut state, &mut last, input, out)
         else {
-            // No terminal, or a scripted input ran dry: stop the same way `q`
-            // does.
+            // No terminal, a scripted input ran dry, or `ctrl-c` was caught
+            // and noticed by `jobs_wait_for_key`: all three end the screen
+            // the same way.
             break;
         };
 
@@ -436,11 +440,7 @@ fn run_jobs_screen(
                 _ => state.mode = JobMode::List,
             },
 
-            JobMode::List => {
-                if handle_list_key(repo, pipelines, cwd, &mut jobs, &mut state, key)? {
-                    break;
-                }
-            }
+            JobMode::List => handle_list_key(repo, pipelines, cwd, &mut jobs, &mut state, key)?,
 
             JobMode::PickRoutine { draft, nav } => match key {
                 Key::Esc => state.mode = JobMode::List,
@@ -584,11 +584,13 @@ fn clamp_cursor(jobs: &[Job], state: &mut JobsState) {
     state.cursor = state.cursor.min(jobs.len().saturating_sub(1));
 }
 
-/// One key over the resting list. `Ok(true)` means quit.
+/// One key over the resting list.
 ///
 /// The cursor only ever addresses a real job — the `(new)` row belongs to the
 /// walk, not this state — so `e`, `space`, `x` and `r` are gated on the list
 /// not being empty and always act on `jobs[cursor]`. `n` starts the walk.
+/// Quitting is not among these keys any more — `ctrl-c` is the only way out,
+/// caught above `run_jobs_screen` rather than read as a key at all.
 fn handle_list_key(
     repo: &Repo,
     pipelines: &Pipelines,
@@ -596,10 +598,9 @@ fn handle_list_key(
     jobs: &mut Vec<Job>,
     state: &mut JobsState,
     key: Key,
-) -> Result<bool> {
+) -> Result<()> {
     let has_jobs = !jobs.is_empty();
     match key {
-        Key::Char('q') => return Ok(true),
         Key::Up | Key::Char('k') => state.cursor = state.cursor.saturating_sub(1),
         Key::Down | Key::Char('j') => {
             state.cursor = (state.cursor + 1).min(jobs.len().saturating_sub(1));
@@ -659,7 +660,7 @@ fn handle_list_key(
         }
         _ => {}
     }
-    Ok(false)
+    Ok(())
 }
 
 /// `resume`/`pause` for the message the pause toggle prints on failure — the
@@ -859,6 +860,11 @@ fn draw_jobs(
 /// waiting (see `RawStdin`), and is read straight away instead: blocking on
 /// the line the terminal will deliver is what this loop is for, where
 /// spinning on that answer would never read a key at all.
+///
+/// `stop::asked()` is checked on every slice too, so a caught `ctrl-c` ends
+/// the screen the same way a drained pipe already does — see `queue`'s own
+/// `wait_for_key` for why this is safe to poll rather than needing the
+/// signal handler itself to unwind anything.
 fn jobs_wait_for_key(
     ctx: &Ctx,
     jobs: &mut Vec<Job>,
@@ -868,6 +874,9 @@ fn jobs_wait_for_key(
     out: &mut impl std::io::Write,
 ) -> Option<Key> {
     loop {
+        if crate::platform::stop::asked() {
+            return None;
+        }
         if !cfg!(unix) || input.byte_pending(crate::status::POLL) {
             return read_key(input);
         }
@@ -964,8 +973,9 @@ fn render_jobs(ctx: &Ctx, jobs: &[Job], state: &JobsState) -> Vec<String> {
 /// The keys, under the frame — built by [`key_hint`] rather than a
 /// hand-spelled literal, the same way `queue`'s own `footer` is, so a jobs
 /// line reads exactly the way the panels it shares wording with do. Never
-/// names `↑↓` or `q`, the two every screen in this project reads the same
-/// way regardless — see `queue`'s own `footer` for why.
+/// names `↑↓`, which every screen in this project reads the same way
+/// regardless, or `q`, which no mode reads specially at all any more — see
+/// `queue`'s own `footer` for why.
 fn jobs_footer(mode: &JobMode) -> String {
     match mode {
         JobMode::List => key_hint(&[
@@ -1427,11 +1437,31 @@ mod tests {
         assert!(jobs::load(&repo).unwrap().is_empty());
     }
 
+    /// `q` has no arm of its own left in `handle_list_key`: it falls to the
+    /// catch-all and does nothing, the same as any other key the list does
+    /// not recognise. `ctrl-c` is the only way out of the screen now — see
+    /// `queue`'s own `q_does_nothing_while_browsing` for why that half is
+    /// not exercised here.
+    #[test]
+    fn q_does_nothing_over_the_resting_list() {
+        let repo = fixture("jobs-screen-q-inert");
+        seed_routines(&repo);
+
+        // `q` first, then a real walk that writes a job — see
+        // `the_walk_writes_a_job_to_the_user_store_named_after_its_routine`
+        // for what each key after it does. If `q` still quit, none of it
+        // would ever run.
+        drive(&repo, "qn \r0 3 * * 1-5\r\r");
+
+        assert_eq!(jobs::load(&repo).unwrap().len(), 1);
+    }
+
     #[test]
     fn the_schedule_field_refuses_enter_until_the_expression_parses() {
         let repo = fixture("jobs-screen-badexpr");
         seed_routines(&repo);
-        // A broken expression, then enter (refused), then esc, then quit.
+        // A broken expression, then enter (refused), then esc back to the
+        // list, then a trailing key that does nothing before input runs out.
         let drawn = drive(&repo, "n \r99 3 * * *\r\x1bq");
         assert!(jobs::load(&repo).unwrap().is_empty(), "enter was refused");
         assert!(
@@ -1611,7 +1641,8 @@ mod tests {
         let repo = fixture("jobs-screen-unticked");
         seed_routines(&repo);
         // Tick `nightly` (folder 0), move the cursor down to `weekly` — which
-        // is not ticked — press enter, then esc out and quit.
+        // is not ticked — press enter, then esc back to the list; the
+        // trailing key does nothing before input runs out.
         drive(&repo, "n \x1b[B\r\x1bq");
         assert!(
             jobs::load(&repo).unwrap().is_empty(),

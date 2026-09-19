@@ -90,7 +90,6 @@ directory. The right pane lists the highlighted group's tasks and what each wait
 | `r` | Show the routines pane. See [Routines](#routines). |
 | `s` | Save the highlighted group as a routine. |
 | `h` | Show hidden groups, such as ones already queued. |
-| `q` | Quit. |
 
 Queueing deletes the group's pending documents from the pending directory. A sibling task
 already in the queue or the archive is left exactly where it is, and the report names it. A

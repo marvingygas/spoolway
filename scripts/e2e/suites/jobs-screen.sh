@@ -52,12 +52,13 @@ lacks "enabled by default, so no key for it" "enabled" "$STORE"
 
 says "and jobs list now shows it" "nightly" "$SPOOLWAY" jobs list
 
-# space over the highlighted job pauses it; q quits.
-printf ' q' | "$SPOOLWAY" jobs >/dev/null 2>&1
+# space over the highlighted job pauses it; the screen then ends as the pipe
+# drains, the same as the walk above.
+printf ' ' | "$SPOOLWAY" jobs >/dev/null 2>&1
 has "space pauses the job" "enabled = false" "$STORE"
 
 # space again resumes it — the key is dropped, not written back as true.
-printf ' q' | "$SPOOLWAY" jobs >/dev/null 2>&1
+printf ' ' | "$SPOOLWAY" jobs >/dev/null 2>&1
 lacks "space again resumes it" "enabled" "$STORE"
 
 # x asks, y confirms.
