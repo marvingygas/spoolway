@@ -926,6 +926,36 @@ impl Task {
         }
     }
 
+    /// Replace a section's whole content with `text` — the road `spoolway
+    /// task edit` uses to hand a stopped task's document to whoever is
+    /// reading its pane.
+    ///
+    /// Unlike [`Task::append_to_section`], which creates a heading it does
+    /// not find, this refuses one the body does not already have: an edit
+    /// names a section the task's own template put there, not an author
+    /// free to invent a heading that will read as ordinary spoolway output.
+    ///
+    /// `text` is trimmed and re-wrapped in the one blank line every other
+    /// section already carries above its own content and below it, rather
+    /// than spliced in as given: a `--from` file with no trailing newline —
+    /// the ordinary shape a person's own editor leaves — would otherwise glue
+    /// the next heading onto its last line, and `## Non-goals` stops being a
+    /// heading `find_section` can see at all. The trailing blank line is
+    /// dropped for the body's own last section, matching the single newline
+    /// [`Task::render`] already ends every document with.
+    pub fn replace_section(&mut self, heading: &str, text: &str) -> Result<()> {
+        let (start, end) = self
+            .find_section(heading)
+            .with_context(|| format!("no `{heading}` section in this task's body"))?;
+        let trimmed = text.trim();
+        let replacement = match end == self.body.len() {
+            true => format!("\n{trimmed}\n"),
+            false => format!("\n{trimmed}\n\n"),
+        };
+        self.body.replace_range(start..end, &replacement);
+        Ok(())
+    }
+
     /// Byte range of a section's content (after the heading line, up to the
     /// next heading of the same or higher level, or end of body).
     fn find_section(&self, heading: &str) -> Option<(usize, usize)> {
@@ -1467,6 +1497,50 @@ mod tests {
         );
         // The pre-existing section is untouched.
         assert!(task.section("## Status Log").unwrap().contains("earlier"));
+    }
+
+    /// `--from` content with no trailing newline — the ordinary shape a
+    /// person's own editor leaves a file in — must not glue the next
+    /// heading onto the replacement's last line. Review finding: an earlier
+    /// version spliced `text` in verbatim and left `## Non-goals` unreadable
+    /// as a heading at all.
+    #[test]
+    fn replace_section_normalises_a_replacement_with_no_trailing_newline() {
+        let mut task = Task::parse(PathBuf::from("demo.md"), SAMPLE).unwrap();
+        task.replace_section("## Goal", "line one\nline two")
+            .unwrap();
+
+        assert_eq!(task.section("## Goal").unwrap(), "line one\nline two");
+        // The next heading must still read as a heading, with the blank
+        // line every other section carries above its own content.
+        assert!(
+            task.body.contains("line two\n\n## Status Log\n"),
+            "{}",
+            task.body
+        );
+        assert_eq!(
+            task.section("## Status Log").unwrap(),
+            "- earlier entry",
+            "a section this edit did not name is untouched"
+        );
+    }
+
+    /// The body's own last section gets no trailing blank line — just the
+    /// one newline [`Task::render`] already ends every document with — so a
+    /// repeated edit never grows a longer and longer gap at the end of the
+    /// file.
+    #[test]
+    fn replace_section_on_the_last_section_adds_no_trailing_blank_line() {
+        let mut task = Task::parse(PathBuf::from("demo.md"), SAMPLE).unwrap();
+        task.replace_section("## Status Log", "- rewritten\n\n\n")
+            .unwrap();
+
+        assert!(task.body.ends_with("- rewritten\n"), "{:?}", task.body);
+        assert!(
+            !task.body.ends_with("- rewritten\n\n"),
+            "no trailing blank line on the last section: {:?}",
+            task.body
+        );
     }
 
     #[test]

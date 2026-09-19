@@ -66,7 +66,7 @@ sits on. `WHAT YOU WRITE DOWN` lists the task-file headings spoolway appends to:
 
 ## What every lane is told about spoolway
 
-The system prompt opens with the step and the task, then five rules:
+The system prompt opens with the step and the task, then six rules:
 
 - One step's worth of the job, and nothing enforces it. The role below is the whole of what is
   the lane's.
@@ -75,6 +75,9 @@ The system prompt opens with the step and the task, then five rules:
 - Nothing will wake you. Poll anything you wait on.
 - Reporting is the only exit. A turn ended any other way stalls the task.
 - Commit as you go. Uncommitted work is committed for you when the lane reports.
+- If the task is ever held on `paused` or `blocked` and a person carries on talking in the
+  lane's pane, it does what they ask, including work its own step would otherwise leave to
+  another. Resuming it stays theirs alone.
 
 A `blocked` step gets a different first rule — its remit is the run, not one task's step — and a
 `READING THE RUN` block naming `spoolway queue list`, `spoolway queue show`, `spoolway lane` and

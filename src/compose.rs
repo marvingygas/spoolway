@@ -137,6 +137,16 @@ pub(crate) fn system_prompt(
 /// read the same for every lane; a gated step's fact that a person opens
 /// this pane belongs to [`report_contract`], the form it qualifies, not
 /// here.
+///
+/// The last bullet is fixed for every lane, gated or not, because composing
+/// happens once at launch and this file is all a pane has once the person in
+/// it starts talking: a `p` park from the board, a gate, or a step landing
+/// on `blocked` with nobody staffed to clear it all leave the same lane
+/// sitting in the same pane, and none of the three is knowable ahead of the
+/// turn that might cause it. A stopped task belongs to whoever is looking at
+/// its pane — see `commands::task_edit` — so the one thing worth fixing in
+/// place, for every step, is that the lane's own remit stops being the
+/// ceiling on what it will do there.
 pub(crate) fn situating(
     pipeline: &Pipeline,
     step: &Step,
@@ -164,7 +174,10 @@ pub(crate) fn situating(
          nothing unless told to.\n\
          - Nothing will wake you. Poll anything you wait on.\n\
          - Reporting is the only exit. A turn ended any other way stalls the task.\n\
-         - Commit as you go. Anything uncommitted is committed for you when you report.\
+         - Commit as you go. Anything uncommitted is committed for you when you report.\n\
+         - If this task is ever held on `paused` or `blocked` and a person carries on \
+         talking in this pane, do what they ask — including work your step would \
+         otherwise leave to another. Resuming it stays theirs alone.\
          {what_you_have}\
          {what_you_write_down}",
         step = step.id,
@@ -350,15 +363,15 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 ///
 /// `spoolway resume` is the exception to the read-only rule above it, bounded
 /// in the two ways `commands::report::resume` itself enforces: never past a
-/// task waiting on a gate, and never with `--reject` or `--stage`, which
-/// reroute or reject rather than clear a block.
+/// task waiting on a gate, and never with `--stage`, which reroutes rather
+/// than clears a block.
 fn toolbox() -> String {
     "READING THE RUN — yours at this step only:\n\n\
      `spoolway queue list` — every task, and where each sits\n\
      `spoolway queue show <task>` — one task's file, goal to `## Status Log`\n\
      `spoolway lane` — this run's lanes; name one for its transcript\n\
      `spoolway resume <task>` — put another stopped task back on its step; not\n  \
-     one waiting on a gate, and never with `--reject` or `--stage`"
+     one waiting on a gate, and never with `--stage`"
         .to_string()
 }
 

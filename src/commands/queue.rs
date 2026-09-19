@@ -132,6 +132,7 @@ fn state_label(state: crate::status::State) -> &'static str {
         Paused => "paused",
         Running => "running",
         Blocked => "blocked",
+        Prompt => "prompt",
         Unreachable => "unreachable",
         Queued => "queued",
         Done => "done",
@@ -5690,42 +5691,41 @@ mod tests {
     /// to exist, not to say anything in particular.
     const BODY: &str = "## Goal\n\nDo the thing.\n";
 
-    /// `queue list --json` reports one `paused` for both a gate-held row and
-    /// a question-held one — `State::WaitingOnYou` is gone — while `next`
-    /// still carries the wording that tells the two apart and `resumable` is
-    /// `true` on both: a question-held row offers the same `[r]` a gate does,
-    /// alongside the pane it names. Nothing emits the old `waiting_on_you`
-    /// state label, and nothing emits `parked` either — that state left with
-    /// the fields behind it, and a lane that stops reporting now reads as an
-    /// ordinary `paused` row like these two.
+    /// `queue list --json` reports `paused` for a gate-held row, key first
+    /// in `next` and `resumable: true` — and, distinctly, `prompt` for a
+    /// live lane herdr reads a permission prompt off: not resumable, and
+    /// `next` names the pane rather than a command. The two used to collapse
+    /// into the same `paused` state with `resumable: true` on both, back
+    /// when a question-held pane was inferred from silence rather than read
+    /// live off `LaneStatus::Blocked` — see `State::Prompt`'s own doc
+    /// comment. Nothing emits the old `waiting_on_you` state label, and
+    /// nothing emits `parked` either — that state left with the fields
+    /// behind it.
     #[test]
-    fn queue_json_reports_paused_for_both_a_gate_and_a_question() {
+    fn queue_json_tells_a_paused_gate_apart_from_a_live_prompt() {
         use crate::status::State;
         use crate::status::testutil::row;
 
         let mut gate = row("release-me");
         gate.state = State::Paused;
         gate.resumable = true;
-        gate.next = "→ handover — [r] resumes it".into();
+        gate.next = "[r] → handover — `spoolway resume release-me`".into();
 
-        let mut question = row("question");
-        question.state = State::Paused;
-        question.resumable = true;
-        question.next = "look at pane `question · implement` — [r] resumes it".into();
+        let mut prompting = row("question");
+        prompting.state = State::Prompt;
+        prompting.resumable = false;
+        prompting.next = "press a key in pane `question · implement`".into();
 
-        let json: Vec<QueueRowJson> = [&gate, &question]
+        let json: Vec<QueueRowJson> = [&gate, &prompting]
             .iter()
             .map(|r| QueueRowJson::from(*r))
             .collect();
 
         assert_eq!(json[0].state, "paused");
         assert!(json[0].resumable);
-        assert_eq!(json[1].state, "paused");
-        assert!(json[1].resumable);
-        assert_eq!(
-            json[1].next,
-            "look at pane `question · implement` — [r] resumes it"
-        );
+        assert_eq!(json[1].state, "prompt");
+        assert!(!json[1].resumable);
+        assert_eq!(json[1].next, "press a key in pane `question · implement`");
 
         let rendered = serde_json::to_string(&json[1]).unwrap();
         assert!(!rendered.contains("waiting_on_you"), "{rendered}");

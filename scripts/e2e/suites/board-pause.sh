@@ -502,5 +502,48 @@ must "resuming it sends the caught fail on to blocked, exactly where it would ha
   "$SPOOLWAY" resume pause-fail-catch
 stage_reaches "and it lands there" pause-fail-catch blocked 25
 
+# --------------------------- a gated stop offers a key before every command
+# The mockup this task built: a report that lands a task on `paused` names
+# what it offers key first, then the command — never a bare key with nothing
+# to run, and never a command with no key in front of it. Proven here
+# against the board's own row for the same stop, which is what a person
+# still watching the board sees for as long as the pane above stays up: the
+# row and the pane always name the same thing. Then `spoolway task edit`,
+# run the way a person — or the lane in that pane, once it is stopped —
+# would run it: from outside the lane entirely, against a task already
+# parked.
+task_doc "$LIVE/gate-edit.md" gate-edit "$BODY" "group: board" \
+  "touches: [notes/gate-edit.md]" "gate_at: implement"
+must "gate-edit queues" "$SPOOLWAY" queue add --from "$LIVE/gate-edit.md"
+
+stage_reaches "a gated pass parks on paused" gate-edit paused 30
+# The row's own NEXT text clips to the pane's width like any other cell, so
+# this checks the key-first shape rather than the full, possibly-clipped
+# command text.
+draws "the board's row offers the key before the command it fires" \
+  "[r] → review — \`spoolway resume gate" 30
+
+MOCKUP="$LIVE/mockup-section.txt"
+printf 'held here for a person, edited from outside the lane\n' > "$MOCKUP"
+must "\`task edit\` rewrites the stopped document's own section" \
+  "$SPOOLWAY" task edit gate-edit --section Non-goals --from "$MOCKUP"
+has "the change is on disk" "held here for a person, edited from outside the lane" \
+  "$SPOOLWAY_PROJECT_HOME/queue/gate-edit.md"
+stage_stays "and the task is still paused, untouched by the edit" gate-edit paused
+
+# The one action left after an edit — resuming — is still named key first,
+# then the command: the same rule every other choice a stop offers follows.
+says "and names the one action still left, key first" \
+  "resume   [r]   spoolway resume gate-edit" \
+  "$SPOOLWAY" task edit gate-edit --section Goal --from "$MOCKUP"
+
+# `--from -`, the stream the mockup itself is drawn with — a shape nothing
+# else here drives, so this is the one proof it works at all.
+says "\`--from -\` reads the new section from standard input" \
+  "\`## Goal\` rewritten, 1 lines" \
+  bash -c "printf 'read from stdin\n' | '$SPOOLWAY' task edit gate-edit --section Goal --from -"
+has "and the stdin content lands on disk" "read from stdin" \
+  "$SPOOLWAY_PROJECT_HOME/queue/gate-edit.md"
+
 board_stop
 finish

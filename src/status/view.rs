@@ -141,6 +141,7 @@ impl State {
             State::Paused => "● paused",
             State::Running => "● running",
             State::Blocked => "● blocked",
+            State::Prompt => "● prompt",
             State::Unreachable => "● unreachable",
             State::Queued => "○ queued",
             State::Done => "● done",
@@ -156,6 +157,9 @@ impl State {
             State::Paused => format!("{AMBER}{BOLD}{word}{RESET}"),
             State::Running => format!("{GREEN}{word}{RESET}"),
             State::Blocked => format!("{ORANGE}{word}{RESET}"),
+            // A live lane, not a stop, so it takes `Running`'s own colour —
+            // the task has not left its step, only paused for a keystroke.
+            State::Prompt => format!("{GREEN}{word}{RESET}"),
             State::Unreachable => format!("{RED}{word}{RESET}"),
             State::Queued => format!("{DIM}{word}{RESET}"),
             State::Done => format!("{DIM}{word}{RESET}"),

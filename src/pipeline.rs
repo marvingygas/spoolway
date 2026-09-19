@@ -219,8 +219,7 @@ pub const BLOCKED: &str = "blocked";
 ///
 /// Where a gated step's pass goes. It is not an ending and not a failure: the
 /// work is done, it went well, and [`Step::gate`] says a person decides whether
-/// it goes any further. `spoolway resume` sends it on; `spoolway resume
-/// --reject` sends it back round.
+/// it goes any further. `spoolway resume` sends it on.
 ///
 /// Distinct from [`BLOCKED`] because the two ask a person for opposite things.
 /// A block is "something is in the way, and I could not finish"; the answer is
@@ -1411,25 +1410,23 @@ impl Pipeline {
         Ok(())
     }
 
-    /// Steps that gate but declare no `on_fail`, so a rejection at that gate
-    /// has nowhere else to go.
+    /// Steps that gate but declare no `on_fail`, so a `spoolway report
+    /// --fail` at that step has nowhere named to go but `blocked`.
     ///
     /// Not one of `validate`'s own refusals: a gated step with no `on_fail`
     /// is a legal shape — [`Step::destination`] already falls back to
     /// `blocked` for an outcome a step names no route for, and `blocked` is
-    /// exactly where a person rejecting a piece of work belongs. What is
-    /// worth naming is only that `--reject`'s help in `src/cli.rs` used to
-    /// promise the step's own `on_fail` route, when a step with none of its
-    /// own always parks on `blocked` instead — a diagnostic for whoever wrote
-    /// the pipeline, not a shape this refuses to run.
+    /// exactly where a failed piece of work belongs with nowhere else named
+    /// for it — a diagnostic for whoever wrote the pipeline, not a shape
+    /// this refuses to run.
     pub fn gate_warnings(&self) -> Vec<String> {
         self.steps
             .iter()
             .filter(|step| step.gate && step.on_fail.is_none())
             .map(|step| {
                 format!(
-                    "{}: `{}` gates but declares no `on_fail`, so `spoolway resume --reject` \
-                     parks the task on `{BLOCKED}` rather than sending it back round.",
+                    "{}: `{}` gates but declares no `on_fail`, so `spoolway report --fail` \
+                     there parks the task on `{BLOCKED}`.",
                     self.name, step.id
                 )
             })
@@ -1443,10 +1440,10 @@ impl Pipeline {
     /// Not a refusal, the same as [`Self::gate_warnings`]: a pipeline
     /// carrying the key still runs identically to one without it. Worth a
     /// warning anyway, because it also silences [`Self::gate_warnings`] on a
-    /// gated step without changing what a rejection there does — see that
-    /// method's own doc comment — so a person reading `pipeline check`'s
-    /// clean gate report has no way to know the step still has nowhere of
-    /// its own to send a fail.
+    /// gated step without changing where a `report --fail` there goes — see
+    /// that method's own doc comment — so a person reading `pipeline
+    /// check`'s clean gate report has no way to know the step still has
+    /// nowhere of its own to send a fail.
     pub fn redundant_on_fail_warnings(&self) -> Vec<String> {
         self.steps
             .iter()
@@ -2217,8 +2214,8 @@ mod tests {
 
     /// The doc comment on `redundant_on_fail_warnings` and `gate_warnings`
     /// both make a claim: the redundant key silences the gate warning
-    /// without changing where a rejection at that gate goes. This is the
-    /// proof — a gated step declaring `on_fail: blocked` draws the
+    /// without changing where a `report --fail` at that gate goes. This is
+    /// the proof — a gated step declaring `on_fail: blocked` draws the
     /// redundant-key warning and not the gate warning; delete the key and
     /// the two swap places.
     #[test]
@@ -2307,10 +2304,9 @@ mod tests {
         }
     }
 
-    /// A gate with nowhere to send a rejection is legal — it parks on
-    /// `blocked` the same as any other fail — but it is the shape
-    /// `--reject`'s own help used to overpromise a real `on_fail` route for,
-    /// so `gate_warnings` names it rather than leaving it silent.
+    /// A gate with nowhere named for a `report --fail` to go is legal — it
+    /// parks on `blocked` the same as any other fail — but it is worth
+    /// naming rather than leaving silent, so `gate_warnings` does.
     #[test]
     fn a_gate_with_no_on_fail_is_warned_about_by_name() {
         let pipeline = Pipeline::parse(
@@ -2327,8 +2323,8 @@ mod tests {
         assert!(warnings[0].contains(BLOCKED), "{}", warnings[0]);
     }
 
-    /// A gate that does declare `on_fail` has somewhere a reject actually
-    /// goes, so nothing here is worth a warning.
+    /// A gate that does declare `on_fail` has somewhere a `report --fail`
+    /// actually goes, so nothing here is worth a warning.
     #[test]
     fn a_gate_with_an_on_fail_is_not_warned_about() {
         let pipeline = Pipeline::parse(

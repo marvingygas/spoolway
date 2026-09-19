@@ -69,20 +69,22 @@ const RECENT: usize = 6;
 /// What one task is doing, reduced to the thing the board colors by.
 #[derive(Clone, Copy, PartialEq)]
 pub enum State {
-    /// A person is the one thing between this task and the rest of its
-    /// pipeline, and nothing went wrong. Two situations reach it: a gated
-    /// step that finished and is waiting to be let past, and a live pane
-    /// that ended its turn on a question. The state does not tell the two
-    /// apart — NEXT does, naming the resume for the first and the pane to
-    /// look at for the second — because the reader's next move is the same
-    /// either way: go and intervene. Next to `blocked` rather than inside
-    /// it, since a paused step passed and a blocked one did not.
+    /// The task's own stage is `paused` — nothing else reaches this state
+    /// any more. A person is the one thing between this task and the rest of
+    /// its pipeline, and nothing went wrong: a gated step finished and is
+    /// waiting to be let past. Next to `blocked` rather than inside it,
+    /// since a paused step passed and a blocked one did not.
     Paused,
     /// Something is working the task right now: a live lane, or the run of a
     /// command step, which has no lane at all.
     Running,
     /// At the pipeline's blocked step, carrying its reason.
     Blocked,
+    /// A live lane's pane is holding a permission prompt — herdr's own
+    /// read, off the lane list, fresh every redraw. The task's own stage has
+    /// not moved and is not `paused`: this is a live turn waiting on a
+    /// keystroke in its pane, not a stop, so nothing here is resumable.
+    Prompt,
     /// Waiting on a dependency that can never arrive.
     Unreachable,
     /// In the queue, waiting for a slot or a dependency.
@@ -1145,7 +1147,6 @@ pub(crate) fn resume_task(repo: &Repo, pipelines: &Pipelines, id: &str) -> Resul
         &crate::cli::ResumeArgs {
             task: id.to_string(),
             stage: None,
-            reject: false,
             message: None,
         },
         None,
@@ -1519,7 +1520,6 @@ impl Default for Board {
 pub fn rows(repo: &Repo, pipelines: &Pipelines) -> Result<Vec<Row>> {
     let tasks = repo.tasks()?;
     let graph = Graph::build_for_run(&tasks, pipelines, &repo.archive_dir(), repo.unattended());
-    let waiting = crate::dispatch::lanes_awaiting_a_person(repo);
     let mux = crate::mux::backend(repo)?;
     let lanes = mux.list_lanes().unwrap_or_default();
     let ledger = crate::usage::read_cached(repo);
@@ -1527,9 +1527,7 @@ pub fn rows(repo: &Repo, pipelines: &Pipelines) -> Result<Vec<Row>> {
     // last stage between calls, so it has nothing to tell "just arrived"
     // apart from "genuinely queued" with, and keeps reading the latter —
     // see `Board::arrived`.
-    build_rows(
-        repo, &tasks, pipelines, &graph, &waiting, &lanes, &ledger, None,
-    )
+    build_rows(repo, &tasks, pipelines, &graph, &lanes, &ledger, None)
 }
 
 // Every argument is a distinct piece of the board's own state that `frame`
@@ -1550,7 +1548,6 @@ fn render(
 ) -> Result<String> {
     let (tasks, load_problems) = repo.tasks_and_problems()?;
     let graph = Graph::build_for_run(&tasks, pipelines, &repo.archive_dir(), repo.unattended());
-    let waiting = crate::dispatch::lanes_awaiting_a_person(repo);
     let mux = crate::mux::backend(repo)?;
     // Read once and passed down: this is a call out to the multiplexer, and the
     // board makes it about once a second already.
@@ -1599,7 +1596,6 @@ fn render(
         &tasks,
         pipelines,
         &graph,
-        &waiting,
         &lanes,
         &ledger,
         Some(&*arrived),
@@ -1914,11 +1910,21 @@ pub struct Unbanked {
 /// destination the dispatcher would not actually take it to. Read for both a
 /// parked block and a staffed one: the row differs in state and colour, not
 /// in where the arrow points.
-fn blocked_next(task: &crate::task::Task, pipeline: &crate::pipeline::Pipeline) -> String {
-    format!(
-        "→ {}",
-        crate::commands::cleared_block_target(task, pipeline, true)
-    )
+///
+/// Key first, then the command it fires, exactly like a paused row's own
+/// `next` below — but only when `resumable` actually offers it: a staffed
+/// block clears on its own, and a block still waiting on a dependency or a
+/// busy lane of its own has no action here for `[r]` to name.
+fn blocked_next(
+    task: &crate::task::Task,
+    pipeline: &crate::pipeline::Pipeline,
+    resumable: bool,
+) -> String {
+    let target = crate::commands::cleared_block_target(task, pipeline, true);
+    match resumable {
+        true => format!("[r] → {target} — `spoolway resume {}`", task.id()),
+        false => format!("→ {target}"),
+    }
 }
 
 /// Where resuming a paused task would carry it, if there is an answer to
@@ -1984,7 +1990,6 @@ fn build_rows(
     tasks: &[crate::task::Task],
     pipelines: &Pipelines,
     graph: &Graph,
-    waiting: &std::collections::BTreeSet<String>,
     lanes: &[crate::mux::Lane],
     ledger: &[crate::usage::Entry],
     grace: Option<&BTreeMap<String, Instant>>,
@@ -2051,20 +2056,6 @@ fn build_rows(
             .filter(|_| runs.state(&lane) == crate::command_step::RunState::Running)
             .and(Some(&lane));
 
-        // Mid-turn right now, as the multiplexer sees it this second.
-        //
-        // The board redraws about once a second and a pass runs every
-        // `interval`, so between the two the lane list is the fresher answer
-        // about a lane that has gone back to work — and when no dispatcher is
-        // running at all it is the only one. Only `Working` counts, and it is
-        // spelled out rather than named through a predicate because this is
-        // the one question being asked: is the lane mid-turn *this second*.
-        // `Blocked` is a lane holding a modal open for a person, so it falls
-        // through to the waiting state below on purpose — marking it is the
-        // pass's job, drawing it is this one's — and `Unknown` is the
-        // multiplexer declining to say rather than saying no.
-        let working = live_lane.is_some_and(|l| l.status == crate::mux::LaneStatus::Working);
-
         // Parked in front of a person, rather than a lane spoolway is about to
         // start there — the one question that decides whether a task on
         // `blocked` reads as a row like any other running step or as a wait.
@@ -2117,7 +2108,11 @@ fn build_rows(
                 // lane of its own still mid-turn — resuming into a pane a
                 // person or an agent is actively using would race it.
                 let resumable = graph.ready(task.id()) && !lane_busy(lanes, &step_ids, task.id());
-                (State::Blocked, blocked_next(task, pipeline), resumable)
+                (
+                    State::Blocked,
+                    blocked_next(task, pipeline, resumable),
+                    resumable,
+                )
             }
             // The step a pass would carry it to, not a description of what it
             // is waiting on — the same rule a block reads its resumability
@@ -2135,11 +2130,13 @@ fn build_rows(
                     None => "→".to_string(),
                 };
                 let next = match (target, resumable) {
-                    (Some(step), true) => format!("{arrow} {step} — [r] resumes it"),
+                    (Some(step), true) => {
+                        format!("[r] {arrow} {step} — `spoolway resume {}`", task.id())
+                    }
                     (Some(step), false) => {
                         format!("{arrow} {step} — `spoolway resume {}`", task.id())
                     }
-                    (None, true) => "[r] resumes it".to_string(),
+                    (None, true) => format!("[r] `spoolway resume {}`", task.id()),
                     (None, false) => format!("`spoolway resume {}`", task.id()),
                 };
                 (State::Paused, next, resumable)
@@ -2152,21 +2149,18 @@ fn build_rows(
                 format!("unknown step `{}` — not in this pipeline", task.stage()),
                 false,
             ),
-            // A pane holding a question, unless the lane in it is visibly
-            // working — in which case the question was answered, or the lane
-            // only looked settled for a moment between turns, and the row
-            // reads as the running step it is. `Paused`, the same state a
-            // gated task on `paused` gets: both ask the reader to intervene,
-            // and NEXT carries the difference — the pane to look at here, the
-            // resume there. Resumable like a gate too, though `r` cannot
-            // answer the question for a person: it restarts the step the
-            // pane never got an answer on, exactly as `resume_task` does for
-            // any other row this key fires on — see its own comment for why
-            // that fallback lands there rather than doing nothing.
-            Some(_) if waiting.contains(&lane) && !working => (
-                State::Paused,
-                format!("look at pane `{lane}` — [r] resumes it"),
-                true,
+            // A pane holding a permission prompt — herdr's own read of
+            // `live_lane.status`, never inferred from silence and never
+            // sticky: asked fresh every redraw, so the row flips back to
+            // `Running` the instant the prompt is answered, with nothing
+            // here to un-mark. Not resumable: the task has not stopped, and
+            // the one thing to do about a live prompt is press a key in the
+            // pane holding it, not reroute the task through `spoolway
+            // resume`.
+            Some(_) if live_lane.is_some_and(|l| l.status == crate::mux::LaneStatus::Blocked) => (
+                State::Prompt,
+                format!("press a key in pane `{lane}`"),
+                false,
             ),
             Some(step) => {
                 // A handoff just landed and no lane is up for it yet — the
@@ -2209,8 +2203,10 @@ fn build_rows(
                     // resumability is a person's question, not a lane's — a
                     // staffed lane working it right now reads the same
                     // destination a cleared block would, and nothing else:
-                    // acceptance criterion 1.
-                    blocked_next(task, pipeline)
+                    // acceptance criterion 1. Not resumable: a lane is
+                    // already working this step, so there is no `[r]` action
+                    // to offer here.
+                    blocked_next(task, pipeline, false)
                 } else {
                     match pipeline.next_running_step(&step.id) {
                         // Plain text, no colour: this string is clipped to the
@@ -2998,9 +2994,8 @@ mod tests {
 
         // Blocked, parked for a person: the step a pass out of `blocked`
         // would actually carry it to — `cleared_block_target`'s own answer —
-        // and nothing else. No blocker reason, no resumability hint: the
-        // state dot already says this is a block, and the key-hint line
-        // already says whether `r` does anything.
+        // key first, then the command, since every dependency is met and no
+        // lane of its own is busy.
         add(&repo, "wall", &[], None);
         let mut wall = repo.task("wall").unwrap();
         wall.front.blocked_from = Some("implement".into());
@@ -3042,8 +3037,8 @@ mod tests {
             row("sessions").next
         );
 
-        assert_eq!(row("wall").next, "→ review");
-        assert_eq!(row("ship").next, "→ review — [r] resumes it");
+        assert_eq!(row("wall").next, "[r] → review — `spoolway resume wall`");
+        assert_eq!(row("ship").next, "[r] → review — `spoolway resume ship`");
         // No loop text on NEXT at all — it moved to the STEP column, read
         // off `step_loop` instead, on the last lap before the route
         // escalates.
@@ -3100,15 +3095,15 @@ mod tests {
 
         assert_eq!(
             row("pause-reach").next,
-            "review failed → document — [r] resumes it"
+            "[r] review failed → document — `spoolway resume pause-reach`"
         );
         assert_eq!(
             row("look-holds").next,
-            "review blocked → blocked — [r] resumes it"
+            "[r] review blocked → blocked — `spoolway resume look-holds`"
         );
         assert_eq!(
             row("sweep-own-tabs").next,
-            "→ review — [r] resumes it",
+            "[r] → review — `spoolway resume sweep-own-tabs`",
             "a caught pass reads exactly as an ordinary gate always has"
         );
     }
@@ -3116,8 +3111,9 @@ mod tests {
     /// The mockup `escalate_clock` draws: `parked_from` naming the step a
     /// lane stopped reporting at, with no `paused_at` beside it — there is no
     /// gate here, so `paused_next` must not read `None` and fall back to a
-    /// bare `[r] resumes it`. `unpark` sends the task straight back onto
-    /// `parked_from` itself, and the NEXT column has to name that same step.
+    /// bare `[r] \`spoolway resume <id>\``. `unpark` sends the task straight
+    /// back onto `parked_from` itself, and the NEXT column has to name that
+    /// same step.
     #[test]
     fn a_task_paused_for_going_quiet_names_the_step_its_resume_carries_it_back_to() {
         let repo = fixture("parked-from-next");
@@ -3131,7 +3127,10 @@ mod tests {
         let rows = rows(&repo, &pipelines).unwrap();
         let row = rows.iter().find(|r| r.id == "release-publishing").unwrap();
         assert!(matches!(row.state, State::Paused));
-        assert_eq!(row.next, "→ review — [r] resumes it");
+        assert_eq!(
+            row.next,
+            "[r] → review — `spoolway resume release-publishing`"
+        );
     }
 
     /// A task the gate has ranked behind another group is not held by the
@@ -3319,63 +3318,65 @@ mod tests {
         assert!(!frame.contains("[r/R] resume / all"), "{frame}");
     }
 
-    /// The lane list wins over the mark when the two disagree.
-    ///
-    /// A lane that settled once carries the mark until a pass takes it back,
-    /// and a pass runs every `interval` while the board redraws every couple
-    /// of seconds. In between — and for good, with no dispatcher running —
-    /// the board would tell a person to go and answer a pane with an agent
-    /// visibly mid-turn in it. A working lane reads as the running step it is,
-    /// and settles back to `paused` the moment it stops.
+    /// `paused` means the stage and nothing else now: a lane's own status —
+    /// `Working`, or merely `Done`/settled with no report yet — never reads
+    /// as `paused` on its own any more. Both draw `Running`, exactly as a
+    /// task on a live step always has, because `live_lane` is present either
+    /// way; only `LaneStatus::Blocked` (see the sibling test below) and the
+    /// task's own stage move the state off `Running`.
     #[test]
-    fn a_marked_lane_that_is_working_reads_as_running() {
+    fn a_settled_lane_with_no_report_still_reads_as_running() {
         let repo = fixture("waiting-but-working");
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
 
         let tasks = repo.tasks().unwrap();
         let graph = Graph::build(&tasks, &pipelines, &repo.archive_dir());
-        let waiting = BTreeSet::from(["login · implement".to_string()]);
 
         let mut working = lane("login · implement", &repo.root);
         working.status = crate::mux::LaneStatus::Working;
-        let rows = build_rows(
-            &repo,
-            &tasks,
-            &pipelines,
-            &graph,
-            &waiting,
-            &[working],
-            &[],
-            None,
-        )
-        .unwrap();
+        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[working], &[], None).unwrap();
         let row = rows.iter().find(|r| r.id == "login").unwrap();
         assert!(matches!(row.state, State::Running), "{}", row.next);
 
-        // Quiet again: the pane really is holding the question. The row reads
-        // `paused`, the same state a gated task gets, and NEXT names both the
-        // pane to look at and the same `[r]` a gate would offer.
         let mut settled = lane("login · implement", &repo.root);
         settled.status = crate::mux::LaneStatus::Done;
-        let rows = build_rows(
-            &repo,
-            &tasks,
-            &pipelines,
-            &graph,
-            &waiting,
-            &[settled],
-            &[],
-            None,
-        )
-        .unwrap();
+        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[settled], &[], None).unwrap();
         let row = rows.iter().find(|r| r.id == "login").unwrap();
-        assert!(matches!(row.state, State::Paused));
-        assert!(row.resumable);
-        assert_eq!(
-            row.next,
-            "look at pane `login · implement` — [r] resumes it"
+        assert!(
+            matches!(row.state, State::Running),
+            "settled-but-unreported is no longer a source of `paused`: {}",
+            row.next
         );
+    }
+
+    /// The one live source of a lane-level stop the board still draws: herdr
+    /// reading a permission prompt off the pane, this frame, with nothing
+    /// remembered from the last one.
+    #[test]
+    fn a_blocked_lane_reads_as_prompt_live_and_never_sticky() {
+        let repo = fixture("blocked-lane-reads-prompt");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], Some("implement"));
+
+        let tasks = repo.tasks().unwrap();
+        let graph = Graph::build(&tasks, &pipelines, &repo.archive_dir());
+
+        let mut prompting = lane("login · implement", &repo.root);
+        prompting.status = crate::mux::LaneStatus::Blocked;
+        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[prompting], &[], None).unwrap();
+        let row = rows.iter().find(|r| r.id == "login").unwrap();
+        assert!(matches!(row.state, State::Prompt), "{}", row.next);
+        assert_eq!(row.next, "press a key in pane `login · implement`");
+        assert!(!row.resumable);
+
+        // The very next frame, with the modal answered: nothing sticky left
+        // to un-mark, the row is just `Running` again.
+        let mut answered = lane("login · implement", &repo.root);
+        answered.status = crate::mux::LaneStatus::Working;
+        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[answered], &[], None).unwrap();
+        let row = rows.iter().find(|r| r.id == "login").unwrap();
+        assert!(matches!(row.state, State::Running), "{}", row.next);
     }
 
     /// A dependency whose id happens to contain one of the words the state
@@ -3400,17 +3401,7 @@ mod tests {
 
         let tasks = repo.tasks().unwrap();
         let graph = Graph::build(&tasks, &pipelines, &repo.archive_dir());
-        let rows = build_rows(
-            &repo,
-            &tasks,
-            &pipelines,
-            &graph,
-            &BTreeSet::new(),
-            &[],
-            &[],
-            None,
-        )
-        .unwrap();
+        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
 
         let row = rows.iter().find(|r| r.id == "paused-board").unwrap();
         assert!(
@@ -3438,19 +3429,8 @@ mod tests {
 
         let tasks = repo.tasks().unwrap();
         let graph = Graph::build(&tasks, &pipelines, &repo.archive_dir());
-        let waiting = BTreeSet::new();
         let lanes = [lane("login · implement", &repo.root)];
-        let rows = build_rows(
-            &repo,
-            &tasks,
-            &pipelines,
-            &graph,
-            &waiting,
-            &lanes,
-            &[],
-            None,
-        )
-        .unwrap();
+        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &lanes, &[], None).unwrap();
 
         let row = rows.iter().find(|r| r.id == "login").unwrap();
         let secs = row.lane_time.expect("a live lane answers");
@@ -3471,12 +3451,11 @@ mod tests {
 
         let tasks = repo.tasks().unwrap();
         let graph = Graph::build(&tasks, &pipelines, &repo.archive_dir());
-        let waiting = BTreeSet::new();
 
         // Nothing started yet: the step is where the task sits, not what it is
         // doing, so this half is what the running half below is measured
         // against.
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &waiting, &[], &[], None).unwrap();
+        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
         let row = rows.iter().find(|r| r.id == "login").unwrap();
         assert!(matches!(row.state, State::Queued));
 
@@ -3492,7 +3471,7 @@ mod tests {
         )
         .unwrap();
 
-        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &waiting, &[], &[], None).unwrap();
+        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
         let row = rows.iter().find(|r| r.id == "login").unwrap();
         assert!(matches!(row.state, State::Running));
         // Its own clock, off the pid file, and not the last lane's
@@ -3515,23 +3494,12 @@ mod tests {
 
         let tasks = repo.tasks().unwrap();
         let graph = Graph::build(&tasks, &pipelines, &repo.archive_dir());
-        let waiting = BTreeSet::new();
         let window = repo.config.dispatch.interval * 2;
 
         // Just arrived: well inside the window, no lane anywhere.
         let mut grace = BTreeMap::new();
         grace.insert("login".to_string(), Instant::now());
-        let rows = build_rows(
-            &repo,
-            &tasks,
-            &pipelines,
-            &graph,
-            &waiting,
-            &[],
-            &[],
-            Some(&grace),
-        )
-        .unwrap();
+        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], Some(&grace)).unwrap();
         let row = rows.iter().find(|r| r.id == "login").unwrap();
         assert!(matches!(row.state, State::Running), "{}", row.next);
 
@@ -3540,17 +3508,7 @@ mod tests {
             "login".to_string(),
             Instant::now() - window - Duration::from_secs(1),
         );
-        let rows = build_rows(
-            &repo,
-            &tasks,
-            &pipelines,
-            &graph,
-            &waiting,
-            &[],
-            &[],
-            Some(&grace),
-        )
-        .unwrap();
+        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], Some(&grace)).unwrap();
         let row = rows.iter().find(|r| r.id == "login").unwrap();
         assert!(matches!(row.state, State::Queued), "{}", row.next);
     }
@@ -3575,19 +3533,8 @@ mod tests {
 
         let tasks = repo.tasks().unwrap();
         let graph = Graph::build(&tasks, &pipelines, &repo.archive_dir());
-        let waiting = BTreeSet::new();
         let lanes = [lane("login · implement", &repo.root)];
-        let rows = build_rows(
-            &repo,
-            &tasks,
-            &pipelines,
-            &graph,
-            &waiting,
-            &lanes,
-            &[],
-            None,
-        )
-        .unwrap();
+        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &lanes, &[], None).unwrap();
 
         let row = rows.iter().find(|r| r.id == "login").unwrap();
         let secs = row
@@ -3947,11 +3894,11 @@ mod tests {
         let row = rows.iter().find(|r| r.id == "ship").unwrap();
         assert!(matches!(row.state, State::Paused));
         // Nothing holds this task back — no dependency, no lane of its own —
-        // so the resume key does the job, and the NEXT column names the step
-        // passing the gate would carry it to, `checks`, rather than the
-        // command that names the same thing.
+        // so the resume key is offered, key first, then the command that
+        // does the same thing, and the step passing the gate would carry it
+        // to, `checks`.
         assert!(row.resumable);
-        assert_eq!(row.next, "→ checks — [r] resumes it");
+        assert_eq!(row.next, "[r] → checks — `spoolway resume ship`");
     }
 
     /// Keeps only [`RECENT`] of them, oldest first out — each its own task, so
@@ -4149,17 +4096,7 @@ mod tests {
 
         let tasks = repo.tasks().unwrap();
         let graph = Graph::build(&tasks, &pipelines, &repo.archive_dir());
-        let rows = build_rows(
-            &repo,
-            &tasks,
-            &pipelines,
-            &graph,
-            &BTreeSet::new(),
-            &[],
-            &[],
-            None,
-        )
-        .unwrap();
+        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
         let row = rows.iter().find(|r| r.id == "gate-board").unwrap();
 
         assert!(!row.resumable, "{}", row.next);
@@ -4188,17 +4125,7 @@ mod tests {
         // own.
         let mut busy = lane("gate-board · implement", &repo.root);
         busy.status = crate::mux::LaneStatus::Working;
-        let rows = build_rows(
-            &repo,
-            &tasks,
-            &pipelines,
-            &graph,
-            &BTreeSet::new(),
-            &[busy],
-            &[],
-            None,
-        )
-        .unwrap();
+        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[busy], &[], None).unwrap();
         let row = rows.iter().find(|r| r.id == "gate-board").unwrap();
         assert!(!row.resumable, "{}", row.next);
         assert!(row.next.contains("spoolway resume"), "{}", row.next);
@@ -4206,28 +4133,17 @@ mod tests {
         // Same pane, settled: the round is over and the key comes back.
         let mut settled = lane("gate-board · implement", &repo.root);
         settled.status = crate::mux::LaneStatus::Done;
-        let rows = build_rows(
-            &repo,
-            &tasks,
-            &pipelines,
-            &graph,
-            &BTreeSet::new(),
-            &[settled],
-            &[],
-            None,
-        )
-        .unwrap();
+        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[settled], &[], None).unwrap();
         let row = rows.iter().find(|r| r.id == "gate-board").unwrap();
         assert!(row.resumable, "{}", row.next);
-        assert!(row.next.contains("[r] resumes it"), "{}", row.next);
-        assert!(!row.next.contains("spoolway resume"), "{}", row.next);
+        assert!(row.next.starts_with("[r] "), "{}", row.next);
+        assert!(row.next.contains("spoolway resume"), "{}", row.next);
     }
 
     /// A blocked row that is actually parked for a person — nobody staffs
     /// that step — follows the same dependency and busy-lane rule as a
-    /// paused one for whether the key does anything, but its NEXT column
-    /// never says so: it reads only the step a pass would carry the task
-    /// to, `cleared_block_target`'s own answer, and nothing else.
+    /// paused one for whether the key does anything, and now says so the
+    /// same way a paused row does: key first, then the command.
     #[test]
     fn a_parked_blocked_row_is_resumable_by_the_same_rule_as_a_paused_one() {
         let repo = fixture("resume-blocked");
@@ -4240,21 +4156,11 @@ mod tests {
 
         let tasks = repo.tasks().unwrap();
         let graph = Graph::build(&tasks, &pipelines, &repo.archive_dir());
-        let rows = build_rows(
-            &repo,
-            &tasks,
-            &pipelines,
-            &graph,
-            &BTreeSet::new(),
-            &[],
-            &[],
-            None,
-        )
-        .unwrap();
+        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
         let row = rows.iter().find(|r| r.id == "wall").unwrap();
 
         assert!(row.resumable, "{}", row.next);
-        assert_eq!(row.next, "→ review");
+        assert_eq!(row.next, "[r] → review — `spoolway resume wall`");
     }
 
     /// A task paused by a `--pause`, `--fail` or `--block` from `blocked` —
@@ -4276,21 +4182,11 @@ mod tests {
 
         let tasks = repo.tasks().unwrap();
         let graph = Graph::build(&tasks, &pipelines, &repo.archive_dir());
-        let rows = build_rows(
-            &repo,
-            &tasks,
-            &pipelines,
-            &graph,
-            &BTreeSet::new(),
-            &[],
-            &[],
-            None,
-        )
-        .unwrap();
+        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
         let row = rows.iter().find(|r| r.id == "wall").unwrap();
 
         assert_eq!(
-            row.next, "→ implement — [r] resumes it",
+            row.next, "[r] → implement — `spoolway resume wall`",
             "never past `implement`, unlike an ordinary gate's own `on_pass`"
         );
     }
@@ -4801,17 +4697,7 @@ mod tests {
 
         let tasks = repo.tasks().unwrap();
         let graph = Graph::build(&tasks, &pipelines, &repo.archive_dir());
-        let rows = build_rows(
-            &repo,
-            &tasks,
-            &pipelines,
-            &graph,
-            &BTreeSet::new(),
-            &[],
-            &[],
-            None,
-        )
-        .unwrap();
+        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
         let row = rows.iter().find(|r| r.id == "login").unwrap();
         assert_eq!(row.next, "→ paused after implement");
     }
@@ -4892,17 +4778,7 @@ mod tests {
 
         let tasks = repo.tasks().unwrap();
         let graph = Graph::build(&tasks, &pipelines, &repo.archive_dir());
-        let rows = build_rows(
-            &repo,
-            &tasks,
-            &pipelines,
-            &graph,
-            &BTreeSet::new(),
-            &[],
-            &[],
-            None,
-        )
-        .unwrap();
+        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
         let row = rows.iter().find(|r| r.id == "login").unwrap();
         assert!(!row.next.contains("loop"), "{}", row.next);
     }

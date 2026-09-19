@@ -687,9 +687,9 @@ impl<'a> Dispatcher<'a> {
             let step_id = task.stage().to_string();
             let name = lane_name(&step_id, task.id());
             // Read rather than removed: the lane this record tracks is left
-            // running, so its bookkeeping — `notified`, `reminded_at` and the
-            // rest of what the reminder loop reads — has to survive into the
-            // next dispatcher's own `self.lanes`, the same as everything
+            // running, so its bookkeeping — `reminded_at` and the rest of
+            // what the reminder loop reads — has to survive into the next
+            // dispatcher's own `self.lanes`, the same as everything
             // `save_lane_records` below carries across for a lane nobody
             // touched at all this pass. `readopted` covers the one case a
             // plain lookup cannot: this stop's own dispatcher may itself be a

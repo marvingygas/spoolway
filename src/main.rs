@@ -414,6 +414,7 @@ fn run() -> Result<()> {
                 Command::Task(TaskCommand::Contract(args)) => {
                     commands::task_contract(&repo, routing(&graph)?, args, &cwd)
                 }
+                Command::Task(TaskCommand::Edit(args)) => commands::task_edit(&repo, args),
 
                 Command::Issue(IssueCommand::Show(args)) => {
                     commands::issue_show(&repo, &args.reference)

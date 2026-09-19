@@ -335,14 +335,17 @@ The lane runs and reports as usual. On its pass the task lands on `paused` and i
 open.
 
 ```
-spoolway resume <task>                     # let it past: the on_pass route
-spoolway resume <task> --reject -m "why"   # send it back: the on_fail route
+spoolway resume <task>                            # let it past: the on_pass route
+spoolway resume <task> --stage implement -m "why"  # send it back to a step you name
 ```
 
-- A rejection message is written to `## Handoff`.
-- A gated step with no `on_fail` parks a rejected task on `blocked`. `spoolway pipeline check`
+- `on_pass` is the only road a plain resume ever takes past a gate, whatever `on_fail` a step
+  declares or does not.
+- `--stage <step>` reroutes the task to that step, whatever the gate would otherwise have done.
+- A gated step with no `on_fail` still parks a *failed report* on `blocked` — that is about
+  `spoolway report --fail` at the step itself, not about resuming it. `spoolway pipeline check`
   warns about it. Writing `on_fail: blocked` outright silences that warning without changing
-  where the rejection goes, so `pipeline check` warns about the redundant key instead.
+  where the fail goes, so `pipeline check` warns about the redundant key instead.
 - A gate waits for a person in an unattended run too.
 - No shipped step is gated. A pull request is already a checkpoint. Gate a step that changes
   something without leaving a pull request behind, such as a deploy.

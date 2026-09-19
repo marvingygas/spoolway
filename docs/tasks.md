@@ -246,7 +246,7 @@ Nothing went wrong. You decide whether it goes on.
 
 ```
 spoolway resume <task>                                    # on, by the step's on_pass
-spoolway resume <task> --reject -m "the migration has not run yet"   # back, by on_fail
+spoolway resume <task> --stage review -m "send it back round"   # on, at a step you name
 ```
 
 A `gate_at` that caught a block, or a loop-max bound for `blocked`, sends a plain resume to
@@ -254,8 +254,32 @@ A `gate_at` that caught a block, or a loop-max bound for `blocked`, sends a plai
 column names the outcome a scheduled pause caught, such as `review failed → e2e`, when it was
 not a plain pass.
 
-`--reject` writes your message into `## Handoff` for the next lane. A gated step with no
-`on_fail` sends a rejected task to `blocked`.
+### The stop is yours to work in
+
+The pane a stop left open is still there. Type into it, and the lane does what you ask,
+including work its own step would otherwise leave to another. Only resuming stays a person's:
+a lane cannot call `spoolway resume` on its own task.
+
+`spoolway task edit` rewrites one section of the task's document while it sits on `paused` or
+`blocked`, under the same task lock `spoolway report` takes.
+
+```
+spoolway task edit <task> --section Mockup --from mockup.md
+spoolway task edit <task> --section Mockup --from -   # read the new content from stdin
+```
+
+`--section` names a `##` heading without its `##`. The heading must already exist in the body.
+The whole section's content is replaced, the way editing the file by hand would. Run against a
+task that is neither `paused` nor `blocked`, it is refused.
+
+Every choice a stop offers is printed key first, then the command that does the same thing:
+
+```
+demo-gate2: `## Mockup` rewritten, 14 lines
+
+  resuming it is still a person's:
+  resume   [r]   spoolway resume demo-gate2
+```
 
 ## Reporting an outcome
 

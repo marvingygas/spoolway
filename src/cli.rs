@@ -136,13 +136,9 @@ pub enum Command {
     ///
     /// A task on `blocked` resumes the step it stopped on. A task on `paused`
     /// finished a `gate: true` step and is waiting for you to let it past —
-    /// this sends it on to wherever the step's `on_pass` points, or, with
-    /// `--reject`, back round by the step's own `on_fail` instead, with your
-    /// reason attached for the lane that picks it up — or onto `blocked`,
-    /// same as any other fail, when the gated step declares no `on_fail` of
-    /// its own; `spoolway pipeline check` warns about a gate shaped that way.
-    /// `--stage` overrides either route by hand, and still works on a paused
-    /// task: naming a step is you choosing where it goes, gate or no gate.
+    /// this sends it on to wherever the step's `on_pass` points. `--stage`
+    /// overrides that route by hand, and still works on a paused task:
+    /// naming a step is you choosing where it goes, gate or no gate.
     Resume(ResumeArgs),
 
     /// Read what a lane has been doing, answer it, or open its session.
@@ -990,16 +986,7 @@ pub struct ResumeArgs {
     #[arg(long, value_name = "STEP")]
     pub stage: Option<String>,
 
-    /// Send it back round instead of past the gate: the gated step's
-    /// `on_fail` route, with your message written into the task file's `##
-    /// Handoff` for the lane that answers it — or `blocked`, same as any
-    /// other fail, when the step declares no `on_fail` of its own. Only
-    /// makes sense against a task on `paused`.
-    #[arg(long)]
-    pub reject: bool,
-
-    /// Note recorded in the task's status log — and, with `--reject`, in
-    /// `## Handoff` for the lane that answers it.
+    /// Note recorded in the task's status log.
     #[arg(long, short = 'm')]
     pub message: Option<String>,
 }
@@ -1138,6 +1125,18 @@ pub enum TaskCommand {
     /// this is `queue add --from`'s own validation, run with nothing saved
     /// at the end of it.
     Contract(TaskContractArgs),
+
+    /// Rewrite one section of a stopped task's document, under its task
+    /// lock.
+    ///
+    /// Refused when the task is neither `paused` nor `blocked` — a task
+    /// still moving is a lane's own to write, through `spoolway report`, not
+    /// a person's or a pane's to rewrite out from under it. The named
+    /// section must already exist in the body; this replaces its content
+    /// whole, the same way a person editing the file by hand would, it does
+    /// not append to it the way `## Status Log` and `## Handoff` are
+    /// appended to elsewhere.
+    Edit(TaskEditArgs),
 }
 
 #[derive(Debug, Args)]
@@ -1158,6 +1157,21 @@ pub struct TaskContractArgs {
     /// it.
     #[arg(long, value_name = "BRANCH")]
     pub base: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct TaskEditArgs {
+    /// The stopped task to rewrite.
+    pub task: String,
+
+    /// The `##` heading to rewrite, named without its `##` — `Mockup`, not
+    /// `## Mockup`.
+    #[arg(long)]
+    pub section: String,
+
+    /// The section's new content: a file path, or `-` for standard input.
+    #[arg(long = "from", value_name = "PATH")]
+    pub from: String,
 }
 
 /// Read one issue out of this project's own tracker.
