@@ -204,8 +204,8 @@ pub fn tracking_template(name: &str) -> Option<&'static str> {
 /// port of) does not: `# spoolway-requires: gh >= 2.97.0`, restored because
 /// the marker-and-label design otherwise ships with no machine-readable
 /// version floor at all — `spoolway doctor` and the submit-time gate
-/// (`scripts/e2e/suites/commands.sh`'s "gh below the floor" block) both read
-/// it, and read nothing back once it is gone, which stops warning silently
+/// (`scripts/e2e/suites/issue-tracking.sh`'s "gh below the floor" block) both
+/// read it, and read nothing back once it is gone, which stops warning silently
 /// rather than failing loudly. `.spoolway/hooks/github.sh` itself still wants
 /// this line added to stay in step.
 pub const HOOK_SCRIPTS: &[(&str, &str)] = &[

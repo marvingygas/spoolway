@@ -242,31 +242,70 @@ sweep
 forget hang
 
 # ------------------------------------------------ a report, nobody listening
-# `orphan` is an ordinary fast task: its implement lane reports in
-# milliseconds. A sixty-second interval on the dispatcher that starts it
-# turns the race between "the report lands" and "the next pass would read
-# it" into a minute of slack — plenty to kill the dispatcher in between and
-# still be certain the report happened with nobody running.
-SAVED_INTERVAL=$E2E_INTERVAL
-E2E_INTERVAL=60s
-dispatcher_start
+# The claim is about a report that lands with nothing running: the lane says
+# it passed, the dispatcher that started it is gone, and the next dispatcher
+# to come up reads the report rather than the lane.
+#
+# This used to raise the interval to sixty seconds, drive `orphan` as far as
+# `review` and kill the dispatcher there, on the reading that the interval
+# bought "a minute of slack" between the report landing and the pass that
+# would read it. It does not. `--interval` bounds an *idle* pass only; with
+# work pending the passes chain, so `orphan` walked implement -> review ->
+# document -> handover -> blocked inside one second and `review` was never
+# observable at all. The scenario could not work as written, and it failed on
+# an idle machine, serial, as reliably as it failed in a concurrent tier.
+#
+# So the window is made instead of caught, the same way `forge.sh` makes its
+# own. `linger:` holds the implement turn open for three seconds without
+# changing anything else about it — see `agents/pi` — which is a lane that is
+# genuinely up and has genuinely not reported. The dispatcher is taken away
+# inside that window, and what is waited for afterwards is `review` appearing
+# with nothing running at all: `spoolway report` writes the stage move itself,
+# so the orphaned lane records its own pass and the task then sits there,
+# because there is no pass to carry it on. That is a state, not a window, and
+# the assertion below is that a dispatcher coming up finds it.
 task_doc "$LIVE/orphan.md" orphan "$BODY" "group: disaster" "touches: [notes/orphan.md]"
+mkdir -p "$CTL"
+echo "linger:3" > "$CTL/orphan.implement"
+dispatcher_start
 must "orphan queues" "$SPOOLWAY" queue add --from "$LIVE/orphan.md"
-if drive orphan review 20; then
+ORPHAN_PID=$(lane_pid "orphan · implement" 30)
+if [ -n "$ORPHAN_PID" ]; then
+  # Inside the lane's own window: it is running and has reported nothing.
   kill_dispatcher KILL
-  STAGE_ORPHANED=$(stage_of orphan)
-  E2E_INTERVAL=$SAVED_INTERVAL
-  dispatcher_start
-  if [ "$STAGE_ORPHANED" = review ] && drive orphan document 20; then
-    ok "a lane that reported with no dispatcher up is picked up on the next pass"
+  orphan_reported() { [ "$(stage_of orphan)" = review ]; }
+  if poll_until 30 orphan_reported; then
+    ok "a lane whose dispatcher died mid-turn still records its own pass"
+    STAGE_ORPHANED=$(stage_of orphan)
+    dispatcher_start
+    # Read off the Status Log, not off `stage:`. There is nothing to wait for
+    # once the pass has read the report: `document` routes on to `handover`,
+    # which is `spoolway stack` against a suite with no forge, so the task is
+    # already sitting on `blocked` by the time a poll looks. What the claim is
+    # about is the hop itself — the pass read the report and routed the task
+    # on from the step it was orphaned on — and the task's own log is where
+    # that is written down whatever it does afterwards.
+    orphan_moved_on() {
+      grep -q '→ `document`' "$SPOOLWAY_PROJECT_HOME/queue/orphan.md" 2>/dev/null ||
+        grep -q '→ `document`' "$SPOOLWAY_PROJECT_HOME/archive/orphan.md" 2>/dev/null
+    }
+    if poll_until 20 orphan_moved_on; then
+      ok "a lane that reported with no dispatcher up is picked up on the next pass"
+    else
+      bad "a lane that reported with no dispatcher up is picked up on the next pass"
+      printf '        stage while orphaned: %s, stage now: %s\n' \
+        "$STAGE_ORPHANED" "$(stage_of orphan)"
+    fi
   else
-    bad "a lane that reported with no dispatcher up is picked up on the next pass"
-    printf '        stage while orphaned: %s, stage now: %s\n' "$STAGE_ORPHANED" "$(stage_of orphan)"
+    bad "a lane whose dispatcher died mid-turn still records its own pass"
+    printf '        stage with nothing running: %s\n' "$(stage_of orphan)"
+    bad "a lane that reported with no dispatcher up is picked up on the next pass (never reached review)"
   fi
 else
-  E2E_INTERVAL=$SAVED_INTERVAL
+  bad "a lane whose dispatcher died mid-turn still records its own pass (no lane started)"
   bad "a lane that reported with no dispatcher up is picked up on the next pass (never reached review)"
 fi
+rm -f "$CTL/orphan.implement"
 sweep
 
 # ------------------------------------------------------------- a stop, live

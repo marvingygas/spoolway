@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # The end-to-end suites, and the one way to run them.
 #
-#   scripts/e2e/run.sh                the pr tier, what every push and every
-#                                     pull request runs
+#   scripts/e2e/run.sh                the pr tier, what `impl`'s `suite` step
+#                                     and every pull request run
 #   scripts/e2e/run.sh --tier smoke   the fast signal — for a person running it
 #                                     by hand, and what `impl_lite`'s `suite`
 #                                     step buys through `scripts/e2e-smoke.sh`
 #   scripts/e2e/run.sh --suite flow   one suite
+#   scripts/e2e/run.sh --jobs 1       one suite at a time, the old behaviour —
+#                                     for a postmortem that needs a suite's own
+#                                     output not interleaved with another's
 #   scripts/e2e/run.sh --list         what there is, and which setting each case is about
 #
 # One instrument, one question: *does spoolway still work when it is really
@@ -21,7 +24,7 @@
 # needs a real git repository, a real detached process, or a real forge: a task
 # walking the pipeline as processes (`flow`), a rebase onto a base that moved
 # (`stacking`, `conflicts`), a command step's pid, log and exit file
-# (`commands`), and a hand-off that hands nothing over (`forge`).
+# (`command-steps`), and a hand-off that hands nothing over (`forge`).
 #
 # Fifteen suites were deleted to arrive at that, and they were not lost
 # coverage: `queue`, `config`, `settings`, `pipelines`, `personas`, `plan`,
@@ -66,10 +69,10 @@ REPO=$(cd "$E2E_DIR/../.." && pwd)
 #               is unit-tested in src/headless.rs, and what a multiplexer
 #               actually does is scripts/e2e/plans/. Two things are the
 #               exception, because neither can be asked of anything but a real
-#               pane: `commands.sh` opens a real tmux server of its own for
-#               the question "did a command step get a pane at all", and runs
-#               the herdr handover against `herdr-stub.sh`, whose header says
-#               why there is no isolated herdr server to use instead.
+#               pane: `command-steps.sh` opens a real tmux server of its own
+#               for the question "did a command step get a pane at all", and
+#               runs the herdr handover against `herdr-stub.sh`, whose header
+#               says why there is no isolated herdr server to use instead.
 #   status      the board's *rendering* — every column, every row state, the
 #               read-only `--watch` board entire: unit tests cover it through
 #               a real pass, and an e2e version would re-assert the same
@@ -96,13 +99,21 @@ REPO=$(cd "$E2E_DIR/../.." && pwd)
 #               model (SPOOLWAY_E2E_CODEX_MODEL); pointed at a local endpoint
 #               it spends nothing.
 smoke_suites=(flow)
-pr_suites=(flow commands stacking stack conflicts forge disaster lock trials routines jobs jobs-screen board-pause queue-unqueue restart overrides)
-nightly_suites=(flow commands stacking stack conflicts forge disaster lock trials routines jobs jobs-screen board-pause queue-unqueue restart overrides upgrade)
+pr_suites=(flow commands command-steps issue-tracking stacking stack conflicts forge disaster lock trials routines jobs jobs-screen board-pause queue-unqueue restart overrides)
+nightly_suites=(flow commands command-steps issue-tracking stacking stack conflicts forge disaster lock trials routines jobs jobs-screen board-pause queue-unqueue restart overrides upgrade)
 cloud_suites=(warmth)
 live_suites=(live)
 
 TIER=pr
 SUITES=()
+# How many suites run at once. Each has its own scratch tree, its own $HOME,
+# its own tmux socket where it needs one and its own dispatch lock (see the
+# module comment above), so nothing here needs coordinating beyond the CPU
+# and disk they share — the same contention `SPOOLWAY_E2E_PR_LOCK` already
+# serialises a whole second `--tier pr` invocation against. Four, not the
+# core count: the suites this buys the most from block on a real process
+# more than they burn CPU, and a person's own laptop runs this too.
+JOBS=${JOBS:-4}
 
 # ------------------------------------------------------------ what is covered
 #
@@ -172,7 +183,7 @@ list() {
     [ -e "$file" ] || continue
     name=$(basename "$file" .sh)
     cases=$(grep -c '^# covers:' "$file")
-    printf '  %-12s %s\n' "$name" \
+    printf '  %-15s %s\n' "$name" \
       "$([ "$cases" -gt 0 ] && echo "$cases setting(s)" || echo "-")"
   done
 
@@ -216,12 +227,18 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --tier)   TIER=$2; shift 2 ;;
     --suite)  SUITES+=("$2"); shift 2 ;;
+    --jobs)   JOBS=$2; shift 2 ;;
     --keep)   KEEP=1; shift ;;
     --list)   list; exit 0 ;;
-    -h|--help) sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown flag: $1" >&2; exit 2 ;;
   esac
 done
+
+case "$JOBS" in
+  *[!0-9]* | '') echo "invalid --jobs: $JOBS (expected a positive integer)" >&2; exit 2 ;;
+esac
+[ "$JOBS" -ge 1 ] || { echo "invalid --jobs: $JOBS (expected a positive integer)" >&2; exit 2; }
 
 if [ ${#SUITES[@]} -eq 0 ]; then
   case "$TIER" in
@@ -343,7 +360,8 @@ trap cleanup EXIT
 trap 'cleanup; trap - EXIT; exit 143' TERM
 trap 'cleanup; trap - EXIT; exit 130' INT
 
-echo "spoolway e2e — $("$SPOOLWAY" --version) — tier ${TIER}"
+echo "spoolway e2e — $("$SPOOLWAY" --version) — tier ${TIER} — ${JOBS} at a time"
+echo
 
 pending=()
 failed=()
@@ -399,6 +417,179 @@ secs() {
   printf '%d.%ds' "$((tenths / 10))" "$((tenths % 10))"
 }
 
+# --------------------------------------------------------- running a tier at once
+#
+# Each suite already has its own scratch tree, its own $HOME, its own tmux
+# socket where it needs one and its own dispatch lock (see the module comment
+# at the top of this file), so nothing here needs coordinating beyond letting
+# up to $JOBS of them have a process at once. A suite is launched as a
+# background subshell of this script and reaped with `wait -n`, which returns
+# the moment *any* of them exits — not the pid-returning `-n -p` form, so this
+# still runs on a bash older than 5.1. Which one just finished is read off the
+# filesystem afterwards (`kill -0` on each tracked pid) rather than trusted to
+# `wait -n`'s own exit status, which is only ever the one job's.
+declare -A SUITE_OF=() WORK_OF=() ROW_OF=() LOG_OF=() STARTED_OF=()
+running=0
+
+# A suite's own ok/bad lines interleaved with three others' would be illegible,
+# so with more than one job at a time its output is captured rather than
+# streamed — the summary row below is what a concurrent run reads live, and a
+# failure's log is dumped under its row the moment it is reaped. `--jobs 1`
+# keeps the old, simpler shape for a postmortem on one suite: streamed live,
+# with nothing captured to repeat back afterwards.
+launch_suite() {
+  local suite=$1 file=$2
+  local work="$ROOT/$suite"
+  mkdir -p "$work"
+  # The suite writes its tally into a file of its own rather than straight into
+  # the results file, because the duration beside it is this process's to add
+  # and only the row they make together is worth keeping. Folding the two here
+  # is also what puts a row in the results file for a suite that was killed
+  # before it could write one at all.
+  local row="$ROOT/$suite.row"
+  : > "$row"
+  local log="$work/output.log"
+  local started
+  started=$(now_ms)
+  # Its own tree, its own process. A suite that leaves a mess behind — and the
+  # ones that end in `blocked` on purpose all do — cannot reach the next.
+  (
+    # Nothing a suite starts may inherit the `pr` lock. The fd above is held
+    # open for this whole run, so without this every process a suite forks
+    # gets a copy of it — including the detached lanes and stand-ins that
+    # `disaster` and `board-pause` leave running on purpose. Those outlive
+    # the run, get reparented to init, and go on holding the lock from a
+    # scratch tree that no longer exists, so the *next* `--tier pr` run on
+    # the machine blocks in `flock` forever: before any suite starts, and so
+    # before the per-suite watchdog covers anything. Observed exactly that
+    # way on a dev box, with `pi` doubles from a finished run still pinning
+    # the file. Closing it here costs the suite nothing — it is this
+    # script's lock, not the suite's, and `lock.sh`'s nested runs each open
+    # their own.
+    if [ -n "${E2E_PR_LOCK_FD:-}" ]; then exec {E2E_PR_LOCK_FD}>&-; fi
+    status=0
+    if [ "$JOBS" -eq 1 ]; then
+      SUITE="$suite" WORK="$work" E2E_RESULTS="$row" \
+        timeout -k 30s "$E2E_SUITE_TIMEOUT" bash "$file" 2>&1 | tee "$log"
+      status=${PIPESTATUS[0]}
+    else
+      SUITE="$suite" WORK="$work" E2E_RESULTS="$row" \
+        timeout -k 30s "$E2E_SUITE_TIMEOUT" bash "$file" >"$log" 2>&1
+      status=$?
+    fi
+    echo "$status" > "$work/exit-status"
+  ) &
+  local pid=$!
+  SUITE_OF[$pid]=$suite
+  WORK_OF[$pid]=$work
+  ROW_OF[$pid]=$row
+  LOG_OF[$pid]=$log
+  STARTED_OF[$pid]=$started
+  running=$((running + 1))
+}
+
+# What a failing suite leaves behind, for a reader who was not watching.
+#
+# With more than one job at a time a suite's output is captured, never
+# streamed, and `$ROOT` goes with the run — so whatever is printed here is the
+# *whole* record of what failed. A blind `tail` is not that record: `forge`
+# ends its one failing scenario by dumping the task document it drove, which
+# is longer than thirty lines, so all three of its failed checks were pushed
+# off the end and the run's own output named none of them. The suite had to be
+# re-run before the failure could be read at all.
+#
+# So: the failed checks by name first — they are one line each, straight from
+# lib.sh's `bad` — then the tail, which is the context around the last of them
+# and, for a suite killed before it could fail anything, the only thing there
+# is. The log itself is copied somewhere that outlives `$ROOT`, one file per
+# suite so a run overwrites its own rather than piling up, because thirty
+# lines is a pointer and the postmortem usually wants the rest.
+dump_failure() {
+  local log=$1 suite=$2 marker named kept
+  marker=$(printf '  \033[31mFAIL\033[0m  ')
+  named=$(grep -aF "$marker" "$log" | head -30)
+  if [ -n "$named" ]; then
+    printf '%s\n' "$named" | sed 's/^/        /' >&2
+    # The tail without the failures already listed above, which are otherwise
+    # printed twice for any suite whose last check is the one that failed.
+    tail -30 "$log" | grep -avF "$marker" | sed 's/^/        /' >&2
+  else
+    tail -30 "$log" | sed 's/^/        /' >&2
+  fi
+  kept="${TMPDIR:-/tmp}/spoolway-e2e-fail.$suite.log"
+  if cp "$log" "$kept" 2>/dev/null; then
+    printf '  \033[31mlog\033[0m     %s\n' "$kept" >&2
+  fi
+}
+
+# The suite's own line, and it comes after the suite rather than before it
+# because the duration does not exist until the suite is over. Watched live
+# that costs nothing a reader needs: the last line printed names the suite
+# *before* this one, so the tier list above says which one is running, and a
+# suite that hangs is named by this line and the TIMEOUT printed under it.
+#
+# Duration first, right-aligned in a column of its own — a run reads as a
+# column of durations rather than as whatever each suite's name left — then
+# the suite name, then its own tally. That tally is not decoration: with more
+# than one job at a time a suite's stdout is captured rather than streamed
+# (see `launch_suite`), so lib.sh's own "N checks passed" line never reaches
+# the terminal at all, and this row is the only place a green concurrent run
+# says how many checks a suite actually ran.
+#
+# Rows print in the order suites *finish*, not the order they were launched —
+# concurrent, that is the only order there is.
+report_suite() {
+  local pid=$1
+  local suite=${SUITE_OF[$pid]} work=${WORK_OF[$pid]} row=${ROW_OF[$pid]} \
+        log=${LOG_OF[$pid]} started=${STARTED_OF[$pid]}
+  local elapsed=$(( $(now_ms) - started ))
+  local status
+  status=$(cat "$work/exit-status" 2>/dev/null || echo 1)
+
+  # `read` on an empty file leaves both fields empty, which is a suite killed
+  # before lib.sh's EXIT trap could record anything — one that sat through the
+  # TERM and had to be put down. Its counts are unknowable and stay zero; the
+  # time it spent is not, and reporting that is the whole point of the row.
+  local suite_pass suite_fail
+  read -r _ suite_pass suite_fail < "$row"
+  printf '%s %d %d %d\n' \
+    "$suite" "${suite_pass:-0}" "${suite_fail:-0}" "$elapsed" >> "$RESULTS"
+
+  if [ "${suite_fail:-0}" -eq 0 ]; then
+    printf '%6s  \033[1m%-15s\033[0m%5d checks passed\n' \
+      "$(secs "$elapsed")" "$suite" "${suite_pass:-0}"
+  else
+    printf '%6s  \033[1m%-15s\033[0m%5d of %d checks failed\n' \
+      "$(secs "$elapsed")" "$suite" "${suite_fail:-0}" "$((${suite_pass:-0} + suite_fail))"
+  fi
+
+  # 124 is `timeout`'s own verdict; 137 is a suite that sat through the TERM
+  # and had to be killed. Either way it is the budget that ended this, not the
+  # suite, so it is reported as the one thing a bare non-zero exit cannot say.
+  if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
+    printf '  \033[31mTIMEOUT\033[0m  no further in %s — hung, not slow\n' \
+      "$E2E_SUITE_TIMEOUT" >&2
+    failed+=("$suite (timed out)")
+    [ "$JOBS" -eq 1 ] || dump_failure "$log" "$suite"
+  elif [ "$status" -ne 0 ]; then
+    failed+=("$suite")
+    [ "$JOBS" -eq 1 ] || dump_failure "$log" "$suite"
+  fi
+
+  unset 'SUITE_OF[$pid]' 'WORK_OF[$pid]' 'ROW_OF[$pid]' 'LOG_OF[$pid]' 'STARTED_OF[$pid]'
+  running=$((running - 1))
+}
+
+# Every tracked pid still holding its slot: still running, so left for the
+# next `wait -n`.
+reap_finished() {
+  local pid
+  for pid in "${!SUITE_OF[@]}"; do
+    kill -0 "$pid" 2>/dev/null && continue
+    report_suite "$pid"
+  done
+}
+
 tier_started=$(now_ms)
 
 for suite in "${SUITES[@]}"; do
@@ -408,53 +599,16 @@ for suite in "${SUITES[@]}"; do
     continue
   fi
 
-  echo
+  while [ "$running" -ge "$JOBS" ]; do
+    wait -n 2>/dev/null || true
+    reap_finished
+  done
+  launch_suite "$suite" "$file"
+done
 
-  work="$ROOT/$suite"
-  mkdir -p "$work"
-  # The suite writes its tally into a file of its own rather than straight into
-  # the results file, because the duration beside it is this process's to add
-  # and only the row they make together is worth keeping. Folding the two here
-  # is also what puts a row in the results file for a suite that was killed
-  # before it could write one at all.
-  row="$ROOT/$suite.row"
-  : > "$row"
-  # Its own tree, its own process. A suite that leaves a mess behind — and the
-  # ones that end in `blocked` on purpose all do — cannot reach the next.
-  status=0
-  started=$(now_ms)
-  SUITE="$suite" WORK="$work" E2E_RESULTS="$row" \
-    timeout -k 30s "$E2E_SUITE_TIMEOUT" bash "$file" || status=$?
-  elapsed=$(( $(now_ms) - started ))
-
-  # `read` on an empty file leaves both fields empty, which is a suite killed
-  # before lib.sh's EXIT trap could record anything — one that sat through the
-  # TERM and had to be put down. Its counts are unknowable and stay zero; the
-  # time it spent is not, and reporting that is the whole point of the row.
-  read -r _ suite_pass suite_fail < "$row"
-  printf '%s %d %d %d\n' \
-    "$suite" "${suite_pass:-0}" "${suite_fail:-0}" "$elapsed" >> "$RESULTS"
-
-  # The suite's own line, and it comes after the suite rather than before it
-  # because the duration does not exist until the suite is over. Watched live
-  # that costs nothing a reader needs: the last line printed names the suite
-  # *before* this one, so the tier list above says which one is running, and a
-  # suite that hangs is named by this line and the TIMEOUT printed under it.
-  #
-  # 44 and 8 put the seconds against a right edge at column 52, so a run reads
-  # as a column of durations rather than as whatever each suite's name left.
-  printf '\033[1m%-44s\033[0m%8s\n' "$suite" "$(secs "$elapsed")"
-
-  # 124 is `timeout`'s own verdict; 137 is a suite that sat through the TERM
-  # and had to be killed. Either way it is the budget that ended this, not the
-  # suite, so it is reported as the one thing a bare non-zero exit cannot say.
-  if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
-    printf '  \033[31mTIMEOUT\033[0m  no further in %s — hung, not slow\n' \
-      "$E2E_SUITE_TIMEOUT" >&2
-    failed+=("$suite (timed out)")
-  elif [ "$status" -ne 0 ]; then
-    failed+=("$suite")
-  fi
+while [ "$running" -gt 0 ]; do
+  wait -n 2>/dev/null || true
+  reap_finished
 done
 
 tier_ms=$(( $(now_ms) - tier_started ))
@@ -464,19 +618,19 @@ while read -r name p f ms; do
   total_fail=$((total_fail + f))
 done < "$RESULTS"
 
-# The three worth naming, longest first. A tier is tuned one suite at a time
-# and this is the line that says which one to start on; the whole table is the
-# results file itself, which KEEP=1 leaves behind.
+# The one that matters under concurrency: with suites running at once, the
+# tier's own wall clock cannot go below its longest suite (see the module
+# comment on `JOBS`), so this is the lane a tier is tuned against. The whole
+# table is the results file itself, which KEEP=1 leaves behind.
 slowest=
-while read -r name p f ms; do
-  slowest="${slowest:+$slowest · }$name $(secs "$ms")"
-done < <(sort -k4 -nr "$RESULTS" | head -3)
+read -r name p f ms < <(sort -k4 -nr "$RESULTS" | head -1)
+[ -n "${name:-}" ] && slowest="$name $(secs "$ms")"
 
 echo
 if [ ${#pending[@]} -gt 0 ]; then
   printf '\033[33mpending\033[0m  %s (no suite file yet)\n' "${pending[*]}"
 fi
-# The verdict, held rather than exited on, so the slowest line below is
+# The verdict, held rather than exited on, so the longest-lane line below is
 # printed whichever way the run went — a red tier is the one most worth
 # knowing the shape of.
 rc=0
@@ -489,5 +643,5 @@ else
     "${failed[*]:-see above}"
   rc=1
 fi
-[ -n "$slowest" ] && printf 'slowest  %s\n' "$slowest"
+[ -n "$slowest" ] && printf 'longest lane  %s\n' "$slowest"
 exit "$rc"

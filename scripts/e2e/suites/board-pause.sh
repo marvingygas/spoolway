@@ -134,14 +134,43 @@ draws() {
   else bad "$what (the board never drew \"$want\")"; tail -30 "$BOARD_LOG" | sed 's/^/        /'; fi
 }
 
+# How many frames the board has drawn so far. `Board::draw` (src/status/mod.rs)
+# writes this exact clear-and-home sequence, unconditionally, once every poll
+# slice — about once a second — whether or not the frame it drew differs from
+# the last, which is what makes counting them a real clock rather than a
+# sleep of another name: it advances on its own pace, never faster and never
+# slower than the board this suite is actually watching.
+_frame_count() { grep -aoF $'\x1b[2J\x1b[H' "$BOARD_LOG" 2>/dev/null | wc -l; }
+_frame_past()  { [ "$(_frame_count)" -gt "$1" ]; }
+
+# Wait for the board to draw at least one frame after this call started —
+# proof a keystroke just sent was actually read and acted on (the loop that
+# reads a key redraws again immediately after applying it), not a guess at
+# how long that takes.
+next_frame() {
+  local secs=${1:-10} before
+  before=$(_frame_count)
+  poll_until "$secs" _frame_past "$before"
+}
+
+# `next_frame`, `n` times over — the pacing a case proving *nothing* happened
+# needs: long enough that a change reacting late would still land inside the
+# window, and no longer than the board actually takes to get there.
+settle_frames() {
+  local n=$1 secs=${2:-10} i
+  for ((i = 0; i < n; i++)); do
+    next_frame "$secs" || return 1
+  done
+}
+
 # The other half: the board is drawing frames continuously, so "it stopped
-# saying that" means the frames drawn *from here on* do not say it. Two
-# frames' worth of wait, then read only what landed after it.
+# saying that" means the frames drawn *from here on* do not say it. Two real
+# frames' worth of wait, then read only what landed after the first of them.
 stops_drawing() {
   local what=$1 unwanted=$2 mark
-  sleep 3
+  settle_frames 1
   mark=$(wc -l < "$BOARD_LOG")
-  sleep 3
+  settle_frames 1
   if tail -n "+$((mark + 1))" "$BOARD_LOG" | grep -qF -- "$unwanted"; then
     bad "$what (the board is still drawing \"$unwanted\")"
     tail -30 "$BOARD_LOG" | sed 's/^/        /'
@@ -197,7 +226,7 @@ else bad "and the lane is still running"; fi
 
 # A key that is neither leaves the panel open and acts on nothing.
 press x
-sleep 3
+settle_frames 2
 stage_stays "a stray key over the panel changes nothing" mid-turn implement
 draws "and the panel is still up" "pause mid-turn"
 
@@ -210,7 +239,7 @@ else bad "and leaves the lane running"; fi
 # `s` leaves the turn running and writes a schedule instead of an interrupt —
 # the NEXT column carries it, and the task's own file gains `gate_at`.
 press p
-sleep 2
+next_frame
 press s
 stops_drawing "\`s\` closes the panel without aborting anything" "pause mid-turn"
 stage_stays "the task stays right where it was" mid-turn implement
@@ -223,14 +252,14 @@ else bad "and the lane is still running"; fi
 # Pressing `s` again, over a fresh panel on the same still-live step, clears
 # the schedule it just wrote.
 press p
-sleep 2
+next_frame
 press s
 stops_drawing "pressing \`s\` again closes the panel too" "pause mid-turn"
 lacks "and clears the schedule it named" "gate_at:" \
   "$SPOOLWAY_PROJECT_HOME/queue/mid-turn.md"
 
 press p
-sleep 2
+next_frame
 press $'\r'
 stage_reaches "enter parks the task" mid-turn paused 25
 if poll_while 15 kill -0 "$LANE_PID"; then ok "and the turn it named is over"
@@ -263,7 +292,7 @@ else bad "and leaves its lane running"; fi
 # parks the rest of the run at once — there is no step in flight to wait out
 # for those.
 press P
-sleep 2
+next_frame
 press s
 stops_drawing "\`s\` closes the run-wide panel without aborting anything" "Pausing aborts"
 stage_stays "the live task keeps running" busy implement
@@ -277,7 +306,7 @@ else bad "and the live lane is still running"; fi
 # `commands::report`'s own road, covered there — this suite owns the
 # keypress alone, so the rest of the run is parked outright the ordinary way.
 press P
-sleep 2
+next_frame
 press $'\r'
 stage_reaches "enter parks the task that was live" busy paused 25
 
@@ -285,7 +314,7 @@ stage_reaches "enter parks the task that was live" busy paused 25
 # Nothing is running now, so there is nothing to confirm: the keypress parks
 # on the spot and no panel is drawn at all.
 queue_idle late busy
-sleep 2
+next_frame
 MARK=$(wc -l < "$BOARD_LOG")
 press P
 stage_reaches "\`P\` with nothing live parks the run at once" late paused 25
@@ -294,7 +323,7 @@ never_draws "with no panel to answer" "Pausing aborts" "$MARK"
 # ----------------------------------------------- a paused row is a no-op
 MARK=$(wc -l < "$BOARD_LOG")
 press p
-sleep 3
+settle_frames 2
 never_draws "\`p\` over an already-paused row opens nothing" "Pausing aborts" "$MARK"
 
 # ------------------------------- pausing a task that never started at all
@@ -302,7 +331,7 @@ never_draws "\`p\` over an already-paused row opens nothing" "Pausing aborts" "$
 # on the spot exactly like the "nothing live" `P` above — the one thing worth
 # checking here is the record it leaves, not the keypress.
 queue_idle never-run late
-sleep 2
+next_frame
 MARK=$(wc -l < "$BOARD_LOG")
 press P
 stage_reaches "pausing a task that never started parks it at once" never-run paused 25
@@ -327,14 +356,14 @@ lacks "or \`resume:\`" "resume:" "$SPOOLWAY_PROJECT_HOME/queue/never-run.md"
 # pause panel. Two tasks sit on `queued` now: `stalled`, and `never-run`
 # back where its resume put it.
 queue_idle stalled late
-sleep 2
+next_frame
 press U
 draws "\`U\` opens the unqueue-all panel" "2 tasks have not started:"
 draws "answered with enter or esc, and nothing else" "[enter] unqueue them   [esc] cancel"
 stage_stays "nothing is written while the panel is open" stalled queued
 
 press U
-sleep 3
+settle_frames 2
 stage_stays "the old confirming letter no longer answers the panel" stalled queued
 draws "and the panel is still up" "2 tasks have not started:"
 
@@ -385,7 +414,7 @@ else bad "the gate lane is really mid-turn"; fi
 draws "the board draws the chain" "chain-tail"
 
 press $'\x1b[B'
-sleep 2
+next_frame
 press u
 
 draws "\`u\` on the chain's head opens a panel naming both" "unqueue chain-head"

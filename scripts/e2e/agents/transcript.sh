@@ -79,3 +79,23 @@ write_transcript() {
     [ -n "$then" ] && touch -t "$then" "$file"
   fi
 }
+
+# ------------------------------------------------------- a pane that outlives
+# `Mux::start_lane` respawns a tmux pane *as the agent itself*, so the pane
+# closes the instant the agent exits — and spoolway is still mid-launch when
+# it does: `Tmux::prompt` pastes the opening prompt, waits 300ms, and sends
+# Enter. A real agent is sitting at its own prompt by then and will be for as
+# long as a person leaves it there. A stand-in that has already reported and
+# returned is gone, `send-keys` fails with `can't find pane`, and the launch
+# is recorded as a failure the task cannot recover from — `MAX_LAUNCHES` is
+# one, so it lands on `blocked` with a reason that has nothing to do with what
+# the scenario was asking.
+#
+# So a suite that runs a real multiplexer can ask its stand-ins to sit still
+# for a moment before they go, the way the thing they stand in for would.
+# Nothing else sets this, and a headless or herdr lane never reads it: the
+# tier's own speed is what this whole change is about, and a lane that
+# lingered everywhere would spend it back.
+if [ -n "${E2E_PANE_LINGER:-}" ]; then
+  trap 'sleep "$E2E_PANE_LINGER"' EXIT
+fi

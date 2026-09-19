@@ -151,8 +151,8 @@ lacks "nor the run id the earlier run minted" "run: r00000000000000af" \
 # in the live queue is precisely what `check_task_routes` refuses a whole
 # start over — correctly — so leaving it here would refuse every dispatcher
 # the rest of this suite starts, and the runtime half below would assert on
-# tasks nothing ever moved. The same disposal `commands.sh` does for its own
-# routeless fixture, for the same reason.
+# tasks nothing ever moved. The same disposal `command-steps.sh` does for its
+# own routeless fixture, for the same reason.
 rm -f "$SPOOLWAY_PROJECT_HOME/queue/old-run.md"
 
 # ------------------------------------------------------- dispatch and cleanup
@@ -176,8 +176,9 @@ mkdir -p "$LIVE/ctl"
 printf '400\n' > "$LIVE/ctl/transcript"
 
 # Records its own environment beside the task file it ran for, one file per
-# event — the same double `commands.sh`'s own `[issue_tracking]` block uses,
-# so a hook that never fired leaves no file at all rather than an empty one.
+# event — the same double `issue-tracking.sh`'s own `[issue_tracking]` block
+# uses, so a hook that never fired leaves no file at all rather than an empty
+# one.
 mkdir -p .spoolway/hooks
 cat > .spoolway/hooks/record.sh <<'EOF'
 #!/bin/sh
@@ -278,6 +279,33 @@ works "both arms' usage rows are still in the ledger, correlated by trial id" \
 # picker, two `enter`s take both screens' defaults, reaching the overview;
 # the trailing `n` is noise it ignores, and the pipe running dry after it
 # declines.
+#
+# Mid-flight is a state this makes rather than one it catches. A mock lane's
+# step is over in a couple of hundred milliseconds and `drive` looks every two
+# hundred, so waiting for one named stage is a bet on the look landing inside
+# it — and with four suites sharing a machine the look lands after the arm has
+# run all the way to `done` and settled, taking its worktree, its branch and
+# its document with it. Every assertion below then fails against an arm that
+# no longer exists, and the discard refuses an id nothing carries any more.
+# That is exactly how this failed once the tier started running concurrently.
+#
+# So every pipeline here gates its own entry step: whichever the picker
+# assigns the arm, the arm runs that one step — cutting the worktree and the
+# branch this scenario is about — and the pass is then held on `paused`, where
+# it stays until a person resumes it. A state, not a window.
+#
+# A gate rather than a command step that parks, which was the other way to
+# hold this open and is the wrong one: a parked command is *running*, and
+# `eval --discard` refuses a trial with work in flight and says to pass
+# `--force`. The claim here is the plain discard, so what it needs is an arm
+# standing still with nothing running — which is what a gate leaves.
+for pipeline_file in .spoolway/pipelines/*.yml; do
+  awk '
+    { print }
+    /^  - id: / && !gated { print "    gate: true"; gated = 1 }
+  ' "$pipeline_file" > "$pipeline_file.gated" && mv "$pipeline_file.gated" "$pipeline_file"
+done
+
 pending_doc oneoff "$BODY" "group: oneoff" "touches: [notes/oneoff.md]"
 printf 'foneoff\rt\r\rn' | "$SPOOLWAY" queue >/dev/null 2>&1
 
@@ -285,12 +313,12 @@ works "the one-task trial's arm reaches the queue" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/oneoff-1.md"
 SOLO_TRIAL=$(grep '^trial:' "$SPOOLWAY_PROJECT_HOME/queue/oneoff-1.md" | awk '{print $2}')
 
-# Driven partway rather than to `done`, and then held: the whole claim of a
-# discard is that it disposes of an arm that has *not* settled, so the arm has
-# to still be in the queue — with a worktree and a branch of its own already
-# cut — at the moment it is discarded. `drive_and_hold` stops the dispatcher,
-# so nothing carries `oneoff-1` further between here and the assertions.
-if drive_and_hold oneoff-1 review 60; then ok "the arm is mid-flight, with a worktree cut"
+# Driven as far as the hold and no further: the whole claim of a discard is
+# that it disposes of an arm that has *not* settled, so the arm has to still
+# be in the queue — with a worktree and a branch of its own already cut — at
+# the moment it is discarded. The gate above holds exactly that, and
+# `drive_and_hold` stops the dispatcher besides.
+if drive_and_hold oneoff-1 paused 60; then ok "the arm is mid-flight, with a worktree cut"
 else bad "the arm is mid-flight, with a worktree cut (at \`$(stage_of oneoff-1)\`)"; fi
 
 # Acceptance criterion: an explicitly discarded trial loses its task

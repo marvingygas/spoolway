@@ -76,13 +76,45 @@ fi
 # and its `on_fail` routes straight to `blocked` now, the same as any other
 # refusal: there is no fallback lane left to decide the empty diff is fine
 # and wave the task through on its own, so it parks for a person instead.
+#
+# The window this needs is made rather than caught. A task's `stage:` reads
+# `handover` both before the dispatcher launches `spoolway stack` and while it
+# is running, so `drive_and_hold handed handover` returns on either — and on a
+# machine where two passes run back to back it is nearly always the second.
+# Stopping the dispatcher then stops nothing, the command having already
+# detached, and the reset lands after `spoolway stack` has read the branch: the
+# hand-off pushes the work it was supposed to find missing, and all three
+# checks below fail for a reason that is this suite's own and not spoolway's.
+# It failed that way on every run it was watched on, with the suite alone and
+# nothing else on the machine.
+#
+# So a command step of this suite's own sits between `document` and
+# `handover` and blocks until a file appears. The task is genuinely parked in
+# it — nothing running, nothing about to start — the branch is wound back
+# there, and touching the file lets the pipeline walk into a hand-off that
+# really does have nothing to send. Its own `timeout:` is the backstop, so a
+# suite that dies before touching the file leaves no command waiting forever.
+HOLD="$LIVE/let-handed-through"
+{
+  printf '\n  - id: hold\n'
+  printf '    description: Parks the task where this suite can wind its branch back.\n'
+  printf "    run: until [ -e '%s' ]; do sleep 0.1; done\n" "$HOLD"
+  printf '    headless: true\n'
+  printf '    timeout: 120s\n'
+  printf '    on_pass: handover\n'
+} >> .spoolway/pipelines/default.yml
+# `document` reaches the hold rather than the hand-off. Its own `on_pass:
+# handover` is the first in the file; the one written just above is the last.
+sed -i '0,/^    on_pass: handover$/s//    on_pass: hold/' .spoolway/pipelines/default.yml
+
 task_doc "$LIVE/handed.md" handed "$BODY" "group: live" "touches: [src/main.rs]"
 must "a task whose branch will end up empty" "$SPOOLWAY" queue add --from "$LIVE/handed.md"
 
-if drive_and_hold handed handover 90; then ok "it reaches the hand-off with its own work still on the branch"
-else bad "it reaches the hand-off with its own work still on the branch (at \`$(stage_of handed)\`)"; fi
+if drive_and_hold handed hold 90; then ok "it reaches the step before the hand-off with its own work still on the branch"
+else bad "it reaches the step before the hand-off with its own work still on the branch (at \`$(stage_of handed)\`)"; fi
 must "the branch is wound back to its cut point, leaving nothing to hand over" \
   git -C "$LIVE/worktrees/task-handed" reset -q --hard plan/live
+: > "$HOLD"
 
 if drive handed blocked 90; then ok "a lane with nothing to hand over blocks for a person instead of guessing"
 else bad "a lane with nothing to hand over blocks for a person instead of guessing (at \`$(stage_of handed)\`)"; fi
