@@ -89,12 +89,10 @@ struct QueueRowJson {
     stage: String,
     pipeline: String,
     state: &'static str,
-    /// How many times the step this task is on has sent it back, and that
-    /// route's own budget — `None` wherever the step declares no `loop:` for
-    /// any route out of it. Mirrors `Row::step_loop`, which the board draws
-    /// inline on the STEP column as `(round n)`.
-    laps: Option<u32>,
-    lap_limit: Option<u32>,
+    /// How many times this task has arrived at the step it is on. Mirrors
+    /// `Row::arrivals`, which the board draws inline on the STEP column as
+    /// `↻<n>` from the second arrival on.
+    arrivals: u32,
     next: String,
     resumable: bool,
     ctx_pct: Option<u64>,
@@ -112,8 +110,7 @@ impl From<&crate::status::Row> for QueueRowJson {
             stage: row.stage.clone(),
             pipeline: row.pipeline.clone(),
             state: state_label(row.state),
-            laps: row.step_loop.map(|(laps, _)| laps),
-            lap_limit: row.step_loop.map(|(_, limit)| limit),
+            arrivals: row.arrivals,
             next: row.next.clone(),
             resumable: row.resumable,
             ctx_pct: row.ctx,

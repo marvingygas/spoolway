@@ -137,17 +137,13 @@ pub struct Row {
     /// thing `queue conflicts` reasons from.
     pub parallel: bool,
     pub stage: String,
-    /// How many times the step a task is on has sent it back, against that
-    /// route's own budget, `(laps, limit)` — read off the step it is on now
-    /// and the routes that step's own `loop:` bounds, the same pair
-    /// `apply_loop_budget` compares before it lets a move through. `None`
-    /// wherever the step bounds no route it can reach, which draws as a bare
-    /// step id; the furthest-spent route wins where a step bounds two.
-    /// Shown on the STEP column from the first arrival: unlike the old NEXT
-    /// suffix this replaced, there is no floor here, since a step's own row
-    /// is where a reader would look to ask "is this looping" in the first
-    /// place.
-    pub step_loop: Option<(u32, u32)>,
+    /// How many times this task has arrived at the step it is on now — the
+    /// sum of every [`crate::task::Frontmatter::rounds`] entry whose key
+    /// ends `->{stage}`, [`crate::task::Task::rounds_at`]'s own answer.
+    /// Whichever route carried it there each time, and with no budget behind
+    /// it: a step reached once is a bare id, since one visit is not yet worth
+    /// a reader's notice, and every visit after that draws `↻<n>` beside it.
+    pub arrivals: u32,
     /// The pipeline this task resolves to, by name — what the `PIPELINE`
     /// column draws. A task with no `pipeline:` of its own names its
     /// project's configured default, exactly [`Pipelines::for_task`]'s own
@@ -2083,25 +2079,11 @@ fn build_rows(
     for task in tasks {
         let pipeline = pipelines.for_task(task)?;
         let step = pipeline.step(task.stage());
-        // `(N/M)`: how many times this step has sent the task back, against
-        // that route's own budget — read off the step it is on right now and
-        // the routes out of it that its own `loop:` bounds, the same pair
-        // `apply_loop_budget` compares before it lets a move through. Not
-        // `arrived_from`: a budget is spent by the step making the move, so
-        // the route it arrived *on* is somebody else's counter. Computed
-        // once, ahead of the match below, because it is a fact about the step
-        // a task sits on and not about any one of the states that match
-        // branches out into.
-        let step_loop = step.and_then(|step| {
-            pipeline
-                .destinations(step)
-                .into_iter()
-                .filter_map(|to| {
-                    step.round_limit(to)
-                        .map(|limit| (task.rounds_via(&step.id, to), limit))
-                })
-                .max_by_key(|(laps, _)| *laps)
-        });
+        // How many times the task has reached the step it is on, whichever
+        // route carried it there each time. Computed once, ahead of the
+        // match below, because it is a fact about the step a task sits on
+        // and not about any one of the states that match branches out into.
+        let arrivals = task.rounds_at(task.stage());
         let lane = crate::mux::lane_name(task.stage(), task.id());
         // By name alone: a task's lane runs in its own worktree, so the
         // checkout path is no test of ownership here the way it is in a pass.
@@ -2298,10 +2280,10 @@ fn build_rows(
                     match pipeline.next_running_step(&step.id) {
                         // Plain text, no colour: this string is clipped to the
                         // room the pane has left, and a cut through an escape
-                        // sequence dyes the rest of the board. No loop count
-                        // here any more — see `step_loop`, above, which reads
-                        // the same pair against the step this task is *on*
-                        // rather than the one named here.
+                        // sequence dyes the rest of the board. No arrival
+                        // count here — see `arrivals`, above, which counts
+                        // the step this task is *on* rather than the one
+                        // named here.
                         Some(next) => format!("→ {next}"),
                         None => "→ done".to_string(),
                     }
@@ -2324,7 +2306,7 @@ fn build_rows(
             issue_url: issue_url_of(task),
             parallel: task.front.parallel,
             stage: task.stage().to_string(),
-            step_loop,
+            arrivals,
             pipeline: pipeline.name.clone(),
             state,
             depth: graph.depth(task.id()),
@@ -2492,9 +2474,11 @@ fn done_rows(
                 issue_url: issue_url_of(task),
                 parallel: task.front.parallel,
                 stage: task.stage().to_string(),
-                // An archived task has no live step to read a loop count off
-                // — its row is history, not a lap in progress.
-                step_loop: None,
+                // Read the same way a live row's is: an archived task's
+                // `rounds` are on file same as any other, and `step_text`
+                // still draws this count for a done row — only the paint
+                // branch in `step_cell` is skipped for one.
+                arrivals: task.rounds_at(task.stage()),
                 pipeline: archived_pipeline_name(pipelines, task.front.pipeline.as_deref()),
                 state: State::Done,
                 // An archived row's `Done` tier already puts it last within
@@ -3068,10 +3052,10 @@ mod tests {
 
     /// The whole point of the column: a task that is moving is described by
     /// where it goes, and a task that is stuck by what is holding it. Also
-    /// where a blocked row, a paused row and a looping row's `step_loop` are
+    /// where a blocked row, a paused row and a row with arrivals on file are
     /// checked, alongside the plain moving and stuck cases, since all of
-    /// them share this one column — the loop count itself belongs to the
-    /// STEP column now, so it is read off `Row::step_loop`, not off `next`.
+    /// them share this one column — the arrival count itself belongs to the
+    /// STEP column now, so it is read off `Row::arrivals`, not off `next`.
     #[test]
     fn the_next_column_names_a_step_for_a_moving_task_and_a_reason_for_a_stuck_one() {
         let repo = fixture("next-column");
@@ -3098,16 +3082,17 @@ mod tests {
         ship.set_stage(crate::pipeline::PAUSED, None);
         ship.save().unwrap();
 
-        // A second lap of `review -> implement`: the shipped default
-        // pipeline bounds `review`'s own move back at 2, so a third failure
-        // would spend it — this is the last lap before the route escalates.
+        // A second arrival at `review`, both times off `implement`. `rounds`
+        // is cleared first: `add`'s own `set_stage` already banked one
+        // arrival off `queued`, which this test is not about.
         add(&repo, "spinner", &[], Some("review"));
         let mut spinner = repo.task("spinner").unwrap();
         spinner.front.arrived_from = Some("implement".into());
+        spinner.front.rounds.clear();
         spinner
             .front
             .rounds
-            .insert(crate::task::route_key("review", "implement"), 2);
+            .insert(crate::task::route_key("implement", "review"), 2);
         spinner.save().unwrap();
 
         let rows = rows(&repo, &pipelines).unwrap();
@@ -3126,11 +3111,10 @@ mod tests {
 
         assert_eq!(row("wall").next, "[r] → review — `spoolway resume wall`");
         assert_eq!(row("ship").next, "[r] → review — `spoolway resume ship`");
-        // No loop text on NEXT at all — it moved to the STEP column, read
-        // off `step_loop` instead, on the last lap before the route
-        // escalates.
+        // No counter text on NEXT at all — it moved to the STEP column, read
+        // off `Row::arrivals` instead.
         assert_eq!(row("spinner").next, "→ document");
-        assert_eq!(row("spinner").step_loop, Some((2, 2)));
+        assert_eq!(row("spinner").arrivals, 2);
     }
 
     /// A paused row that caught something other than a plain pass carries the
@@ -3249,46 +3233,50 @@ mod tests {
         );
     }
 
-    /// The STEP counter shows from the first move back — there is no floor
-    /// any more, unlike the NEXT suffix it replaced — but only where the step
-    /// the task is on declares a `loop:` for a route out of itself. A step
-    /// that bounds nothing has no ceiling to read a lap count against,
-    /// however many rounds are on file, so it stays a bare step id.
+    /// `Row::arrivals` is a plain count of every `rounds` entry ending
+    /// `->{stage}` — no `loop:` bound involved at all, unlike the pair this
+    /// replaced. A step reached once still banks the arrival even though the
+    /// STEP column draws no suffix for it below two — see `step_text`.
     #[test]
-    fn the_step_counter_shows_from_the_first_move_back_and_is_omitted_where_nothing_is_bounded() {
-        let repo = fixture("loop-suffix-floor");
+    fn arrivals_sum_every_route_into_the_step_regardless_of_any_loop_bound() {
+        let repo = fixture("arrival-counter");
         let pipelines = Pipelines::builtin();
 
-        // One move down a bounded route: shown, unlike the old NEXT suffix,
-        // which said nothing below two laps.
-        add(&repo, "first-lap", &[], Some("review"));
-        let mut first_lap = repo.task("first-lap").unwrap();
-        first_lap.front.arrived_from = Some("implement".into());
-        first_lap
-            .front
+        // One arrival at `review`, off a route the shipped pipeline does
+        // bound: the count is banked all the same. `rounds` is cleared
+        // first: `add`'s own `set_stage` already banked one arrival off
+        // `queued`, which this test is not about.
+        add(&repo, "once", &[], Some("review"));
+        let mut once = repo.task("once").unwrap();
+        once.front.arrived_from = Some("implement".into());
+        once.front.rounds.clear();
+        once.front
             .rounds
-            .insert(crate::task::route_key("review", "implement"), 1);
-        first_lap.save().unwrap();
+            .insert(crate::task::route_key("implement", "review"), 1);
+        once.save().unwrap();
 
-        // Sitting on `implement`, which the shipped pipeline gives no `loop:`
-        // of its own — so there is no budget to read a count against, however
-        // many rounds are on file for the routes either side of it.
-        add(&repo, "unbounded", &[], Some("implement"));
-        let mut unbounded = repo.task("unbounded").unwrap();
-        unbounded.front.arrived_from = Some("review".into());
-        unbounded
+        // Two arrivals at `implement`, off two different routes — the
+        // shipped pipeline gives `implement` no `loop:` of its own, so there
+        // is no budget behind this count either.
+        add(&repo, "twice", &[], Some("implement"));
+        let mut twice = repo.task("twice").unwrap();
+        twice.front.arrived_from = Some("review".into());
+        twice.front.rounds.clear();
+        twice
             .front
             .rounds
-            .insert(crate::task::route_key("review", "implement"), 5);
-        unbounded.save().unwrap();
+            .insert(crate::task::route_key("review", "implement"), 3);
+        twice
+            .front
+            .rounds
+            .insert(crate::task::route_key("queued", "implement"), 2);
+        twice.save().unwrap();
 
         let rows = rows(&repo, &pipelines).unwrap();
         let row = |id: &str| rows.iter().find(|r| r.id == id).unwrap();
 
-        assert_eq!(row("first-lap").next, "→ document");
-        assert_eq!(row("first-lap").step_loop, Some((1, 2)));
-        assert_eq!(row("unbounded").next, "→ review");
-        assert_eq!(row("unbounded").step_loop, None);
+        assert_eq!(row("once").arrivals, 1);
+        assert_eq!(row("twice").arrivals, 5);
     }
 
     /// The frame carries the run's own header, because whose process this is

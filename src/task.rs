@@ -642,6 +642,22 @@ impl Task {
             .unwrap_or(0)
     }
 
+    /// How many times this task has arrived at `step`, whichever route
+    /// carried it there each time — every `rounds` entry keyed `*->{step}`,
+    /// summed. Unlike [`Self::rounds_via`], which asks about one route's own
+    /// budget, this is a fact about the step itself: the board's STEP column
+    /// reads it to say how many times a task has stood there, with no route
+    /// or budget behind the number at all.
+    pub fn rounds_at(&self, step: &str) -> u32 {
+        let suffix = format!("->{step}");
+        self.front
+            .rounds
+            .iter()
+            .filter(|(key, _)| key.ends_with(&suffix))
+            .map(|(_, n)| *n)
+            .sum()
+    }
+
     /// Bank one launch at `to`, arriving from `from` — an agent lane's own
     /// conversation, or a command step's `run:` process starting.
     ///

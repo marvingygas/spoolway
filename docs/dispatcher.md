@@ -118,7 +118,7 @@ task id marks `parallel: true`.
 |---|---|
 | TASK | The task id. |
 | PIPELINE | The pipeline the task runs on. |
-| STEP | The current step. `(2/2)` is the loop counter: laps taken over the budget. |
+| STEP | The current step. `↻<n>` is how many times the task has arrived at that step, whichever route carried it there. It appears from the second arrival on and always draws dim. |
 | STATE | One of the states below. |
 | CTX | How full the lane's context window is, as a percentage of the model's `context_window`. |
 | OUT | Output tokens this step has produced. |
