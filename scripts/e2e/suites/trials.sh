@@ -204,7 +204,8 @@ must "and a project key" "$SPOOLWAY" config set issue_tracking.project_key acme/
 # itself.
 TRIAL_ID=$(grep '^trial:' "$SPOOLWAY_PROJECT_HOME/queue/alpha-1.md" | awk '{print $2}')
 task_doc "$LIVE/control.md" control "$BODY" "group: control-live" \
-  "touches: [notes/control.md]" "pipeline: default"
+  "touches: [notes/control.md]" "pipeline: default" \
+  "group_description: an ordinary control task beside the trial arms"
 must "control queues" "$SPOOLWAY" queue add --from "$LIVE/control.md"
 
 if drive control gone 60; then ok "the ordinary control task runs the pipeline to done"

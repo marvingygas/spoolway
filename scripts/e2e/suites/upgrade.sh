@@ -205,7 +205,42 @@ stage() {
   cp -a "$FIXTURES/$version/.spoolway" "$dir/.spoolway"
   must "the fixture committed" git -C "$dir" add -A
   must "the fixture committed" git -C "$dir" commit -qm "fixture $version"
-  must "the project claims its state directory" "$SPOOLWAY" init
+  # Captured rather than let straight through: acceptance criterion 3 — a
+  # second `init` over a project that already has everything reports `kept`
+  # for every file it considered and writes nothing, and this is the one
+  # place in the suite that runs `init` a second time over a tree it did
+  # not just scaffold itself, so it is the one place that can prove `place`
+  # reaches a *real* past release's own files rather than only ones this
+  # suite's own fixtures were built by today's binary.
+  if "$SPOOLWAY" init >"$WORK/$version/init.out" 2>&1; then
+    :
+  else
+    printf '  \033[31mSETUP\033[0m the project claims its state directory\n' >&2
+    sed 's/^/        /' "$WORK/$version/init.out" >&2
+    annotate "setup failed: the project claims its state directory"
+    exit 2
+  fi
+}
+
+# assert_init_reused_everything <version>
+#
+# Review finding 1: `stage`'s own `spoolway init` runs a second time over a
+# tree that release's own `init` already scaffolded in full, so every file
+# it considers is already there — this asserts the transcript `stage`
+# captured reads `kept` for it rather than `wrote`, and that `nothing to
+# install.` is what it closes with. Every fixture under `scripts/e2e/
+# fixtures/` ships with `issue_tracking.hook` blank, so there is no
+# `.github/workflows/spoolway-issues.yml` row to expect here either — that
+# half of acceptance criterion 3 (a `wrote` row for something a fixture
+# actually lacks) is `tests/init_output.rs`'s own job, against a project
+# this binary controls the shape of rather than a fixture frozen at a past
+# release.
+assert_init_reused_everything() {
+  local version=$1 out="$WORK/$1/init.out"
+  lacks "the $version fixture's second init wrote anything at all" "  wrote" "$out"
+  has "and reported every file it considered kept instead" \
+    "  kept     .spoolway/config.toml" "$out"
+  has "closing with nothing to install" "nothing to install." "$out"
 }
 
 # ----------------------------------------------------------------- 0.1.0: fold
@@ -217,6 +252,7 @@ stage() {
 # this binary ships: it still carries a `cleanup:` line the block has since
 # dropped.
 stage 0.1.0
+assert_init_reused_everything 0.1.0
 PIPELINE=".spoolway/pipelines/default.yml"
 cp "$PIPELINE" "$WORK/0.1.0/before-default.yml"
 has "the 0.1.0 fixture really does carry that release's own stale key block" \
@@ -251,6 +287,7 @@ works "the 0.1.0 fixture's dead lane-prompts template is swept" \
 # empty), so an update over it should carry its `retention_days` forward
 # unchanged rather than migrate or rewrite anything.
 stage 0.2.0
+assert_init_reused_everything 0.2.0
 PIPELINE=".spoolway/pipelines/default.yml"
 cp "$PIPELINE" "$WORK/0.2.0/before-default.yml"
 
@@ -277,6 +314,7 @@ works "the 0.2.0 fixture's dead lane-prompts template is swept" \
 # whether the three dead templates the fixture still carries are gone
 # afterwards.
 stage 0.3.0
+assert_init_reused_everything 0.3.0
 
 must "spoolway sync runs against the 0.3.0 project" "$SPOOLWAY" sync
 

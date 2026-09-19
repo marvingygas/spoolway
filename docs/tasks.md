@@ -32,7 +32,7 @@ depends_on:
   - login
 ---
 ## Context
-## Goal
+## Intend
 ## Non-goals
 ## Acceptance criteria
 ## References
@@ -56,6 +56,7 @@ as JSON.
 | `base` | you | The branch the group lands in. Required, here or with `spoolway queue add --base`. |
 | `source` | you | Where the task came from: an issue URL, a plan page path, a name. Never parsed. |
 | `plan` | you | The plan page's absolute path, when `source` holds an issue. Never parsed. |
+| `group_description` | you | The group's own words for its tracker issue. See [Issue tracking](configuration.md#open--a-fifth-event-run-by-queue-add-itself). |
 | `epic`, `ticket` | the `open` hook, or you | Tracker references. A document that sets `ticket:` itself skips the hook. See [Issue tracking](configuration.md#open--a-fifth-event-run-by-queue-add-itself). |
 | `stage` | the pipeline | The step the task is on. |
 | `branch` | the dispatcher | `task/<id>`, or `task/<slug>-<id>` with `issue_tracking.key_in_names`. |
@@ -104,6 +105,10 @@ When `depends_on` names more than one id, the first must be the one whose branch
 contains the others. `queue add` reorders the list to put it first. A list with no such id is
 refused.
 
+When `issue_tracking.hook` is set, one document in a group must set `group_description:`. A
+document already queued in the same group also satisfies it. A submission is refused, naming
+the group, when none does.
+
 ### The body is the project's
 
 spoolway never reads the body. It is written once, from the skeleton in
@@ -112,7 +117,7 @@ spoolway never reads the body. It is written once, from the skeleton in
 | Section | What goes there |
 |---|---|
 | `## Context` | Three to five facts about the system today and the decision this task implements. |
-| `## Goal` | What the task achieves, in one or two sentences. |
+| `## Intend` | What the task achieves, in one or two sentences. |
 | `## Mockup` | What the result looks like, drawn as the thing itself. Delete the heading when nothing a person opens changes. The reviewer checks the change against it. |
 | `## Non-goals` | What the task must not do. |
 | `## Acceptance criteria` | Statements that are true or false when the task is done. |

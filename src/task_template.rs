@@ -88,27 +88,77 @@ pub fn resolve_tracking(repo: &Repo, name: &str) -> String {
 /// not carry — `SPOOLWAY_EPIC` for a group of one, say — renders empty
 /// rather than failing: a blank body is a project's problem to notice, not
 /// spoolway's to refuse over.
+///
+/// A whole line is dropped, its own newline with it, when it holds at least
+/// one placeholder and every placeholder on it resolves empty — `- Blocked
+/// by: ${SPOOLWAY_DEPENDS_TICKETS}` disappears entirely for a task with no
+/// dependency, rather than rendering as an empty bullet nobody meant to
+/// leave behind. A line with no placeholder at all, or one where at least
+/// one placeholder resolves to something, is rendered exactly as before —
+/// this only ever removes a line that would otherwise say nothing.
 pub fn render_tracking(text: &str, env: &std::collections::BTreeMap<String, String>) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
-    while let Some(start) = rest.find("${") {
+    loop {
+        let (line, newline) = match rest.find('\n') {
+            Some(idx) => (&rest[..idx], true),
+            None => (rest, false),
+        };
+        let (rendered, has_placeholder, all_empty) = render_line(line, env);
+        if !(has_placeholder && all_empty) {
+            out.push_str(&rendered);
+            if newline {
+                out.push('\n');
+            }
+        }
+        if !newline {
+            break;
+        }
+        rest = &rest[line.len() + 1..];
+    }
+    out
+}
+
+/// One line of [`render_tracking`]'s own substitution — split out so the
+/// caller can decide whether to keep the line at all, not only what to
+/// render it as. Returns the rendered line, whether it held any
+/// `${SPOOLWAY_*}` placeholder, and whether every placeholder it held
+/// resolved to the empty string.
+fn render_line(
+    line: &str,
+    env: &std::collections::BTreeMap<String, String>,
+) -> (String, bool, bool) {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    let mut has_placeholder = false;
+    let mut all_empty = true;
+    loop {
+        let Some(start) = rest.find("${") else {
+            out.push_str(rest);
+            break;
+        };
         out.push_str(&rest[..start]);
         rest = &rest[start + 2..];
         match rest.find('}') {
             Some(end) => {
-                out.push_str(env.get(&rest[..end]).map(String::as_str).unwrap_or(""));
+                has_placeholder = true;
+                let value = env.get(&rest[..end]).map(String::as_str).unwrap_or("");
+                if !value.is_empty() {
+                    all_empty = false;
+                }
+                out.push_str(value);
                 rest = &rest[end + 1..];
             }
-            // An unclosed `${` at the end of the template is not a
-            // placeholder to resolve — left verbatim rather than swallowed.
+            // An unclosed `${` at the end of the line is not a placeholder
+            // to resolve — left verbatim rather than swallowed.
             None => {
                 out.push_str("${");
+                out.push_str(rest);
                 break;
             }
         }
     }
-    out.push_str(rest);
-    out
+    (out, has_placeholder, all_empty)
 }
 
 #[cfg(test)]
@@ -193,5 +243,46 @@ mod tests {
             &env,
         );
         assert_eq!(rendered, "task `scan-pending`, blocked by: .");
+    }
+
+    /// A line holding at least one placeholder whose placeholders all
+    /// resolve empty is dropped entirely — no empty bullet, no gap where it
+    /// stood — while a line with no placeholder, and a line where one
+    /// placeholder of several resolves non-empty, are both rendered exactly
+    /// as before. The mockup this covers: `- Blocked by: ` on a dependency-
+    /// free task.
+    #[test]
+    fn render_tracking_drops_a_line_whose_placeholders_all_resolve_empty() {
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("SPOOLWAY_TASK".to_string(), "demo".to_string());
+        env.insert("SPOOLWAY_BRANCH".to_string(), "task/demo".to_string());
+
+        let rendered = render_tracking(
+            "Mirrors task `${SPOOLWAY_TASK}`.\n\
+             \n\
+             - Source: `${SPOOLWAY_SOURCE}`\n\
+             - Blocked by: ${SPOOLWAY_DEPENDS_TICKETS}\n\
+             - Branch: `${SPOOLWAY_BRANCH}`\n",
+            &env,
+        );
+
+        assert_eq!(
+            rendered,
+            "Mirrors task `demo`.\n\
+             \n\
+             - Branch: `task/demo`\n"
+        );
+    }
+
+    /// A line with two placeholders, one empty and one not, keeps its
+    /// substitution and is not dropped — dropping only ever happens when
+    /// *every* placeholder on the line resolves empty.
+    #[test]
+    fn render_tracking_keeps_a_line_with_one_set_and_one_empty_placeholder() {
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("SPOOLWAY_TASK".to_string(), "demo".to_string());
+
+        let rendered = render_tracking("task `${SPOOLWAY_TASK}`, epic `${SPOOLWAY_EPIC}`\n", &env);
+        assert_eq!(rendered, "task `demo`, epic ``\n");
     }
 }

@@ -158,7 +158,7 @@ depends_on:
   - login
 ---
 ## Context
-## Goal
+## Intend
 ## Non-goals
 ## Acceptance criteria
 ## References

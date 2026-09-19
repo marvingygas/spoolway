@@ -140,11 +140,11 @@ pub const TRACKING_TEMPLATES: &[(&str, &str)] = &[
     ("ticket", include_str!("../assets/tracking/ticket.md")),
 ];
 
-/// Read one of [`TRACKING_TEMPLATES`] by name. Not reached outside a test:
-/// `init` places the pair by iterating the slice above directly, and
-/// `resolve_tracking` never falls back to either by name — this is only
-/// what a test compares a seeded file's contents against.
-#[allow(dead_code)]
+/// Read one of [`TRACKING_TEMPLATES`] by name — what `crate::update`'s own
+/// `shipped_for` hands `--replace` for a tracking template, the same way it
+/// already does for a task skeleton and a prompt; `init` itself still places
+/// the pair by iterating the slice above directly, and `resolve_tracking`
+/// never falls back to either by name.
 pub fn tracking_template(name: &str) -> Option<&'static str> {
     TRACKING_TEMPLATES
         .iter()
@@ -163,19 +163,24 @@ pub fn tracking_template(name: &str) -> Option<&'static str> {
 /// rule a prompt or a task skeleton already follows once a project has made
 /// a file its own.
 ///
-/// `github.sh`'s `open`, `blocked` and `paused` branches were run against a
-/// real repository: the issues they create, the `sub_issues` link and the
-/// comment all landed. Its `done` branch hands the ticket to its pull
-/// request with a `Closes #<n>` trailer rather than closing anything itself.
-/// Both of that branch's `gh pr view` lookups were confirmed live and return
-/// the shapes it reads; its two writing calls, `gh pr edit` and
-/// `gh issue comment`, were not, because nobody has yet had a throwaway
-/// pull request to let them write to. It pipes that body into `--body-file -`,
-/// and a POSIX pipe carries the exact bytes `printf` wrote. The `fetch`
-/// branch, plus every
-/// branch of the Jira pair, are written
-/// the same careful way but have not been run against a live tracker —
-/// `jira.sh`'s `acli` commands were checked flag by
+/// `github.sh` treats GitHub as a mirror: `open` opens the group's epic (if
+/// any) and the task's own ticket, `queued` labels the ticket in progress,
+/// `blocked`/`paused` comment a snapshot of the task file's own status log
+/// and handoff, and `done` — reached when `spoolway stack` has already
+/// opened this task's own pull request, not when it merges — leaves a
+/// `<!-- spoolway-issue: URL -->` marker comment on that pull request and
+/// relabels the ticket for review. Closing the ticket itself is left to
+/// [`GITHUB_ISSUE_WORKFLOW`], the workflow a project writes alongside this
+/// hook: it trusts only a marker left by an owner, member or collaborator,
+/// reads the pull request's `merged` event, and closes the ticket — and,
+/// once every child of a group has closed, the group's own epic — from
+/// there. This whole design, `open` through `done`, was run against a real
+/// repository: the issues it creates, the parent link, the labels, the
+/// marker comment and the workflow's own close all landed, four times over,
+/// closing a real group and the tasks inside it. The `fetch` branch, plus
+/// every branch of the Jira pair, are written the same careful way but have
+/// not been run against a live tracker — `jira.sh`'s `acli` commands were
+/// checked flag by
 /// flag against acli 1.3.30-stable, and its header names what still wants a
 /// project's own site to confirm: the field `workitem create --json` puts the
 /// new key in and `workitem view --json` puts an issue's own fields in,
@@ -193,10 +198,33 @@ pub fn tracking_template(name: &str) -> Option<&'static str> {
 /// group only lists and deletes. So the Jira comment names the task and leaves
 /// the file in the queue, while the GitHub pair, which needs nothing beyond
 /// the `gh` login a project already has, still folds it into the comment.
+///
+/// `github.sh` carries one line `.spoolway/hooks/github.sh` (the file this
+/// repository actually runs, and what `github.sh` here is a byte-for-byte
+/// port of) does not: `# spoolway-requires: gh >= 2.97.0`, restored because
+/// the marker-and-label design otherwise ships with no machine-readable
+/// version floor at all — `spoolway doctor` and the submit-time gate
+/// (`scripts/e2e/suites/commands.sh`'s "gh below the floor" block) both read
+/// it, and read nothing back once it is gone, which stops warning silently
+/// rather than failing loudly. `.spoolway/hooks/github.sh` itself still wants
+/// this line added to stay in step.
 pub const HOOK_SCRIPTS: &[(&str, &str)] = &[
     ("github.sh", include_str!("../assets/hooks/github.sh")),
     ("jira.sh", include_str!("../assets/hooks/jira.sh")),
 ];
+
+/// The GitHub Actions workflow that closes a mirrored issue once its pull
+/// request actually merges — `.github/workflows/spoolway-issues.yml` in
+/// this repository, unchanged, and proven there: it closed #159 through
+/// #162 and their group #158 on four real merges. `spoolway init` writes it
+/// into a project's own `.github/workflows/` only when `[issue_tracking]`
+/// names `github`, and — like a hook script — never touches one already
+/// there. It reads the `<!-- spoolway-issue: URL -->` marker `github.sh`'s
+/// `done` branch leaves on the pull request, but only from a comment whose
+/// author is the repository's own owner, a member or a collaborator, so a
+/// marker pasted into a comment by anyone else cannot close a ticket it
+/// does not belong to.
+pub const GITHUB_ISSUE_WORKFLOW: &str = include_str!("../assets/tracking/spoolway-issues.yml");
 
 /// The markers around spoolway's rules in the project's `.gitignore`.
 ///
@@ -245,118 +273,78 @@ mod tests {
         );
     }
 
-    /// The `done` handoff this task added has to carry every bug two
-    /// review rounds found: the trailer search safe against a shorter
-    /// ticket number matching inside a longer one, a byte-accurate (not
-    /// character-counting) check against GitHub's 65,536-byte body limit
-    /// that fails outright rather than truncating the existing body (which
-    /// risks cutting `spoolway stack`'s own trailer), and every `gh` call —
-    /// the branch lookup, the body read, the edit, the handoff comment —
-    /// checked for failure rather than treated as an incidental step. Static
-    /// substring checks can only prove these markers are present, not that
-    /// the script's logic is correct on its own — see `tracking::tests` for
-    /// execution-level proof of `github.sh`'s behavior covering all of the
-    /// above.
+    /// `spoolway doctor` and the submit-time version gate both read this
+    /// declaration back through `crate::tracking::required_tools` — see
+    /// [`HOOK_SCRIPTS`]'s own doc for why it is restored here even though
+    /// `.spoolway/hooks/github.sh` does not carry it (yet).
     #[test]
-    fn github_sh_hands_off_to_a_pull_request() {
+    fn shipped_github_hook_declares_its_gh_version_floor() {
+        let script = hook_script("github.sh");
+        assert!(
+            script.contains("# spoolway-requires: gh >= 2.97.0"),
+            "github.sh no longer declares the gh version its own commands were checked against"
+        );
+    }
+
+    /// `hand_off_for_review` — the `done` branch — leaves the marker comment
+    /// [`GITHUB_ISSUE_WORKFLOW`] trusts on the pull request, relabels the
+    /// ticket for review, and tells it where to find the pull request,
+    /// checking every `gh` call for failure rather than treating a failed
+    /// lookup, comment or edit as nothing to react to. Static substring
+    /// checks can only prove these markers are present, not that the
+    /// script's logic is correct on its own — see `tracking::tests` for
+    /// execution-level proof of `github.sh`'s `done` behavior.
+    #[test]
+    fn github_sh_hands_off_to_a_pull_request_for_review() {
         let sh = hook_script("github.sh");
         for marker in [
-            "Closes #",
+            "spoolway-issue:",
             "gh pr view",
-            "gh pr edit",
+            "gh pr comment",
+            "gh issue edit",
+            "--remove-label spoolway:in-progress",
+            "--add-label spoolway:review",
             "gh issue comment",
-            "65536",
-            "awaiting merge",
-            "exit 1",
+            "ready for review",
+            "no pull request found",
         ] {
             assert!(sh.contains(marker), "hook script drops `{marker}`");
         }
-        // Every `gh` call's own result is checked through sh's exit status,
-        // rather than treating a failed lookup, read, edit or comment as
-        // nothing to react to. `gh` is called four times in the done
-        // branch (the branch lookup, the body read, the edit, the handoff
-        // comment); each needs its own check.
+        // The branch lookup, the marker comment and the label swap are each
+        // checked with `|| exit $?` — a failed lookup, comment or edit must
+        // stop the handoff rather than let a later step run against a
+        // pull request or ticket the earlier one never actually reached.
+        // The closing "ready for review" comment needs no `|| exit $?` of
+        // its own: it is the function's last command, so its own exit
+        // status is already `hand_off_for_review`'s. Scoped to that
+        // function's own body — `open`'s `epic=$(...)`/`ticket=$(...)` use
+        // the same guard for the same reason and would otherwise inflate
+        // the count without proving anything about `done`.
+        let done_branch = sh
+            .split("hand_off_for_review() {")
+            .nth(1)
+            .expect("github.sh still defines hand_off_for_review");
+        let done_branch = &done_branch[..done_branch.find("\n}\n").unwrap_or(done_branch.len())];
         assert_eq!(
-            sh.matches("if !").count(),
-            4,
-            "github.sh no longer checks all four `gh` calls in its done branch"
+            done_branch.matches("|| exit $?").count(),
+            3,
+            "github.sh no longer checks all three of the branch lookup, the marker comment \
+             and the label swap in its done branch"
         );
         // The branch lookup can also succeed with nothing to report — a
         // `done` this hook fires for always has a pull request behind it by
         // then, so that has to fail too rather than read as "nothing to do".
         assert!(
-            sh.contains("if [ -z \"$pr\" ]"),
+            sh.contains("[ -n \"$pr\" ]"),
             "github.sh no longer treats a missing pull request as a failure"
         );
-        // The script may not cut the existing pull request body to make
-        // room for the trailer any more — that risks truncating `spoolway
-        // stack`'s own trailer — so it must fail instead once the two no
-        // longer fit. `head -c` is also this file's own way of capping the
-        // blocked/paused task-file comment below, which is unrelated and
-        // must stay, so this checks for the specific budget variable the
-        // done branch used to cut the body with rather than the bare tool
-        // name.
+        // `done` here is the hand-off, not a merge — GitHub itself is what
+        // closes the ticket, once the pull request the marker names
+        // actually merges.
         assert!(
-            !sh.contains("head -c \"$budget\""),
-            "github.sh still truncates an oversized pull request body"
-        );
-        // GitHub's limit is bytes, not characters — `${#var}` undercounts
-        // anything outside plain ASCII.
-        assert!(
-            sh.contains("wc -c"),
-            "github.sh sizes the body by character count, not bytes"
-        );
-        // Review finding: `spoolway resume` is not how a held `done` hook
-        // retries at all — `tracking::retry_if_failed`'s own doc says so —
-        // so recommending it anywhere here would be wrong regardless of how
-        // it was worded, not just an unscoped claim. A literal, absolute
-        // ban catches a reintroduction directly rather than trusting a
-        // positive check on the *replacement* wording to notice one; the
-        // explanatory comment above the `done` branch on both platforms is
-        // written to describe this without ever typing that phrase, so the
-        // ban costs nothing there.
-        assert!(
-            !sh.contains("spoolway resume"),
-            "github.sh recommends `spoolway resume`, which a held `done` hook never retries \
-             through — see `tracking::retry_if_failed`'s own doc"
-        );
-        // The positive half of the same finding: every one of the done
-        // branch's six recovery messages (the four checked `gh` calls plus
-        // the two result checks — no pull request found, body over the
-        // byte limit — that are not `gh` failures but still end the branch
-        // the same way) still has to explain the *real* recovery path —
-        // automatic retry under `on_fail = pause`, a manual fallback
-        // otherwise — not just drop the wrong claim and go silent. Counted
-        // by `on_fail = pause` rather than a longer phrase like "retries
-        // this automatically": `github.sh`'s own multi-argument `echo`
-        // calls wrap that phrase across two string literals on two source
-        // lines, which a substring search across the whole file would miss
-        // even though the two arguments still read as one sentence once
-        // `echo` joins them at runtime — see
-        // `tracking::tests::github_sh_done_fails_when_the_pull_request_lookup_fails`
-        // for the actual execution proof that they do; nothing in this
-        // file runs a shell, so it can only count source text. One of the
-        // seven total matches below is the explanatory comment above the
-        // branch, not a message; two of the total `on_fail = ignore`
-        // matches split the same way, one message and one comment.
-        assert_eq!(
-            sh.matches("on_fail = pause").count(),
-            7,
-            "github.sh drops the automatic-retry explanation from one of its six done-branch \
-             errors, or the comment naming the same thing"
-        );
-        assert_eq!(
-            sh.matches("on_fail = ignore").count(),
-            2,
-            "github.sh drops the manual-fallback explanation naming the shipped default"
-        );
-        // Review finding: a workflow on a push to the default branch cannot
-        // recover the ticket, because the `Closes #<n>` trailer lives only
-        // in the pull request's own body, never in a commit message — the
-        // named automation has to trigger on the pull request itself.
-        assert!(
-            sh.contains("pull_request:") && sh.contains("merged"),
-            "github.sh's stacked-task automation example is still the unusable push-based one"
+            sh.contains("GitHub will close this issue after the pull request merges"),
+            "github.sh's own comment no longer explains that GitHub closes the ticket, not \
+             this hook"
         );
     }
 

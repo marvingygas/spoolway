@@ -101,8 +101,17 @@ reading the file whole.
 
 3. **Write one document per task**, with **Write**, at
    `~/.spoolway/<project>/pending/<task-id>.md`. Frontmatter first, then the body in the shape
-   step 1's contract already printed for this task's own pipeline — the `body` field, byte-
-   identical to `.spoolway/templates/tasks/<pipeline>.md`:
+   step 1's contract already printed for this task's own pipeline — same headings, same order
+   as the `body` field's `.spoolway/templates/tasks/<pipeline>.md`, with every `[[bracketed]]`
+   placeholder replaced by this task's own answer, never carried through unfilled. A heading
+   with nothing of its own to say for this task (an optional `## Mockup`, say) is dropped
+   rather than left standing in on the placeholder's own words. The same goes for a heading's
+   un-bracketed guidance paragraph — "Three to five facts, one line each. …" under `## Context`,
+   "Out of scope. Doing any of these is a review failure, not a bonus." under `## Non-goals`,
+   "Read these before you start. …" under `## References`, and the like: that prose is an
+   instruction to you, not words for the finished document, and it is replaced by this task's
+   own answer or dropped with the rest of an unused heading — never left standing as if the
+   task itself said it:
 
    - `id` — the task id, and the file's own stem. **Keep it short enough to become a lane
      name:** a lane is called `<id> · <step>` and stops at 34 bytes. Measure against the

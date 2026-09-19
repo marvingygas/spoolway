@@ -585,6 +585,30 @@ fn shipped_for(repo: &Repo, path: &Path) -> Option<String> {
         return crate::assets::task_template(stem).map(str::to_string);
     }
 
+    // The two ticket-body templates `init` seeds into
+    // `.spoolway/templates/tracking/` — never touched by an ordinary sync,
+    // exactly like a prompt or a task skeleton, but reachable by name here
+    // the same way both of those already are.
+    if path.starts_with(repo.tracking_templates_dir()) {
+        return crate::assets::tracking_template(stem).map(str::to_string);
+    }
+
+    // The hook scripts `init` seeds into `.spoolway/hooks/` — same rule:
+    // never touched by an ordinary sync, `--replace` only.
+    if path.starts_with(repo.checkout.join(".spoolway/hooks")) {
+        return crate::assets::HOOK_SCRIPTS
+            .iter()
+            .find(|(known, _)| Path::new(known).file_stem().and_then(|s| s.to_str()) == Some(stem))
+            .map(|(_, body)| body.to_string());
+    }
+
+    // The workflow `init` writes into `.github/workflows/` only for
+    // `github` — the one shipped asset outside `.spoolway/` entirely, and
+    // still never touched by an ordinary sync.
+    if path == repo.checkout.join(".github/workflows/spoolway-issues.yml") {
+        return Some(crate::assets::GITHUB_ISSUE_WORKFLOW.to_string());
+    }
+
     // The ignore rules are deliberately not here. They are a block in a file the
     // project owns the rest of, so there is no whole-file version of it to write:
     // `ignores` above refreshes the block, on every run, and that is the only way
@@ -1534,7 +1558,19 @@ mod tests {
             // The flat file a project had before prompts gained a directory.
             // `--replace` still reaches it, because reading still finds it.
             (prompts.join("reviewer.md"), "## "),
-            (repo.task_templates_dir().join("default.md"), "## Goal"),
+            (repo.task_templates_dir().join("default.md"), "## Intend"),
+            (
+                repo.tracking_templates_dir().join("ticket.md"),
+                "${SPOOLWAY_TASK}",
+            ),
+            (
+                repo.checkout.join(".spoolway/hooks/github.sh"),
+                "hand_off_for_review",
+            ),
+            (
+                repo.checkout.join(".github/workflows/spoolway-issues.yml"),
+                "close-issue",
+            ),
         ] {
             let shipped = shipped_for(&repo, &path)
                 .unwrap_or_else(|| panic!("nothing shipped for {}", path.display()));

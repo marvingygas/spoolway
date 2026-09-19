@@ -18,6 +18,17 @@ struct Answers {
     /// The project the tracker's tickets open into. Blank whenever `tracker`
     /// is, and always blank on a config that is staying as it is.
     project_key: String,
+    /// Whether `tracker`/`project_key` were actually resolved this run —
+    /// true on a fresh project (always asked or answered) and on an
+    /// established one when `--tracker` was given a value, or given bare
+    /// with somebody there to answer the picker. False means
+    /// `tracker`/`project_key` are the untouched placeholders above, and
+    /// whoever decides what `.github/workflows/spoolway-issues.yml` gets
+    /// written for has to read the tracker already on disk instead — which
+    /// also covers a bare `--tracker` on an established project with nobody
+    /// to ask: there is no answer to apply, so nothing about
+    /// `[issue_tracking]` is touched, the same as the flag being absent.
+    tracker_touched: bool,
 }
 
 impl Answers {
@@ -56,14 +67,18 @@ impl Answers {
         }
         .provider();
 
-        // Tracker and project key are only asked and applied when a config is
-        // going to be written. An established project's issue integration is
-        // not replaced merely because init was run to add another skill copy.
-        if !fresh {
-            if args.tracker.is_some() || args.project_key.is_some() {
+        // Tracker and project key are asked, or answered outright, whenever a
+        // config is going to be written (a fresh project) or `--tracker` was
+        // given (whatever the project's age — see this task's own acceptance
+        // criteria). `--project-key` alone, with no `--tracker` alongside it,
+        // is dropped on an established project exactly as it always was: an
+        // established project's issue integration is not replaced merely
+        // because init was run to add another skill copy.
+        if !fresh && args.tracker.is_none() {
+            if args.project_key.is_some() {
                 println!(
-                    "  note  this project has a config already, so --tracker/--project-key \
-                     were not applied — change them with `spoolway config set`, \
+                    "  note  this project has a config already, so --project-key was not \
+                     applied without --tracker — change it with `spoolway config set`, \
                      or re-run with --force to take the shipped config back"
                 );
             }
@@ -71,20 +86,44 @@ impl Answers {
                 provider,
                 tracker: Tracker::None,
                 project_key: String::new(),
+                tracker_touched: false,
             });
         }
 
-        let (tracker, project_key) = Self::tracker(args)?;
-
-        Ok(Self {
-            provider,
-            tracker,
-            project_key,
-        })
+        match Self::tracker(args, fresh)? {
+            Some((tracker, project_key)) => Ok(Self {
+                provider,
+                tracker,
+                project_key,
+                tracker_touched: true,
+            }),
+            // A bare `--tracker` on an established project with nobody to
+            // ask: review finding 4 — answering `none` here on the
+            // person's behalf would silently clear a tracker the project
+            // already had. There is no answer, so nothing is touched,
+            // exactly as if the flag had been left out.
+            None => {
+                println!(
+                    "  note  --tracker was given with no value and there is nobody to answer \
+                     its picker, so [issue_tracking] was left exactly as it is — answer with \
+                     `--tracker <value>` or run this at a terminal"
+                );
+                Ok(Self {
+                    provider,
+                    tracker: Tracker::None,
+                    project_key: String::new(),
+                    tracker_touched: false,
+                })
+            }
+        }
     }
 
     /// The tracker `[issue_tracking]` names, and the project it files into —
     /// off the flags, or off a menu the provider question's own takes.
+    /// `None` only for a bare `--tracker` on an established project
+    /// (`fresh` false) with nobody to answer its picker — see
+    /// [`Answers::tracker_touched`]'s own doc for why that case answers
+    /// nothing rather than `none`.
     ///
     /// The note beside each entry is whether its command-line tool is on
     /// `PATH`, so choosing Jira without `acli` installed says so at the
@@ -92,12 +131,30 @@ impl Answers {
     /// is the menu's default: a script with nobody to ask gets the same "no
     /// issue tracking" behaviour a project had before this existed, not a
     /// `gh` hook nobody asked for.
-    fn tracker(args: &InitArgs) -> Result<(Tracker, String)> {
-        let tracker = match args.tracker {
-            Some(tracker) => tracker,
-            None => {
+    fn tracker(args: &InitArgs, fresh: bool) -> Result<Option<(Tracker, String)>> {
+        let tracker = match args.tracker.as_deref() {
+            // A value answers outright — `--tracker github` — parsed by the
+            // same case-insensitive rule clap's own `value_enum` uses, since
+            // `InitArgs::tracker` is a plain string now (see its own doc).
+            Some(raw) if !raw.is_empty() => <Tracker as clap::ValueEnum>::from_str(raw, true)
+                .map_err(|message| {
+                    anyhow::anyhow!("--tracker: {message} — pick `github`, `jira` or `none`")
+                })?,
+            // The flag absent entirely, or given bare (`--tracker` with no
+            // value, filled in by `default_missing_value`): both fall
+            // through to the picker below, whatever the project's age.
+            _ => {
                 if !crate::ask::interactive() {
-                    return Ok((Tracker::None, String::new()));
+                    // A fresh project has no existing answer to preserve, so
+                    // nobody to ask still settles on `none` — the same
+                    // scripted-default behaviour this always had. An
+                    // established project does have one, and answering on
+                    // its behalf is exactly the bug review finding 4 named.
+                    return Ok(if fresh {
+                        Some((Tracker::None, String::new()))
+                    } else {
+                        None
+                    });
                 }
 
                 let trackers = <Tracker as clap::ValueEnum>::value_variants();
@@ -129,7 +186,7 @@ impl Answers {
         };
 
         if tracker == Tracker::None {
-            return Ok((tracker, String::new()));
+            return Ok(Some((tracker, String::new())));
         }
 
         let project_key = match &args.project_key {
@@ -140,7 +197,7 @@ impl Answers {
             )?
             .unwrap_or_default(),
         };
-        Ok((tracker, project_key))
+        Ok(Some((tracker, project_key)))
     }
 
     /// Point a bundled pipeline at this project's one profile.
@@ -183,22 +240,13 @@ fn pad_to_value_column(path: &str) -> String {
     }
 }
 
-/// One `wrote` row for the mockup's report block, aligned to the same
-/// column [`pad_to_value_column`] gives the `stamped` row below it.
-///
-/// `count_noun` is `None` for a single file's row, which ends right after
-/// the path — there is nothing to count — and `Some((n, noun))` for a
-/// directory's row, which reports how many of `noun` it holds and pluralizes
-/// accordingly.
-fn wrote_row(path: &str, count_noun: Option<(usize, &str)>) -> String {
-    match count_noun {
-        None => format!("  wrote    {path}"),
-        Some((count, noun)) => format!(
-            "  wrote    {}{count} {noun}{}",
-            pad_to_value_column(path),
-            if count == 1 { "" } else { "s" }
-        ),
-    }
+/// One row of the mockup's report block: `verb` (`wrote`, `kept` or `set`)
+/// against `what`, either a path relative to the project root or — for
+/// `set` — a `key = value` pair. Every verb is left-padded to nine columns
+/// — `wrote` plus four spaces, `kept` plus five, `set` plus six — so the
+/// three line up whichever one a row starts with.
+fn report_row(verb: &str, what: &str) -> String {
+    format!("  {verb:<9}{what}")
 }
 
 /// The mockup's second `bound` row: how much was already sitting under a
@@ -345,110 +393,83 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     std::fs::create_dir_all(state.join("prompts"))
         .with_context(|| format!("creating {}", state.join("prompts").display()))?;
 
-    // Whether `place` actually wrote `path`, so the `wrote` rows below
-    // report only what a run actually did — a repeat `init` that adds
-    // nothing new says nothing about `config.toml`, pipelines or prompts,
-    // the same way `claim` and the stamped line already say nothing on a
-    // repeat run.
-    let place = |path: std::path::PathBuf, contents: &[u8], exec: bool| -> Result<bool> {
-        if path.exists() && !args.force {
-            return Ok(false);
-        }
-        write_atomic(&path, contents)?;
-        if exec {
-            // A hook is invoked as a bare command line — see
-            // `crate::tracking::hook_path` — so it needs the execute bit
-            // itself; nothing else `init` writes is ever run rather than
-            // read.
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perms = std::fs::metadata(&path)?.permissions();
-                perms.set_mode(0o755);
-                std::fs::set_permissions(&path, perms)?;
-            }
-        }
-        Ok(true)
-    };
-
-    // The mockup's three `wrote` rows, collected as they happen rather than
-    // guessed from whether a config already existed: `--force` writes every
-    // one of these again on a project that was already initialized, and a
-    // plain repeat run writes none of them, so what actually happened is
-    // the only thing worth trusting.
+    // Whether `place` actually wrote `path`, so `wrote_rows` and `wrote_any`
+    // below report only what a run actually did — a repeat `init` that adds
+    // nothing new reports `kept` for everything it considered, the same way
+    // `claim` and the stamped line already say nothing on a repeat run.
+    // `wrote_rows` collects one `kept`/`wrote` row per file `place` is asked
+    // about, in call order, rather than an aggregate count: acceptance
+    // criterion 3 asks for every file it considered, and a project adding
+    // its own pipeline or prompt directory later means a fixed set of
+    // aggregate buckets could not have named it anyway.
     let mut wrote_rows: Vec<String> = Vec::new();
+    let mut wrote_any = false;
+    let mut place =
+        |path: std::path::PathBuf, rel: &str, contents: &[u8], exec: bool| -> Result<bool> {
+            if path.exists() && !args.force {
+                wrote_rows.push(report_row("kept", rel));
+                return Ok(false);
+            }
+            write_atomic(&path, contents)?;
+            if exec {
+                // A hook is invoked as a bare command line — see
+                // `crate::tracking::hook_path` — so it needs the execute bit
+                // itself; nothing else `init` writes is ever run rather than
+                // read.
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mut perms = std::fs::metadata(&path)?.permissions();
+                    perms.set_mode(0o755);
+                    std::fs::set_permissions(&path, perms)?;
+                }
+            }
+            wrote_rows.push(report_row("wrote", rel));
+            Ok(true)
+        };
 
-    if place(
+    wrote_any |= place(
         Config::path_in(root),
+        ".spoolway/config.toml",
         config
             .render()
             .context("rendering default config")?
             .as_bytes(),
         false,
-    )? {
-        wrote_rows.push(wrote_row(".spoolway/config.toml", None));
-    }
+    )?;
     // One file per pipeline, named for the pipeline it holds. A project adds
     // its own by writing another file here and nothing else.
-    let mut pipelines_written = 0usize;
     for (name, body) in crate::pipeline::BUILTIN_PIPELINES {
-        if place(
-            Pipelines::file_in(root, name),
-            answers.fill(body).as_bytes(),
-            false,
-        )? {
-            pipelines_written += 1;
-        }
-    }
-    if pipelines_written > 0 {
-        wrote_rows.push(wrote_row(
-            ".spoolway/pipelines/",
-            Some((pipelines_written, "pipeline")),
-        ));
+        let path = Pipelines::file_in(root, name);
+        let rel = relative(root, &path);
+        wrote_any |= place(path, &rel, answers.fill(body).as_bytes(), false)?;
     }
     // Written whole, and never looked at again. A prompt is the project's from
     // the moment `init` finishes: no sync rewrites one, so nothing here has to
     // be a shape a later binary can still find its way around in.
-    let mut prompts_written = 0usize;
     for prompt in assets::PROMPTS {
         let dir = state.join("prompts").join(prompt.name);
-        // A directory counts as written the moment anything in it is — its
-        // own `PROMPT.md` or, on a repeat run, only one of its assets that
-        // had gone missing — so `|=` rather than overwriting: the first
-        // `place` that actually writes must not be undone by a later one
-        // that finds nothing to do.
-        let mut wrote_this_prompt =
-            place(dir.join(assets::PROMPT_FILE), prompt.body.as_bytes(), false)?;
+        let path = dir.join(assets::PROMPT_FILE);
+        let rel = relative(root, &path);
+        wrote_any |= place(path, &rel, prompt.body.as_bytes(), false)?;
         // A prompt's belongings follow its prose: written once, never updated,
         // and the project's to restyle from here on. No setting names them —
         // the prompt that fills them is the only thing that reads them.
         for (name, body) in prompt.assets {
-            wrote_this_prompt |= place(
-                dir.join(assets::PROMPT_ASSETS).join(name),
-                body.as_bytes(),
-                false,
-            )?;
+            let path = dir.join(assets::PROMPT_ASSETS).join(name);
+            let rel = relative(root, &path);
+            wrote_any |= place(path, &rel, body.as_bytes(), false)?;
         }
-        if wrote_this_prompt {
-            prompts_written += 1;
-        }
-    }
-    if prompts_written > 0 {
-        wrote_rows.push(wrote_row(
-            ".spoolway/prompts/",
-            Some((prompts_written, "prompt")),
-        ));
     }
     // One task skeleton per shipped pipeline, named for the pipeline that takes
     // it. A project adds a pipeline's shape by writing a file beside these, and
     // one that writes nothing takes `default`.
     for (name, skeleton) in assets::TASK_TEMPLATES {
-        place(
-            root.join(crate::config::TASK_TEMPLATES_DIR)
-                .join(format!("{name}.md")),
-            skeleton.as_bytes(),
-            false,
-        )?;
+        let path = root
+            .join(crate::config::TASK_TEMPLATES_DIR)
+            .join(format!("{name}.md"));
+        let rel = relative(root, &path);
+        wrote_any |= place(path, &rel, skeleton.as_bytes(), false)?;
     }
     // The two ticket-body templates a tracker hook renders and hands to its
     // own `gh`/`acli` call — seeded once, like a task skeleton, and never
@@ -456,26 +477,77 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     // a single line naming the task instead of this prose; see
     // `crate::task_template::resolve_tracking`.
     for (name, body) in assets::TRACKING_TEMPLATES {
-        place(
-            root.join(crate::config::TRACKING_TEMPLATES_DIR)
-                .join(format!("{name}.md")),
-            body.as_bytes(),
-            false,
-        )?;
+        let path = root
+            .join(crate::config::TRACKING_TEMPLATES_DIR)
+            .join(format!("{name}.md"));
+        let rel = relative(root, &path);
+        wrote_any |= place(path, &rel, body.as_bytes(), false)?;
     }
     // The hook scripts every project gets, whichever tracker it answered —
     // switching later is a `spoolway config set issue_tracking.hook` away,
     // not a second `init`.
     for (name, body) in assets::HOOK_SCRIPTS {
-        place(
-            root.join(".spoolway/hooks").join(name),
-            body.as_bytes(),
-            true,
-        )?;
+        let path = root.join(".spoolway/hooks").join(name);
+        let rel = relative(root, &path);
+        wrote_any |= place(path, &rel, body.as_bytes(), true)?;
+    }
+    // The workflow that closes a mirrored issue once its pull request
+    // merges, written only for github — see `.github/workflows/
+    // spoolway-issues.yml` in this repository, unchanged. Driven by the
+    // tracker actually in force, not only one just answered: a bare repeat
+    // `init` never touches `answers.tracker` (see `Answers::tracker_touched`)
+    // but still has to report `kept` for a workflow an earlier run already
+    // wrote, per the mockup's own bare-rerun transcript.
+    let github_in_force = if answers.tracker_touched {
+        answers.tracker == Tracker::Github
+    } else {
+        Config::load_tracked(root)
+            .map(|existing| existing.issue_tracking.hook == Tracker::Github.hook_name())
+            .unwrap_or(false)
+    };
+    if github_in_force {
+        let path = root.join(".github/workflows/spoolway-issues.yml");
+        let rel = relative(root, &path);
+        wrote_any |= place(path, &rel, assets::GITHUB_ISSUE_WORKFLOW.as_bytes(), false)?;
     }
     // No plan skeleton here any more. spoolway-plan carries its own, under the
     // skill's own `assets/`, and writes a self-contained page with it — there
     // is nothing left for `init` to place in the project.
+
+    // `--tracker`, given bare or with a value, answers `[issue_tracking]`
+    // even on a project that already has a `config.toml` — `place` above
+    // leaves that file `kept` rather than rewriting it wholesale, so the
+    // two keys the tracker question settles are edited into it directly,
+    // the same narrow edit `spoolway config set` itself makes.
+    if already_initialized && answers.tracker_touched {
+        let existing = Config::load_tracked(root)?;
+        let updated = crate::confkv::set(
+            &existing,
+            "issue_tracking.hook",
+            &config.issue_tracking.hook,
+        )?;
+        updated.save_key(root, "issue_tracking.hook")?;
+        wrote_rows.push(report_row(
+            "set",
+            &format!(
+                "issue_tracking.hook = {}",
+                crate::confkv::get(&updated, "issue_tracking.hook")?
+            ),
+        ));
+        wrote_any = true;
+        if answers.tracker != Tracker::None {
+            let updated =
+                crate::confkv::set(&updated, "issue_tracking.project_key", &answers.project_key)?;
+            updated.save_key(root, "issue_tracking.project_key")?;
+            wrote_rows.push(report_row(
+                "set",
+                &format!(
+                    "issue_tracking.project_key = {}",
+                    crate::confkv::get(&updated, "issue_tracking.project_key")?
+                ),
+            ));
+        }
+    }
 
     // Not written through `place` either: this only ever removes, and never
     // creates a `.gitignore` a project did not already have. See
@@ -538,6 +610,18 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
             "Set model and effort on every agent step in .spoolway/pipelines/*.yml before \
              dispatching."
         );
+    } else if answers.tracker_touched && answers.tracker != Tracker::None {
+        // The one closing line an established project's tracker question
+        // gets: it never sees "Project initialized successfully." above,
+        // and `--tracker` just changed something real about it.
+        println!();
+        println!("issue tracking is on.");
+    } else if !wrote_any {
+        // A bare repeat run that found nothing missing — every row above
+        // read `kept` — gets a closing line of its own too, rather than
+        // trailing off silently into the install report's own output.
+        println!();
+        println!("nothing to install.");
     }
     Ok(())
 }
@@ -1096,7 +1180,7 @@ mod tests {
         let root = scaffold(
             "tracker-github",
             &InitArgs {
-                tracker: Some(Tracker::Github),
+                tracker: Some("github".into()),
                 project_key: Some("acme/app".into()),
                 ..InitArgs::default()
             },
@@ -1127,7 +1211,7 @@ mod tests {
         let root = scaffold(
             "tracker-none",
             &InitArgs {
-                tracker: Some(Tracker::None),
+                tracker: Some("none".into()),
                 project_key: Some("should-be-ignored".into()),
                 ..InitArgs::default()
             },
@@ -1149,7 +1233,7 @@ mod tests {
         let root = scaffold(
             "hook-untouched",
             &InitArgs {
-                tracker: Some(Tracker::Github),
+                tracker: Some("github".into()),
                 project_key: Some("acme/app".into()),
                 ..InitArgs::default()
             },

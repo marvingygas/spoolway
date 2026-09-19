@@ -6534,6 +6534,7 @@ mod tests {
             // its own overrides this back to `None` explicitly with `edit`.
             pipeline: Some("default".to_string()),
             group: None,
+            group_description: None,
             source: None,
             plan: None,
             gate_at: None,
