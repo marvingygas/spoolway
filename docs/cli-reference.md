@@ -55,7 +55,7 @@ archive directories. The right pane lists the highlighted group's tasks.
 | `o` | Open the highlighted task's document in your editor |
 | `f` | Filter groups by name, task id and title. `enter` keeps the filter, `esc` clears it |
 | `h` | Show hidden groups: first the queued ones, then the finished ones |
-| `p` | Fork the group into a trial. See [Trials](planning.md#trials) |
+| `t` | Fork the group into a trial. See [Trials](planning.md#trials) |
 | `r` | Switch to the routines pane. See [Routines](planning.md#routines) |
 | `s` | Save the highlighted group into `.spoolway/routines/<name>/` |
 

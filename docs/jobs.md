@@ -66,6 +66,7 @@ pipeline, scope, next firing, last firing, and the documents it queues.
 | `space` | Pause or resume it. |
 | `x` | Delete it, after `y`/`n`. |
 | `r` | Fire it now. |
+| `ctrl-c` | Leave the screen. |
 
 ### The three choices
 

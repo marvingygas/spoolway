@@ -68,7 +68,7 @@ as JSON.
 | `attempts`, `launched_at`, `prompts`, `rounds`, `arrived_from`, `launch_failures` | the dispatcher | Launch and loop counters. The board and the ledger read them. |
 | `last_report` | `spoolway report` | The last outcome a lane reported. |
 | `blocked_from`, `parked_from`, `escalated`, `paused_at`, `paused_by`, `resume` | the dispatcher | Where a stopped task continues from, and for a pause which road caught it — `gate` for a step's own `gate:`, `schedule` for the task's own `gate_at:`, absent for a `--pause` raised from `blocked`. `spoolway resume` reads them. |
-| `skip`, `trial` | the queue screen's `p` picker | Steps to pass without a lane, and the trial this task is an arm of. See [Trials](planning.md#trials). |
+| `skip`, `trial` | the queue screen's `t` picker | Steps to pass without a lane, and the trial this task is an arm of. See [Trials](planning.md#trials). |
 | `borrowed` | the dispatcher | The checkout already existed and is not removed at cleanup. |
 
 Keys not in this table are kept as they are, so a project can add its own metadata.

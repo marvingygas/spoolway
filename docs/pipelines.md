@@ -314,7 +314,7 @@ flowchart LR
 ### `skip:` — walking past a step
 
 A task's own `skip:` field walks the named steps to their `on_pass` without starting a lane.
-The queue screen's `p` trial picker writes it, so a trial arm never opens a pull request. See
+The queue screen's `t` trial picker writes it, so a trial arm never opens a pull request. See
 [Runs](eval.md#runs).
 
 ## Gates
