@@ -311,6 +311,38 @@ if [ "${E2E_AGENTS:-mock}" = real ]; then
   E2E_SUITE_TIMEOUT=${E2E_SUITE_TIMEOUT_REAL:-100m}
 fi
 
+# ------------------------------------------------------------------ the clock
+#
+# Every change made to these suites claims seconds, and until this was here
+# those seconds could only be reconstructed from CI log timestamps after the
+# fact — which has already cost something: three timing budgets were last
+# re-sized by estimate, and one of the three was a watchdog calling a merely
+# slow suite hung. A suite runs in a process of its own, so this loop is the
+# only place that knows a suite's whole wall clock, including the part a
+# timed-out one spends being killed.
+#
+# Milliseconds off a single `date` call, so the seconds and the nanoseconds
+# cannot straddle a second between them, and `10#` so a nanosecond field with
+# leading zeros is not read as octal. `scripts/e2e/suites/lock.sh` builds the
+# same clock and its header says why neither is `%s%3N`: the width on `%3N` is
+# a GNU extension, and uutils coreutils — which is `date` on some developer
+# machines — ignores it and prints all nine digits instead.
+now_ms() {
+  local t
+  t=$(date +%s.%N)
+  echo $(( ${t%.*} * 1000 + 10#${t#*.} / 1000000 ))
+}
+
+# Milliseconds as the tenth of a second the summary is read in. Integer
+# arithmetic throughout: what is stored is exact and sorts with a plain
+# `sort -n`, and nothing here has to parse a decimal back out of a field.
+secs() {
+  local tenths=$(( ($1 + 50) / 100 ))
+  printf '%d.%ds' "$((tenths / 10))" "$((tenths % 10))"
+}
+
+tier_started=$(now_ms)
+
 for suite in "${SUITES[@]}"; do
   file="$E2E_DIR/suites/$suite.sh"
   if [ ! -f "$file" ]; then
@@ -319,15 +351,42 @@ for suite in "${SUITES[@]}"; do
   fi
 
   echo
-  printf '\033[1m%s\033[0m\n' "$suite"
 
   work="$ROOT/$suite"
   mkdir -p "$work"
+  # The suite writes its tally into a file of its own rather than straight into
+  # the results file, because the duration beside it is this process's to add
+  # and only the row they make together is worth keeping. Folding the two here
+  # is also what puts a row in the results file for a suite that was killed
+  # before it could write one at all.
+  row="$ROOT/$suite.row"
+  : > "$row"
   # Its own tree, its own process. A suite that leaves a mess behind — and the
   # ones that end in `blocked` on purpose all do — cannot reach the next.
   status=0
-  SUITE="$suite" WORK="$work" E2E_RESULTS="$RESULTS" \
+  started=$(now_ms)
+  SUITE="$suite" WORK="$work" E2E_RESULTS="$row" \
     timeout -k 30s "$E2E_SUITE_TIMEOUT" bash "$file" || status=$?
+  elapsed=$(( $(now_ms) - started ))
+
+  # `read` on an empty file leaves both fields empty, which is a suite killed
+  # before lib.sh's EXIT trap could record anything — one that sat through the
+  # TERM and had to be put down. Its counts are unknowable and stay zero; the
+  # time it spent is not, and reporting that is the whole point of the row.
+  read -r _ suite_pass suite_fail < "$row"
+  printf '%s %d %d %d\n' \
+    "$suite" "${suite_pass:-0}" "${suite_fail:-0}" "$elapsed" >> "$RESULTS"
+
+  # The suite's own line, and it comes after the suite rather than before it
+  # because the duration does not exist until the suite is over. Watched live
+  # that costs nothing a reader needs: the last line printed names the suite
+  # *before* this one, so the tier list above says which one is running, and a
+  # suite that hangs is named by this line and the TIMEOUT printed under it.
+  #
+  # 44 and 8 put the seconds against a right edge at column 52, so a run reads
+  # as a column of durations rather than as whatever each suite's name left.
+  printf '\033[1m%-44s\033[0m%8s\n' "$suite" "$(secs "$elapsed")"
+
   # 124 is `timeout`'s own verdict; 137 is a suite that sat through the TERM
   # and had to be killed. Either way it is the budget that ended this, not the
   # suite, so it is reported as the one thing a bare non-zero exit cannot say.
@@ -340,20 +399,37 @@ for suite in "${SUITES[@]}"; do
   fi
 done
 
-while read -r name p f; do
+tier_ms=$(( $(now_ms) - tier_started ))
+
+while read -r name p f ms; do
   total_pass=$((total_pass + p))
   total_fail=$((total_fail + f))
 done < "$RESULTS"
+
+# The three worth naming, longest first. A tier is tuned one suite at a time
+# and this is the line that says which one to start on; the whole table is the
+# results file itself, which KEEP=1 leaves behind.
+slowest=
+while read -r name p f ms; do
+  slowest="${slowest:+$slowest · }$name $(secs "$ms")"
+done < <(sort -k4 -nr "$RESULTS" | head -3)
 
 echo
 if [ ${#pending[@]} -gt 0 ]; then
   printf '\033[33mpending\033[0m  %s (no suite file yet)\n' "${pending[*]}"
 fi
+# The verdict, held rather than exited on, so the slowest line below is
+# printed whichever way the run went — a red tier is the one most worth
+# knowing the shape of.
+rc=0
 if [ ${#failed[@]} -eq 0 ] && [ "$total_fail" -eq 0 ]; then
-  printf '\033[32m%d checks passed across %d suites\033[0m\n' \
-    "$total_pass" "$(( ${#SUITES[@]} - ${#pending[@]} ))"
-  exit 0
+  printf '\033[32m%d checks passed across %d suites in %s\033[0m\n' \
+    "$total_pass" "$(( ${#SUITES[@]} - ${#pending[@]} ))" "$(secs "$tier_ms")"
+else
+  printf '\033[31m%d of %d checks failed in %s — %s\033[0m\n' \
+    "$total_fail" "$((total_pass + total_fail))" "$(secs "$tier_ms")" \
+    "${failed[*]:-see above}"
+  rc=1
 fi
-printf '\033[31m%d of %d checks failed — %s\033[0m\n' \
-  "$total_fail" "$((total_pass + total_fail))" "${failed[*]:-see above}"
-exit 1
+[ -n "$slowest" ] && printf 'slowest  %s\n' "$slowest"
+exit "$rc"
