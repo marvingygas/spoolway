@@ -114,7 +114,7 @@ task id marks `parallel: true`.
 | OUT | Output tokens this step has produced. |
 | COST | What this step has cost. |
 | TIME | How long the lane has been on this step. |
-| NEXT | For a running task, the step it goes to on pass. For one with a scheduled pause, `→ paused after <step>`. For a queued task, what it waits on. For a paused task, the outcome the pause caught and where a resume sends it, key first: `[r] review failed → e2e — \`spoolway resume <task>\``; a caught pass reads `[r] → e2e — \`spoolway resume <task>\``. For a lane holding a permission prompt, `press a key in pane \`<task> · <step>\``. |
+| NEXT | For a running task, the step it goes to on pass. For one with a scheduled pause, `→ paused after <step>`. For a queued task, what it waits on. For a paused task, the outcome the pause caught and where a resume sends it, key first: `[r] review failed → e2e — \`spoolway resume <task>\``; a caught pass reads `[r] → e2e — \`spoolway resume <task>\``. A task parked before it ever started reads `→ queued — [r] resumes it`. For a lane holding a permission prompt, `press a key in pane \`<task> · <step>\``. |
 
 `spoolway spend task` gives the task's whole bill.
 
@@ -157,7 +157,7 @@ Lowercase acts on the row under the `▸` cursor. Uppercase acts on the whole ru
 |---|---|
 | `↑` `↓` | Move the cursor. |
 | `o` | Open the task file in `$VISUAL`, else `$EDITOR`, in a new pane. |
-| `r` | Resume a paused or blocked row whose dependencies are done. Same as `spoolway resume <task>`. |
+| `r` | Resume a paused or blocked row whose dependencies are done. A row parked before it ever started resumes straight back to `queued`, whatever its dependencies read. Same as `spoolway resume <task>`. |
 | `R` | Resume every paused task. Asks first if any of them is at a real gate. |
 | `p` | Pause the row, including a `blocked` one. Asks first if it would interrupt a running agent turn or command. |
 | `P` | Pause every task in the run, including any `blocked`. Asks first, listing what it would interrupt. |

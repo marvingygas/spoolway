@@ -559,7 +559,10 @@ impl Board {
     /// A no-op wherever there is nothing to do: no cursor yet, a cursor
     /// sitting on a row the queue no longer has, or a row whose own
     /// `resumable` says the key does nothing here — the dependency or
-    /// busy-lane rule that decided the NEXT column already decided this.
+    /// busy-lane rule that decided the NEXT column already decided this, for
+    /// a row with a real step to check; a row parked off `queued` carries no
+    /// such rule at all and reads `resumable` outright — see `build_rows`'s
+    /// `paused` arm.
     fn resume_cursor(&mut self, repo: &Repo, pipelines: &Pipelines) -> Result<()> {
         let Some(id) = self.cursor.clone() else {
             return Ok(());
@@ -1137,10 +1140,11 @@ pub(crate) fn resume_task(repo: &Repo, pipelines: &Pipelines, id: &str) -> Resul
     // `commands::resume` reads `paused_at.is_some()` itself to route a gate
     // one way and everything else the other, so naming a step here would
     // only risk disagreeing with it — see `back_onto_its_step`, which finds
-    // `parked_from` and `blocked_from` on its own, falls through to the
-    // pipeline's entry step when neither is set, and handles the
-    // question-pane case through `resume_target`'s `last_report.step`:
-    // pressing `r` there restarts the step the pane was never answered on.
+    // `parked_from` and `blocked_from` on its own, falls back to `queued`
+    // when a task that never started leaves every field `resume_target`
+    // reads unset, and handles the question-pane case through
+    // `resume_target`'s `last_report.step`: pressing `r` there restarts the
+    // step the pane was never answered on.
     crate::commands::resume(
         repo,
         pipelines,
@@ -1349,8 +1353,10 @@ pub(crate) fn carry_to_pending(repo: &Repo, task: &crate::task::Task) -> Result<
 /// is not a step any pipeline declares, so a `parked_from: queued` would
 /// never match the step a launch is starting and would never be spent by
 /// `Dispatcher::start_one` — it would sit in the document for the rest of the
-/// run. `resume_target` already falls through to the pipeline's entry step
-/// when nothing names one, which is where a task that never started belongs.
+/// run. `resume_target` already answers `queued` itself when nothing names a
+/// step, which is where a task that never started belongs — see
+/// [`build_rows`]'s `paused` arm, which reads the same answer to skip the
+/// dependency and lane check a real step still needs.
 ///
 /// Goes through [`crate::task::Task::set_stage_unbanked`] rather than
 /// `set_stage`: the task never left `implement` (or wherever it was), so
@@ -1369,8 +1375,8 @@ pub(crate) fn carry_to_pending(repo: &Repo, task: &crate::task::Task) -> Result<
 ///
 /// `parked_from` is left unset for a task parked off `queued`: it had not
 /// started, so there is no step to send it back to, and `resume_task` puts
-/// it on the pipeline's own entry step instead. `escalated` is written
-/// either way — it says why the park happened, not where it happened from.
+/// it back on `queued` itself instead. `escalated` is written either way —
+/// it says why the park happened, not where it happened from.
 pub(crate) fn park(task: &mut crate::task::Task, message: &str, escalated: bool) {
     if task.stage() != crate::pipeline::QUEUED {
         task.front.parked_from = Some(task.stage().to_string());
@@ -2116,30 +2122,46 @@ fn build_rows(
             }
             // The step a pass would carry it to, not a description of what it
             // is waiting on — the same rule a block reads its resumability
-            // by, on exactly the same two conditions.
+            // by, on exactly the same two conditions. Except when nothing
+            // here names a real step at all: no gate (`paused_at`) and no
+            // `p`/`escalate_clock` park (`parked_from`) is exactly the shape
+            // `park` leaves on a task still on `queued` — see `park`'s own
+            // docs — and `resume_target` is the same answer `back_onto_its_step`
+            // itself would act on for that shape. Its `queued` means there is
+            // no step of this task's own to check a dependency or a lane
+            // against: `queued` is where that check belongs, and this row
+            // goes straight back to it.
             None if task.stage() == crate::pipeline::PAUSED => {
-                let resumable = graph.ready(task.id()) && !lane_busy(lanes, &step_ids, task.id());
-                let target = paused_next(task, pipeline);
-                // The word this pause caught, ahead of the arrow — "review
-                // failed → e2e" rather than a bare "→ e2e" — so a caught
-                // fail or block never reads like the plain pass a gate
-                // always used to mean. `None` for that plain pass leaves the
-                // arrow exactly as it always drew.
-                let arrow = match paused_arrow(task) {
-                    Some(label) => format!("{label} →"),
-                    None => "→".to_string(),
-                };
-                let next = match (target, resumable) {
-                    (Some(step), true) => {
-                        format!("[r] {arrow} {step} — `spoolway resume {}`", task.id())
-                    }
-                    (Some(step), false) => {
-                        format!("{arrow} {step} — `spoolway resume {}`", task.id())
-                    }
-                    (None, true) => format!("[r] `spoolway resume {}`", task.id()),
-                    (None, false) => format!("`spoolway resume {}`", task.id()),
-                };
-                (State::Paused, next, resumable)
+                let never_started = task.front.paused_at.is_none()
+                    && task.front.parked_from.is_none()
+                    && crate::commands::resume_target(task, pipeline) == crate::pipeline::QUEUED;
+                if never_started {
+                    (State::Paused, "→ queued — [r] resumes it".to_string(), true)
+                } else {
+                    let resumable =
+                        graph.ready(task.id()) && !lane_busy(lanes, &step_ids, task.id());
+                    let target = paused_next(task, pipeline);
+                    // The word this pause caught, ahead of the arrow — "review
+                    // failed → e2e" rather than a bare "→ e2e" — so a caught
+                    // fail or block never reads like the plain pass a gate
+                    // always used to mean. `None` for that plain pass leaves the
+                    // arrow exactly as it always drew.
+                    let arrow = match paused_arrow(task) {
+                        Some(label) => format!("{label} →"),
+                        None => "→".to_string(),
+                    };
+                    let next = match (target, resumable) {
+                        (Some(step), true) => {
+                            format!("[r] {arrow} {step} — `spoolway resume {}`", task.id())
+                        }
+                        (Some(step), false) => {
+                            format!("{arrow} {step} — `spoolway resume {}`", task.id())
+                        }
+                        (None, true) => format!("[r] `spoolway resume {}`", task.id()),
+                        (None, false) => format!("`spoolway resume {}`", task.id()),
+                    };
+                    (State::Paused, next, resumable)
+                }
             }
             None if task.stage() == crate::pipeline::DONE => {
                 (State::Queued, "finished".to_string(), false)
@@ -4272,6 +4294,56 @@ mod tests {
         assert_eq!(task.stage(), crate::pipeline::QUEUED, "{}", task.stage());
         assert_eq!(task.front.parked_from, None);
         assert_eq!(task.front.resume, None);
+    }
+
+    /// A row parked off `queued` has no step of its own to check a
+    /// dependency or a lane against — `resumable` reads `true` outright, and
+    /// NEXT says so plainly, even while the dependency that would have gated
+    /// it on `queued` is still unfinished. The complement of
+    /// [`a_paused_row_is_not_resumable_while_its_own_dependency_is_unfinished`],
+    /// which is about a row with a real step to check.
+    #[test]
+    fn a_row_parked_off_queued_is_resumable_however_its_dependency_stands() {
+        let repo = fixture("resume-queued-park-deps");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "blocker", &[], Some("implement"));
+        add(&repo, "never-run", &["blocker"], None);
+        let mut task = repo.task("never-run").unwrap();
+        park(&mut task, "paused from the board", false);
+        task.save().unwrap();
+
+        let tasks = repo.tasks().unwrap();
+        let graph = Graph::build(&tasks, &pipelines, &repo.archive_dir());
+        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+        let row = rows.iter().find(|r| r.id == "never-run").unwrap();
+
+        assert!(row.resumable, "{}", row.next);
+        assert_eq!(row.next, "→ queued — [r] resumes it");
+    }
+
+    /// `R` over a run `P` parked leaves nothing stranded on `paused` that
+    /// had not started: every row parked off `queued` — even one still
+    /// waiting on an unfinished dependency of its own — goes straight back
+    /// to `queued`, where that dependency is checked the ordinary way.
+    #[test]
+    fn shift_r_sends_every_queued_park_back_to_queued_whatever_its_dependency() {
+        let repo = fixture("resume-all-queued-parks");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "blocker", &[], Some("implement"));
+        add(&repo, "never-run", &["blocker"], None);
+        let mut task = repo.task("never-run").unwrap();
+        park(&mut task, "paused from the board", false);
+        task.save().unwrap();
+
+        let mut board = Board::for_test();
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Char('R'))
+            .unwrap();
+
+        let task = repo.task("never-run").unwrap();
+        assert_eq!(task.stage(), crate::pipeline::QUEUED, "{}", task.stage());
+        assert_eq!(task.front.parked_from, None);
+        assert!(task.front.rounds.is_empty(), "{:?}", task.front.rounds);
     }
 
     /// `r` on a row whose own rule says it is not resumable does

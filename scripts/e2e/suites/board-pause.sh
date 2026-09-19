@@ -11,7 +11,9 @@
 # since pausing is the one panel that can also abort a live lane; `U` and a
 # `p` of a task that never started each get one pass through the same
 # `enter`/`esc` answers near the bottom, to cover the other panels and the
-# `parked_from` record a park off `queued` leaves.
+# `parked_from` record a park off `queued` leaves; `R`, last of all, proves
+# it sends that same kind of row straight back to `queued`, dependency or
+# not, still gating on a real one beside it.
 #
 # How a key gets in. The board reads stdin itself, between redraws, only
 # while the dispatcher is waiting out its interval — so this suite runs a
@@ -544,6 +546,29 @@ says "\`--from -\` reads the new section from standard input" \
   bash -c "printf 'read from stdin\n' | '$SPOOLWAY' task edit gate-edit --section Goal --from -"
 has "and the stdin content lands on disk" "read from stdin" \
   "$SPOOLWAY_PROJECT_HOME/queue/gate-edit.md"
+
+# --------------------------------- `R` sends a queued park back to `queued`
+# The reach this task adds: the run-wide resume key reaches a row parked off
+# `queued` itself exactly as it reaches a real step, and does not hold it for
+# a dependency the way a real step's row still would. `behind` and `late`
+# have sat on `paused` since `P` first parked them, both still gated by
+# `busy` — still paused itself, and never resumed by anything above — so
+# neither dependency has finished. `gate-edit` is still paused too, a real
+# gate, so this also proves `R`'s panel still gates on it the same as ever
+# while the queued parks beside it need no such asking. Last in the suite on
+# purpose: `mid-turn` and `busy` go past `R`'s own panel back onto
+# `implement` here too, and their lanes are `hang`-mode ones that never
+# report, so nothing after this point may still need the worker slots they
+# take back.
+press R
+draws "\`R\` still gates on the one real gate among the parks" "resume all"
+draws "naming it, not the queued parks beside it" "gate-edit"
+press $'\r'
+stage_reaches "a row parked off \`queued\` goes back to \`queued\`, dependency or not" \
+  late queued 25
+stage_reaches "and every other queued park along with it" behind queued 25
+lacks "carrying no leftover \`parked_from\`" "parked_from:" \
+  "$SPOOLWAY_PROJECT_HOME/queue/late.md"
 
 board_stop
 finish

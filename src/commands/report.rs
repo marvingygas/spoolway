@@ -1293,6 +1293,23 @@ fn back_onto_its_step(
         None => resume_target(&task, pipeline),
     };
 
+    // A park off `queued` itself lands here too — `park` records no
+    // `parked_from` for it, so the check above never catches it — and it
+    // is the same kind of round trip as `unpark`'s: the task never left
+    // `queued`, so sending it back is not a lap of anything the pipeline
+    // routed. `queued` is also not a step any pipeline declares, so
+    // `resume_at` and `set_stage` below — built for a real step's
+    // `on_pass`/loop bookkeeping — are the wrong road for it regardless.
+    if args.stage.is_none() && target == crate::pipeline::QUEUED {
+        task.front.paused_at = None;
+        task.front.paused_by = None;
+        task.set_stage_unbanked(crate::pipeline::QUEUED, "put back from the board");
+        task.save()?;
+        free_stale_lanes(repo, pipelines, &task);
+        println!("{}: -> {target}", args.task);
+        return Ok(());
+    }
+
     let message = args
         .message
         .clone()
@@ -4104,6 +4121,10 @@ mod tests {
     /// step: it is the `queued` arm that applies the dependency and hook
     /// gates, and a resume that lands past it launches the task off a
     /// dependency still mid-work (jobs review finding 1).
+    ///
+    /// The round trip banks nothing, the same as `unpark`'s own: the task
+    /// never left `queued`, so `paused->queued` is a lap no pipeline routed,
+    /// not one to count against a `loop:` budget.
     #[test]
     fn resuming_a_task_parked_off_queued_lands_it_back_on_queued() {
         let repo = fixture("unpark-from-queued");
@@ -4116,6 +4137,7 @@ mod tests {
             task.front.parked_from, None,
             "what `park` leaves on `queued`"
         );
+        let arrived_from_before = task.front.arrived_from.clone();
 
         resume(
             &repo,
@@ -4132,6 +4154,8 @@ mod tests {
         let task = queued(&repo, "stuck");
         assert_eq!(task.stage(), crate::pipeline::QUEUED);
         assert_eq!(task.front.paused_at, None);
+        assert!(task.front.rounds.is_empty(), "{:?}", task.front.rounds);
+        assert_eq!(task.front.arrived_from, arrived_from_before);
     }
 
     /// A bare `spoolway resume` on a `p`-parked task reaches `unpark`, not
