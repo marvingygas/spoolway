@@ -2863,9 +2863,9 @@ pub fn queue_screen(repo: &Repo, pipelines: &Pipelines, cwd: &std::path::Path) -
         // process exit to carry it into.
         //
         // `confirmed: true`: `run_screen`'s own `enter` already walked
-        // whoever is here through the overview and the overrides gate, via
-        // `confirm_start` — `dispatch` must not ask a second time now that
-        // its `TermGuard` is gone.
+        // whoever is here through the overview, the overrides gate and the
+        // warnings screen, via `confirm_start` — `dispatch` must not ask a
+        // second time now that its `TermGuard` is gone.
         ScreenExit::StartDispatcher => super::dispatch(
             repo,
             pipelines,
@@ -2975,7 +2975,8 @@ fn run_screen(
                     let trial = trial.clone();
                     let base = crate::repo::branch_at(cwd)?;
                     let outcome = begin_trial(repo, pipelines, &base, &groups, &trial);
-                    if let Some(exit) = apply_submit_outcome(repo, outcome, &mut state, input, out)?
+                    if let Some(exit) =
+                        apply_submit_outcome(repo, pipelines, outcome, &mut state, input, out)?
                     {
                         return Ok(exit);
                     }
@@ -3028,7 +3029,8 @@ fn run_screen(
                     let nav = nav.clone();
                     let base = crate::repo::branch_at(cwd)?;
                     let outcome = begin_routine_queue(repo, pipelines, &base, &routines, &nav);
-                    if let Some(exit) = apply_submit_outcome(repo, outcome, &mut state, input, out)?
+                    if let Some(exit) =
+                        apply_submit_outcome(repo, pipelines, outcome, &mut state, input, out)?
                     {
                         return Ok(exit);
                     }
@@ -3040,7 +3042,8 @@ fn run_screen(
                     let nav = nav.clone();
                     let base = crate::repo::branch_at(cwd)?;
                     let outcome = begin_routine_solo(repo, pipelines, &base, &routines, &nav);
-                    if let Some(exit) = apply_submit_outcome(repo, outcome, &mut state, input, out)?
+                    if let Some(exit) =
+                        apply_submit_outcome(repo, pipelines, outcome, &mut state, input, out)?
                     {
                         return Ok(exit);
                     }
@@ -3056,13 +3059,14 @@ fn run_screen(
                 // `enter` validates the selection and writes it straight
                 // through — nothing is drawn in between any more. A
                 // validation failure hands back `Mode::Outcome`; a clean
-                // write goes on to the overview and the overrides gate,
-                // reached the same way a bare `spoolway dispatch` reaches
-                // them — see `confirm_start`.
+                // write goes on to the overview, the overrides gate and the
+                // warnings screen, reached the same way a bare `spoolway
+                // dispatch` reaches them — see `confirm_start`.
                 Key::Enter if !state.selected.is_empty() => {
                     let base = crate::repo::branch_at(cwd)?;
                     let outcome = begin_submission(repo, pipelines, &base, &mut groups, &mut state);
-                    if let Some(exit) = apply_submit_outcome(repo, outcome, &mut state, input, out)?
+                    if let Some(exit) =
+                        apply_submit_outcome(repo, pipelines, outcome, &mut state, input, out)?
                     {
                         return Ok(exit);
                     }
@@ -4862,9 +4866,10 @@ fn plural(n: usize, noun: &str) -> String {
 
 /// What [`begin_submission`] comes back with: either an ordinary [`Mode`] to
 /// show — a refusal, or the "already running" notice — or word that a clean
-/// batch landed and the caller still has the overview and the overrides gate
-/// of its own to run, which need `input`/`out` and can end the whole loop,
-/// none of which `begin_submission` has any business holding.
+/// batch landed and the caller still has the overview, the overrides gate
+/// and the warnings screen of its own to run, which need `input`/`out` and
+/// can end the whole loop, none of which `begin_submission` has any business
+/// holding.
 #[derive(Debug)]
 enum SubmitOutcome {
     Mode(Mode),
@@ -4873,11 +4878,12 @@ enum SubmitOutcome {
 
 /// The common tail every batch-writing key in [`run_screen`] shares once it
 /// has its [`SubmitOutcome`]: an ordinary [`Mode`] goes straight onto
-/// `state.mode`, and a landed batch runs the overview and the overrides
-/// gate — [`Some`] to leave `run_screen` for good, `None` (back to
-/// [`Mode::Browsing`]) for `esc` off either screen.
+/// `state.mode`, and a landed batch runs the overview, the overrides gate
+/// and the warnings screen — [`Some`] to leave `run_screen` for good, `None`
+/// (back to [`Mode::Browsing`]) for `esc` off any of the three.
 fn apply_submit_outcome(
     repo: &Repo,
+    pipelines: &Pipelines,
     outcome: SubmitOutcome,
     state: &mut ScreenState,
     input: &mut impl PollableRead,
@@ -4889,7 +4895,7 @@ fn apply_submit_outcome(
             Ok(None)
         }
         SubmitOutcome::Confirmed => {
-            if confirm_start(repo, input, out)? {
+            if confirm_start(repo, pipelines, input, out)? {
                 return Ok(Some(ScreenExit::StartDispatcher));
             }
             state.mode = Mode::Browsing;
@@ -4938,11 +4944,11 @@ fn begin_submission(
 }
 
 /// What a landed write becomes: [`SubmitOutcome::Confirmed`], sending the
-/// caller on to the overview and the overrides gate — unless a dispatcher
-/// already holds the queue's own lock, in which case starting a second one
-/// would only be refused once `commands::dispatch` actually ran (see
-/// `Lock::acquire`'s own bail), so this shows the report as an ordinary
-/// [`Mode::Outcome`] instead of ever reaching either gate.
+/// caller on to the overview, the overrides gate and the warnings screen —
+/// unless a dispatcher already holds the queue's own lock, in which case
+/// starting a second one would only be refused once `commands::dispatch`
+/// actually ran (see `Lock::acquire`'s own bail), so this shows the report
+/// as an ordinary [`Mode::Outcome`] instead of ever reaching any of them.
 ///
 /// A lock file `Lock::holder` could not even read falls back to the
 /// ordinary path: an unreadable file is closer to "no answer" than to "a
@@ -4958,23 +4964,32 @@ fn after_write(repo: &Repo, msg: String) -> SubmitOutcome {
     }
 }
 
-/// The overview, then the overrides gate — both reached by `enter`, once a
-/// submission has just landed. `Ok(true)` to leave the loop and start a
-/// dispatcher; `Ok(false)` for `esc` off either screen, back to
-/// [`Mode::Browsing`] rather than ending the whole command — the one thing
-/// `commands::dispatch`'s own copy of this pair could not do on its own
-/// before this task, since it only ever ran after `run_screen` had already
-/// returned and this screen's own `TermGuard` had already dropped.
+/// The overview, then the overrides gate, then doctor's own warnings —
+/// all three reached by `enter`, once a submission has just landed.
+/// `Ok(true)` to leave the loop and start a dispatcher; `Ok(false)` for
+/// `esc` off any of the three screens, back to [`Mode::Browsing`] rather
+/// than ending the whole command — the one thing `commands::dispatch`'s own
+/// copies of this trio could not do on their own before this task, since
+/// they only ever ran after `run_screen` had already returned and this
+/// screen's own `TermGuard` had already dropped.
 ///
-/// `term: None` throughout both calls: `run_screen` already holds its own
-/// `TermGuard` for the whole of this loop, so nothing here may construct a
-/// second one — see `tool_requirements_gate_with`'s own doc on why that is a
-/// bug, not just redundant. `interactive: true` unconditionally, for the
-/// same reason `finish_submit` gives `open_and_prefix`: this screen already
-/// blocks on a key for every other prompt it draws, whether or not the
-/// process happens to have a real terminal.
+/// The warnings screen sees no workspace-move error here — nothing has
+/// tried the move yet, since that only happens inside `dispatch` itself,
+/// well after this function has returned — so `dispatch` still holds a
+/// second, narrower notice of its own for that one failure; see
+/// `dispatch::workspace_move_notice`.
+///
+/// `term: None` throughout all three calls: `run_screen` already holds its
+/// own `TermGuard` for the whole of this loop, so nothing here may
+/// construct a second one — see `tool_requirements_gate_with`'s own doc on
+/// why that is a bug, not just redundant. `interactive: true`
+/// unconditionally, for the same reason `finish_submit` gives
+/// `open_and_prefix`: this screen already blocks on a key for every other
+/// prompt it draws, whether or not the process happens to have a real
+/// terminal.
 fn confirm_start(
     repo: &Repo,
+    pipelines: &Pipelines,
     input: &mut impl PollableRead,
     out: &mut impl std::io::Write,
 ) -> Result<bool> {
@@ -4987,9 +5002,28 @@ fn confirm_start(
     )? {
         return Ok(false);
     }
-    super::dispatch::overrides_gate_with(
+    if !super::dispatch::overrides_gate_with(
         repo,
         true,
+        input,
+        out,
+        None::<fn() -> crate::platform::TermGuard>,
+    )? {
+        return Ok(false);
+    }
+    // `dispatch::dispatch` itself computes this same merged flag from a
+    // `DispatchArgs` this screen never sees — but `queue_screen` always
+    // hands the eventual run a bare `DispatchArgs { confirmed: true,
+    // ..Default::default() }` (see `queue_screen`'s own match on
+    // `ScreenExit::StartDispatcher`), whose `unattended()` reduces to
+    // `config.unattended.enabled` alone, exactly what this reads.
+    let unattended_lines =
+        super::dispatch::unattended_block_lines(repo.config.unattended.enabled, &repo.config);
+    super::dispatch::warnings_gate_with(
+        repo,
+        pipelines,
+        true,
+        &unattended_lines,
         input,
         out,
         None::<fn() -> crate::platform::TermGuard>,
@@ -9446,6 +9480,55 @@ mod tests {
 
         assert_eq!(exit, ScreenExit::StartDispatcher);
         assert!(repo.queue_dir().join("wire.md").exists());
+    }
+
+    /// Review finding 1: `confirm_start` runs doctor's warnings screen too,
+    /// after the overview and the overrides gate — `enter` off it starts the
+    /// dispatcher exactly as the other two do. `unattended.enabled` is
+    /// turned on so the screen has something to say (its own "no ceiling"
+    /// note), rather than being skipped for having nothing to draw.
+    #[test]
+    fn confirming_the_warnings_screen_with_enter_also_starts_a_dispatcher() {
+        let mut repo = fixture("screen-warnings-enter");
+        repo.config.unattended.enabled = true;
+        write_pending(&repo, "wire", &document("wire", "group: one\n", BODY));
+        let groups = listed(&repo);
+
+        // Space selects, enter submits, enter confirms the overview (no
+        // overrides layer here, so that gate asks nothing), enter confirms
+        // the warnings screen.
+        let (exit, drawn) = screen_exit(&repo, groups, " \r\r\r");
+
+        assert_eq!(exit, ScreenExit::StartDispatcher);
+        assert!(repo.queue_dir().join("wire.md").exists());
+        assert!(
+            drawn.contains("before this run starts"),
+            "the warnings screen must actually have drawn: {drawn}"
+        );
+    }
+
+    /// The other half of review finding 1, and acceptance criterion 3 for
+    /// the queue's own path: `esc` off the warnings screen returns to
+    /// browsing rather than ending the whole command — before this fix,
+    /// `dispatch`'s own copy of this gate ran after `run_screen` had already
+    /// returned, so `esc` there could only end the process outright.
+    #[test]
+    fn esc_off_the_warnings_screen_returns_to_browsing_not_out_of_the_command() {
+        let mut repo = fixture("screen-warnings-esc");
+        repo.config.unattended.enabled = true;
+        write_pending(&repo, "wire", &document("wire", "group: one\n", BODY));
+        let groups = listed(&repo);
+
+        let (exit, _) = screen_exit(&repo, groups, " \r\r\x1b");
+
+        // Back to browsing, not `StartDispatcher` — and with nothing left in
+        // the scripted input, `run_screen` ends the same way the empty
+        // screen does, on its own.
+        assert_eq!(exit, ScreenExit::Quit);
+        assert!(
+            repo.queue_dir().join("wire.md").exists(),
+            "the submission still landed; only the dispatcher was declined"
+        );
     }
 
     /// A stray key on the overview — anything but `enter` or `esc` — does

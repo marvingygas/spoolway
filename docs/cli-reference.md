@@ -243,8 +243,37 @@ shows what is patched and waits for a key:
   [enter] start the run   [esc] back   [x] don't ask again until this changes
 ```
 
-`esc` on either screen ends the command. From the queue screen's own `enter`, `esc` on either
-screen returns to browsing instead.
+`enter` there then shows a warnings screen, built from `spoolway doctor`'s own cheap checks
+plus an unattended run's own notice, and waits for a key:
+
+```
+  before this run starts
+
+  settings
+    unattended mode is on with no ceiling in tokens or dollars,
+    so nothing stops a run that will not settle.
+
+  files
+    .spoolway/config.toml was written by an older spoolway version
+    and no longer matches this one — `spoolway update` takes it.
+
+  problems
+    the `archivist` prompt is missing, so the document step will
+    fail on every task that reaches it.
+
+  [enter] start the run   [esc] back   [x] hide until these change
+```
+
+Each section is skipped when it has nothing to say, and the whole screen is skipped, with
+nothing drawn, when all three are empty. `x` stores its own fingerprint of the rendered lines,
+separate from the overrides screen's, and the screen returns as soon as any line differs from
+it.
+
+`esc` on any of the three screens ends the command. From the queue screen's own `enter`, `esc`
+on any of the three screens returns to browsing instead.
+
+A failure to move this run into its own workspace is shown afterward, once the run has already
+taken the lock, on its own notice with only `[enter] continue` to press.
 
 | Exit code | Meaning |
 |---|---|

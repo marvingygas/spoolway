@@ -132,6 +132,33 @@ says "naming the pipeline it touches" \
 works "and proceeds without anybody there to answer" \
   timeout 10 "$SPOOLWAY" dispatch --dry-run
 
+# ------------------------------------------------- the warnings screen, no tty
+# The gate task `warnings-screen` adds sits right beside `overrides_gate`
+# above and is proved the same way: `src/commands/dispatch.rs`'s own unit
+# tests cover `warnings_gate_with`'s render and its print-and-proceed path
+# against a scripted reader, but only a real process piped the way every
+# script here pipes it can show that doctor's cheap findings and the
+# unattended block, once they are real data rather than a fixture, still
+# never block a `spoolway dispatch` with nothing there to answer. Turning on
+# `unattended.enabled` and leaving both ceilings at their default of 0 is
+# also the mockup's own example line — "no ceiling in tokens or dollars" —
+# so this is the one config shape in this file guaranteed to give the new
+# screen something to say.
+must "unattended, with neither ceiling set — the mockup's own case" \
+  "$SPOOLWAY" config set unattended.enabled true
+
+says "dispatch prints the warnings screen's own heading with no tty to ask" \
+  "before this run starts" \
+  "$SPOOLWAY" dispatch --dry-run
+says "and the unattended block the mockup draws" \
+  "no unattended.max_output_tokens is set" \
+  "$SPOOLWAY" dispatch --dry-run
+works "and proceeds without anybody there to answer, same as the overrides gate beside it" \
+  timeout 10 "$SPOOLWAY" dispatch --dry-run
+
+must "unattended off again, so nothing later in this file inherits it" \
+  "$SPOOLWAY" config set unattended.enabled false
+
 # ------------------------------------------------- the four new contracts
 # Each one is a unit-tested render in src/commands/{config,override,template,
 # hook}.rs already; what a unit test cannot see is the command actually

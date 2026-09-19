@@ -205,6 +205,134 @@ fn finish(report: &Report, verbose: bool, json: bool) -> Result<()> {
     }
 }
 
+/// One of [`cheap_findings`]'s own rows, grouped for `dispatch`'s warnings
+/// screen rather than tagged with [`Row`] — see
+/// `commands::dispatch::warnings_gate_with`. `Setting` and `Problem` mirror
+/// [`Row::Note`] and [`Row::Fail`]; `File` is the one note [`cheap_findings`]
+/// tells apart from any other on the way out — [`doctor_sync`]'s own notes
+/// about a file on disk being behind this spoolway or never written — because
+/// the screen's mockup gives that one case its own heading rather than
+/// folding it into the settings catch-all.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Warning {
+    Setting(String),
+    File(String),
+    Problem(String),
+}
+
+/// Doctor's note- and failure-level findings, from the checks that never
+/// reach the network or open a pane — the same rows [`doctor`] itself would
+/// print, minus the two that shell out to `git ls-remote`/`gh auth status`
+/// and the live pane check, and minus every passing [`Row::Ok`], which the
+/// warnings screen has no room for.
+///
+/// Called by `commands::dispatch::warnings_gate_with` so a run says before it
+/// starts what `spoolway doctor` would have said anyway — see
+/// `doctor()`'s own doc comment for the order these checks run in, which
+/// this mirrors except for the calls named below.
+///
+/// Three more of `doctor()`'s own rows are left out on purpose, not merely
+/// skipped for being expensive:
+///
+/// - The override-layer note has its own screen one step earlier, in
+///   `dispatch`'s own overrides gate, and repeating it here would ask the
+///   same question twice.
+/// - `check_backend_checkout`'s "backend and checkout" row is never called
+///   here at all: `dispatch` already refuses to start over it, earlier in
+///   the very same call, before any gate runs — by the time this screen can
+///   draw, it has already passed, and re-running it would need a second
+///   resolved [`crate::mux::Mux`] this function has no cheap way to hand it
+///   again for no new answer.
+/// - `Lock::holder`'s "a dispatcher is running" note is never called either:
+///   every point this screen can run from — always before `Lock::acquire` —
+///   is a point `dispatch` has already confirmed no other dispatcher holds
+///   the lock, or it would have exited instead of reaching a gate at all.
+///   Calling it here would at best repeat a fact already acted on, and if
+///   ever read a moment too late, once the lock is this very process's own,
+///   would misreport the caller's own lock back to it as somebody else's.
+pub(crate) fn cheap_findings(repo: &Repo, pipelines: &Pipelines, config: &Config) -> Vec<Warning> {
+    let mux = crate::mux::backend(repo);
+    let tasks = repo.tasks().unwrap_or_default();
+    let graph = Graph::build_for_run(&tasks, pipelines, &repo.archive_dir(), repo.unattended());
+
+    let mut report = Report::default();
+    report.record_all(config_checks(repo, None, config));
+    report.record_all(issue_tracking_checks(repo, &config.issue_tracking));
+    report.record_all(retired_key_notes(&repo.checkout));
+    warmth_notes(repo, pipelines, config, &mut report);
+    report.record_all(pipeline_graph_checks(pipelines, config, &graph));
+    report.record_all(cheap_branch_checks(repo, &tasks));
+    report.record(mux_finding(&mux));
+    report.record(Finding::Check(
+        "git identity".into(),
+        crate::commands::dispatch::check_git_identity(repo, pipelines, config),
+    ));
+    report.record(Finding::Check(
+        "no stale .git/index.lock".into(),
+        crate::commands::dispatch::check_index_lock(repo),
+    ));
+    report.record_all(agent_checks(pipelines, config));
+    report.record_all(model_health_checks(pipelines, config));
+    report.record_all(agent_kind_checks(config));
+    // `doctor_sync`'s own rows are the ones tagged `Warning::File` below —
+    // marked by index range rather than by a new `Row` variant, since `Row`
+    // is `doctor`'s own report shape and this screen's "files" heading is
+    // not doctor's to know about.
+    let sync_start = report.rows.len();
+    doctor_sync(repo, &mut report);
+    let sync_end = report.rows.len();
+    report.record_all(prompt_checks(repo, pipelines));
+    report.record_all(jobs_checks(repo, pipelines));
+
+    warnings_from_rows(report.rows, sync_start..sync_end)
+}
+
+/// [`cheap_findings`]'s own last step, pulled out on its own so a test can
+/// hand it a hand-built set of rows rather than a real project: every
+/// [`Row::Fail`] becomes a [`Warning::Problem`], every [`Row::Note`] a
+/// [`Warning::Setting`] unless its index falls in `sync_rows` (then
+/// [`Warning::File`]) or it is `verbose_only` (then dropped — the short
+/// report's own rule: a note describing the machine this ran on rather than
+/// the project says nothing a person needs before starting a run), and every
+/// [`Row::Ok`] dropped, since a screen for warnings has no room for a check
+/// that passed.
+fn warnings_from_rows(rows: Vec<Row>, sync_rows: std::ops::Range<usize>) -> Vec<Warning> {
+    rows.into_iter()
+        .enumerate()
+        .filter_map(|(i, row)| match row {
+            Row::Ok { .. } => None,
+            Row::Fail { label, why } => Some(Warning::Problem(format!("{label}: {why}"))),
+            Row::Note {
+                verbose_only: true, ..
+            } => None,
+            Row::Note { text, .. } if sync_rows.contains(&i) => Some(Warning::File(text)),
+            Row::Note { text, .. } => Some(Warning::Setting(text)),
+        })
+        .collect()
+}
+
+/// [`branch_and_forge_checks`]'s own first check, alone: whether the branch
+/// (or branches) work is based on resolve at all. Its sibling checks in that
+/// function are the two [`cheap_findings`] leaves out — one `git ls-remote`
+/// per base, and `gh auth status` — both reaching the network, which nothing
+/// on `dispatch`'s pre-run path may do.
+fn cheap_branch_checks(repo: &Repo, tasks: &[Task]) -> Vec<Finding> {
+    let mut bases: Vec<String> = tasks.iter().filter_map(|t| t.front.base.clone()).collect();
+    bases.sort();
+    bases.dedup();
+    if bases.is_empty() {
+        vec![Finding::Check(
+            "on a usable branch".into(),
+            repo.branch().map(Some),
+        )]
+    } else {
+        vec![Finding::Check(
+            "work is based on".into(),
+            Ok(Some(bases.join(", "))),
+        )]
+    }
+}
+
 /// Check that everything the configured pipeline needs is actually present,
 /// before a dispatch pass discovers it the hard way.
 ///
@@ -3034,6 +3162,92 @@ mod tests {
         assert!(
             outcome.is_ok(),
             "the tracked config itself is perfectly fine: {outcome:?}"
+        );
+    }
+
+    /// [`warnings_from_rows`]'s own mapping, task `warnings-screen`'s
+    /// acceptance criterion 1: a passing row has no room on the screen, a
+    /// failure becomes a problem, a note in the `doctor_sync` range becomes a
+    /// file note, an ordinary note becomes a setting, and a `verbose_only`
+    /// note — describing the machine rather than the project — is dropped
+    /// like the short report already drops it.
+    #[test]
+    fn warnings_from_rows_sorts_ok_fail_and_note_into_their_sections() {
+        let rows = vec![
+            Row::Ok {
+                label: "config parses".into(),
+                note: None,
+            },
+            Row::Fail {
+                label: "prompt `archivist`".into(),
+                why: "missing".into(),
+            },
+            Row::Note {
+                text: "config.toml is behind".into(),
+                verbose_only: false,
+            },
+            Row::Note {
+                text: "unattended has no ceiling".into(),
+                verbose_only: false,
+            },
+            Row::Note {
+                text: "no dispatcher running".into(),
+                verbose_only: true,
+            },
+        ];
+        // Row 2 (index 2) is the one `doctor_sync` row in this hand-built
+        // set — the range a real call gets from `report.rows.len()` either
+        // side of its own `doctor_sync` call.
+        let warnings = warnings_from_rows(rows, 2..3);
+        assert_eq!(
+            warnings,
+            vec![
+                Warning::Problem("prompt `archivist`: missing".into()),
+                Warning::File("config.toml is behind".into()),
+                Warning::Setting("unattended has no ceiling".into()),
+            ]
+        );
+    }
+
+    /// Acceptance criterion 1: with an active override layer on top of an
+    /// otherwise ordinary project, [`cheap_findings`] carries neither the
+    /// override-layer note — `dispatch`'s own overrides gate already has
+    /// this, one screen earlier — nor anything from the two checks that
+    /// reach the network (`gh auth status`, and a `git ls-remote` per base)
+    /// or the one that opens a real pane.
+    #[test]
+    fn cheap_findings_excludes_network_pane_and_override_layer_checks() {
+        let repo = crate::commands::testutil::fixture("doctor-cheap-findings");
+        let overrides = repo.overrides_dir();
+        std::fs::create_dir_all(overrides.join("pipelines")).unwrap();
+        std::fs::write(
+            overrides.join("pipelines/default.yml"),
+            "steps:\n  implement:\n    model: fake-opus\n",
+        )
+        .unwrap();
+
+        let pipelines = Pipelines::builtin();
+        let config = Config::default();
+        let warnings = cheap_findings(&repo, &pipelines, &config);
+
+        fn text(w: &Warning) -> &str {
+            match w {
+                Warning::Setting(t) | Warning::File(t) | Warning::Problem(t) => t.as_str(),
+            }
+        }
+        assert!(
+            warnings
+                .iter()
+                .all(|w| !text(w).contains("overrides are active")),
+            "the override layer has its own screen already: {warnings:?}"
+        );
+        assert!(
+            warnings.iter().all(|w| {
+                !text(w).contains("gh auth")
+                    && !text(w).contains("is publishable")
+                    && !text(w).contains("a lane really starts")
+            }),
+            "no network or live-pane check may appear on this path: {warnings:?}"
         );
     }
 }
