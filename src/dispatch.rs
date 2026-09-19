@@ -114,6 +114,35 @@ pub const RESTART_MAX: u32 = 4;
 /// starts its own count fresh rather than inheriting an old storm.
 pub const RESTART_WINDOW: Duration = Duration::from_secs(30);
 
+/// How many passes in a row may skip the interval wait, each because it
+/// moved a task and the next one is worth trying at once — see
+/// `commands::dispatch`'s pass loop — before a run is made to wait out the
+/// interval anyway.
+///
+/// An ordinary walk is a handful of steps deep, so real work never comes
+/// close to this. It exists only so a queue that reports movement on every
+/// single pass — a bug, or a pipeline that cycles a task back to a step it
+/// just left — cannot hold the loop spinning with no wait at all forever.
+/// Not configurable, on the same grounds [`MAX_REMINDERS`] is one: nothing
+/// has needed to tune it, and the figure only has to be well past any real
+/// walk's depth.
+pub const MAX_CONSECUTIVE_WORKING_PASSES: u32 = 100;
+
+/// Whether the pass loop in `commands::dispatch` should run the next pass at
+/// once instead of waiting out the interval, given what the pass that just
+/// finished reported and how many passes in a row have already skipped the
+/// wait on that same strength.
+///
+/// Keyed on [`Report::moved`] rather than `!report.actions.is_empty()`: an
+/// action line can recur unchanged for as long as some condition holds — a
+/// busy pane, a slot or exclusivity wait, a relaunch backoff, the ceiling's
+/// own drain note — and none of those mean the next pass has anything new
+/// to try. A pass that failed outright never reaches here at all — see the
+/// loop, which treats that the same as an empty report.
+pub fn skip_wait(report: &Report, consecutive_working: u32) -> bool {
+    report.moved && consecutive_working < MAX_CONSECUTIVE_WORKING_PASSES
+}
+
 /// How long a task's next step waits for the step before it to let go of the
 /// task's pane.
 ///
@@ -171,6 +200,18 @@ pub struct Report {
     pub ceiling: Option<String>,
     /// Whether any lane of this run was still open at the end of the pass.
     pub lanes_live: bool,
+    /// Whether this pass changed at least one task's own stage, freed a
+    /// lane, or archived a task — see [`skip_wait`], which is the only
+    /// reader.
+    ///
+    /// Deliberately not `!actions.is_empty()`: `actions` also carries lines
+    /// a pass can push unchanged for as long as some condition holds — a
+    /// busy pane retried every pass up to `LAUNCH_BUSY_TIMEOUT`, an
+    /// exclusivity or slot wait, an unattended relaunch backoff, the
+    /// output/cost ceiling's own drain note — none of which mean anything
+    /// will be different next pass. Only an actual stage change, a freed
+    /// lane or an archive is that.
+    pub moved: bool,
 }
 
 /// Per-lane bookkeeping the multiplexer does not keep for us: when a lane
@@ -714,6 +755,14 @@ impl<'a> Dispatcher<'a> {
 
         let (mut tasks, load_problems) = self.repo.tasks_and_problems()?;
 
+        // Every task's own stage, before this pass moves anything — compared
+        // against the same tasks' stages once the pass is done, to answer
+        // `Report::moved` below. `tasks` keeps its length and order for the
+        // rest of this pass — nothing here removes, inserts or reorders it —
+        // so a plain zip against the post-pass slice lines each task back up
+        // with its own before, with no id map needed.
+        let stage_before: Vec<String> = tasks.iter().map(|t| t.stage().to_string()).collect();
+
         // What each task's `last_report` reads as right now, so a `persist`
         // later this pass can tell a report that landed while the pass was
         // working from the pass's own stale copy. See [`Dispatcher::persist`].
@@ -830,6 +879,14 @@ impl<'a> Dispatcher<'a> {
 
         report.quiet = report.actions.is_empty() && owned.is_empty();
         report.lanes_live = !owned.is_empty();
+        // See `Report::moved`'s own doc for why this is a stage diff and a
+        // check of `freed`/`archived`, not `!report.actions.is_empty()`.
+        report.moved = !freed.is_empty()
+            || !archived.is_empty()
+            || tasks
+                .iter()
+                .zip(&stage_before)
+                .any(|(task, before)| task.stage() != before);
         self.prune_stale_lane_records(&tasks, &step_ids);
         // The write itself is `pass`'s, so an early `?` above still leaves
         // the lane records it built on disk — see [`Dispatcher::pass`].
@@ -9212,6 +9269,101 @@ mod tests {
         );
         // Never shorter than a pass, whatever the arithmetic says.
         assert_eq!(relaunch_backoff(interval, 0), interval);
+    }
+
+    /// A pass that moved something — changed a task's stage, freed a lane
+    /// or archived one — is worth trying again at once; one that found
+    /// nothing to do, or only pushed an action line that says nothing has
+    /// changed, is not.
+    #[test]
+    fn skip_wait_is_true_only_for_a_pass_that_moved() {
+        let idle = Report::default();
+        assert!(!skip_wait(&idle, 0));
+
+        let lanes_running_only = Report {
+            lanes_live: true,
+            ..Report::default()
+        };
+        assert!(!skip_wait(&lanes_running_only, 0));
+
+        // The one case this whole change exists to tell apart from real
+        // progress: a pass that pushed the same status line it will push
+        // again next pass — a busy-pane retry, a slot wait, a ceiling's own
+        // drain note — none of which is `report.moved`.
+        let action_with_nothing_moved = Report {
+            actions: vec!["waiting for pane `foo` to reach its prompt (busy 0:10 of 10:00)".into()],
+            moved: false,
+            ..Report::default()
+        };
+        assert!(!skip_wait(&action_with_nothing_moved, 0));
+
+        let moved = Report {
+            actions: vec!["started foo · implement".into()],
+            moved: true,
+            ..Report::default()
+        };
+        assert!(skip_wait(&moved, 0));
+    }
+
+    /// However long a queue keeps reporting movement, the streak of skipped
+    /// waits has a ceiling — see [`MAX_CONSECUTIVE_WORKING_PASSES`] — past
+    /// which the loop is made to wait it out once, same as an idle pass.
+    #[test]
+    fn skip_wait_bounds_a_streak_of_working_passes() {
+        let moved = Report {
+            moved: true,
+            ..Report::default()
+        };
+        assert!(skip_wait(&moved, MAX_CONSECUTIVE_WORKING_PASSES - 1));
+        assert!(!skip_wait(&moved, MAX_CONSECUTIVE_WORKING_PASSES));
+        assert!(!skip_wait(&moved, MAX_CONSECUTIVE_WORKING_PASSES + 1));
+    }
+
+    /// [`Report::moved`] itself, computed by a real pass rather than built
+    /// by hand: freeing a superseded lane sets it, and a pass that only
+    /// finds an ordinary busy lane — no free, no archive, no stage change —
+    /// must not, however many action lines a pass like that pushes
+    /// elsewhere.
+    #[test]
+    fn report_moved_reflects_a_free_not_a_busy_lane_sitting_where_it_is() {
+        // Nothing queued at all: an ordinary idle pass.
+        let repo = fixture("report-moved-idle");
+        let idle = run_pass(&repo, &FakeMux::new(vec![]));
+        assert!(!idle.moved, "an idle pass reported moved: {idle:?}");
+
+        // A lane genuinely still working, on the task's own current step —
+        // free_finished_lanes leaves a live one alone, so there is nothing
+        // here to call moved.
+        let repo = fixture("report-moved-busy");
+        add_task_with(&repo, "demo", "implement", |_| {});
+        let busy = run_pass(
+            &repo,
+            &FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Working)]),
+        );
+        assert!(
+            !busy.moved,
+            "a pass that only found a busy lane reported moved: {busy:?}"
+        );
+
+        // The same setup as `a_settled_lane_on_a_superseded_step_is_freed`,
+        // just above: the lane's own last turn already moved the task on to
+        // `review` mid-conversation, and this pass is the one that finds the
+        // `implement` pane it left behind and frees it. That free alone is
+        // real progress, whether or not `review` itself manages to start in
+        // the same pass.
+        let repo = fixture("report-moved-freed");
+        add_task_with(&repo, "demo", "review", |f| {
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+        });
+        let freed = run_pass(
+            &repo,
+            &FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]),
+        );
+        assert!(
+            freed.moved,
+            "a pass that freed a superseded lane did not report moved: {freed:?}"
+        );
     }
 
     #[test]

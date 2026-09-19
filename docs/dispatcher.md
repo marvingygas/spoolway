@@ -71,8 +71,10 @@ flowchart TD
   B1 & B2 & B3 --> C[Sort the ready tasks]
   C --> D[Start lanes while slots are free]
   D --> E[Fire issue-tracking hooks for tasks that arrived at queued, blocked, paused or done]
-  E --> F[Draw the board, wait one interval]
-  F --> A
+  E --> F{Draw the board. Did this pass move a task?}
+  F -->|yes| A
+  F -->|no| G[Wait one interval]
+  G --> A
 ```
 
 A model's `slots` caps lanes on that model, and a profile's `concurrency` caps lanes on that
@@ -104,7 +106,9 @@ file's path. `spoolway prompt contract` prints the system prompt for a sample ta
 ## Reading the state
 
 The dispatcher draws the board in the terminal it runs in and runs a pass every
-`dispatch.interval` (10 seconds by default).
+`dispatch.interval` (10 seconds by default). A pass that moves a task to a new stage, frees a
+lane or archives a task runs the next pass at once instead of waiting out the interval. A long
+run of such passes in a row eventually waits anyway.
 
 <img src="screenshots/dispatch.png" alt="the dispatcher board">
 
