@@ -21,15 +21,24 @@ requests are merged, so a problem found on the way is this pass's problem. Diagn
 on the branch it belongs to, and carry on. A pull request handed back untouched with a note
 about what is wrong with it is the one outcome this skill exists to avoid.
 
-**Start nothing.** This pass reads the queue and it stops there. It never runs
-`spoolway dispatch`, never resumes a task, and never starts a lane. A dispatcher this pass
-starts is one nobody asked for and nobody is watching: it cuts worktrees, opens panes and
-puts real agents to work on a tree that is halfway through a merge. If a dispatcher is
-already running, step 1 has already told you — wait for it, do not restart it. Starting one
-is the human's call, after this pass is over and the binary is installed.
+**Start nothing on your own initiative.** This pass reads the queue and it stops there. It
+never runs `spoolway dispatch`, never resumes a task, and never starts a lane *because it
+decided to*. A dispatcher this pass starts unbidden is one nobody asked for and nobody is
+watching: it cuts worktrees, opens panes and puts real agents to work on a tree that is
+halfway through a merge. If a dispatcher is already running, step 1 has already told you —
+wait for it rather than reaching for a restart.
 
-That rule is worth more than it looks, because the way it gets broken is not by deciding to
-break it. See the heredoc entry under *What has bitten before*: a command can be run by
+**The human can ask, and then you do it.** Restarting is safe by design, not by luck —
+`Dispatcher::sweep_on_stop` (`src/teardown.rs`) settles the books "without touching any of
+it": no worktree, no workspace, no pane, no tab is removed, and the lane, agent and any
+`background: true` command alike, is left running. A command step is spawned under
+`libc::setsid()` with null stdio precisely so it outlives the pass that started it, its
+timeout clock is the `.pid` file's mtime so a restart does not reset it, and the launch
+counter is forgiven so the next run does not read the surviving lane as a failed launch.
+What is *not* free is the timing and the keystroke — see *Restarting the dispatcher* below.
+
+The first of those two is worth more than it looks, because the way it gets broken is not by
+deciding to break it. See the heredoc entry under *What has bitten before*: a command can be run by
 writing about it.
 
 **Merging is local, not on the forge.** Nothing is merged through `gh pr merge`. You merge
@@ -220,13 +229,24 @@ Only once the queue is empty and no dispatcher is running:
 ```
 cargo build --release
 spoolway queue list                       # confirm again — nothing in flight
-cp target/release/spoolway ~/.local/bin/
+ls -l $(command -v spoolway)              # read this before writing to it
+cp target/release/spoolway ~/.cargo/bin/spoolway.new
+mv -f ~/.cargo/bin/spoolway.new ~/.cargo/bin/spoolway
 spoolway --version
 ```
 
-**Never `cp` while a dispatcher runs.** The `cp` writes through the inode the running process
-is executing. A half-written binary is a dispatcher that dies mid-pass, and lanes that start
-after it pick up a build nobody meant to be running.
+**Never plain-`cp` over the binary.** The `cp` truncates and writes through the inode the
+running process is executing. A half-written binary is a dispatcher that dies mid-pass, and
+lanes that start after it pick up a build nobody meant to be running.
+
+**Install by rename instead**, as above. `mv` replaces the directory entry in one step;
+anything already executing keeps the old inode and never sees a partial file. That makes the
+install safe even with a lane live, which the plain `cp` never is.
+
+**Resolve the path first.** `~/.local/bin/spoolway` on this machine is a *symlink* into
+`~/.cargo/bin/`, so `cp target/release/spoolway ~/.local/bin/` follows it and writes straight
+through to the real file — the exact inode the running dispatcher is executing. Write to the
+resolved path, not the link.
 
 ### 10. Take what the new binary writes
 
@@ -271,6 +291,66 @@ every checkout it cuts, in `Dispatcher::tear_down_checkout`, and it cuts them un
 another tool: `~/.herdr/worktrees/` is herdr's, and `.claude/worktrees/` and anything under
 `/tmp/claude-*/` are Claude Code's. Check the path before reporting spoolway left something
 behind.
+
+## Restarting the dispatcher
+
+Only when the human asks for it. The mechanism is safe; the timing and the keystroke are
+what go wrong.
+
+**Do it between the merges and the install, not during them.** A dispatcher started while
+the tree is halfway through a merge puts real agents to work on that tree. Finish the
+merges, push, then stop it, install, and start it again.
+
+**One `ctrl-c`. Exactly one.** The handler restores `SIG_DFL` on its first press — read it
+in `src/platform.rs`, it says so:
+
+    // Back to the default first, so a second press kills outright
+    // rather than setting a flag that is already set.
+
+So the first press asks for a graceful stop and the second *kills the process outright*. The
+graceful stop is not instant — `sweep_on_stop` harvests a whole transcript per live lane
+before it returns — so the second press is easy to talk yourself into. What it costs: the
+lane's spend is never banked, the launch counter is never forgiven, and `Lock`'s `Drop`
+never runs, so `dispatch.pid` is left behind naming a dead process. Press once and wait for
+the shell prompt to come back.
+
+A stale `dispatch.pid` is not fatal — `Lock::holder` checks `is_running` and treats a dead
+holder as no holder — but nothing banked the spend of the lane that was live when you killed
+it, and that is gone for good.
+
+**Send the keys to the dispatcher's own pane, not a new one.** Find it by its foreground
+process group rather than by guessing:
+
+```
+herdr pane list
+herdr pane process-info --pane <id>        # foreground_processes names `spoolway dispatch`
+herdr pane send-keys <id> c-c              # `ctrl-c` is not a spelling herdr accepts
+herdr pane send-text <id> "spoolway dispatch"
+herdr pane send-keys <id> enter
+```
+
+`c-c` is the spelling that works. Do not try several spellings to see which lands: the ones
+that work all land, and that is how one `ctrl-c` becomes three.
+
+**Expect two screens before the board, and answer both.** Since #240 and #246, `spoolway
+dispatch` does not go straight to the board: it draws what is queued behind an `[enter] start
+a dispatcher` gate, then holds the run's warnings behind `[enter] start the run`. A
+dispatcher that looks like it "did not start" is usually just sitting on one of those. Verify
+it actually took the lock rather than trusting the screen:
+
+```
+spoolway queue list                        # `dispatcher: running (pid N)`
+head -1 <project home>/dispatch.pid        # N, not the old pid
+```
+
+**Do not read the pane to decide whether it started.** `herdr pane read` returns what is
+painted, which includes the dead dispatcher's last frame still on screen — a masthead reading
+`dispatcher running · pid <old>` is that old frame, not a live claim. The masthead prints
+`std::process::id()`, so it can only ever name its own process. The lock file and `queue
+list` are the evidence; the pane is not.
+
+**Never switch backend with a live lane.** The backends cannot see each other, and a switch
+mid-run duplicates agents into the same worktree.
 
 ## Reporting
 
@@ -332,6 +412,21 @@ open list whether they were missed or refused.
   Quote the delimiter, always: `<<'PY'`. Nothing inside then means anything to the shell.
   The general form is that this pass writes a lot of text containing command names, and text
   containing command names is dangerous in exactly one place, which is an unquoted heredoc.
+- **The second `ctrl-c` killed the graceful stop.** Three spellings were tried against
+  `herdr pane send-keys` to find the one it accepted — `c-c`, `C-c`, `ctrl+c`. All three
+  landed. The first asked the dispatcher to stop, and the second hit while `sweep_on_stop`
+  was still harvesting transcripts, restoring `SIG_DFL` and killing it where it stood: no
+  spend banked for the live lane, no launch counter forgiven, and `dispatch.pid` left naming
+  a dead process. The general form: a key-sending API that reports nothing on success gives
+  no way to tell "wrong spelling" from "sent", so probing spellings sends the key as many
+  times as you probe. Look the spelling up, send it once, and verify by the effect.
+- **`sync` wanted to undo a commit, and taking it whole would have.** Step 10 is not
+  automatic. A merge that installs an older binary than the project's own control plane makes
+  `sync` offer to put back a setting somebody deliberately retired — here `dispatch.interval`,
+  removed hours earlier ahead of the task that retires it in the binary. Read the dry run
+  file by file and take the ones that are the new binary's to write. A setting the project
+  moved past is the project's, not the binary's, and `doctor` reporting it as drift is
+  expected until that task lands.
 - **`spoolway sync` was skipped, so `doctor` complains for weeks.** The drift step 10 clears
   looks like something wrong with the project. It is the merge's own doing, and it appears on
   every pass that brings in a new default.
