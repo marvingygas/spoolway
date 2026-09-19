@@ -698,13 +698,15 @@ add_command_step() {
     printf '    on_pass: %s\n' "$on_pass"
   } >> "$file"
 
-  # `implement` goes through the new step now, which means `review` is entered
-  # from it rather than from `implement` — so the budget `review` keeps has to
-  # name the new step. One that names a route the graph no longer has is
-  # refused at load, correctly: it would bound nothing, and the cycle it was
-  # written for would be free to run forever.
+  # `implement` goes through the new step now, so its `on_pass` names the new
+  # step rather than `review`.
+  #
+  # `review`'s own budget is left alone. A `loop:` map names the steps a step
+  # *sends a task to*, so `review`'s entry is `implement` — the step its
+  # `on_fail` routes back to — and inserting a step ahead of `review` does not
+  # change that. Rewriting it to name the new step would name a route `review`
+  # does not have, and is refused at load.
   sed -i "0,/^    on_pass: review$/s//    on_pass: $id/" "$file"
-  sed -i "0,/^      implement: /s//      $id: /" "$file"
 }
 
 # The pristine pipeline, kept so each case below can put back whatever it
@@ -945,18 +947,19 @@ else
   bad "a loop of 2 still stops the task rather than circling forever \
 (at \`$(stage_of gated-twice)\`)"
 fi
-# `arrivals` counts every line naming `→ \`e2e\``, and this log carries four
-# of them: the entry from `review`, the two laps `gate` sent back, and
-# `apply_loop_budget`'s own note on the third — "`gate` → `e2e` spent its 2
-# rounds…" — which matches the same grep. The two real laps are what the
-# `rounds` counter below actually proves; this only checks that the third
-# attempt left no further arrival at `e2e` behind it.
-if [ "$(arrivals $SPOOLWAY_PROJECT_HOME/queue/gated-twice.md e2e)" -eq 4 ]; then
+# `arrivals` counts every line naming `→ \`e2e\``, and this log carries three
+# of them: the entry from `review`, and the two laps `gate` sent back. The
+# note `apply_loop_budget` writes on the third attempt is *not* among them —
+# it reads "`gate` may not send this back to `e2e` a 3rd time", naming the
+# move it is refusing rather than one it made, so it no longer answers a grep
+# for arrivals. The two real laps are what the `rounds` counter below proves;
+# this only checks that the third attempt left no further arrival behind it.
+if [ "$(arrivals $SPOOLWAY_PROJECT_HOME/queue/gated-twice.md e2e)" -eq 3 ]; then
   ok "the third attempt spent the budget rather than arriving at e2e again"
 else
   bad "the third attempt spent the budget rather than arriving at e2e again \
 (arrived at \`e2e\` $(arrivals $SPOOLWAY_PROJECT_HOME/queue/gated-twice.md e2e) \
-time(s), wanted 4)"
+time(s), wanted 3)"
 fi
 counter "and the counter agrees: two laps banked, not one" \
   rounds "gate->e2e" 2 $SPOOLWAY_PROJECT_HOME/queue/gated-twice.md
@@ -1117,12 +1120,11 @@ rm -f "$SCRATCH_FAIL" "$SCRATCH_HOLD"
   printf '    run: while [ ! -f %q ]; do sleep 0.2; done\n' "$SCRATCH_HOLD"
   printf '    on_pass: review\n'
 } >> .spoolway/pipelines/default.yml
-# The same two rewrites `add_command_step` makes for one splice, done by hand
-# for two: `implement`'s own `on_pass: review` becomes the entry into
-# `scratch`, and `review`'s `loop: implement: 2` is renamed to name `hold` —
-# the step that now actually arrives at `review` on every lap.
+# The same rewrite `add_command_step` makes, done by hand for this splice:
+# `implement`'s own `on_pass: review` becomes the entry into `scratch`.
+# `review`'s `loop: implement: 2` is left alone — a budget names the step its
+# owner sends a task *to*, and `review` still sends back to `implement`.
 sed -i "0,/^    on_pass: review\$/s//    on_pass: scratch/" .spoolway/pipelines/default.yml
-sed -i "0,/^      implement: /s//      hold: /" .spoolway/pipelines/default.yml
 works "a background step that also declares on_fail checks out" "$SPOOLWAY" pipeline check
 
 dispatcher_restart   # the pipeline it is holding has neither new step in it
