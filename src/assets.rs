@@ -10,7 +10,7 @@
 /// prompt that is spoolway's outright and changes when spoolway changes. Which
 /// is also what stops a project losing them by rewriting its prompts.
 ///
-/// The consequence is deliberate: `spoolway update` never touches a prompt.
+/// The consequence is deliberate: `spoolway sync` never touches a prompt.
 /// These are the defaults a project starts from, and after `init` they are the
 /// project's — to sharpen, to rewrite, or to leave. Anyone wanting today's
 /// defaults runs `init` in a scratch directory and copies what they like.
@@ -25,7 +25,7 @@ pub struct Prompt {
     /// Files written to the prompt's own `assets/`, by filename.
     ///
     /// These inherit the prompt's rules rather than a skeleton's: `init`
-    /// writes them once, `update` never touches them, and after that they are
+    /// writes them once, `sync` never touches them, and after that they are
     /// the project's. A project restyles its pages by editing these in place,
     /// which is why there is no setting naming them — the prompt that fills
     /// them is the only thing that reads them, and it knows where its own
@@ -127,7 +127,7 @@ pub fn task_template(name: &str) -> Option<&'static str> {
 /// The two ticket-body templates a project's `.spoolway/templates/tracking/`
 /// starts from, by name — seeded by `spoolway init` the way a task
 /// skeleton's own shipped default is seeded into `.spoolway/templates/tasks/`.
-/// `spoolway update` never touches either, once `init` has written them: the
+/// `spoolway sync` never touches either, once `init` has written them: the
 /// same rule a task skeleton or a prompt already follows.
 ///
 /// [`crate::task_template::resolve_tracking`] never falls back to these at
@@ -159,7 +159,7 @@ pub fn tracking_template(name: &str) -> Option<&'static str> {
 /// switching trackers later is a `spoolway config set issue_tracking.hook`
 /// away, not a second `init`.
 ///
-/// `spoolway update` never touches a hook it has already written, the same
+/// `spoolway sync` never touches a hook it has already written, the same
 /// rule a prompt or a task skeleton already follows once a project has made
 /// a file its own.
 ///
@@ -423,7 +423,7 @@ mod tests {
     /// file under `assets/pipelines/` by `BUILTIN_PIPELINES`. A file named by
     /// neither is shipped in the binary's `include_str!` closure only if a table
     /// row references it, so an unreferenced one is dead weight: never written by
-    /// `init`, never reachable by `update --replace`, never validated. A stray
+    /// `init`, never reachable by `sync --replace`, never validated. A stray
     /// `local.yml` pipeline with a repo-local `run:` line and six orphan prompt
     /// directories had accumulated this way before this test existed. Wire a new
     /// asset into its table, or delete it.

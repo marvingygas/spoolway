@@ -61,7 +61,7 @@ npm install -g spoolway
 ```
 
 The package is a small wrapper around a prebuilt binary. It runs on Linux (x64, arm64,
-musl) and macOS (Apple Silicon, Intel). `spoolway update` shows
+musl) and macOS (Apple Silicon, Intel). `spoolway sync` shows
 what changed, and `spoolway whats-new` prints the release notes offline.
 
 From source instead, in a clone of this repository:

@@ -162,14 +162,14 @@ const SKILLS: &[Skill] = &[
 /// Skill directories this project once shipped under a name it no longer
 /// uses — a short, hand-written literal, and never derived from [`SKILLS`]:
 /// a skill this binary actively ships must never appear here by
-/// construction, or `spoolway update` would delete what `install` is about
+/// construction, or `spoolway sync` would delete what `install` is about
 /// to rewrite in the very same pass. `spoolway-pipeline` is the one entry
 /// today, renamed and widened into `spoolway-config` — see [`SKILLS`]'s own
 /// comment above.
 pub const RETIRED_SKILLS: &[&str] = &["spoolway-pipeline"];
 
 /// Templates under `.spoolway/templates/` this project once shipped and no
-/// longer does, each with the reason `spoolway update` reports beside it — a
+/// longer does, each with the reason `spoolway sync` reports beside it — a
 /// short, hand-written literal, and never derived from anything the binary
 /// ships today, for the same reason [`RETIRED_SKILLS`] is: a template this
 /// binary still ships must never appear here by construction, and a

@@ -2,9 +2,9 @@
 //! nothing, see `skeletons()` below.
 //!
 //! A skeleton exists to be restyled — that is the whole reason one is a file
-//! rather than prose in a skill. So `update`'s usual rule (take the file back
+//! rather than prose in a skill. So `sync`'s usual rule (take the file back
 //! only when it is byte-for-byte ours) is useless for it: every project that
-//! used it as intended would be refused an update forever.
+//! used it as intended would be refused a sync forever.
 //!
 //! But it is not decoration either. A skeleton can carry a block something
 //! parses, and a restyled skeleton whose block predates a schema change would
@@ -158,7 +158,7 @@ pub struct Skeleton {
 /// shipped version for a project's copy to have drifted from — see
 /// `assets::Prompt::assets`.
 ///
-/// Kept as a function, not deleted outright, so `update`'s machinery above
+/// Kept as a function, not deleted outright, so `sync`'s machinery above
 /// stays the general "keep a project's copy of a shipped block current"
 /// mechanism it always was, ready for whatever next needs it — rather than
 /// dead code deleted and then rewritten from scratch.
@@ -174,7 +174,7 @@ impl Skeleton {
             .expect("a shipped skeleton carries its own block")
     }
 
-    /// What `update` should do to the copy in `text`.
+    /// What `sync` should do to the copy in `text`.
     pub fn state(&self, text: &str) -> BlockState {
         let Some(found) = self.region.read(text) else {
             return BlockState::Missing;
@@ -245,7 +245,7 @@ mod tests {
     }
 
     /// The block a shipped skeleton carries has to be findable by its own
-    /// region locator, or `update` would find nothing to keep current in a
+    /// region locator, or `sync` would find nothing to keep current in a
     /// file it wrote itself.
     #[test]
     fn a_shipped_skeleton_carries_a_block_we_can_find() {
@@ -278,7 +278,7 @@ mod tests {
     }
 
     /// A block whose fingerprint is in `history` is stale, not hand-edited —
-    /// the difference being that `update` replaces one and reports the
+    /// the difference being that `sync` replaces one and reports the
     /// other. A fingerprint nobody appended at the time is what turns every
     /// unedited project's skeleton into a file spoolway refuses to touch.
     #[test]

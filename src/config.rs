@@ -1773,7 +1773,7 @@ impl Config {
     ///
     /// What `init` writes, what a missing file is restored from, and — because
     /// `self` is by then the config loaded from the very file being replaced —
-    /// what `spoolway update` rewrites an existing one to. Rendering keeps a
+    /// what `spoolway sync` rewrites an existing one to. Rendering keeps a
     /// struct's values and nothing else, which is exactly the config contract:
     /// what a setting is set to is the project's, and the table above it is
     /// spoolway's. There used to be a comment standing above each key instead

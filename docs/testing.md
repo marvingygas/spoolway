@@ -85,7 +85,7 @@ with a `// covers:` line.
 | `board-pause` | The board's confirm panels: `p`, `P`, `U` over a live lane |
 | `restart` | The dispatcher's restart guard and its exit codes |
 | `overrides` | The override commands: fork a setting out of the checkout, list it, promote it back |
-| `upgrade` | Whether this binary still reads what an older release wrote. A `.spoolway/` tree scaffolded by an old tag's own binary, under `scripts/e2e/fixtures/`, goes through a real `spoolway update`. A value set under a retired table lands at its current home, and hand-written prose comes back byte for byte |
+| `upgrade` | Whether this binary still reads what an older release wrote. A `.spoolway/` tree scaffolded by an old tag's own binary, under `scripts/e2e/fixtures/`, goes through a real `spoolway sync`. A value set under a retired table lands at its current home, and hand-written prose comes back byte for byte |
 | `warmth` | `cloud` tier. Real `claude-haiku-4-5` lanes, to check session reuse against a real transcript. |
 | `live` | `live` tier. The real `codex` binary through `agent verify codex --live`. |
 

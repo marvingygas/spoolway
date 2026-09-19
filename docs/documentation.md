@@ -68,11 +68,11 @@ spoolway never reads a task's body. No heading in it is required.
 
 ## Keeping the skeletons current
 
-`spoolway update` never touches a prompt, its assets or a task skeleton. To take a shipped
+`spoolway sync` never touches a prompt, its assets or a task skeleton. To take a shipped
 version back, run:
 
 ```
-spoolway update --replace <path>
+spoolway sync --replace <path>
 ```
 
-See [Installation and setup](installation.md#keeping-a-project-current).
+See [Installation and setup](installation.md#keeping-a-projects-files-current).

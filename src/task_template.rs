@@ -12,9 +12,9 @@
 //! [`crate::task::Task::append_to_section`] if the skeleton does not have them.
 //! A skeleton may be a single `## Goal` and everything still works.
 //!
-//! Which is why there is nothing of ours in the file and `spoolway update` never
+//! Which is why there is nothing of ours in the file and `spoolway sync` never
 //! touches one. `init` writes a skeleton where none exists; after that it is the
-//! project's, exactly like a prompt. `spoolway update --replace <path>` is the
+//! project's, exactly like a prompt. `spoolway sync --replace <path>` is the
 //! deliberate way to take a shipped one back.
 //!
 //! One skeleton per pipeline, selected by filename, the way a step's `prompt:`

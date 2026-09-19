@@ -30,8 +30,8 @@ You review one task's diff and deliver a verdict. You do not fix anything.
 ...
 ```
 
-Edit the shipped prompts in place. `spoolway update` never touches a prompt. To take a shipped
-prompt back, run `spoolway update --replace .spoolway/prompts/<name>/PROMPT.md`.
+Edit the shipped prompts in place. `spoolway sync` never touches a prompt. To take a shipped
+prompt back, run `spoolway sync --replace .spoolway/prompts/<name>/PROMPT.md`.
 
 ## A prompt is a section of the system prompt, not the whole of it
 

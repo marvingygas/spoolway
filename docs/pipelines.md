@@ -105,7 +105,7 @@ steps:
 | `last` | `false` | Command steps only. `true` runs it only on the last task of a chain. See [`last:`](#last--a-step-the-chain-runs-once). |
 
 The same table is at the top of every pipeline file, between `# >>> spoolway >>>` and
-`# <<< spoolway <<<`. `spoolway update` rewrites that block. A file without the markers is
+`# <<< spoolway <<<`. `spoolway sync` rewrites that block. A file without the markers is
 never written to.
 
 There is no `kind:` key. A step with `agent:` runs a prompt on a model. A step with `run:` runs

@@ -66,7 +66,7 @@ turning each into a fix concrete enough to approve.
    because the class is what the human is really approving:
 
    - **Mechanical** — restores what spoolway itself writes, with no judgement in it:
-     `spoolway init` for a missing prompt or skeleton (it writes only what is absent), `spoolway update` for one that is present but behind (it replaces only the
+     `spoolway init` for a missing prompt or skeleton (it writes only what is absent), `spoolway sync` for one that is present but behind (it replaces only the
      generated block and copies their prose through unread — `--dry-run` first), or
      `spoolway config set <key> <value>` where doctor named both the key and the value it
      will accept. **Prompts are never mechanical.** Nothing updates one, so a finding
@@ -114,7 +114,7 @@ turning each into a fix concrete enough to approve.
 | note: no git remote | nothing can be handed over: every task's change goes out as a pull request | add the remote | outside |
 | ``prompt contract``: ``profile `x` never uses `{prompt_file}` `` | the prompt file is written but never handed to the agent | point the profile at a `kind` spoolway knows (the argv per kind is fixed in the binary; `args` is retired) | decision — the kind is theirs |
 | note: `dispatch.max_launches` / `max_attempts` retired | the launch guard it sized is a constant now (one launch, then a person) | nothing to set — the key is dropped on the next `config` save | mechanical |
-| ``prompt names `spoolway <verb>` `` | that lane runs a command this release does not have, and finds out mid-run | fix the prose, or `spoolway update --replace .spoolway/prompts/<name>/PROMPT.md` to take the shipped one | decision — it is their text |
+| ``prompt names `spoolway <verb>` `` | that lane runs a command this release does not have, and finds out mid-run | fix the prose, or `spoolway sync --replace .spoolway/prompts/<name>/PROMPT.md` to take the shipped one | decision — it is their text |
 | `queue list --json`: `"state": "blocked"` | it is out of the pipeline until someone puts it back | address the blocker it names, then `spoolway resume <task>` | decision |
 | `queue list --json`: `"state": "paused"` with `"next"` naming a pane | a lane asked a question and is holding its pane | look at the pane | theirs |
 | `queue list --json`: `"laps"` non-null | a task looping between two steps | say how many rounds and on which step; the cause is in the lane's log | decision |
@@ -127,7 +127,7 @@ turning each into a fix concrete enough to approve.
   `git checkout`, not `resume`, not `dispatch`.
 - Never `spoolway init --force`. It overwrites an edited prompt, the pipeline and the
   config. Plain `init` writes only what is missing, which is the whole of the fix — and
-  where the fix is "this project is behind", it is `spoolway update`, which never touches
+  where the fix is "this project is behind", it is `spoolway sync`, which never touches
   a prompt at all.
 - Never start a dispatcher from here. `--dry-run` is a check; `spoolway dispatch` is
   the pipeline running, and that is a human's call.
