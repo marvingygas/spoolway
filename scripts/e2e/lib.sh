@@ -63,6 +63,11 @@ must() {
   sed 's/^/        /' "$log" >&2
   rm -f "$log"
   annotate "setup failed: $what"
+  # Counted like any other failure. The suite is about to exit without
+  # reaching `finish`, and the EXIT trap reports the tally — so a setup
+  # failure that did not bump it would be a red suite reporting nothing
+  # failed.
+  fail=$((fail+1))
   exit 2
 }
 
@@ -445,8 +450,9 @@ dispatcher_restart() {
 }
 
 # A suite reaching its end is the ordinary exit; a failed `must` is the other
-# one. Both have to take the dispatcher down with them.
-trap dispatcher_stop EXIT
+# one. Both have to take the dispatcher down with them, and both have to hand
+# run.sh the tally — see `record_results`.
+trap 'dispatcher_stop; record_results' EXIT
 
 # ------------------------------------------------------------- the task queue
 stage_of() { grep '^stage:' "$SPOOLWAY_PROJECT_HOME/queue/$1.md" 2>/dev/null | awk '{print $2}'; }
@@ -545,6 +551,22 @@ finish() {
   else
     printf '\033[31m%d of %d checks failed\033[0m\n' "$fail" "$((pass+fail))"
   fi
-  [ -n "${E2E_RESULTS:-}" ] && printf '%s %d %d\n' "${SUITE:-e2e}" "$pass" "$fail" >> "$E2E_RESULTS"
+  record_results
   exit $(( fail > 0 ))
+}
+
+# Hand run.sh what this suite counted.
+#
+# A suite that dies on a failed `must` exits without ever reaching `finish`, so
+# until this was called from the EXIT trap too its tally never reached the
+# results file at all — and run.sh, summing a file with no row for it, closed a
+# red run with "0 of 0 checks failed". The count was the one thing that said
+# how far the suite got before it died, and it was the one thing missing.
+#
+# `finish` and the trap both call it, so it records once and only once.
+record_results() {
+  [ "${E2E_RECORDED:-0}" -eq 1 ] && return 0
+  E2E_RECORDED=1
+  [ -n "${E2E_RESULTS:-}" ] && printf '%s %d %d\n' "${SUITE:-e2e}" "$pass" "$fail" >> "$E2E_RESULTS"
+  return 0
 }
