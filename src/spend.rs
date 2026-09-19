@@ -534,13 +534,19 @@ struct Totals {
     /// time it is swept, so its row count says how often somebody ran
     /// `spoolway spend`, not how much work was done.
     sessions: std::collections::BTreeSet<String>,
+    /// `wall_s` last banked for each lane seen so far, keyed on the identity
+    /// a re-bank shares with its earlier line — task, step, round and
+    /// session. A lane still running and its settled twin both carry that
+    /// identity, so the second line must replace the first line's `wall_s`
+    /// in the running total rather than add to it, and must not count a
+    /// second lane. Tokens and cost stay summed per row unconditionally: they
+    /// are banked as deltas, so the settled line's zero already adds nothing.
+    lane_wall_s: std::collections::HashMap<(String, String, u32, String), i64>,
 }
 
 impl Totals {
     fn add(&mut self, entry: &crate::usage::Entry) {
-        self.lanes += 1;
         self.tokens.add(&entry.tokens);
-        self.wall_s += entry.wall_s;
         self.sessions.insert(entry.session.clone());
         match entry.cost_usd {
             Some(cost) => {
@@ -553,6 +559,20 @@ impl Totals {
             // the way a real unpriced model does. See `money`'s footer note.
             None if entry.tokens.is_zero() => {}
             None => self.unpriced += 1,
+        }
+
+        let key = (
+            entry.task.clone(),
+            entry.step.clone(),
+            entry.round,
+            entry.session.clone(),
+        );
+        match self.lane_wall_s.insert(key, entry.wall_s) {
+            Some(previous) => self.wall_s += entry.wall_s - previous,
+            None => {
+                self.lanes += 1;
+                self.wall_s += entry.wall_s;
+            }
         }
     }
 
@@ -734,6 +754,31 @@ mod tests {
         totals.add(&lane(Some(17.52)));
         totals.add(&zero_token);
         assert_eq!(totals.money(), "17.52");
+    }
+
+    /// A lane can bank more than one ledger line — one while it is still
+    /// running, one when it settles — both carrying the same task, step,
+    /// round and session. Tokens and cost are deltas, so the second line adds
+    /// nothing there, but `wall_s` is banked as the lane's age at write time,
+    /// not a delta, and the row itself is not deduped at all. Both must be
+    /// counted once: `lanes` as one lane, `wall_s` as its final age rather
+    /// than the sum of every bank.
+    #[test]
+    fn a_lane_banked_twice_counts_once_and_keeps_its_final_age() {
+        let mut totals = Totals::default();
+        let running = lane(Some(2.5));
+        let mut settled = lane(None);
+        settled.tokens = crate::usage::Tokens::default();
+        settled.wall_s = 125;
+
+        totals.add(&running);
+        totals.add(&settled);
+
+        assert_eq!(totals.lanes, 1, "a lane re-banked twice must count once");
+        assert_eq!(
+            totals.wall_s, 125,
+            "wall_s must be the lane's final age, not the sum of every bank"
+        );
     }
 
     /// STEP used to be a fixed twelve characters — `{:<12}` — so a label

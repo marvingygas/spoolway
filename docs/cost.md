@@ -34,6 +34,11 @@ A transcript can grow after the lane is torn down. Every `spoolway eval` and `sp
 reads settled sessions again and appends one line for the turns that arrived later. That
 line carries no `outcome`. Lanes still running are left alone.
 
+A lane banked more than once still counts as one lane. `spoolway spend` groups these lines
+by task, step, round and session: tokens and cost are deltas, so the settled line's zero
+adds nothing, and `WALL` takes the lane's most recently banked age rather than summing every
+line.
+
 ### Directory spend
 
 A watched directory has sessions of its own that never went through the dispatcher: a person
