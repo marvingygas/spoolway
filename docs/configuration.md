@@ -105,7 +105,6 @@ Write and inspect the layer with `spoolway pipeline override`, `prompt override`
 backend = "herdr"
 herdr_mode = "split"
 worktree_root = ""
-interval = "10s"
 lane_quiet = "15m"
 auto_commit = true
 ```
@@ -115,8 +114,7 @@ auto_commit = true
 | `backend` | `herdr` | Where lanes run: `herdr` or `headless`. `herdr` puts each agent in a pane you can watch and take over. `headless` is spoolway's own test backend; `spoolway dispatch` refuses to run it unless `SPOOLWAY_TEST_BACKEND` is set in the environment. |
 | `herdr_mode` | `split` | Layout under `backend = "herdr"`. `split` gives each task its own workspace named `spoolway/<task>`. `grouped` puts every project in the shared `spoolway-dispatcher` workspace, one tab per project, one pane per task. See [the dispatcher](dispatcher.md#one-home-for-every-run-in-every-project). |
 | `worktree_root` | blank | Where a task's worktree is created. Blank means `~/.spoolway/<project>/worktrees`. The directory is `task-<id>`, or `task-<slug>-<id>` with a tracker slug. |
-| `interval` | `10s` | Time between dispatcher passes. |
-| `lane_quiet` | `15m` | How long a lane may stay silent before the dispatcher reminds it to report. After three reminders the task is escalated. |
+| `lane_quiet` | `15m` | How long a lane may stay silent before the dispatcher reminds it to report. After three reminders the task is escalated. Not how often a pass looks — the dispatcher polls at a fixed rate nobody sets. |
 | `auto_commit` | `true` | Commit a lane's uncommitted work as `wip(<task>): <step>` when its step ends. A task with work spoolway could not commit stops at `blocked` instead of being archived. |
 | `priority` | `group` | Which ready task fills a free slot. `group` prefers a task whose group is already running. `any` weighs every ready task on steps left, group size and dependents. |
 | `lane_child_ceiling` | `1h` | How long a lane with a running child process is excused from the reminder loop. |
@@ -292,7 +290,9 @@ names a tracker.
 | `on_fail` | `ignore` | What a failing hook does to its task. `ignore` records the failure. `pause` also holds the task: on `queued` it lands on `paused`, on `done` it stays out of the archive. |
 | `key_in_names` | `false` | Prefix the `group:`, the branch (`task/<slug>-<id>`) and the worktree directory with the slug the `open` hook returns. A group already carrying the slug gains it exactly once. |
 
-The script is called once per task per event.
+The script is called once per task per event. A failing hook retries on a doubling delay
+from ten seconds, capped at an hour, and the count and next retry time survive a dispatcher
+restart.
 
 | Event | When it fires | Waits for the script |
 |---|---|---|

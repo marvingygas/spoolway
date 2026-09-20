@@ -424,7 +424,14 @@ total_fail=0
 # grace period for whatever ignored it. The budget scales with `E2E_AGENTS` the
 # same way `drive` scales its own waits — a stand-in's turn is over in
 # milliseconds and a real model's takes minutes.
-E2E_SUITE_TIMEOUT=${E2E_SUITE_TIMEOUT:-10m}
+#
+# Thirty minutes rather than the ten it was while `E2E_INTERVAL` existed. The
+# dispatcher's rate is fixed now, so every transition a suite drives costs a
+# real `dispatch::PROBE_INTERVAL` and no knob can buy it back: `commands`, the
+# longest of them, measured a little over twenty-one minutes where it used to
+# fit inside ten. Ten would report it as hung, which is the one thing this
+# bound exists not to say about a suite that is merely slow.
+E2E_SUITE_TIMEOUT=${E2E_SUITE_TIMEOUT:-30m}
 if [ "${E2E_AGENTS:-mock}" = real ]; then
   E2E_SUITE_TIMEOUT=${E2E_SUITE_TIMEOUT_REAL:-100m}
 fi

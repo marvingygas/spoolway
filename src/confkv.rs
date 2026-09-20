@@ -66,18 +66,12 @@ pub const REFERENCE: &[Reference] = &[
                     blank means `~/.spoolway/<project>/worktrees`.",
     },
     Reference {
-        key: "dispatch.interval",
-        values: "<duration>",
-        default: "10s",
-        sentence: "How long the dispatcher waits between passes.",
-    },
-    Reference {
         key: "dispatch.lane_quiet",
         values: "<duration>",
         default: "15m",
         sentence: "How long a lane may say nothing before the dispatcher reminds it to \
-                    report. Not the same thing as `interval`, which is only how often a \
-                    pass looks.",
+                    report. Not how often a pass looks — the dispatcher polls at a fixed \
+                    rate nobody sets.",
     },
     Reference {
         key: "dispatch.auto_commit",
@@ -529,7 +523,23 @@ pub fn get(config: &Config, key: &str) -> Result<String> {
     if let Some(unset) = unset_value(config, key) {
         return Ok(unset);
     }
+    if let Some(hint) = retired_hint(key) {
+        bail!("unknown key `{key}`\n  {hint}");
+    }
     bail!("no config key `{key}`{}", nearest(config, key))
+}
+
+/// A sentence for the one retired key whose absence is worth more than "no
+/// config key" — somebody who used to set this is told where it went,
+/// rather than left to search for a setting `nearest` cannot find, since
+/// nothing left in [`REFERENCE`] is even a substring of its name.
+fn retired_hint(key: &str) -> Option<&'static str> {
+    match key {
+        "dispatch.interval" => {
+            Some("the dispatcher polls at a fixed rate; there is nothing to set")
+        }
+        _ => None,
+    }
 }
 
 /// What an omitted key reads as, for the two kinds of key that may be omitted.
@@ -880,7 +890,7 @@ mod tests {
         let entries = entries(&config).unwrap();
         let keys: Vec<&str> = entries.iter().map(|e| e.key.as_str()).collect();
 
-        assert!(keys.contains(&"dispatch.interval"));
+        assert!(keys.contains(&"dispatch.lane_quiet"));
         assert!(keys.contains(&"agents.pi.kind"));
         // `permission_mode` is listed for a kind that has modes and not for
         // one that does not: it is omitted wherever the kind carries none,
@@ -1191,8 +1201,27 @@ mod tests {
 
         assert!(set(&config, "agents.pi.concurrency", "lots").is_err());
         // Durations are validated by the real deserialiser, not by this module.
-        assert!(set(&config, "dispatch.interval", "every so often").is_err());
-        assert!(set(&config, "dispatch.interval", "5m").is_ok());
+        assert!(set(&config, "dispatch.lane_quiet", "every so often").is_err());
+        assert!(set(&config, "dispatch.lane_quiet", "5m").is_ok());
+    }
+
+    /// `dispatch.interval` is gone, not merely undocumented: this project no
+    /// longer offers a way to tune how often a pass runs.
+    #[test]
+    fn dispatch_interval_is_an_unknown_key() {
+        let config = Config::default();
+        let get_err = get(&config, "dispatch.interval").unwrap_err().to_string();
+        assert!(
+            get_err.contains("the dispatcher polls at a fixed rate; there is nothing to set"),
+            "{get_err}"
+        );
+        let set_err = set(&config, "dispatch.interval", "5s")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            set_err.contains("the dispatcher polls at a fixed rate; there is nothing to set"),
+            "{set_err}"
+        );
     }
 
     /// Cross-field check, not serde: any `u8` deserialises into
@@ -1300,7 +1329,7 @@ mod tests {
     #[test]
     fn round_trips_through_get() {
         let config = Config::default();
-        assert_eq!(get(&config, "dispatch.interval").unwrap(), "10s");
+        assert_eq!(get(&config, "dispatch.lane_quiet").unwrap(), "15m");
         assert_eq!(get(&config, "agents.claude.kind").unwrap(), "claude");
     }
 

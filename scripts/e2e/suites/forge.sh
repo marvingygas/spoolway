@@ -45,7 +45,7 @@ task_body "$BODY"
 task_doc "$LIVE/shipped.md" shipped "$BODY" "group: live" "touches: [src/main.rs]"
 must "a task" "$SPOOLWAY" queue add --from "$LIVE/shipped.md"
 
-if drive shipped gone 90; then ok "a task hands its change over and is archived"
+if drive shipped gone 200; then ok "a task hands its change over and is archived"
 else bad "a task hands its change over and is archived (at \`$(stage_of shipped)\`)"; fi
 
 if handed_over shipped; then ok "the branch reached the remote and a pull request is open"
@@ -110,13 +110,13 @@ sed -i '0,/^    on_pass: handover$/s//    on_pass: hold/' .spoolway/pipelines/de
 task_doc "$LIVE/handed.md" handed "$BODY" "group: live" "touches: [src/main.rs]"
 must "a task whose branch will end up empty" "$SPOOLWAY" queue add --from "$LIVE/handed.md"
 
-if drive_and_hold handed hold 90; then ok "it reaches the step before the hand-off with its own work still on the branch"
+if drive_and_hold handed hold 150; then ok "it reaches the step before the hand-off with its own work still on the branch"
 else bad "it reaches the step before the hand-off with its own work still on the branch (at \`$(stage_of handed)\`)"; fi
 must "the branch is wound back to its cut point, leaving nothing to hand over" \
   git -C "$LIVE/worktrees/task-handed" reset -q --hard plan/live
 : > "$HOLD"
 
-if drive handed blocked 90; then ok "a lane with nothing to hand over blocks for a person instead of guessing"
+if drive handed blocked 150; then ok "a lane with nothing to hand over blocks for a person instead of guessing"
 else bad "a lane with nothing to hand over blocks for a person instead of guessing (at \`$(stage_of handed)\`)"; fi
 
 has "and the command log says why, rather than a bare git failure" \

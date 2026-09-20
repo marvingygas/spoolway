@@ -254,7 +254,20 @@ fn run() -> Result<()> {
             commands::config_override(&repo, home_error.as_ref())
         }
         command => {
-            let repo = Repo::discover(&cwd)?;
+            // `sync` is the one command below that has to survive a
+            // `config.toml` that no longer parses, for the same reason
+            // `doctor` and `config edit`/`config override` read leniently
+            // above: it is the command that brings a config like that
+            // forward — most sharply, one still carrying a key this binary
+            // retired hard enough that `Config::load` now refuses it
+            // outright (see `crate::sync::config`). Every other command
+            // reaching this arm still dies on a config it cannot read.
+            let repo = if matches!(command, Command::Sync(_)) {
+                let (repo, _, _) = Repo::discover_lenient(&cwd)?;
+                repo
+            } else {
+                Repo::discover(&cwd)?
+            };
 
             // Whether this checkout has fallen behind a `spoolway update`
             // that already ran, before anything else here reads a file:
@@ -282,7 +295,17 @@ fn run() -> Result<()> {
             // `[config]` commands above: those exist to work on a project
             // whose config or layout is in question, and a sweep run ahead
             // of them would be one more thing to rule out.
-            retain::sweep_once(&repo);
+            //
+            // Skipped for the same reason under `sync`: `repo.config` came
+            // from `discover_lenient` above, which is `Config::default()`
+            // — a made-up `retention_days` — on exactly the config `sync`
+            // exists to work on. Sweeping against a fabricated setting
+            // before a person's own project is even readable is the thing
+            // this comment already rules out for every command above; `sync`
+            // reaching this arm at all must not put it back.
+            if !matches!(command, Command::Sync(_)) {
+                retain::sweep_once(&repo);
+            }
 
             // The graph that *routes* the queue is the project's, read from
             // `repo.root` — never the checkout's. A lane reports from inside

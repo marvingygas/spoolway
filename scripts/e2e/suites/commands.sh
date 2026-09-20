@@ -310,6 +310,21 @@ refuses "so --replace has nothing left to hand back" \
   "not a file spoolway ships" \
   env -C "$INITDIR/unasked" "$SPOOLWAY" sync --replace .spoolway/templates/lane-prompts.md
 
+# ------------------------------------------------------- dispatch.interval
+# `dispatch.interval` is retired hard: `DispatchConfig` denies unknown
+# fields, so a config that still names it is a parse error rather than a
+# quietly-dropped setting, everywhere except `sync`, which is the one place
+# meant to bring such a file forward.
+CONFIG="$INITDIR/unasked/.spoolway/config.toml"
+sed -i '/^\[dispatch\]$/a interval = "10s"' "$CONFIG"
+refuses "a config still naming dispatch.interval is refused" \
+  "unknown field" \
+  env -C "$INITDIR/unasked" "$SPOOLWAY" config get dispatch.lane_quiet
+must "sync runs over the project anyway" env -C "$INITDIR/unasked" "$SPOOLWAY" sync
+lacks "dispatch.interval is gone from the rewritten config" "interval" "$CONFIG"
+works "and the config is accepted again" \
+  env -C "$INITDIR/unasked" "$SPOOLWAY" config get dispatch.lane_quiet
+
 # --------------------------------------------------------------- task contract
 # `task contract` never touches `.spoolway/` in either mode — bare, it only
 # ever reads pipelines already loaded in memory; `--from`, it runs the very
@@ -713,7 +728,7 @@ task_doc "$LIVE/archived-row.md" archived-row "$BODY" \
   "group: arch-row" "touches: [notes/archived-row.md]"
 must "a task queued for the archive-cycling case" \
   "$SPOOLWAY" queue add --from "$LIVE/archived-row.md"
-if drive archived-row gone 60; then
+if drive archived-row gone 180; then
   ok "it ran to completion and left the queue"
 else
   bad "it ran to completion and left the queue (at \`$(stage_of archived-row)\`)"

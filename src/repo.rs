@@ -470,6 +470,17 @@ impl Repo {
         task::load_dir(&self.queue_dir())
     }
 
+    /// [`Repo::tasks_and_problems`], reparsing only the queue files whose
+    /// mtime moved since `cache` last saw them — see
+    /// [`task::load_dir_cached`]. For a dispatcher tick, which runs once a
+    /// second and cannot afford to reparse the whole queue that often.
+    pub fn tasks_and_problems_cached(
+        &self,
+        cache: &mut task::TaskCache,
+    ) -> Result<(Vec<Task>, Vec<task::LoadProblem>)> {
+        task::load_dir_cached(&self.queue_dir(), cache)
+    }
+
     /// The id of every task file currently in `queue/`, read from the file
     /// names alone rather than by parsing each one.
     ///

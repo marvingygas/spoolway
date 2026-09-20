@@ -139,7 +139,7 @@ fi
 # down reads as `base` having written it. That is how this went red once four
 # suites started sharing a machine: the checks in between spawn `spoolway` of
 # their own, and under that load `top` gets there first.
-if drive_and_hold base gone 90; then ok "the bottom of the chain runs and is archived"
+if drive_and_hold base gone 200; then ok "the bottom of the chain runs and is archived"
 else bad "the bottom of the chain runs and is archived (at \`$(stage_of base)\`)"; fi
 
 if handed_over base; then ok "and hands its change over as a branch and a pull request"
@@ -186,7 +186,7 @@ has "and the pass says why it walked past" \
 # cut through to the moment `handover` runs, so any stage in between shows
 # the same thing the instant of the cut itself did: the ancestry is a fact
 # of the cut, not something built afterwards.
-if drive_and_hold top handover 90; then ok "the task above it is cut once the one below is in"
+if drive_and_hold top handover 150; then ok "the task above it is cut once the one below is in"
 else bad "the task above it is cut once the one below is in (at \`$(stage_of top)\`)"; fi
 
 if git rev-parse --verify -q task/base >/dev/null; then
@@ -211,7 +211,7 @@ says "distinctly from \`base:\`, which still names the plan branch" \
   "base: plan/live" "$SPOOLWAY" queue show top
 
 # ------------------------------------------------------------- and then the top
-if drive top blocked 90; then ok "the task above it runs once the one below is in"
+if drive top blocked 150; then ok "the task above it runs once the one below is in"
 else bad "the task above it runs once the one below is in (at \`$(stage_of top)\`)"; fi
 
 if handed_over top; then ok "and it hands its change over too, before the one call that fails"
@@ -311,7 +311,7 @@ says "check_dependencies_set puts the parent that reaches the other one first" \
 # `apex` is still in the queue naming it.
 sed -i 's/^stage: blocked$/stage: done/' "$SPOOLWAY_PROJECT_HOME/queue/top.md"
 
-if drive_and_hold apex handover 90; then ok "apex is cut once both its parents are in"
+if drive_and_hold apex handover 150; then ok "apex is cut once both its parents are in"
 else bad "apex is cut once both its parents are in (at \`$(stage_of apex)\`)"; fi
 
 says "and it was cut from the deeper parent" "cut_from: task/top" \
@@ -324,7 +324,7 @@ else
   ls "$LIVE/worktrees/task-apex" 2>/dev/null | sed 's/^/        /'
 fi
 
-if drive apex blocked 90; then ok "apex hands its own change over too"
+if drive apex blocked 150; then ok "apex hands its own change over too"
 else bad "apex hands its own change over too (at \`$(stage_of apex)\`)"; fi
 
 if stacked_on apex task/top; then

@@ -12,7 +12,6 @@ lookup in a task file or in the list of live lanes.
 
 ```
 spoolway dispatch                 # runs until the queue is empty
-spoolway dispatch --interval 5m   # override the configured interval between passes
 spoolway dispatch --force         # start past the restart guard
 spoolway dispatch --plain         # print the board once as a plain table, for scripts
 ```
@@ -85,8 +84,7 @@ fifth refused with exit code 5. A start that runs clears the count, and so does 
 
 ## What a pass does
 
-A pass reads two things: each task file's stage, and the list of live lanes. It remembers
-nothing between passes, so it is safe to interrupt at any point.
+A pass reads two things: each task file's stage, and the list of live lanes.
 
 ```mermaid
 flowchart TD
@@ -99,9 +97,16 @@ flowchart TD
   D --> E[Fire issue-tracking hooks for tasks that arrived at queued, blocked, paused or done]
   E --> F{Draw the board. Did this pass move a task?}
   F -->|yes| A
-  F -->|no| G[Wait one interval]
+  F -->|no| G[Wait for the next pass]
   G --> A
 ```
+
+Between two passes the wait is not empty. A tick runs every second, reading only the queue and
+the commands directory off disk: no multiplexer call, no pane capture, no process spawned. It
+routes a background command step that finished since the last look, but only a `headless: true`
+step, or any background step on the headless backend — a step running in a pane still waits for
+the next pass to close it. The dispatcher keeps a small cache of the queue and the commands
+directory across the ticks inside one wait, rebuilt fresh at the start of the next pass.
 
 A model's `slots` caps lanes on that model, and a profile's `concurrency` caps lanes on that
 profile. A model marked `exclusive` never runs beside a different exclusive model. See
@@ -131,10 +136,11 @@ file's path. `spoolway prompt contract` prints the system prompt for a sample ta
 
 ## Reading the state
 
-The dispatcher draws the board in the terminal it runs in and runs a pass every
-`dispatch.interval` (10 seconds by default). A pass that moves a task to a new stage, frees a
-lane or archives a task runs the next pass at once instead of waiting out the interval. A long
-run of such passes in a row eventually waits anyway.
+The dispatcher draws the board in the terminal it runs in and runs a pass every ten
+seconds, with a one-second tick between passes. Neither rate is configurable. A pass that
+moves a task to a new stage, frees a lane or archives a task runs the next pass at once
+instead of waiting for the next one. A long run of such passes in a row eventually waits
+anyway.
 
 <img src="screenshots/dispatch.png" alt="the dispatcher board">
 
@@ -302,6 +308,7 @@ separate from this. See [When a task needs a person](tasks.md#when-a-task-needs-
 | A step's `loop:` | How many times a task may arrive at the step from a given step. | `spoolway resume`, for the loops out of the step it resumes at. |
 | Reminder loop | Three reminders to a silent lane. | Anything the lane writes to its transcript. |
 | Live-child ceiling | How long a lane may hold a child process before it is escalated. | The process exiting. |
+| Issue-tracking hook retry | A failing `[issue_tracking]` hook retries on a doubling delay from ten seconds, capped at an hour. | The hook succeeding. |
 
 When a loop budget runs out, the task goes to the step's `on_loop_max`, or to its `on_pass`
 when there is none.

@@ -147,7 +147,7 @@ task_doc "$LIVE/tracked-b.md" tracked-b "$BODY" "group: tracked-pair" \
 must "the first of a dependent pair queues" "$SPOOLWAY" queue add --from "$LIVE/tracked-a.md"
 must "the second, depending on it, queues too" "$SPOOLWAY" queue add --from "$LIVE/tracked-b.md"
 
-if drive tracked-a gone 60 && drive tracked-b gone 60; then
+if drive tracked-a gone 180 && drive tracked-b gone 180; then
   ok "both tasks of the dependent pair reach done"
 else
   bad "both tasks of the dependent pair reach done (at \`$(stage_of tracked-a)\`/\`$(stage_of tracked-b)\`)"
@@ -367,7 +367,7 @@ task_doc "$LIVE/hook-queued.md" hook-queued "$BODY" "group: live" \
 must "a task queues under an always-failing hook" \
   "$SPOOLWAY" queue add --from "$LIVE/hook-queued.md"
 
-if drive hook-queued paused 30; then
+if drive hook-queued paused 60; then
   ok "a failing queued hook under on_fail=pause lands the task on paused"
 else
   bad "a failing queued hook under on_fail=pause lands the task on paused \
@@ -410,8 +410,10 @@ done
 has "the blocked event's hook ran and failed" "1" "$TRACKING/hook-blocked · blocked.exit"
 has "the paused event's hook ran and failed" "1" "$TRACKING/hook-paused · paused.exit"
 # `done` is the one event a failure is retried on, and `retry_if_failed`
-# forgets the run — `.exit` file and all — on every pass that finds it still
-# failing. The `.failed` marker it leaves first is the evidence that survives;
+# forgets the run — `.exit` file and all — once the ladder's own next-attempt
+# time (`hook_backoff` in src/tracking.rs) has passed, not on every pass that
+# finds it still failing — see the ladder scenario below for the pacing
+# itself. The `.failed` marker it leaves first is the evidence that survives;
 # see `failure_count` in src/tracking.rs, which reads both for the same reason.
 works "the done event's hook ran and failed" \
   test -f "$TRACKING/hook-done · done.failed"
@@ -433,6 +435,82 @@ else
 (queue file present: $([ -f "$SPOOLWAY_PROJECT_HOME/queue/hook-done.md" ] && echo yes || echo no), \
 stage: $(stage_of hook-done))"
 fi
+
+# --------------------------------------------------- done hook: the ladder
+# `on_fail = "pause"` above proved the hold; this proves the *pace* of its
+# retry — the whole reason it was given a ladder. The hook counts every time
+# it actually runs a real `done` event for this one task, filtered by
+# `SPOOLWAY_TASK` so the still-failing `hook-done` task above — sharing this
+# same global `issue_tracking.hook` from the moment it is switched — cannot
+# add to the count. If a failed hook retried every pass, this harness's own
+# one-second interval would show a dozen runs in as many seconds; the ladder
+# says the first ten seconds see exactly one retry, not one per pass.
+LADDER_COUNT="$LIVE/ladder-runs.txt"
+rm -f "$LADDER_COUNT"
+cat > .spoolway/hooks/fail-counted.sh <<EOF
+#!/bin/sh
+[ "\$SPOOLWAY_EVENT" = open ] && exit 0
+[ "\$SPOOLWAY_TASK" = "ladder-demo" ] && echo run >> "$LADDER_COUNT"
+exit 1
+EOF
+chmod +x .spoolway/hooks/fail-counted.sh
+must "the ladder hook is named" "$SPOOLWAY" config set issue_tracking.hook fail-counted.sh
+dispatcher_restart   # a new hook name only takes effect on the next start
+
+{
+  echo "---"; echo "id: ladder-demo"; echo "title: ladder-demo, done"
+  echo "stage: done"; echo "group: live"
+  echo "base: plan/live"; echo "pipeline: default"
+  echo "touches: [notes/ladder-demo.md]"; echo "---"; cat "$BODY"
+} > "$SPOOLWAY_PROJECT_HOME/queue/ladder-demo.md"
+
+for _ in $(seq 1 100); do
+  [ -s "$LADDER_COUNT" ] && break
+  sleep 0.2
+done
+FIRST_COUNT=$(wc -l < "$LADDER_COUNT" 2>/dev/null || echo 0)
+if [ "$FIRST_COUNT" = "1" ]; then
+  ok "the failing done hook ran once, right away"
+else
+  bad "the failing done hook ran once, right away (ran $FIRST_COUNT times)"
+fi
+
+# Well inside the ladder's own ten seconds, so the retry cannot have come due
+# yet however many passes have gone by. It used to be worth saying "at a
+# one-second pass rate" here, because four seconds then held four passes and a
+# per-pass retry would already have shown; a fixed ten-second probe may hold
+# none at all, so what this pins now is only that the ladder is not skipped.
+# The count settling at exactly two below is what still says "one retry, not
+# one per pass".
+sleep 4
+COUNT_AFTER_4S=$(wc -l < "$LADDER_COUNT" 2>/dev/null || echo 0)
+if [ "$COUNT_AFTER_4S" = "1" ]; then
+  ok "four seconds in, inside the ladder's own ten, it still has not retried"
+else
+  bad "four seconds in, inside the ladder's own ten, it still has not retried \
+(ran $COUNT_AFTER_4S times — a retry before the ladder is due)"
+fi
+
+# The retry fires on the first pass *after* the ladder comes due, and the
+# ladder's ten seconds and the probe's ten are unrelated clocks that do not
+# line up — so the wait has to cover the ladder plus a whole
+# `dispatch::PROBE_INTERVAL` behind it, not the twelve seconds that sufficed
+# when a pass came round every second.
+for _ in $(seq 1 300); do
+  COUNT=$(wc -l < "$LADDER_COUNT" 2>/dev/null || echo 0)
+  [ "$COUNT" -ge 2 ] && break
+  sleep 0.2
+done
+COUNT=$(wc -l < "$LADDER_COUNT" 2>/dev/null || echo 0)
+if [ "$COUNT" = "2" ]; then
+  ok "the ladder's own ten-second step fired exactly one retry, not one per pass"
+else
+  bad "the ladder's own ten-second step fired exactly one retry, not one per pass \
+(ran $COUNT times)"
+fi
+
+must "the hook is put back so it stops holding tasks" \
+  "$SPOOLWAY" config set issue_tracking.hook ""
 
 # ----------------------------------------------------------- github.sh, real
 # The shipped script itself, not a hand-written stand-in — `configure_project`

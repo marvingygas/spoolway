@@ -145,7 +145,7 @@ gate_run() {
   # together — the same shape as `dispatcher_start`, and for the same
   # reason. `setsid` may or may not fork, so the group leader `exec`s the
   # binary over itself after writing its own pid.
-  setsid bash -c 'echo $$ > "$2"; exec "$1" dispatch --plain --interval 1s' \
+  setsid bash -c 'echo $$ > "$2"; exec "$1" dispatch --plain' \
     _ "$SPOOLWAY" "$GATE_PID" >"$GATE_LOG" 2>&1 &
   disown
   poll_until 10 test -s "$GATE_PID"

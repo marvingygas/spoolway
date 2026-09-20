@@ -499,24 +499,11 @@ pub struct DispatchConfig {
     /// checkout spoolway cut is not herdr's to know about.
     pub worktree_root: String,
 
-    /// How long to wait between passes when running as a background job.
-    ///
-    /// Ten seconds by default, which is about the floor worth having: below it,
-    /// each pass's mux IPC round-trip and full reread of every task file cost
-    /// more in polling overhead than they buy in reaction time, since a lane
-    /// takes real wall-clock minutes regardless of how often it is looked at.
-    ///
-    /// None of this applies to a local llama.cpp: its KV cache has no TTL and is
-    /// evicted by other lanes competing for slots, so `concurrency` governs it
-    /// and this does not.
-    #[serde(with = "human_duration")]
-    pub interval: Duration,
-
     /// How long a lane may say nothing before the dispatcher reminds it to
     /// report.
     ///
-    /// Patience, which is not the same quantity as [`Self::interval`] and used
-    /// to be read off it. How often a pass *looks* at a lane says nothing
+    /// Patience, which is not the same quantity as how often a pass looks —
+    /// it used to be read off that instead. How often a pass *looks* at a lane says nothing
     /// about how long that lane may reasonably be quiet, and at the shipped
     /// ten-second interval the two together meant a lane had ten seconds to
     /// speak or be nudged. Turning the poll rate down to react faster silently
@@ -688,7 +675,6 @@ impl Default for DispatchConfig {
             // stays `MuxMode`'s own `#[default]` for a config that omits the
             // key entirely, which is not this.
             herdr_mode: MuxMode::Split,
-            interval: Duration::from_secs(10),
             // Four of these (`MAX_REMINDERS` + 1) comfortably outlast the 45
             // minutes the shipped `checks` step waits on `gh pr checks
             // --watch`, so an agent step parked behind a long background job is
@@ -1575,6 +1561,31 @@ impl Config {
         Ok(config)
     }
 
+    /// [`Config::load`], tolerating a file that still names the retired
+    /// `dispatch.interval` key.
+    ///
+    /// Every other caller keeps refusing it outright: `DispatchConfig`'s
+    /// `deny_unknown_fields` is what makes the key a hard parse error rather
+    /// than a quietly-dropped one, on purpose, so a project only discovers
+    /// it is gone the moment something tries to read it. `spoolway sync` is
+    /// the one caller that exists to bring a file like that forward rather
+    /// than reject it, so this strips the key from the raw text before
+    /// parsing — the same way [`Config::save_key`] edits a document in
+    /// place — and parses what is left.
+    pub fn load_dropping_interval(root: &Path) -> Result<Config> {
+        let path = Config::path_in(root);
+        let raw = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        let stripped = crate::confdoc::remove(&raw, &["dispatch", "interval"])?;
+        let mut config: Config =
+            toml::from_str(&stripped).with_context(|| format!("parsing {}", path.display()))?;
+        config.migrate();
+        if let Ok(overrides) = crate::overrides::dir_for(root) {
+            config = crate::overrides::apply_config_patch(config, &overrides)?;
+        }
+        Ok(config)
+    }
+
     /// [`Config::load_impl`] with its retired-table notices handed back
     /// rather than printed, so a test can see which ones a given file on disk
     /// earns. `load_impl` is the only caller outside tests; it prints them.
@@ -1990,7 +2001,7 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 /// Durations are written the way a person would: `10m`, `90s`, `1h30m`.
 ///
 /// Shared with [`crate::pipeline`], so a `timeout:` in a pipeline file is
-/// written the same way `dispatch.interval` in config.toml is. One spelling
+/// written the same way `dispatch.lane_quiet` in config.toml is. One spelling
 /// of a duration across every file spoolway reads.
 pub(crate) mod human_duration {
     use super::*;
@@ -2163,7 +2174,7 @@ mod tests {
         let text = toml::to_string_pretty(&original).unwrap();
         let parsed: Config = toml::from_str(&text).unwrap();
 
-        assert_eq!(parsed.dispatch.interval, original.dispatch.interval);
+        assert_eq!(parsed.dispatch.lane_quiet, original.dispatch.lane_quiet);
         assert_eq!(parsed.agents["claude"].kind, "claude");
         // No profile guesses a harness cap. Zero has to survive the round
         // trip as zero rather than being written out and read back as
@@ -2251,7 +2262,7 @@ mod tests {
     /// existing config fails to load because of this key.
     #[test]
     fn an_absent_watch_table_loads_as_no_extra_dirs() {
-        let parsed: Config = toml::from_str("[dispatch]\ninterval = \"10s\"\n").unwrap();
+        let parsed: Config = toml::from_str("[dispatch]\nauto_commit = false\n").unwrap();
         assert!(parsed.watch.dirs.is_empty());
     }
 
@@ -2795,7 +2806,7 @@ mod tests {
     /// it, whichever table it lands on.
     #[test]
     fn a_config_missing_a_whole_table_reads_its_shipped_defaults() {
-        let config: Config = toml::from_str("[dispatch]\ninterval = \"10s\"\n")
+        let config: Config = toml::from_str("[dispatch]\nlane_quiet = \"10m\"\n")
             .expect("a config predating [unattended] must still parse");
         assert!(
             config.unattended.blocked_session,
@@ -2980,10 +2991,10 @@ mod tests {
                     [a_future_table]\n\
                     also_unknown = 1\n\n\
                     [dispatch]\n\
-                    interval = \"10s\"\n";
+                    lane_quiet = \"10m\"\n";
         let config: Config =
             toml::from_str(raw).expect("an unknown key from a newer binary must still parse");
-        assert_eq!(config.dispatch.interval, Duration::from_secs(10));
+        assert_eq!(config.dispatch.lane_quiet, Duration::from_secs(600));
 
         let rendered = toml::to_string(&config).unwrap();
         assert!(!rendered.contains("a_future_key"));

@@ -52,7 +52,7 @@ must "and one above it, to keep the plan open" "$SPOOLWAY" queue add --from "$LI
 
 # Driven to the hand-off and no further: its work is committed on its own
 # branch, and nothing has been pushed anywhere yet.
-if drive_and_hold clash handover 30; then ok "a finished task reaches the handover step"
+if drive_and_hold clash handover 60; then ok "a finished task reaches the handover step"
 else bad "a finished task reaches the handover step (at \`$(stage_of clash)\`)"; fi
 
 # The base moves with a change to the same file the lane wrote in its own
@@ -69,7 +69,7 @@ must "and the forge hears about it" git push -q origin plan/live
 # opens the pull request and stops there rather than landing the stack — which
 # is the window this suite is about: the base has moved, and nothing has
 # merged anything back yet.
-if drive_and_hold clash gone 60; then ok "the handover step hands over anyway, without touching what moved"
+if drive_and_hold clash gone 180; then ok "the handover step hands over anyway, without touching what moved"
 else bad "the handover step hands over anyway, without touching what moved (at \`$(stage_of clash)\`)"; fi
 if grep -q "rebased onto\|rebase" $SPOOLWAY_PROJECT_HOME/archive/clash.md; then
   bad "and does not claim a rebase that never happened"

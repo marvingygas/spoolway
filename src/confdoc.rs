@@ -291,16 +291,16 @@ session_reuse_ctx = 50
         let text = "\
 [dispatch]
 # a comment somebody wrote about this
-interval = \"1m\"
+lane_quiet = \"1m\"
 
 # and one about the next thing
 auto_commit = true
 ";
         let edited = set(
             text,
-            &["dispatch", "interval"],
+            &["dispatch", "lane_quiet"],
             &Value::String("30s".into()),
-            crate::confkv::note("dispatch.interval"),
+            crate::confkv::note("dispatch.lane_quiet"),
         )
         .unwrap();
 
@@ -309,7 +309,7 @@ auto_commit = true
             "\
 [dispatch]
 # a comment somebody wrote about this
-interval = \"30s\"
+lane_quiet = \"30s\"
 
 # and one about the next thing
 auto_commit = true
@@ -319,7 +319,7 @@ auto_commit = true
 
     #[test]
     fn a_key_the_file_never_had_arrives_with_its_note() {
-        let text = "[dispatch]\ninterval = \"10s\"\n";
+        let text = "[dispatch]\nlane_quiet = \"10s\"\n";
         let edited = set(
             text,
             &["dispatch", "auto_commit"],
@@ -330,14 +330,14 @@ auto_commit = true
 
         assert!(edited.contains("auto_commit = false"));
         assert!(edited.contains("# Whether spoolway commits"));
-        assert!(edited.starts_with("[dispatch]\ninterval = \"10s\"\n"));
+        assert!(edited.starts_with("[dispatch]\nlane_quiet = \"10s\"\n"));
     }
 
     /// What `sync` reads back out of a rewrite, so its report is the rewrite's
     /// own account of itself rather than a guess made before it ran.
     #[test]
     fn compare_names_the_settings_a_rewrite_added() {
-        let before = "[dispatch]\ninterval = \"10s\"\n";
+        let before = "[dispatch]\nlane_quiet = \"10m\"\n";
         let after = Config::default().render().unwrap();
 
         let refresh = compare(before, &after).unwrap();
@@ -370,14 +370,14 @@ auto_commit = true
     fn compare_names_a_comment_that_is_not_the_one_the_binary_writes() {
         let before = "\
 [dispatch]
-# Ten seconds because our lanes are quick and we like the board fresh.
-interval = \"10s\"
+# Ten minutes because our lanes are quick and we like the board fresh.
+lane_quiet = \"10m\"
 ";
         let after = Config::default().render().unwrap();
 
         let refresh = compare(before, &after).unwrap();
 
-        assert!(refresh.renoted.contains(&"dispatch.interval".to_string()));
+        assert!(refresh.renoted.contains(&"dispatch.lane_quiet".to_string()));
     }
 
     /// The wrap width is the binary's business. A note re-wrapped and nothing
@@ -400,7 +400,7 @@ interval = \"10s\"
     #[test]
     fn a_rewritten_config_still_holds_what_the_project_set() {
         let mut text = Config::default().render().unwrap();
-        text = text.replace("interval = \"10s\"", "interval = \"45s\"");
+        text = text.replace("lane_quiet = \"15m\"", "lane_quiet = \"45m\"");
         text.push_str("\n[sandbox]\nenabled = true\n");
 
         let mut current: Config = toml::from_str(&text).unwrap();
@@ -408,7 +408,7 @@ interval = \"10s\"
         let rewritten = current.render().unwrap();
         current.agrees_with(&rewritten).unwrap();
 
-        assert!(rewritten.contains("interval = \"45s\""));
+        assert!(rewritten.contains("lane_quiet = \"45m\""));
         assert!(rewritten.contains("auto_commit = false"));
         assert!(!rewritten.contains("[sandbox]"));
     }

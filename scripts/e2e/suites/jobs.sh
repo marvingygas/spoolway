@@ -40,7 +40,7 @@ one_shot_start_board() {
   local pidfile="$LIVE/one-shot-board.pid"
   rm -f "$pidfile"
   setsid bash -c 'echo $$ >"$1"; shift; exec "$@"' \
-    _ "$pidfile" "$SPOOLWAY" dispatch --interval "${E2E_INTERVAL:-1s}" \
+    _ "$pidfile" "$SPOOLWAY" dispatch \
     >>"$E2E_DISPATCH_LOG" 2>&1 </dev/null &
   poll_until 10 test -s "$pidfile" || {
     printf '  \033[31mSETUP\033[0m the one-shot board dispatcher never started\n' >&2

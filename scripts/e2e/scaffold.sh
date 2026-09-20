@@ -417,8 +417,6 @@ spoolway config set agents.pi.concurrency "$WORKERS"
 # the key is split on its *last* dot, so everything between `models.` and
 # `.context_window` is the name.
 spoolway config set "models.$MODEL.context_window" "$CTX"
-# Short, because somebody is watching this happen.
-spoolway config set dispatch.interval 10s
 
 # `blocked` is no longer a step end-to-end.yml declares; `Pipelines::assemble`
 # materialises it from these four keys instead. Kept on `pi` and this
@@ -436,18 +434,18 @@ if [ "$HEADLESS" = 1 ]; then
 fi
 
 # What the plan itself asks for. Every `config: <key> <value>` line in the plan
-# file is applied here, which is how one plan runs with a dispatch interval of
-# ten seconds and another with a session share of 5% without either of them
-# needing a flag on this script. The plan says which settings it is reaching and
-# this is the reaching.
+# file is applied here, which is how one plan runs with a session share of 5%
+# and another with a different concurrency without either of them needing a
+# flag on this script. The plan says which settings it is reaching and this
+# is the reaching.
 while read -r key value; do
   [ -n "$key" ] || continue
   say "the plan asks for: $key = $value"
   spoolway config set "$key" -- "$value"
 # The coverage block is a `<pre>` in a page, so the last line of it carries the
 # closing tag. Taken off here rather than left to whoever reads the value: a
-# `dispatch.interval` of `10s</pre>` is refused, and a value that takes any
-# string at all would swallow one silently, which is worse.
+# key whose value is `5</pre>` is refused, and a value that takes any string
+# at all would swallow one silently, which is worse.
 done < <(sed -n 's/^ *config: *//p' "$PLAN_FILE" | sed 's#</pre>##')
 
 git add -A

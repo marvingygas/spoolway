@@ -293,7 +293,12 @@ fn config(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<(
     // worktree — the run this command now exists for — `root` and
     // `checkout` can hold two different files. `current` is always the
     // checkout's own, so a rewrite is sourced from the file it replaces.
-    let current = match crate::config::Config::load(&repo.checkout) {
+    //
+    // `load_dropping_interval` rather than `Config::load`: `dispatch.interval`
+    // is retired hard enough that an ordinary load refuses a file still
+    // naming it, and this is the one place that has to bring such a file
+    // forward instead of rejecting it.
+    let current = match crate::config::Config::load_dropping_interval(&repo.checkout) {
         Ok(config) => config,
         Err(err) => {
             outcomes.push(Outcome::blocked(&shown, format!("{err:#}")));
@@ -1091,7 +1096,7 @@ mod tests {
         let repo = fixture("report-shape");
         std::fs::write(
             crate::config::Config::path_in(&repo.root),
-            "[dispatch]\ninterval = \"45s\"\n",
+            "[dispatch]\nlane_quiet = \"45m\"\n",
         )
         .unwrap();
 
@@ -1129,7 +1134,7 @@ mod tests {
         let path = crate::config::Config::path_in(&repo.root);
         std::fs::write(
             &path,
-            "[dispatch]\nbackend = \"headless\"\ninterval = \"45s\"\n",
+            "[dispatch]\nbackend = \"headless\"\nlane_quiet = \"45m\"\n",
         )
         .unwrap();
 
@@ -1138,7 +1143,7 @@ mod tests {
         let after = std::fs::read_to_string(&path).unwrap();
 
         assert!(after.contains("backend = \"headless\""));
-        assert!(after.contains("interval = \"45s\""));
+        assert!(after.contains("lane_quiet = \"45m\""));
         assert!(after.contains("auto_commit"));
         // The explanation is not a comment standing above the key any more —
         // it is one row of the reference table on top of the whole file.
@@ -1160,8 +1165,8 @@ mod tests {
     fn a_comment_that_is_not_the_binarys_is_rewritten_and_named() {
         let repo = fixture("config-comment");
         let path = crate::config::Config::path_in(&repo.root);
-        let mine = "# Ten seconds: our lanes are quick and we watch the board.";
-        std::fs::write(&path, format!("[dispatch]\n{mine}\ninterval = \"10s\"\n")).unwrap();
+        let mine = "# Ten minutes: our lanes are quick and we watch the board.";
+        std::fs::write(&path, format!("[dispatch]\n{mine}\nlane_quiet = \"10m\"\n")).unwrap();
 
         let mut outcomes = Vec::new();
         config(&repo, &args(), &mut outcomes).unwrap();
@@ -1169,15 +1174,15 @@ mod tests {
 
         assert!(!after.contains(mine));
         // Still explained — just in the table, not standing above the key.
-        assert!(after.contains("How long the dispatcher waits"));
+        assert!(after.contains("How long a lane may say nothing"));
         assert!(
-            after.contains("interval = \"10s\""),
+            after.contains("lane_quiet = \"10m\""),
             "the value is the one thing kept"
         );
         assert!(
             outcome_lines(&outcomes)
                 .iter()
-                .any(|line| line.starts_with("wrote") && line.contains("dispatch.interval")),
+                .any(|line| line.starts_with("wrote") && line.contains("dispatch.lane_quiet")),
             "{:?}",
             outcome_lines(&outcomes)
         );
@@ -1188,7 +1193,7 @@ mod tests {
     fn a_dry_run_says_what_the_config_would_gain_and_writes_nothing() {
         let repo = fixture("config-dry");
         let path = crate::config::Config::path_in(&repo.root);
-        let before = "[dispatch]\ninterval = \"45s\"\n";
+        let before = "[dispatch]\nlane_quiet = \"45m\"\n";
         std::fs::write(&path, before).unwrap();
 
         let mut outcomes = Vec::new();
@@ -1204,6 +1209,46 @@ mod tests {
 
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
         assert!(!outcomes.is_empty());
+    }
+
+    /// `dispatch.interval` is retired hard enough that an ordinary load
+    /// refuses a file still naming it — the same refusal `spoolway config
+    /// get` or `dispatch` would hit on this file today. `sync` is the one
+    /// path that has to bring it forward instead: it drops the key, rewrites
+    /// the reference header around its removal, and leaves the rest of the
+    /// file exactly as it read it.
+    #[test]
+    fn a_config_still_naming_dispatch_interval_is_refused_before_sync_and_accepted_after() {
+        let repo = fixture("config-retired-interval");
+        let path = crate::config::Config::path_in(&repo.root);
+        std::fs::write(
+            &path,
+            "[dispatch]\nbackend = \"headless\"\ninterval = \"45s\"\n",
+        )
+        .unwrap();
+
+        assert!(
+            crate::config::Config::load(&repo.root).is_err(),
+            "an ordinary load must still refuse the retired key"
+        );
+
+        let mut outcomes = Vec::new();
+        config(&repo, &args(), &mut outcomes).unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+
+        assert!(!after.contains("interval"), "{after}");
+        assert!(after.contains("backend = \"headless\""), "{after}");
+        assert!(
+            crate::config::Config::load(&repo.root).is_ok(),
+            "the rewritten file must load cleanly now that the key is gone"
+        );
+        assert!(
+            outcome_lines(&outcomes)
+                .iter()
+                .any(|line| line.starts_with("wrote") && line.contains("dispatch.interval")),
+            "{:?}",
+            outcome_lines(&outcomes)
+        );
     }
 
     /// Run from a linked worktree, `sync` writes the checkout it was run

@@ -44,7 +44,7 @@ impl std::fmt::Display for RestartsRefused {
 
 impl std::error::Error for RestartsRefused {}
 
-/// Run the pipeline: one pass, or a loop on the configured interval.
+/// Run the pipeline: one pass, or a loop on the dispatcher's fixed poll rate.
 ///
 /// Returns the code the process should exit with, rather than `()`, so a
 /// caller restarting this in a tight loop against a repo that cannot run
@@ -228,10 +228,7 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // touches this file at all.
     crate::problem_log::open(repo);
 
-    let interval = match &args.interval {
-        Some(text) => crate::config::parse_duration(text).map_err(anyhow::Error::msg)?,
-        None => repo.config.dispatch.interval,
-    };
+    let interval = crate::dispatch::PROBE_INTERVAL;
 
     // The dispatcher's own pane stays wherever it was started, under both
     // `grouped` and `split` — herdr has nothing to move it into. This still
@@ -444,6 +441,20 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
                     if crate::platform::stop::asked() {
                         break;
                     }
+                    // The cheap tick, once per slice — see
+                    // `crate::dispatch::Dispatcher::tick`. The board's own
+                    // next draw reads the queue fresh, so a stage change
+                    // this made shows up there with nothing more to do
+                    // here — but a tick's own action (a background command
+                    // stopped at its timeout, say) is not a stage change,
+                    // and the board would never otherwise say it happened.
+                    // Left unprinted under a board all the same, the same
+                    // asymmetry `pass`'s own report has: there is nowhere
+                    // on the board's own frame for either to go yet. See
+                    // review finding 4.
+                    if let Err(err) = tick(&mut dispatcher, repo, false) {
+                        crate::problem_log::append(repo, &format!("tick failed: {err:#}"));
+                    }
                     let _ = board.draw(repo, pipelines, crate::status::Phase::Waiting, &mut out);
                     let slice = crate::status::POLL.min(left);
                     if listening && stdin.byte_pending(slice) {
@@ -474,11 +485,39 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
                     if crate::platform::stop::asked() {
                         break;
                     }
+                    if let Err(err) = tick(&mut dispatcher, repo, true) {
+                        crate::problem_log::append(repo, &format!("tick failed: {err:#}"));
+                    }
                     std::thread::sleep(crate::status::POLL.min(left));
                 }
             }
         }
     }
+}
+
+/// One tick between two probes — see [`crate::dispatch::Dispatcher::tick`].
+/// Never reached for `--dry-run`, which returns after its one `pass` well
+/// before this wait loop.
+///
+/// `plain` mirrors the same split `pass`'s own caller makes on `board.
+/// is_none()`: a tick's actions reach the terminal only for a `--plain` run,
+/// which has nothing else narrating what happened — a run with a board
+/// leaves them silent for now, the same gap a probe's own actions already
+/// have there. See review finding 4.
+fn tick(dispatcher: &mut crate::dispatch::Dispatcher, repo: &Repo, plain: bool) -> Result<()> {
+    let report = dispatcher.tick()?;
+    for problem in &report.problems {
+        crate::problem_log::append(repo, problem);
+    }
+    if plain {
+        for action in &report.actions {
+            println!("  {action}");
+        }
+        for problem in &report.problems {
+            println!("  ! {problem}");
+        }
+    }
+    Ok(())
 }
 
 /// The first step, if any, whose `run:` calls `spoolway stack` — the one

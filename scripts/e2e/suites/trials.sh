@@ -208,9 +208,9 @@ task_doc "$LIVE/control.md" control "$BODY" "group: control-live" \
   "group_description: an ordinary control task beside the trial arms"
 must "control queues" "$SPOOLWAY" queue add --from "$LIVE/control.md"
 
-if drive control gone 60; then ok "the ordinary control task runs the pipeline to done"
+if drive control gone 180; then ok "the ordinary control task runs the pipeline to done"
 else bad "the ordinary control task runs the pipeline to done (stuck at \`$(stage_of control)\`)"; fi
-if drive alpha-1 gone 60 && drive beta-1 gone 60; then
+if drive alpha-1 gone 180 && drive beta-1 gone 180; then
   ok "both trial arms run their assigned pipelines to done"
 else
   bad "both trial arms run their assigned pipelines to done (at \`$(stage_of alpha-1)\`/\`$(stage_of beta-1)\`)"
@@ -318,7 +318,7 @@ SOLO_TRIAL=$(grep '^trial:' "$SPOOLWAY_PROJECT_HOME/queue/oneoff-1.md" | awk '{p
 # be in the queue — with a worktree and a branch of its own already cut — at
 # the moment it is discarded. The gate above holds exactly that, and
 # `drive_and_hold` stops the dispatcher besides.
-if drive_and_hold oneoff-1 paused 60; then ok "the arm is mid-flight, with a worktree cut"
+if drive_and_hold oneoff-1 paused 120; then ok "the arm is mid-flight, with a worktree cut"
 else bad "the arm is mid-flight, with a worktree cut (at \`$(stage_of oneoff-1)\`)"; fi
 
 # Acceptance criterion: an explicitly discarded trial loses its task

@@ -819,10 +819,6 @@ impl Tracker {
         to start at all outside a herdr pane, so there is always somewhere for that board to \
         draw.")]
 pub struct DispatchArgs {
-    /// Override the configured interval between passes, e.g. `5m`.
-    #[arg(long, value_name = "DURATION")]
-    pub interval: Option<String>,
-
     /// Print a line per pass instead of drawing the live board.
     ///
     /// The board owns the terminal and redraws about once a second, which

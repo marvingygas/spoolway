@@ -90,7 +90,7 @@ one_shot_start() {
   local pidfile="$LIVE/one-shot.pid"
   rm -f "$pidfile"
   setsid bash -c 'echo $$ >"$1"; shift; exec "$@"' \
-    _ "$pidfile" "$SPOOLWAY" dispatch --plain --interval "${E2E_INTERVAL:-1s}" \
+    _ "$pidfile" "$SPOOLWAY" dispatch --plain \
     >>"$E2E_DISPATCH_LOG" 2>&1 &
   poll_until 10 test -s "$pidfile" || {
     printf '  \033[31mSETUP\033[0m the one-shot dispatcher never started\n' >&2
@@ -110,7 +110,7 @@ one_shot_start_board() {
   local pidfile="$LIVE/one-shot-board.pid"
   rm -f "$pidfile"
   setsid bash -c 'echo $$ >"$1"; shift; exec "$@"' \
-    _ "$pidfile" "$SPOOLWAY" dispatch --interval "${E2E_INTERVAL:-1s}" \
+    _ "$pidfile" "$SPOOLWAY" dispatch \
     >>"$E2E_DISPATCH_LOG" 2>&1 </dev/null &
   poll_until 10 test -s "$pidfile" || {
     printf '  \033[31mSETUP\033[0m the one-shot board dispatcher never started\n' >&2
@@ -208,7 +208,9 @@ fi
 # from the very first case still alive and unreported. Its own reconciliation
 # — matching a task's step against `Mux::list_lanes` — is what has to notice
 # that and leave it alone; nothing here is asked to hold that promise, only
-# to watch it kept over several passes rather than one.
+# to watch it kept over several passes rather than one. Two passes cost a
+# real PROBE_INTERVAL each now — no --interval knob left to shrink it — so
+# the wait has to clear twenty seconds of dispatcher time, not fifteen.
 STARTS_BEFORE=$(grep -c 'started hang · implement' "$E2E_DISPATCH_LOG" 2>/dev/null || true)
 PASSES_BEFORE=$(grep -c 'lanes still working\|nothing to do' "$E2E_DISPATCH_LOG" 2>/dev/null || true)
 passed_twice_more() {
@@ -216,7 +218,7 @@ passed_twice_more() {
   now=$(grep -c 'lanes still working\|nothing to do' "$E2E_DISPATCH_LOG" 2>/dev/null || true)
   [ "${now:-0}" -ge "$(( ${PASSES_BEFORE:-0} + 2 ))" ]
 }
-if poll_until 15 passed_twice_more; then
+if poll_until 30 passed_twice_more; then
   STARTS_AFTER=$(grep -c 'started hang · implement' "$E2E_DISPATCH_LOG" 2>/dev/null || true)
   PID_NOW=$(cat "$SPOOLWAY_PROJECT_HOME/headless/hang · implement.pid" 2>/dev/null || true)
   if [ "$STARTS_AFTER" = "$STARTS_BEFORE" ] && [ "$PID_NOW" = "$PID1" ] && kill -0 "$PID1" 2>/dev/null; then

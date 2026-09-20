@@ -52,6 +52,20 @@ pub(crate) use view::{DIM, GUTTER, RESET};
 /// same phase every time and the mark would sit still while the run moved.
 pub const POLL: Duration = Duration::from_secs(1);
 
+/// How long the board keeps calling a task `Running` after its stage changes
+/// with no lane up for it yet — the ordinary gap between `spoolway report`
+/// writing the new stage and the dispatcher's next pass starting a lane
+/// there. Past this, the row falls back to reading `Queued`, honestly.
+///
+/// Twenty seconds: two passes at the ten-second `dispatch.interval` a
+/// project shipped with before this task removed it — the same figure
+/// `crate::dispatch::PROBE_INTERVAL` fixes the poll rate at now, doubled. A
+/// named constant of its own rather than the poll rate doubled at read time,
+/// on purpose: the two agreeing today is a coincidence of the numbers this
+/// task chose, not a fact about what this grace is for, so it must not start
+/// moving with the poll rate if that ever changes.
+pub(crate) const HANDOFF_GRACE: Duration = Duration::from_secs(20);
+
 /// How often a live session's transcript may be re-read for the CTX column.
 ///
 /// Ten times the redraw interval, because the two are paid for very
@@ -2181,7 +2195,7 @@ fn build_rows(
                 // first place, since that arm above never reaches here.
                 let mid_handoff = grace
                     .and_then(|arrived| arrived.get(task.id()))
-                    .is_some_and(|since| since.elapsed() < repo.config.dispatch.interval * 2);
+                    .is_some_and(|since| since.elapsed() < HANDOFF_GRACE);
                 let state = match live || command_run.is_some() || mid_handoff {
                     true => State::Running,
                     false => State::Queued,
@@ -3502,10 +3516,10 @@ mod tests {
     /// A task fresh off a handoff, with no lane up for it yet, reads
     /// `Running` for the ordinary gap before the dispatcher's next pass
     /// starts one there — the same gap `spoolway report` opens by writing
-    /// the new stage the instant a lane's turn ends. Once the grace window
-    /// (two `dispatch.interval`s) has passed with still no lane, the row
-    /// falls back to reading `Queued`, honestly. Faked forward by moving the
-    /// clock in `grace` back rather than sleeping through it for real.
+    /// the new stage the instant a lane's turn ends. Once [`HANDOFF_GRACE`]
+    /// has passed with still no lane, the row falls back to reading
+    /// `Queued`, honestly. Faked forward by moving the clock in `grace` back
+    /// rather than sleeping through it for real.
     #[test]
     fn a_stage_that_just_changed_reads_running_until_the_grace_window_passes() {
         let repo = fixture("mid-handoff-grace");
@@ -3514,7 +3528,7 @@ mod tests {
 
         let tasks = repo.tasks().unwrap();
         let graph = Graph::build(&tasks, &pipelines, &repo.archive_dir());
-        let window = repo.config.dispatch.interval * 2;
+        let window = HANDOFF_GRACE;
 
         // Just arrived: well inside the window, no lane anywhere.
         let mut grace = BTreeMap::new();
