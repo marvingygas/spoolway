@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="{{ site.lang }}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% if page.url == "/" %}{{ site.title }} — {{ site.tagline }}{% else %}{{ page.title }} · {{ site.title }}{% endif %}</title>
+<meta name="description" content="{{ page.description | default: site.description | strip_newlines | truncate: 300 }}">
+<link rel="canonical" href="{{ page.url | absolute_url }}">
+<meta property="og:site_name" content="{{ site.title }}">
+<meta property="og:title" content="{% if page.url == '/' %}{{ site.title }}{% else %}{{ page.title }}{% endif %}">
+<meta property="og:description" content="{{ page.description | default: site.description | strip_newlines | truncate: 300 }}">
+<meta property="og:url" content="{{ page.url | absolute_url }}">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary">
+<link rel="icon" href="{{ '/logo/lockup-a-mark-left.png' | relative_url }}">
+<style>
+  :root {
+    --bg: #ffffff; --fg: #18181b; --muted: #52525b; --line: #e4e4e7;
+    --accent: #3f3f46; --code-bg: #f4f4f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #18181b; --fg: #e4e4e7; --muted: #a1a1aa; --line: #3f3f46;
+            --accent: #d4d4d8; --code-bg: #27272a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 0 16px; }
+  header { border-bottom: 1px solid var(--line); padding: 14px 0; margin-bottom: 32px; }
+  header .wrap { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  header a { color: var(--fg); text-decoration: none; font-weight: 600; }
+  header nav { margin-left: auto; display: flex; gap: 16px; }
+  header nav a { font-weight: 400; color: var(--muted); }
+  header nav a:hover { color: var(--fg); }
+  main { padding-bottom: 64px; }
+  h1, h2, h3 { line-height: 1.25; margin-top: 2em; }
+  h1 { margin-top: 0; font-size: 2rem; }
+  a { color: #2563eb; }
+  @media (prefers-color-scheme: dark) { a { color: #60a5fa; } }
+  code { background: var(--code-bg); padding: 2px 5px; border-radius: 4px; font-size: 0.9em; }
+  pre { background: var(--code-bg); padding: 14px; border-radius: 8px; overflow-x: auto; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; display: block; overflow-x: auto; }
+  th, td { border: 1px solid var(--line); padding: 8px 10px; text-align: left; }
+  th { background: var(--code-bg); }
+  img { max-width: 100%; height: auto; }
+  blockquote { border-left: 3px solid var(--line); margin-left: 0; padding-left: 16px; color: var(--muted); }
+  footer { border-top: 1px solid var(--line); padding: 24px 0; color: var(--muted); font-size: 0.9rem; }
+  .mermaid { background: none; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <a href="{{ '/' | relative_url }}">spoolway</a>
+    <nav>
+      <a href="{{ '/installation.html' | relative_url }}">Install</a>
+      <a href="{{ '/concepts.html' | relative_url }}">Concepts</a>
+      <a href="{{ '/cli-reference.html' | relative_url }}">CLI</a>
+      <a href="https://github.com/{{ site.repository }}">GitHub</a>
+    </nav>
+  </div>
+</header>
+<main class="wrap">
+{{ content }}
+</main>
+<footer>
+  <div class="wrap">
+    spoolway is free software under the
+    <a href="https://github.com/{{ site.repository }}/blob/main/LICENSE">MIT license</a>.
+    Source and issues on <a href="https://github.com/{{ site.repository }}">GitHub</a>.
+  </div>
+</footer>
+<script type="module">
+  const blocks = document.querySelectorAll('pre > code.language-mermaid');
+  if (blocks.length) {
+    const { default: mermaid } = await import('https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs');
+    blocks.forEach((b) => {
+      const d = document.createElement('div');
+      d.className = 'mermaid';
+      d.textContent = b.textContent;
+      b.parentElement.replaceWith(d);
+    });
+    const dark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    mermaid.initialize({ startOnLoad: true, theme: dark ? 'dark' : 'default' });
+  }
+</script>
+</body>
+</html>

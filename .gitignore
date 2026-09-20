@@ -19,3 +19,6 @@ __pycache__/
 # run rather than the system; `docs/` is where anything worth keeping goes.
 .spoolway/e2e-notes.md
 /log.md
+
+# Assembled by site/build.sh; never committed.
+site/_src/
