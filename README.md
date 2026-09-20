@@ -11,17 +11,14 @@
   <a href="https://github.com/marvingygas/spoolway/releases/latest"><img alt="release" src="https://img.shields.io/github/v/release/marvingygas/spoolway?style=flat-square&label=release&labelColor=3f3f46&color=18181b"></a>
 </p>
 
-Minimalistic command line state machine for turning coding agents into a pipeline you can actually reason about. No dependencies, terminal native. Runs headless or in a supported multiplexer. Manages worktrees and opens GitHub stacked pull requests.
+Descriptive agent workflow builder ran by a minimalistic command line state machine for turning coding agents into a pipeline you can actually reason about. Determinism where possible. Terminal native. Built for herdr.
+Create yaml pipelines, mixing agents and commands, cloud and local models. Create a implemenation plan in any way you want and cut spoolway tasks which get linked to the best matched pipline. Measurable, comparable, repeatable. 
 
 Supported providers:
 
 - **`claude`**
 - **`codex`**
 - **`pi`**
-
-Supported multiplexers:
-
-- **`herdr`**
 
 ## Why
 
@@ -39,13 +36,14 @@ inside, so it never surprises you with a bill or an opinion.
   implementation, a cloud model for review, a shell command for the tests.
 - **A worktree per task.** Every task works on its own branch in its own checkout.
   Parallel tasks never touch each other's files.
-- **Stacked pull requests.** A dependent task's branch is cut from its dependency's
+- **Stacked pull requests built-in.** A dependent task's branch is cut from its dependency's
   branch. A chain of tasks arrives as one ordered stack of PRs. You land the stack.
   Optional, driven by **`spoolway stack`**.
 - **Session reuse.** A step can resume its prompt's earlier conversation. It stops
   reusing when the model's window is too full.
-- **Unattended runs.** Overnight, an unblocker prompt resumes blocked work. A token or
-  dollar ceiling stops the run.
+- **Unattended runs.** Blocked agents won't need you, the unblocker agent takes over
+  resolving the issue, only pausing the pipeline if there is no other way. The unblocker
+  is just a prompt you can customize.
 - **Trials.** Fork a group into one arm per task, each on its own pipeline, and compare
   the arms in eval.
 - **Routines.** Keep the tasks you run more than once in `.spoolway/routines/`.
