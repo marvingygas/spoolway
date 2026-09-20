@@ -415,6 +415,18 @@ ends at the push is claiming something it never checked.
   red it finds there will often have nothing to do with the pull requests it merged, because
   main's gate covers a release rehearsal, a nightly tier and a set of advisories that no branch
   ever runs — so "none of my merges caused this" is not a reason to leave it.
+
+  The same pass found a second red underneath it, from a different direction and
+  worth knowing on its own: a commit pushed **straight to `main`** runs no workflow at
+  all. `ci.yml` has no `push:` trigger and `release.yml`'s fires only on `v*` tags, so a
+  direct push is untested until the schedule — and three of them had landed here, one
+  of which rewrote the README's tagline without moving the crate description with it
+  (reddening `assets::the_crate_description_is_the_readme_tagline`, and with it both
+  `verify / test` and the rehearsal's locked suite) while another moved the stack
+  trailer's two facts to the console and left the `stack` e2e suite asserting the old
+  shape. Neither had a pull request, so neither had ever been checked. When the survey's
+  `git log` shows commits on `main` that are not merges, they are the first place to
+  look once the dispatched run comes back red.
 - **The stacked pull request looks conflict-free and is not.** A stacked branch reports
   `CLEAN` against its own base while its tip conflicts badly with `main`. `mergeStateStatus`
   answers a question about `baseRefName`, so on a stack it is answering the wrong one.
