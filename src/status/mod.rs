@@ -311,8 +311,11 @@ pub struct Board {
     /// `render`'s own body. By id rather than a plain row index, so a state
     /// change that resorts the board — a task passing its step, one landing on
     /// `paused` above it — never leaves the cursor pointing at a different
-    /// task than the one a person last put it on. `None` again only once the
-    /// board has nothing left to show at all.
+    /// task than the one a person last put it on. The same seeding block
+    /// re-lands it on the first row whenever the id it already holds falls
+    /// out of the frame's own rows entirely, such as a group finishing and
+    /// taking the cursor's row with it — no key pressed. `None` again only
+    /// once the board has nothing left to show at all.
     cursor: Option<String>,
     /// What a `p`, `P` or `R` keypress is waiting on, if anything — see
     /// [`BoardMode`]. `Browsing` on every other key, including the plain
@@ -1626,8 +1629,14 @@ fn render(
     // person's first `↑`/`↓` press go to discover it — see `Board::cursor`'s
     // own doc comment. Seeded from `rows`, the same composed list `table`
     // draws below, rather than a second read of the same task files, graph
-    // and lane list this function already just did.
-    if cursor.is_none() {
+    // and lane list this function already just did. Re-seeded, not just
+    // seeded once, because a group finishing can carry the row the cursor
+    // named off the table between two frames with no key pressed — the same
+    // "gone id" case `shift_cursor` already treats as no cursor at all.
+    let cursor_still_shown = cursor
+        .as_deref()
+        .is_some_and(|id| rows.iter().any(|row| row.id == id));
+    if !cursor_still_shown {
         *cursor = rows.first().map(|row| row.id.clone());
     }
     let totals = group_totals(&ledger, &rows);
@@ -4126,6 +4135,35 @@ mod tests {
         assert_eq!(board.cursor, None, "nothing has drawn a frame yet");
         board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
         assert_eq!(board.cursor.as_deref(), Some("login"));
+    }
+
+    /// A group finishing takes its last row off the board entirely — see
+    /// `done_rows_only_appear_for_a_group_still_in_the_queue` — and a cursor
+    /// still naming that row must not strand there with nothing drawn under
+    /// it. The very next frame, with no key pressed, lands it back on the
+    /// first row still on the board.
+    #[test]
+    fn the_cursor_falls_back_to_the_first_row_when_its_group_finishes() {
+        let repo = fixture("cursor-group-finishes");
+        let pipelines = Pipelines::builtin();
+        add_to(&repo, "login", &[], Some("implement"), Some("auth"));
+        add(&repo, "other", &[], None);
+
+        let mut board = Board::for_test();
+        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
+        board.cursor = Some("login".to_string());
+
+        // "login" finishes and leaves the queue; nothing else in "auth" is
+        // still queued, so the group drops off the board entirely rather
+        // than lingering as a done row.
+        std::fs::remove_file(repo.queue_dir().join("login.md")).unwrap();
+
+        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
+        assert_eq!(
+            board.cursor.as_deref(),
+            Some("other"),
+            "the cursor falls back to the first remaining row once its own row is gone"
+        );
     }
 
     /// The cursor walks the archived rows the board draws too, not just the
