@@ -153,12 +153,20 @@ else
   [ -n "$top_pr" ] && sed 's/^/        /' "$top_pr"
 fi
 
-# --------------------------------------- the trailer's own two extra lines
+# ------------------------------------------- the two facts stack reports itself
 # `edge` changes a file its `touches` never names, and `rival` — a sibling
 # `parallel: true` task nothing here ever runs `stack` for — sits on a branch
 # that touches the very same file differently, off the same base. Neither is
-# a reason to refuse the pull request; both are the trailer's business, so
-# what is checked is that they reach the body rather than that anything stops.
+# a reason to refuse the pull request, so what is checked is that both are
+# *reported* rather than that anything stops.
+#
+# Reported on the console, and nowhere else. e761a22 cut the pull request
+# trailer down to the co-author tag: the undeclared-file list and the predicted
+# sibling conflict are for whoever is watching the lane run, and repeating them
+# under the task only crowded the body a reviewer opens. So this asserts both
+# halves — that `stack` says them on its own output, and that the body stays
+# clear of them — because a check that only watched the console would let the
+# lines drift back into the pull request unnoticed.
 must "rival's branch, off main" git branch task/rival main
 must "its worktree" git worktree add -q "$WORKTREES/rival" task/rival
 (
@@ -188,19 +196,24 @@ if [ $? -eq 0 ]; then ok "and for a task with an undeclared file and a conflicti
 else bad "and for a task with an undeclared file and a conflicting sibling"; sed 's/^/        /' <<<"$edge_out"; fi
 
 edge_pr=$(grep -l '^head=task/edge$' "$LIVE/prs"/[0-9]* 2>/dev/null | head -1)
-if [ -n "$edge_pr" ] \
-   && grep -qF "Changed 1 file it did not declare in \`touches\`:" "${edge_pr}.body" 2>/dev/null \
-   && grep -qF "  notes/undeclared.md" "${edge_pr}.body" 2>/dev/null; then
-  ok "the trailer names the file it changed outside \`touches\`"
+if grep -qF "1 file(s) not declared: notes/undeclared.md" <<<"$edge_out"; then
+  ok "its \`touches\` line names the file it changed outside \`touches\`"
 else
-  bad "the trailer names the file it changed outside \`touches\`"
-  [ -n "$edge_pr" ] && sed 's/^/        /' "${edge_pr}.body"
+  bad "its \`touches\` line names the file it changed outside \`touches\`"
+  sed 's/^/        /' <<<"$edge_out"
+fi
+if grep -qF "conflicts with rival" <<<"$edge_out"; then
+  ok "and its \`siblings\` line names the parallel task it will conflict with"
+else
+  bad "and its \`siblings\` line names the parallel task it will conflict with"
+  sed 's/^/        /' <<<"$edge_out"
 fi
 if [ -n "$edge_pr" ] \
-   && grep -qF "Will conflict with \`rival\`, which is not ordered against this task." "${edge_pr}.body" 2>/dev/null; then
-  ok "and the parallel sibling it will conflict with"
+   && ! grep -qF "notes/undeclared.md" "${edge_pr}.body" 2>/dev/null \
+   && ! grep -qiF "will conflict with" "${edge_pr}.body" 2>/dev/null; then
+  ok "and neither is repeated in the pull request body"
 else
-  bad "and the parallel sibling it will conflict with"
+  bad "and neither is repeated in the pull request body"
   [ -n "$edge_pr" ] && sed 's/^/        /' "${edge_pr}.body"
 fi
 
