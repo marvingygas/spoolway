@@ -265,31 +265,30 @@ shows what is patched and waits for a key:
   [enter] start the run   [esc] back   [x] don't ask again until this changes
 ```
 
-`enter` there then shows a warnings screen, built from `spoolway doctor`'s own cheap checks
-plus an unattended run's own notice, and waits for a key:
+`enter` there then shows a warnings screen, built from `spoolway doctor`'s own cheap
+checks, and waits for a key:
 
 ```
-  before this run starts
+before this run starts
 
-  settings
-    unattended mode is on with no ceiling in tokens or dollars,
-    so nothing stops a run that will not settle.
+settings
+  unattended.enabled is on with no unattended.max_output_tokens and no
+    unattended.max_cost_usd
 
-  files
-    .spoolway/config.toml was written by an older spoolway version
-    and no longer matches this one — `spoolway update` takes it.
+files
+  .spoolway/config.toml is behind this spoolway
 
-  problems
-    the `archivist` prompt is missing, so the document step will
-    fail on every task that reaches it.
+problems
+  prompt `archivist`: missing
 
-  [enter] start the run   [esc] back   [x] hide until these change
+[enter] start the run   [esc] back   [x] hide until these change
 ```
 
-Each section is skipped when it has nothing to say, and the whole screen is skipped, with
-nothing drawn, when all three are empty. `x` stores its own fingerprint of the rendered lines,
-separate from the overrides screen's, and the screen returns as soon as any line differs from
-it.
+A line names the setting and its state, and nothing else. What to do about it is in
+[Configuration](configuration.md). Each section is skipped when it has nothing to say, and the
+whole screen is skipped, with nothing drawn, when all three are empty. `x` stores its own
+fingerprint of the rendered lines, separate from the overrides screen's, and the screen returns
+as soon as any line differs from it.
 
 `esc` on any of the three screens ends the command. From the queue screen's own `enter`, `esc`
 on any of the three screens returns to browsing instead.

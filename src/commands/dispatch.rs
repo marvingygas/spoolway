@@ -194,8 +194,8 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // skips all three: the queue screen's own `enter` already walked a
     // person through this same trio, reusing its own `TermGuard` rather than
     // nesting a second one — see `commands::queue::confirm_start`, which
-    // builds its own copy of `unattended_lines` rather than reading this
-    // one, since it never runs this block at all.
+    // calls `warnings_gate_with` itself rather than reading this one, since
+    // it never runs this block at all.
     if !args.confirmed {
         if !overview_gate(repo)? {
             return Ok(0);
@@ -203,8 +203,7 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         if !overrides_gate(repo)? {
             return Ok(0);
         }
-        let unattended_lines = unattended_block_lines(unattended, &repo.config);
-        if !warnings_gate(repo, pipelines, &unattended_lines)? {
+        if !warnings_gate(repo, pipelines)? {
             return Ok(0);
         }
     }
@@ -895,43 +894,18 @@ fn overrides_gate_kind(row: &OverrideRow) -> String {
     format!("{n} key{}", if n == 1 { "" } else { "s" })
 }
 
-/// `dispatch`'s own summary of what an unattended run does and does not
-/// bound, held as lines for [`warnings_gate_with`] rather than printed on
-/// the spot — see that function's own call site in [`dispatch`].
-///
-/// `unattended` is the merged flag `dispatch` itself already computed
-/// (`--unattended` or `unattended.enabled`), not `config.unattended.enabled`
-/// alone: a run made unattended by the command line reports on itself the
-/// same way one made unattended by config does.
-pub(crate) fn unattended_block_lines(unattended: bool, config: &Config) -> Vec<String> {
-    if !unattended {
-        return Vec::new();
-    }
-    vec![
-        "unattended: blocks resume where they happened, and a `loop` that gives up into \
-         `blocked` does not apply. A gated step still parks on `paused` for you."
-            .to_string(),
-        match config.unattended.max_output_tokens {
-            0 => "no unattended.max_output_tokens is set, so nothing bounds this run in \
-                  tokens."
-                .to_string(),
-            ceiling => format!("stopping once this run has spent {ceiling} output tokens."),
-        },
-        match config.unattended.max_cost_usd {
-            ceiling if ceiling <= 0.0 => "no unattended.max_cost_usd is set, so nothing bounds \
-                                           this run in dollars — an empty queue or ctrl-c is \
-                                           what ends it if neither ceiling is."
-                .to_string(),
-            ceiling => format!("stopping once this run has spent ${ceiling:.2}."),
-        },
-    ]
-}
-
 /// The screen between the overrides gate and the run itself: doctor's cheap
 /// findings (see [`crate::commands::doctor::cheap_findings`]) under the
-/// mockup's own three headings, plus the unattended block — one of the two
-/// notices [`dispatch`] used to print with a bare `println!` and lose to
-/// `Board::draw`'s own clear screen a moment later (task `warnings-screen`).
+/// mockup's own three headings — one of the two notices [`dispatch`] used to
+/// print with a bare `println!` and lose to `Board::draw`'s own clear screen
+/// a moment later (task `warnings-screen`).
+///
+/// An unattended run with no ceiling gets no block of its own here any
+/// more: doctor's own `unattended.enabled` note (see
+/// `pipeline_graph_checks`) already lands under `settings`, since both read
+/// the same string. It fires on `config.unattended.enabled` alone and
+/// cannot see a `--unattended` flag with the config setting left off — an
+/// accepted gap, not one this screen closes.
 ///
 /// `Ok(true)` to go on and start the run, `Ok(false)` only for `esc`.
 /// Alongside [`overview_gate`] and [`overrides_gate`], and — like both —
@@ -940,14 +914,12 @@ pub(crate) fn unattended_block_lines(unattended: bool, config: &Config) -> Vec<S
 /// exists to fix, a failure to open the run's shared workspace, cannot join
 /// this screen for exactly that reason — it is only attempted once the lock
 /// is held — so it gets its own, smaller one instead; see
-/// [`workspace_open_notice`], which is why this takes only `unattended` and
-/// no workspace-open error of its own.
-fn warnings_gate(repo: &Repo, pipelines: &Pipelines, unattended: &[String]) -> Result<bool> {
+/// [`workspace_open_notice`].
+fn warnings_gate(repo: &Repo, pipelines: &Pipelines) -> Result<bool> {
     warnings_gate_with(
         repo,
         pipelines,
         crate::ask::interactive(),
-        unattended,
         &mut crate::screen::RawStdin,
         &mut std::io::stdout(),
         Some(crate::platform::TermGuard::new as fn() -> _),
@@ -969,7 +941,6 @@ pub(crate) fn warnings_gate_with(
     repo: &Repo,
     pipelines: &Pipelines,
     interactive: bool,
-    unattended: &[String],
     input: &mut impl PollableRead,
     out: &mut impl std::io::Write,
     term: Option<impl FnOnce() -> crate::platform::TermGuard>,
@@ -977,13 +948,12 @@ pub(crate) fn warnings_gate_with(
     use crate::commands::doctor::Warning;
 
     let cheap = crate::commands::doctor::cheap_findings(repo, pipelines, &repo.config);
-    let settings: Vec<String> = unattended
+    let settings: Vec<String> = cheap
         .iter()
-        .cloned()
-        .chain(cheap.iter().filter_map(|w| match w {
+        .filter_map(|w| match w {
             Warning::Setting(text) => Some(text.clone()),
             _ => None,
-        }))
+        })
         .collect();
     let files: Vec<String> = cheap
         .iter()
@@ -1120,6 +1090,9 @@ fn print_warnings_notice(
 /// exactly the text a person was shown — never the title, which never
 /// changes, and never the footer, which is this screen's prompt rather than
 /// a fact about the project.
+///
+/// One line per item, with nothing between them: a scan of names before
+/// pressing `enter` has no room for a blank line every notice used to carry.
 fn warnings_lines(settings: &[String], files: &[String], problems: &[String]) -> Vec<String> {
     let mut lines = Vec::new();
     for (heading, texts) in [
@@ -1131,10 +1104,7 @@ fn warnings_lines(settings: &[String], files: &[String], problems: &[String]) ->
             continue;
         }
         lines.push(heading.to_string());
-        for (i, text) in texts.iter().enumerate() {
-            if i > 0 {
-                lines.push(String::new());
-            }
+        for text in texts {
             lines.extend(wrap_indent(text, "  ", 80));
         }
         lines.push(String::new());
@@ -1149,19 +1119,21 @@ fn warnings_lines(settings: &[String], files: &[String], problems: &[String]) ->
     lines
 }
 
-/// `text`, word-wrapped to `width` columns with `indent` at the start of
-/// every line it produces. A local copy of the same wrapping
-/// `commands::queue`'s own `wrapped` does for a labeled row, rather than a
-/// reach into a sibling module for one small utility this screen has no
-/// label to sit beside — every line here carries the same indent, not only
-/// the continuation lines a label would leave bare.
+/// `text`, word-wrapped to `width` columns, `indent` at the start of the
+/// first line and two columns further in on every line after it — the
+/// mockup's own hang, telling a wrapped continuation apart from the next
+/// item without a blank line to separate them now that [`warnings_lines`]
+/// prints none. A local copy of the same wrapping `commands::queue`'s own
+/// `wrapped` does for a labeled row, rather than a reach into a sibling
+/// module for one small utility this screen has no label to sit beside.
 fn wrap_indent(text: &str, indent: &str, width: usize) -> Vec<String> {
+    let hang = format!("{indent}  ");
     let mut lines = Vec::new();
     let mut current = indent.to_string();
     let mut bare = true;
     for word in text.split_whitespace() {
         if !bare && current.chars().count() + 1 + word.chars().count() > width {
-            lines.push(std::mem::replace(&mut current, indent.to_string()));
+            lines.push(std::mem::replace(&mut current, hang.clone()));
             bare = true;
         }
         if !bare {
@@ -2802,50 +2774,6 @@ mod tests {
         assert!(!dispatcher_running_gate_with(&repo, 250, &mut input, &mut out).unwrap());
     }
 
-    /// `unattended_block_lines` says nothing at all for an attended run —
-    /// the block is the one thing on this screen that exists only because a
-    /// run is unattended.
-    #[test]
-    fn unattended_block_lines_is_empty_when_attended() {
-        assert!(unattended_block_lines(false, &Config::default()).is_empty());
-    }
-
-    /// Both ceilings unset is the shape the mockup itself draws: three lines,
-    /// the last two both saying nothing bounds the run.
-    #[test]
-    fn unattended_block_lines_names_both_unset_ceilings() {
-        let lines = unattended_block_lines(true, &Config::default());
-        assert_eq!(lines.len(), 3, "{lines:?}");
-        assert!(lines[0].starts_with("unattended:"), "{lines:?}");
-        assert!(
-            lines[1].contains("no unattended.max_output_tokens is set"),
-            "{lines:?}"
-        );
-        assert!(
-            lines[2].contains("no unattended.max_cost_usd is set"),
-            "{lines:?}"
-        );
-    }
-
-    /// A ceiling that is actually set is reported as a fact rather than a
-    /// gap — the branch the mockup itself never draws, but the one every
-    /// bounded unattended run actually takes.
-    #[test]
-    fn unattended_block_lines_names_a_set_ceiling() {
-        let mut config = Config::default();
-        config.unattended.max_output_tokens = 500_000;
-        config.unattended.max_cost_usd = 12.5;
-        let lines = unattended_block_lines(true, &config);
-        assert!(
-            lines[1].contains("stopping once this run has spent 500000 output tokens."),
-            "{lines:?}"
-        );
-        assert!(
-            lines[2].contains("stopping once this run has spent $12.50."),
-            "{lines:?}"
-        );
-    }
-
     /// The mockup's own three headings, in order, each skipped when its
     /// section is empty — [`print_warnings_notice`] and
     /// [`warnings_gate_with`]'s own fingerprint both build on this.
@@ -2874,26 +2802,49 @@ mod tests {
         assert_eq!(heading_order, vec!["settings", "files", "problems"]);
     }
 
-    /// A section's text wraps at 80 columns with the mockup's own two-space
-    /// hang on every line, not only the continuation ones.
+    /// Two items under the same heading are a single line apart, not two —
+    /// the blank line this screen used to leave between them is gone, so a
+    /// scan of names has nothing to skip over.
     #[test]
-    fn warnings_lines_wraps_a_long_line_with_a_two_space_hang() {
+    fn warnings_lines_puts_no_blank_line_between_items() {
+        let lines = warnings_lines(
+            &["first setting".to_string(), "second setting".to_string()],
+            &[],
+            &[],
+        );
+        assert_eq!(
+            lines,
+            vec![
+                "settings".to_string(),
+                "  first setting".to_string(),
+                "  second setting".to_string(),
+            ]
+        );
+    }
+
+    /// A section's text wraps at 80 columns, the first line at `indent` and
+    /// every line after it two columns further in — the mockup's own hang,
+    /// the only thing telling a wrapped continuation apart from the next
+    /// item now that nothing sits between them.
+    #[test]
+    fn warnings_lines_wraps_a_long_line_with_a_two_column_hang() {
         let long = "word ".repeat(30);
         let lines = warnings_lines(&[long], &[], &[]);
-        for line in &lines[1..] {
+        assert!(lines[1].starts_with("  word"), "{lines:?}");
+        for line in &lines[2..] {
             if line.is_empty() {
                 continue;
             }
-            assert!(line.starts_with("  "), "{lines:?}");
+            assert!(line.starts_with("    "), "{lines:?}");
             assert!(line.chars().count() <= 80, "{lines:?}");
         }
     }
 
     /// A fresh project has never been initialised, so `doctor_sync`'s own
-    /// notes fire and land under "files" — enough, with no unattended lines,
-    /// to prove this screen has something to say without a tty, and prints
-    /// it without ever reading a key (`input` is left empty; a `read_key`
-    /// call here would hang the test).
+    /// notes fire and land under "files" — enough to prove this screen has
+    /// something to say without a tty, and prints it without ever reading a
+    /// key (`input` is left empty; a `read_key` call here would hang the
+    /// test).
     #[test]
     fn warnings_gate_with_no_tty_prints_and_proceeds() {
         let repo = fixture("warnings-gate-no-tty");
@@ -2904,7 +2855,6 @@ mod tests {
             &repo,
             &pipelines,
             false,
-            &[],
             &mut input,
             &mut out,
             Some(crate::platform::TermGuard::inert),
@@ -2918,12 +2868,14 @@ mod tests {
 
     /// `enter` starts the run without writing an acknowledgement — the
     /// mockup reserves that for `x` alone, the same rule
-    /// `overrides_gate_with` follows.
+    /// `overrides_gate_with` follows. `unattended.enabled` with no ceiling
+    /// set is what guarantees this screen has a setting worth reading,
+    /// rather than skipping itself for having nothing to say.
     #[test]
     fn warnings_gate_enter_proceeds_without_acknowledging() {
-        let repo = fixture("warnings-gate-enter");
+        let mut repo = fixture("warnings-gate-enter");
+        repo.config.unattended.enabled = true;
         let pipelines = Pipelines::builtin();
-        let unattended = ["a setting worth reading".to_string()];
         let mut input = keys("\r");
         let mut out = Vec::new();
         assert!(
@@ -2931,7 +2883,6 @@ mod tests {
                 &repo,
                 &pipelines,
                 true,
-                &unattended,
                 &mut input,
                 &mut out,
                 Some(crate::platform::TermGuard::inert),
@@ -2944,9 +2895,9 @@ mod tests {
     /// anything below it in `dispatch` ever spawns a lane.
     #[test]
     fn warnings_gate_esc_declines() {
-        let repo = fixture("warnings-gate-esc");
+        let mut repo = fixture("warnings-gate-esc");
+        repo.config.unattended.enabled = true;
         let pipelines = Pipelines::builtin();
-        let unattended = ["a setting worth reading".to_string()];
         let mut input = keys("\x1b");
         let mut out = Vec::new();
         assert!(
@@ -2954,7 +2905,6 @@ mod tests {
                 &repo,
                 &pipelines,
                 true,
-                &unattended,
                 &mut input,
                 &mut out,
                 Some(crate::platform::TermGuard::inert),
@@ -2969,9 +2919,9 @@ mod tests {
     /// and it draws nothing.
     #[test]
     fn warnings_gate_x_acknowledges_and_is_not_asked_again() {
-        let repo = fixture("warnings-gate-x");
+        let mut repo = fixture("warnings-gate-x");
+        repo.config.unattended.enabled = true;
         let pipelines = Pipelines::builtin();
-        let unattended = ["a setting worth reading".to_string()];
 
         let mut input = keys("x");
         let mut out = Vec::new();
@@ -2980,7 +2930,6 @@ mod tests {
                 &repo,
                 &pipelines,
                 true,
-                &unattended,
                 &mut input,
                 &mut out,
                 Some(crate::platform::TermGuard::inert),
@@ -2995,7 +2944,6 @@ mod tests {
                 &repo,
                 &pipelines,
                 true,
-                &unattended,
                 &mut no_input,
                 &mut out,
                 Some(crate::platform::TermGuard::inert),
@@ -3014,16 +2962,15 @@ mod tests {
     /// screen's headings are not.
     #[test]
     fn warnings_gate_footer_is_flush_left() {
-        let repo = fixture("warnings-gate-footer");
+        let mut repo = fixture("warnings-gate-footer");
+        repo.config.unattended.enabled = true;
         let pipelines = Pipelines::builtin();
-        let unattended = ["a setting worth reading".to_string()];
         let mut input = keys("\x1b");
         let mut out = Vec::new();
         warnings_gate_with(
             &repo,
             &pipelines,
             true,
-            &unattended,
             &mut input,
             &mut out,
             Some(crate::platform::TermGuard::inert),

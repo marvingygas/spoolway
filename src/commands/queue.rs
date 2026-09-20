@@ -5074,19 +5074,10 @@ fn confirm_start(
     )? {
         return Ok(false);
     }
-    // `dispatch::dispatch` itself computes this same merged flag from a
-    // `DispatchArgs` this screen never sees — but `queue_screen` always
-    // hands the eventual run a bare `DispatchArgs { confirmed: true,
-    // ..Default::default() }` (see `queue_screen`'s own match on
-    // `ScreenExit::StartDispatcher`), whose `unattended()` reduces to
-    // `config.unattended.enabled` alone, exactly what this reads.
-    let unattended_lines =
-        super::dispatch::unattended_block_lines(repo.config.unattended.enabled, &repo.config);
     super::dispatch::warnings_gate_with(
         repo,
         pipelines,
         true,
-        &unattended_lines,
         input,
         out,
         None::<fn() -> crate::platform::TermGuard>,
