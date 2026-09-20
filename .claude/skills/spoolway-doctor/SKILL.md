@@ -37,11 +37,8 @@ turning each into a fix concrete enough to approve.
    form). The others report by printing. **Read the output; never conclude from an exit
    code.**
 
-   Two more, when they apply:
+   One more, when it applies:
 
-   - `spoolway dispatch --dry-run` — what the next pass would actually do, spawning
-     nothing and writing to no task file. Run it only when `queue list` says no dispatcher is
-     running: it takes the same lock, and with one up it just says so.
    - `spoolway lane <lane> --json` — for a lane a task has been sitting on. Lanes are named
      `<task> · <step>`; `spoolway lane --json` with no argument lists them.
 
@@ -108,7 +105,7 @@ turning each into a fix concrete enough to approve.
 | ``agent `x`: `pi` is not on PATH`` | every step on that profile refuses to start | install the CLI, or point the profile at one that is installed | outside |
 | ``agent `x` permission mode: … is not a mode`` | the lane dies on an unrecognised flag, passes into a run | `spoolway config set agents.x.permission_mode <one it lists>` | mechanical |
 | ``prompt for `step` is missing`` | that step cannot start a lane | `spoolway init` | mechanical |
-| ``lanes can be started: …`` | there is nowhere to run a lane | install the multiplexer, or `dispatch.backend = "headless"` | decision |
+| ``lanes can be started: …`` | there is nowhere to run a lane | install herdr and run `spoolway dispatch` from inside a pane it opens | outside |
 | ``pipelines are valid`` fails | nothing dispatches | edit `.spoolway/pipelines/`, confirm with `spoolway pipeline check` | decision |
 | ``task dependency graph`` fails | a cycle or an unknown `depends_on`; those tasks never start | edit the task's frontmatter in the project's own `queue/` | decision |
 | note: no git remote | nothing can be handed over: every task's change goes out as a pull request | add the remote | outside |
@@ -129,8 +126,8 @@ turning each into a fix concrete enough to approve.
   config. Plain `init` writes only what is missing, which is the whole of the fix — and
   where the fix is "this project is behind", it is `spoolway sync`, which never touches
   a prompt at all.
-- Never start a dispatcher from here. `--dry-run` is a check; `spoolway dispatch` is
-  the pipeline running, and that is a human's call.
+- Never start a dispatcher from here. Everything above is a check; `spoolway dispatch`
+  is the pipeline actually running, and that is a human's call.
 - Never silence a finding by lowering the bar it failed — loosening a review standard,
   widening a `touches`, dropping a `depends_on`. That makes the failure disappear without
   changing anything it was reporting.
