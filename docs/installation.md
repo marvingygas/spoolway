@@ -1,6 +1,6 @@
 ---
 domain: installation
-covers: ["src/install.rs", "src/update.rs", "src/sync.rs", "src/release.rs", "src/release_notes.rs", "CHANGELOG.md", "src/assets.rs", "src/ask.rs", "src/gitignore.rs", "npm/**", "scripts/build-npm.mjs"]
+covers: ["src/install.rs", "src/update.rs", "src/sync.rs", "src/release.rs", "src/release_notes.rs", "CHANGELOG.md", "src/assets.rs", "src/ask.rs", "src/gitignore.rs", "npm/**", "scripts/build-npm.mjs", "herdr-plugin.toml", "scripts/fetch-or-build.sh"]
 ---
 
 # Installation and setup
@@ -32,6 +32,27 @@ cargo install --path .
 
 By hand: every GitHub release has one archive per platform and a `SHA256SUMS` file. Unpack the
 archive and put the binary on your `PATH`.
+
+As a herdr plugin:
+
+```
+herdr plugin install marvingygas/spoolway
+```
+
+`herdr-plugin.toml` at the repository root declares spoolway's id, version, minimum herdr
+version, description, platforms, one `[[build]]` step and four panes and actions, one pair per
+command: `init`, `queue`, `dispatch` and `doctor`. The `[[build]]` step runs
+`scripts/fetch-or-build.sh`, which maps the host's platform onto one of the triples in
+[`npm/targets.json`](../npm/targets.json), downloads that platform's release archive and its
+`SHA256SUMS`, verifies the checksum, and unpacks the binary to `./bin/spoolway` inside the
+plugin's own directory. `herdr plugin uninstall` deletes that directory, so nothing the script
+writes lands anywhere else, such as `~/.local/bin` or `~/.cargo/bin`. If the host's platform has
+no matching triple, no release matches the manifest's version, or the checksum fails to verify,
+the script falls back to `cargo build --release` and copies the result into place instead of
+failing the install.
+
+`herdr-plugin.toml`'s `version` is kept equal to `Cargo.toml`'s by hand; CI fails the build when
+the two disagree. See [Testing](testing.md).
 
 ## What spoolway needs
 

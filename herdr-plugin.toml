@@ -1,0 +1,87 @@
+# herdr-plugin.toml — manifest that lets herdr index and install spoolway.
+#
+# `version` is a hand-maintained copy of Cargo.toml's own version: Cargo.toml
+# is the single source of truth (scripts/build-npm.mjs stamps every
+# package.json from it at build time), but this file ships to `main`
+# unstamped, so `.github/workflows/verify.yml`'s `test` job fails the build
+# when the two disagree instead of letting them drift.
+
+id = "spoolway"
+name = "spoolway"
+version = "0.4.0"
+min_herdr_version = "0.7.0"
+description = "Agent state machine: a background dispatcher that drives agent sessions through defined pipelines"
+platforms = ["linux", "macos"]
+
+[[build]]
+platforms = ["linux", "macos"]
+command = ["/bin/sh", "scripts/fetch-or-build.sh"]
+
+# Four panes. Every command is ./bin/spoolway, by relative path — the plugin
+# root is the working directory herdr hands them, and scripts/fetch-or-build.sh
+# is what puts a binary there.
+[[panes]]
+id = "init"
+title = "Set up this project"
+placement = "popup"
+width = "80%"
+height = "80%"
+command = ["./bin/spoolway", "init"]
+
+[[panes]]
+id = "queue"
+title = "Queue"
+placement = "tab"
+command = ["./bin/spoolway", "queue"]
+
+[[panes]]
+id = "dispatch"
+title = "Dispatch"
+placement = "tab"
+command = ["./bin/spoolway", "dispatch"]
+
+[[panes]]
+id = "doctor"
+title = "Check this project"
+placement = "popup"
+width = "80%"
+height = "80%"
+command = ["./bin/spoolway", "doctor"]
+
+# One action per pane. Ids are unique across the file — herdr rejects a
+# duplicate action id at load time.
+[[actions]]
+id = "init"
+title = "Set up this project"
+description = "Scaffold .spoolway/ in this workspace's project."
+contexts = ["workspace"]
+command = ["herdr", "plugin", "pane", "open",
+           "--plugin", "spoolway", "--entrypoint", "init", "--focus"]
+
+[[actions]]
+id = "queue"
+title = "Show the queue"
+description = "Open this workspace's task queue."
+contexts = ["workspace"]
+command = ["herdr", "plugin", "pane", "open",
+           "--plugin", "spoolway", "--entrypoint", "queue", "--focus"]
+
+[[actions]]
+id = "dispatch"
+title = "Run the dispatcher"
+description = "Run this workspace's dispatcher."
+contexts = ["workspace"]
+command = ["herdr", "plugin", "pane", "open",
+           "--plugin", "spoolway", "--entrypoint", "dispatch", "--focus"]
+
+[[actions]]
+id = "doctor"
+title = "Check this project"
+description = "Check this workspace's project for problems."
+contexts = ["workspace"]
+command = ["herdr", "plugin", "pane", "open",
+           "--plugin", "spoolway", "--entrypoint", "doctor", "--focus"]
+
+# No keys here: herdr has none to declare. They are written into
+# ~/.herdr/config.toml by `spoolway herdr bind`, and removed by
+# `spoolway herdr unbind`. This file never mentions them.
