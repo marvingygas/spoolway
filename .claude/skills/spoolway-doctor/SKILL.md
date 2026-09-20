@@ -63,7 +63,7 @@ turning each into a fix concrete enough to approve.
    because the class is what the human is really approving:
 
    - **Mechanical** — restores what spoolway itself writes, with no judgement in it:
-     `spoolway init` for a missing prompt or skeleton (it writes only what is absent), `spoolway sync` for one that is present but behind (it replaces only the
+     `spoolway init --yes` for a missing prompt or skeleton (it writes only what is absent), `spoolway sync` for one that is present but behind (it replaces only the
      generated block and copies their prose through unread — `--dry-run` first), or
      `spoolway config set <key> <value>` where doctor named both the key and the value it
      will accept. **Prompts are never mechanical.** Nothing updates one, so a finding
@@ -104,7 +104,7 @@ turning each into a fix concrete enough to approve.
 | ``agent `x` has a model: no model set`` | lanes on that profile start with an empty model | name a `model:` on each step that runs on `x`, in `.spoolway/pipelines/<name>.yml` (`agents.*.model` is retired) | decision — the model is theirs |
 | ``agent `x`: `pi` is not on PATH`` | every step on that profile refuses to start | install the CLI, or point the profile at one that is installed | outside |
 | ``agent `x` permission mode: … is not a mode`` | the lane dies on an unrecognised flag, passes into a run | `spoolway config set agents.x.permission_mode <one it lists>` | mechanical |
-| ``prompt for `step` is missing`` | that step cannot start a lane | `spoolway init` | mechanical |
+| ``prompt for `step` is missing`` | that step cannot start a lane | `spoolway init --yes` | mechanical |
 | ``lanes can be started: …`` | there is nowhere to run a lane | install herdr and run `spoolway dispatch` from inside a pane it opens | outside |
 | ``pipelines are valid`` fails | nothing dispatches | edit `.spoolway/pipelines/`, confirm with `spoolway pipeline check` | decision |
 | ``task dependency graph`` fails | a cycle or an unknown `depends_on`; those tasks never start | edit the task's frontmatter in the project's own `queue/` | decision |
