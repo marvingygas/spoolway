@@ -143,7 +143,7 @@ pub fn row(id: &str) -> Row {
         issue_url: None,
         parallel: false,
         stage: "implement".into(),
-        step_loop: None,
+        arrivals: 0,
         pipeline: "default".into(),
         state: State::Queued,
         depth: 0,

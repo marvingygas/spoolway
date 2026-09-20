@@ -773,12 +773,24 @@ fn task_label(row: &Row) -> String {
     }
 }
 
+/// Below this many arrivals the count is not yet worth a reader's notice, so
+/// the step id stays bare.
+const ARRIVAL_FLOOR: u32 = 2;
+
+/// The STEP column's counter suffix, on its own — `None` below
+/// [`ARRIVAL_FLOOR`]. The one place the threshold and the ` ↻<n>` spelling
+/// are written, so `step_text` and `table`'s painted branch can never drift
+/// onto different text for the same row.
+fn arrival_suffix(arrivals: u32) -> Option<String> {
+    (arrivals >= ARRIVAL_FLOOR).then(|| format!(" ↻{arrivals}"))
+}
+
 /// The STEP column's plain text, counter included where there is one — the
 /// same string whether or not it ends up painted, so a width computed from it
 /// and a cell padded against it always agree.
 fn step_text(row: &Row) -> String {
-    match row.step_loop {
-        Some((laps, limit)) => format!("{} ({laps}/{limit})", row.stage),
+    match arrival_suffix(row.arrivals) {
+        Some(suffix) => format!("{}{suffix}", row.stage),
         None => row.stage.clone(),
     }
 }
@@ -817,7 +829,7 @@ pub(super) fn table(
     // every board, since a project's pipeline names are usually shorter than
     // the header naming them.
     let pipeline_w = width(&|r| r.pipeline.chars().count(), 8);
-    // Two widths: the bare step id, and the id with its `(N/M)` counter where
+    // Two widths: the bare step id, and the id with its `↻<n>` counter where
     // a row has one. `show_loop`, below, decides which the column actually
     // draws at any given pane width — narrow enough and the counter goes,
     // same as any other shed column, and STEP returns to `step_w_bare`.
@@ -1200,14 +1212,14 @@ pub(super) fn table(
             pipeline_w,
             false,
         );
-        // The counter, dim while a lap is still short of the ceiling and at
-        // full weight on the last one before the route escalates — the step
-        // id itself carries neither, only the `(N/M)` beside it does. Gone
-        // whole once `show_loop` has shed, so the column reads exactly as it
-        // did before the counter existed. A `Done` row skips this and takes
-        // the whole-cell dim every other archived column gets instead —
-        // history reads as one dim block, not a step id at one weight next
-        // to a counter at another.
+        // The counter draws `DIM` in every case — the step id itself is
+        // never dimmed, only the `↻<n>` beside it is, and nothing about the
+        // count is coloured since it reads against no ceiling. Gone whole
+        // once `show_loop` has shed, so the column reads exactly as it did
+        // before the counter existed. A `Done` row skips this and takes the
+        // whole-cell dim every other archived column gets instead — history
+        // reads as one dim block, not a step id at one weight next to a
+        // counter at another.
         let step_plain = match show_loop {
             true => step_text(row),
             false => row.stage.clone(),
@@ -1215,15 +1227,9 @@ pub(super) fn table(
         let step_cell = match row.state == State::Done {
             true => cell(&step_plain, step_w),
             false => {
-                let painted = match (show_loop, row.step_loop) {
-                    (true, Some((laps, limit))) => {
-                        let suffix = format!(" ({laps}/{limit})");
-                        match laps < limit {
-                            true => format!("{}{}", row.stage, style.paint(DIM, &suffix)),
-                            false => format!("{}{suffix}", row.stage),
-                        }
-                    }
-                    _ => row.stage.clone(),
+                let painted = match show_loop.then(|| arrival_suffix(row.arrivals)).flatten() {
+                    Some(suffix) => format!("{}{}", row.stage, style.paint(DIM, &suffix)),
+                    None => row.stage.clone(),
                 };
                 pad(&painted, &step_plain, step_w, false)
             }
@@ -2078,46 +2084,43 @@ mod tests {
         }
     }
 
-    /// The counter's own weight, apart from the step id beside it: dim while
-    /// a lap is short of the ceiling, at the step id's own weight on the
-    /// last lap before the route escalates — acceptance criterion 3. Rows
-    /// carry counters of different widths here, on purpose, so the same
-    /// assertion also proves STATE lines up after STEP regardless: the
-    /// column is padded by what a reader sees, not by the escape codes the
-    /// dim wraps around the suffix.
+    /// The counter's own weight, apart from the step id beside it: `DIM` in
+    /// every case, whatever the count — acceptance criterion 2. Rows carry
+    /// counters of different widths here, on purpose, so the same assertion
+    /// also proves STATE lines up after STEP regardless: the column is
+    /// padded by what a reader sees, not by the escape codes the dim wraps
+    /// around the suffix. A count below 2 stays a bare step id.
     #[test]
-    fn the_step_counter_dims_below_the_ceiling_and_lines_up_the_columns_after_it() {
-        let looping = |id: &str, stage: &str, step_loop: Option<(u32, u32)>| Row {
+    fn the_step_counter_is_always_dim_and_lines_up_the_columns_after_it() {
+        let looping = |id: &str, stage: &str, arrivals: u32| Row {
             stage: stage.into(),
-            step_loop,
+            arrivals,
             state: State::Running,
             next: "→ review".into(),
             ..row(id)
         };
         let rows = vec![
-            looping("a", "review", Some((1, 2))),
-            looping("bb", "documenting-a-longer-name", Some((2, 2))),
-            looping("ccc", "gate", None),
+            looping("a", "review", 2),
+            looping("bb", "documenting-a-longer-name", 4),
+            looping("ccc", "gate", 1),
         ];
         let totals = BTreeMap::new();
         let painted = table(&rows, Style::board(200), &totals, None);
 
-        // Short of the ceiling: the `(1/2)` is wrapped in its own dim, apart
-        // from the step id beside it.
+        // Two arrivals: the `↻2` is wrapped in its own dim, apart from the
+        // step id beside it.
         assert!(
-            painted.contains(&format!("review{DIM} (1/2){RESET}")),
+            painted.contains(&format!("review{DIM} ↻2{RESET}")),
             "{painted}"
         );
-        // The last lap before escalation: plain text, no dim at all around
-        // the counter.
+        // Any higher count: still dim, not full weight.
         assert!(
-            painted.contains("documenting-a-longer-name (2/2)"),
+            painted.contains(&format!("documenting-a-longer-name{DIM} ↻4{RESET}")),
             "{painted}"
         );
-        assert!(
-            !painted.contains(&format!("documenting-a-longer-name{DIM} (2/2)")),
-            "{painted}"
-        );
+        // One arrival: no suffix at all, bare step id.
+        assert!(painted.contains("gate"), "{painted}");
+        assert!(!painted.contains("gate ↻"), "{painted}");
 
         let stripped = strip(&painted);
         let at = |line: &str, of: &dyn Fn(char) -> bool| line.chars().position(of).expect(line);
@@ -2142,16 +2145,16 @@ mod tests {
     /// `clip_to` at all, so the shedding loop never runs and the counter is
     /// never one of the things it drops, whatever the row's own width.
     #[test]
-    fn plain_table_draws_the_loop_counter_at_every_width() {
+    fn plain_table_draws_the_arrival_counter_at_every_width() {
         let spinner = Row {
             stage: "review".into(),
-            step_loop: Some((1, 2)),
+            arrivals: 2,
             state: State::Running,
             next: "→ document".into(),
             ..row("spinner")
         };
         let plain = plain_table(&[spinner]);
-        assert!(plain.contains("review (1/2)"), "{plain}");
+        assert!(plain.contains("review ↻2"), "{plain}");
         assert!(!plain.contains('\x1b'), "{plain}");
     }
 
@@ -2160,10 +2163,10 @@ mod tests {
     /// toward `ID_FLOOR` — and STEP returns to the width it had before the
     /// counter existed.
     #[test]
-    fn a_narrow_pane_drops_the_loop_counter_before_task_clips() {
+    fn a_narrow_pane_drops_the_arrival_counter_before_task_clips() {
         let looping = |id: &str| Row {
             stage: "review".into(),
-            step_loop: Some((1, 2)),
+            arrivals: 2,
             state: State::Running,
             ctx: Some(10),
             out: Some(100),
@@ -2176,7 +2179,7 @@ mod tests {
         let totals = BTreeMap::new();
 
         let wide = strip(&table(&rows, Style::board(200), &totals, None));
-        assert!(wide.contains("review (1/2)"), "{wide}");
+        assert!(wide.contains("review ↻2"), "{wide}");
 
         // Shrink the pane one column at a time from a width nothing has to
         // give at, and stop at the first width where the counter is gone.
@@ -2186,7 +2189,7 @@ mod tests {
         // reliable way to find it, rather than guessing a pane width by hand.
         let mut pane = 200;
         let mut narrow = wide.clone();
-        while narrow.contains("(1/2)") {
+        while narrow.contains("↻2") {
             pane -= 1;
             narrow = strip(&table(&rows, Style::board(pane), &totals, None));
         }
