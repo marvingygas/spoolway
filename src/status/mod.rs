@@ -157,7 +157,7 @@ pub struct Row {
     /// ends `->{stage}`, [`crate::task::Task::rounds_at`]'s own answer.
     /// Whichever route carried it there each time, and with no budget behind
     /// it: a step reached once is a bare id, since one visit is not yet worth
-    /// a reader's notice, and every visit after that draws `↻<n>` beside it.
+    /// a reader's notice, and every visit after that draws `↻ <n>` beside it.
     pub arrivals: u32,
     /// The pipeline this task resolves to, by name — what the `PIPELINE`
     /// column draws. A task with no `pipeline:` of its own names its
