@@ -35,6 +35,17 @@ agent_models
 # running the last scenario here is refused for the wrong reason. Headless
 # needs nothing to be running and changes none of the answers this suite
 # asserts.
+#
+# The marker with it: `spoolway dispatch` refuses `backend = headless`
+# outright unless this is set, since the backend draws nowhere a person can
+# see and only this harness may run it. Every other suite gets it from
+# `fixture.sh`'s `configure_project`, which this one does not call — it
+# builds its project by hand. Nothing here asserts on that refusal, and
+# nothing here reaches it either: every start below is answered by a check
+# that sits ahead of the pane gate. Exported anyway, so the day one of these
+# scenarios does reach it, it is answered by the guard this suite is about
+# rather than by a backend it only ever picked for being quiet.
+export SPOOLWAY_TEST_BACKEND=1
 must "the headless backend" "$SPOOLWAY" config set dispatch.backend headless
 must "the spoolway commit" git add -A
 must "the spoolway commit" git commit -qm "spoolway"
@@ -54,9 +65,10 @@ echo $$ > "$SPOOLWAY_PROJECT_HOME/dispatch.pid"
 # tell "deferred" from "the guard has had enough" before the fifth call ever
 # happens.
 # `--plain`, on every call below: without it a start that finds the lock held
-# does not return at all — it becomes a one-shot status watcher and sits
-# printing the board until interrupted, which is the right thing for a person
-# and a hang for a suite asserting an exit code.
+# still returns at once with exit 4, but it also tries to focus a pane —
+# not what this suite is testing, and this hand-written lock file names none
+# to focus anyway. `--plain` keeps every call here to exactly the plain
+# table and the exit code the suite is actually asserting on.
 for n in 1 2 3 4; do
   exit_code "start $n could not run and says so, not an error" 4 "$SPOOLWAY" dispatch --plain
 done

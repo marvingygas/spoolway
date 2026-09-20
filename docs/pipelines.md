@@ -270,7 +270,7 @@ A build, a test suite, a formatter or a deploy script is a command step.
 | Routing | exit 0 takes `on_pass`, else `on_fail` | `on_pass` at once. A later non-zero exit sends the task to `on_fail` from wherever it is. |
 | `timeout` | routes to `on_fail` | kills the run, nothing routes |
 
-A command step runs in its own pane under the herdr and tmux backends. `headless: true` runs
+A command step runs in its own pane under the herdr backend. `headless: true` runs
 it with no pane. A pane closes the moment its exit code is judged, on a pass and on a failure
 alike. Only a timed-out run's pane stands, until the task reaches the step again or is cleaned
 up. Under `backend = "headless"` no command step has a pane.

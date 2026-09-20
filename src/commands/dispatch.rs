@@ -113,7 +113,7 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
             &format!("a dispatcher is already running for this repo (pid {pid})"),
             RESTART_WINDOW,
         )?;
-        watch(repo, pipelines, args)?;
+        already_running(repo, pipelines, pid, args, &mut std::io::stdout())?;
         return Ok(EXIT_ALREADY_RUNNING);
     }
 
@@ -175,6 +175,15 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     refuse(check_index_lock(repo)).context("refusing to start")?;
     refuse(check_backend_checkout(repo, mux.as_ref())).context("refusing to start")?;
 
+    // There is one way to start a run and it is visible: refused here, in the
+    // same early group as the three checks above, so a run begun in a
+    // backgrounded shell or a `backend = headless` config edit outside the
+    // harness is stopped before it takes the lock or writes anywhere, not
+    // found and killed by hand once it is already spending. No exemption —
+    // not `--plain`, not an environment override, not a per-platform
+    // carve-out.
+    check_dispatcher_visible(mux.as_ref())?;
+
     // The last three things a person sees before anything is spawned or
     // written: the overview, naming every task the run is about to touch;
     // the overrides gate, since a layer changes what runs without `git
@@ -202,7 +211,13 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
 
     // Taken for the whole run. Two dispatchers would both see the same task at
     // the same step and both spawn a lane into its worktree.
-    let _lock = crate::lock::Lock::acquire(&repo.lock_file(), unattended)?;
+    //
+    // The pane is asked for here rather than trusted from the environment —
+    // same reasoning as `Mux::in_own_pane`'s own read, which
+    // `check_dispatcher_visible` just passed: `None` here only degrades to
+    // the older three-line lock shape, never refuses the start.
+    let pane_id = mux.own_pane_id();
+    let _lock = crate::lock::Lock::acquire(&repo.lock_file(), unattended, pane_id.as_deref())?;
 
     // Note this project once per run, so `spoolway eval --by --all` can find
     // its ledger later. A project that is dispatched in is a project that spends.
@@ -218,61 +233,28 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         None => repo.config.dispatch.interval,
     };
 
-    if args.dry_run {
-        println!("dry run: nothing will be started, torn down, or written\n");
-    }
-
-    // Under herdr this is a no-op: the dispatcher's own pane stays wherever it
-    // was started, under both `grouped` and `split` — see `Mux::move_self_into`.
-    // It is tmux that still needs this: this is where it moves the caller's
-    // own window into the run's shared session.
+    // The dispatcher's own pane stays wherever it was started, under both
+    // `grouped` and `split` — herdr has nothing to move it into. This still
+    // has to find or open the run's shared workspace, though, under
+    // `grouped`: a task's lane joins that workspace's tab, and it must exist
+    // before the first one starts.
     //
-    // Never for `--dry-run`, which opens nothing and closes nothing. A
-    // failure here is held for `workspace_move_notice`, just below, rather
+    // A failure here is held for `workspace_open_notice`, just below, rather
     // than printed on the spot — this is the one notice `warnings_gate`,
-    // above, could not carry: the move is only attempted once the lock is
-    // held, past the point `esc` could still mean "nothing happened yet".
-    let mut workspace_move_error = None;
-    if !args.dry_run {
-        match mux
-            .dispatch_workspace(&repo.root, true)
-            .and_then(|workspace| match workspace {
-                Some(id) => {
-                    mux.move_self_into(&id)?;
-                    // A run in a background tmux server is invisible until
-                    // attached to, and the person this backend is for may
-                    // never have typed a tmux command — the one they need is
-                    // handed over. Only when the board is not about to draw
-                    // in that session anyway: a dispatcher started inside
-                    // tmux moved there with its pane.
-                    if mux.name() == "tmux" && mux.own_workspace().as_deref() != Some(id.as_str()) {
-                        println!(
-                            "  the run's lanes live in tmux — watch them with: tmux attach -t '{}'",
-                            crate::tmux::session_name(&crate::mux::dispatch_workspace_label(
-                                &repo.root
-                            ))
-                        );
-                    }
-                    Ok(())
-                }
-                None => Ok(()),
-            }) {
-            Ok(()) => {}
-            Err(err) => {
-                workspace_move_error = Some(format!(
-                    "could not move this run into its own workspace: {err:#}"
-                ));
-            }
-        }
+    // above, could not carry: this is only attempted once the lock is held,
+    // past the point `esc` could still mean "nothing happened yet".
+    let mut workspace_open_error = None;
+    if let Err(err) = mux.dispatch_workspace(&repo.root, true) {
+        workspace_open_error = Some(format!("could not open this run's own workspace: {err:#}"));
     }
 
     // The one notice `warnings_gate` ran too early to carry — see just
     // above. Held on screen the same way, but with only `[enter]` to
-    // dismiss it: by now the lock is held and, under tmux, this process's
-    // own pane may already have moved, so there is no earlier screen left
-    // for `esc` to mean "back to" — see `workspace_move_notice`'s own doc.
-    if let Some(err) = &workspace_move_error {
-        workspace_move_notice(err)?;
+    // dismiss it: by now the lock is held, so there is no earlier screen
+    // left for `esc` to mean "back to" — see `workspace_open_notice`'s own
+    // doc.
+    if let Some(err) = &workspace_open_error {
+        workspace_open_notice(err)?;
     }
 
     // The run watches itself. A resident dispatcher spends almost all of its
@@ -280,26 +262,22 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // costs the run nothing — where a scrolling log says only what the last
     // pass did, the board says what the whole queue is doing right now.
     //
-    // Not for `--dry-run`, which is a person already looking at one pass, and
-    // not for `--plain`, which is a person who would rather have the log — a
+    // Not for `--plain`, which is a person who would rather have the log — a
     // pipe, a CI job, a terminal that mangles the redraw.
     // From here the run holds live lanes, so an interrupted one's spend and
     // launch counter still have to be settled on the way out. Caught rather
     // than left to kill the process where it stands — see
     // `crate::dispatch::Dispatcher::sweep_on_stop`.
-    if !args.dry_run {
-        crate::platform::stop::catch_interrupt();
-    }
+    crate::platform::stop::catch_interrupt();
 
-    let mut board = match args.dry_run || args.plain {
+    let mut board = match args.plain {
         true => None,
         false => Some(crate::status::Board::new()),
     };
     let mut out = std::io::stdout();
 
     loop {
-        let mut dispatcher =
-            crate::dispatch::Dispatcher::new(repo, pipelines, mux.as_ref(), args.dry_run);
+        let mut dispatcher = crate::dispatch::Dispatcher::new(repo, pipelines, mux.as_ref());
 
         // Drawn before the pass rather than only after it, so a pass that takes
         // a while is a board saying "pass running" instead of a blank terminal.
@@ -361,26 +339,11 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
             }
         }
 
-        // A dry run is one pass. It archives nothing, so the empty-queue exit
-        // below can never fire and a looping dry run would keep reporting the
-        // same untouched queue — the second pass has nothing to add to the
-        // first.
-        if args.dry_run {
-            return Ok(0);
-        }
-
         // Spent, and nothing left running to spend more. The queue keeps its
         // place: every task is where its last lane left it, and the next run
         // picks them up from exactly there.
         if let Some(note) = spent_out {
-            stop(
-                repo,
-                pipelines,
-                mux.as_ref(),
-                board.as_mut(),
-                &mut out,
-                args,
-            )?;
+            stop(repo, pipelines, mux.as_ref(), board.as_mut(), &mut out)?;
             println!("  {note}");
             println!("  spoolway dispatch    # picks the queue back up where it stands");
             return Ok(0);
@@ -394,14 +357,7 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         // Asked for while the last pass was running. Unwound here rather than
         // in the handler, which may do nothing but set the flag.
         if crate::platform::stop::asked() {
-            stop(
-                repo,
-                pipelines,
-                mux.as_ref(),
-                board.as_mut(),
-                &mut out,
-                args,
-            )?;
+            stop(repo, pipelines, mux.as_ref(), board.as_mut(), &mut out)?;
             println!("  stopped.");
             return Ok(0);
         }
@@ -409,14 +365,7 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         match repo.tasks() {
             Ok(tasks) if tasks.is_empty() => {
                 if crate::jobs::enabled_count(repo) == 0 {
-                    stop(
-                        repo,
-                        pipelines,
-                        mux.as_ref(),
-                        board.as_mut(),
-                        &mut out,
-                        args,
-                    )?;
+                    stop(repo, pipelines, mux.as_ref(), board.as_mut(), &mut out)?;
                     println!("  queue is empty — every task is done. Stopping.");
                     return Ok(0);
                 }
@@ -926,11 +875,11 @@ pub(crate) fn unattended_block_lines(unattended: bool, config: &Config) -> Vec<S
 /// Alongside [`overview_gate`] and [`overrides_gate`], and — like both —
 /// before `Lock::acquire`: `esc` here must still mean "nothing has happened
 /// yet", which is only true ahead of the lock. The other notice this task
-/// exists to fix, a workspace-move failure, cannot join this screen for
-/// exactly that reason — the move is only attempted once the lock is held —
-/// so it gets its own, smaller one instead; see [`workspace_move_notice`],
-/// which is why this takes only `unattended` and no workspace-move error of
-/// its own.
+/// exists to fix, a failure to open the run's shared workspace, cannot join
+/// this screen for exactly that reason — it is only attempted once the lock
+/// is held — so it gets its own, smaller one instead; see
+/// [`workspace_open_notice`], which is why this takes only `unattended` and
+/// no workspace-open error of its own.
 fn warnings_gate(repo: &Repo, pipelines: &Pipelines, unattended: &[String]) -> Result<bool> {
     warnings_gate_with(
         repo,
@@ -1037,15 +986,15 @@ pub(crate) fn warnings_gate_with(
     }
 }
 
-/// The one screen [`warnings_gate`] cannot show: a failure to move this
-/// run's own pane into its workspace, only known once `dispatch` has
-/// already taken the lock and attempted the move — see that call site's own
-/// comment. Unlike `warnings_gate`, there is no earlier screen left to
-/// decline back to here, so `[enter]` is the only key this reads, and
-/// nothing is fingerprinted: a pane move either works or it does not, once,
+/// The one screen [`warnings_gate`] cannot show: a failure to find or open
+/// this run's own shared workspace, only known once `dispatch` has already
+/// taken the lock and attempted it — see that call site's own comment.
+/// Unlike `warnings_gate`, there is no earlier screen left to decline back
+/// to here, so `[enter]` is the only key this reads, and nothing is
+/// fingerprinted: opening a workspace either works or it does not, once,
 /// this run — there is no standing state worth hiding until it changes.
-fn workspace_move_notice(err: &str) -> Result<()> {
-    workspace_move_notice_with(
+fn workspace_open_notice(err: &str) -> Result<()> {
+    workspace_open_notice_with(
         err,
         crate::ask::interactive(),
         &mut crate::screen::RawStdin,
@@ -1054,12 +1003,12 @@ fn workspace_move_notice(err: &str) -> Result<()> {
     )
 }
 
-/// [`workspace_move_notice`]'s own logic, against an injected reader, writer
+/// [`workspace_open_notice`]'s own logic, against an injected reader, writer
 /// and terminal guard — see [`overrides_gate_with`]'s own doc comment on the
 /// pattern. With no tty on either end the notice is still printed, once, so
 /// it is on record; nothing here may then block on a keypress nobody can
 /// answer.
-pub(crate) fn workspace_move_notice_with(
+pub(crate) fn workspace_open_notice_with(
     err: &str,
     interactive: bool,
     input: &mut impl PollableRead,
@@ -1338,7 +1287,7 @@ pub(crate) fn check_backend_checkout(
                     repo.root.display()
                 ),
                 fix: "a bare repository, say. Switch backends:\n\n  spoolway config set \
-                      dispatch.backend tmux"
+                      dispatch.backend headless"
                     .to_string(),
             }));
         }
@@ -1385,6 +1334,42 @@ pub(crate) fn check_backend_checkout(
     Ok(Some(format!("{} · main checkout", mux.name())))
 }
 
+/// Refuse a start nobody can see: a herdr run outside any pane, or a
+/// `backend = headless` run started without the end-to-end harness's own
+/// marker.
+///
+/// Not a third [`Refusal`]: neither half of this reads as a `doctor` row —
+/// there is no dispatcher yet for `doctor` to ask whether it is visible —
+/// and the herdr half's own message is the multi-line shape the task's
+/// mockup draws, not the single line [`refuse`] joins a reason and a fix
+/// into.
+///
+/// `headless` is checked by name rather than by a trait method the way the
+/// herdr half is: the marker gates the backend itself, not any property a
+/// `Mux` could answer for — a fake pane to ask about would be one more thing
+/// for a test double to get right for no reason a real backend needs.
+fn check_dispatcher_visible(mux: &dyn crate::mux::Mux) -> Result<()> {
+    if mux.name() == "headless" {
+        if crate::platform::env_var(crate::headless::TEST_BACKEND_ENV).is_err() {
+            bail!(
+                "backend = headless is spoolway's own test backend — nothing draws it \
+                 anywhere a person can see, so only the end-to-end harness runs it, with \
+                 {} exported.\n\n  Switch back:\n\n    spoolway config set dispatch.backend \
+                 herdr",
+                crate::headless::TEST_BACKEND_ENV
+            );
+        }
+        return Ok(());
+    }
+    if !mux.in_own_pane() {
+        bail!(
+            "a dispatcher has to be visible, and this is not a herdr pane.\n\n  Open one and \
+             run it there:\n\n    herdr\n    spoolway dispatch"
+        );
+    }
+    Ok(())
+}
+
 /// Refuse the whole start over any live task whose `pipeline:` does not
 /// resolve — absent, or naming a pipeline this project does not define.
 /// There is no project default any more, so a task that cannot route here
@@ -1417,37 +1402,43 @@ fn check_task_routes(pipelines: &Pipelines, tasks: &[Task]) -> Result<()> {
     Ok(())
 }
 
-/// Draw the read-only board over a run someone else's process is driving.
+/// A repo whose lock another process already holds: name it, and, for a
+/// person actually looking at a terminal, bring the pane it is drawing its
+/// board in to the front — there is one board per run now, and it is
+/// already up.
 ///
-/// The queue re-reads and the multiplexer call the board already makes are
-/// the whole of what this needs — see [`crate::status::Board::watching`] —
-/// so nothing here takes the lock, starts a lane, writes a task file, or
-/// moves a pane. `ctrl-c` ends this loop and this loop alone; the run it is
-/// watching is someone else's to stop.
-fn watch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Result<()> {
+/// `--plain` keeps its own one-shot table, byte for byte: a script asking
+/// what is running gets an answer meant for parsing, and "focusing its pane"
+/// is a line for a person, not a caller polling this in a loop.
+fn already_running(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    pid: u32,
+    args: &DispatchArgs,
+    out: &mut impl std::io::Write,
+) -> Result<()> {
     if args.plain {
-        // One read, one print, no loop: a script wants the table as it
-        // stands, not a process that sits there polling on its behalf.
-        let holder = crate::lock::Lock::holder(&repo.lock_file())?;
-        match holder {
-            Some(pid) => println!("watching dispatcher (pid {pid})\n"),
-            None => println!("no dispatcher is running\n"),
-        }
+        // One read, one print: a script wants the table as it stands, not a
+        // process that sits there polling on its behalf.
+        writeln!(out, "watching dispatcher (pid {pid})\n")?;
         let rows = crate::status::rows(repo, pipelines)?;
-        print!("{}", crate::status::plain_table(&rows));
+        write!(out, "{}", crate::status::plain_table(&rows))?;
         return Ok(());
     }
 
-    crate::platform::stop::catch_interrupt();
-    let mut board = crate::status::Board::watching();
-    let mut out = std::io::stdout();
-    // `Phase::Waiting` throughout: a watcher never passes and never stops a
-    // run, so neither of the other two phases means anything here — the
-    // header this board draws comes from the lock, not from a phase this
-    // process is in.
-    while !crate::platform::stop::asked() {
-        let _ = board.draw(repo, pipelines, crate::status::Phase::Waiting, &mut out);
-        std::thread::sleep(crate::status::POLL);
+    writeln!(
+        out,
+        "  a dispatcher is already running for this repo (pid {pid})"
+    )?;
+    // `None` for an older three-line lock, or a run with no pane recorded —
+    // nothing here to focus, so nothing more is printed. A pane that has
+    // gone away since the lock was written is not fatal either: reported and
+    // stepped over, the same as a failed workspace move is today.
+    if let Some(pane_id) = crate::lock::Lock::pane(&repo.lock_file()) {
+        match crate::mux::backend(repo).and_then(|mux| mux.focus_pane(&pane_id)) {
+            Ok(()) => writeln!(out, "  → focusing its pane {pane_id}")?,
+            Err(err) => writeln!(out, "  → could not focus its pane {pane_id}: {err:#}")?,
+        }
     }
     Ok(())
 }
@@ -1468,19 +1459,16 @@ fn stop(
     mux: &dyn crate::mux::Mux,
     board: Option<&mut crate::status::Board>,
     out: &mut std::io::Stdout,
-    args: &DispatchArgs,
 ) -> Result<()> {
-    if !args.dry_run {
-        let mut dispatcher = crate::dispatch::Dispatcher::new(repo, pipelines, mux, args.dry_run);
-        let mut report = crate::dispatch::Report::default();
-        match dispatcher.sweep_on_stop(&mut report) {
-            Ok(()) => {
-                for action in &report.actions {
-                    println!("  {action}");
-                }
+    let mut dispatcher = crate::dispatch::Dispatcher::new(repo, pipelines, mux);
+    let mut report = crate::dispatch::Report::default();
+    match dispatcher.sweep_on_stop(&mut report) {
+        Ok(()) => {
+            for action in &report.actions {
+                println!("  {action}");
             }
-            Err(err) => println!("  ! could not settle this run's lanes: {err:#}"),
         }
+        Err(err) => println!("  ! could not settle this run's lanes: {err:#}"),
     }
 
     // The last frame stays where it is and the reason the run ended is printed
@@ -1506,8 +1494,9 @@ mod tests {
     use crate::commands::testutil::fixture;
 
     /// A dispatcher already running for this repo must send `spoolway
-    /// dispatch` down [`watch`], never through [`crate::lock::Lock::acquire`]
-    /// — the watcher reads the run, it never joins it.
+    /// dispatch` down [`already_running`], never through
+    /// [`crate::lock::Lock::acquire`] — a second start reads the run, it
+    /// never joins it.
     ///
     /// Proved indirectly rather than by mocking `Lock::acquire`: this process
     /// takes the lock itself first, the same way a real dispatcher would, and
@@ -1515,11 +1504,11 @@ mod tests {
     /// refuses a second holder outright — see its own doc comment — so a
     /// second acquire attempt here would surface as this call returning an
     /// error naming "already running", not as a silent takeover. `--plain`
-    /// keeps this one call and one exit, with no board loop to interrupt.
+    /// keeps this one call and one exit, with nothing left to interrupt.
     #[test]
-    fn dispatch_watches_rather_than_taking_the_lock() {
-        let repo = fixture("watch-never-locks");
-        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false).unwrap();
+    fn a_dispatch_finding_the_lock_held_never_takes_it() {
+        let repo = fixture("lock-held-never-taken");
+        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
 
         let args = DispatchArgs {
             plain: true,
@@ -1544,7 +1533,7 @@ mod tests {
     #[test]
     fn four_starts_that_could_not_run_get_the_fifth_refused() {
         let repo = fixture("restart-storm");
-        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false).unwrap();
+        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
 
         let args = DispatchArgs {
             plain: true,
@@ -1662,7 +1651,7 @@ mod tests {
     #[test]
     fn a_lock_already_held_exits_four() {
         let repo = fixture("lock-held-exit");
-        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false).unwrap();
+        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
         let args = DispatchArgs {
             plain: true,
             ..Default::default()
@@ -1671,6 +1660,48 @@ mod tests {
             dispatch(&repo, &Pipelines::builtin(), &args).unwrap(),
             EXIT_ALREADY_RUNNING
         );
+    }
+
+    /// A repo whose lock is held, found by a non-`--plain` start, prints the
+    /// mockup's own two lines and focuses the pane the lock names — headless
+    /// here so this never shells out to a real herdr, and its `focus_pane`
+    /// never fails, so this is the ordinary case.
+    #[test]
+    fn already_running_names_the_pid_and_focuses_the_recorded_pane() {
+        let mut repo = fixture("already-running-focuses-pane");
+        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, Some("w1:p5")).unwrap();
+
+        let mut out = Vec::new();
+        let args = DispatchArgs::default();
+        already_running(&repo, &Pipelines::builtin(), 8123, &args, &mut out).unwrap();
+
+        let printed = String::from_utf8(out).unwrap();
+        assert!(
+            printed.contains("a dispatcher is already running for this repo (pid 8123)"),
+            "{printed}"
+        );
+        assert!(printed.contains("→ focusing its pane w1:p5"), "{printed}");
+    }
+
+    /// A lock with no pane recorded — an older three-line file, or a run
+    /// with nothing to name — prints only the pid line: there is nothing to
+    /// focus, so nothing more is said about it.
+    #[test]
+    fn already_running_says_nothing_about_focus_with_no_pane_recorded() {
+        let repo = fixture("already-running-no-pane");
+        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
+
+        let mut out = Vec::new();
+        let args = DispatchArgs::default();
+        already_running(&repo, &Pipelines::builtin(), 8123, &args, &mut out).unwrap();
+
+        let printed = String::from_utf8(out).unwrap();
+        assert!(
+            printed.contains("a dispatcher is already running for this repo (pid 8123)"),
+            "{printed}"
+        );
+        assert!(!printed.contains("focusing"), "{printed}");
     }
 
     /// An empty queue is never counted towards the restart guard: a repo
@@ -1698,7 +1729,7 @@ mod tests {
     #[test]
     fn force_clears_the_restart_counter() {
         let repo = fixture("force-clears-storm");
-        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false).unwrap();
+        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
 
         let args = DispatchArgs {
             plain: true,
@@ -1982,6 +2013,9 @@ mod tests {
         /// sets it otherwise — see `backend_checkout_passes_herdr_under_grouped_mode`,
         /// the one case this matters for `check_backend_checkout`.
         owns_workspace: bool,
+        /// `Mux::in_own_pane`'s own default (`true`) unless a test sets it
+        /// otherwise — see `dispatcher_visible_refuses_herdr_outside_a_pane`.
+        in_own_pane: bool,
     }
 
     impl Mux for StubMux {
@@ -1996,6 +2030,9 @@ mod tests {
         }
         fn task_owns_workspace(&self) -> bool {
             self.owns_workspace
+        }
+        fn in_own_pane(&self) -> bool {
+            self.in_own_pane
         }
         fn resident_while_waiting(&self) -> bool {
             unimplemented!()
@@ -2052,12 +2089,6 @@ mod tests {
         fn focus_lane(&self, _name: &str) -> Result<()> {
             unimplemented!()
         }
-        fn rename_tab(&self, _tab_id: &str, _label: &str) -> Result<()> {
-            unimplemented!()
-        }
-        fn rename_workspace(&self, _workspace_id: &str, _label: &str) -> Result<()> {
-            unimplemented!()
-        }
         fn rename_pane(&self, _pane_id: &str, _label: &str) -> Result<()> {
             unimplemented!()
         }
@@ -2069,9 +2100,10 @@ mod tests {
     fn backend_checkout_is_unconcerned_with_a_non_herdr_backend() {
         let repo = bare_repo("non-herdr");
         let mux = StubMux {
-            name: "tmux",
+            name: "headless",
             available: true,
             owns_workspace: true,
+            in_own_pane: true,
         };
         assert!(check_backend_checkout(&repo, &mux).unwrap().is_some());
     }
@@ -2085,6 +2117,7 @@ mod tests {
             name: "herdr",
             available: true,
             owns_workspace: true,
+            in_own_pane: true,
         };
         assert!(check_backend_checkout(&repo, &mux).unwrap().is_some());
     }
@@ -2098,6 +2131,7 @@ mod tests {
             name: "herdr",
             available: true,
             owns_workspace: true,
+            in_own_pane: true,
         };
         let bare = format!("{:#}", check_backend_checkout(&repo, &mux).unwrap_err());
         assert!(bare.contains(&repo.root.display().to_string()), "{bare}");
@@ -2137,6 +2171,7 @@ mod tests {
             name: "herdr",
             available: true,
             owns_workspace: true,
+            in_own_pane: true,
         };
 
         let bare = format!("{:#}", check_backend_checkout(&repo, &mux).unwrap_err());
@@ -2186,6 +2221,7 @@ mod tests {
             name: "herdr",
             available: true,
             owns_workspace: false,
+            in_own_pane: true,
         };
 
         assert!(
@@ -2195,6 +2231,74 @@ mod tests {
         );
 
         cleanup();
+    }
+
+    /// A herdr run with no pane to draw in is refused, naming the way in —
+    /// `herdr` and `spoolway dispatch` — with no exemption.
+    #[test]
+    fn dispatcher_visible_refuses_herdr_outside_a_pane() {
+        let mux = StubMux {
+            name: "herdr",
+            available: true,
+            owns_workspace: true,
+            in_own_pane: false,
+        };
+        let err = format!("{:#}", check_dispatcher_visible(&mux).unwrap_err());
+        assert!(err.contains("has to be visible"), "{err}");
+        assert!(err.contains("herdr"), "{err}");
+        assert!(err.contains("spoolway dispatch"), "{err}");
+    }
+
+    /// A herdr run that is in a pane passes straight through.
+    #[test]
+    fn dispatcher_visible_passes_herdr_in_a_pane() {
+        let mux = StubMux {
+            name: "herdr",
+            available: true,
+            owns_workspace: true,
+            in_own_pane: true,
+        };
+        assert!(check_dispatcher_visible(&mux).is_ok());
+    }
+
+    /// `backend = headless` with no harness marker is refused, naming it as
+    /// the test backend and offering the way back to herdr.
+    ///
+    /// Read through [`crate::platform::env_var`] rather than `std::env::var`
+    /// so the marker can be set per-thread below without touching the real
+    /// process environment every other test shares.
+    #[test]
+    fn dispatcher_visible_refuses_headless_with_no_marker() {
+        let mux = StubMux {
+            name: "headless",
+            available: true,
+            owns_workspace: true,
+            in_own_pane: false,
+        };
+        let err = format!("{:#}", check_dispatcher_visible(&mux).unwrap_err());
+        assert!(err.contains("test backend"), "{err}");
+        assert!(
+            err.contains("spoolway config set dispatch.backend herdr"),
+            "{err}"
+        );
+    }
+
+    /// The same run passes once the end-to-end harness's own marker is set —
+    /// `in_own_pane: false` alongside it, to prove the marker is what gates
+    /// this backend rather than the pane check meant for herdr.
+    #[test]
+    fn dispatcher_visible_passes_headless_with_the_marker_set() {
+        let mux = StubMux {
+            name: "headless",
+            available: true,
+            owns_workspace: true,
+            in_own_pane: false,
+        };
+        let result =
+            crate::platform::test_env::with_env(crate::headless::TEST_BACKEND_ENV, "1", || {
+                check_dispatcher_visible(&mux)
+            });
+        assert!(result.is_ok());
     }
 
     /// A project with no layer at all is nothing to ask about — the gate
@@ -2870,16 +2974,16 @@ mod tests {
         );
     }
 
-    /// `workspace_move_notice_with`'s own case: no tty, so the failure is
+    /// `workspace_open_notice_with`'s own case: no tty, so the failure is
     /// printed once, on record, and nothing here blocks on a key nobody can
     /// answer — `input` is left empty, or a `read_key` call would hang the
     /// test.
     #[test]
-    fn workspace_move_notice_with_no_tty_prints_and_returns() {
+    fn workspace_open_notice_with_no_tty_prints_and_returns() {
         let mut input = keys("");
         let mut out = Vec::new();
-        workspace_move_notice_with(
-            "could not move this run into its own workspace: nope",
+        workspace_open_notice_with(
+            "could not open this run's own workspace: nope",
             false,
             &mut input,
             &mut out,
@@ -2896,11 +3000,11 @@ mod tests {
     /// `warnings_gate_with` there is no `esc` branch to exercise here at
     /// all.
     #[test]
-    fn workspace_move_notice_with_enter_dismisses() {
+    fn workspace_open_notice_with_enter_dismisses() {
         let mut input = keys("\r");
         let mut out = Vec::new();
-        workspace_move_notice_with(
-            "could not move this run into its own workspace: nope",
+        workspace_open_notice_with(
+            "could not open this run's own workspace: nope",
             true,
             &mut input,
             &mut out,
@@ -2916,11 +3020,11 @@ mod tests {
     /// the same reason: nothing here may wait forever for an answer that can
     /// no longer come.
     #[test]
-    fn workspace_move_notice_with_none_dismisses() {
+    fn workspace_open_notice_with_none_dismisses() {
         let mut input = keys("");
         let mut out = Vec::new();
-        workspace_move_notice_with(
-            "could not move this run into its own workspace: nope",
+        workspace_open_notice_with(
+            "could not open this run's own workspace: nope",
             true,
             &mut input,
             &mut out,

@@ -42,6 +42,10 @@ SPOOLWAY="$PWD/target/release/spoolway" scripts/e2e/run.sh --tier nightly
 Every lane runs a stand-in agent script from `scripts/e2e/agents/`. The harness needs `git`,
 `bash`, `curl`, `setsid` and `flock`. Only the `cloud` and `live` tiers run a real agent binary.
 
+`spoolway dispatch` refuses `backend = headless` unless `SPOOLWAY_TEST_BACKEND` is set in the
+environment. `fixture.sh` and `scaffold.sh` export it for every suite and scaffolded project
+that runs on that backend.
+
 ### Coverage
 
 `--list` reads every key in `.spoolway/config.toml` and in `assets/pipelines/default.yml`, and
@@ -76,7 +80,7 @@ with a `// covers:` line.
 | `stack` | `spoolway stack`: the squash, a refused lease, an empty diff, a bad `branch:`, the body from the task file, a base branch that exists locally and nowhere else |
 | `conflicts` | A base that moves under a waiting branch, and the rebase |
 | `forge` | The `gh` test double, and a hand-off with nothing to hand over |
-| `disaster` | A hard kill with lanes live, a stale lock, a restart over a running lane, a stop with live lanes, retention, a dead multiplexer |
+| `disaster` | A hard kill with lanes live, a stale lock, a restart over a running lane, a stop with live lanes, retention |
 | `lock` | A second `--tier pr` run waits for the first |
 | `trials` | The `t` picker on the queue screen, the arms it queues, and their cleanup |
 | `routines` | The routines pane and the `s` save panel on the queue screen |

@@ -56,6 +56,18 @@ use crate::mux::{
 /// see [`crate::repo::Repo::headless_dir`].
 pub(crate) const LANE_DIR: &str = "headless";
 
+/// The environment variable that has to be set for `spoolway dispatch` to
+/// run this backend at all — see `commands::dispatch::check_dispatcher_visible`.
+///
+/// This backend runs no multiplexer, so nothing draws the board anywhere a
+/// person could see it; every end-to-end suite needs exactly that, since CI
+/// has no multiplexer to run herdr against, but a project config edited onto
+/// `headless` by mistake would otherwise start a run just as invisible as
+/// one begun outside a herdr pane. `fixture.sh` and `scaffold.sh` export
+/// this beside `dispatch.backend = "headless"`, which is the harness saying
+/// it means it.
+pub(crate) const TEST_BACKEND_ENV: &str = "SPOOLWAY_TEST_BACKEND";
+
 /// Marks a workspace that owns the checkout under it, and may therefore have it
 /// removed. The other kind borrows somebody else's checkout — a plan closeout
 /// running in place — and removing that would take a person's own worktree.
@@ -374,12 +386,12 @@ pub(crate) fn await_pid_file(mut read: impl FnMut() -> Option<u32>) -> Option<u3
 }
 
 /// Why this backend refuses to start anywhere but Unix, and what to do
-/// instead — the same shape [`crate::mux::Herdr::unavailable`] and
-/// [`crate::tmux::Tmux::unavailable`] already answer with: what is missing,
-/// and the `dispatch.backend` that works in its place.
+/// instead — the same shape [`crate::mux::Herdr::unavailable`] already
+/// answers with: what is missing, and the `dispatch.backend` that works in
+/// its place.
 const NOT_UNIX: &str = "headless lanes need `libc::setsid()` to detach a turn, and this \
      platform has no such syscall. Dispatch through a multiplexer instead: set \
-     `dispatch.backend = \"herdr\"` or `\"tmux\"`.";
+     `dispatch.backend = \"herdr\"`.";
 
 /// Spawn `sh -c script` detached in `cwd`: `libc::setsid()`, called in the
 /// child between fork and exec — see [`crate::command_step`]'s own copy of
@@ -749,7 +761,7 @@ impl Mux for Headless {
             bail!(
                 "`{}` cannot run headless: spoolway does not know how to hand it a prompt and \
                  reopen its session. Run this project under a multiplexer \
-                 (`dispatch.backend = \"herdr\"` or `\"tmux\"`), or use one of the kinds that \
+                 (`dispatch.backend = \"herdr\"`), or use one of the kinds that \
                  can: {}",
                 spec.kind,
                 headless_kinds()
@@ -840,12 +852,11 @@ impl Mux for Headless {
         self.stop_lane(name, "")
     }
 
-    // [`Mux::vacate_lane`] is not implemented here either, for a simpler
-    // reason than tmux's: there is no pane. A headless turn is a process that
-    // runs to completion and exits, so there is nothing resident to ask to
-    // leave and nothing left standing to hand back. The trait's default
-    // defers to `stop_lane` below, which is exactly what a headless lane has
-    // always done to end.
+    // [`Mux::vacate_lane`] is not implemented here either: there is no pane.
+    // A headless turn is a process that runs to completion and exits, so
+    // there is nothing resident to ask to leave and nothing left standing to
+    // hand back. The trait's default defers to `stop_lane` below, which is
+    // exactly what a headless lane has always done to end.
 
     fn stop_lane(&self, name: &str, _pane_id: &str) -> Result<()> {
         self.kill(name);
@@ -860,14 +871,6 @@ impl Mux for Headless {
     /// the log is where a person reads what it did. The pane it does not have
     /// is kept just as faithfully.
     fn focus_lane(&self, _name: &str) -> Result<()> {
-        Ok(())
-    }
-
-    fn rename_tab(&self, _tab_id: &str, _label: &str) -> Result<()> {
-        Ok(())
-    }
-
-    fn rename_workspace(&self, _workspace_id: &str, _label: &str) -> Result<()> {
         Ok(())
     }
 

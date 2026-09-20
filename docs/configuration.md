@@ -104,7 +104,6 @@ Write and inspect the layer with `spoolway pipeline override`, `prompt override`
 [dispatch]
 backend = "herdr"
 herdr_mode = "split"
-tmux_mode = "grouped"
 worktree_root = ""
 interval = "10s"
 lane_quiet = "15m"
@@ -113,9 +112,8 @@ auto_commit = true
 
 | Key | Default | What it controls |
 |---|---|---|
-| `backend` | `herdr` | Where lanes run: `herdr`, `tmux` or `headless`. The first two put each agent in a pane you can watch and take over. `headless` needs no multiplexer. |
+| `backend` | `herdr` | Where lanes run: `herdr` or `headless`. `herdr` puts each agent in a pane you can watch and take over. `headless` is spoolway's own test backend; `spoolway dispatch` refuses to run it unless `SPOOLWAY_TEST_BACKEND` is set in the environment. |
 | `herdr_mode` | `split` | Layout under `backend = "herdr"`. `split` gives each task its own workspace named `spoolway/<task>`. `grouped` puts every project in the shared `spoolway-dispatcher` workspace, one tab per project, one pane per task. See [the dispatcher](dispatcher.md#one-home-for-every-run-in-every-project). |
-| `tmux_mode` | `grouped` | Layout under `backend = "tmux"`. `grouped` shares the `spoolway-dispatcher` session, one window per project, one pane per task. `split` gives each task its own session named `spoolway/<task>`. See [tmux](dispatcher.md#tmux). |
 | `worktree_root` | blank | Where a task's worktree is created. Blank means `~/.spoolway/<project>/worktrees`. The directory is `task-<id>`, or `task-<slug>-<id>` with a tracker slug. |
 | `interval` | `10s` | Time between dispatcher passes. |
 | `lane_quiet` | `15m` | How long a lane may stay silent before the dispatcher reminds it to report. After three reminders the task is escalated. |
@@ -448,7 +446,7 @@ These keys still parse in an older `config.toml` and are dropped on the next sav
 | `[stack.summary]` | The task's `title:` and body are the pull request |
 | `[sandbox]`, `blocked_on_write`, `blocked_on_overreach` | Nothing. See [What confines a profile](agents.md#what-confines-a-profile). |
 | `[paths]`, `[docs]`, `[plans]` | Fixed locations. See [Runtime state](#runtime-state). |
-| `dispatch.max_launches`, `open_on_escalation`, `open`, `protected_branches`, `notify`, `default_pipeline` | Nothing |
+| `dispatch.max_launches`, `open_on_escalation`, `open`, `protected_branches`, `notify`, `default_pipeline`, `tmux_mode` | Nothing |
 | `pipeline_gen.pipeline_auto`, `pipeline_loop_default`, `pipeline_local_models` | Nothing |
 | `agents.<profile>.model`, `context_window`, `args`, `env`, `session_reuse_uncached` | `model:` on the step, `[models]`, and `models.<glob>.session_reuse_idle` |
 

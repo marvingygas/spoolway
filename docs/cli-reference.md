@@ -185,11 +185,13 @@ Run the pipeline. It draws the live board and keeps running until the queue is e
 | Flag | Default | What it does |
 |---|---|---|
 | `--interval <DURATION>` | `dispatch.interval` | Time between passes, e.g. `5m` |
-| `--dry-run` | | Print what one pass would do, then exit. Nothing is started or written |
 | `--plain` | | Print one line per pass. The board is not drawn |
 | `--unattended` | `unattended.enabled` | Start a lane on `blocked` for every blocked task. Nothing waits for a person. See [Unattended runs](pipelines.md#unattended-runs) |
 | `--attended` | | Park blocked tasks for a person, whatever the config says |
 | `--force` | | Start past the restart guard |
+
+`spoolway dispatch` asks herdr which pane it is running in and refuses to start outside one.
+No flag exempts it, `--plain` included. See [The dispatcher](dispatcher.md#running-it).
 
 Before it starts, it checks every live task's `pipeline:` field. A missing or unknown pipeline
 refuses the whole start and dispatches nothing:
@@ -201,8 +203,9 @@ refusing to start: task `auth-refresh` has no `pipeline:`
 Nothing was dispatched.
 ```
 
-If another dispatcher already holds the lock, the board opens read-only, headed `watching
-dispatcher`.
+If another dispatcher already holds the lock, it prints that a dispatcher is already running,
+asks herdr to focus that dispatcher's pane, and exits without drawing a board. `--plain` prints
+its one-shot table headed `watching dispatcher (pid N)` instead.
 
 The restart guard refuses the fifth start in 30 seconds when the four before it could not
 run. See [Restarting into a repo that cannot run](dispatcher.md#restarting-into-a-repo-that-cannot-run).
@@ -292,7 +295,7 @@ it.
 `esc` on any of the three screens ends the command. From the queue screen's own `enter`, `esc`
 on any of the three screens returns to browsing instead.
 
-A failure to move this run into its own workspace is shown afterward, once the run has already
+A failure to find or open this run's own workspace is shown afterward, once the run has already
 taken the lock, on its own notice with only `[enter] continue` to press.
 
 | Exit code | Meaning |

@@ -460,7 +460,7 @@ fn queue_unqueue_forced(
     }
 
     let mux_ref = mux.as_ref();
-    let mut dispatcher = crate::dispatch::Dispatcher::new(repo, pipelines, mux_ref, false);
+    let mut dispatcher = crate::dispatch::Dispatcher::new(repo, pipelines, mux_ref);
     let mut report = crate::dispatch::Report::default();
     let borrowed = task.front.borrowed;
     dispatcher.tear_down_checkout(&mut task, &mut report);
@@ -5035,11 +5035,11 @@ fn after_write(repo: &Repo) -> SubmitOutcome {
 /// they only ever ran after `run_screen` had already returned and this
 /// screen's own `TermGuard` had already dropped.
 ///
-/// The warnings screen sees no workspace-move error here — nothing has
-/// tried the move yet, since that only happens inside `dispatch` itself,
-/// well after this function has returned — so `dispatch` still holds a
-/// second, narrower notice of its own for that one failure; see
-/// `dispatch::workspace_move_notice`.
+/// The warnings screen sees no workspace-open error here — nothing has
+/// tried opening the workspace yet, since that only happens inside
+/// `dispatch` itself, well after this function has returned — so
+/// `dispatch` still holds a second, narrower notice of its own for that one
+/// failure; see `dispatch::workspace_open_notice`.
 ///
 /// `term: None` throughout all three calls: `run_screen` already holds its
 /// own `TermGuard` for the whole of this loop, so nothing here may
@@ -9092,7 +9092,7 @@ mod tests {
         );
         let groups = listed(&repo);
 
-        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false).unwrap();
+        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
         let pid = std::process::id();
 
         // `\t \r` selects and submits; the extra `\r` answers the "go to
@@ -9135,7 +9135,7 @@ mod tests {
         );
         let groups = listed(&repo);
 
-        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false).unwrap();
+        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
 
         // `\t \r` selects and submits; `\x1b` declines the "go to the
         // dispatcher" draw, and the trailing `q` quits the browsing screen

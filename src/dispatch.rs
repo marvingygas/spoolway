@@ -405,7 +405,6 @@ pub struct Dispatcher<'a> {
     pub(crate) pipelines: &'a Pipelines,
     pub(crate) mux: &'a dyn Mux,
     pub(crate) lanes: HashMap<String, LaneRecord>,
-    pub(crate) dry_run: bool,
     /// Whether this run stops for a person. Settled once when the run takes its
     /// lock and carried here rather than re-read per decision, so that one pass
     /// cannot make half its choices in each mode.
@@ -528,8 +527,8 @@ enum Routed {
 /// sitting on a stage a hook was fired for — see
 /// [`Dispatcher::tracking_gate`].
 enum TrackingGate {
-    /// No hook is configured to hold this stage, or this is a dry run with
-    /// nothing to read yet — proceed as if nothing were asked.
+    /// No hook is configured to hold this stage, or this is a trial arm
+    /// `fire` never ran for — proceed as if nothing were asked.
     Inactive,
     /// The hook fired but has not exited yet.
     Pending,
@@ -603,18 +602,12 @@ fn fall_through(step: &Step, task: &Task, dependents: usize) -> FallThrough {
 }
 
 impl<'a> Dispatcher<'a> {
-    pub fn new(
-        repo: &'a Repo,
-        pipelines: &'a Pipelines,
-        mux: &'a dyn Mux,
-        dry_run: bool,
-    ) -> Dispatcher<'a> {
+    pub fn new(repo: &'a Repo, pipelines: &'a Pipelines, mux: &'a dyn Mux) -> Dispatcher<'a> {
         Dispatcher {
             repo,
             pipelines,
             mux,
             lanes: load_lane_records(repo),
-            dry_run,
             // From the lock this run already holds, so the dispatcher and every
             // lane's own `spoolway report` answer the question the same way.
             unattended: repo.unattended(),
@@ -700,17 +693,14 @@ impl<'a> Dispatcher<'a> {
 
         // Fire any cron job whose expression matches this minute, before the
         // queue is read below, so its freshly queued documents are dispatched
-        // by this same pass. A dry run makes no changes and so fires nothing.
-        // Trouble with a job is reported like any other pass trouble and
-        // never fails the pass.
-        if !self.dry_run {
-            crate::jobs::fire_due(
-                self.repo,
-                self.pipelines,
-                &mut report.actions,
-                &mut report.problems,
-            );
-        }
+        // by this same pass. Trouble with a job is reported like any other
+        // pass trouble and never fails the pass.
+        crate::jobs::fire_due(
+            self.repo,
+            self.pipelines,
+            &mut report.actions,
+            &mut report.problems,
+        );
 
         let (mut tasks, load_problems) = self.repo.tasks_and_problems()?;
 
@@ -751,11 +741,8 @@ impl<'a> Dispatcher<'a> {
         // above, whose snapshot `owned` and `free_finished_lanes` reason from
         // below: closing a tab here can leave that snapshot naming a pane in
         // a tab that no longer exists, which is why `sweep_anchor_tabs` never
-        // closes a workspace's only tab — see its own doc. A dry run makes no
-        // changes and so closes nothing.
-        if !self.dry_run {
-            self.sweep_anchor_tabs(&tasks, &mine, &mut report);
-        }
+        // closes a workspace's only tab — see its own doc.
+        self.sweep_anchor_tabs(&tasks, &mine, &mut report);
 
         // Only sessions we named, in a directory that is ours, are ours.
         // Anything else in this multiplexer belongs to a person or to another
@@ -1244,7 +1231,7 @@ impl<'a> Dispatcher<'a> {
                     let running = lane.is_some_and(|lane| {
                         matches!(lane.status, LaneStatus::Working | LaneStatus::Blocked)
                     });
-                    if running && !self.dry_run && tasks[index].launch_landed() {
+                    if running && tasks[index].launch_landed() {
                         self.persist(&mut tasks[index])?;
                     }
                     match lane {
@@ -1336,7 +1323,7 @@ impl<'a> Dispatcher<'a> {
                             // settled rather than after the quiet timer nudges
                             // it. See `Dispatcher::lane_ended_on_abort`.
                             if self.lane_ended_on_abort(lane) {
-                                self.park_after_interrupt(&mut tasks[index], &step, lane, report)?;
+                                self.park_after_interrupt(&mut tasks[index], &step, report)?;
                                 continue;
                             }
 
@@ -1427,8 +1414,6 @@ impl<'a> Dispatcher<'a> {
     /// covers every arrival at any of them without repeating the check four
     /// times. `fire` is idempotent for the run's whole lifetime, so a task
     /// sitting on one of these across many passes only ever starts it once.
-    /// A dry run starts nothing real, the same way it writes no stage change
-    /// below.
     #[allow(clippy::too_many_arguments)]
     fn route_reserved_stage(
         &mut self,
@@ -1450,7 +1435,7 @@ impl<'a> Dispatcher<'a> {
         // not real work, and the trial runtime boundary makes that
         // invariant rather than something a person has to remember to skip
         // — see `Frontmatter::trial`.
-        if !self.dry_run && task.front.trial.is_none() {
+        if task.front.trial.is_none() {
             let group_open = graph.group_open(task.id());
             if let Err(err) = crate::tracking::fire(self.repo, task, stage, group_open) {
                 report.problems.push(format!(
@@ -1464,22 +1449,19 @@ impl<'a> Dispatcher<'a> {
             // A hook that has not yet exited clean holds the task here
             // rather than let it start — see
             // [`crate::config::IssueTrackingConfig::on_fail`]. `Pending`
-            // covers both "still running" and "not started yet", which is
-            // not reachable the moment `dry_run` is off, since the fire
-            // above already ran this same pass — a real hook (an HTTP call,
-            // say) almost never exits inside the few milliseconds `fire`'s
-            // own `start` waits for a pid, so holding on anything but a
-            // clean exit is what actually stops the task rather than only
-            // reacting to a code this pass happened to already have. A
-            // clean exit falls through to the dependency gate below, same
-            // as `on_fail = "ignore"` always does.
+            // covers both "still running" and "not started yet" — a real
+            // hook (an HTTP call, say) almost never exits inside the few
+            // milliseconds `fire`'s own `start` waits for a pid, so holding
+            // on anything but a clean exit is what actually stops the task
+            // rather than only reacting to a code this pass happened to
+            // already have. A clean exit falls through to the dependency
+            // gate below, same as `on_fail = "ignore"` always does.
             //
-            // `TrackingGate::Inactive` covers both a blank `hook` (or one
-            // that fails `is_bare_filename`, which never starts a run) and
-            // a dry run — see [`Dispatcher::tracking_gate`] — so this never
-            // holds every task at `queued` forever for a project that asked
-            // for no hook at all, and never reports a real pass's "would
-            // start" as "nothing to do".
+            // `TrackingGate::Inactive` covers a blank `hook` (or one that
+            // fails `is_bare_filename`, which never starts a run) — see
+            // [`Dispatcher::tracking_gate`] — so this never holds every task
+            // at `queued` forever for a project that asked for no hook at
+            // all.
             match self.tracking_gate(task, stage) {
                 TrackingGate::Inactive | TrackingGate::Clean => {}
                 TrackingGate::Failed(code) => {
@@ -1522,13 +1504,6 @@ impl<'a> Dispatcher<'a> {
                         pipeline: pipeline.name.clone(),
                         command_forget: None,
                     }),
-                    // A lane's dry run is `start_lanes`' to report;
-                    // this is the other kind, and it has to be said
-                    // here because the write below is what a dry run
-                    // may not do.
-                    _ if self.dry_run => report
-                        .actions
-                        .push(format!("would start `{next}` for {id}")),
                     _ => {
                         task.set_stage(&next, None);
                         self.persist(task)?;
@@ -1556,11 +1531,9 @@ impl<'a> Dispatcher<'a> {
             // `on_fail = "pause"`, holds the task here rather than let
             // it archive — see
             // [`crate::config::IssueTrackingConfig::on_fail`]. `Pending`
-            // covers both "not started yet" (unreachable the moment
-            // `dry_run` is off, since the fire above already ran this
-            // same pass) and "still running": either way there is
-            // nothing to route on yet, so the task waits for a pass
-            // that can see a code. A clean exit clears whatever
+            // covers both "not started yet" and "still running": either
+            // way there is nothing to route on yet, so the task waits
+            // for a pass that can see a code. A clean exit clears whatever
             // `retry_if_failed` may have left recorded, then falls
             // through to the ordinary archive below, same as
             // `on_fail = "ignore"` always does.
@@ -1616,16 +1589,11 @@ impl<'a> Dispatcher<'a> {
     /// differently, which they do: `queued` pauses the task on a failing
     /// hook, `done` retries it.
     fn tracking_gate(&self, task: &Task, stage: &str) -> TrackingGate {
-        // `!self.dry_run`: a dry run has nothing to read either, since
-        // `fire` never ran for it, and holding on `holds_on_fail` alone
-        // would report a real pass's "would start" as "nothing to do" —
-        // the opposite of what a dry run is for. A trial arm is the same
-        // shape: `route_reserved_stage` never calls `fire` for one (see its
-        // own trial check just above its call site), so there is never a
-        // code here to read, and holding on `Pending` forever would deadlock
-        // every trial arm at `queued`.
-        if self.dry_run || task.front.trial.is_some() || !crate::tracking::holds_on_fail(self.repo)
-        {
+        // A trial arm: `route_reserved_stage` never calls `fire` for one
+        // (see its own trial check just above its call site), so there is
+        // never a code here to read, and holding on `Pending` forever would
+        // deadlock every trial arm at `queued`.
+        if task.front.trial.is_some() || !crate::tracking::holds_on_fail(self.repo) {
             return TrackingGate::Inactive;
         }
         match crate::tracking::exit_code(self.repo, task, stage) {
@@ -1813,12 +1781,6 @@ impl<'a> Dispatcher<'a> {
             if parked {
                 // `held` is false here — the `held && parked` case above
                 // already claimed and skipped every other pass.
-                if self.dry_run {
-                    report
-                        .actions
-                        .push(format!("would keep and focus the pane of {}", lane.name));
-                    continue;
-                }
                 self.hold_for_block(lane, task_id, step_id, current, report);
                 continue;
             }
@@ -1830,13 +1792,6 @@ impl<'a> Dispatcher<'a> {
             // started again.
             let still_current = current.map(|t| t.stage() == step_id).unwrap_or(false);
             if still_current && !held {
-                continue;
-            }
-
-            if self.dry_run {
-                report
-                    .actions
-                    .push(format!("would free pane of {}", lane.name));
                 continue;
             }
 
@@ -1945,17 +1900,6 @@ impl<'a> Dispatcher<'a> {
         else {
             return false;
         };
-
-        // A dry run may not write a record, and so has no clock to expire
-        // against. It says what it sees and leaves it there, which is the
-        // truthful answer: this step is waiting on that lane.
-        if self.dry_run {
-            report.actions.push(format!(
-                "{}: `{step_id}` would wait for `{old_step}` to hand the task's pane over",
-                task.id()
-            ));
-            return true;
-        }
 
         let now = now_secs();
         let ledger = self.ledger();
@@ -2099,27 +2043,6 @@ impl<'a> Dispatcher<'a> {
         // finished yet.
         let busy = matches!(lane.status, LaneStatus::Working | LaneStatus::Blocked);
 
-        // Ahead of both mutations below, not after them: `pass()` saves
-        // `self.lanes` unconditionally, so a dry run that flipped
-        // `person_turn_busy` — set on the way in, or cleared on the way
-        // out — would persist that flip without having committed anything.
-        // A dry run that caught the idle-after-busy moment would then have
-        // told the *next*, real pass the round was already handled, and the
-        // work would never be committed at all.
-        if self.dry_run {
-            if !busy
-                && self
-                    .lanes
-                    .get(&lane.name)
-                    .is_some_and(|record| record.person_turn_busy)
-            {
-                report
-                    .actions
-                    .push(format!("would commit a person's round in {}", lane.name));
-            }
-            return Ok(());
-        }
-
         let Some(record) = self.lanes.get_mut(&lane.name) else {
             return Ok(());
         };
@@ -2189,7 +2112,7 @@ impl<'a> Dispatcher<'a> {
         task: Option<&Task>,
         pipeline: &str,
     ) {
-        if self.dry_run || record.session.is_empty() {
+        if record.session.is_empty() {
             return;
         }
         // Read before the harvest, and used verbatim as the line's `ts` below.
@@ -2451,9 +2374,7 @@ impl<'a> Dispatcher<'a> {
     /// settled lane that never reported — and hand its task to `paused` with
     /// `reason` as the whole of what a person reads. The busy-lane watchdog
     /// that used to share this with [`Dispatcher::check_unreported`] is gone:
-    /// a busy lane is never escalated any more, whatever it is doing, and a
-    /// dry run only says so, a real pass tears the lane down and moves the
-    /// task.
+    /// a busy lane is never escalated any more, whatever it is doing.
     fn escalate_clock(
         &mut self,
         task: &mut Task,
@@ -2463,13 +2384,6 @@ impl<'a> Dispatcher<'a> {
         reason: &str,
         report: &mut Report,
     ) -> Result<()> {
-        if self.dry_run {
-            report
-                .actions
-                .push(format!("would escalate {} — {reason}", lane.name));
-            return Ok(());
-        }
-
         let output = self.pane_tail(lane);
         self.tear_down_and_escalate(
             task,
@@ -2511,16 +2425,8 @@ impl<'a> Dispatcher<'a> {
         &mut self,
         task: &mut Task,
         step: &Step,
-        lane: &Lane,
         report: &mut Report,
     ) -> Result<()> {
-        if self.dry_run {
-            report.actions.push(format!(
-                "would park {} — its own Escape ended the turn",
-                lane.name
-            ));
-            return Ok(());
-        }
         crate::status::park(
             task,
             &format!("`{}` ended its turn on a person's own Escape", step.id),
@@ -2545,14 +2451,6 @@ impl<'a> Dispatcher<'a> {
     /// this pass sees settled into work.
     fn unpark_quietly(&mut self, task: &mut Task, step: &Step, report: &mut Report) -> Result<()> {
         if task.front.parked_from.as_deref() != Some(step.id.as_str()) {
-            return Ok(());
-        }
-        if self.dry_run {
-            report.actions.push(format!(
-                "{}: would un-park `{}` — its lane is already busy, nothing would be sent",
-                task.id(),
-                step.id
-            ));
             return Ok(());
         }
         task.front.parked_from = None;
@@ -2685,15 +2583,6 @@ impl<'a> Dispatcher<'a> {
                 return Ok(());
             }
 
-            if self.dry_run {
-                report.actions.push(format!(
-                    "would remind {} to report ({}/{MAX_REMINDERS})",
-                    lane.name,
-                    reminders + 1
-                ));
-                return Ok(());
-            }
-
             let nudge = crate::compose::reminder_prompt(task, step);
             self.mux.prompt(&lane.name, &nudge)?;
             // Baselined *after* the nudge lands, not before. A lane with no
@@ -2751,12 +2640,6 @@ impl<'a> Dispatcher<'a> {
         lane: &Lane,
         report: &mut Report,
     ) -> Result<()> {
-        if self.dry_run {
-            report
-                .actions
-                .push(format!("would retire {} — reported", lane.name));
-            return Ok(());
-        }
         // The record's kind is preferred over the multiplexer's own for the
         // same reason `free_finished_lanes` prefers it: it is what spoolway
         // launched with, and so what the adapter table was read for.
@@ -2873,9 +2756,7 @@ impl<'a> Dispatcher<'a> {
         // task is about to sit on `paused`, where a person may well resume it
         // at a step that cleans up. Where it stood at launch is the lane
         // record's, because there is no lane left to ask.
-        if !self.dry_run
-            && let Some(worktree) = task.front.worktree_path.clone()
-        {
+        if let Some(worktree) = task.front.worktree_path.clone() {
             let started_at = record.as_ref().map(|r| r.head.as_str()).unwrap_or("");
             if let Some(note) = crate::commands::auto_commit(
                 self.repo,
@@ -3284,13 +3165,6 @@ impl<'a> Dispatcher<'a> {
                          launches a step's lane once (max_launches) before asking a person",
                         step.id
                     );
-                    if self.dry_run {
-                        report.actions.push(format!(
-                            "would hand {} to a person — {reason}",
-                            tasks[candidate.task_index].id()
-                        ));
-                        continue;
-                    }
                     let task = &mut tasks[candidate.task_index];
                     self.escalate(task, &pipeline, &step, &reason)?;
                     report.actions.push(format!("{}: {reason}", task.id()));
@@ -3353,19 +3227,6 @@ impl<'a> Dispatcher<'a> {
             }
 
             let task = &mut tasks[candidate.task_index];
-            if self.dry_run {
-                report.actions.push(format!(
-                    "would start `{}` for {} on agent `{agent_name}`",
-                    step.id,
-                    task.id()
-                ));
-                *in_flight.entry(agent_name).or_insert(0) += 1;
-                *model_in_flight.entry(model_name.clone()).or_insert(0) += 1;
-                if model_price.is_some_and(|p| p.exclusive) {
-                    resident_exclusive.get_or_insert(model_name);
-                }
-                continue;
-            }
 
             // A retry reuses the lane name, so the previous attempt's record is
             // about to be overwritten. Bank what it spent first: those tokens
@@ -3757,13 +3618,6 @@ impl<'a> Dispatcher<'a> {
             }
 
             crate::command_step::RunState::Fresh => {
-                if self.dry_run {
-                    report
-                        .actions
-                        .push(format!("would run `{}` for {id}: {run}", step.id));
-                    return Ok(None);
-                }
-
                 let (worktree, _) = ensure_workspace(self.repo, self.mux, task, &self.report_seen)?;
                 let env = BTreeMap::from([
                     (crate::commands::TASK_ENV.to_string(), id.clone()),
@@ -3888,7 +3742,7 @@ impl<'a> Dispatcher<'a> {
     /// same key wins to the named value. Under `headless` this whole question
     /// answers itself: `runs.start` below is a child of this process, so it
     /// inherits everything the dispatcher was started with, `SPOOLWAY_GH`
-    /// among it, with no forwarding to write. A herdr or tmux pane has no
+    /// among it, with no forwarding to write. A herdr pane has no
     /// such thing — the multiplexer server spawned it, from *its* own
     /// environment, which the dispatcher's exports never reached — so
     /// without handing this layer across explicitly a command step loses
@@ -3986,9 +3840,6 @@ impl<'a> Dispatcher<'a> {
         pipeline: &Pipeline,
         report: &mut Report,
     ) -> Option<String> {
-        if self.dry_run {
-            return None;
-        }
         let runs = crate::command_step::Runs::new(&self.repo.commands_dir());
         // A key is `<task> · <step>` — see `crate::command_step::Runs::key`.
         let prefix = format!("{} · ", task.id());
@@ -4345,8 +4196,8 @@ fn ensure_workspace(
     }
 
     // The directory can survive a restart of the multiplexer fronting it even
-    // though every id it ever handed out did not — a reboot, a `tmux
-    // kill-server`, herdr restarted. Believing `workspace_id` and `tab_id`
+    // though every id it ever handed out did not — a reboot, herdr
+    // restarted. Believing `workspace_id` and `tab_id`
     // then means `start_one` splits into a tab nothing answers to, on this
     // pass and on every pass after it, so they are checked against the live
     // multiplexer rather than trusted outright.
@@ -4380,13 +4231,13 @@ fn ensure_workspace(
             .context("workspace went stale but the task has no worktree to reopen a pane on")?;
         // `reopen_owned_pane`, never the plain `create_pane`, for a checkout
         // this task cut for itself: a backend that marks ownership on the
-        // session rather than asking the multiplexer directly (tmux's
-        // `@spoolway_checkout`) stamps only through that call, and a pane
-        // opened without it answers to `remove_workspace` as though the
-        // checkout were borrowed — cleanup then refuses to take it back and
-        // the worktree leaks. A genuinely borrowed checkout gets the
-        // unstamped pane it always did: it is not this task's to remove
-        // either way.
+        // session rather than asking the multiplexer directly stamps only
+        // through that call, and a pane opened without it answers to
+        // `remove_workspace` as though the checkout were borrowed — cleanup
+        // then refuses to take it back and the worktree leaks. See
+        // `Mux::reopen_owned_pane`'s own doc for why no backend does this
+        // any more. A genuinely borrowed checkout gets the unstamped pane it
+        // always did: it is not this task's to remove either way.
         match mux.task_owns_workspace() {
             true if task.front.borrowed => {
                 let workspace = mux.create_pane(&checkout, &format!("spoolway/{}", task.id()))?;
@@ -5325,9 +5176,8 @@ pub fn our_checkouts(repo: &Repo, tasks: &[Task]) -> HashSet<PathBuf> {
     {
         // Both spellings: the path as recorded, and its canonical form. A
         // backend that resolves symlinks when it reports a lane's `cwd`
-        // (herdr, or tmux's `pane_current_path`) hands back the same
-        // directory under a different name, and [`owns_cwd`] checks against
-        // whichever this set happens to hold.
+        // (herdr) hands back the same directory under a different name, and
+        // [`owns_cwd`] checks against whichever this set happens to hold.
         if let Ok(canon) = path.canonical() {
             out.insert(canon);
         }
@@ -5340,10 +5190,9 @@ pub fn our_checkouts(repo: &Repo, tasks: &[Task]) -> HashSet<PathBuf> {
 /// reported it — is one of `mine`.
 ///
 /// A plain set membership first, then the same test on the canonicalised
-/// path. tmux stamps [`crate::tmux`]'s `OPT_CWD` with the exact string the
-/// dispatcher recorded, so the first test is normally enough; the fallback
-/// is for a backend that canonicalises, where byte-equality alone dropped
-/// every lane and escalated every task. See review finding 38.
+/// path. The dispatcher's own recorded string is normally enough; the
+/// fallback is for a backend that canonicalises, where byte-equality alone
+/// dropped every lane and escalated every task. See review finding 38.
 pub fn owns_cwd(mine: &HashSet<PathBuf>, cwd: &std::path::Path) -> bool {
     mine.contains(cwd)
         || cwd
@@ -5595,7 +5444,7 @@ mod tests {
         /// call takes the checkout and the row together.
         unbound_workspace: bool,
         /// Whether this backend actually offers a pane to
-        /// [`crate::mux::Mux::run_in_pane`], the way herdr and tmux do. False
+        /// [`crate::mux::Mux::run_in_pane`], the way herdr does. False
         /// is every other test's backend, headless included: `run_in_pane`
         /// answers `None`, exactly the trait's own default, and a command
         /// step falls back to the detached run it always used.
@@ -5675,8 +5524,8 @@ mod tests {
             self.unbound_workspace = true;
             self
         }
-        /// A backend that actually offers a command step a pane — herdr or
-        /// tmux, rather than every other test's fake, which declines exactly
+        /// A backend that actually offers a command step a pane — herdr,
+        /// rather than every other test's fake, which declines exactly
         /// as headless does.
         fn offering_panes(mut self) -> FakeMux {
             self.run_commands_in_pane = true;
@@ -5810,11 +5659,6 @@ mod tests {
                 .borrow()
                 .get(label)
                 .and_then(|tab| tab.tab_id.clone()))
-        }
-
-        fn move_self_into(&self, workspace_id: &str) -> Result<()> {
-            self.log(format!("move_self_into {workspace_id}"));
-            Ok(())
         }
 
         fn task_owns_workspace(&self) -> bool {
@@ -6008,14 +5852,6 @@ mod tests {
         }
         fn focus_lane(&self, name: &str) -> Result<()> {
             self.log(format!("focus {name}"));
-            Ok(())
-        }
-        fn rename_tab(&self, _tab: &str, label: &str) -> Result<()> {
-            self.log(format!("tab {label}"));
-            Ok(())
-        }
-        fn rename_workspace(&self, _workspace: &str, label: &str) -> Result<()> {
-            self.log(format!("workspace {label}"));
             Ok(())
         }
         fn rename_pane(&self, _pane: &str, label: &str) -> Result<()> {
@@ -6468,13 +6304,13 @@ mod tests {
     }
 
     fn run_pass(repo: &Repo, mux: &FakeMux) -> Report {
-        Dispatcher::new(repo, &Pipelines::builtin(), mux, false)
+        Dispatcher::new(repo, &Pipelines::builtin(), mux)
             .pass()
             .unwrap()
     }
 
     fn run_pass_with(repo: &Repo, mux: &FakeMux, pipelines: &Pipelines) -> Report {
-        Dispatcher::new(repo, pipelines, mux, false).pass().unwrap()
+        Dispatcher::new(repo, pipelines, mux).pass().unwrap()
     }
 
     /// The shipped pipelines, minus their `blocked` step — the shape every
@@ -6635,7 +6471,7 @@ mod tests {
 
         let mux = FakeMux::new(vec![]).tabs_in_one_workspace();
         let pipelines = Pipelines::builtin();
-        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux, false);
+        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
         let mut report = Report::default();
 
         dispatcher
@@ -6685,7 +6521,7 @@ mod tests {
         };
         let mux = FakeMux::new(vec![lane]);
         let mut report = Report::default();
-        Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
+        Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
             .sweep_on_stop(&mut report)
             .unwrap();
 
@@ -6766,7 +6602,7 @@ mod tests {
 
         let mux = FakeMux::new(vec![]);
         let mut report = Report::default();
-        Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
+        Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
             .sweep_on_stop(&mut report)
             .unwrap();
 
@@ -6814,7 +6650,7 @@ mod tests {
 
         let mux = FakeMux::new(vec![]);
         let mut report = Report::default();
-        let archived = Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
+        let archived = Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
             .clean_up(&mut task, &[], &mut report)
             .unwrap();
 
@@ -6845,7 +6681,7 @@ mod tests {
 
         let mux = FakeMux::new(vec![]);
         let mut report = Report::default();
-        Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
+        Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
             .clean_up(&mut task, &[], &mut report)
             .unwrap();
 
@@ -6884,7 +6720,7 @@ mod tests {
 
         let mux = FakeMux::new(vec![]);
         let mut report = Report::default();
-        Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
+        Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
             .clean_up(&mut task, &[], &mut report)
             .unwrap();
 
@@ -7089,7 +6925,7 @@ mod tests {
 
         let mux = FakeMux::new(vec![]);
         let mut report = Report::default();
-        let archived = Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
+        let archived = Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
             .clean_up(&mut task, &[], &mut report)
             .unwrap();
 
@@ -7133,7 +6969,7 @@ mod tests {
 
         let mux = FakeMux::new(vec![]);
         let mut report = Report::default();
-        Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
+        Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
             .clean_up(&mut task, &[], &mut report)
             .unwrap();
 
@@ -7173,7 +7009,7 @@ mod tests {
 
         let mux = FakeMux::new(vec![]);
         let pipelines = Pipelines::builtin();
-        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux, false);
+        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
         let mut report = Report::default();
 
         dispatcher
@@ -7221,7 +7057,7 @@ mod tests {
 
         let mux = FakeMux::new(vec![]);
         let mut report = Report::default();
-        let archived = Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
+        let archived = Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
             .clean_up(&mut task, &[], &mut report)
             .unwrap();
 
@@ -7251,7 +7087,7 @@ mod tests {
 
         let mux = FakeMux::new(vec![]);
         let mut report = Report::default();
-        let archived = Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
+        let archived = Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
             .clean_up(&mut task, &[], &mut report)
             .unwrap();
 
@@ -7283,7 +7119,7 @@ mod tests {
 
         let mux = FakeMux::new(vec![]);
         let pipelines = Pipelines::builtin();
-        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux, false);
+        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
         let mut report = Report::default();
 
         dispatcher
@@ -7336,7 +7172,7 @@ mod tests {
 
         let mux = FakeMux::new(vec![]).with_unbound_workspace();
         let mut report = Report::default();
-        let archived = Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
+        let archived = Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
             .clean_up(&mut task, &[], &mut report)
             .unwrap();
 
@@ -7372,7 +7208,7 @@ mod tests {
 
         let mux = FakeMux::new(vec![]);
         let mut report = Report::default();
-        let archived = Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
+        let archived = Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
             .clean_up(&mut task, &[], &mut report)
             .unwrap();
 
@@ -7400,7 +7236,7 @@ mod tests {
 
             let mux = FakeMux::new(vec![]).tabs_in_one_workspace();
             let mut report = Report::default();
-            Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
+            Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
                 .sweep_on_stop(&mut report)
                 .unwrap();
 
@@ -7416,7 +7252,7 @@ mod tests {
         let repo = fixture("stop-no-workspace");
         let mux = FakeMux::new(vec![]).tabs_in_one_workspace();
         let mut report = Report::default();
-        Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
+        Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
             .sweep_on_stop(&mut report)
             .unwrap();
 
@@ -7872,9 +7708,7 @@ mod tests {
         add_task(&repo, "demo", "queued");
 
         let mux = FakeMux::new(vec![]);
-        let report = Dispatcher::new(&repo, &pipelines, &mux, false)
-            .pass()
-            .unwrap();
+        let report = Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
 
         assert!(mux.did("start").is_empty(), "no lane should have started");
         // Below the launch-failure ceiling this is a bounded notice on
@@ -7909,7 +7743,7 @@ mod tests {
         add_task(&repo, "demo", "implement");
 
         let mux = FakeMux::new(vec![]);
-        let report = Dispatcher::new(&repo, &pipelines, &mux, false)
+        let report = Dispatcher::new(&repo, &pipelines, &mux)
             .pass()
             .expect("an undefined profile does not abort the pass");
 
@@ -8135,7 +7969,7 @@ mod tests {
 
         let mux = FakeMux::new(vec![]).with_sweep_tabs(vec![anchor, holding_the_recorded_pane]);
         let pipelines = Pipelines::builtin();
-        let dispatcher = Dispatcher::new(&repo, &pipelines, &mux, false);
+        let dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
         let tasks = repo.tasks().unwrap();
         let mine = our_checkouts(&repo, &tasks);
         let mut report = Report::default();
@@ -8179,7 +8013,7 @@ mod tests {
 
         let mux = FakeMux::new(vec![]).with_sweep_tabs(vec![work, dispatch]);
         let pipelines = Pipelines::builtin();
-        let dispatcher = Dispatcher::new(&repo, &pipelines, &mux, false);
+        let dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
         let tasks = repo.tasks().unwrap();
         let mine = our_checkouts(&repo, &tasks);
         let mut report = Report::default();
@@ -8207,7 +8041,7 @@ mod tests {
         std::fs::write(&lanes, "{ this is not json").unwrap();
 
         let mux = FakeMux::new(vec![]);
-        Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
+        Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
             .pass()
             .expect("a corrupt lanes.json does not fail the pass");
 
@@ -8423,9 +8257,7 @@ mod tests {
         add_task(&repo, "waiting", "document");
 
         let mux = FakeMux::new(vec![lane(&repo, "busy · implement", LaneStatus::Working)]);
-        let report = Dispatcher::new(&repo, &pipelines, &mux, false)
-            .pass()
-            .unwrap();
+        let report = Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
 
         assert!(mux.did("start").is_empty(), "no lane should have started");
         assert!(
@@ -9021,7 +8853,7 @@ mod tests {
         });
 
         let mux = FakeMux::new(vec![]);
-        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux, false);
+        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
         let mut task = reload(&path);
         let step = pipeline.step(crate::pipeline::BLOCKED).unwrap();
 
@@ -9155,7 +8987,7 @@ mod tests {
         });
 
         let mux = FakeMux::new(vec![]);
-        let report = Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
+        let report = Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
             .pass()
             .unwrap();
 
@@ -9186,7 +9018,7 @@ mod tests {
         });
 
         let mux = FakeMux::new(vec![]);
-        Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
+        Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
             .pass()
             .unwrap();
 
@@ -9441,26 +9273,20 @@ mod tests {
         // comment on the same pattern in
         // `a_lane_waiting_on_a_person_is_left_completely_alone`.
         let mux = FakeMux::new(vec![lane(&repo, "demo · release", LaneStatus::Done)]);
-        Dispatcher::new(&repo, &pipelines, &mux, false)
-            .pass()
-            .unwrap();
+        Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
         // Freshly settled is not yet a fault — the report may have landed while
         // the pass was reading.
         assert_eq!(reload(&path).stage(), "release");
 
         age_lane(&repo, "demo · release", Duration::from_secs(86_400));
         mux.clear_calls();
-        Dispatcher::new(&repo, &pipelines, &mux, false)
-            .pass()
-            .unwrap();
+        Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
         assert_eq!(reload(&path).stage(), "release", "reminded, not paused");
 
         // Nothing follows the reminder, and there is no clock left to wait
         // out: the very next pass pauses it.
         mux.clear_calls();
-        Dispatcher::new(&repo, &pipelines, &mux, false)
-            .pass()
-            .unwrap();
+        Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
         let task = reload(&path);
         assert_eq!(task.stage(), crate::pipeline::PAUSED);
         assert_eq!(task.front.parked_from.as_deref(), Some("release"));
@@ -9816,47 +9642,6 @@ mod tests {
                 .actions
                 .iter()
                 .any(|line| line.contains("demo") && line.contains("its own Escape")),
-            "got {:?}",
-            report.actions
-        );
-    }
-
-    /// `--dry-run` reports the park it would make rather than the nudge it
-    /// would otherwise send — and, being a dry run, writes nothing: the task
-    /// must still be sitting on `implement` afterwards.
-    #[test]
-    fn a_dry_run_reports_the_park_it_would_make_not_the_nudge() {
-        let repo = fixture("hand-interrupt-dry");
-        let path = add_task_with(&repo, "demo", "implement", |f| {
-            f.workspace_id = Some("w1".into());
-            f.pane_id = Some("w1:p1".into());
-        });
-        record_lane(
-            &repo,
-            "demo · implement",
-            "aborted-session",
-            &implement_kind(&repo),
-        );
-
-        let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]);
-        let home = pi_home_aborted("aborted-session");
-        let report = with_home(&home, || {
-            Dispatcher::new(&repo, &Pipelines::builtin(), &mux, true).pass()
-        });
-        std::fs::remove_dir_all(&home).ok();
-        let report = report.unwrap();
-
-        assert_eq!(
-            reload(&path).stage(),
-            "implement",
-            "a dry run writes nothing"
-        );
-        assert!(mux.did("prompt").is_empty());
-        assert!(
-            report
-                .actions
-                .iter()
-                .any(|line| line.contains("would park")),
             "got {:?}",
             report.actions
         );
@@ -10518,7 +10303,7 @@ mod tests {
         let home = pi_home_with(session, 8_400);
         let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]);
         with_home(&home, || {
-            Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
+            Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
                 .pass()
                 .unwrap();
         });
@@ -10586,7 +10371,7 @@ mod tests {
         }
 
         let mux = FakeMux::new(vec![]);
-        let report = Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
+        let report = Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
             .pass()
             .unwrap();
 
@@ -10643,9 +10428,7 @@ mod tests {
         add_task(&repo, "later", crate::pipeline::QUEUED);
 
         let mux = FakeMux::new(vec![lane(&repo, "gated · release", LaneStatus::Done)]);
-        let report = Dispatcher::new(&repo, &pipelines, &mux, false)
-            .pass()
-            .unwrap();
+        let report = Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
         assert_eq!(
             mux.did("start").len(),
             2,
@@ -10726,7 +10509,7 @@ mod tests {
         );
 
         let mux = FakeMux::new(vec![]);
-        let report = Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
+        let report = Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
             .pass()
             .unwrap();
 
@@ -11021,7 +10804,7 @@ mod tests {
         // A person planning in their own session, expensively. No `task`.
         write_spend(&repo, "", 50_000);
         assert!(
-            Dispatcher::new(&repo, &pipelines, &mux, false)
+            Dispatcher::new(&repo, &pipelines, &mux)
                 .over_output_ceiling()
                 .is_none(),
             "an interactive session spent the run's ceiling"
@@ -11029,7 +10812,7 @@ mod tests {
 
         // And one lane, which is what the ceiling is for.
         write_spend(&repo, "demo", 1_500);
-        let note = Dispatcher::new(&repo, &pipelines, &mux, false)
+        let note = Dispatcher::new(&repo, &pipelines, &mux)
             .over_output_ceiling()
             .expect("the lane's own spend is over the ceiling");
         assert!(note.contains("1500 output tokens"), "{note}");
@@ -11074,14 +10857,14 @@ mod tests {
         .unwrap();
 
         assert!(
-            Dispatcher::new(&repo, &pipelines, &mux, false)
+            Dispatcher::new(&repo, &pipelines, &mux)
                 .over_cost_ceiling()
                 .is_none(),
             "max_cost_usd defaults to 0 — off"
         );
 
         repo.config.unattended.max_cost_usd = 5.0;
-        let note = Dispatcher::new(&repo, &pipelines, &mux, false)
+        let note = Dispatcher::new(&repo, &pipelines, &mux)
             .over_cost_ceiling()
             .expect("$7.50 spent is over a $5.00 ceiling");
         assert!(note.contains("$7.50"), "{note}");
@@ -11109,7 +10892,7 @@ mod tests {
         let pipelines = Pipelines::builtin();
         let mux = FakeMux::new(vec![]);
         let mut report = Report::default();
-        Dispatcher::new(&repo, &pipelines, &mux, false)
+        Dispatcher::new(&repo, &pipelines, &mux)
             .sweep_on_stop(&mut report)
             .unwrap();
 
@@ -11192,7 +10975,7 @@ mod tests {
         let mux = FakeMux::new(vec![]);
         let mut report = Report::default();
         with_home(&home, || {
-            Dispatcher::new(&repo, &pipelines, &mux, false)
+            Dispatcher::new(&repo, &pipelines, &mux)
                 .sweep_on_stop(&mut report)
                 .unwrap();
         });
@@ -11221,7 +11004,7 @@ mod tests {
         let repo = fixture("lazy-usage-banked");
         let mux = FakeMux::new(vec![]);
         let pipelines = Pipelines::builtin();
-        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux, false);
+        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
         dispatcher.pass().unwrap();
         assert!(
             dispatcher.ledger.is_none(),
@@ -11267,7 +11050,7 @@ mod tests {
         let mux = FakeMux::new(vec![]);
         let mut report = Report::default();
         with_home(&home, || {
-            Dispatcher::new(&repo, &pipelines, &mux, false).hold_for_block(
+            Dispatcher::new(&repo, &pipelines, &mux).hold_for_block(
                 &lane,
                 "demo",
                 "implement",
@@ -11329,9 +11112,7 @@ mod tests {
         let pipelines = Pipelines::builtin();
         let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]);
         with_home(&home, || {
-            Dispatcher::new(&repo, &pipelines, &mux, false)
-                .pass()
-                .unwrap();
+            Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
         });
         assert_eq!(
             reload(&path).stage(),
@@ -11354,9 +11135,7 @@ mod tests {
 
         let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]);
         with_home(&home, || {
-            Dispatcher::new(&repo, &pipelines, &mux, false)
-                .pass()
-                .unwrap();
+            Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
         });
         assert_eq!(
             reload(&path).stage(),
@@ -11368,9 +11147,7 @@ mod tests {
         // out: the very next pass pauses it.
         let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]);
         with_home(&home, || {
-            Dispatcher::new(&repo, &pipelines, &mux, false)
-                .pass()
-                .unwrap();
+            Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
         });
         assert_eq!(reload(&path).stage(), crate::pipeline::PAUSED);
     }
@@ -11515,7 +11292,7 @@ mod tests {
 
         let home = pi_home_with("carried-session", 10);
         with_home(&home, || {
-            Dispatcher::new(&repo, &session_pipelines(), &FakeMux::new(vec![]), false)
+            Dispatcher::new(&repo, &session_pipelines(), &FakeMux::new(vec![]))
                 .pass()
                 .unwrap();
         });
@@ -11551,7 +11328,7 @@ mod tests {
             "carried-session",
         );
 
-        let report = Dispatcher::new(&repo, &session_pipelines(), &FakeMux::new(vec![]), false)
+        let report = Dispatcher::new(&repo, &session_pipelines(), &FakeMux::new(vec![]))
             .pass()
             .unwrap();
 
@@ -11590,7 +11367,7 @@ mod tests {
         let repo = fixture("session-not-found");
         add_task(&repo, "demo", "fix");
 
-        let report = Dispatcher::new(&repo, &session_pipelines(), &FakeMux::new(vec![]), false)
+        let report = Dispatcher::new(&repo, &session_pipelines(), &FakeMux::new(vec![]))
             .pass()
             .unwrap();
 
@@ -11617,7 +11394,7 @@ mod tests {
         // carries no `session:` in this pipeline.
         write_entry(&repo, "demo", "fix", &kind, "test-model", "carried-session");
 
-        Dispatcher::new(&repo, &session_pipelines(), &FakeMux::new(vec![]), false)
+        Dispatcher::new(&repo, &session_pipelines(), &FakeMux::new(vec![]))
             .pass()
             .unwrap();
 
@@ -11648,7 +11425,7 @@ mod tests {
             "carried-session",
         );
 
-        Dispatcher::new(&repo, &session_pipelines(), &FakeMux::new(vec![]), false)
+        Dispatcher::new(&repo, &session_pipelines(), &FakeMux::new(vec![]))
             .pass()
             .unwrap();
 
@@ -12132,7 +11909,7 @@ mod tests {
         // 900 of a 1000-token window is 90%, past the 80% ceiling just set.
         let home = pi_home_with("ceiling-session", 900);
         let report = with_home(&home, || {
-            Dispatcher::new(&repo, &session_pipelines(), &mux, false)
+            Dispatcher::new(&repo, &session_pipelines(), &mux)
                 .pass()
                 .unwrap()
         });
@@ -12261,9 +12038,7 @@ mod tests {
         // 1000-token window — 90%, past the 80% ceiling just set.
         let home = claude_home_with("ceiling-session-reported", 10, 800);
         let report = with_home(&home, || {
-            Dispatcher::new(&repo, &pipelines, &mux, false)
-                .pass()
-                .unwrap()
+            Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap()
         });
         std::fs::remove_dir_all(&home).ok();
 
@@ -13113,7 +12888,7 @@ mod tests {
 
         let mux = FakeMux::new(vec![]);
         let pipelines = Pipelines::builtin();
-        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux, false);
+        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
         let mut report = Report::default();
 
         dispatcher
@@ -13153,7 +12928,7 @@ mod tests {
 
         let mux = FakeMux::new(vec![]);
         let pipelines = Pipelines::builtin();
-        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux, false);
+        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
         let mut report = Report::default();
 
         // `first` archives while `second` is still queued, naming it — kept
@@ -13209,7 +12984,7 @@ mod tests {
 
         let mux = FakeMux::new(vec![]);
         let pipelines = Pipelines::builtin();
-        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux, false);
+        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
         let mut report = Report::default();
 
         dispatcher
@@ -13254,7 +13029,7 @@ mod tests {
 
         let mux = FakeMux::new(vec![]);
         let pipelines = Pipelines::builtin();
-        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux, false);
+        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
         let mut report = Report::default();
 
         dispatcher
@@ -13305,7 +13080,7 @@ mod tests {
 
         let mux = FakeMux::new(vec![]);
         let pipelines = Pipelines::builtin();
-        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux, false);
+        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
         let mut report = Report::default();
         dispatcher
             .clean_up(&mut reload(&finished), &[], &mut report)
@@ -13512,7 +13287,7 @@ mod tests {
 
             let mux = FakeMux::new(vec![]);
             let pipelines = Pipelines::builtin();
-            let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux, false);
+            let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
             dispatcher.lanes.insert(
                 "demo · implement".into(),
                 LaneRecord {
@@ -13581,7 +13356,7 @@ mod tests {
         let home = pi_home_with(session, 5_000);
         let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Working)]);
         with_home(&home, || {
-            Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
+            Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
                 .pass()
                 .unwrap();
         });
@@ -13610,21 +13385,6 @@ mod tests {
         assert!(mux.calls().is_empty());
         assert_eq!(report.problems.len(), 1);
         assert!(report.problems[0].contains("does not define"));
-    }
-
-    #[test]
-    fn a_dry_run_changes_nothing() {
-        let repo = fixture("dry");
-        let path = add_task(&repo, "demo", "queued");
-
-        let mux = FakeMux::new(vec![]);
-        let report = Dispatcher::new(&repo, &Pipelines::builtin(), &mux, true)
-            .pass()
-            .unwrap();
-
-        assert!(mux.calls().is_empty());
-        assert_eq!(reload(&path).stage(), "queued");
-        assert!(report.actions.iter().any(|a| a.starts_with("would start")));
     }
 
     // ------------------------------------------------------------ command steps
@@ -13700,7 +13460,7 @@ mod tests {
     fn drive(repo: &Repo, pipelines: &Pipelines, mux: &FakeMux, path: &Path, want: &str) -> Report {
         let started = std::time::Instant::now();
         loop {
-            let report = Dispatcher::new(repo, pipelines, mux, false).pass().unwrap();
+            let report = Dispatcher::new(repo, pipelines, mux).pass().unwrap();
             if reload(path).stage() == want {
                 return report;
             }
@@ -13819,9 +13579,7 @@ mod tests {
                 started.elapsed() < Duration::from_secs(5),
                 "the command never exited"
             );
-            Dispatcher::new(&repo, &pipelines, &mux, false)
-                .pass()
-                .unwrap();
+            Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
             std::thread::sleep(Duration::from_millis(20));
         }
 
@@ -13830,9 +13588,7 @@ mod tests {
         // every pass after that, since the destination never gets a slot to
         // move on to.
         for _ in 0..5 {
-            Dispatcher::new(&repo, &pipelines, &mux, false)
-                .pass()
-                .unwrap();
+            Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
         }
 
         assert_eq!(
@@ -13920,9 +13676,7 @@ mod tests {
                 started.elapsed() < Duration::from_secs(5),
                 "the command never exited"
             );
-            Dispatcher::new(&repo, &pipelines, &mux, false)
-                .pass()
-                .unwrap();
+            Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
             std::thread::sleep(Duration::from_millis(20));
         }
 
@@ -13931,9 +13685,7 @@ mod tests {
         // `mux.prompt` refuses the briefing — attempt 1 of `MAX_LAUNCH_
         // FAILURES`, well below the ceiling that would make this arm move
         // the stage a second time itself.
-        Dispatcher::new(&repo, &pipelines, &mux, false)
-            .pass()
-            .unwrap();
+        Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
 
         assert_eq!(
             reload(&path).stage(),
@@ -13976,7 +13728,7 @@ mod tests {
         );
     }
 
-    /// A herdr or tmux pane is spawned from the multiplexer server's own
+    /// A herdr pane is spawned from the multiplexer server's own
     /// environment, not the dispatcher's — the dispatcher's own exports never
     /// reach it any other way. `start_command_in_pane` hands `run_in_pane`
     /// the dispatcher's own process environment as the layer the step's named
@@ -14144,9 +13896,7 @@ mod tests {
         reloaded.save().unwrap();
         mux.clear_calls();
 
-        Dispatcher::new(&repo, &pipelines, &mux, false)
-            .pass()
-            .unwrap();
+        Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
 
         assert!(
             mux.did("close_pane").is_empty(),
@@ -14185,9 +13935,7 @@ mod tests {
         let ran = repo.root.join("the-entry-ran");
         let pipelines = pipelines_running(&format!("touch {}", ran.display()), false);
 
-        let report = Dispatcher::new(&repo, &pipelines, &mux, false)
-            .pass()
-            .unwrap();
+        let report = Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
         assert_eq!(
             reload(&path).stage(),
             "implement",
@@ -14203,33 +13951,6 @@ mod tests {
             !mux.did("start").iter().any(|s| s.contains("implement")),
             "a command step started a lane: {:?}",
             mux.did("start")
-        );
-    }
-
-    /// The dry run of the same. `set_stage` writes the task file, and a dry run
-    /// may not — so this arm says what it would start and stops there.
-    #[test]
-    fn a_dry_run_of_a_command_entry_says_so_and_writes_nothing() {
-        let repo = fixture("command-entry-dry");
-        let path = add_task(&repo, "demo", crate::pipeline::QUEUED);
-        let mux = FakeMux::new(vec![]);
-        let ran = repo.root.join("the-entry-ran");
-        let pipelines = pipelines_running(&format!("touch {}", ran.display()), false);
-
-        let report = Dispatcher::new(&repo, &pipelines, &mux, true)
-            .pass()
-            .unwrap();
-
-        assert!(mux.calls().is_empty(), "{:?}", mux.calls());
-        assert!(!ran.exists(), "a dry run ran the command");
-        assert_eq!(reload(&path).stage(), crate::pipeline::QUEUED);
-        assert!(
-            report
-                .actions
-                .iter()
-                .any(|a| a == "would start `implement` for demo"),
-            "a dry run has to say what it would have started: {:?}",
-            report.actions
         );
     }
 
@@ -14255,9 +13976,7 @@ mod tests {
         add_task(&repo, "demo", crate::pipeline::QUEUED);
 
         let mux = FakeMux::new(vec![]);
-        let report = Dispatcher::new(&repo, &pipelines, &mux, false)
-            .pass()
-            .unwrap();
+        let report = Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
 
         assert!(mux.did("start").is_empty(), "no lane should have started");
         assert_eq!(report.problems.len(), 1, "{:?}", report.problems);
@@ -14365,9 +14084,7 @@ mod tests {
 
         // And it is still there a pass later, rather than having been sent back
         // round by a lane nobody should have started.
-        let report = Dispatcher::new(&repo, &pipelines, &mux, false)
-            .pass()
-            .unwrap();
+        let report = Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
         assert_eq!(
             reload(&path).stage(),
             crate::pipeline::BLOCKED,
@@ -14454,9 +14171,7 @@ mod tests {
         let pipelines = pipelines_failing_to_blocked();
 
         drive(&repo, &pipelines, &mux, &path, crate::pipeline::BLOCKED);
-        Dispatcher::new(&repo, &pipelines, &mux, false)
-            .pass()
-            .unwrap();
+        Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
 
         assert!(
             mux.calls().iter().any(|call| call.contains("blocked")),
@@ -14476,14 +14191,10 @@ mod tests {
         let pipelines = pipelines_running("sleep 30", false);
 
         let started = std::time::Instant::now();
-        Dispatcher::new(&repo, &pipelines, &mux, false)
-            .pass()
-            .unwrap();
+        Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
         let first = started.elapsed();
         // And a second pass, which finds it still going and leaves it alone.
-        Dispatcher::new(&repo, &pipelines, &mux, false)
-            .pass()
-            .unwrap();
+        Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
 
         assert!(
             started.elapsed() < Duration::from_secs(10),
@@ -14511,9 +14222,7 @@ mod tests {
         let mux = FakeMux::new(vec![]);
         let pipelines = pipelines_running("sleep 30", true);
 
-        Dispatcher::new(&repo, &pipelines, &mux, false)
-            .pass()
-            .unwrap();
+        Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
 
         assert_eq!(
             reload(&path).stage(),
@@ -14559,9 +14268,7 @@ mod tests {
             .unwrap()
             .on_fail = Some(crate::pipeline::BLOCKED.to_string());
 
-        Dispatcher::new(&repo, &pipelines, &mux, false)
-            .pass()
-            .unwrap();
+        Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
         let mut task = reload(&path);
         assert_eq!(
             task.stage(),
@@ -14585,7 +14292,7 @@ mod tests {
 
         let pipeline = pipelines.pipelines.get(&name).unwrap();
         let mut report = Report::default();
-        let rerouted = Dispatcher::new(&repo, &pipelines, &mux, false).reap_stale_runs(
+        let rerouted = Dispatcher::new(&repo, &pipelines, &mux).reap_stale_runs(
             &mut task,
             pipeline,
             &mut report,
@@ -14641,9 +14348,7 @@ mod tests {
             .unwrap()
             .on_fail = Some(crate::pipeline::BLOCKED.to_string());
 
-        Dispatcher::new(&repo, &pipelines, &mux, false)
-            .pass()
-            .unwrap();
+        Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
         let mut task = reload(&path);
         assert_eq!(task.stage(), "review");
 
@@ -14659,7 +14364,7 @@ mod tests {
 
         let pipeline = pipelines.pipelines.get(&name).unwrap();
         let mut report = Report::default();
-        let rerouted = Dispatcher::new(&repo, &pipelines, &mux, false).reap_stale_runs(
+        let rerouted = Dispatcher::new(&repo, &pipelines, &mux).reap_stale_runs(
             &mut task,
             pipeline,
             &mut report,
@@ -14692,9 +14397,7 @@ mod tests {
         // this exit code at all.
         let pipelines = pipelines_running("exit 0", true);
 
-        Dispatcher::new(&repo, &pipelines, &mux, false)
-            .pass()
-            .unwrap();
+        Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
         let mut task = reload(&path);
         assert_eq!(task.stage(), "review");
 
@@ -14715,11 +14418,7 @@ mod tests {
         let name = "default".to_string();
         let pipeline = pipelines.pipelines.get(&name).unwrap();
         let mut report = Report::default();
-        Dispatcher::new(&repo, &pipelines, &mux, false).reap_stale_runs(
-            &mut task,
-            pipeline,
-            &mut report,
-        );
+        Dispatcher::new(&repo, &pipelines, &mux).reap_stale_runs(&mut task, pipeline, &mut report);
 
         assert!(
             runs.pane(&key).is_none(),
@@ -14748,9 +14447,7 @@ mod tests {
         let mux = FakeMux::new(vec![]);
         let pipelines = pipelines_running("sleep 30", true);
 
-        Dispatcher::new(&repo, &pipelines, &mux, false)
-            .pass()
-            .unwrap();
+        Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
         assert_eq!(reload(&path).stage(), "review");
 
         // The destination could not be placed: the task is back on the
@@ -14762,9 +14459,7 @@ mod tests {
         let key = crate::command_step::Runs::key("implement", "demo");
         assert_eq!(runs.state(&key), crate::command_step::RunState::Running);
 
-        Dispatcher::new(&repo, &pipelines, &mux, false)
-            .pass()
-            .unwrap();
+        Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
         assert_eq!(
             reload(&path).stage(),
             "review",
@@ -14813,9 +14508,7 @@ mod tests {
 
         // The first pass starts it; the timeout has not passed yet, so the task
         // stays exactly where it is.
-        let first = Dispatcher::new(&repo, &pipelines, &mux, false)
-            .pass()
-            .unwrap();
+        let first = Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
         assert_eq!(reload(&path).stage(), "implement", "{first:?}");
 
         let key = crate::command_step::Runs::key("implement", "demo");
@@ -14823,9 +14516,7 @@ mod tests {
         let pid = runs.read_pid(&key).unwrap();
 
         std::thread::sleep(Duration::from_millis(400));
-        let report = Dispatcher::new(&repo, &pipelines, &mux, false)
-            .pass()
-            .unwrap();
+        let report = Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
 
         assert!(
             report
@@ -14856,9 +14547,7 @@ mod tests {
         let mux = FakeMux::new(vec![]);
         let pipelines = pipelines_running_for("sleep 300", true, Duration::from_millis(300));
 
-        Dispatcher::new(&repo, &pipelines, &mux, false)
-            .pass()
-            .unwrap();
+        Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
         assert_ne!(
             reload(&path).stage(),
             "implement",
@@ -14870,9 +14559,7 @@ mod tests {
         let pid = runs.read_pid(&key).unwrap();
 
         std::thread::sleep(Duration::from_millis(400));
-        let report = Dispatcher::new(&repo, &pipelines, &mux, false)
-            .pass()
-            .unwrap();
+        let report = Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
 
         assert!(
             report
@@ -14883,35 +14570,6 @@ mod tests {
             report.actions
         );
         assert!(!crate::headless::alive(pid), "the background run survived");
-    }
-
-    /// A dry run says what it would start and starts nothing. A pass a person
-    /// runs to look at the pipeline must not launch a deploy script.
-    #[test]
-    fn a_dry_run_starts_no_command() {
-        let repo = fixture("command-dry");
-        let path = add_task(&repo, "demo", "implement");
-        let mux = FakeMux::new(vec![]);
-        let pipelines = pipelines_running("touch it-ran.txt", false);
-
-        let report = Dispatcher::new(&repo, &pipelines, &mux, true)
-            .pass()
-            .unwrap();
-
-        assert!(
-            report
-                .actions
-                .iter()
-                .any(|a| a.contains("would run") && a.contains("touch it-ran.txt")),
-            "{:?}",
-            report.actions
-        );
-        assert_eq!(reload(&path).stage(), "implement");
-        assert_eq!(
-            crate::command_step::Runs::new(&repo.commands_dir())
-                .state(&crate::command_step::Runs::key("implement", "demo")),
-            crate::command_step::RunState::Fresh
-        );
     }
 
     /// The step that hands the change over, and what the pipeline says about it.
@@ -15859,77 +15517,6 @@ mod tests {
         }
     }
 
-    /// The other half of the same bug: a dry run has nothing to read either,
-    /// since `fire` is deliberately skipped for it — so the hold must be
-    /// skipped too, or `dispatch --dry-run` reports the opposite of what a
-    /// real pass would do.
-    #[test]
-    fn a_dry_run_under_on_fail_pause_still_says_it_would_start_the_task() {
-        let mut repo = fixture("hook-queued-dry-run");
-        write_hook(&repo, "pass.sh", "exit 0");
-        repo.config.issue_tracking.hook = "pass.sh".into();
-        repo.config.issue_tracking.on_fail = "pause".into();
-        let path = add_task(&repo, "demo", crate::pipeline::QUEUED);
-        let mux = FakeMux::new(vec![]);
-
-        let report = Dispatcher::new(&repo, &Pipelines::builtin(), &mux, true)
-            .pass()
-            .unwrap();
-        assert!(
-            report
-                .actions
-                .iter()
-                .any(|a| a.starts_with("would start `implement` for demo")),
-            "a dry run under on_fail=pause must still say what a real pass would do: {:?}",
-            report.actions
-        );
-        assert_eq!(
-            reload(&path).stage(),
-            crate::pipeline::QUEUED,
-            "a dry run writes nothing"
-        );
-    }
-
-    /// A direct test of the two gates `Dispatcher::pass` wraps around every
-    /// `issue_tracking` hook — `!self.dry_run` ahead of `RESERVED`'s own
-    /// `crate::tracking::fire`, and the same `!self.dry_run` ahead of
-    /// `holds_on_fail`'s read of `exit_code` — read off the hook's own run
-    /// state rather than inferred from where the task ends up. A dry run
-    /// must never start the hook at all: `exit_code` reads `None` before and
-    /// after it, on a hook that would otherwise resolve in milliseconds. The
-    /// very next pass, for real, is what actually starts it — proving the
-    /// gate is the `dry_run` flag itself, not some other reason the hook
-    /// never ran.
-    #[test]
-    fn dry_run_never_fires_the_tracking_hook_the_gate_is_checked_directly() {
-        let mut repo = fixture("hook-gate-dry-run");
-        write_hook(&repo, "pass.sh", "exit 0");
-        repo.config.issue_tracking.hook = "pass.sh".into();
-        let path = add_task(&repo, "demo", crate::pipeline::QUEUED);
-        let mux = FakeMux::new(vec![]);
-
-        Dispatcher::new(&repo, &Pipelines::builtin(), &mux, true)
-            .pass()
-            .unwrap();
-        assert_eq!(
-            crate::tracking::exit_code(&repo, &reload(&path), crate::pipeline::QUEUED),
-            None,
-            "a dry run must never start the hook `fire` gates"
-        );
-
-        Dispatcher::new(&repo, &Pipelines::builtin(), &mux, false)
-            .pass()
-            .unwrap();
-        for _ in 0..200 {
-            if crate::tracking::exit_code(&repo, &reload(&path), crate::pipeline::QUEUED).is_some()
-            {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        panic!("a real pass never started the hook the dry run correctly skipped");
-    }
-
     /// The same failure with `on_fail` left blank (`"ignore"`) changes
     /// nothing about where the task goes — it starts exactly as it would
     /// with no hook at all, and the failure is only ever recorded.
@@ -16116,7 +15703,7 @@ mod tests {
 
         let mux = FakeMux::new(vec![]);
         let pipelines = Pipelines::builtin();
-        let dispatcher = Dispatcher::new(&repo, &pipelines, &mux, false);
+        let dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
         dispatcher.reclaim_scratch("demo");
 
         let branches = repo.git(&["branch", "--list", "demo-rebase"]).unwrap();
@@ -16156,7 +15743,7 @@ mod tests {
 
         let mux = FakeMux::new(vec![]);
         let pipelines = Pipelines::builtin();
-        let dispatcher = Dispatcher::new(&repo, &pipelines, &mux, false);
+        let dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
         dispatcher.reclaim_scratch("demo");
 
         let branches = repo.git(&["branch", "--list", "demo-rebase"]).unwrap();

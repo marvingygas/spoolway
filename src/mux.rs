@@ -1,8 +1,8 @@
 //! The terminal multiplexer spoolway drives.
 //!
 //! Every agent runs in a real pane, so any lane can be watched, attached to, or
-//! taken over by hand. herdr is the only backend today; the operations below
-//! are deliberately the small set a tmux backend could also implement.
+//! taken over by hand. herdr is the only multiplexer backend; headless, also
+//! behind this trait, runs no multiplexer at all.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet};
@@ -195,6 +195,33 @@ pub trait Mux {
     /// Why it is not, phrased as the thing to go and do about it.
     fn unavailable(&self) -> String;
 
+    /// Is this process running in a pane the backend itself would recognise,
+    /// right now?
+    ///
+    /// Used only by `commands::dispatch`'s own pane gate, which refuses to
+    /// start a run this answers `false` for: a board with nowhere to draw is
+    /// a run nobody can see. `true` by default — the right answer for
+    /// headless, which has no pane concept at all and is gated on its own
+    /// test marker instead, never on this.
+    fn in_own_pane(&self) -> bool {
+        true
+    }
+
+    /// This process's own pane id, if it is running in one — what
+    /// [`crate::lock::Lock::acquire`] writes as the lock file's fourth line,
+    /// for a second `spoolway dispatch` finding it held to read back and
+    /// focus, through [`Mux::focus_pane`], instead of drawing a second
+    /// board.
+    ///
+    /// `None` by default, the right answer for headless, which has no pane
+    /// concept at all, and for any backend that cannot answer right now: a
+    /// start does not fail over failing to record this, it only leaves the
+    /// lock in the three-line shape an older binary would have written, and
+    /// a second start that finds it held falls back to naming the pid alone.
+    fn own_pane_id(&self) -> Option<String> {
+        None
+    }
+
     /// Does a lane that is waiting on a person keep a *process* alive while it
     /// waits?
     ///
@@ -233,11 +260,11 @@ pub trait Mux {
     ///
     /// Verified before either is reused — see
     /// [`crate::dispatch::ensure_workspace`] — because a multiplexer that
-    /// restarts while the worktrees survive (a reboot, `tmux kill-server`,
-    /// herdr being restarted) forgets every workspace and tab id it ever
-    /// handed out. Reusing one blindly means `start_one` reads a `tab_id`
-    /// nothing answers to any more, so the pane split fails on that pass and
-    /// on every pass after it.
+    /// restarts while the worktrees survive (a reboot, herdr being
+    /// restarted) forgets every workspace and tab id it ever handed out.
+    /// Reusing one blindly means `start_one` reads a `tab_id` nothing
+    /// answers to any more, so the pane split fails on that pass and on
+    /// every pass after it.
     ///
     /// `tab_id` is `None` for a backend that records none (headless); only
     /// the workspace is checked then.
@@ -245,8 +272,8 @@ pub trait Mux {
     /// `true` by default, which is right for a backend with nothing that can
     /// go stale behind its back: headless derives a workspace id from the
     /// checkout path itself, so there is no separate registry for a restart
-    /// to lose track of. Herdr and tmux — both fronted by a server that can
-    /// restart out from under a surviving checkout — answer for real.
+    /// to lose track of. Herdr — fronted by a server that can restart out
+    /// from under a surviving checkout — answers for real.
     fn workspace_alive(&self, _workspace_id: &str, _tab_id: Option<&str>) -> Result<bool> {
         Ok(true)
     }
@@ -254,7 +281,7 @@ pub trait Mux {
     /// The one workspace every run of every project shares, found or opened.
     ///
     /// Fixed rather than named after a project — see
-    /// [`dispatch_workspace_label`] — so that two projects dispatching at
+    /// [`DISPATCH_WORKSPACE_LABEL`] — so that two projects dispatching at
     /// once are one row in the sidebar, not two: it holds no checkout of its
     /// own, and each project gets one tab of its own inside it.
     ///
@@ -274,7 +301,7 @@ pub trait Mux {
         Ok(None)
     }
 
-    /// A tab (herdr) or window (tmux) of `workspace_id`, opened on `cwd` with
+    /// A tab of `workspace_id`, opened on `cwd` with
     /// one pane, already sitting in `cwd` and free for the caller's own use —
     /// never a placeholder to be split from. Used to open a project's own tab
     /// in the run's shared workspace, on the worktree of whichever task is
@@ -294,7 +321,8 @@ pub trait Mux {
     /// The default refuses, the same as [`Mux::open_tab`]: a backend gets
     /// this only by implementing it. Headless inherits the refusal rather
     /// than overriding it — it has no pane to run anything in at all — and
-    /// is the only backend left on it: herdr and tmux both implement this.
+    /// is the only backend left on it: herdr is the only one that implements
+    /// this.
     fn open_command(&self, _cwd: &Path, _label: &str, _command: &str) -> Result<()> {
         bail!("this backend has no pane to open a command in")
     }
@@ -328,39 +356,9 @@ pub trait Mux {
     /// policy the dispatcher owns, not a backend.
     ///
     /// `Ok(vec![])` from a backend with no tabs to sweep: headless has none
-    /// at all, and tmux is not reached by this sweep — it shares
-    /// [`Herdr::create_pane`]'s old bug under its own `task_window`, but
-    /// that is a task of its own.
+    /// at all.
     fn tabs_for_sweep(&self) -> Result<Vec<SweepTab>> {
         Ok(Vec::new())
-    }
-
-    /// Move the dispatcher's own pane into the run's workspace, so the board
-    /// draws in the same group as the lanes it is drawing.
-    ///
-    /// Called once at the start of a run, after
-    /// [`Mux::dispatch_workspace`] has found or made the workspace. A pane
-    /// already in there is left where it is, which is what makes a dispatcher
-    /// restarted in the pane a previous one moved a no-op rather than a second
-    /// tab. Herdr never overrides this: the dispatcher's own pane stays where
-    /// it was started under both layouts, and only tmux still moves its
-    /// window into the shared session.
-    ///
-    /// `Ok(())` from a backend with no panes to move, and from a `dispatch`
-    /// that is not running in one — a run started from an ordinary terminal
-    /// against a reachable server still dispatches, it just draws where it was
-    /// started.
-    fn move_self_into(&self, _workspace_id: &str) -> Result<()> {
-        Ok(())
-    }
-
-    /// Which workspace the dispatcher's own pane is in right now, if the
-    /// backend has such a thing and this process is in one.
-    ///
-    /// Read live rather than remembered: the stop sweep is what asks, and by
-    /// then the pane has already been moved once — see [`Mux::move_self_into`].
-    fn own_workspace(&self) -> Option<String> {
-        None
     }
 
     /// Is the workspace and tab recorded against a task the task's own, or
@@ -419,14 +417,14 @@ pub trait Mux {
     /// `!task.front.borrowed`.
     ///
     /// A backend that marks ownership on the workspace or session itself
-    /// rather than asking the multiplexer directly — tmux's
-    /// `@spoolway_checkout`, headless's own workspace id — has to re-apply
-    /// that mark here, or the pane this opens answers to
-    /// [`Mux::remove_workspace`] as a borrowed one and cleanup silently
-    /// leaves the worktree behind. [`Mux::create_pane`] by default, which is
-    /// right for a backend like herdr whose removal asks the multiplexer for
-    /// the workspace's own checkout rather than trusting a mark spoolway
-    /// wrote down itself.
+    /// rather than asking the multiplexer directly has to re-apply that mark
+    /// here, or the pane this opens answers to [`Mux::remove_workspace`] as
+    /// a borrowed one and cleanup silently leaves the worktree behind.
+    /// [`Mux::create_pane`] by default, which is right for a backend like
+    /// herdr whose removal asks the multiplexer for the workspace's own
+    /// checkout rather than trusting a mark spoolway wrote down itself. No
+    /// backend overrides this any more; the one that did went with the
+    /// backend it belonged to.
     fn reopen_owned_pane(&self, cwd: &Path, label: &str) -> Result<Workspace> {
         self.create_pane(cwd, label)
     }
@@ -437,8 +435,7 @@ pub trait Mux {
     /// Which pane in the tab actually gets split is this call's own decision,
     /// not the caller's: herdr has no rebalance command, so spoolway chooses
     /// the smallest one, ties to the newest, along its longer side, every
-    /// time. tmux needs none of that — `select-layout tiled` retiles the
-    /// whole window after every split.
+    /// time.
     fn split_pane(&self, tab_id: &str, cwd: &Path) -> Result<String>;
 
     /// Run a shell script in a fresh pane of `tab_id`, labelled for a person,
@@ -457,16 +454,14 @@ pub trait Mux {
     /// [`crate::dispatch::Dispatcher::start_command_in_pane`] — hands this
     /// the dispatcher's own process environment as an inherited layer, with
     /// the step's named map merged on top, same key winning to the named
-    /// value. A herdr or tmux pane starts life with the multiplexer server's
-    /// own environment, not the dispatcher's, and would otherwise never see
+    /// value. A herdr pane starts life with the multiplexer server's own
+    /// environment, not the dispatcher's, and would otherwise never see
     /// anything the dispatcher was started with — `SPOOLWAY_GH`, an e2e
     /// suite's own forge stub, among it — the way a headless run's child
     /// process does by ordinary inheritance. Applied by the backend before
-    /// the script runs, and both backends have to write it out rather than
-    /// hand it across some other way: written to a file beside the run's
-    /// other bookkeeping and sourced with one `.` command under herdr — see
-    /// [`Herdr::run_in_pane`] — and as `-e KEY=VALUE` flags on the respawn
-    /// itself under tmux. A person watching a herdr pane sees the `.`
+    /// the script runs: written to a file beside the run's other
+    /// bookkeeping and sourced with one `.` command — see
+    /// [`Herdr::run_in_pane`]. A person watching a herdr pane sees the `.`
     /// command land, not the environment itself; typing the whole thing in,
     /// as one `export` line, is exactly what this is avoiding — herdr cuts
     /// that line mid-value past some length and the pane's shell then waits
@@ -512,9 +507,9 @@ pub trait Mux {
     /// stopping the turn's process is the only interrupt there is — see the
     /// headless impl, which does exactly what [`Mux::stop_lane`] does.
     ///
-    /// Addressed by lane name alone, like [`Mux::prompt`]: a herdr or tmux
-    /// backend resolves its own pane from it, and there is no pane to close
-    /// here the way [`Mux::stop_lane`] needs one for.
+    /// Addressed by lane name alone, like [`Mux::prompt`]: a herdr backend
+    /// resolves its own pane from it, and there is no pane to close here the
+    /// way [`Mux::stop_lane`] needs one for.
     fn interrupt_lane(&self, name: &str) -> Result<()>;
     /// End the agent session by closing the pane it is in. The pane is the
     /// lane's alone — its task's next step gets a new one — so there is no
@@ -552,9 +547,8 @@ pub trait Mux {
     /// start` would be typed into whatever is still sitting there.
     ///
     /// The default closes the pane, by deferring to [`Mux::stop_lane`], which
-    /// is the right answer for every backend that has nothing to type at —
-    /// headless, which has no panes at all, and tmux, whose pane *is* the
-    /// agent process.
+    /// is the right answer for a backend that has nothing to type at —
+    /// headless, which has no panes at all.
     fn vacate_lane(&self, name: &str, _kind: &str, pane_id: &str) -> Result<Vacated> {
         self.stop_lane(name, pane_id)?;
         Ok(Vacated::PaneClosed)
@@ -575,25 +569,28 @@ pub trait Mux {
     /// workspace id instead.
     ///
     /// The default does nothing and never fails, which is the right answer
-    /// for both backends that never override it: tmux is on its way out and
-    /// needs nothing built for this, and headless has no workspace for
-    /// [`Mux::dispatch_workspace`] to ever name, so this is never even
-    /// reached with an id worth acting on. Only herdr overrides it.
+    /// for headless: it has no workspace for [`Mux::dispatch_workspace`] to
+    /// ever name, so this is never even reached with an id worth acting on.
+    /// Only herdr overrides it.
     fn focus_workspace(&self, _workspace_id: &str) -> Result<()> {
         Ok(())
     }
-    /// Unused by the dispatcher itself now that a row's label is fixed at
-    /// creation and never changed underneath it — a task's tab and workspace
-    /// are named once, either `spoolway/<task>` under `split` or the
-    /// project's own name under `grouped`, and neither is renamed as a lane
-    /// moves through steps the way it used to be. Kept on the trait, and
-    /// exercised by the live tmux integration tests, rather than removed:
-    /// deleting it would ripple into `headless.rs`, outside this task.
-    #[allow(dead_code)]
-    fn rename_tab(&self, tab_id: &str, label: &str) -> Result<()>;
-    /// See [`Mux::rename_tab`] — unused for the same reason.
-    #[allow(dead_code)]
-    fn rename_workspace(&self, workspace_id: &str, label: &str) -> Result<()>;
+
+    /// Bring a live dispatcher's own pane to the front, for a second
+    /// `spoolway dispatch` that found the lock already held — the pane named
+    /// on [`crate::lock::Lock::acquire`]'s fourth line, read back through
+    /// [`crate::lock::Lock::pane`]. Like [`Mux::focus_workspace`], there is
+    /// no lane to resolve this from: the dispatcher's pane is not an agent's,
+    /// so a backend answering for real looks the pane up and focuses the
+    /// workspace and tab it sits in.
+    ///
+    /// The default does nothing and never fails — headless has no pane to
+    /// bring anywhere. A real backend's `Err` is never fatal to the caller:
+    /// a pane that has gone away since the lock was written is reported and
+    /// stepped over, the same as a failed workspace move is today.
+    fn focus_pane(&self, _pane_id: &str) -> Result<()> {
+        Ok(())
+    }
     fn rename_pane(&self, pane_id: &str, label: &str) -> Result<()>;
 }
 
@@ -614,7 +611,6 @@ pub fn backend(repo: &crate::repo::Repo) -> Result<Box<dyn Mux>> {
             &config.dispatch,
             repo.headless_dir(),
         )?),
-        crate::config::Backend::Tmux => Box::new(crate::tmux::Tmux::new(root, &config.dispatch)?),
     })
 }
 
@@ -942,19 +938,18 @@ impl Herdr {
         Ok(path)
     }
 
-    /// The pane this process is running in, if it is running in one.
+    /// Whether this process is running in a pane at all, right now.
     ///
     /// Asked of herdr rather than read out of `HERDR_PANE_ID`, because the
     /// environment a pane's shell was started with is fixed at that moment,
     /// and herdr's own bookkeeping is what stays current if a pane is ever
     /// moved elsewhere.
     ///
-    /// `None` when there is no pane to speak of: `dispatch` run from an
-    /// ordinary terminal that can still reach the server.
-    fn own_pane(&self) -> Option<CurrentPane> {
-        self.call::<PaneCurrent>(&["pane", "current"])
-            .ok()
-            .map(|c| c.pane)
+    /// `false` when there is no pane to speak of: `dispatch` run from an
+    /// ordinary terminal that can still reach the server — the case
+    /// `commands::dispatch`'s own pane gate refuses on.
+    fn own_pane(&self) -> bool {
+        self.call::<serde_json::Value>(&["pane", "current"]).is_ok()
     }
 
     /// git, in the repository this backend was built on.
@@ -1351,6 +1346,24 @@ struct ForegroundProcess {
     is_shell: bool,
 }
 
+/// What `herdr pane current` and `herdr pane get <id>` both answer: a pane's
+/// own id, and the workspace and tab it sits in. Shared by
+/// [`Herdr::own_pane_id`], which reads `pane_id` off the calling pane, and
+/// [`Herdr::focus_pane`], which reads `workspace_id` and `tab_id` off a pane
+/// named by someone else's lock file.
+#[derive(Debug, Deserialize)]
+struct PaneCurrentResult {
+    pane: PaneLocation,
+}
+
+#[derive(Debug, Deserialize)]
+struct PaneLocation {
+    pane_id: String,
+    workspace_id: String,
+    #[serde(default)]
+    tab_id: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct AgentList {
     agents: Vec<RawAgent>,
@@ -1403,18 +1416,6 @@ struct RawPane {
     pane_id: String,
     #[serde(default)]
     tab_id: Option<String>,
-}
-
-/// What `pane current` answers with: the pane the calling process is in.
-#[derive(Debug, Deserialize)]
-struct PaneCurrent {
-    pane: CurrentPane,
-}
-
-#[derive(Debug, Deserialize)]
-struct CurrentPane {
-    #[serde(default)]
-    workspace_id: String,
 }
 
 /// `workspace create` returns this shape. `worktree open` returns the same
@@ -1480,13 +1481,22 @@ impl Mux for Herdr {
 
     fn unavailable(&self) -> String {
         "no herdr server is reachable — every lane runs in a pane, so start herdr first \
-         (`herdr`) and run this from inside it. To dispatch through tmux instead, set \
-         `dispatch.backend = \"tmux\"`; with no multiplexer at all, `\"headless\"`."
+         (`herdr`) and run this from inside it."
             .to_string()
     }
 
     fn resident_while_waiting(&self) -> bool {
         true
+    }
+
+    fn in_own_pane(&self) -> bool {
+        self.own_pane()
+    }
+
+    fn own_pane_id(&self) -> Option<String> {
+        self.call::<PaneCurrentResult>(&["pane", "current"])
+            .ok()
+            .map(|r| r.pane.pane_id)
     }
 
     fn dispatch_workspace(&self, _root: &Path, create: bool) -> Result<Option<String>> {
@@ -1623,10 +1633,6 @@ impl Mux for Herdr {
     fn remove_checkout(&self, path: &Path) -> Result<()> {
         self.git(&["worktree", "remove", "--force", &path.display().to_string()])?;
         Ok(())
-    }
-
-    fn own_workspace(&self) -> Option<String> {
-        self.own_pane().map(|pane| pane.workspace_id)
     }
 
     // `lane_process_alive` is deliberately left at the trait's own default,
@@ -1790,8 +1796,8 @@ impl Mux for Herdr {
     // resumed task's checkout with `worktree open` while the plain
     // `create_pane` still used `workspace create`, and the two now do the same
     // thing — `create_pane` reaches for `worktree open` first whatever brought
-    // it there. tmux keeps its own override because it has a mark to re-apply;
-    // herdr has none, and asks the multiplexer for the binding instead.
+    // it there. Herdr has no mark of its own to re-apply, and asks the
+    // multiplexer for the binding instead.
 
     fn split_pane(&self, tab_id: &str, cwd: &Path) -> Result<String> {
         let path = cwd.display().to_string();
@@ -2092,12 +2098,18 @@ impl Mux for Herdr {
         self.call_ignoring_result(&["workspace", "focus", workspace_id])
     }
 
-    fn rename_tab(&self, tab_id: &str, label: &str) -> Result<()> {
-        self.call_ignoring_result(&["tab", "rename", tab_id, label])
-    }
-
-    fn rename_workspace(&self, workspace_id: &str, label: &str) -> Result<()> {
-        self.call_ignoring_result(&["workspace", "rename", workspace_id, label])
+    fn focus_pane(&self, pane_id: &str) -> Result<()> {
+        // `pane get`, not `pane focus`: herdr's own `pane focus` moves the
+        // focus one hop in a direction relative to a pane already focused,
+        // which is no use for jumping straight to an arbitrary one — this
+        // resolves the workspace and tab `pane_id` sits in instead, the same
+        // two calls `Herdr::focus_workspace` already makes one of.
+        let info: PaneCurrentResult = self.call(&["pane", "get", pane_id])?;
+        self.call_ignoring_result(&["workspace", "focus", &info.pane.workspace_id])?;
+        if let Some(tab_id) = info.pane.tab_id.as_deref() {
+            self.call_ignoring_result(&["tab", "focus", tab_id])?;
+        }
+        Ok(())
     }
 
     fn rename_pane(&self, pane_id: &str, label: &str) -> Result<()> {
@@ -2124,12 +2136,6 @@ pub fn lane_name(step: &str, task: &str) -> String {
 /// once now share this one row in the sidebar, each holding a tab of its
 /// own — see [`Mux::open_tab`] — rather than a row each.
 pub const DISPATCH_WORKSPACE_LABEL: &str = "spoolway-dispatcher";
-
-/// The same label, as a function — kept so a caller written against the old,
-/// per-project signature still compiles against a fixed one.
-pub fn dispatch_workspace_label(_root: &Path) -> String {
-    DISPATCH_WORKSPACE_LABEL.to_string()
-}
 
 /// The name reserved for [`dispatch_home`], under `~/.spoolway/`. No checkout
 /// may claim it as its own directory name — `spoolway init` refuses it the
@@ -2314,7 +2320,7 @@ fn worktree_open_argv(root: &str, path: &str, label: &str) -> Vec<String> {
 
 /// A branch name reduced to one directory component: `task/add-endpoint`
 /// becomes `task-add-endpoint`. Every backend names a task's worktree
-/// directory this way, so herdr, tmux and headless agree — and a slug the
+/// directory this way, so herdr and headless agree — and a slug the
 /// tracker prefixed onto the branch (`task/proj-12-add-endpoint`) rides into
 /// the directory name for free. Without it a `/` in the branch would nest
 /// every worktree under a shared `task/` directory that nothing owns or
@@ -2326,9 +2332,9 @@ pub(crate) fn branch_slug(branch: &str) -> String {
 /// Cut a worktree with git, at exactly the path asked for.
 ///
 /// Shared by the headless backend, which has never had a multiplexer to ask,
-/// and by herdr and tmux both — neither hands its own worktree-cutting
-/// machinery a repository any more; every checkout is cut here, with git, and
-/// the multiplexer is only ever pointed at what already exists.
+/// and by herdr — it no longer hands its own worktree-cutting machinery a
+/// repository either; every checkout is cut here, with git, and the
+/// multiplexer is only ever pointed at what already exists.
 ///
 /// A branch left behind by an earlier run is reused rather than fought with:
 /// `-b` on a branch that already exists fails outright, and the task it belongs
@@ -2552,6 +2558,23 @@ mod tests {
         let row = &list.agents[0];
         assert_eq!(row.launch_pending, None);
         assert_eq!(row.interactive_ready, None);
+    }
+
+    /// Captured from a real `herdr pane current` — the same shape `pane get
+    /// <id>` answers, which is why one struct reads both.
+    /// [`Herdr::own_pane_id`] reads `pane_id` off this; [`Herdr::focus_pane`]
+    /// reads `workspace_id` and `tab_id` off the very same fields for a pane
+    /// named by someone else's lock file.
+    #[test]
+    fn pane_current_result_parses_a_real_payload() {
+        let payload = r#"{"pane":{"agent":"claude","agent_status":"working",
+            "cwd":"/repo","focused":false,"pane_id":"w3S:p1","revision":3,
+            "tab_id":"w3S:t1","terminal_id":"term_x","workspace_id":"w3S"}}"#;
+        let parsed: PaneCurrentResult =
+            serde_json::from_str(payload).expect("a live pane payload parses");
+        assert_eq!(parsed.pane.pane_id, "w3S:p1");
+        assert_eq!(parsed.pane.workspace_id, "w3S");
+        assert_eq!(parsed.pane.tab_id.as_deref(), Some("w3S:t1"));
     }
 
     /// The failure this check exists for: a `.pane` file once held `w8:p4`
@@ -3498,12 +3521,6 @@ mod tests {
         fn focus_lane(&self, _name: &str) -> Result<()> {
             unimplemented!()
         }
-        fn rename_tab(&self, _tab_id: &str, _label: &str) -> Result<()> {
-            unimplemented!()
-        }
-        fn rename_workspace(&self, _workspace_id: &str, _label: &str) -> Result<()> {
-            unimplemented!()
-        }
         fn rename_pane(&self, _pane_id: &str, _label: &str) -> Result<()> {
             unimplemented!()
         }
@@ -3558,14 +3575,7 @@ mod tests {
     /// once share one row in the sidebar rather than opening one each.
     #[test]
     fn the_dispatch_workspace_is_shared_by_every_project() {
-        assert_eq!(
-            dispatch_workspace_label(Path::new("/home/x/dev/spoolway")),
-            "spoolway-dispatcher"
-        );
-        assert_eq!(
-            dispatch_workspace_label(Path::new("/home/x/dev/some-other-app")),
-            "spoolway-dispatcher"
-        );
+        assert_eq!(DISPATCH_WORKSPACE_LABEL, "spoolway-dispatcher");
     }
 
     /// The call that binds a task's checkout to its project: `--cwd` is the
@@ -3648,68 +3658,5 @@ mod tests {
             "mode never changes what the anchor resolves to"
         );
         assert!(!grouped.task_owns_workspace());
-    }
-
-    /// The tmux backend never reads [`crate::repo::Repo::checkout`] at all —
-    /// `Tmux::new`'s own signature only ever took the one path `backend`
-    /// still hands it as `cwd`, `repo.root`, so there is no argument
-    /// position left for `repo.checkout` to reach.
-    ///
-    /// Proved by making the two actually distinguishable rather than by
-    /// comparing answers that would agree either way: `repo.root` is a real
-    /// directory and `repo.checkout` is one that was never created.
-    /// `Mux::is_available`'s `tmux -V` runs with `Command::current_dir` set
-    /// to whichever path `Tmux` was built from — see `Tmux::command` in
-    /// `src/tmux.rs` — and a `current_dir` that does not exist fails the
-    /// spawn itself, before `tmux` ever runs, independent of whether tmux is
-    /// even installed. So `is_available` answering `true` here is only
-    /// possible if `backend` built this `Tmux` from `repo.root`; had it
-    /// leaked `repo.checkout` in the way this task's `Herdr` fix newly
-    /// reads, this would answer `false` instead. `tmux -V` itself never
-    /// touches a session or a socket, so this stays clear of a real tmux
-    /// server the way `src/tmux.rs`'s own `Fixture` is careful to.
-    ///
-    /// That mechanism needs a tmux to spawn: where the binary is missing —
-    /// every `windows-latest` runner — the spawn fails for its own reason,
-    /// `is_available` answers `false` whichever path `backend` passed, and
-    /// the assertion below cannot tell the two apart rather than failing on
-    /// a real defect. So this skips there, the same guard the eighteen
-    /// tests in `src/tmux.rs` that drive a real pane already use. The
-    /// property is about `backend`'s argument order and does not vary by
-    /// platform, so proving it wherever tmux is installed proves it.
-    #[test]
-    fn tmux_backend_selection_reads_the_root_never_the_checkout() {
-        let tmux_installed = std::process::Command::new("tmux")
-            .arg("-V")
-            .output()
-            .is_ok_and(|output| output.status.success());
-        if !tmux_installed {
-            return;
-        }
-        let root = crate::scratch::root("mux-test-tmux-unaffected");
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        // Never created: a checkout `Tmux` has no business reading at all,
-        // and the one thing that makes this test able to tell the two
-        // paths apart rather than merely asserting they agree.
-        let checkout = root.join("never-created");
-
-        let mut config = crate::config::Config::default();
-        config.dispatch.backend = crate::config::Backend::Tmux;
-        let mux = backend(&crate::repo::Repo {
-            root: root.clone(),
-            checkout,
-            config,
-            home: root.join(".home"),
-        })
-        .unwrap();
-
-        assert!(
-            mux.is_available(),
-            "a real, existing root must be what `tmux -V` runs against — this only fails if \
-             `backend` handed `Tmux::new` the checkout instead"
-        );
-
-        std::fs::remove_dir_all(&root).ok();
     }
 }

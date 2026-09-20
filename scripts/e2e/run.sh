@@ -43,6 +43,37 @@
 # Uses whatever `spoolway` is on PATH; set SPOOLWAY to point at a build:
 #   SPOOLWAY=target/release/spoolway scripts/e2e/run.sh
 #
+# `--dry-run` is gone from `spoolway dispatch` — a run either draws where a
+# person can see it or it is refused outright, with no exemption left to
+# preview against. Nine cases across three suites used to prove something
+# with a throwaway pass, and each one is re-expressed or removed:
+#
+#   stacking.sh   "nothing starts `top` while `base` is unfinished" is
+#                 re-expressed against the real, resident dispatcher `drive`
+#                 already starts, read once `base` is demonstrably in flight.
+#   commands.sh   "a dry run says it would start the entry command step" is
+#                 removed outright — the real pass `records` already drives
+#                 right after it proves the same claim more strongly, and
+#                 the routeless-task refusal beside it needed no `--dry-run`
+#                 in the first place, since `check_task_routes` bails ahead
+#                 of the lock and every write whether or not the pass is
+#                 real.
+#   overrides.sh  the seven piped passes that asked the overrides gate and
+#                 the warnings screen what they do with no tty are
+#                 re-expressed as three real, resident runs — started in
+#                 their own session, watched until their log shows them past
+#                 all three gates, then stopped. See `gate_run` there: with
+#                 no `--dry-run` there is no early exit anywhere between the
+#                 gates and `Lock::acquire`, so a piped run that reaches a
+#                 gate is a run that goes on to hold the lock, and the case
+#                 has to stop it rather than wait for it to end.
+#
+# The cursor case in `overrides.sh` is the one worth knowing about: it
+# asserts a piped dispatch emits no hide/show-cursor escape, and clap's
+# error text for a flag that no longer exists contains none either — so left
+# calling `--dry-run` it would have gone on reporting `ok` while asking
+# nothing at all.
+#
 # KEEP=1 leaves every scratch tree behind for a postmortem.
 set -uo pipefail
 
@@ -63,17 +94,28 @@ REPO=$(cd "$E2E_DIR/../.." && pwd)
 #   backends    parity between `herdr` and `headless` needs a multiplexer, and
 #               these suites must run without one. The backend's own behaviour
 #               is unit-tested in src/headless.rs, and what a multiplexer
-#               actually does is scripts/e2e/plans/. Two things are the
-#               exception, because neither can be asked of anything but a real
-#               pane: `commands.sh` opens a real tmux server of its own for
-#               the question "did a command step get a pane at all", and runs
-#               the herdr handover against `herdr-stub.sh`, whose header says
-#               why there is no isolated herdr server to use instead.
-#   status      the board's *rendering* — every column, every row state, the
-#               read-only `--watch` board entire: unit tests cover it through
-#               a real pass, and an e2e version would re-assert the same
-#               branches through a slower path. The board's keys are a
-#               different question and do have a suite: `board-pause` drives
+#               actually does is scripts/e2e/plans/. `commands.sh`'s
+#               herdr-stub cases are the exception, because they can be asked
+#               of nothing but a real pane: the paned-command-step case,
+#               which needs to watch a real pane open, carry an environment,
+#               and close, and the environment-handover case, which needs to
+#               watch an 8KB value actually reach one. Both run against
+#               `scripts/e2e/herdr-stub.sh` — herdr, the one backend left,
+#               chosen over a real server because it has no isolated
+#               instance a suite can spin up of its own; the double's own
+#               header says why. `disaster.sh` used to carry a third case
+#               here, killing a real tmux server under a live agent lane to
+#               prove the heal path that follows; it had no herdr equivalent
+#               — the double answers no `agent start` at all, so it can host
+#               a pane's own lifecycle but never a real lane — and is gone
+#               with the backend it needed.
+#   status      the board's *rendering* — every column, every row state:
+#               unit tests cover it through a real pass, and an e2e version
+#               would re-assert the same branches through a slower path.
+#               There is one board per run now, focused rather than drawn a
+#               second time — see `commands::dispatch::already_running`. The
+#               board's keys are a different question and do have a suite:
+#               `board-pause` drives
 #               `p`, `P` and `U` as real keystrokes into a real dispatcher,
 #               because those interrupt a live lane, write or move a task
 #               file, and answer only to `enter`/`esc` once a panel is open —

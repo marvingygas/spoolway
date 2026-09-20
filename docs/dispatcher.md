@@ -1,6 +1,6 @@
 ---
 domain: dispatcher
-covers: ["src/dispatch.rs", "src/mux.rs", "src/tmux.rs", "src/headless.rs", "src/lock.rs", "src/status/**", "src/problem_log.rs", "src/prompt.rs", "src/teardown.rs", "src/runfiles.rs"]
+covers: ["src/dispatch.rs", "src/mux.rs", "src/headless.rs", "src/lock.rs", "src/status/**", "src/problem_log.rs", "src/prompt.rs", "src/teardown.rs", "src/runfiles.rs"]
 ---
 
 # The dispatcher
@@ -12,15 +12,41 @@ lookup in a task file or in the list of live lanes.
 
 ```
 spoolway dispatch                 # runs until the queue is empty
-spoolway dispatch --dry-run       # print what one pass would do, and do nothing
 spoolway dispatch --interval 5m   # override the configured interval between passes
 spoolway dispatch --force         # start past the restart guard
 spoolway dispatch --plain         # print the board once as a plain table, for scripts
 ```
 
+`spoolway dispatch` asks herdr which pane it is running in and refuses to start outside one,
+whatever flags are given:
+
+```
+$ spoolway dispatch
+spoolway: a dispatcher has to be visible, and this is not a herdr pane.
+
+  Open one and run it there:
+
+    herdr
+    spoolway dispatch
+```
+
+`backend = headless` refuses the same way unless `SPOOLWAY_TEST_BACKEND` is set in the
+environment. Nothing draws a headless run, so only the end-to-end harness sets that marker.
+See [`dispatch.backend`](configuration.md#dispatch--the-run-loop).
+
 One dispatcher serves the whole project. Every pass re-reads the queue, so a task queued
 while it runs is picked up on the next pass. A second `spoolway dispatch` on the same project
-draws the same board in read-only mode, headed `watching dispatcher`.
+prints that a dispatcher is already running, asks herdr to focus its pane, and exits without
+drawing a board:
+
+```
+$ spoolway dispatch
+  a dispatcher is already running for this repo (pid 8123)
+  → focusing its pane w1:p5
+```
+
+`spoolway dispatch --plain` against the same held lock prints its own one-shot table headed
+`watching dispatcher (pid N)` instead, for scripts.
 
 Queueing a batch from the queue screen while another dispatcher holds the lock works the same
 way: the batch is written, and `enter` on the overview brings that dispatcher's workspace to
@@ -30,7 +56,7 @@ Before the first pass, `enter` on the queue screen and an [overrides
 layer](configuration.md#the-overrides-layer) screen, in turn, a warnings screen holds `spoolway
 doctor`'s cheap findings and, for an unattended run, its own notice, until a key answers it. See
 [`spoolway dispatch`](cli-reference.md#spoolway-dispatch). Once the run has taken the lock, a
-failure to move it into its own workspace gets a notice of its own.
+failure to find or open its own workspace gets a notice of its own.
 
 | Exit code | Meaning |
 |---|---|
@@ -296,17 +322,14 @@ A blocked task keeps its pane open until it is resumed.
 
 ```toml
 [dispatch]
-backend = "herdr"     # or "tmux", or "headless"
+backend = "herdr"     # or "headless"
 herdr_mode = "split"  # or "grouped"
-tmux_mode = "grouped" # or "split"
 ```
 
 | Backend | Mode | Where a lane runs |
 |---|---|---|
 | `herdr` | `grouped` | One tab per project in the shared `spoolway-dispatcher` workspace. One pane per running task. |
 | `herdr` | `split` | One herdr workspace per task, nested under the project's row as `spoolway/<task>`. |
-| `tmux` | `grouped` | One window per project in the shared `spoolway-dispatcher` session. One pane per running task. |
-| `tmux` | `split` | One tmux session per task, named `spoolway/<task>`. |
 | `headless` | | No panes. Each turn is a detached process that logs to a file. |
 
 Under a multiplexer every lane is a real pane you can watch and type into. A task holds one
@@ -315,7 +338,7 @@ pane for its whole life. See [Vacating a pane](#vacating-a-pane). A lane is name
 
 ### One home for every run, in every project
 
-`spoolway-dispatcher` is one workspace (herdr) or session (tmux) shared by every project on the
+`spoolway-dispatcher` is one herdr workspace shared by every project on the
 machine. It opens on `~/.spoolway/.dispatcher/`, which is not a repository. Every project's home
 is named `<label>-<id>`, so no project can take the name `.dispatcher`. The board itself stays
 in the pane you ran `spoolway dispatch` in.
@@ -331,28 +354,12 @@ tab. Each split halves the smallest pane in the tab along its longer side, so a 
 spiral. A tab left holding nothing is closed on the next pass, unless it is its workspace's only
 tab.
 
-### tmux
-
-The run lives in a background tmux server. Attach to look, detach to walk away.
-
-| Keys | What they do |
-|---|---|
-| `tmux attach -t spoolway-dispatcher` | Attach to the shared session. |
-| `Ctrl-b d` | Detach. Everything keeps running. |
-| `Ctrl-b w` | Every session and window as a tree. |
-| `Ctrl-b n` / `Ctrl-b p` | Next / previous window. `Ctrl-b 1..9` jumps by number. |
-| `Ctrl-b ↑` / `Ctrl-b ↓` | Move between panes. `Ctrl-b z` zooms one. |
-| `Ctrl-b [` | Scroll back. `q` leaves. |
-
-Under `grouped`, a project's window closes when its dispatcher stops. Under `split`, a task's
-session goes when the task is cleaned up. A paused or blocked task keeps its pane either way.
-
 ### Vacating a pane
 
 When a step finishes, the dispatcher asks its session to leave the pane, so the next step can
 start in the same pane. Only herdr can send that request, and only `claude` has a quit gesture.
-See [Leaving a pane without closing it](agents.md#leaving-a-pane-without-closing-it). tmux and
-headless close the pane instead.
+See [Leaving a pane without closing it](agents.md#leaving-a-pane-without-closing-it). Headless
+closes the pane instead.
 
 The next step waits up to two minutes for the earlier lane to leave. After that it splits its
 own pane and the old one is closed. The pane goes blank during the handover.

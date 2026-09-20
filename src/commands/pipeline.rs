@@ -229,7 +229,7 @@ const FIELD_SENTENCES: &[(&str, &str)] = &[
     (
         "headless",
         "Run the command detached, with no pane. Absent, a command step gets a \
-         pane of its own under the herdr and tmux backends.",
+         pane of its own under the herdr backend.",
     ),
     (
         "last",
@@ -916,7 +916,7 @@ pub fn pipeline_gen(repo: &Repo, mux: &dyn Mux, args: &PipelineGenArgs) -> Resul
     if repo.config.dispatch.backend == crate::config::Backend::Headless {
         bail!(
             "`dispatch.backend` is `headless` — `spoolway pipeline gen` opens a real pane to \
-             work in, so set it to `herdr` or `tmux` with `spoolway config set \
+             work in, so set it to `herdr` with `spoolway config set \
              dispatch.backend <backend>`"
         );
     }
@@ -1195,12 +1195,6 @@ mod tests {
             unimplemented!()
         }
         fn focus_lane(&self, _name: &str) -> Result<()> {
-            unimplemented!()
-        }
-        fn rename_tab(&self, _tab_id: &str, _label: &str) -> Result<()> {
-            unimplemented!()
-        }
-        fn rename_workspace(&self, _workspace_id: &str, _label: &str) -> Result<()> {
             unimplemented!()
         }
         fn rename_pane(&self, _pane_id: &str, _label: &str) -> Result<()> {

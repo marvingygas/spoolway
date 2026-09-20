@@ -378,12 +378,14 @@ open list whether they were missed or refused.
   of its checks still running, and a rollup read at the survey goes stale within minutes.
   Re-read it at the tip, with `--watch`, right before the merge.
 - **An e2e suite that hangs instead of failing, and reads as a slow job.** `dispatch` that
-  finds the lock held draws the read-only board and polls forever, and that branch sits above
+  finds the lock held used to draw a read-only board and poll forever, and that branch sat above
   the refusals in `run` — so a suite asserting on a refusal, with a dispatcher `drive` left
-  running, never reaches the thing under test and never returns. It burned a whole 45-minute
-  job timeout on #174 before anybody called it stuck. Two lessons, both general: a suite case
-  that expects a refusal needs `dispatcher_stop` in front of it, and a step running five times
-  its usual duration is hung, not slow — reproduce it locally rather than waiting for a log the
+  running, never reached the thing under test and never returned. It burned a whole 45-minute
+  job timeout on #174 before anybody called it stuck. That mechanism is gone now — a held lock
+  prints two lines and exits 4 at once — so a suite in that shape today fails on its assertion
+  rather than hanging. The two lessons underneath it are still general: a suite case that
+  expects a refusal needs `dispatcher_stop` in front of it, and a step running five times its
+  usual duration is hung, not slow — reproduce it locally rather than waiting for a log the
   forge will not serve until the job ends.
 - **`main` moved between the survey and the merge.** Other things push here. If the merge
   behaves strangely, `git fetch origin` and check that `main` is still where step 2 left it.

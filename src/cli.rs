@@ -815,27 +815,19 @@ impl Tracker {
         task with the step it is on and where it goes next, ordered top to bottom within its \
         group by the order its tasks will run in. `ctrl-c` stops the run and leaves the last \
         frame on screen.\n\n\
-        `--plain` keeps the loop but prints a line per pass instead of drawing. `--dry-run` \
-        reports what one pass would do and changes nothing.")]
+        `--plain` keeps the loop but prints a line per pass instead of drawing. A run refuses \
+        to start at all outside a herdr pane, so there is always somewhere for that board to \
+        draw.")]
 pub struct DispatchArgs {
     /// Override the configured interval between passes, e.g. `5m`.
     #[arg(long, value_name = "DURATION")]
     pub interval: Option<String>,
 
-    /// Report what one pass would do without spawning anything or writing to
-    /// task files.
-    ///
-    /// A single pass, because a dry run archives nothing: looping would report
-    /// the same untouched queue for as long as you let it.
-    #[arg(long)]
-    pub dry_run: bool,
-
     /// Print a line per pass instead of drawing the live board.
     ///
     /// The board owns the terminal and redraws about once a second, which
     /// is what you want in front of you and not what you want in a pipe, a CI
-    /// log or a terminal that mangles the redraw. `--dry-run` prints lines
-    /// regardless: there is no run to watch.
+    /// log or a terminal that mangles the redraw.
     #[arg(long)]
     pub plain: bool,
 

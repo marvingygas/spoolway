@@ -37,7 +37,7 @@ archive and put the binary on your `PATH`.
 
 | Requirement | What it means |
 |---|---|
-| A multiplexer | `herdr` or `tmux`. The `headless` backend needs none. |
+| A multiplexer | `herdr`. The `headless` backend needs none. |
 | Agent binaries | `claude`, `codex` or `pi`, whichever your pipeline steps name. |
 | `git` | Always. Plus `gh` if your pipeline opens pull requests. |
 
@@ -316,7 +316,7 @@ or print the line.
 
 ### Linux
 
-The reference platform. All three backends run here.
+The reference platform. Both backends run here.
 
 ### macOS
 

@@ -63,8 +63,8 @@ jstr() {
   printf '"%s"' "$s"
 }
 
-# The next id, counted under a lock: the dispatcher and its `--watch` board
-# can both be in here at once.
+# The next id, counted under a lock: the dispatcher and a suite's own
+# foreground `spoolway` calls can both be in here at once.
 next_id() {
   local n
   exec 9>"$STATE/seq.lock"
@@ -172,9 +172,36 @@ case "$DOMAIN $VERB" in
     ;;
 
   "pane current")
-    # The dispatcher is not running in a pane of this double. herdr answers a
-    # usage error here, and `Herdr::own_pane` reads any failure as "no pane".
-    fail no_current_pane "not running in a herdr pane"
+    # `spoolway dispatch`'s own pane gate calls this before anything else —
+    # see `commands::dispatch::check_dispatcher_visible` — and refuses the
+    # whole run on any failure here, the same way it would over a bare
+    # terminal with no real herdr pane at all. This double's caller is never
+    # actually placed in a pane the way a person's shell would be — nothing
+    # here can be, per this file's own header — so answering the gate is
+    # what stands in for that placement, and every case in this suite that
+    # needs a dispatcher to actually run relies on it: this suite's whole
+    # premise is a dispatcher that *is* running where a person could see it,
+    # same as every other backend it drives through this double.
+    #
+    # `HERDR_STUB_NO_PANE`, set by the one case that is about the gate
+    # itself rather than about what a pane does, asks for the opposite: the
+    # answer a bare terminal actually gets, so that refusal has something
+    # real to run against instead of being proven only by a unit test that
+    # already knows the answer it wants.
+    #
+    # A fixed, self-consistent triple rather than an empty `workspace_id`:
+    # `Herdr::own_pane_id` (src/mux.rs) parses `pane_id` out of this same
+    # reply now, for the fourth line `Lock::acquire` writes, and a shape
+    # this double's caller could never actually have — no `pane_id` at
+    # all — made that parse fail silently on every e2e dispatcher start.
+    # Not registered in `$STATE/panes`: nothing here calls `pane get` on it,
+    # and this double never places its caller in a pane it tracks for real —
+    # see the header.
+    if [ -n "${HERDR_STUB_NO_PANE:-}" ]; then
+      fail no_current_pane "not running in a herdr pane"
+    else
+      echo '{"result":{"pane":{"pane_id":"self:p0","tab_id":"self:t0","workspace_id":"self"}}}'
+    fi
     ;;
 
   "workspace list")
