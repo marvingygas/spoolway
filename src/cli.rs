@@ -220,6 +220,33 @@ pub enum Command {
 
     /// Check that everything the configured pipeline needs is actually present.
     Doctor(DoctorArgs),
+
+    /// This plugin's own keybindings — written straight into herdr's
+    /// `config.toml`, since herdr has no manifest key section to declare
+    /// them in.
+    #[command(subcommand)]
+    Herdr(HerdrCommand),
+}
+
+/// `spoolway herdr bind`/`unbind`.
+#[derive(Debug, Subcommand)]
+pub enum HerdrCommand {
+    /// Print the four `[[keys.command]]` blocks this writes, then write them
+    /// once confirmed. A key already bound — to this or to anything else —
+    /// is skipped, never overwritten.
+    Bind(HerdrKeysArgs),
+
+    /// The reverse of `bind`: remove only the blocks whose command names
+    /// this plugin's binary, leaving every other block untouched.
+    Unbind(HerdrKeysArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct HerdrKeysArgs {
+    /// Answer the confirmation yes without asking — for a script, or a
+    /// terminal nobody is at.
+    #[arg(long)]
+    pub yes: bool,
 }
 
 /// How much of the check-up to print.
@@ -277,7 +304,15 @@ pub const HELP_GROUPS: &[(&str, &[&str])] = &[
     ),
     (
         "Setting up:",
-        &["init", "install", "update", "sync", "whats-new", "doctor"],
+        &[
+            "init",
+            "install",
+            "update",
+            "sync",
+            "whats-new",
+            "doctor",
+            "herdr",
+        ],
     ),
     ("Called by lanes, not by you:", &["report", "stack"]),
 ];

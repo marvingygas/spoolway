@@ -83,5 +83,5 @@ command = ["herdr", "plugin", "pane", "open",
            "--plugin", "spoolway", "--entrypoint", "doctor", "--focus"]
 
 # No keys here: herdr has none to declare. They are written into
-# ~/.herdr/config.toml by `spoolway herdr bind`, and removed by
+# ~/.config/herdr/config.toml by `spoolway herdr bind`, and removed by
 # `spoolway herdr unbind`. This file never mentions them.

@@ -64,9 +64,9 @@ use std::path::PathBuf;
 use anyhow::Result;
 
 use cli::{
-    AgentCommand, Cli, Command, ConfigCommand, GroupCommand, HookCommand, IssueCommand,
-    JobsCommand, ModelsCommand, OverrideCommand, PipelineCommand, PromptCommand, QueueCommand,
-    TaskCommand, TemplateCommand,
+    AgentCommand, Cli, Command, ConfigCommand, GroupCommand, HerdrCommand, HookCommand,
+    IssueCommand, JobsCommand, ModelsCommand, OverrideCommand, PipelineCommand, PromptCommand,
+    QueueCommand, TaskCommand, TemplateCommand,
 };
 use pipeline::Pipelines;
 use repo::Repo;
@@ -152,6 +152,12 @@ fn run() -> Result<()> {
         // is the file work `update` used to also do, and that still needs a
         // real checkout to land in.
         Command::Update(_) => update::run(&cwd),
+
+        // A machine-wide fact — which key runs this plugin's panes, in
+        // `~/.config/herdr/config.toml` — not a project one: like `update`,
+        // this runs before a project is even looked for.
+        Command::Herdr(HerdrCommand::Bind(args)) => commands::herdr_bind(args),
+        Command::Herdr(HerdrCommand::Unbind(args)) => commands::herdr_unbind(args),
 
         // The one command that has to survive a config it cannot read, because
         // it is the command you run to find out what is wrong with it. Every
@@ -333,7 +339,8 @@ fn run() -> Result<()> {
                 | Command::Doctor(_)
                 | Command::WhatsNew(_)
                 | Command::VersionCheck
-                | Command::Update(_) => {
+                | Command::Update(_)
+                | Command::Herdr(_) => {
                     unreachable!("handled above")
                 }
 

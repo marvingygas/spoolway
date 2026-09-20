@@ -867,6 +867,63 @@ $ spoolway doctor
 By default it prints only failures, notes and a closing line. A failing run exits non-zero.
 `--json` prints the findings as one object.
 
+### `spoolway herdr bind`
+
+Print the four `[[keys.command]]` blocks this writes into herdr's
+`~/.config/herdr/config.toml`, then write them once confirmed.
+
+```
+$ spoolway herdr bind
+
+  ~/.config/herdr/config.toml — 4 bindings to add
+
+  prefix+alt+s  popup   spoolway init
+  prefix+alt+d  popup   spoolway dispatch
+  prefix+alt+q  popup   spoolway queue
+  prefix+alt+k  popup   spoolway doctor
+
+  Write them? [y/N] y
+
+  wrote 4 bindings to ~/.config/herdr/config.toml
+  reloaded the running herdr config
+```
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--yes` | | Answer the confirmation yes without asking |
+
+Each block opens `init`, `dispatch`, `queue` or `doctor` as an 80%×80% popup. A key already
+bound, to this or to anything else, is skipped and reported, never overwritten. The command
+each block runs is `spoolway`, when that resolves on `PATH`; otherwise the absolute path to the
+plugin's own binary, read off `herdr plugin list --json`. After a successful write it runs
+`herdr server reload-config` and reports that separately, so a write that landed and a reload
+that failed are never mistaken for one outcome.
+
+### `spoolway herdr unbind`
+
+Remove the blocks `bind` wrote from `~/.config/herdr/config.toml`, leaving every other block,
+comment and table untouched.
+
+```
+$ spoolway herdr unbind
+
+  ~/.config/herdr/config.toml — 4 bindings to remove
+
+  prefix+alt+s   prefix+alt+d   prefix+alt+q   prefix+alt+k
+
+  Remove them? [y/N] y
+
+  removed 4 bindings from ~/.config/herdr/config.toml
+  reloaded the running herdr config
+```
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--yes` | | Answer the confirmation yes without asking |
+
+Only a block whose command matches one `bind` writes is removed. It also reloads the running
+herdr config afterward, reported on its own line.
+
 ## Called by lanes, not by you
 
 Prompts call these. You rarely run them yourself.
