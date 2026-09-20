@@ -477,14 +477,73 @@ fn arrived_by_fail_paragraph(task: &Task, pipeline: &Pipeline, step: &Step) -> S
     )
 }
 
+/// One offered form: the exact command line, and the sentence under it
+/// saying what reporting it claims — the fact [`report_contract`] used to
+/// leave for `spoolway report --help` alone to say, though `--help` is not
+/// where a lane reads its own contract from.
+type Form = (&'static str, &'static str);
+
+const PASS: Form = (
+    "    spoolway report --pass  -m \"<one line on what happened>\"",
+    "  This step's work is done and it came out right.",
+);
+
+const FAIL: Form = (
+    "    spoolway report --fail  -m \"<what is not right, and where>\"",
+    "  This step's work is done, and what you found is not right. Your\n  \
+     message is what somebody works from to put it right, so say what\n  \
+     is wrong and where.",
+);
+
+const BLOCK: Form = (
+    "    spoolway report --block -m \"<what is in the way>\"",
+    "  You cannot settle this within what this step is allowed to do. It\n  \
+     goes up to a person, or to a stronger agent. Say what you tried\n  \
+     and what stopped you.",
+);
+
+const BLOCKED_PASS: Form = (
+    "    spoolway report --pass  -m \"<one line on what happened>\"",
+    "  The way is clear. Your own work stands in for the step that got\n  \
+     stuck, so the task carries on from there.",
+);
+
+const BLOCKED_PASS_STAGE: Form = (
+    "    spoolway report --pass --stage <step> -m \"<one line on what happened>\"",
+    "  The same, except you name where the task goes next. Only a step\n  \
+     this task has already been through.",
+);
+
+const BLOCKED_PAUSE: Form = (
+    "    spoolway report --pause -m \"<what needs a person, and why>\"",
+    "  You could not clear it, and a person has to. Say plainly what they\n  \
+     need to decide.",
+);
+
+const HANDOFF: Form = (
+    "    --handoff \"<what the next step should know>\"   repeatable",
+    "  Anything worth passing on that one line cannot hold. One per thing.",
+);
+
+/// Render a list of [`Form`]s as `report_contract` prints them: the command
+/// line, a blank line, its explanation, a blank line, the next form.
+fn render_forms(forms: &[Form]) -> String {
+    forms
+        .iter()
+        .map(|(line, explanation)| format!("{line}\n\n{explanation}"))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 /// The report contract: the exact `spoolway report` command that ends a
-/// lane's turn, and every flag it takes. Closes `THIS PASS`, after whatever
-/// [`policy`] added — the one thing a model must not have lost track of by
-/// the end of a long turn is the command that ends it.
+/// lane's turn, every flag it takes, and the sentence under each saying what
+/// reporting it claims. Closes `THIS PASS`, after whatever [`policy`] added
+/// — the one thing a model must not have lost track of by the end of a long
+/// turn is the command that ends it.
 ///
-/// Forms only, and nothing else: no prose choosing a verb for the lane, no
-/// mention of any step or role, no `stage:` warning — those are the
-/// project's own prompt to give or spoolway's policy to enforce, not a
+/// Forms and their claims, and nothing else: no prose choosing a verb for
+/// the lane, no mention of any step or role, no `stage:` warning — those are
+/// the project's own prompt to give or spoolway's policy to enforce, not a
 /// paragraph competing with them for the same attention. `--handoff` stays,
 /// beside the others, because it is the one mechanism by which any step
 /// leaves something for the next — spoolway's to enable, never a project's
@@ -505,10 +564,17 @@ fn arrived_by_fail_paragraph(task: &Task, pipeline: &Pipeline, step: &Step) -> S
 /// not as a promise that failing this step is a distinct outcome from
 /// getting stuck on it.
 ///
-/// A form this left out is named anyway, under refusal wording — a lane
+/// A form left out is named anyway, under refusal wording — a lane
 /// that has never been told a command exists cannot be tempted to reach for
 /// it, but a lane that infers `--fail` from having seen `--block` and
-/// `--pass` can, so the gap is closed rather than left silent.
+/// `--pass` can, so the gap is closed rather than left silent. `--stage`
+/// gets no such treatment any more: `commands::report` already refuses it
+/// by name off every step but `blocked`, with a message that quotes the
+/// task's own step and offers a plain `--pass` instead, so repeating the
+/// refusal here would be a second copy of a fact the command itself already
+/// enforces — `blocked`'s own forms are what teach a lane the flag exists at
+/// all. A step with nothing left to withhold prints no "not available to
+/// you" block.
 ///
 /// One line closes the whole contract when `step` would hold a pass here —
 /// see [`crate::commands::gate_hold`], read against a hypothetical pass,
@@ -525,40 +591,26 @@ pub(crate) fn report_contract(task: &Task, step: &Step) -> String {
         !blocked && step.destination(Outcome::Fail) == step.destination(Outcome::Block);
 
     let forms = if blocked {
-        "    spoolway report --pass  -m \"<one line on what happened>\"\n    \
-              spoolway report --pass  --stage <step> -m \"<one line on what happened>\"\n    \
-              spoolway report --pause -m \"<what needs a person, and why>\"\n    \
-              --handoff \"<what the next step should know>\"   repeatable"
+        render_forms(&[BLOCKED_PASS, BLOCKED_PASS_STAGE, BLOCKED_PAUSE, HANDOFF])
     } else if fail_redundant {
-        "    spoolway report --pass  -m \"<one line on what happened>\"\n    \
-              spoolway report --block -m \"<what is in the way>\"\n    \
-              --handoff \"<what the next step should know>\"   repeatable"
+        render_forms(&[PASS, BLOCK, HANDOFF])
     } else {
-        "    spoolway report --pass  -m \"<one line on what happened>\"\n    \
-              spoolway report --fail  -m \"<one line on what happened>\"\n    \
-              spoolway report --block -m \"<what is in the way>\"\n    \
-              --handoff \"<what the next step should know>\"   repeatable"
+        render_forms(&[PASS, FAIL, BLOCK, HANDOFF])
     };
 
-    // `--stage` only ever means anything alongside `--pass` on `blocked`
-    // itself — see `commands::report`'s own refusal by name. Unlike
-    // `--pause`, which is simply never offered off `blocked` (there is
-    // nothing there to withhold: no other step's contract has ever printed
-    // it), `--stage` is a flag every step's own report line could plausibly
-    // reach for once it exists at all, so it is named under the refusal
-    // wording here rather than left for a lane to discover by trying it.
+    // `--stage` is never withheld now — see this function's own doc for why.
+    // What is left: `--fail` off an ordinary step whose fail and block
+    // destinations collide, and both `--fail` and `--block` off `blocked`,
+    // which offers neither as a usable form.
     let withheld: &[&str] = if blocked {
         &["spoolway report --fail", "spoolway report --block"]
     } else if fail_redundant {
-        &[
-            "spoolway report --fail",
-            "spoolway report --pass --stage <step>",
-        ]
+        &["spoolway report --fail"]
     } else {
-        &["spoolway report --pass --stage <step>"]
+        &[]
     };
 
-    let mut contract = format!("Your last action is one `spoolway report` command:\n\n{forms}");
+    let mut contract = format!("Your last action is one `spoolway report` command.\n\n{forms}");
     if !withheld.is_empty() {
         contract.push_str(
             "\n\nThese commands are not available to you. Never use one, under any\n\
