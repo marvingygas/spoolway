@@ -381,7 +381,7 @@ prints the same notice and proceeds. See [`spoolway queue`](cli-reference.md#spo
 
 | Script | Needs | What it does |
 |---|---|---|
-| `github.sh` | `gh` >= 2.97.0, logged in | Reads an issue on `fetch`. Creates the epic and ticket on `open`, nests them under the issue in `SPOOLWAY_SOURCE`, and returns `slug=gh-<number>` and `url=`. Comments with the task file on `blocked` and `paused`. On `done` it leaves a `<!-- spoolway-issue: URL -->` marker comment on the task's pull request, swaps the `spoolway:in-progress` label for `spoolway:review`, and comments that the ticket is ready for review. It closes nothing itself. |
+| `github.sh` | `gh` >= 2.97.0, logged in | Reads an issue on `fetch`. Creates the epic and ticket on `open`, nests them under the issue in `SPOOLWAY_SOURCE`, and returns `slug=gh-<number>` and `url=`. The epic is titled with the group's name and its body leads with the full `group_description:`, followed by the rendered epic template. Comments with the task file on `blocked` and `paused`. On `done` it leaves a `<!-- spoolway-issue: URL -->` marker comment on the task's pull request, swaps the `spoolway:in-progress` label for `spoolway:review`, and comments that the ticket is ready for review. It closes nothing itself. |
 | `jira.sh` | `acli` >= 1.3.30 and `jq` >= 1.6 | The same events. Returns the lowercased key as the slug. Comments name the task without attaching the file. Check the link type, epic status and JSON field names named in the script's header against your site. |
 
 ### How a GitHub issue gets closed
