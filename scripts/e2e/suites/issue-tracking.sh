@@ -620,10 +620,14 @@ has "and the ticket is parented under the epic, by native --parent" \
 
 # A group of two: the same epic is shared, `github-pair-b` also depends on
 # `github-pair-a`, and `--blocked-by` is what carries that dependency's own
-# ticket across onto the second issue.
+# ticket across onto the second issue. The description is deliberately more
+# than one line: the epic's title must be the group slug itself, and the
+# full multiline text — not just its first line — must lead the issue body.
 task_doc "$LIVE/github-pair-a.md" github-pair-a "$BODY" \
   "group: github-pair" "touches: [notes/github-pair-a.md]" \
-  "group_description: proving a shared epic and native parent/blocked-by links"
+  "group_description: |" \
+  "  Proving a shared epic and native parent/blocked-by links." \
+  "  A second line the title must never swallow."
 task_doc "$LIVE/github-pair-b.md" github-pair-b "$BODY" \
   "group: github-pair" "touches: [notes/github-pair-b.md]" \
   "depends_on: [github-pair-a]"
@@ -641,9 +645,39 @@ else
 fi
 works "both tasks of the pair share the one epic" \
   test "$PAIR_EPIC" = "$PAIR_EPIC_B"
-has "the epic's title is the group description's own first line, not the group's name" \
-  "title=proving a shared epic and native parent/blocked-by links" \
-  "$GH_STUB_ISSUES/${PAIR_EPIC##*/}"
+# `has` is a substring check, so it would also pass for a title spoolway never
+# asked for (`title=github-pair-extra`); an exact line match is what actually
+# proves `SPOOLWAY_GROUP` was used verbatim.
+if grep -qFx "title=github-pair" "$GH_STUB_ISSUES/${PAIR_EPIC##*/}"; then
+  ok "the epic's title is the group slug itself, not the description"
+else
+  bad "the epic's title is the group slug itself, not the description"
+  sed 's/^/        /' "$GH_STUB_ISSUES/${PAIR_EPIC##*/}" 2>/dev/null
+fi
+
+# Independent substring/line-order checks would still pass with an extra
+# blank line, a missing one, or a swallowed template — none of that proves
+# the exact ordered body the ## Mockup describes. Build the whole expected
+# body and `cmp` the full captured file against it.
+#
+# No `- Source:` line is expected: neither fixture sets `source:`, so
+# `$SPOOLWAY_SOURCE` resolves empty and `task_template::render_tracking`
+# drops a template line whose only placeholder is empty (task_template.rs,
+# `render_tracking`/`render_line`) rather than leaving a bare `- Source: `.
+PAIR_BODY="$GH_STUB_ISSUES/${PAIR_EPIC##*/}.body"
+printf '%s\n' \
+  "Proving a shared epic and native parent/blocked-by links." \
+  "A second line the title must never swallow." \
+  "" \
+  '- Group: `github-pair`' \
+  '- Tasks queued together: `2`' \
+  > "$LIVE/expected-epic-body.txt"
+if cmp -s "$LIVE/expected-epic-body.txt" "$PAIR_BODY"; then
+  ok "the epic's body is exactly the full description, one blank line, then the intact rendered template"
+else
+  bad "the epic's body is exactly the full description, one blank line, then the intact rendered template"
+  diff "$LIVE/expected-epic-body.txt" "$PAIR_BODY" | sed 's/^/        /'
+fi
 has "the first ticket is parented under the shared epic" \
   "$PAIR_EPIC" "$GH_STUB_ISSUES/${PAIR_TICKET_A##*/}.parent"
 has "the second ticket names the first as blocking it" \

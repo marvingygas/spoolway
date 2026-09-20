@@ -162,11 +162,16 @@ if [ "$SPOOLWAY_EVENT" = open ]; then
   # description` (queue.rs:890) in turn refuses a submission whose group
   # sets no `group_description:` on any of its documents.
   if [ -z "$epic" ]; then
-    epic_title=$(printf '%s\n' "$SPOOLWAY_GROUP_DESCRIPTION" | head -n 1)
-    epic_lead=$(printf '%s\n' "$SPOOLWAY_GROUP_DESCRIPTION" | tail -n +2)
+    epic_title=$SPOOLWAY_GROUP
+    # A `group_description: |` block scalar keeps its own trailing newline
+    # all the way through (queue.rs:1579 stores it verbatim); command
+    # substitution strips that, so the blank line below is always exactly
+    # one regardless of whether the author wrote `|`, `|-` or a plain
+    # scalar.
+    epic_lead=$(printf '%s\n' "$SPOOLWAY_GROUP_DESCRIPTION")
     epic_body="$SPOOLWAY_OUT.epic-body.md"
     {
-      [ -n "$epic_lead" ] && printf '%s\n\n' "$epic_lead"
+      printf '%s\n\n' "$epic_lead"
       cat "$SPOOLWAY_EPIC_BODY"
     } > "$epic_body"
     set -- gh issue create -R "$repo" -t "$epic_title" \
