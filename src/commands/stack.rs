@@ -293,7 +293,7 @@ pub fn stack(repo: &Repo, args: &StackArgs) -> Result<()> {
     );
 
     let title = subject.clone();
-    let body = compose_body(&task.body, &gaps, &conflicts);
+    let body = compose_body(&task.body);
 
     let (own_number, url) = open_or_reuse_pr(&worktree, &branch, &cut_from, &title, &body)?;
     report_line("pull req", format!("#{own_number} — {url}"));
@@ -421,28 +421,26 @@ fn parallel_conflicts(repo: &Repo, worktree: &Path, id: &str) -> Vec<String> {
     conflicts
 }
 
-/// The pull request's body, with the trailer below it, cut to fit GitHub's
-/// body limit.
+/// The pull request's body, with the co-authorship tag below it, cut to fit
+/// GitHub's body limit.
 ///
 /// The body is everything after the task file's frontmatter fence, verbatim
 /// — the only mode `spoolway stack` has now that its optional model summary
 /// turn is gone.
-fn compose_body(task_body: &str, gaps: &[String], conflicts: &[String]) -> String {
+///
+/// Nothing rides under it but the tag. What the branch touched outside
+/// `touches`, and which open `parallel: true` task it is predicted to
+/// conflict with, are both reported on the console by `spoolway stack` as it
+/// runs; neither is repeated in the pull request a reviewer opens.
+fn compose_body(task_body: &str) -> String {
     let mut body = String::new();
     body.push_str(task_body.trim_end());
     body.push('\n');
 
-    // The trailer's gap and conflict lists are unbounded — a branch touching
-    // a few dozen undeclared files makes a trailer no fixed guess would
-    // budget for — so the cut below is sized against the trailer this run
-    // would actually carry, worst case first: `truncated: true` is always
-    // the larger of the two shapes trailer() can print, so budgeting against
-    // it is never an underestimate whichever way the truncation check comes
-    // out below.
-    let worst_case_trailer = trailer(gaps, conflicts, true);
-    let budget = MAX_BODY.saturating_sub(worst_case_trailer.len() + 2);
-    let truncated = body.len() > budget;
-    if truncated {
+    // The tag is the whole trailer and a fixed width, so what it leaves the
+    // body is one subtraction: its own line, and the blank line above it.
+    let budget = MAX_BODY.saturating_sub(CO_AUTHOR.len() + 2);
+    if body.len() > budget {
         // Cut at the last section boundary — a line opening `## ` — that
         // still fits, so a reader never lands mid-heading. A body with no
         // heading at all inside the budget falls back to a hard cut.
@@ -454,11 +452,8 @@ fn compose_body(task_body: &str, gaps: &[String], conflicts: &[String]) -> Strin
     }
 
     body.push('\n');
-    body.push_str(&if truncated {
-        worst_case_trailer
-    } else {
-        trailer(gaps, conflicts, false)
-    });
+    body.push_str(CO_AUTHOR);
+    body.push('\n');
     body
 }
 
@@ -472,54 +467,11 @@ fn char_boundary_floor(s: &str, at: usize) -> usize {
     at
 }
 
-/// The rule that opens the trailer — a plain dashed line, the way a footer is
-/// set off from the letter above it.
-const TRAILER_RULE: &str = "─────────────────────────────────────────────────────────";
-
-/// The tag every pull request closes with.
+/// The tag every pull request closes with, and the whole of its trailer.
 ///
 /// No address beside the name, deliberately. A trailer here names no email —
 /// not the person who ran the task, and not one for the model either.
 const CO_AUTHOR: &str = "Co-Authored-By: Claude Code";
-
-/// The pull request's trailer: what the branch touched outside `touches`,
-/// which open `parallel: true` task it is predicted to conflict with, and the
-/// co-authorship tag under both.
-///
-/// Only the tag is always there. The other two appear when there is something
-/// to say, and neither is a reason to refuse — both are what a reviewer would
-/// otherwise find out when they came to land the stack.
-fn trailer(gaps: &[String], conflicts: &[String], truncated: bool) -> String {
-    let mut out = String::new();
-    out.push_str(TRAILER_RULE);
-    out.push('\n');
-
-    if truncated {
-        out.push_str("The body above was cut short to fit GitHub's 65,536-character limit.\n\n");
-    }
-
-    if !gaps.is_empty() {
-        out.push_str(&format!(
-            "Changed {} file{} it did not declare in `touches`:\n",
-            gaps.len(),
-            if gaps.len() == 1 { "" } else { "s" }
-        ));
-        for file in gaps {
-            out.push_str(&format!("  {file}\n"));
-        }
-        out.push('\n');
-    }
-
-    for conflict in conflicts {
-        out.push_str(&format!(
-            "Will conflict with `{conflict}`, which is not ordered against this task.\n\n"
-        ));
-    }
-
-    out.push_str(CO_AUTHOR);
-    out.push('\n');
-    out
-}
 
 /// The pull request already open on `branch`, or a freshly opened one.
 ///
@@ -1028,31 +980,24 @@ mod tests {
         );
     }
 
-    /// Nothing to report leaves the tag standing on its own, and no trace of
-    /// who ran the task: an address in a trailer is what this shape dropped.
+    /// The body is the task file and the tag under it, and nothing else: no
+    /// rule set above it, no undeclared-file list, no conflict warning, and no
+    /// trace of who ran the task — an address in a trailer is what this shape
+    /// dropped.
     #[test]
-    fn compose_body_is_verbatim_with_a_trailer() {
-        let body = compose_body("## Goal\n\nDo the thing.\n", &[], &[]);
-        assert!(body.starts_with("## Goal\n\nDo the thing.\n"));
-        assert!(body.trim_end().ends_with("Co-Authored-By: Claude Code"));
-        assert!(!body.contains("did not declare"));
-        assert!(!body.contains("Will conflict"));
+    fn compose_body_is_the_task_body_and_the_tag_alone() {
+        let body = compose_body("## Goal\n\nDo the thing.\n");
+        assert_eq!(
+            body,
+            "## Goal\n\nDo the thing.\n\nCo-Authored-By: Claude Code\n"
+        );
+        assert!(!body.contains('─'), "no rule opens the trailer");
         assert!(!body.contains('@'), "a trailer names no address");
     }
 
-    /// The order the trailer reads in: what the branch did that the task file
-    /// did not say it would, and the tag last.
-    #[test]
-    fn the_touches_gap_comes_before_the_co_author_tag() {
-        let body = compose_body("## Goal\n", &["untouched.rs".to_string()], &[]);
-        let gap = body.find("did not declare").expect("the gap is reported");
-        let tag = body.find(CO_AUTHOR).expect("the tag is there");
-        assert!(gap < tag, "the gap belongs above the tag:\n{body}");
-    }
-
-    /// Over the limit, the cut lands on a section boundary and the trailer
-    /// says so — never a hard cut mid-sentence when a heading was available
-    /// to cut at instead.
+    /// Over the limit, the cut lands on a section boundary — never a hard cut
+    /// mid-sentence when a heading was available to cut at instead — and the
+    /// tag still closes whatever body survives.
     #[test]
     fn compose_body_cuts_at_a_section_boundary_past_the_limit() {
         let mut long_body = String::new();
@@ -1061,38 +1006,12 @@ mod tests {
                 "## Section {i}\n\nSome text about section {i}.\n\n"
             ));
         }
-        let body = compose_body(&long_body, &[], &[]);
-        assert!(body.len() <= MAX_BODY);
-        assert!(body.contains("cut short to fit GitHub's 65,536-character limit"));
-        // The cut happened right at a section boundary: what is left ends on
-        // a blank line right after a paragraph, never mid-heading or
-        // mid-sentence.
-        let before_trailer = body.split(TRAILER_RULE).next().unwrap();
-        assert!(before_trailer.trim_end().ends_with('.'));
-    }
-
-    /// A trailer's own lists are unbounded — one line per undeclared file,
-    /// one paragraph per predicted conflict — so a fixed reservation for it
-    /// can undercount and push the composed body past `MAX_BODY` on exactly
-    /// the run that fixed budget existed to protect. A few dozen of each is
-    /// nowhere near a realistic branch, and still has to fit.
-    #[test]
-    fn compose_body_stays_under_the_limit_with_a_large_trailer() {
-        let gaps: Vec<String> = (0..80)
-            .map(|i| format!("src/generated/file-{i}.rs"))
-            .collect();
-        let conflicts: Vec<String> = (0..40).map(|i| format!("sibling-task-{i}")).collect();
-        let mut long_body = String::new();
-        for i in 0..2000 {
-            long_body.push_str(&format!(
-                "## Section {i}\n\nSome text about section {i}.\n\n"
-            ));
-        }
-        let body = compose_body(&long_body, &gaps, &conflicts);
+        let body = compose_body(&long_body);
         assert!(body.len() <= MAX_BODY, "{} bytes", body.len());
-        // The whole trailer survived intact — cutting the body is what paid
-        // for it, not dropping any of the trailer's own lines.
-        assert!(body.contains("src/generated/file-79.rs"));
-        assert!(body.contains("Will conflict with `sibling-task-39`"));
+        assert!(body.trim_end().ends_with(CO_AUTHOR));
+        // The cut happened right at a section boundary: what is left ends on
+        // a paragraph, never mid-heading or mid-sentence.
+        let before_tag = body.trim_end().strip_suffix(CO_AUTHOR).unwrap();
+        assert!(before_tag.trim_end().ends_with('.'));
     }
 }
