@@ -101,12 +101,13 @@ flowchart TD
   G --> A
 ```
 
-Between two passes the wait is not empty. A tick runs every second, reading only the queue and
-the commands directory off disk: no multiplexer call, no pane capture, no process spawned. It
-routes a background command step that finished since the last look, but only a `headless: true`
-step, or any background step on the headless backend — a step running in a pane still waits for
-the next pass to close it. The dispatcher keeps a small cache of the queue and the commands
-directory across the ticks inside one wait, rebuilt fresh at the start of the next pass.
+Between two passes the wait is not empty. On Linux, the dispatcher watches the queue directory
+and the commands directory for the whole wait, alongside the keystroke it already listens for.
+A file landing in the queue directory redraws the board at once. A file landing in the commands
+directory, such as a background command step finishing, ends the wait immediately and starts the
+next pass, which is what routes that step. On a target that is not Linux, or if the watch cannot
+be opened, the dispatcher falls back to a plain per-second sleep for the rest of the wait, and the
+board redraws every second.
 
 A model's `slots` caps lanes on that model, and a profile's `concurrency` caps lanes on that
 profile. A model marked `exclusive` never runs beside a different exclusive model. See
@@ -136,11 +137,12 @@ file's path. `spoolway prompt contract` prints the system prompt for a sample ta
 
 ## Reading the state
 
-The dispatcher draws the board in the terminal it runs in and runs a pass every ten
-seconds, with a one-second tick between passes. Neither rate is configurable. A pass that
-moves a task to a new stage, frees a lane or archives a task runs the next pass at once
-instead of waiting for the next one. A long run of such passes in a row eventually waits
-anyway.
+The dispatcher draws the board in the terminal it runs in and runs a pass every ten seconds.
+That rate is not configurable, and stays the floor under how long a quiet run can go without a
+pass: a change in the queue or commands directory wakes the board or the next pass sooner, as
+described above. A pass that moves a task to a new stage, frees a lane or archives a task runs
+the next pass at once instead of waiting for the next one. A long run of such passes in a row
+eventually waits anyway.
 
 <img src="screenshots/dispatch.png" alt="the dispatcher board">
 

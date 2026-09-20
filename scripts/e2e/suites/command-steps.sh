@@ -1149,18 +1149,21 @@ unset HERDR_STUB_STATE
 PATH="$PATH_BEFORE_HERDR_STUB"; export PATH
 dispatcher_restart
 
-# --------------------------------------------------- the tick: acted on fast
-# The split this task makes: a background step's own `.exit` file is read by
-# the cheap tick — `status::POLL`'s own one second — not only by the slower
-# probe (`dispatch::PROBE_INTERVAL`, ten seconds, fixed rather than
-# `dispatch.interval` now but no faster than it ever was), which still owns
-# starting a lane and asking the multiplexer anything. Proven by reaching
-# `blocked` well under the thirty seconds a probe with no tick at all would
-# routinely need — see the timing comment below.
+# --------------------------------------------------- the wake: acted on fast
+# The split this task makes: a background step's own `.exit` file lands in
+# the commands directory, which wakes `spoolway dispatch`'s own wait the
+# moment it is written — see `crate::screen::DirWatch` — rather than sitting
+# there until the next `dispatch::PROBE_INTERVAL` (ten seconds, fixed rather
+# than `dispatch.interval` now but no faster than it ever was) probe happens
+# to look. There is no tick in the loop any more: the wake breaks the wait
+# outright and lets a fresh pass — the only thing that ever starts a lane or
+# asks the multiplexer anything — run at once. Proven by reaching `blocked`
+# well under the thirty seconds a run with no wake at all would routinely
+# need — see the timing comment below.
 cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
 {
   printf '\n  - id: tick-check\n'
-  printf '    description: A background step that fails at once, to prove the tick alone reroutes it.\n'
+  printf '    description: A background step that fails at once, to prove the wake alone reroutes it.\n'
   printf '    run: exit 1\n'
   printf '    background: true\n'
   printf '    on_pass: tick-check-landed\n'
@@ -1185,20 +1188,20 @@ must "a task behind the tick-check step queues" \
 # needs two of its passes to get `tick-check` started at all — settling
 # `implement`, then starting the background run and moving on to the dead
 # end — so this cannot be timed against zero. What it is timed against is
-# the *third* pass a probe with no tick would need, to notice the
+# the *third* pass a run with no wake would need, to notice the
 # meanwhile-finished exit code on its own: thirty seconds, worst case,
 # against this cap's twenty-five.
 if drive tick-check blocked 150; then
   ELAPSED=$(( $(date +%s) - START_TS ))
   if [ "$ELAPSED" -lt 25 ]; then
-    ok "a tick alone reroutes the finished background step, well inside the ten-second probe \
+    ok "the wake alone reroutes the finished background step, well inside the ten-second probe \
 (${ELAPSED}s)"
   else
-    bad "a tick alone reroutes the finished background step, well inside the ten-second probe \
+    bad "the wake alone reroutes the finished background step, well inside the ten-second probe \
 (took ${ELAPSED}s — no faster than the probe alone would have)"
   fi
 else
-  bad "a tick alone reroutes the finished background step, well inside the ten-second probe \
+  bad "the wake alone reroutes the finished background step, well inside the ten-second probe \
 (never reached blocked; at \`$(stage_of tick-check)\`)"
 fi
 

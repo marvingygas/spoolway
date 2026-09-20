@@ -279,6 +279,14 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // one unbroken streak, never the run's total.
     let mut consecutive_working: u32 = 0;
 
+    // Wakes the wait below the moment a lane's own `spoolway report` or a
+    // finished background command lands, instead of it being found up to
+    // `interval` later — see `crate::screen::DirWatch`. `None` on a target
+    // with nothing to watch with, or if opening the watch failed for some
+    // other reason; either way the wait below falls back to the plain
+    // interval alone, exactly as it behaved before this task.
+    let watch = crate::screen::open_dir_watch(&repo.queue_dir(), &repo.commands_dir());
+
     loop {
         let mut dispatcher = crate::dispatch::Dispatcher::new(repo, pipelines, mux.as_ref());
 
@@ -404,25 +412,28 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         consecutive_working = 0;
 
         match board.as_mut() {
-            // The wait, redrawn: the same sleep the plain run takes, cut into
-            // frames so the board is current while nothing is happening —
-            // and, with a board up, a wait spent listening rather than
-            // discarding whatever lands on the terminal it already holds in
-            // raw mode.
+            // The wait: blocks in one `poll` on however many of stdin and
+            // `watch`'s own fd this run actually has, for up to the whole
+            // remaining interval at a stretch — not sliced into
+            // one-second frames the way it used to have to be to run a
+            // tick between them. A keystroke or a file landing wakes it at
+            // once, same as it always answered a keystroke; ten quiet
+            // seconds now cost exactly the one draw below and one at the
+            // top of the next pass, not ten redraws finding nothing new
+            // each time.
             //
-            // `byte_pending` stands in for the sleep itself rather than
-            // beside it: it blocks the kernel's own `poll` for exactly the
-            // slice a plain sleep would have taken, so a wait with nothing
-            // typed into it costs the loop nothing extra — the same number
-            // of redraws, over the same wall clock, as before this read a
-            // key at all. A key applies to the board and the loop goes
-            // straight back around to redraw it; nothing pressed and this is
-            // the old sleep, waited out in full.
+            // A key applies to the board and it redraws to show it. A
+            // queue change redraws too — the next draw already rereads the
+            // queue fresh, so nothing else is owed it. A commands change
+            // is what a finished background step is routed on, so that one
+            // breaks the wait outright and lets the top of the outer loop
+            // run a fresh pass at once, in place of the tick that used to
+            // read it here instead.
             Some(board) => {
                 let mut stdin = crate::screen::RawStdin;
                 // Set once, the moment stdin is found to have gone away —
                 // a closed pipe, or no controlling terminal at all — and
-                // never asked again after that. `byte_pending` reports a
+                // never asked again after that. `poll_ready` reports a
                 // closed descriptor "ready" exactly as it does a real
                 // keystroke, since the read that follows either way returns
                 // promptly; without this guard the loop would keep taking
@@ -433,42 +444,75 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
                 // cooked stdin answers `byte_pending` with `false` at once
                 // (see `RawStdin`), and starting out listening there would
                 // spin on that answer with no sleep in it. Off from the start,
-                // the wait is the plain sleep below and `read_key` is never
-                // reached (jobs review finding 8).
+                // the wait falls back to the plain sleep below and
+                // `read_key` is never reached (jobs review finding 8).
                 let mut listening = cfg!(unix);
+                let _ = board.draw(repo, pipelines, crate::status::Phase::Waiting, &mut out);
                 let until = std::time::Instant::now() + interval;
-                while let Some(left) = until.checked_duration_since(std::time::Instant::now()) {
+                'wait: while let Some(left) =
+                    until.checked_duration_since(std::time::Instant::now())
+                {
                     if crate::platform::stop::asked() {
                         break;
                     }
-                    // The cheap tick, once per slice — see
-                    // `crate::dispatch::Dispatcher::tick`. The board's own
-                    // next draw reads the queue fresh, so a stage change
-                    // this made shows up there with nothing more to do
-                    // here — but a tick's own action (a background command
-                    // stopped at its timeout, say) is not a stage change,
-                    // and the board would never otherwise say it happened.
-                    // Left unprinted under a board all the same, the same
-                    // asymmetry `pass`'s own report has: there is nowhere
-                    // on the board's own frame for either to go yet. See
-                    // review finding 4.
-                    if let Err(err) = tick(&mut dispatcher, repo, false) {
-                        crate::problem_log::append(repo, &format!("tick failed: {err:#}"));
+                    let mut fds = Vec::new();
+                    if listening {
+                        fds.push(libc::STDIN_FILENO);
                     }
-                    let _ = board.draw(repo, pipelines, crate::status::Phase::Waiting, &mut out);
-                    let slice = crate::status::POLL.min(left);
-                    if listening && stdin.byte_pending(slice) {
-                        match crate::screen::read_key(&mut stdin) {
-                            Some(key) => {
-                                let _ = board.on_key(repo, pipelines, key);
-                            }
-                            None => {
-                                listening = false;
-                                std::thread::sleep(slice);
+                    if let Some(watch) = &watch {
+                        fds.push(watch.fd());
+                    }
+                    if fds.is_empty() {
+                        std::thread::sleep(crate::status::POLL.min(left));
+                        continue;
+                    }
+
+                    // With a watch, the whole remaining interval is one
+                    // poll — a key or a file landing wakes it, and this is
+                    // the one wait per quiet interval criterion 2 asks for.
+                    // With no watch to wake it early (`open_dir_watch`
+                    // found nothing to watch with — see its own doc), this
+                    // falls back to the plain per-second cadence the board
+                    // always redrew at, so a target that is not Linux keeps
+                    // behaving as it does today rather than freezing for
+                    // the whole interval — review finding 1.
+                    let slice = match &watch {
+                        Some(_) => left,
+                        None => crate::status::POLL.min(left),
+                    };
+                    let ready = crate::screen::poll_ready(&fds, slice);
+                    let mut idx = 0;
+                    // With no watch, every slice redraws regardless of what
+                    // `poll_ready` found — the countdown and every row need
+                    // to move even when nothing changed. With one, a redraw
+                    // is owed only for what actually woke this slice.
+                    let mut redraw = watch.is_none();
+                    if listening {
+                        if ready[idx] {
+                            match crate::screen::read_key(&mut stdin) {
+                                Some(key) => {
+                                    let _ = board.on_key(repo, pipelines, key);
+                                    redraw = true;
+                                }
+                                None => listening = false,
                             }
                         }
-                    } else if !listening {
-                        std::thread::sleep(slice);
+                        idx += 1;
+                    }
+                    if let Some(watch) = &watch
+                        && ready[idx]
+                    {
+                        let changed = watch.drain();
+                        if changed.contains(&crate::screen::Changed::Commands) {
+                            break 'wait;
+                        }
+                        if changed.contains(&crate::screen::Changed::Queue) {
+                            redraw = true;
+                        }
+                    }
+                    if redraw {
+                        let _ =
+                            board.draw(repo, pipelines, crate::status::Phase::Waiting, &mut out);
                     }
                 }
             }
@@ -477,47 +521,28 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
                     "  next pass in {}",
                     crate::config::format_duration(interval)
                 );
-                // Cut into the same slices the board's wait takes, so a stop
-                // asked for during the wait is noticed then rather than a whole
-                // interval later.
                 let until = std::time::Instant::now() + interval;
                 while let Some(left) = until.checked_duration_since(std::time::Instant::now()) {
                     if crate::platform::stop::asked() {
                         break;
                     }
-                    if let Err(err) = tick(&mut dispatcher, repo, true) {
-                        crate::problem_log::append(repo, &format!("tick failed: {err:#}"));
+                    let Some(watch) = &watch else {
+                        // The floor alone, in the same slices as before —
+                        // see `crate::screen::open_dir_watch`'s own doc —
+                        // so a stop asked for mid-wait is still noticed
+                        // within a second rather than a whole interval
+                        // later.
+                        std::thread::sleep(crate::status::POLL.min(left));
+                        continue;
+                    };
+                    let ready = crate::screen::poll_ready(&[watch.fd()], left);
+                    if ready[0] && watch.drain().contains(&crate::screen::Changed::Commands) {
+                        break;
                     }
-                    std::thread::sleep(crate::status::POLL.min(left));
                 }
             }
         }
     }
-}
-
-/// One tick between two probes — see [`crate::dispatch::Dispatcher::tick`].
-/// Never reached for `--dry-run`, which returns after its one `pass` well
-/// before this wait loop.
-///
-/// `plain` mirrors the same split `pass`'s own caller makes on `board.
-/// is_none()`: a tick's actions reach the terminal only for a `--plain` run,
-/// which has nothing else narrating what happened — a run with a board
-/// leaves them silent for now, the same gap a probe's own actions already
-/// have there. See review finding 4.
-fn tick(dispatcher: &mut crate::dispatch::Dispatcher, repo: &Repo, plain: bool) -> Result<()> {
-    let report = dispatcher.tick()?;
-    for problem in &report.problems {
-        crate::problem_log::append(repo, problem);
-    }
-    if plain {
-        for action in &report.actions {
-            println!("  {action}");
-        }
-        for problem in &report.problems {
-            println!("  ! {problem}");
-        }
-    }
-    Ok(())
 }
 
 /// The first step, if any, whose `run:` calls `spoolway stack` — the one
