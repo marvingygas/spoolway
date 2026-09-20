@@ -130,10 +130,10 @@ Every task on the board is in one of a few states:
 | `queued` | Waiting for its dependencies and a free slot. |
 | `running` | An agent is working the task's current step, or it has just moved there and a lane is starting. |
 | `prompt` | A lane's pane is holding a permission prompt. Press a key in the pane. |
-| `paused` | Waiting for you on purpose: a gate, or a park. `r` on the board resumes it. |
-| `blocked` | A step reported a block, or ran out of loops. Read the task's `## Blocker`, then `spoolway resume`. An unattended run hands it to the unblocker prompt instead. |
+| `paused` | Waiting for you on purpose: a gated step, or an unresolvable issue. |
+| `blocked` | A step reported a block and for a person. An unattended run hands it to the unblocker prompt instead. |
 | `unreachable` | A task it depends on is blocked, so it cannot start until you clear that one. |
-| `done` | Finished: the branch is handed over, the worktree removed, the task archived. |
+| `done` | Finished: the worktree removed, the task archived. |
 
 ### 5. Calibrate
 
@@ -252,10 +252,9 @@ routine  = "nightly"       # a folder or a single .md under .spoolway/routines/
 
 ### Routines
 
-A routine is work you run more than once. It lives in `.spoolway/routines/`, tracked in git.
+A routine is task that can be re-queued anytime. It lives in `.spoolway/routines/`.
 Press `s` on a group in the queue screen to save it there, and `r` to browse and queue what is
-saved. Every queued copy gets a fresh id, so a routine can run again. The saved files are
-never changed.
+saved.
 
 ### Trials
 
