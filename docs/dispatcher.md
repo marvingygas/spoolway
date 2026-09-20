@@ -36,7 +36,17 @@ See [`dispatch.backend`](configuration.md#dispatch--the-run-loop).
 
 One dispatcher serves the whole project. Every pass re-reads the queue, so a task queued
 while it runs is picked up on the next pass. A second `spoolway dispatch` on the same project
-draws the same board in read-only mode, headed `watching dispatcher`.
+prints that a dispatcher is already running, asks herdr to focus its pane, and exits without
+drawing a board:
+
+```
+$ spoolway dispatch
+  a dispatcher is already running for this repo (pid 8123)
+  → focusing its pane w1:p5
+```
+
+`spoolway dispatch --plain` against the same held lock prints its own one-shot table headed
+`watching dispatcher (pid N)` instead, for scripts.
 
 Queueing a batch from the queue screen while another dispatcher holds the lock works the same
 way: the batch is written, and `enter` on the overview brings that dispatcher's workspace to

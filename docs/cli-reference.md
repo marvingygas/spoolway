@@ -203,8 +203,9 @@ refusing to start: task `auth-refresh` has no `pipeline:`
 Nothing was dispatched.
 ```
 
-If another dispatcher already holds the lock, the board opens read-only, headed `watching
-dispatcher`.
+If another dispatcher already holds the lock, it prints that a dispatcher is already running,
+asks herdr to focus that dispatcher's pane, and exits without drawing a board. `--plain` prints
+its one-shot table headed `watching dispatcher (pid N)` instead.
 
 The restart guard refuses the fifth start in 30 seconds when the four before it could not
 run. See [Restarting into a repo that cannot run](dispatcher.md#restarting-into-a-repo-that-cannot-run).

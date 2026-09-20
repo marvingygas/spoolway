@@ -3286,7 +3286,7 @@ mod tests {
         let legacy = crate::platform::test_home::with_home(&home, || legacy_home_fixture(&work));
 
         let lock_path = legacy.join(crate::lock::LOCK_FILE);
-        let lock = crate::lock::Lock::acquire(&lock_path, false).unwrap();
+        let lock = crate::lock::Lock::acquire(&lock_path, false, None).unwrap();
 
         let err = crate::platform::test_home::with_home(&home, || bind(&work))
             .expect_err("a live dispatcher over the legacy home refuses the move");
@@ -3550,7 +3550,7 @@ mod tests {
         let legacy = crate::platform::test_home::with_home(&home, || legacy_home_fixture(&work));
         let name = legacy.file_name().unwrap().to_string_lossy().into_owned();
 
-        let lock = crate::lock::Lock::acquire(&legacy.join(crate::lock::LOCK_FILE), false)
+        let lock = crate::lock::Lock::acquire(&legacy.join(crate::lock::LOCK_FILE), false, None)
             .expect("a dispatcher's own lock over the legacy home");
 
         let err = crate::platform::test_home::with_home(&home, || adopt(&work, &name))

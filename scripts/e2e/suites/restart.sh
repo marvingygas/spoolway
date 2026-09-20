@@ -65,9 +65,10 @@ echo $$ > "$SPOOLWAY_PROJECT_HOME/dispatch.pid"
 # tell "deferred" from "the guard has had enough" before the fifth call ever
 # happens.
 # `--plain`, on every call below: without it a start that finds the lock held
-# does not return at all — it becomes a one-shot status watcher and sits
-# printing the board until interrupted, which is the right thing for a person
-# and a hang for a suite asserting an exit code.
+# still returns at once with exit 4, but it also tries to focus a pane —
+# not what this suite is testing, and this hand-written lock file names none
+# to focus anyway. `--plain` keeps every call here to exactly the plain
+# table and the exit code the suite is actually asserting on.
 for n in 1 2 3 4; do
   exit_code "start $n could not run and says so, not an error" 4 "$SPOOLWAY" dispatch --plain
 done

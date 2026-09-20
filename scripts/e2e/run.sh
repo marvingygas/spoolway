@@ -109,11 +109,13 @@ REPO=$(cd "$E2E_DIR/../.." && pwd)
 #               — the double answers no `agent start` at all, so it can host
 #               a pane's own lifecycle but never a real lane — and is gone
 #               with the backend it needed.
-#   status      the board's *rendering* — every column, every row state, the
-#               read-only `--watch` board entire: unit tests cover it through
-#               a real pass, and an e2e version would re-assert the same
-#               branches through a slower path. The board's keys are a
-#               different question and do have a suite: `board-pause` drives
+#   status      the board's *rendering* — every column, every row state:
+#               unit tests cover it through a real pass, and an e2e version
+#               would re-assert the same branches through a slower path.
+#               There is one board per run now, focused rather than drawn a
+#               second time — see `commands::dispatch::already_running`. The
+#               board's keys are a different question and do have a suite:
+#               `board-pause` drives
 #               `p`, `P` and `U` as real keystrokes into a real dispatcher,
 #               because those interrupt a live lane, write or move a task
 #               file, and answer only to `enter`/`esc` once a panel is open —

@@ -834,13 +834,13 @@ fi
 #
 # Stopped first, and the stop is load-bearing: `drive opener` above started a
 # dispatcher and left it running, and a `dispatch` that finds the lock held
-# does not refuse — it draws the read-only board instead, polling until
-# somebody stops it. That branch sits *above* the routing guard in `run`, so
-# with the lock held this call never reaches the refusal under test and
-# never returns either; the suite hangs until the job's own timeout kills it
-# rather than failing on the line that is wrong. No `--dry-run` needed to keep
-# this call to one pass that writes nothing: `check_task_routes` bails out
-# ahead of the lock and every write, real pass or not.
+# does not refuse — it prints the two already-running lines and exits 4 at
+# once. That branch sits *above* the routing guard in `run`, so with the lock
+# held this call never reaches `check_task_routes` at all, and "and names the
+# task" below fails against the wrong message rather than proving the
+# refusal it names. No `--dry-run` needed to keep this call to one pass that
+# writes nothing: `check_task_routes` bails out ahead of the lock and every
+# write, real pass or not.
 dispatcher_stop
 task_doc "$SPOOLWAY_PROJECT_HOME/queue/routeless.md" routeless "$BODY" \
   "stage: queued" "group: live" "touches: [notes/routeless.md]" "pipeline:"
@@ -1415,11 +1415,13 @@ must "herdr gives each task a workspace" "$SPOOLWAY" config set dispatch.herdr_m
 # in src/commands/dispatch.rs — those already know the answer they are
 # asking `Mux::in_own_pane` for; this asks the double for real. Stopped
 # first: a resident dispatcher left running from the headless section above
-# would find its own lock held and draw the read-only board instead of
-# refusing, the same hazard the routeless-task case earlier in this file
-# guards against. `HERDR_STUB_NO_PANE` is this one call's own — every other
-# `dispatch` in this suite runs without it, and the double answers "there is
-# a pane" by default for exactly that reason.
+# would find its own lock held and exit 4 without ever reaching
+# `check_dispatcher_visible`, so "and names why" below would fail against
+# the wrong message rather than proving the refusal it names — the same
+# hazard the routeless-task case earlier in this file guards against.
+# `HERDR_STUB_NO_PANE` is this one call's own — every other `dispatch` in
+# this suite runs without it, and the double answers "there is a pane" by
+# default for exactly that reason.
 dispatcher_stop
 task_doc "$LIVE/paneless.md" paneless "$BODY" "group: live" "touches: [notes/paneless.md]"
 must "a task queued ahead of the pane gate" "$SPOOLWAY" queue add --from "$LIVE/paneless.md"

@@ -9092,7 +9092,7 @@ mod tests {
         );
         let groups = listed(&repo);
 
-        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false).unwrap();
+        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
         let pid = std::process::id();
 
         // `\t \r` selects and submits; the extra `\r` answers the "go to
@@ -9135,7 +9135,7 @@ mod tests {
         );
         let groups = listed(&repo);
 
-        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false).unwrap();
+        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
 
         // `\t \r` selects and submits; `\x1b` declines the "go to the
         // dispatcher" draw, and the trailing `q` quits the browsing screen

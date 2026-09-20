@@ -113,7 +113,7 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
             &format!("a dispatcher is already running for this repo (pid {pid})"),
             RESTART_WINDOW,
         )?;
-        watch(repo, pipelines, args)?;
+        already_running(repo, pipelines, pid, args, &mut std::io::stdout())?;
         return Ok(EXIT_ALREADY_RUNNING);
     }
 
@@ -211,7 +211,13 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
 
     // Taken for the whole run. Two dispatchers would both see the same task at
     // the same step and both spawn a lane into its worktree.
-    let _lock = crate::lock::Lock::acquire(&repo.lock_file(), unattended)?;
+    //
+    // The pane is asked for here rather than trusted from the environment —
+    // same reasoning as `Mux::in_own_pane`'s own read, which
+    // `check_dispatcher_visible` just passed: `None` here only degrades to
+    // the older three-line lock shape, never refuses the start.
+    let pane_id = mux.own_pane_id();
+    let _lock = crate::lock::Lock::acquire(&repo.lock_file(), unattended, pane_id.as_deref())?;
 
     // Note this project once per run, so `spoolway eval --by --all` can find
     // its ledger later. A project that is dispatched in is a project that spends.
@@ -1396,37 +1402,43 @@ fn check_task_routes(pipelines: &Pipelines, tasks: &[Task]) -> Result<()> {
     Ok(())
 }
 
-/// Draw the read-only board over a run someone else's process is driving.
+/// A repo whose lock another process already holds: name it, and, for a
+/// person actually looking at a terminal, bring the pane it is drawing its
+/// board in to the front — there is one board per run now, and it is
+/// already up.
 ///
-/// The queue re-reads and the multiplexer call the board already makes are
-/// the whole of what this needs — see [`crate::status::Board::watching`] —
-/// so nothing here takes the lock, starts a lane, writes a task file, or
-/// moves a pane. `ctrl-c` ends this loop and this loop alone; the run it is
-/// watching is someone else's to stop.
-fn watch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Result<()> {
+/// `--plain` keeps its own one-shot table, byte for byte: a script asking
+/// what is running gets an answer meant for parsing, and "focusing its pane"
+/// is a line for a person, not a caller polling this in a loop.
+fn already_running(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    pid: u32,
+    args: &DispatchArgs,
+    out: &mut impl std::io::Write,
+) -> Result<()> {
     if args.plain {
-        // One read, one print, no loop: a script wants the table as it
-        // stands, not a process that sits there polling on its behalf.
-        let holder = crate::lock::Lock::holder(&repo.lock_file())?;
-        match holder {
-            Some(pid) => println!("watching dispatcher (pid {pid})\n"),
-            None => println!("no dispatcher is running\n"),
-        }
+        // One read, one print: a script wants the table as it stands, not a
+        // process that sits there polling on its behalf.
+        writeln!(out, "watching dispatcher (pid {pid})\n")?;
         let rows = crate::status::rows(repo, pipelines)?;
-        print!("{}", crate::status::plain_table(&rows));
+        write!(out, "{}", crate::status::plain_table(&rows))?;
         return Ok(());
     }
 
-    crate::platform::stop::catch_interrupt();
-    let mut board = crate::status::Board::watching();
-    let mut out = std::io::stdout();
-    // `Phase::Waiting` throughout: a watcher never passes and never stops a
-    // run, so neither of the other two phases means anything here — the
-    // header this board draws comes from the lock, not from a phase this
-    // process is in.
-    while !crate::platform::stop::asked() {
-        let _ = board.draw(repo, pipelines, crate::status::Phase::Waiting, &mut out);
-        std::thread::sleep(crate::status::POLL);
+    writeln!(
+        out,
+        "  a dispatcher is already running for this repo (pid {pid})"
+    )?;
+    // `None` for an older three-line lock, or a run with no pane recorded —
+    // nothing here to focus, so nothing more is printed. A pane that has
+    // gone away since the lock was written is not fatal either: reported and
+    // stepped over, the same as a failed workspace move is today.
+    if let Some(pane_id) = crate::lock::Lock::pane(&repo.lock_file()) {
+        match crate::mux::backend(repo).and_then(|mux| mux.focus_pane(&pane_id)) {
+            Ok(()) => writeln!(out, "  → focusing its pane {pane_id}")?,
+            Err(err) => writeln!(out, "  → could not focus its pane {pane_id}: {err:#}")?,
+        }
     }
     Ok(())
 }
@@ -1482,8 +1494,9 @@ mod tests {
     use crate::commands::testutil::fixture;
 
     /// A dispatcher already running for this repo must send `spoolway
-    /// dispatch` down [`watch`], never through [`crate::lock::Lock::acquire`]
-    /// — the watcher reads the run, it never joins it.
+    /// dispatch` down [`already_running`], never through
+    /// [`crate::lock::Lock::acquire`] — a second start reads the run, it
+    /// never joins it.
     ///
     /// Proved indirectly rather than by mocking `Lock::acquire`: this process
     /// takes the lock itself first, the same way a real dispatcher would, and
@@ -1491,11 +1504,11 @@ mod tests {
     /// refuses a second holder outright — see its own doc comment — so a
     /// second acquire attempt here would surface as this call returning an
     /// error naming "already running", not as a silent takeover. `--plain`
-    /// keeps this one call and one exit, with no board loop to interrupt.
+    /// keeps this one call and one exit, with nothing left to interrupt.
     #[test]
-    fn dispatch_watches_rather_than_taking_the_lock() {
-        let repo = fixture("watch-never-locks");
-        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false).unwrap();
+    fn a_dispatch_finding_the_lock_held_never_takes_it() {
+        let repo = fixture("lock-held-never-taken");
+        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
 
         let args = DispatchArgs {
             plain: true,
@@ -1520,7 +1533,7 @@ mod tests {
     #[test]
     fn four_starts_that_could_not_run_get_the_fifth_refused() {
         let repo = fixture("restart-storm");
-        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false).unwrap();
+        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
 
         let args = DispatchArgs {
             plain: true,
@@ -1638,7 +1651,7 @@ mod tests {
     #[test]
     fn a_lock_already_held_exits_four() {
         let repo = fixture("lock-held-exit");
-        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false).unwrap();
+        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
         let args = DispatchArgs {
             plain: true,
             ..Default::default()
@@ -1647,6 +1660,48 @@ mod tests {
             dispatch(&repo, &Pipelines::builtin(), &args).unwrap(),
             EXIT_ALREADY_RUNNING
         );
+    }
+
+    /// A repo whose lock is held, found by a non-`--plain` start, prints the
+    /// mockup's own two lines and focuses the pane the lock names — headless
+    /// here so this never shells out to a real herdr, and its `focus_pane`
+    /// never fails, so this is the ordinary case.
+    #[test]
+    fn already_running_names_the_pid_and_focuses_the_recorded_pane() {
+        let mut repo = fixture("already-running-focuses-pane");
+        repo.config.dispatch.backend = crate::config::Backend::Headless;
+        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, Some("w1:p5")).unwrap();
+
+        let mut out = Vec::new();
+        let args = DispatchArgs::default();
+        already_running(&repo, &Pipelines::builtin(), 8123, &args, &mut out).unwrap();
+
+        let printed = String::from_utf8(out).unwrap();
+        assert!(
+            printed.contains("a dispatcher is already running for this repo (pid 8123)"),
+            "{printed}"
+        );
+        assert!(printed.contains("→ focusing its pane w1:p5"), "{printed}");
+    }
+
+    /// A lock with no pane recorded — an older three-line file, or a run
+    /// with nothing to name — prints only the pid line: there is nothing to
+    /// focus, so nothing more is said about it.
+    #[test]
+    fn already_running_says_nothing_about_focus_with_no_pane_recorded() {
+        let repo = fixture("already-running-no-pane");
+        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
+
+        let mut out = Vec::new();
+        let args = DispatchArgs::default();
+        already_running(&repo, &Pipelines::builtin(), 8123, &args, &mut out).unwrap();
+
+        let printed = String::from_utf8(out).unwrap();
+        assert!(
+            printed.contains("a dispatcher is already running for this repo (pid 8123)"),
+            "{printed}"
+        );
+        assert!(!printed.contains("focusing"), "{printed}");
     }
 
     /// An empty queue is never counted towards the restart guard: a repo
@@ -1674,7 +1729,7 @@ mod tests {
     #[test]
     fn force_clears_the_restart_counter() {
         let repo = fixture("force-clears-storm");
-        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false).unwrap();
+        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
 
         let args = DispatchArgs {
             plain: true,

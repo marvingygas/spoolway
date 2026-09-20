@@ -207,6 +207,21 @@ pub trait Mux {
         true
     }
 
+    /// This process's own pane id, if it is running in one — what
+    /// [`crate::lock::Lock::acquire`] writes as the lock file's fourth line,
+    /// for a second `spoolway dispatch` finding it held to read back and
+    /// focus, through [`Mux::focus_pane`], instead of drawing a second
+    /// board.
+    ///
+    /// `None` by default, the right answer for headless, which has no pane
+    /// concept at all, and for any backend that cannot answer right now: a
+    /// start does not fail over failing to record this, it only leaves the
+    /// lock in the three-line shape an older binary would have written, and
+    /// a second start that finds it held falls back to naming the pid alone.
+    fn own_pane_id(&self) -> Option<String> {
+        None
+    }
+
     /// Does a lane that is waiting on a person keep a *process* alive while it
     /// waits?
     ///
@@ -558,6 +573,22 @@ pub trait Mux {
     /// ever name, so this is never even reached with an id worth acting on.
     /// Only herdr overrides it.
     fn focus_workspace(&self, _workspace_id: &str) -> Result<()> {
+        Ok(())
+    }
+
+    /// Bring a live dispatcher's own pane to the front, for a second
+    /// `spoolway dispatch` that found the lock already held — the pane named
+    /// on [`crate::lock::Lock::acquire`]'s fourth line, read back through
+    /// [`crate::lock::Lock::pane`]. Like [`Mux::focus_workspace`], there is
+    /// no lane to resolve this from: the dispatcher's pane is not an agent's,
+    /// so a backend answering for real looks the pane up and focuses the
+    /// workspace and tab it sits in.
+    ///
+    /// The default does nothing and never fails — headless has no pane to
+    /// bring anywhere. A real backend's `Err` is never fatal to the caller:
+    /// a pane that has gone away since the lock was written is reported and
+    /// stepped over, the same as a failed workspace move is today.
+    fn focus_pane(&self, _pane_id: &str) -> Result<()> {
         Ok(())
     }
     fn rename_pane(&self, pane_id: &str, label: &str) -> Result<()>;
@@ -1315,6 +1346,24 @@ struct ForegroundProcess {
     is_shell: bool,
 }
 
+/// What `herdr pane current` and `herdr pane get <id>` both answer: a pane's
+/// own id, and the workspace and tab it sits in. Shared by
+/// [`Herdr::own_pane_id`], which reads `pane_id` off the calling pane, and
+/// [`Herdr::focus_pane`], which reads `workspace_id` and `tab_id` off a pane
+/// named by someone else's lock file.
+#[derive(Debug, Deserialize)]
+struct PaneCurrentResult {
+    pane: PaneLocation,
+}
+
+#[derive(Debug, Deserialize)]
+struct PaneLocation {
+    pane_id: String,
+    workspace_id: String,
+    #[serde(default)]
+    tab_id: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct AgentList {
     agents: Vec<RawAgent>,
@@ -1442,6 +1491,12 @@ impl Mux for Herdr {
 
     fn in_own_pane(&self) -> bool {
         self.own_pane()
+    }
+
+    fn own_pane_id(&self) -> Option<String> {
+        self.call::<PaneCurrentResult>(&["pane", "current"])
+            .ok()
+            .map(|r| r.pane.pane_id)
     }
 
     fn dispatch_workspace(&self, _root: &Path, create: bool) -> Result<Option<String>> {
@@ -2043,6 +2098,20 @@ impl Mux for Herdr {
         self.call_ignoring_result(&["workspace", "focus", workspace_id])
     }
 
+    fn focus_pane(&self, pane_id: &str) -> Result<()> {
+        // `pane get`, not `pane focus`: herdr's own `pane focus` moves the
+        // focus one hop in a direction relative to a pane already focused,
+        // which is no use for jumping straight to an arbitrary one — this
+        // resolves the workspace and tab `pane_id` sits in instead, the same
+        // two calls `Herdr::focus_workspace` already makes one of.
+        let info: PaneCurrentResult = self.call(&["pane", "get", pane_id])?;
+        self.call_ignoring_result(&["workspace", "focus", &info.pane.workspace_id])?;
+        if let Some(tab_id) = info.pane.tab_id.as_deref() {
+            self.call_ignoring_result(&["tab", "focus", tab_id])?;
+        }
+        Ok(())
+    }
+
     fn rename_pane(&self, pane_id: &str, label: &str) -> Result<()> {
         self.call_ignoring_result(&["pane", "rename", pane_id, label])
     }
@@ -2489,6 +2558,23 @@ mod tests {
         let row = &list.agents[0];
         assert_eq!(row.launch_pending, None);
         assert_eq!(row.interactive_ready, None);
+    }
+
+    /// Captured from a real `herdr pane current` — the same shape `pane get
+    /// <id>` answers, which is why one struct reads both.
+    /// [`Herdr::own_pane_id`] reads `pane_id` off this; [`Herdr::focus_pane`]
+    /// reads `workspace_id` and `tab_id` off the very same fields for a pane
+    /// named by someone else's lock file.
+    #[test]
+    fn pane_current_result_parses_a_real_payload() {
+        let payload = r#"{"pane":{"agent":"claude","agent_status":"working",
+            "cwd":"/repo","focused":false,"pane_id":"w3S:p1","revision":3,
+            "tab_id":"w3S:t1","terminal_id":"term_x","workspace_id":"w3S"}}"#;
+        let parsed: PaneCurrentResult =
+            serde_json::from_str(payload).expect("a live pane payload parses");
+        assert_eq!(parsed.pane.pane_id, "w3S:p1");
+        assert_eq!(parsed.pane.workspace_id, "w3S");
+        assert_eq!(parsed.pane.tab_id.as_deref(), Some("w3S:t1"));
     }
 
     /// The failure this check exists for: a `.pane` file once held `w8:p4`

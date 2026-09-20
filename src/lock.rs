@@ -41,7 +41,15 @@ impl Lock {
     /// whether a block parks the task or resumes it. A `--unattended` that lived
     /// on the dispatcher alone would give a run whose dispatcher never stopped
     /// and whose lanes parked themselves anyway.
-    pub fn acquire(path: &Path, unattended: bool) -> Result<Lock> {
+    ///
+    /// `pane_id` is the fourth line: the pane the dispatcher is drawing its
+    /// board in, if it has one, off [`crate::mux::Mux::own_pane_id`] — what a
+    /// second `spoolway dispatch` finding this lock held reads back and asks
+    /// herdr to focus, in place of drawing a second board. `None` for a
+    /// caller with no pane to record — headless, or a test — and left as an
+    /// empty line rather than omitted, so the line count a reader splits on
+    /// never depends on whether this run had one.
+    pub fn acquire(path: &Path, unattended: bool, pane_id: Option<&str>) -> Result<Lock> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -50,7 +58,11 @@ impl Lock {
             true => UNATTENDED,
             false => ATTENDED,
         };
-        let contents = format!("{pid}\n{}\n{mode}\n", started_at(pid).unwrap_or_default());
+        let contents = format!(
+            "{pid}\n{}\n{mode}\n{}\n",
+            started_at(pid).unwrap_or_default(),
+            pane_id.unwrap_or_default()
+        );
 
         // Two attempts, not one: a `path` that is already there might be a
         // live holder's, which is refused below naming it, or one a crashed
@@ -113,6 +125,26 @@ impl Lock {
             UNATTENDED => Some(true),
             ATTENDED => Some(false),
             _ => None,
+        }
+    }
+
+    /// The pane a live dispatcher's board is drawn in, if it has one — the
+    /// fourth line, off [`Lock::acquire`]'s own `pane_id`.
+    ///
+    /// Through [`Lock::holder`] first, same reasoning as [`Lock::unattended`]:
+    /// a stale lock has nothing left to focus, and a second `spoolway
+    /// dispatch` that raced the first one's exit must not go looking for a
+    /// pane the dead run only used to hold.
+    ///
+    /// `None` from a lock with no fourth line at all — written by a binary
+    /// before this line existed — or an empty one, which [`Lock::acquire`]
+    /// itself writes for a caller with no pane to record.
+    pub fn pane(path: &Path) -> Option<String> {
+        Lock::holder(path).ok().flatten()?;
+        let raw = std::fs::read_to_string(path).ok()?;
+        match raw.lines().nth(3)?.trim() {
+            "" => None,
+            pane => Some(pane.to_string()),
         }
     }
 
@@ -562,7 +594,7 @@ mod tests {
         assert_eq!(Lock::holder(&path).unwrap(), None);
         // And so the lock is takeable, rather than wedged until someone finds
         // the file and deletes it.
-        assert!(Lock::acquire(&path, false).is_ok());
+        assert!(Lock::acquire(&path, false, None).is_ok());
     }
 
     /// Written by a version that recorded only the pid, or on a platform with
@@ -591,19 +623,19 @@ mod tests {
     #[test]
     fn a_second_acquire_is_refused_while_the_first_is_held() {
         let path = scratch("held");
-        let _first = Lock::acquire(&path, false).unwrap();
-        assert!(Lock::acquire(&path, false).is_err());
+        let _first = Lock::acquire(&path, false, None).unwrap();
+        assert!(Lock::acquire(&path, false, None).is_err());
     }
 
     #[test]
     fn the_lock_is_released_on_drop() {
         let path = scratch("drop");
         {
-            let _lock = Lock::acquire(&path, false).unwrap();
+            let _lock = Lock::acquire(&path, false, None).unwrap();
             assert!(Lock::holder(&path).unwrap().is_some());
         }
         assert!(Lock::holder(&path).unwrap().is_none());
-        Lock::acquire(&path, false).unwrap();
+        Lock::acquire(&path, false, None).unwrap();
     }
 
     /// The run's mode is what a lane's own `spoolway report` reads to decide
@@ -613,14 +645,14 @@ mod tests {
     fn the_lock_carries_the_runs_mode_and_only_while_the_run_is_live() {
         let path = scratch("mode");
         {
-            let _lock = Lock::acquire(&path, true).unwrap();
+            let _lock = Lock::acquire(&path, true, None).unwrap();
             assert_eq!(Lock::unattended(&path), Some(true));
         }
         // Released: there is no run to have a mode, so the project's own
         // setting is what speaks.
         assert_eq!(Lock::unattended(&path), None);
 
-        let _attended = Lock::acquire(&path, false).unwrap();
+        let _attended = Lock::acquire(&path, false, None).unwrap();
         assert_eq!(Lock::unattended(&path), Some(false));
     }
 
@@ -638,6 +670,39 @@ mod tests {
         .unwrap();
         assert_eq!(Lock::holder(&path).unwrap(), Some(pid));
         assert_eq!(Lock::unattended(&path), None);
+    }
+
+    /// The pane a run started with survives the trip through the file, and
+    /// stops being an answer the moment the run is over — the same shape as
+    /// the mode, above.
+    #[test]
+    fn the_lock_carries_the_runs_pane_and_only_while_the_run_is_live() {
+        let path = scratch("pane");
+        {
+            let _lock = Lock::acquire(&path, false, Some("w1:p5")).unwrap();
+            assert_eq!(Lock::pane(&path).as_deref(), Some("w1:p5"));
+        }
+        assert_eq!(Lock::pane(&path), None);
+    }
+
+    /// Both shapes a fourth line can take are still a live holder, whether
+    /// or not there is a pane to go with it: a three-line file written by a
+    /// binary before this task, and a four-line one written by this one with
+    /// nothing to record — headless, or a test.
+    #[test]
+    fn a_lock_file_with_no_pane_still_names_its_holder_either_shape() {
+        let pid = std::process::id();
+        let started = started_at(pid).unwrap_or_default();
+
+        let three_lines = scratch("pane-three-lines");
+        std::fs::write(&three_lines, format!("{pid}\n{started}\nattended\n")).unwrap();
+        assert_eq!(Lock::holder(&three_lines).unwrap(), Some(pid));
+        assert_eq!(Lock::pane(&three_lines), None);
+
+        let four_lines_blank = scratch("pane-four-lines-blank");
+        std::fs::write(&four_lines_blank, format!("{pid}\n{started}\nattended\n\n")).unwrap();
+        assert_eq!(Lock::holder(&four_lines_blank).unwrap(), Some(pid));
+        assert_eq!(Lock::pane(&four_lines_blank), None);
     }
 
     /// The bug this task closes: `holder()` then a plain `write` left a
@@ -658,7 +723,7 @@ mod tests {
                 let barrier = barrier.clone();
                 std::thread::spawn(move || {
                     barrier.wait();
-                    Lock::acquire(&path, false)
+                    Lock::acquire(&path, false, None)
                 })
             })
             .collect();
@@ -677,7 +742,7 @@ mod tests {
         // crashed dispatcher leaves behind.
         std::fs::write(&path, "0\n").unwrap();
         assert!(Lock::holder(&path).unwrap().is_none());
-        Lock::acquire(&path, false).unwrap();
+        Lock::acquire(&path, false, None).unwrap();
     }
 
     /// The per-task lock releases on drop, and a second acquire then

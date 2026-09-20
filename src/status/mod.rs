@@ -294,20 +294,12 @@ pub struct Board {
     /// through the same `Board` going out of scope and reach the same
     /// restore.
     _term: crate::platform::TermGuard,
-    /// Whether this board is reading someone else's run rather than driving
-    /// one of its own — see [`Board::watching`]. The only thing it changes is
-    /// the header: everything below it is read fresh from the same task
-    /// files and the same live lane list regardless of who is watching.
-    watching: bool,
-    /// The task id the cursor sits on. For a driving board, starts `None`
-    /// only until [`render`] draws its first frame, which lands it on the
-    /// first row of the first group straight away rather than leaving a
-    /// person's first `↑`/`↓` press go to discover that row — see the
-    /// seeding block inline in `render`'s own body. Left `None` forever on a
-    /// watching board instead: it reads no key, so a cursor mark on it would
-    /// claim it can act on a row it never will. By id rather than a plain row
-    /// index, so a state change
-    /// that resorts the board — a task passing its step, one landing on
+    /// The task id the cursor sits on. Starts `None` only until [`render`]
+    /// draws its first frame, which lands it on the first row of the first
+    /// group straight away rather than leaving a person's first `↑`/`↓`
+    /// press go to discover that row — see the seeding block inline in
+    /// `render`'s own body. By id rather than a plain row index, so a state
+    /// change that resorts the board — a task passing its step, one landing on
     /// `paused` above it — never leaves the cursor pointing at a different
     /// task than the one a person last put it on. `None` again only once the
     /// board has nothing left to show at all.
@@ -334,7 +326,6 @@ impl Board {
             recent: VecDeque::new(),
             adopted: false,
             _term: term,
-            watching: false,
             cursor: None,
             mode: BoardMode::Browsing,
             jobs_next: None,
@@ -347,35 +338,6 @@ impl Board {
     #[cfg(test)]
     pub fn for_test() -> Board {
         Board::with_term(crate::platform::TermGuard::inert())
-    }
-
-    /// [`Board::for_test`], watching rather than driving.
-    #[cfg(test)]
-    pub fn watching_for_test() -> Board {
-        Board::watching_with_term(crate::platform::TermGuard::inert())
-    }
-
-    /// A watching board over a given terminal guard — the one place the
-    /// watching board's shape is spelled, so [`Board::watching`] and
-    /// [`Board::watching_for_test`] cannot drift.
-    fn watching_with_term(term: crate::platform::TermGuard) -> Board {
-        Board {
-            watching: true,
-            ..Board::with_term(term)
-        }
-    }
-
-    /// A board for a process that holds no lock of its own: `spoolway
-    /// dispatch` finding one already running. Draws the exact rows a driving
-    /// board would — the same task files, the same [`Mux::list_lanes`] — but
-    /// its header names whoever [`crate::lock::Lock::holder`] says holds the
-    /// lock right now, read fresh every frame, rather than this process's own
-    /// pid. A dispatcher that dies mid-watch is what turns that into "no
-    /// dispatcher is running" on the very next redraw, with whatever it left
-    /// running still on the board — the one thing a killed-rather-than-stopped
-    /// run needs a person to see.
-    pub fn watching() -> Board {
-        Board::watching_with_term(crate::platform::TermGuard::new())
     }
 
     /// Draw one frame over whatever is on the terminal.
@@ -409,7 +371,6 @@ impl Board {
             repo,
             pipelines,
             phase,
-            self.watching,
             &mut self.stages,
             &mut self.arrived,
             &mut self.recent,
@@ -1580,7 +1541,6 @@ fn render(
     repo: &Repo,
     pipelines: &Pipelines,
     phase: Phase,
-    watching: bool,
     stages: &mut BTreeMap<String, String>,
     arrived: &mut BTreeMap<String, Instant>,
     recent: &mut VecDeque<RecentEvent>,
@@ -1652,15 +1612,12 @@ fn render(
     rows.sort_by(|a, b| a.key().cmp(&b.key()));
 
     // Lands the cursor on the first row of the first group before the very
-    // first frame a driving board draws is ever shown, rather than leaving a
+    // first frame this board draws is ever shown, rather than leaving a
     // person's first `↑`/`↓` press go to discover it — see `Board::cursor`'s
     // own doc comment. Seeded from `rows`, the same composed list `table`
     // draws below, rather than a second read of the same task files, graph
-    // and lane list this function already just did. Never for a watching
-    // board: nothing here reads a key for it, so painting a cursor mark
-    // would claim it can act on a row it never will — see the key line's own
-    // watching gate a little further down.
-    if !watching && cursor.is_none() {
+    // and lane list this function already just did.
+    if cursor.is_none() {
         *cursor = rows.first().map(|row| row.id.clone());
     }
     let totals = group_totals(&ledger, &rows);
@@ -1676,29 +1633,16 @@ fn render(
 
     // ---- the frame ----
     let mut frame = String::new();
-    // The dispatcher is whoever is drawing this — ourselves, when this board
-    // is driving a run, or whoever the lock names, when it is only watching
-    // one. No pass clock: `up` already ticks on every redraw, so a board that
-    // has not changed in a while is visibly alive without a second clock
-    // counting the other way — and when the next pass is due is not something
-    // a person watching can do anything about.
-    let mut header = match watching {
-        // Read fresh every frame, never cached: a watcher that opened on a
-        // live dispatcher and stays up after that dispatcher dies is exactly
-        // what turns this into "no dispatcher is running" without a second
-        // process having to notice and say so.
-        true => match crate::lock::Lock::holder(&repo.lock_file())? {
-            Some(pid) => vec!["watching dispatcher".to_string(), format!("pid {pid}")],
-            None => vec!["no dispatcher is running".to_string()],
+    // No pass clock: `up` already ticks on every redraw, so a board that has
+    // not changed in a while is visibly alive without a second clock
+    // counting the other way.
+    let mut header = vec![
+        match phase {
+            Phase::Stopping => "dispatcher stopped".to_string(),
+            _ => "dispatcher running".to_string(),
         },
-        false => vec![
-            match phase {
-                Phase::Stopping => "dispatcher stopped".to_string(),
-                _ => "dispatcher running".to_string(),
-            },
-            format!("pid {}", std::process::id()),
-        ],
-    };
+        format!("pid {}", std::process::id()),
+    ];
     // Absent only if the lock file has gone missing under a live run, which is
     // a thing to leave out rather than a thing to print an empty figure for.
     if let Some(up) = run_elapsed(repo).map(human_secs) {
@@ -1781,12 +1725,9 @@ fn render(
     ) {
         tail.push_str(&format!(" {line}\n"));
     }
-    // The key hint, last of all — only for a board actually driving a run:
-    // [`Board::watching`] never reads a key, and a hint under it would tell
-    // somebody watching another process's board that pressing r or p does
-    // something here. Nothing about the hint depends on whether any row can
-    // use it right now; it says what the board can do, not what it would do
-    // this frame.
+    // The key hint, last of all. Nothing about it depends on whether any row
+    // can use it right now; it says what the board can do, not what it would
+    // do this frame.
     //
     // Built by `crate::screen::key_hint` — see that function's own doc
     // comment for why this is the one place left to build it, rather than
@@ -1794,17 +1735,15 @@ fn render(
     // row on its own, without naming `↑↓`: every screen this project draws
     // leaves the arrows and `q` off its own key line, since a person reads
     // those the same way everywhere.
-    if !watching {
-        tail.push_str(&format!(
-            "\n{}\n",
-            crate::screen::key_hint(&[
-                ("o", "open task"),
-                ("r/R", "resume / all"),
-                ("p/P", "pause / all"),
-                ("u/U", "unqueue / all"),
-            ])
-        ));
-    }
+    tail.push_str(&format!(
+        "\n{}\n",
+        crate::screen::key_hint(&[
+            ("o", "open task"),
+            ("r/R", "resume / all"),
+            ("p/P", "pause / all"),
+            ("u/U", "unqueue / all"),
+        ])
+    ));
 
     let height = pane_height();
     let rows = match height {
@@ -3382,27 +3321,33 @@ mod tests {
         );
     }
 
-    /// A driving board says what the keys it now reads do — the mockup's own
-    /// last line — but a board only watching someone else's run never reads
-    /// one, so the hint would be a lie there and is left off.
+    /// A board says what its keys do — the mockup's own last line — on every
+    /// frame it draws, not only once something on the board can use one: the
+    /// hint says what the board can do, not what it would do this frame.
+    /// There is one board per run now, and it is the one reading keys, so
+    /// the hint is never conditional.
     #[test]
-    fn a_driving_board_carries_the_key_hint_but_a_watching_one_does_not() {
+    fn the_key_hint_is_drawn_on_every_frame() {
         let repo = fixture("key-hint");
         let pipelines = Pipelines::builtin();
-        add(&repo, "login", &[], Some("implement"));
 
-        let mut driving = Board::for_test();
-        let frame = strip(&driving.frame(&repo, &pipelines, Phase::Waiting).unwrap());
+        let mut board = Board::for_test();
+        let frame = strip(&board.frame(&repo, &pipelines, Phase::Waiting).unwrap());
+        assert!(
+            frame.contains(
+                "[o] open task   [r/R] resume / all   [p/P] pause / all   [u/U] unqueue / all"
+            ),
+            "an empty queue's own frame should still carry the hint — {frame}"
+        );
+
+        add(&repo, "login", &[], Some("implement"));
+        let frame = strip(&board.frame(&repo, &pipelines, Phase::Waiting).unwrap());
         assert!(
             frame.contains(
                 "[o] open task   [r/R] resume / all   [p/P] pause / all   [u/U] unqueue / all"
             ),
             "{frame}"
         );
-
-        let mut watching = Board::watching_for_test();
-        let frame = strip(&watching.frame(&repo, &pipelines, Phase::Waiting).unwrap());
-        assert!(!frame.contains("[r/R] resume / all"), "{frame}");
     }
 
     /// `paused` means the stage and nothing else now: a lane's own status —
@@ -4179,27 +4124,6 @@ mod tests {
         assert_eq!(board.cursor, None, "nothing has drawn a frame yet");
         board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
         assert_eq!(board.cursor.as_deref(), Some("login"));
-    }
-
-    /// A watching board never seeds a cursor at all: it reads no key (the
-    /// dispatch loop that owns keys never calls `on_key` for one), so a
-    /// cursor mark on its first row would claim it can act on that row when
-    /// it never will — regression for review finding 1 on this task, which
-    /// caught `frame` seeding every board regardless of `watching`.
-    #[test]
-    fn a_watching_board_never_paints_a_cursor_mark() {
-        let repo = fixture("watching-board-no-cursor");
-        let pipelines = Pipelines::builtin();
-        add(&repo, "login", &[], Some("implement"));
-
-        let mut watching = Board::watching_for_test();
-        let frame = watching.frame(&repo, &pipelines, Phase::Waiting).unwrap();
-        assert_eq!(watching.cursor, None, "a watcher reads no key to act with");
-        assert!(
-            !strip(&frame).contains('▸'),
-            "no row may carry the cursor mark on a watching board:\n{}",
-            strip(&frame)
-        );
     }
 
     /// The cursor walks the archived rows the board draws too, not just the

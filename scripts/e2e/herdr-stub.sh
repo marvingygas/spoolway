@@ -63,8 +63,8 @@ jstr() {
   printf '"%s"' "$s"
 }
 
-# The next id, counted under a lock: the dispatcher and its `--watch` board
-# can both be in here at once.
+# The next id, counted under a lock: the dispatcher and a suite's own
+# foreground `spoolway` calls can both be in here at once.
 next_id() {
   local n
   exec 9>"$STATE/seq.lock"
@@ -188,10 +188,19 @@ case "$DOMAIN $VERB" in
     # answer a bare terminal actually gets, so that refusal has something
     # real to run against instead of being proven only by a unit test that
     # already knows the answer it wants.
+    #
+    # A fixed, self-consistent triple rather than an empty `workspace_id`:
+    # `Herdr::own_pane_id` (src/mux.rs) parses `pane_id` out of this same
+    # reply now, for the fourth line `Lock::acquire` writes, and a shape
+    # this double's caller could never actually have — no `pane_id` at
+    # all — made that parse fail silently on every e2e dispatcher start.
+    # Not registered in `$STATE/panes`: nothing here calls `pane get` on it,
+    # and this double never places its caller in a pane it tracks for real —
+    # see the header.
     if [ -n "${HERDR_STUB_NO_PANE:-}" ]; then
       fail no_current_pane "not running in a herdr pane"
     else
-      echo '{"result":{"pane":{"workspace_id":""}}}'
+      echo '{"result":{"pane":{"pane_id":"self:p0","tab_id":"self:t0","workspace_id":"self"}}}'
     fi
     ;;
 

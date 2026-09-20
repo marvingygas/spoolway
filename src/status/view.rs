@@ -1434,12 +1434,10 @@ pub fn banner(header: &str) -> String {
 /// true; frame 0, held, the moment nothing is.
 ///
 /// A function of the wall clock alone, not a counter this call increments —
-/// the same instant must land on the same frame whether it is the dispatcher
-/// drawing its own board or a second process `watching` the same run, and
-/// nothing is shared between the two but the clock they both read. Flips on
-/// every whole second rather than every draw, so redrawing more or less often
-/// — the wait loop's `POLL`, a pass, the final frame — never changes what the
-/// spool does.
+/// the same instant lands on the same frame whichever redraw reads it.
+/// Flips on every whole second rather than every draw, so redrawing more or
+/// less often — the wait loop's `POLL`, a pass, the final frame — never
+/// changes what the spool does.
 pub(super) fn spool_frame(running: bool) -> usize {
     if !running {
         return 0;
