@@ -132,7 +132,14 @@ else
 fi
 
 # --------------------------------------------------------- the bottom lands first
-if drive base gone 90; then ok "the bottom of the chain runs and is archived"
+# Held, not just driven. Everything asserted below is about the moment `base`
+# finished and nothing else had started, and the dispatcher left running would
+# take `top` straight on — through `top`'s own `suite` step, which really is
+# the last of the chain and really does write the line the check two screens
+# down reads as `base` having written it. That is how this went red once four
+# suites started sharing a machine: the checks in between spawn `spoolway` of
+# their own, and under that load `top` gets there first.
+if drive_and_hold base gone 90; then ok "the bottom of the chain runs and is archived"
 else bad "the bottom of the chain runs and is archived (at \`$(stage_of base)\`)"; fi
 
 if handed_over base; then ok "and hands its change over as a branch and a pull request"

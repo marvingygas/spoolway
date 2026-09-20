@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# A minimal `gh` double, shared by `scripts/e2e/suites/stack.sh` and the
-# `github.sh` hook coverage in `scripts/e2e/suites/commands.sh` — not the
-# fuller `e2e-fake-gh.sh` every other suite shares, because that one speaks
+# A minimal `gh` double, shared by `scripts/e2e/suites/stack.sh`,
+# `stacking.sh`, and the `github.sh` hook coverage in
+# `scripts/e2e/suites/issue-tracking.sh` — not the fuller `e2e-fake-gh.sh`
+# every other suite shares, because that one speaks
 # `pr create --body` and `spoolway stack` speaks `--body-file`, and these
 # suites are explicitly the ones with no real forge to talk to: local git
 # plumbing and this script are the whole of what `spoolway stack` and the
@@ -97,6 +98,21 @@ case "${1:-}" in
   auth) exit 0 ;;
   pr)
     case "${2:-}" in
+      checks)
+        # `spoolway stack`'s own `checks` step calls this with no target at
+        # all — `gh pr checks --watch --fail-fast` — so, like real `gh`, the
+        # pull request is whichever one belongs to the current branch. Never
+        # asked to actually watch anything real: this sandbox forge runs no
+        # CI, so finding the pull request at all is the whole of what this
+        # answers for, the same shrug `e2e-fake-gh.sh`'s own `checks` case
+        # gives.
+        branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+        pr_for_branch "$branch" >/dev/null || {
+          echo "no pull requests found for branch \"$branch\"" >&2
+          exit 1
+        }
+        echo "All checks were successful"
+        ;;
       view)
         # `--jq` filters the raw shape below for real, the same way `issue
         # view` already does — `github.sh`'s `done` branch asks for

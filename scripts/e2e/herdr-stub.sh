@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # A minimal `herdr` double, for the one case in
-# `scripts/e2e/suites/commands.sh` that has to watch a *pane* receive its
+# `scripts/e2e/suites/command-steps.sh` that has to watch a *pane* receive its
 # environment.
 #
 # Why a double rather than a real server. tmux hands a suite an instance of

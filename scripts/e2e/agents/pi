@@ -51,6 +51,20 @@ mode=$(cat "$step_ctl" 2>/dev/null || true)
 [ -n "$mode" ] || mode=$(cat "$E2E_CTL/$SPOOLWAY_TASK" 2>/dev/null || true)
 mode=${mode:-$SPOOLWAY_TASK}
 
+# `linger:<seconds>` is not a pathology and not a mode of its own: it is the
+# ordinary turn, held back. A stand-in's whole turn fits inside the launch
+# handshake, so a scenario about a lane that is *up but has not reported yet*
+# — the dispatcher taken away underneath it, say — is otherwise racing a turn
+# measured in milliseconds. Spent like any other step-scoped ctl file, so the
+# wait governs one turn and not the step forever.
+case "$mode" in
+  linger:*)
+    sleep "${mode#linger:}"
+    mode=$(cat "$E2E_CTL/$SPOOLWAY_TASK" 2>/dev/null || true)
+    mode=${mode:-$SPOOLWAY_TASK}
+    ;;
+esac
+
 case "$mode" in
   crash) exit 0 ;;          # ends its turn without reporting
   hang | vanish) sleep 300 ;; # never finishes on its own

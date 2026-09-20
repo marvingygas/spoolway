@@ -2357,8 +2357,66 @@ pub fn cut_worktree(repo: &Path, path: &Path, branch: &str, base: &str) -> Resul
     };
     run(repo, "git", &args)
         .with_context(|| format!("could not cut a worktree for `{branch}` at {path_arg}"))?;
+    if let Some(worktrees_dir) = path.parent() {
+        link_shared_target(worktrees_dir, path);
+    }
     Ok(())
 }
+
+/// Point this worktree's `target/debug` at one directory shared by every
+/// lane cut under `worktrees_dir`, instead of the cold `cargo build` each of
+/// its own would otherwise start from.
+///
+/// Every lane worktree sits directly under the same `worktrees_dir`,
+/// whatever the last path segment is named — [`cut_worktree`]'s four
+/// callers differ there: `mux.rs`, `headless.rs` and `tmux.rs` join
+/// `branch_slug(branch)`, `dispatch.rs` joins `task.id()` — so a shared
+/// directory found *from* `worktrees_dir` resolves to the same place for
+/// every one of them, with no `CARGO_TARGET_DIR` or `sccache` needed.
+///
+/// Only `debug` is shared, not `target` itself. `cargo clippy --all-targets`
+/// and `cargo test --all-targets`, which every gate script runs, are what
+/// most of the cold-build cost is, and both build the `debug` profile — two
+/// lane worktrees held 2.1 GB and 1.8 GB of it before this, while CI
+/// restores a cache through `Swatinem/rust-cache`. `target/release` stays a
+/// real, private directory: it is what `./target/release/spoolway` actually
+/// executes, in `handover`'s `spoolway stack` and every gate script's own
+/// `pipeline check`, and sharing it would let one lane's concurrent `cargo
+/// build --release` overwrite the binary another lane's next step is about
+/// to run.
+///
+/// The shared directory sits beside `worktrees_dir`, never inside it:
+/// `home_inventory_line` (`src/commands/init.rs`) and `migrate_legacy_home`
+/// (`src/repo.rs`) both read every directory directly under the worktree
+/// root as a worktree of its own, and a `.cargo-target` there would be
+/// misread as one — `git worktree repair` genuinely fails on a path that
+/// is not a worktree.
+///
+/// Best-effort and never fatal: a `target/debug` this worktree already has —
+/// a real directory from before this existed, or a symlink already sitting
+/// there — is left alone rather than clobbered, and a platform with no
+/// symlinks just keeps building from cold.
+#[cfg(unix)]
+fn link_shared_target(worktrees_dir: &Path, worktree: &Path) {
+    let Some(shared_root) = worktrees_dir.parent() else {
+        return;
+    };
+    let shared_debug = shared_root.join(".cargo-target").join("debug");
+    if std::fs::create_dir_all(&shared_debug).is_err() {
+        return;
+    }
+    if std::fs::create_dir_all(worktree.join("target")).is_err() {
+        return;
+    }
+    let link = worktree.join("target").join("debug");
+    if std::fs::symlink_metadata(&link).is_ok() {
+        return;
+    }
+    let _ = std::os::unix::fs::symlink(&shared_debug, &link);
+}
+
+#[cfg(not(unix))]
+fn link_shared_target(_worktrees_dir: &Path, _worktree: &Path) {}
 
 /// herdr's own bound on an agent name: 1–32 characters, refused outright by
 /// `agent start` with `invalid_agent_name` (herdr 0.8.2). It is not spoolway's
@@ -3658,5 +3716,120 @@ mod tests {
             "mode never changes what the anchor resolves to"
         );
         assert!(!grouped.task_owns_workspace());
+    }
+
+    /// Two lanes cut under the same `worktrees_dir` end up with
+    /// `target/debug` symlinked to the same directory, so a `cargo build`
+    /// in either one warms the other's cache instead of starting cold — see
+    /// [`link_shared_target`]. `target/release` stays real and private in
+    /// each: it is what a lane's own step actually executes, and sharing it
+    /// too would let one lane's release build overwrite the binary another
+    /// is about to run.
+    #[test]
+    fn two_worktrees_cut_from_the_same_root_share_one_debug_directory_but_not_release() {
+        let root = crate::scratch::root("mux-shared-target");
+        std::fs::create_dir_all(&root).unwrap();
+        crate::scratch::git_init(&root, &["-b", "main"]);
+        std::fs::write(root.join("README"), "seed").unwrap();
+        run(&root, "git", &["add", "README"]).unwrap();
+        run(&root, "git", &["commit", "-q", "-m", "seed"]).unwrap();
+
+        let worktrees_dir = root.join("worktrees");
+        let one = worktrees_dir.join("task-one");
+        let two = worktrees_dir.join("task-two");
+        cut_worktree(&root, &one, "task/one", "main").unwrap();
+        cut_worktree(&root, &two, "task/two", "main").unwrap();
+
+        let one_debug = one.join("target").join("debug");
+        let two_debug = two.join("target").join("debug");
+        assert!(
+            one_debug.is_symlink() && two_debug.is_symlink(),
+            "each lane's `target/debug` is a symlink, not a directory of its own"
+        );
+        assert_eq!(
+            std::fs::canonicalize(&one_debug).unwrap(),
+            std::fs::canonicalize(&two_debug).unwrap(),
+            "both symlinks resolve to the same shared directory"
+        );
+
+        assert!(
+            !one.join("target").is_symlink() && !two.join("target").is_symlink(),
+            "`target` itself stays a real, private directory in each worktree"
+        );
+        std::fs::write(one.join("target").join("release-marker"), "one").unwrap();
+        assert!(
+            !two.join("target").join("release-marker").exists(),
+            "nothing outside `debug` is shared between lanes"
+        );
+
+        // The shared directory sits beside `worktrees_dir`, not inside it —
+        // a scan over `worktrees_dir` must see exactly the two worktrees
+        // cut above, and no `.cargo-target` entry alongside them (review
+        // finding 5).
+        let entries: Vec<_> = std::fs::read_dir(&worktrees_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            entries.len(),
+            2,
+            "the worktree root holds only the worktrees cut into it: {entries:?}"
+        );
+        assert!(
+            root.join(".cargo-target").join("debug").is_dir(),
+            "the shared directory sits beside `worktrees_dir`, one level up"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Tearing a lane down does not take every other lane's build cache with
+    /// it. `target/debug` is a symlink into the directory all of them share,
+    /// and `git worktree remove --force` is what teardown runs — on a
+    /// worktree holding untracked build output, which is the only reason
+    /// `--force` is there. If it ever followed that symlink instead of
+    /// removing it, one task reaching `done` would empty the cache every
+    /// concurrent lane is building against, and nothing would say so.
+    #[test]
+    fn tearing_a_lane_down_removes_the_symlink_and_not_the_shared_directory() {
+        let root = crate::scratch::root("mux-shared-target-teardown");
+        std::fs::create_dir_all(&root).unwrap();
+        crate::scratch::git_init(&root, &["-b", "main"]);
+        std::fs::write(root.join("README"), "seed").unwrap();
+        run(&root, "git", &["add", "README"]).unwrap();
+        run(&root, "git", &["commit", "-q", "-m", "seed"]).unwrap();
+
+        let worktrees_dir = root.join("worktrees");
+        let one = worktrees_dir.join("task-one");
+        let two = worktrees_dir.join("task-two");
+        cut_worktree(&root, &one, "task/one", "main").unwrap();
+        cut_worktree(&root, &two, "task/two", "main").unwrap();
+
+        // What a real lane leaves behind: an artefact in the shared cache,
+        // and untracked output of its own in the worktree about to go.
+        let shared_debug = root.join(".cargo-target").join("debug");
+        std::fs::write(shared_debug.join("an-artefact"), "warm").unwrap();
+        std::fs::create_dir_all(one.join("target").join("release")).unwrap();
+        std::fs::write(one.join("target").join("release").join("spoolway"), "bin").unwrap();
+
+        run(
+            &root,
+            "git",
+            &["worktree", "remove", "--force", one.to_str().unwrap()],
+        )
+        .unwrap();
+
+        assert!(!one.exists(), "the torn-down worktree is gone");
+        assert!(
+            shared_debug.join("an-artefact").is_file(),
+            "the shared cache the other lane is still building against survives"
+        );
+        assert!(
+            std::fs::canonicalize(two.join("target").join("debug")).unwrap()
+                == std::fs::canonicalize(&shared_debug).unwrap(),
+            "and the lane still running is still pointed at it"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
     }
 }

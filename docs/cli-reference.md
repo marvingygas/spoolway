@@ -198,7 +198,7 @@ refuses the whole start and dispatches nothing:
 
 ```
 refusing to start: task `auth-refresh` has no `pipeline:`
-  Set `pipeline:` to one of: bugfix, impl, impl_fast, impl_tdd, impl_ui, release.
+  Set `pipeline:` to one of: bugfix, impl, impl_fast, impl_lite, impl_tdd, impl_ui, release.
 
 Nothing was dispatched.
 ```

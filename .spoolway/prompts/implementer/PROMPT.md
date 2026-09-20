@@ -89,6 +89,10 @@ your changes.
 
 ## Never
 
+- Never run `scripts/e2e/run.sh` to prove your work. A `pr` tier inside your turn costs a
+  45-minute slot to reach a verdict the `suite` step reaches anyway, and it was the single
+  largest fixed cost in this pipeline. `--tier smoke` is available when you genuinely cannot
+  tell whether an edit parses; reach for it rarely, and never for the full tier.
 - Never install the binary this project builds over the one already running. `cargo build` and
   `cargo test` in your worktree as much as you like, but `cargo install` or copying your build
   over the running dispatcher's own binary overwrites the process that started you and that

@@ -1,6 +1,6 @@
 ---
 domain: testing
-covers: ["scripts/e2e/**", "scripts/e2e-*.sh", "scripts/gate.sh", ".github/workflows/**", "src/scratch.rs"]
+covers: ["scripts/e2e/**", "scripts/e2e-*.sh", "scripts/gate.sh", "scripts/gate-quick.sh", ".github/workflows/**", "src/scratch.rs"]
 ---
 
 # Testing
@@ -22,6 +22,7 @@ repository, a real detached process or a real forge. Anything only a screen can 
 scripts/e2e/run.sh                        # the pr tier
 scripts/e2e/run.sh --tier smoke           # the fast signal
 scripts/e2e/run.sh --suite flow           # one suite
+scripts/e2e/run.sh --jobs 1               # one suite at a time, output live
 scripts/e2e/run.sh --list                 # every suite, and which setting each case covers
 ```
 
@@ -36,6 +37,7 @@ SPOOLWAY="$PWD/target/release/spoolway" scripts/e2e/run.sh --tier nightly
 |---|---|---|
 | `--tier smoke\|pr\|nightly\|cloud\|live` | `pr` | Run a named set of suites |
 | `--suite <name>` | | Run one suite. Repeatable. Overrides `--tier`. |
+| `--jobs <n>` | `4` | How many suites run at once. `JOBS=<n>` does the same. `--jobs 1` runs them one at a time and streams each suite's output live; anything higher captures it and prints it under the suite's row. A value that is not a positive integer is refused. |
 | `--keep` | off | Keep each suite's scratch tree on disk. `KEEP=1` does the same. |
 | `--list` | | Print the suites and the setting-to-case map |
 
@@ -45,6 +47,9 @@ Every lane runs a stand-in agent script from `scripts/e2e/agents/`. The harness 
 `spoolway dispatch` refuses `backend = headless` unless `SPOOLWAY_TEST_BACKEND` is set in the
 environment. `fixture.sh` and `scaffold.sh` export it for every suite and scaffolded project
 that runs on that backend.
+
+Each run's scratch root lives under `/tmp` and is removed on exit. A kept tree carries a
+`.keep` marker, and the next run sweeps any other run's root whose process is gone.
 
 ### Coverage
 
@@ -65,7 +70,7 @@ with a `// covers:` line.
 | Tier | Suites | Used by |
 |---|---|---|
 | `smoke` | flow | A person, by hand |
-| `pr` | flow, commands, stacking, stack, conflicts, forge, disaster, lock, trials, routines, jobs, jobs-screen, board-pause, restart, overrides | The `suite` step of the pipelines, on the last task of a chain |
+| `pr` | flow, commands, command-steps, issue-tracking, stacking, stack, conflicts, forge, disaster, lock, trials, routines, jobs, jobs-screen, board-pause, queue-unqueue, restart, overrides | The `suite` step of the pipelines, on the last task of a chain |
 | `nightly` | the `pr` suites plus `upgrade` | Daily CI and the release workflow |
 | `cloud` | warmth | Nothing automatic. Runs only with `SPOOLWAY_E2E_CLOUD=1`. |
 | `live` | live | Nothing automatic. Runs only with `SPOOLWAY_E2E_CODEX_MODEL=<model>`. |
@@ -75,7 +80,9 @@ with a `// covers:` line.
 | Suite | Covers |
 |---|---|
 | `flow` | A task's whole life: queued, implement, review, handover, archived |
-| `commands` | Command steps: `run:`, exit-code routing, `background:`, `timeout:`; the queue screen submitting a group; `issue_tracking.key_in_names` |
+| `commands` | CLI behaviour that belongs to no domain of its own: `init` and `sync`, the three contracts, the queue screen read off a real pipe, the archive's rows, `config`'s checkout/project asymmetry, the overrides layer through a linked worktree, housekeeping's retention sweep, a confirm dialog over a real pty |
+| `command-steps` | A `run:` step's own mechanics: exit-code routing, `background:`, `timeout:`, `loop:`, headless and paned steps, the environment a step is handed |
+| `issue-tracking` | `[issue_tracking]`'s hook on `queued`, `blocked`, `paused`, `done` and `open`, the shipped `github.sh` against the `gh` double, and `key_in_names` |
 | `stacking` | Three chained tasks, each pull request on the branch it is cut from |
 | `stack` | `spoolway stack`: the squash, a refused lease, an empty diff, a bad `branch:`, the body from the task file, a base branch that exists locally and nowhere else |
 | `conflicts` | A base that moves under a waiting branch, and the rebase |
@@ -87,6 +94,7 @@ with a `// covers:` line.
 | `jobs` | A cron job fired by a real dispatcher pass, and what `spoolway doctor` says about a bad job |
 | `jobs-screen` | The `spoolway jobs` screen writing, pausing and deleting a job |
 | `board-pause` | The board's confirm panels: `p`, `P`, `U` over a live lane |
+| `queue-unqueue` | `spoolway queue unqueue`: its `--help`, the refusal and the two routes out of it, and `--force` over a live lane |
 | `restart` | The dispatcher's restart guard and its exit codes |
 | `overrides` | The override commands: fork a setting out of the checkout, list it, promote it back |
 | `upgrade` | Whether this binary still reads what an older release wrote. A `.spoolway/` tree scaffolded by an old tag's own binary, under `scripts/e2e/fixtures/`, goes through a real `spoolway sync`. A value set under a retired table lands at its current home, and hand-written prose comes back byte for byte |
@@ -94,7 +102,8 @@ with a `// covers:` line.
 | `live` | `live` tier. The real `codex` binary through `agent verify codex --live`. |
 
 Each suite runs in its own process and scratch tree under `/tmp`, with its own prompts, so no
-suite depends on the shipped prompt text.
+suite depends on the shipped prompt text. That isolation is what lets four of them run at
+once, which is the default — see `--jobs`.
 
 ## The one suite that spends money
 
@@ -154,7 +163,7 @@ flowchart LR
   C -- fail --> A
 ```
 
-`test` runs `scripts/gate.sh` for every task:
+`impl`'s `test` step runs `scripts/gate.sh` for every task:
 
 ```sh
 cargo fmt --check
@@ -165,19 +174,36 @@ cargo build --release
 ./target/release/spoolway pipeline check
 ```
 
-`suite` runs `scripts/e2e-pr.sh` on the last task of a chain, through `last:` (see
-[`last:`](pipelines.md#last--a-step-the-chain-runs-once)):
+`impl`'s `suite` step runs `scripts/e2e-pr.sh` on the last task of a chain, through `last:`
+(see [`last:`](pipelines.md#last--a-step-the-chain-runs-once)):
 
 ```sh
 SPOOLWAY="$PWD/target/release/spoolway" scripts/e2e/run.sh --tier pr
 ```
 
+`impl_lite` runs the same two steps against lighter scripts:
+
+```mermaid
+flowchart LR
+  R[review] --> B[test: scripts/gate-quick.sh] --> C[suite: scripts/e2e-smoke.sh<br/>last task only] --> D[document]
+  B -- fail --> R
+  C -- fail --> R
+```
+
+`test` runs `scripts/gate-quick.sh`, `scripts/gate.sh`'s six commands minus `cargo deny check
+advisories`. `suite` runs `scripts/e2e-smoke.sh`, which runs the `smoke` tier instead of `pr`:
+
+```sh
+SPOOLWAY="$PWD/target/release/spoolway" scripts/e2e/run.sh --tier smoke
+```
+
 A failure sends the task back to the step before `test` (`e2e` in `impl`, `reproduce-again`
 in `bugfix`), at most twice, then `on_loop_max` parks it. The gate needs `cargo-deny` installed.
 
-`.github/workflows/ci.yml` runs daily on `main` at 03:17 UTC. Pushes and pull requests do
-not trigger it. The Linux job runs the same gate plus the `nightly` tier. A commit that
-already has a successful run is skipped.
+`.github/workflows/ci.yml` runs daily on `main` at 03:17 UTC, and on every pull request.
+Pushes do not trigger it. The scheduled run's Linux job runs the same gate plus the
+`nightly` tier; a pull request runs the `pr` tier instead. A commit that already has a
+successful run is skipped.
 
 Run it by hand before a release or to check a fix:
 
@@ -188,5 +214,6 @@ gh run view <run-id> --json headSha,conclusion,jobs
 ```
 
 Daily CI and the release workflow share `.github/workflows/verify.yml`. See
-[Releasing spoolway](releasing.md). The pipelines have no `checks` step, so no hosted check
-runs for a pull request. Daily CI checks the integrated tree.
+[Releasing spoolway](releasing.md). `impl`'s `checks` step waits on those runs
+(`gh pr checks --watch --fail-fast`) and fails the task if they come back red. Daily CI
+checks the integrated tree.

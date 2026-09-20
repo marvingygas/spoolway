@@ -216,11 +216,20 @@ fi
 # `dispatch.priority = "group"` — the shipped default, unchanged above — used
 # to drop a never-run group's candidates outright while some other group was
 # already open, whether or not that open group had any ready work of its own.
-# Three slots: `gate-chain`'s own task is started and running first, so its
-# group is genuinely open — past `queued` — before either never-run group is
-# even in the queue; only then are the other two queued, against a dispatcher
-# already up. The old code would have left their two slots idle for as long
-# as `gate-chain` stayed open; this one fills them the very next pass.
+# Three slots: `gate-chain`'s own task is started first, so its group is
+# genuinely open — past `queued` — before either never-run group is even in
+# the queue; only then are the other two queued, against a dispatcher already
+# up. The old code would have left their two slots idle for as long as
+# `gate-chain` stayed open; this one fills them the very next pass.
+#
+# What says a task started is the dispatcher's own `started <task> · <step>`
+# line, not a live lane pid. A pass that moves a row now runs the next one at
+# once instead of waiting, so a stand-in's whole turn — and every step after
+# it — can fit between two polls of `headless/<lane>.pid`: `lane_pid` answers
+# about a lane that is *running*, and these three lanes are never reliably
+# caught running. The suites that do hold a pid (`disaster`, `board-pause`,
+# `queue-unqueue`) all drive a lane made to hang on purpose. The log line is
+# the durable record of the same fact each check here is actually about.
 must "three slots" "$SPOOLWAY" config set agents.pi.concurrency 3
 dispatcher_stop
 task_doc "$LIVE/chain-a.md" chain-a "$BODY" "group: gate-chain" "touches: [notes/chain-a.md]"
@@ -230,7 +239,7 @@ must "the chain's first task" "$SPOOLWAY" queue add --from "$LIVE/chain-a.md"
 must "the chain's second task, not yet ready" "$SPOOLWAY" queue add --from "$LIVE/chain-b.md"
 dispatcher_start
 
-if lane_pid "chain-a · implement" 30 >/dev/null; then
+if wait_for_text 30 "$E2E_DISPATCH_LOG" "started chain-a · implement"; then
   ok "the chain's own task starts and its group counts as open"
 else
   bad "the chain's own task starts and its group counts as open"
@@ -246,8 +255,8 @@ task_doc "$LIVE/gate-untouched-b.md" gate-untouched-b "$BODY" \
   "group: gate-untouched-b" "touches: [notes/gate-untouched-b.md]"
 must "a second never-run group" "$SPOOLWAY" queue add --from "$LIVE/gate-untouched-b.md"
 
-if lane_pid "gate-untouched-a · implement" 30 >/dev/null \
-  && lane_pid "gate-untouched-b · implement" 30 >/dev/null; then
+if wait_for_text 30 "$E2E_DISPATCH_LOG" "started gate-untouched-a · implement" \
+  && wait_for_text 30 "$E2E_DISPATCH_LOG" "started gate-untouched-b · implement"; then
   ok "both never-run groups start anyway, on the two slots gate-chain left free"
 else
   bad "both never-run groups start anyway, on the two slots gate-chain left free"

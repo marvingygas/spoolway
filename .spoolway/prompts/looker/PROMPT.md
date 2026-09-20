@@ -131,6 +131,10 @@ nobody remembers making, long after the task is archived.
 
 ## Never
 
+- Never run `scripts/e2e/run.sh` to prove your work. A `pr` tier inside your turn costs a
+  45-minute slot to reach a verdict the `suite` step reaches anyway, and it was the single
+  largest fixed cost in this pipeline. `--tier smoke` is available when you genuinely cannot
+  tell whether an edit parses; reach for it rarely, and never for the full tier.
 - Never approve a screen you did not open.
 - Never approve one you did not finish. If the change gave a screen something to commit, the
   key that commits it is part of the state, and the rendering alone is not a verdict.

@@ -25,12 +25,13 @@
 #
 # nightly only — see run.sh's own header for why, and the task's own goal:
 # this is a release-time question ("does this binary still read what a past
-# release wrote"), not a per-chain one. The `pr` tier is what the `suite`
-# step runs, once, on the last task of a chain, through
-# `scripts/e2e-pr.sh` and under a 45-minute timeout — and an ordinary
-# chain's diff essentially never touches the fold in `Config::migrate` or a
-# shipped pipeline's key block. So leaving `upgrade` out of `pr_suites`
-# costs that gate nothing. The `nightly` tier still asks the question: once
+# release wrote"), not a per-chain one. A `suite` step runs its tier once, on
+# the last task of a chain, under a 45-minute timeout: the `pr` tier through
+# `scripts/e2e-pr.sh` in `impl`, and the narrower `smoke` tier through
+# `scripts/e2e-smoke.sh` in `impl_lite`. Neither carries `upgrade`, and an
+# ordinary chain's diff essentially never touches the fold in
+# `Config::migrate` or a shipped pipeline's key block. So leaving `upgrade`
+# out of `pr_suites` costs either gate nothing. The `nightly` tier still asks the question: once
 # a day against main, and again from the release workflow before every tag,
 # which is when an answer here is actually worth having.
 set -uo pipefail

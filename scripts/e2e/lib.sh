@@ -553,8 +553,11 @@ drive_and_hold() {
 # ------------------------------------------------------------------ reporting
 #
 # Each suite is its own process, so counts cannot come back in a variable.
-# `$E2E_RESULTS` is where run.sh collects them; a suite run on its own has no
-# such file and simply prints its own summary.
+# `$E2E_RESULTS` is a file of this suite's own that run.sh hands it to leave
+# them in, and which run.sh then folds into its results file with the duration
+# it timed beside them — the suite cannot time itself, because the wall clock
+# that matters includes the part a suite killed by the watchdog never sees. A
+# suite run on its own has no such file and simply prints its own summary.
 finish() {
   dispatcher_stop
   echo
@@ -571,9 +574,10 @@ finish() {
 #
 # A suite that dies on a failed `must` exits without ever reaching `finish`, so
 # until this was called from the EXIT trap too its tally never reached the
-# results file at all — and run.sh, summing a file with no row for it, closed a
-# red run with "0 of 0 checks failed". The count was the one thing that said
-# how far the suite got before it died, and it was the one thing missing.
+# results file at all — and run.sh, which zeroes the counts a suite left it
+# none of, closed a red run with "0 of 0 checks failed". The count was the one
+# thing that said how far the suite got before it died, and it was the one
+# thing missing.
 #
 # `finish` and the trap both call it, so it records once and only once.
 record_results() {

@@ -3,7 +3,7 @@
 use anyhow::anyhow;
 
 use super::*;
-use crate::dispatch::{RESTART_MAX, RESTART_WINDOW};
+use crate::dispatch::{RESTART_MAX, RESTART_WINDOW, skip_wait};
 use crate::screen::PollableRead;
 
 /// An empty queue is an ordinary ending: nothing was there to dispatch, and
@@ -276,6 +276,12 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     };
     let mut out = std::io::stdout();
 
+    // Consecutive passes that skipped the wait because the one before it
+    // moved a task — see the check ahead of the wait, below. Reset the
+    // moment a pass finds nothing to move, so the count only ever measures
+    // one unbroken streak, never the run's total.
+    let mut consecutive_working: u32 = 0;
+
     loop {
         let mut dispatcher = crate::dispatch::Dispatcher::new(repo, pipelines, mux.as_ref());
 
@@ -286,8 +292,14 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         }
 
         let mut spent_out = None;
+        // Whether this pass moved a task and so has more ready to try at
+        // once — see the wait below, and `dispatch::skip_wait`. A pass that
+        // errored outright never sets this: a transient failure should cost
+        // one wait, not be retried with no pause at all.
+        let mut worked = false;
         match dispatcher.pass() {
             Ok(report) => {
+                worked = skip_wait(&report, consecutive_working);
                 // The ceiling drains rather than kills: the run is over, but not
                 // until whatever is mid-turn has had its chance to report. A
                 // lane torn down halfway spent its tokens and produced nothing.
@@ -382,6 +394,17 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
             // not to decide the work is finished.
             _ => idle_announced = false,
         }
+
+        // A pass that moved a task almost always has more ready right away,
+        // so it runs the next pass straight off instead of waiting out the
+        // rate — `skip_wait`, above, already bounds how long a streak of
+        // these can run unbroken. Once it says no — nothing moved, or the
+        // streak hit its ceiling — the count starts over from here.
+        if worked {
+            consecutive_working += 1;
+            continue;
+        }
+        consecutive_working = 0;
 
         match board.as_mut() {
             // The wait, redrawn: the same sleep the plain run takes, cut into
