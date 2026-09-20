@@ -187,15 +187,18 @@ pub fn live_headless_lane_at(
     let mux = crate::mux::backend(repo).unwrap();
     let pane = mux.create_pane(&repo.root, id).unwrap();
     let name = crate::mux::lane_name(step, id);
-    mux.start_lane(&crate::mux::LaneSpec {
-        name: &name,
-        label,
-        kind: "pi",
-        pane_id: &pane.pane_id,
-        args: &["--session-id".to_string(), "s1".to_string()],
-        env: &BTreeMap::new(),
-        path_prefix: Some(&bin),
-    })
+    mux.start_lane(
+        &crate::mux::LaneSpec {
+            name: &name,
+            label,
+            kind: "pi",
+            pane_id: &pane.pane_id,
+            args: &["--session-id".to_string(), "s1".to_string()],
+            env: &BTreeMap::new(),
+            path_prefix: Some(&bin),
+        },
+        &mut || {},
+    )
     .unwrap();
     mux.prompt(&name, "go").unwrap();
     (mux, name)

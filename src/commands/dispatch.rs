@@ -2202,7 +2202,11 @@ mod tests {
         fn close_pane(&self, _pane_id: &str) -> Result<()> {
             unimplemented!()
         }
-        fn start_lane(&self, _spec: &crate::mux::LaneSpec<'_>) -> Result<()> {
+        fn start_lane(
+            &self,
+            _spec: &crate::mux::LaneSpec<'_>,
+            _tick: &mut dyn FnMut(),
+        ) -> Result<()> {
             unimplemented!()
         }
         fn prompt(&self, _name: &str, _text: &str) -> Result<()> {

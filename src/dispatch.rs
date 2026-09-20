@@ -770,7 +770,14 @@ impl<'a> Dispatcher<'a> {
     /// `tick` is called between this pass's own units of work — after the
     /// anchor-tab sweep, after each task `collect_candidates` settles or
     /// turns into a candidate, after each lane `start_lanes` starts or
-    /// skips, and after each task `clean_up` archives.
+    /// skips, and after each task `clean_up` archives — and, inside a lane
+    /// start itself, once every `VACATE_POLL` for as long as
+    /// `Mux::start_lane`'s own herdr call is waiting on a spawned child, up
+    /// to the two minutes `agent start` is bounded at. That last one is not
+    /// a checkpoint between units of work the way the others are; it is
+    /// `Mux::start_lane`'s own wait handing `tick` back mid-launch, so the
+    /// keyboard is never dead for the one stretch of a pass that can run
+    /// the longest.
     ///
     /// This is `commands::dispatch`'s run loop's own hook: a pass moving a
     /// handful of tasks used to hold the keyboard dead for its whole
@@ -3463,6 +3470,7 @@ impl<'a> Dispatcher<'a> {
                 inherited.as_deref(),
                 &mut self.file_seen,
                 &ledger,
+                tick,
             );
             if let Some(stuck) = handover.filter(|handover| !handover.ready) {
                 match outcome.is_ok() {
@@ -4743,6 +4751,11 @@ fn start_one(
     // The pass's one usage-ledger snapshot, for the session lookups below —
     // see [`Dispatcher::ledger`] and review finding 33.
     ledger: &[crate::usage::Entry],
+    // Handed straight to `Mux::start_lane` — see its own doc. `agent start`
+    // is the one call in this function that can run for the whole two
+    // minutes herdr bounds it at, and this is what keeps a busy pass's
+    // keyboard-reading callback reaching the board through that span.
+    tick: &mut dyn FnMut(),
 ) -> Result<Started> {
     let name = lane_name(&step.id, task.id());
 
@@ -5009,17 +5022,20 @@ fn start_one(
             }
         },
     };
-    let launched = mux.start_lane(&LaneSpec {
-        name: &name,
-        // The lane's own name, on its own pane — a grid of panes is only
-        // readable if each says what it is.
-        label: &label,
-        kind: &profile.kind,
-        pane_id: &pane_id,
-        args: &args,
-        env: &env,
-        path_prefix: None,
-    });
+    let launched = mux.start_lane(
+        &LaneSpec {
+            name: &name,
+            // The lane's own name, on its own pane — a grid of panes is only
+            // readable if each says what it is.
+            label: &label,
+            kind: &profile.kind,
+            pane_id: &pane_id,
+            args: &args,
+            env: &env,
+            path_prefix: None,
+        },
+        tick,
+    );
     if let Err(err) = launched {
         // Taking a pane back rather than leaving it behind means the same
         // step retries into a fresh one instead of the tab filling up over a
@@ -6001,7 +6017,7 @@ mod tests {
             self.log(format!("close_pane {pane_id}"));
             Ok(())
         }
-        fn start_lane(&self, spec: &LaneSpec<'_>) -> Result<()> {
+        fn start_lane(&self, spec: &LaneSpec<'_>, _tick: &mut dyn FnMut()) -> Result<()> {
             self.log(format!("start {}", spec.name));
             // The real backend labels the pane as the last thing `start_lane`
             // does; mirroring it here keeps the label assertable.

@@ -493,7 +493,17 @@ pub trait Mux {
     /// with it: a tab whose last pane closes goes with it, and a workspace
     /// whose last tab closes goes with that.
     fn close_pane(&self, pane_id: &str) -> Result<()>;
-    fn start_lane(&self, spec: &LaneSpec<'_>) -> Result<()>;
+    /// Start a lane in `spec.pane_id`, calling `tick` once per poll of
+    /// whatever this backend is waiting on internally — herdr's `agent
+    /// start` can take up to two minutes, and `tick` is what keeps a
+    /// dispatch pass's own keyboard-reading callback (see
+    /// [`crate::dispatch::Dispatcher::pass`]) reaching the board through
+    /// that whole span rather than only once this call returns. Every
+    /// caller passes something, the test doubles included; a caller with no
+    /// tick of its own to run passes `&mut || {}`, the same as `Dispatcher`
+    /// itself does when nothing is listening. headless ignores it — it has
+    /// no herdr call to wait on.
+    fn start_lane(&self, spec: &LaneSpec<'_>, tick: &mut dyn FnMut()) -> Result<()>;
     fn prompt(&self, name: &str, text: &str) -> Result<()>;
     fn read(&self, name: &str, lines: usize) -> Result<String>;
     /// Stop a lane's turn in place, without ending the lane itself.
@@ -646,7 +656,128 @@ const VACATE_TIMEOUT: Duration = Duration::from_secs(10);
 /// How often the pane is checked while [`VACATE_TIMEOUT`] runs down. One
 /// `herdr agent list` per tick, so short enough to hand a settled pane back
 /// promptly and long enough not to spin on the socket.
+///
+/// Also the poll interval [`spawn_and_wait`] and [`poll_wait`] step a
+/// spawned herdr child on — the one wait [`Herdr::start_agent`],
+/// [`Herdr::call_watching_for_stall`] and [`Herdr::wait_for_pane_shell`] now
+/// all share, in place of each making its own.
 const VACATE_POLL: Duration = Duration::from_millis(250);
+
+/// Sleep for [`VACATE_POLL`], having called `tick` first — the wait
+/// [`Herdr::wait_for_pane_shell`] steps on directly, and the one
+/// [`spawn_and_wait`] steps on itself while also polling a spawned child's
+/// pipes.
+///
+/// A plain sleep, on purpose, not a poll on stdin: an earlier version of
+/// this put `libc::STDIN_FILENO` in the poll set to wake early on a
+/// keypress, but `tick` is not always something that reads and drains one —
+/// `Herdr::call_watching_for_stall`'s own callers pass `&mut || {}`, and the
+/// board's own `tick` stops reading once its `listening` flag goes false
+/// (`commands::dispatch`, a closed stdin) or is never reading at all
+/// (`--plain`). Any of those left a byte sitting on stdin unread, and
+/// `crate::screen::poll_ready` answers `POLLIN` on it again immediately,
+/// so the "poll instead of sleep" became a 100% CPU spin for the rest of
+/// the wait rather than the early wake it was meant to be (review finding
+/// 2). `tick` still runs once every [`VACATE_POLL`] here — a bound this
+/// launch never had at all before, when it was dead for the whole of
+/// herdr's two-minute `agent start` — unlike `commands::dispatch`'s own
+/// interval wait between passes, where stdin is polled directly and a key
+/// wakes it at once rather than waiting out a poll interval.
+fn poll_wait(tick: &mut dyn FnMut()) {
+    tick();
+    std::thread::sleep(VACATE_POLL);
+}
+
+/// Spawn `program` with `args` and wait for it to exit by polling, rather
+/// than blocking a whole call in `std::process::Command::output`'s own
+/// `wait` — the one thing that let `agent start`'s up to two minutes own
+/// the thread `Dispatcher::pass`'s own `tick` callback needs to keep
+/// reaching the board through. `tick` runs once per poll, whatever the
+/// child is doing yet; see [`Mux::start_lane`]'s own doc for what it does
+/// and why every caller has one to give it, even if that one is `&mut || {}`.
+///
+/// stdin is explicitly closed — `Command::output` does this too, for free,
+/// by nulling any stdio left unset, but `spawn` inherits the parent's own
+/// stdin unless told otherwise. Left inherited, the herdr child (and the
+/// agent `agent start` launches inside the pane) would read straight from
+/// the dispatcher's own raw-mode terminal, consuming the very keystrokes
+/// `tick` exists to answer instead (review finding 1).
+///
+/// stdout and stderr are drained as they arrive rather than only once the
+/// child exits: `Command::output` reads both off a background thread for
+/// exactly this reason — a reply larger than a pipe's buffer (64KiB on
+/// Linux) blocks the child on a write nobody is reading, and `try_wait`
+/// alone would never see it exit. Polled by `crate::screen::poll_ready`,
+/// which also doubles as this loop's own sleep between `try_wait` checks —
+/// stdin is deliberately not in that poll set; see [`poll_wait`]'s own doc
+/// for why (review finding 2).
+///
+/// No deadline of its own: the child ends when herdr's own `--timeout`
+/// says it should, and this only ever reports what that exit already
+/// carries. Inventing a spoolway-side bound here would move the two-minute
+/// bound `agent start` is given — herdr's to own, not this function's.
+fn spawn_and_wait(
+    cwd: &Path,
+    program: &str,
+    args: &[&str],
+    tick: &mut dyn FnMut(),
+) -> Result<std::process::Output> {
+    use std::io::Read;
+    use std::os::unix::io::AsRawFd;
+
+    let mut child = std::process::Command::new(program)
+        .args(args)
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .with_context(|| format!("running `{program} {}`", args.join(" ")))?;
+    let mut out_pipe = child.stdout.take().expect("stdout piped above");
+    let mut err_pipe = child.stderr.take().expect("stderr piped above");
+    let out_fd = out_pipe.as_raw_fd();
+    let err_fd = err_pipe.as_raw_fd();
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+
+    let status = loop {
+        tick();
+        if let Some(status) = child
+            .try_wait()
+            .with_context(|| format!("waiting on `{program} {}`", args.join(" ")))?
+        {
+            break status;
+        }
+        let ready = crate::screen::poll_ready(&[out_fd, err_fd], VACATE_POLL);
+        if ready.first().copied().unwrap_or(false) {
+            drain_ready(&mut out_pipe, &mut stdout);
+        }
+        if ready.get(1).copied().unwrap_or(false) {
+            drain_ready(&mut err_pipe, &mut stderr);
+        }
+    };
+    // The child is gone, so its write ends are closed: nothing left for
+    // these to read can ever block, unlike `drain_ready`'s single read
+    // above, taken mid-wait while the child could still be writing more.
+    let _ = out_pipe.read_to_end(&mut stdout);
+    let _ = err_pipe.read_to_end(&mut stderr);
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+/// One read of whatever `poll_ready` just found waiting on `pipe`, mid-wait
+/// in [`spawn_and_wait`]. Never more than one: `poll_ready` only promises a
+/// byte is there *now*, not that a second read after this one would not
+/// block on a writer that has not produced more yet.
+fn drain_ready(pipe: &mut impl std::io::Read, into: &mut Vec<u8>) {
+    let mut buf = [0u8; 4096];
+    if let Ok(n) = pipe.read(&mut buf) {
+        into.extend_from_slice(&buf[..n]);
+    }
+}
 
 /// Marks an [`Mux::start_lane`] `Err` as herdr's `agent_pane_busy` refusal — the
 /// pane it was asked to start in has not yet reached an interactive shell
@@ -802,18 +933,20 @@ impl Herdr {
     /// stderr on failure, carrying a `code`. So this runs `herdr` itself and
     /// reads that envelope directly, rather than pattern-matching the text
     /// `run` would have produced.
-    fn call_watching_for_stall(&self, args: &[&str]) -> PromptOutcome {
-        let output = match std::process::Command::new("herdr")
-            .args(args)
-            .current_dir(&self.cwd)
-            .output()
-        {
+    ///
+    /// `tick` is [`spawn_and_wait`]'s own — [`Mux::prompt`], the only caller,
+    /// has no dispatch-pass tick of its own to hand in (it is reached from
+    /// `commands::lanes` too, with no pass anywhere near it), so it always
+    /// passes `&mut || {}`. Kept as a parameter rather than hardcoded here
+    /// so this shares the one wait [`Herdr::start_agent`] and
+    /// [`Herdr::wait_for_pane_shell`] use, instead of a second copy of it.
+    fn call_watching_for_stall(&self, args: &[&str], tick: &mut dyn FnMut()) -> PromptOutcome {
+        // `spawn_and_wait` already attaches its own "running `herdr …`"
+        // context to a spawn failure — nothing further is added here, or
+        // that sentence would read twice (review finding 3).
+        let output = match spawn_and_wait(&self.cwd, "herdr", args, tick) {
             Ok(output) => output,
-            Err(err) => {
-                return PromptOutcome::Failed(
-                    anyhow::Error::new(err).context(format!("running `herdr {}`", args.join(" "))),
-                );
-            }
+            Err(err) => return PromptOutcome::Failed(err),
         };
 
         if output.status.success() {
@@ -857,7 +990,12 @@ impl Herdr {
     /// bound, or a `pane process-info` call that itself errors, is left for
     /// `agent start` to answer for, with [`PaneBusy`] as the caller's own
     /// backstop for exactly that expiry.
-    fn wait_for_pane_shell(&self, pane_id: &str) {
+    ///
+    /// `tick` runs once per poll, through [`poll_wait`] — the same sleep
+    /// [`spawn_and_wait`] steps on, since this loop spawns no child of its
+    /// own (each check is its own short-lived `herdr pane process-info`)
+    /// and so cannot share that function directly.
+    fn wait_for_pane_shell(&self, pane_id: &str, tick: &mut dyn FnMut()) {
         let deadline = Instant::now() + VACATE_TIMEOUT;
         loop {
             let ready = self
@@ -866,7 +1004,7 @@ impl Herdr {
             if ready || Instant::now() >= deadline {
                 return;
             }
-            std::thread::sleep(VACATE_POLL);
+            poll_wait(tick);
         }
     }
 
@@ -881,12 +1019,16 @@ impl Herdr {
     /// carrying no envelope at all, comes back exactly as fatal as
     /// [`Herdr::call_ignoring_result`] would have left it, with the same
     /// message `run` itself would have formatted.
-    fn start_agent(&self, args: &[&str], pane_id: &str) -> Result<()> {
-        let output = std::process::Command::new("herdr")
-            .args(args)
-            .current_dir(&self.cwd)
-            .output()
-            .with_context(|| format!("running `herdr {}`", args.join(" ")))?;
+    ///
+    /// `tick` is [`spawn_and_wait`]'s own — `agent start` is bounded at two
+    /// minutes by herdr, not by spoolway, and this is what keeps a dispatch
+    /// pass's keyboard-reading callback reaching the board through that
+    /// whole span instead of only once this returns. See [`Mux::start_lane`].
+    fn start_agent(&self, args: &[&str], pane_id: &str, tick: &mut dyn FnMut()) -> Result<()> {
+        // `spawn_and_wait` already attaches its own "running `herdr …`"
+        // context to a spawn failure — see [`Herdr::call_watching_for_stall`]
+        // and review finding 3.
+        let output = spawn_and_wait(&self.cwd, "herdr", args, tick)?;
         if output.status.success() {
             return Ok(());
         }
@@ -1879,7 +2021,7 @@ impl Mux for Herdr {
         self.call_ignoring_result(&["pane", "close", pane_id])
     }
 
-    fn start_lane(&self, spec: &LaneSpec<'_>) -> Result<()> {
+    fn start_lane(&self, spec: &LaneSpec<'_>, tick: &mut dyn FnMut()) -> Result<()> {
         // Everything below is typed at a shell prompt, and lands in an agent's
         // chat input instead if anything is running in the pane. Nothing checks
         // for that here, because both panes the dispatcher ever hands in are
@@ -1919,7 +2061,7 @@ impl Mux for Herdr {
         // and a pane still busy with that sourcing answers `agent_pane_busy`
         // even though nothing is actually wrong. This closes that race,
         // rather than leaving it to `PaneBusy` below on every occurrence.
-        self.wait_for_pane_shell(spec.pane_id);
+        self.wait_for_pane_shell(spec.pane_id, tick);
 
         let handle = to_agent_name(spec.name);
         let mut args: Vec<&str> = vec![
@@ -1942,7 +2084,7 @@ impl Mux for Herdr {
             "--",
         ];
         args.extend(spec.args.iter().map(String::as_str));
-        self.start_agent(&args, spec.pane_id)?;
+        self.start_agent(&args, spec.pane_id, tick)?;
 
         // The label is cosmetic — `list_lanes` finds a lane by the session name
         // `agent start` was given above, never by what the pane is called.
@@ -1980,7 +2122,7 @@ impl Mux for Herdr {
             "--timeout",
             PROMPT_SUBMIT_TIMEOUT_MS,
         ];
-        match self.call_watching_for_stall(&wait) {
+        match self.call_watching_for_stall(&wait, &mut || {}) {
             PromptOutcome::Started => return Ok(()),
             PromptOutcome::Failed(err) => return Err(err),
             PromptOutcome::Stalled => {}
@@ -1995,15 +2137,18 @@ impl Mux for Herdr {
         // read: the Enter still has to land and the turn still has to start,
         // and a lane status read the instant after pressing it can catch the
         // lane before either has happened.
-        match self.call_watching_for_stall(&[
-            "agent",
-            "wait",
-            name,
-            "--until",
-            "working",
-            "--timeout",
-            PROMPT_SUBMIT_TIMEOUT_MS,
-        ]) {
+        match self.call_watching_for_stall(
+            &[
+                "agent",
+                "wait",
+                name,
+                "--until",
+                "working",
+                "--timeout",
+                PROMPT_SUBMIT_TIMEOUT_MS,
+            ],
+            &mut || {},
+        ) {
             PromptOutcome::Started => Ok(()),
             PromptOutcome::Stalled => {
                 // The lane's own name, not the wire spelling: this reaches a
@@ -2753,6 +2898,126 @@ mod tests {
     #[test]
     fn stderr_with_no_envelope_is_not_read_as_pane_busy() {
         assert!(!is_pane_busy_envelope("not json at all"));
+    }
+
+    /// `spawn_and_wait` is the wait `start_agent` and `call_watching_for_stall`
+    /// now share — this is the unit test the task's own `Context` points to
+    /// in place of a suite: nothing an end-to-end run can observe tells a
+    /// blocked `.output()` apart from a polled wait that answers the
+    /// keyboard, since both return the same argv's own stdout, stderr and
+    /// exit code either way. `tick` runs at least once even for a child that
+    /// has already exited by the first check — the call still yields the
+    /// keyboard once before it returns, never only after.
+    #[test]
+    fn spawn_and_wait_ticks_before_an_already_finished_child_is_reported() {
+        let mut ticks = 0;
+        let output =
+            spawn_and_wait(&std::env::temp_dir(), "true", &[], &mut || ticks += 1).unwrap();
+        assert!(ticks >= 1, "the call yields the keyboard before returning");
+        assert!(output.status.success());
+    }
+
+    /// The case the task exists for: a child slower than one poll interval.
+    /// `tick` is what a busy dispatch pass hangs its own keyboard-reading
+    /// callback off — see [`Mux::start_lane`] — so a child that outlives
+    /// [`VACATE_POLL`] must be ticked more than the one time any call, fast
+    /// or slow, already gets.
+    #[test]
+    fn spawn_and_wait_ticks_repeatedly_while_a_slow_child_runs() {
+        let mut ticks = 0;
+        let output = spawn_and_wait(
+            &std::env::temp_dir(),
+            "sh",
+            &["-c", "sleep 0.6"],
+            &mut || ticks += 1,
+        )
+        .unwrap();
+        assert!(
+            ticks >= 2,
+            "a child slower than one VACATE_POLL must be ticked more than once, got {ticks}"
+        );
+        assert!(output.status.success());
+    }
+
+    /// Review finding 1: `spawn` inherits the parent's own stdin unless
+    /// told otherwise, unlike `.output()`, which nulls it for free. Left
+    /// inherited, a child reading stdin here would read this test binary's
+    /// own — a `cat` that blocks waiting for input the test process never
+    /// sends would hang until the test itself times out; closed instead, it
+    /// sees EOF at once and exits clean.
+    #[test]
+    fn spawn_and_wait_closes_the_childs_stdin_like_output_would_have() {
+        let output = spawn_and_wait(&std::env::temp_dir(), "cat", &[], &mut || {}).unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"");
+    }
+
+    /// stdout and stderr still come back exactly as `.output()` would have
+    /// handed them — this is what lets [`Herdr::start_agent`] and
+    /// [`Herdr::call_watching_for_stall`] go on reading herdr's own JSON
+    /// error envelope off stderr the same way they always did.
+    #[test]
+    fn spawn_and_wait_captures_stdout_and_stderr_like_output_would_have() {
+        let output = spawn_and_wait(
+            &std::env::temp_dir(),
+            "sh",
+            &["-c", "printf out; printf err >&2"],
+            &mut || {},
+        )
+        .unwrap();
+        assert_eq!(output.stdout, b"out");
+        assert_eq!(output.stderr, b"err");
+    }
+
+    /// Every refusal code this task promised to keep telling apart —
+    /// `agent_pane_busy`, `agent_prompt_stalled`, `timeout` — is reached
+    /// only through the `!output.status.success()` branch in
+    /// [`Herdr::call_watching_for_stall`] and [`Herdr::start_agent`]. The
+    /// four tests above all assert a *successful* child, so none of them
+    /// would notice `spawn_and_wait` handing back a success status for a
+    /// child that failed: every one of those branches would go silently
+    /// dead, a refusal would read as a clean start, and nothing would say
+    /// so. `.output()` carried the real exit status and the stderr that
+    /// came with it; a non-zero exit with a herdr-shaped envelope on
+    /// stderr pins that the polled wait still does.
+    #[test]
+    fn spawn_and_wait_carries_a_failing_exit_and_its_envelope_like_output_would_have() {
+        let envelope = r#"{"error":{"code":"agent_pane_busy","message":"pane busy"}}"#;
+        let output = spawn_and_wait(
+            &std::env::temp_dir(),
+            "sh",
+            &["-c", &format!("printf '%s' '{envelope}' >&2; exit 3")],
+            &mut || {},
+        )
+        .unwrap();
+        assert!(
+            !output.status.success(),
+            "a failed child must report failed"
+        );
+        assert_eq!(output.status.code(), Some(3));
+        assert_eq!(String::from_utf8_lossy(&output.stderr), envelope);
+    }
+
+    /// The failure mode `.output()`'s own background threads exist to
+    /// avoid: a child that writes more than fits in a pipe's kernel buffer
+    /// before it exits blocks on that write until something drains it.
+    /// `spawn_and_wait` has no thread of its own to do that on — see the
+    /// task's own non-goals — so it has to drain mid-wait, polled by the
+    /// very `poll_ready` call that also serves as this loop's own sleep. A
+    /// child asked to write 200KiB (comfortably past a 64KiB pipe) and this
+    /// returning at all, with every byte of it, is the proof that drain
+    /// actually ran before the child was done writing rather than only
+    /// after.
+    #[test]
+    fn spawn_and_wait_drains_output_past_a_pipes_own_buffer() {
+        let output = spawn_and_wait(
+            &std::env::temp_dir(),
+            "sh",
+            &["-c", "yes | head -c 200000"],
+            &mut || {},
+        )
+        .unwrap();
+        assert_eq!(output.stdout.len(), 200_000);
     }
 
     /// `Herdr::new` used to resolve its anchor through
@@ -3561,7 +3826,7 @@ mod tests {
             self.closed.borrow_mut().push(pane_id.to_string());
             Ok(())
         }
-        fn start_lane(&self, _spec: &LaneSpec<'_>) -> Result<()> {
+        fn start_lane(&self, _spec: &LaneSpec<'_>, _tick: &mut dyn FnMut()) -> Result<()> {
             unimplemented!()
         }
         fn prompt(&self, _name: &str, _text: &str) -> Result<()> {
