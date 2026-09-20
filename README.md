@@ -310,11 +310,6 @@ blocked_effort = "medium"
 blocked_session = true       # the unblocker carries its own earlier session forward
 blocked_prompt = "unblocker"
 
-[pipeline_gen]
-pipeline_agent = "claude"    # who `spoolway pipeline gen` opens its session as
-pipeline_model = "claude-opus-5"
-pipeline_effort = "medium"
-
 [housekeeping]
 update_check = true          # tell a person at a keyboard that a newer release is out
 calibrate_window = "14d"     # how far back `/spoolway-calibrate` reads

@@ -39,6 +39,15 @@ reading the file whole.
    per pipeline its `description:`, `id_budget`, `gate_at` steps, `last_of_chain`, and
    skeleton `body`.
 
+   **A project with no pipelines is not a dead end.** Where this reports `no pipelines
+   defined`, install the shipped ones yourself: a bare `spoolway init` — `--provider` takes
+   only `claude` or `codex`, not `pi`, so this is the same mechanical fix
+   **spoolway-doctor**'s own pi copy reaches for. Re-runnable, and it writes only what is
+   absent, so it restores just the missing pipelines and prompts and leaves everything else
+   in the project untouched. Then re-run `spoolway task contract` and carry on with what it
+   now reports, without asking the person first — say one line about it, `Installed the two
+   shipped pipelines; routing against them.`, ahead of the ballot in step 2.
+
 2. **Route each subject to a pipeline, then decompose against that pipeline's own shape.**
    Read the pipelines before choosing task boundaries. Let their purpose and steps shape the
    split instead of fitting pipelines onto an already-cut list.
@@ -67,14 +76,11 @@ reading the file whole.
    task's criteria kept under five bullets or split again.
 
    **Offer the shape, as one printed ballot.** Settle on a recommended count first, then put
-   **that count and the four below it** on the ballot, floored at 1 — a recommendation of 6
-   names 2, 3, 4, 5 and 6; a recommendation of 3 names 1, 2 and 3. Open with the line that
-   names every member — `Split this shape: 2, 3, 4, 5 or 6 tasks — or generate a pipeline` —
-   then give every count its own lettered section, largest first, the recommended one marked
-   as such, and say that the person answers with a letter. The last letter is always "Generate
-   a pipeline for this plan" (`spoolway pipeline gen --plan <path>`, one line, session ends
-   with nothing cut). A printed ballot has no option limit, so every count is shown in full
-   and nothing is left for the person to type out.
+   **that count and the three below it** on the ballot, floored at 1 — a recommendation of 6
+   names 3, 4, 5 and 6; a recommendation of 3 names 1, 2 and 3, floored rather than padded back
+   up to four. Open with the line that names every member — `Split this shape: 3, 4, 5 or 6
+   tasks` — then give every count its own lettered section, largest first, the recommended one
+   marked as such, and say that the person answers with a letter.
 
    **Print the ballot and end the turn there.** Do not reach for a dialog tool: pi has none
    of its own, and what a given install's plugins offer is not something this skill can count

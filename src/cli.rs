@@ -1257,14 +1257,6 @@ pub enum PipelineCommand {
     /// without reading a single `.spoolway/pipelines/*.yml` itself.
     List,
 
-    /// Open a fresh agent session, in a pane of this checkout, to write a new
-    /// pipeline.
-    ///
-    /// Nothing is written by this command itself: it opens the pane, starts
-    /// the `[pipeline_gen]` profile, and prompts the `spoolway-config`
-    /// skill to carry the procedure from there.
-    Gen(PipelineGenArgs),
-
     /// Fork one step's key into the patch layer, without touching the
     /// tracked file or committing anything.
     ///
@@ -1283,14 +1275,6 @@ pub struct PipelineOverrideArgs {
     /// `<step>.<key>=<value>`, e.g. `implement.model=claude-opus-5`.
     #[arg(long = "set", value_name = "STEP.KEY=VALUE")]
     pub set: String,
-}
-
-#[derive(Debug, Args)]
-pub struct PipelineGenArgs {
-    /// Where the pipeline is being generated for, named however its producer
-    /// names it — an issue URL, a page path, a ticket. Never parsed.
-    #[arg(long)]
-    pub plan: Option<String>,
 }
 
 /// What spoolway can run, and whether it really can.

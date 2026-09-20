@@ -438,10 +438,6 @@ fn run() -> Result<()> {
                     let read = Pipelines::load(&repo.checkout, &repo.config)?;
                     commands::pipeline_contract(&repo, &read)
                 }
-                Command::Pipeline(PipelineCommand::Gen(args)) => {
-                    let mux = mux::backend(&repo)?;
-                    commands::pipeline_gen(&repo, mux.as_ref(), args)
-                }
                 Command::Pipeline(PipelineCommand::Override(args)) => {
                     commands::pipeline_override(&repo, &args.name, &args.set)
                 }

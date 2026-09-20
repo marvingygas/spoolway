@@ -123,9 +123,13 @@ pub struct Config {
     #[allow(dead_code)]
     #[serde(default, skip_serializing)]
     paths: LegacyPaths,
-    /// What `spoolway pipeline gen` opens, and what it tells the generation
-    /// procedure. See [`PipelineGenConfig`].
-    pub pipeline_gen: PipelineGenConfig,
+    /// Where an old `[pipeline_gen]` table lands so an existing config still
+    /// parses. See [`LegacyPipelineGen`]; `spoolway pipeline gen` is gone, and
+    /// nothing replaces the session it used to open. Dropped unconditionally
+    /// on the next save.
+    #[allow(dead_code)]
+    #[serde(default, skip_serializing)]
+    pipeline_gen: LegacyPipelineGen,
     /// Everything spoolway does for its own upkeep, with no bearing on how a
     /// task runs. See [`HousekeepingConfig`].
     pub housekeeping: HousekeepingConfig,
@@ -234,7 +238,7 @@ impl Default for Config {
             dispatch: DispatchConfig::default(),
             unattended: UnattendedConfig::default(),
             paths: LegacyPaths::default(),
-            pipeline_gen: PipelineGenConfig::default(),
+            pipeline_gen: LegacyPipelineGen::default(),
             housekeeping: HousekeepingConfig::default(),
             update: LegacyUpdate::default(),
             calibrate: LegacyCalibrate::default(),
@@ -307,69 +311,17 @@ pub struct IssueTrackingConfig {
     pub key_in_names: bool,
 }
 
-/// What `spoolway pipeline gen` opens, and what it hands the generation
-/// procedure — everything the `spoolway-config` skill needs that is a
-/// per-project preference rather than a fact the skill decides for itself.
+/// An old `[pipeline_gen]` table: what `spoolway pipeline gen` opened, and
+/// what it handed the generation procedure.
 ///
-/// No `prompt` key here, deliberately: the skill *is* the whole brief for
-/// this session, the same way a prompt is for a lane's — a second file
-/// layered on top would only be one more place the instructions could
-/// disagree with each other.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct PipelineGenConfig {
-    /// A profile from `[agents.*]` — which binary the generation session
-    /// runs as.
-    pub pipeline_agent: String,
-
-    /// The model that session runs. Blank refuses the command outright: a
-    /// generation session with no model named would launch and then have
-    /// nothing to say about what it is.
-    pub pipeline_model: String,
-
-    /// How hard that model thinks, handed straight through the same way a
-    /// step's `effort:` is. Blank means the kind's own default.
-    pub pipeline_effort: String,
-
-    /// Retired: whether the generation procedure asked before writing, or
-    /// took its own recommendation outright. Nothing in spoolway ever
-    /// branched on it — `spoolway-pipeline`'s own procedure decided, having
-    /// only been told the answer in advance. Kept only so an existing config
-    /// still parses; dropped unconditionally on the next save.
-    #[allow(dead_code)]
-    #[serde(default, skip_serializing)]
-    pipeline_auto: bool,
-
-    /// Retired: the loop budget every loop a generated pipeline wrote
-    /// started at. Kept only so an existing config still parses; dropped
-    /// unconditionally on the next save. Its default stays `1` — what the
-    /// live key meant before it retired — rather than `0`, even though
-    /// nothing reads it either way; a changed number with no reader is still
-    /// worth explaining rather than leaving to look like an accident.
-    #[allow(dead_code)]
-    #[serde(default, skip_serializing)]
-    pipeline_loop_default: u32,
-
-    /// Retired: whether local models were involved in what got generated.
-    /// Kept only so an existing config still parses; dropped unconditionally
-    /// on the next save.
-    #[allow(dead_code)]
-    #[serde(default, skip_serializing)]
-    pipeline_local_models: bool,
-}
-
-impl Default for PipelineGenConfig {
-    fn default() -> Self {
-        Self {
-            pipeline_agent: "claude".into(),
-            pipeline_model: String::new(),
-            pipeline_effort: String::new(),
-            pipeline_auto: false,
-            pipeline_loop_default: 1,
-            pipeline_local_models: false,
-        }
-    }
-}
+/// The command is gone — it wrote nothing itself, only opened a pane and
+/// prompted the `spoolway-config` skill, which now sends someone straight to
+/// that skill instead. Deserialised as a free map for the same reason
+/// [`LegacySandbox`] is: an existing config still opens, all six keys
+/// included; nothing here is read, and the table is dropped on the next save.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(transparent)]
+struct LegacyPipelineGen(#[allow(dead_code)] BTreeMap<String, toml::Value>);
 
 /// `[housekeeping]`: everything spoolway does for its own upkeep, with no
 /// bearing on how any task runs.
@@ -2766,6 +2718,32 @@ mod tests {
         assert!(!rendered.contains("format ="));
     }
 
+    /// A whole `[pipeline_gen]` table, all six keys it ever carried — the
+    /// three live ones `spoolway pipeline gen` read plus the three already
+    /// retired inside it — must still parse now that the command and the
+    /// table are both gone, and none of it comes back on the next save.
+    #[test]
+    fn a_pipeline_gen_table_parses_and_drops_on_the_next_save() {
+        let raw = "[pipeline_gen]\n\
+                    pipeline_agent = \"claude\"\n\
+                    pipeline_model = \"claude-opus-5\"\n\
+                    pipeline_effort = \"high\"\n\
+                    pipeline_auto = true\n\
+                    pipeline_loop_default = 3\n\
+                    pipeline_local_models = true\n";
+        let config: Config =
+            toml::from_str(raw).expect("an old [pipeline_gen] table must still parse");
+
+        let rendered = toml::to_string(&config).unwrap();
+        assert!(!rendered.contains("[pipeline_gen"));
+        assert!(!rendered.contains("pipeline_agent"));
+        assert!(!rendered.contains("pipeline_model"));
+        assert!(!rendered.contains("pipeline_effort"));
+        assert!(!rendered.contains("pipeline_auto"));
+        assert!(!rendered.contains("pipeline_loop_default"));
+        assert!(!rendered.contains("pipeline_local_models"));
+    }
+
     /// A profile naming a kind `agent::ADAPTERS` has no row for any more —
     /// because the kind it named was retired, the way a real one once was —
     /// parses as an ordinary but unrecognised kind. It has to survive
@@ -3061,9 +3039,8 @@ mod tests {
     /// parses, and neither comes back on the next save.
     ///
     /// Scoped to the `[agents.claude]` table rather than the whole rendered
-    /// file: `[pipeline_gen]` carries a `model` key of its own now, a
-    /// legitimate one, so a whole-file search for `model =` would flag it
-    /// too.
+    /// file, so a `model =` key legitimate elsewhere in the config would not
+    /// flag it too.
     #[test]
     fn a_profiles_retired_model_and_window_parse_and_drop() {
         let raw = "[agents.claude]\n\

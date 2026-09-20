@@ -1,5 +1,5 @@
-//! `spoolway pipeline show`, `pipeline check`, `pipeline contract`, `pipeline
-//! list` and `pipeline gen`.
+//! `spoolway pipeline show`, `pipeline check`, `pipeline contract` and
+//! `pipeline list`.
 
 use super::*;
 
@@ -890,146 +890,6 @@ fn report_gate_warnings(warnings: &[String]) {
     }
 }
 
-/// Open a fresh agent session, in a pane of this checkout, to write a new
-/// pipeline — never a step of the graph this binary walks itself.
-///
-/// Nothing about a pipeline is written here: the session that opens reads
-/// `spoolway-config`'s own generation procedure and does the rest. This
-/// command's whole job is getting that session started, with the plan in
-/// front of it.
-pub fn pipeline_gen(repo: &Repo, mux: &dyn Mux, args: &PipelineGenArgs) -> Result<()> {
-    let cfg = &repo.config.pipeline_gen;
-
-    if cfg.pipeline_model.trim().is_empty() {
-        bail!(
-            "`pipeline_gen.pipeline_model` is blank — set one with `spoolway config set \
-             pipeline_gen.pipeline_model <model>`"
-        );
-    }
-    let profile = repo.config.agent(&cfg.pipeline_agent).with_context(|| {
-        format!(
-            "`pipeline_gen.pipeline_agent` names `{}` — set it to a profile from `[agents.*]` \
-             with `spoolway config set pipeline_gen.pipeline_agent <profile>`",
-            cfg.pipeline_agent
-        )
-    })?;
-    if repo.config.dispatch.backend == crate::config::Backend::Headless {
-        bail!(
-            "`dispatch.backend` is `headless` — `spoolway pipeline gen` opens a real pane to \
-             work in, so set it to `herdr` with `spoolway config set \
-             dispatch.backend <backend>`"
-        );
-    }
-
-    let plan = args
-        .plan
-        .as_deref()
-        .map(str::trim)
-        .filter(|p| !p.is_empty());
-
-    // A session id of its own, the same shape a lane's is — it is what names
-    // this session's scratch file and, for a kind that mints its own id and
-    // will not take one, its per-session home.
-    let session = crate::usage::new_session_id();
-    let name = format!("pipeline-gen-{}", &session[..8]);
-
-    let system_prompt = pipeline_gen_system_prompt(plan);
-    // Under the project's home rather than the checkout, the same as every
-    // other scratch file a lane leaves behind — `scratch_dir` creates it.
-    let scratch_dir = repo.scratch_dir();
-    let prompt_file = scratch_dir.join(format!("{name}.md"));
-    write_atomic(&prompt_file, &system_prompt)?;
-
-    let state_dir = repo.root.join(crate::config::STATE_DIR);
-    // This session opens directly in `repo.root`, never a worktree of its
-    // own, so its git directory is the main checkout's — resolved through
-    // git rather than assumed, the same as a real lane start.
-    let git_dir = crate::repo::git_dir(&repo.root)?;
-    let values: std::collections::BTreeMap<&str, String> = std::collections::BTreeMap::from([
-        ("model", cfg.pipeline_model.clone()),
-        ("session_id", session.clone()),
-        ("prompt_file", prompt_file.display().to_string()),
-        ("task_file", String::new()),
-        ("worktree", repo.root.display().to_string()),
-        ("repo", repo.root.display().to_string()),
-        ("state_dir", state_dir.display().to_string()),
-        // Same grant a lane gets: a kind confined to what it names has to be
-        // told where this project's runtime state lives — see
-        // `crate::repo::Repo::home`.
-        ("project_home", repo.home().display().to_string()),
-        ("git_dir", git_dir.display().to_string()),
-    ]);
-
-    let mut lane_args = profile.render_args(&values)?;
-    let effort = (!cfg.pipeline_effort.trim().is_empty()).then(|| cfg.pipeline_effort.trim());
-    lane_args.extend(profile.effort_args(effort));
-
-    let workspace = mux.create_pane(&repo.root, &name)?;
-    let launched = mux.start_lane(&crate::mux::LaneSpec {
-        name: &name,
-        label: &name,
-        kind: &profile.kind,
-        pane_id: &workspace.pane_id,
-        args: &lane_args,
-        env: &std::collections::BTreeMap::new(),
-        path_prefix: None,
-    });
-    if let Err(err) = launched {
-        let _ = mux.close_pane(&workspace.pane_id);
-        return Err(err);
-    }
-
-    let prompt = pipeline_gen_opening_prompt(plan);
-    mux.prompt(&name, &prompt)?;
-
-    println!(
-        "agent         {} · {} · effort {}",
-        cfg.pipeline_agent,
-        cfg.pipeline_model,
-        if cfg.pipeline_effort.trim().is_empty() {
-            "(default)"
-        } else {
-            cfg.pipeline_effort.trim()
-        }
-    );
-    if let Some(plan) = plan {
-        println!("plan          {plan}");
-    }
-    println!();
-    println!("opened a pane on this checkout");
-    println!("prompted `spoolway-config`");
-    println!();
-    println!("Nothing is written yet. Answer it in that pane.");
-
-    Ok(())
-}
-
-/// The system prompt written to the project's own `scratch/`, for a kind whose argv
-/// template needs one — see [`crate::agent::Adapter::args`]'s `{prompt_file}`.
-/// There is no prompt for this session: the `spoolway-config` skill is the
-/// whole brief, so this names only the plan and says as much.
-fn pipeline_gen_system_prompt(plan: Option<&str>) -> String {
-    match plan {
-        Some(plan) => format!(
-            "Generating a pipeline for the plan at {plan}.\n\nThe `spoolway-config` skill \
-             carries the whole procedure.\n"
-        ),
-        None => "Generating a pipeline.\n\nThe `spoolway-config` skill carries the whole \
-                  procedure.\n"
-            .to_string(),
-    }
-}
-
-/// The opening line typed into the pane once the session is up.
-fn pipeline_gen_opening_prompt(plan: Option<&str>) -> String {
-    match plan {
-        Some(plan) => format!(
-            "Use the `spoolway-config` skill to generate a pipeline for the plan at {plan}."
-        ),
-        None => "Use the `spoolway-config` skill to generate a pipeline.".to_string(),
-    }
-}
-
 /// `spoolway pipeline override <name> --set <step>.<key>=<value>`.
 ///
 /// Reads the tracked pipeline from `repo.checkout` — the branch actually
@@ -1108,112 +968,17 @@ pub fn pipeline_override(repo: &Repo, name: &str, set: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
-
-    use crate::mux::{Lane, LaneSpec, Mux, Workspace};
-
     use super::*;
 
-    /// A `Mux` that records what `pipeline_gen` asked of it, the same way
-    /// `dispatch.rs`'s own test fake does — the one lane launch, and only it,
-    /// is what a refusal or a success is checked against here.
-    #[derive(Default)]
-    struct FakeMux {
-        panes: RefCell<u32>,
-        lanes: RefCell<Vec<String>>,
-        prompts: RefCell<Vec<(String, String)>>,
-    }
-
-    impl Mux for FakeMux {
-        fn name(&self) -> &'static str {
-            "fake"
-        }
-        fn is_available(&self) -> bool {
-            true
-        }
-        fn unavailable(&self) -> String {
-            String::new()
-        }
-        fn resident_while_waiting(&self) -> bool {
-            true
-        }
-        fn list_lanes(&self) -> Result<Vec<Lane>> {
-            Ok(Vec::new())
-        }
-        fn create_workspace(
-            &self,
-            _cwd: &Path,
-            _branch: &str,
-            _base: &str,
-            _label: &str,
-        ) -> Result<Workspace> {
-            unimplemented!("pipeline_gen never cuts a task worktree")
-        }
-        fn remove_workspace(&self, _id: &str) -> Result<()> {
-            unimplemented!()
-        }
-        fn close_workspace(&self, _id: &str) -> Result<()> {
-            unimplemented!()
-        }
-        fn close_tab(&self, _id: &str) -> Result<()> {
-            unimplemented!()
-        }
-        fn create_pane(&self, cwd: &Path, label: &str) -> Result<Workspace> {
-            *self.panes.borrow_mut() += 1;
-            Ok(Workspace {
-                workspace_id: "w0".into(),
-                pane_id: format!("{label}-pane"),
-                tab_id: Some("w0:t1".into()),
-                checkout_path: cwd.to_path_buf(),
-            })
-        }
-        fn split_pane(&self, _tab_id: &str, _cwd: &Path) -> Result<String> {
-            unimplemented!("pipeline_gen splits no pane of its own")
-        }
-        fn close_pane(&self, _pane_id: &str) -> Result<()> {
-            Ok(())
-        }
-        fn start_lane(&self, spec: &LaneSpec<'_>) -> Result<()> {
-            self.lanes
-                .borrow_mut()
-                .push(format!("{} {}", spec.kind, spec.args.join(" ")));
-            Ok(())
-        }
-        fn prompt(&self, name: &str, text: &str) -> Result<()> {
-            self.prompts
-                .borrow_mut()
-                .push((name.to_string(), text.to_string()));
-            Ok(())
-        }
-        fn read(&self, _name: &str, _lines: usize) -> Result<String> {
-            unimplemented!()
-        }
-        fn interrupt_lane(&self, _name: &str) -> Result<()> {
-            unimplemented!()
-        }
-        fn stop_lane(&self, _name: &str, _pane_id: &str) -> Result<()> {
-            unimplemented!()
-        }
-        fn focus_lane(&self, _name: &str) -> Result<()> {
-            unimplemented!()
-        }
-        fn rename_pane(&self, _pane_id: &str, _label: &str) -> Result<()> {
-            Ok(())
-        }
-    }
-
-    /// A repo whose config carries a usable `[pipeline_gen]` block, in a
-    /// fresh scratch checkout — `pipeline_gen` writes its system prompt under
-    /// the project's own `scratch/`, which has to actually exist to write into.
+    /// A scratch checkout with a repo's config loaded — shared by every
+    /// command test below that needs a real `Repo` to run against.
     fn repo_for(name: &str) -> Repo {
-        let root = crate::scratch::root(&format!("pipeline-gen-{name}"));
+        let root = crate::scratch::root(&format!("pipeline-cmd-{name}"));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         crate::scratch::git_init(&root, &["-b", "main"]);
         init_at(&root);
-        let mut config = Config::default();
-        config.pipeline_gen.pipeline_model = "claude-opus-5".into();
-        config.pipeline_gen.pipeline_effort = "high".into();
+        let config = Config::default();
         // A scratch home beside the checkout, the same as every other
         // command test's — nothing here touches the real `~/.spoolway/`.
         let home = root.join(".home");
@@ -1223,85 +988,6 @@ mod tests {
             config,
             home,
         }
-    }
-
-    #[test]
-    fn pipeline_gen_refuses_a_blank_model() {
-        let mut repo = repo_for("blank-model");
-        repo.config.pipeline_gen.pipeline_model.clear();
-        let mux = FakeMux::default();
-        let err = pipeline_gen(&repo, &mux, &PipelineGenArgs { plan: None }).unwrap_err();
-        assert!(
-            err.to_string().contains("pipeline_gen.pipeline_model"),
-            "{err}"
-        );
-        assert_eq!(*mux.panes.borrow(), 0);
-    }
-
-    #[test]
-    fn pipeline_gen_refuses_an_agent_naming_no_profile() {
-        let mut repo = repo_for("bad-agent");
-        repo.config.pipeline_gen.pipeline_agent = "nosuchprofile".into();
-        let mux = FakeMux::default();
-        let err = pipeline_gen(&repo, &mux, &PipelineGenArgs { plan: None }).unwrap_err();
-        assert!(
-            err.to_string().contains("pipeline_gen.pipeline_agent"),
-            "{err}"
-        );
-        assert_eq!(*mux.panes.borrow(), 0);
-    }
-
-    #[test]
-    fn pipeline_gen_refuses_a_headless_backend() {
-        let mut repo = repo_for("headless");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
-        let mux = FakeMux::default();
-        let err = pipeline_gen(&repo, &mux, &PipelineGenArgs { plan: None }).unwrap_err();
-        assert!(err.to_string().contains("dispatch.backend"), "{err}");
-        assert_eq!(*mux.panes.borrow(), 0);
-    }
-
-    /// The happy path: exactly one pane, one lane, one prompt — and the
-    /// system prompt file the lane's argv points at actually names the plan.
-    #[test]
-    fn pipeline_gen_opens_one_pane_and_prompts_the_skill() {
-        let repo = repo_for("happy");
-        let mux = FakeMux::default();
-        pipeline_gen(
-            &repo,
-            &mux,
-            &PipelineGenArgs {
-                plan: Some(".spoolway/plans/my-plan.html".into()),
-            },
-        )
-        .expect("a valid config should launch cleanly");
-
-        assert_eq!(*mux.panes.borrow(), 1);
-        assert_eq!(mux.lanes.borrow().len(), 1);
-        let launch = &mux.lanes.borrow()[0];
-        assert!(launch.contains("claude-opus-5"), "{launch}");
-        assert!(launch.contains("--effort high"), "{launch}");
-
-        assert_eq!(mux.prompts.borrow().len(), 1);
-        let (_, text) = &mux.prompts.borrow()[0];
-        assert!(text.contains("spoolway-config"), "{text}");
-        assert!(text.contains(".spoolway/plans/my-plan.html"), "{text}");
-
-        // The system prompt file itself, found by scanning the scratch
-        // directory rather than guessing its name — the launch's own argv
-        // proves the two agree.
-        let scratch = repo.scratch_dir();
-        let written = std::fs::read_dir(&scratch)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .find(|e| e.path().extension().is_some_and(|ext| ext == "md"))
-            .expect("pipeline_gen writes a system prompt file under scratch");
-        let contents = std::fs::read_to_string(written.path()).unwrap();
-        assert!(
-            contents.contains(".spoolway/plans/my-plan.html"),
-            "{contents}"
-        );
-        assert!(contents.contains("spoolway-config"), "{contents}");
     }
 
     /// `init` now claims a name under the real `~/.spoolway/`, so every test

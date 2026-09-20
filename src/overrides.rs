@@ -11,8 +11,8 @@
 //!
 //! A patch may only set keys on a pipeline or a step that already exists —
 //! never add or remove one, since list order decides slot priority and a
-//! spliced step is a change to the graph, `spoolway pipeline gen`'s job, not
-//! an override's.
+//! spliced step is a change to the graph, the `spoolway-config` skill's job,
+//! not an override's.
 //!
 //! `spoolway pipeline override`, `prompt override` and `config override`
 //! write into this layer, `spoolway override list` reads it back out, and

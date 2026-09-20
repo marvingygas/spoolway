@@ -436,16 +436,6 @@ queued task's `skip:` list. It refuses an agent step with no `model:`.
 The `spoolway-config` skill writes and edits pipelines with you, starting from the blank that
 `spoolway pipeline contract` prints.
 
-## Generating a pipeline
-
-```
-spoolway pipeline gen [--plan <path>]
-```
-
-Opens an agent session in a pane and runs the `spoolway-config` skill from a plan. See
-[`[pipeline_gen]`](configuration.md#pipeline_gen--generating-a-pipeline) for the profile and
-model it uses. The `spoolway-tasks` skill offers this when no existing pipeline fits.
-
 ## Converting a workflow you already run
 
 | Your workflow has | It becomes |

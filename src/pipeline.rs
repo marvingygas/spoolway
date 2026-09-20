@@ -89,11 +89,12 @@ pub fn key_block() -> &'static str {
 /// The built-in set, parsed. Falls out of [`BUILTIN_PIPELINES`] so there is one
 /// copy of the text and no second definition to keep in step.
 ///
-/// `pub(crate)` rather than private: [`Pipelines::load`] reads this directly
-/// as the on-disk fallback for a project with no `.spoolway/pipelines/` of
-/// its own, and the `#[cfg(test)]` [`Pipelines::builtin`] and
-/// [`Pipelines::shipped`] helpers both build on it too.
-pub(crate) fn builtin_pipelines() -> Result<BTreeMap<String, Pipeline>> {
+/// Test-only: production no longer falls back to the built-ins when a
+/// project has none of its own (see [`Pipelines::load_impl`]), so the only
+/// callers left are the `#[cfg(test)]` [`Pipelines::builtin`] and
+/// [`Pipelines::shipped`] fixtures.
+#[cfg(test)]
+fn builtin_pipelines() -> Result<BTreeMap<String, Pipeline>> {
     BUILTIN_PIPELINES
         .iter()
         .map(|(name, raw)| {
@@ -107,9 +108,11 @@ pub(crate) fn builtin_pipelines() -> Result<BTreeMap<String, Pipeline>> {
 /// Every `<name>.yml` in the pipeline directory, or `None` when the directory
 /// is not there at all.
 ///
-/// An empty directory is `Some(empty)` rather than `None`, so that deleting the
-/// last pipeline is an error about having no pipelines instead of a silent
-/// fallback to the built-in ones.
+/// `Some(empty)` and `None` both reach the same `no pipelines defined` bail in
+/// [`Pipelines::load_impl`] now — there is no fallback left for either to opt
+/// into. The split still matters for one thing: only `None` goes on to check
+/// for the old single-file `pipeline.yml`, so a project carrying one gets that
+/// migration message instead of the generic one.
 fn read_pipeline_dir(dir: &Path) -> Result<Option<Vec<(String, String)>>> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -946,6 +949,12 @@ impl Pipeline {
     /// A `name:` key is refused by `deny_unknown_fields` — the field is
     /// `#[serde(skip)]` — which is the point: two places that could disagree
     /// about what a pipeline is called is one place too many.
+    ///
+    /// Test-only: production parses through [`parse_unchecked`] instead,
+    /// deferring `validate()` to [`Pipelines::assemble`]; the callers left
+    /// here are `builtin_pipelines` and every test that wants a pipeline
+    /// straight from a validated string.
+    #[cfg(test)]
     pub fn parse(name: &str, raw: &str) -> Result<Pipeline> {
         let mut pipeline: Pipeline = serde_norway::from_str(raw).context("parsing pipeline")?;
         pipeline.name = name.to_string();
@@ -1769,13 +1778,12 @@ impl Pipeline {
 
 /// Parse one pipeline file without validating it.
 ///
-/// [`Pipeline::parse`] is what every other caller wants — a file that has to
-/// stand on its own, with nothing still to arrive from outside it. This is
-/// only for [`Pipelines::load`]'s own directory loop, where a file's
-/// `blocked` step may declare an override missing some of its five keys on
-/// purpose, and validating before [`Pipelines::assemble`] has filled the rest
-/// in from config would refuse a step that is about to become a perfectly
-/// good one.
+/// The production parser: [`Pipelines::load`]'s own directory loop calls this,
+/// not [`Pipeline::parse`] (test-only now — see its own doc), because a
+/// file's `blocked` step may declare an override missing some of its five
+/// keys on purpose, and validating before [`Pipelines::assemble`] has filled
+/// the rest in from config would refuse a step that is about to become a
+/// perfectly good one.
 fn parse_unchecked(name: &str, raw: &str) -> Result<Pipeline> {
     let mut pipeline: Pipeline = serde_norway::from_str(raw).context("parsing pipeline")?;
     pipeline.name = name.to_string();
@@ -1913,10 +1921,15 @@ impl Pipelines {
         Pipelines::load_impl(root, config, None)
     }
 
-    /// Two sources, in order: the directory, and the built-in definitions. The
-    /// old single `pipeline.yml` is no longer read — a project still carrying
-    /// one is told what to do with it rather than silently served the
-    /// built-ins beside it.
+    /// One source: the directory. A missing directory and an empty one now
+    /// reach the same `no pipelines defined` error from
+    /// [`Pipelines::validate`] — a project with neither has nothing to run,
+    /// and it hears that where it happens rather than the built-ins standing
+    /// in and the gap surfacing three commands later at dispatch, once a
+    /// step needs a `PROMPT.md` that was never written. The old single
+    /// `pipeline.yml` is still called out on its own, so a project carrying
+    /// one is told what to do with it rather than reading a generic
+    /// "no pipelines defined" for a file that is actually right there.
     ///
     /// `overrides` is applied to each pipeline right after it is parsed and
     /// before [`Pipelines::assemble`] runs — assembling first would
@@ -1929,44 +1942,39 @@ impl Pipelines {
         overrides: Option<&Path>,
     ) -> Result<Pipelines> {
         let dir = Pipelines::dir_in(root);
-        if let Some(files) = read_pipeline_dir(&dir)? {
-            let mut pipelines = BTreeMap::new();
-            for (name, raw) in files {
-                // Unvalidated: a file's own `blocked` step may declare only
-                // some of its five keys on purpose, leaning on
-                // `Pipelines::assemble` to fill the rest in from config
-                // before anything checks that the step is a runnable one.
-                let mut pipeline = parse_unchecked(&name, &raw)
-                    .with_context(|| format!("in {}", Pipelines::file_in(root, &name).display()))?;
-                if let Some(overrides) = overrides {
-                    crate::overrides::apply_pipeline_patch(&mut pipeline, overrides)?;
+        let files = match read_pipeline_dir(&dir)? {
+            Some(files) => files,
+            None => {
+                let old = root.join(crate::config::STATE_DIR).join(PIPELINE_FILE);
+                if old.exists() {
+                    bail!(
+                        "{} is the old single-file shape, which this spoolway no longer \
+                         reads. Split it by hand: one `.spoolway/pipelines/<name>.yml` per \
+                         `pipelines:` entry (the file name is the pipeline name, so drop the \
+                         map key and the old `default:` — every task now names its own \
+                         pipeline instead), then delete the old file. `spoolway pipeline \
+                         contract` prints the annotated blank for reference.",
+                        old.display()
+                    );
                 }
-                pipelines.insert(name, pipeline);
+                Vec::new()
             }
-            return Pipelines::assemble(pipelines, config)
-                .with_context(|| format!("in {}", dir.display()));
-        }
+        };
 
-        let old = root.join(crate::config::STATE_DIR).join(PIPELINE_FILE);
-        if old.exists() {
-            bail!(
-                "{} is the old single-file shape, which this spoolway no longer reads. \
-                 Split it by hand: one `.spoolway/pipelines/<name>.yml` per `pipelines:` entry \
-                 (the file name is the pipeline name, so drop the map key and the old \
-                 `default:` — every task now names its own pipeline instead), then delete \
-                 the old file. `spoolway pipeline contract` prints the annotated \
-                 blank for reference.",
-                old.display()
-            );
-        }
-
-        let mut pipelines = builtin_pipelines()?;
-        if let Some(overrides) = overrides {
-            for pipeline in pipelines.values_mut() {
-                crate::overrides::apply_pipeline_patch(pipeline, overrides)?;
+        let mut pipelines = BTreeMap::new();
+        for (name, raw) in files {
+            // Unvalidated: a file's own `blocked` step may declare only
+            // some of its five keys on purpose, leaning on
+            // `Pipelines::assemble` to fill the rest in from config
+            // before anything checks that the step is a runnable one.
+            let mut pipeline = parse_unchecked(&name, &raw)
+                .with_context(|| format!("in {}", Pipelines::file_in(root, &name).display()))?;
+            if let Some(overrides) = overrides {
+                crate::overrides::apply_pipeline_patch(&mut pipeline, overrides)?;
             }
+            pipelines.insert(name, pipeline);
         }
-        Pipelines::assemble(pipelines, config)
+        Pipelines::assemble(pipelines, config).with_context(|| format!("in {}", dir.display()))
     }
 
     /// Put a parsed set together with the one setting that is not
@@ -2023,8 +2031,9 @@ impl Pipelines {
         Ok(set)
     }
 
-    /// The built-in definitions, already parsed. Production code loads from
-    /// disk and falls back to the same files; this is the test fixture.
+    /// The built-in definitions, already parsed — a test fixture standing in
+    /// for a project's own `.spoolway/pipelines/`, which production always
+    /// loads from disk with no fallback of its own.
     #[cfg(test)]
     pub fn builtin() -> Pipelines {
         let mut pipelines = Pipelines::assemble(
