@@ -196,7 +196,7 @@ pins every frame:
 Run the **debug** binary, not `spoolway`. The one on `PATH` is the last build somebody
 installed, so it will happily show you the old layout and tell you nothing.
 
-### 7. Push
+### 7. Push, then prove `main` is green
 
 ```
 git push origin main
@@ -206,6 +206,39 @@ gh pr list --state open
 The second line is the check, not a formality. Every pull request whose head landed should now
 be gone from the open list, the stacked one included. Anything still open did not actually
 merge — find out why before moving on.
+
+Then run `main`'s own gate against what you just pushed. **The push starts nothing.** `ci.yml`
+triggers on `pull_request`, `schedule` and `workflow_dispatch` — there is no `push:` entry — so
+a merge pushed to `main` is a merge no workflow has looked at, and nothing will look at it
+until the 03:17 UTC schedule the next morning. Dispatch it yourself:
+
+```
+git rev-parse HEAD                                  # the sha the run has to be for
+gh workflow run ci.yml --ref main                   # the tier input defaults to nightly
+gh run list --workflow=ci.yml --branch main --event workflow_dispatch \
+  --limit 5 --json databaseId,headSha,createdAt     # find the run for that sha
+gh run watch <id> --exit-status
+```
+
+Match the run to the sha before watching it. `gh workflow run` prints no run id, and the newest
+dispatch against `main` can easily be a stale one or somebody else's — watching the wrong run is
+how a pass reports green for a tree nothing tested.
+
+**The pull requests' own checks do not answer this.** They ran the `pr` tier, and
+`dress-rehearsal` excludes itself from pull requests by its own `if:`. `main` gets the `nightly`
+tier and the rehearsal on top of it, so main's gate is a strictly larger suite than anything
+that ran on the branches — and step 6's local `cargo test` is smaller still. A column of green
+pull requests is no evidence at all about the run you have just dispatched.
+
+**A red run here is this pass's, on the same terms as a red tip.** Open the failing job, find
+what is actually wrong, fix it on `main`, push, and dispatch again until it is green. What not
+to do is stop at the push and call the pile empty: the merges are the reason anybody is looking
+at `main` today, and a red left here sits until the next morning's schedule, where it surfaces
+as a mysterious nightly failure rather than as the thing this pass walked past.
+
+A failure need not be the merges' doing to be this pass's to fix. `dress-rehearsal` tests a
+*release*, not a branch, and it goes red for things no pull request ever touched — see the
+fixture entry under *What has bitten before*.
 
 ### 8. Anything still in flight
 
@@ -224,7 +257,7 @@ is somebody's next decision, and it would hand this pass a moving pile it can ne
 
 ### 9. Install the build
 
-Only once the queue is empty and no dispatcher is running:
+Only once `main` is green (step 7), the queue is empty and no dispatcher is running:
 
 ```
 cargo build --release
@@ -365,8 +398,23 @@ Say which pull requests you left open, and whether it was because the fix would 
 behaviour or because the failure was the task's premise, so nobody has to work out from the
 open list whether they were missed or refused.
 
+Then say what `main`'s own dispatched run did, by run id, and name anything you fixed to get it
+there. That run is the only statement anybody has that the merged tree is good; a report that
+ends at the push is claiming something it never checked.
+
 ## What has bitten before
 
+- **The pass ended at the push, and `main` stayed red.** `ci.yml` carries no `push:` trigger,
+  so the merges landed and nothing ran against them; the next thing to look at `main` was the
+  03:17 schedule, which had already been failing for two days. What it was failing on was
+  `dress-rehearsal`, and no merged pull request had anything to do with it: v0.4.0 was tagged and
+  published, `Cargo.toml` moved past it, and `scripts/e2e/fixtures/0.4.0/` — the closing step of
+  `docs/releasing.md` — was never scaffolded, so `scripts/e2e/suites/upgrade.sh` began asking for
+  it exactly as it is designed to. Two lessons, and the second is the one that generalises. A
+  merge pass owes `main` a green run of main's own gate, dispatched rather than assumed. And the
+  red it finds there will often have nothing to do with the pull requests it merged, because
+  main's gate covers a release rehearsal, a nightly tier and a set of advisories that no branch
+  ever runs — so "none of my merges caused this" is not a reason to leave it.
 - **The stacked pull request looks conflict-free and is not.** A stacked branch reports
   `CLEAN` against its own base while its tip conflicts badly with `main`. `mergeStateStatus`
   answers a question about `baseRefName`, so on a stack it is answering the wrong one.
