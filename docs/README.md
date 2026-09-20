@@ -46,6 +46,7 @@ Each page covers one part of the system. The order below is the order most peopl
 | [CLI reference](cli-reference.md) | Every command, subcommand and flag |
 | [Testing](testing.md) | The test suites and how to run them |
 | [Releasing spoolway](releasing.md) | The release pipeline and the commands it runs |
+| [The herdr plugin](herdr-plugin.md) | Installing spoolway as a herdr plugin, and the rehearsal before listing |
 
 ## How it works
 

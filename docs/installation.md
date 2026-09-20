@@ -51,6 +51,10 @@ no matching triple, no release matches the manifest's version, or the checksum f
 the script falls back to `cargo build --release` and copies the result into place instead of
 failing the install.
 
+See [The herdr plugin](herdr-plugin.md) for the manifest's panes and actions, what
+`spoolway herdr bind`/`unbind` write, and the rehearsal run before the repository is listed
+in herdr's marketplace.
+
 `herdr-plugin.toml`'s `version` is kept equal to `Cargo.toml`'s by hand; CI fails the build when
 the two disagree. See [Testing](testing.md).
 
