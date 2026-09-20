@@ -230,6 +230,21 @@ pub fn report(
         &destination,
         pause_note.as_deref().or(args.message.as_deref()),
     );
+    // The line `set_stage` just wrote is spoolway's own arrival note, credited
+    // to no step, the same as every other arrival. A gate is the one road
+    // where that note replaces the lane's own `-m` rather than carrying it —
+    // and the lane's account of its own pass is real work, so it is not
+    // thrown away: it lands as a second line here, credited to `current`,
+    // the step it reported from.
+    if pause_note.is_some()
+        && let Some(message) = args.message.as_deref()
+        && !message.trim().is_empty()
+    {
+        task.log_status(&format!(
+            "`{current}`: {}",
+            message.trim().replace('\n', " ")
+        ));
+    }
     task.save()?;
 
     // Printed only now the task file is on disk: a note about a commit that
@@ -295,8 +310,9 @@ pub struct Routed {
     /// `gate_at` — is what parked this at `paused` rather than the ordinary
     /// graph. See [`gate_hold`].
     pub gated: bool,
-    /// The status-log wording a gate wants in place of the lane's own `-m`
-    /// message, if one caught this report.
+    /// The status-log wording a gate wants for the arrival line, in place of
+    /// the lane's own `-m` message there, if one caught this report — the
+    /// lane's own message still lands as a second line; see [`report`].
     pub pause_note: Option<String>,
     /// The step this run resumed itself onto, when nobody was staffing
     /// `blocked` to park in front of. `None` on every other road out.
@@ -473,14 +489,13 @@ pub fn route(
     // `past_the_gate`.
     let hold = gate_hold(task, step, outcome, &destination);
     let gated = hold.is_some();
-    // What the status log says about this arrival, in place of the lane's own
-    // `-m` message — the Mockup draws the gate note alone, and this is that
-    // wording change. The lane's own account of the pass genuinely does not
-    // reach this log line any more: a lane leaving something for the person
-    // who answers the gate to read has `--handoff` for it, credited to
-    // `current` in `## Handoff` above, same as any other step — the `-m`
-    // message itself is not copied there automatically, so a lane that wants
-    // both has to say so with `--handoff` too.
+    // What the status log's arrival line says, in place of the lane's own
+    // `-m` message — the Mockup draws this note on the arrival, not the
+    // lane's own account of its pass, which `report` writes back in as a
+    // second line credited to `current` once `set_stage` has banked this
+    // one. A lane leaving something for the person who answers the gate to
+    // read still has `--handoff` for it too, credited to `current` in
+    // `## Handoff` above, same as any other step.
     let mut pause_note = None;
     if let Some(kind) = hold {
         task.front.paused_at = Some(current.to_string());
@@ -3455,6 +3470,58 @@ mod tests {
         assert_eq!(task.stage(), "announce", "resume takes the `on_pass` route");
         assert_eq!(task.front.paused_at, None);
         assert_eq!(task.front.paused_by, None, "cleared alongside paused_at");
+    }
+
+    /// A gated pass writes two status-log lines, not one: spoolway's own
+    /// arrival note, credited to no step, and the lane's own `-m` right
+    /// under it, credited to the step it reported from — the Mockup's own
+    /// shape. `set_stage`'s arrival line used to be the only one, and the
+    /// lane's account of its own pass was thrown away entirely.
+    #[test]
+    fn a_gated_pass_writes_the_arrival_note_and_the_lanes_own_message() {
+        clear_lane_env();
+        let repo = fixture("gate-hands-over-status-log");
+        let pipelines = gate_pipelines();
+        add(&repo, "ship", &[]);
+        let mut task = queued(&repo, "ship");
+        task.set_stage("deploy", None);
+        task.save().unwrap();
+
+        report(
+            &repo,
+            &pipelines,
+            &ReportArgs {
+                task: Some("ship".into()),
+                stage: None,
+                pass: true,
+                fail: false,
+                block: false,
+                pause: false,
+                message: Some("Rendering matches the mockup exactly.".into()),
+                handoff: vec![],
+            },
+            Some("deploy"),
+        )
+        .unwrap();
+
+        let task = queued(&repo, "ship");
+        let log = task.section("## Status Log").unwrap_or_default();
+        let arrival = log
+            .lines()
+            .find(|line| line.contains("held by this step's own gate"))
+            .unwrap_or_else(|| panic!("no gate arrival line: {log}"));
+        assert!(
+            arrival.contains("→ `paused`"),
+            "the arrival line is spoolway's own: {log}"
+        );
+        let own_message = log
+            .lines()
+            .find(|line| line.contains("Rendering matches the mockup exactly."))
+            .unwrap_or_else(|| panic!("the lane's own message never reached the log: {log}"));
+        assert!(
+            own_message.contains("`deploy`:") && !own_message.contains('→'),
+            "credited to the step it reported from, with no arrow — it is not a transition: {log}"
+        );
     }
 
     /// `caught_at` — read by `resume` and the board alike — must still tell a

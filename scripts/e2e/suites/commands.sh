@@ -605,6 +605,45 @@ lacks "with no mention of the bundled sample it dropped" "bugfix" "$PICHECK_OUT"
 says "prompt contract prints the shape-to-write section" \
   "THE SHAPE TO WRITE" "$SPOOLWAY" prompt contract --pipeline default
 
+# A gated step's report contract carries no "not available to you" block at
+# all: `--stage` is refused by `spoolway report` itself off every step but
+# `blocked`, and `compose::report_contract` no longer names it under refusal
+# wording to say so a second time — see `src/compose.rs`. `check`'s `on_fail`
+# has to land somewhere other than `blocked` — a `retry` step to send it to —
+# or its fail and block destinations collide and `--fail` stays withheld,
+# same as any other step whose two outcomes go the same way; only with a
+# distinct fail route does the block disappear entirely rather than shrink to
+# one line, which is the Mockup's own "gated step's whole contract" case.
+# Written relative to the suite's cwd, its checkout root — `Pipelines::
+# dir_in` reads `.spoolway/pipelines/` under there, never under
+# `$SPOOLWAY_PROJECT_HOME` — the same place `restart.sh` and `warmth.sh`
+# already write their own throwaway pipelines. `builder` is the harness's
+# own prompt, written by `own_prompts`: no suite names a shipped one, so
+# rewording `assets/prompts/` never reaches this check.
+cat > .spoolway/pipelines/gate-check.yml <<'YML'
+steps:
+  - id: check
+    agent: pi
+    prompt: builder
+    model: fake-local
+    gate: true
+    on_pass: done
+    on_fail: retry
+
+  - id: retry
+    agent: pi
+    prompt: builder
+    model: fake-local
+    on_pass: done
+YML
+silent_about "a gated step's contract carries no withheld block" \
+  "not available to you" \
+  "$SPOOLWAY" prompt contract --pipeline gate-check --step check
+says "and still holds the pass for the person who opens the pane" \
+  "A pass is held here for a person, who opens this pane." \
+  "$SPOOLWAY" prompt contract --pipeline gate-check --step check
+rm -f .spoolway/pipelines/gate-check.yml
+
 # ------------------------------------------------------------- the queue screen
 # The one thing no unit test can reach: `spoolway queue` reading real keystrokes
 # off a pipe, submitting a real group, and clearing that group's documents off

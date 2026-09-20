@@ -15513,10 +15513,9 @@ mod tests {
     /// policy, and names `--handoff` — `--finding` is gone entirely. The
     /// builtin `default` pipeline's `implement` declares no `on_fail` of its
     /// own, so `--fail` lands on `blocked` exactly where `--block` does and
-    /// the contract withholds it, alongside `--stage` (which only ever
-    /// means anything on a `--pass` from `blocked` itself) — the system
-    /// prompt's true final line is therefore the second of those two
-    /// refusals, not `--handoff`.
+    /// the contract withholds it — the one form left to withhold now that
+    /// `--stage` is never named off a step but `blocked` — so the system
+    /// prompt's true final line is that refusal, not `--handoff`.
     #[test]
     fn the_system_prompt_ends_with_the_report_contract() {
         let repo = fixture("prompt-contract");
@@ -15528,9 +15527,7 @@ mod tests {
         let prompt =
             crate::compose::system_prompt(&repo, &task, pipeline, step, "[prompt]").unwrap();
         assert!(
-            prompt
-                .trim_end()
-                .ends_with("spoolway report --pass --stage <step>"),
+            prompt.trim_end().ends_with("spoolway report --fail"),
             "got: {prompt}"
         );
         assert!(
@@ -15697,10 +15694,10 @@ mod tests {
     /// A step whose fail and block routes actually differ — `default`'s
     /// `review`, `on_fail: implement`, `on_pass: document` — offers `--fail`
     /// as a real form and refuses no *outcome* flag: withholding one of
-    /// those is a per-step decision, not a blanket ban. `--stage` is still
-    /// named under the refusal wording here, the same as on every step but
-    /// `blocked` itself — it only ever means anything alongside a `--pass`
-    /// from there.
+    /// those is a per-step decision, not a blanket ban. With `--stage`
+    /// never named off a step but `blocked` any more, this step has nothing
+    /// left to withhold, so its contract carries no "not available to you"
+    /// block at all.
     #[test]
     fn a_step_whose_fail_and_block_routes_differ_offers_fail_with_no_refusal() {
         let repo = fixture("prompt-contract-fail-offered");
@@ -15718,13 +15715,8 @@ mod tests {
             crate::compose::system_prompt(&repo, &task, pipeline, step, "[prompt]").unwrap();
         assert!(prompt.contains("--fail  -m"), "got: {prompt}");
         assert!(
-            !prompt.contains("spoolway report --fail\n")
-                && !prompt.contains("spoolway report --block\n"),
-            "neither outcome flag should be refused here: got: {prompt}"
-        );
-        assert!(
-            prompt.contains("spoolway report --pass --stage <step>"),
-            "`--stage` is still refused by name off `blocked`: got: {prompt}"
+            !prompt.contains("not available to you"),
+            "nothing is left to withhold here: got: {prompt}"
         );
     }
 
