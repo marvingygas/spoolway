@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# `spoolway herdr bind`/`unbind` against a real `~/.config/herdr/config.toml`
-# — no project, no repo: both commands are a fact about this machine's herdr
-# install, not about any checkout, so this suite needs neither `new_repo` nor
-# a forge.
+# `spoolway herdr bind`/`unbind` against a real `~/.config/herdr/config.toml`.
+# Both commands are a fact about this machine's herdr install, not about any
+# checkout, so the suite stands in an unrelated git repository on purpose and
+# proves they leave its identity alone. It needs neither `new_repo` nor a forge.
 #
 # `herdr server reload-config` is the one real dependency this cannot drive
 # for real — there is no server here to reload, the same reason
@@ -24,6 +24,11 @@ LIVE=${WORK:-$(mktemp -d)}
 # suite — this one just never calls it, since there is no checkout to seed.
 export HOME="$LIVE/home"
 mkdir -p "$HOME/.config/herdr"
+
+UNRELATED="$LIVE/unrelated"
+mkdir -p "$UNRELATED"
+git -C "$UNRELATED" init -q
+cd "$UNRELATED" || exit 2
 
 HERDRBIN="$LIVE/herdrbin"
 mkdir -p "$HERDRBIN"
@@ -127,5 +132,11 @@ works "unbind runs with a hand-written block sitting right after bind's own" \
 cat "$LIVE/seed.toml" "$HANDWRITTEN" > "$LIVE/expected-with-handwritten-block.toml"
 works "the hand-written block, and the blank line before it, are untouched" \
   diff -u "$LIVE/expected-with-handwritten-block.toml" "$CONFIG"
+
+if [ -e "$UNRELATED/.git/spoolway-id" ] || [ -e "$UNRELATED/.git/spoolway-label" ]; then
+  bad "herdr commands do not claim the git checkout they are run from"
+else
+  ok "herdr commands do not claim the git checkout they are run from"
+fi
 
 finish

@@ -565,7 +565,16 @@ fn notify(cli: &Cli, cwd: &std::path::Path) {
     // installing as it installs it, and a line telling somebody to run what
     // they are already running is noise — twice over, since the process an
     // upgrade re-execs would print it again on the way through.
-    if matches!(cli.command, Command::Update(_) | Command::WhatsNew(_)) {
+    //
+    // `herdr` is machine-wide too. Its command arms deliberately run before a
+    // project is looked for, so the best-effort config read below must not do
+    // that lookup first: discovery binds an otherwise-unclaimed checkout,
+    // making a keybinding edit silently stamp whichever git repository the
+    // caller happened to be standing in.
+    if matches!(
+        cli.command,
+        Command::Update(_) | Command::WhatsNew(_) | Command::Herdr(_)
+    ) {
         return;
     }
 
