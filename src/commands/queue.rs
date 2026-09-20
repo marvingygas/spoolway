@@ -91,7 +91,7 @@ struct QueueRowJson {
     state: &'static str,
     /// How many times this task has arrived at the step it is on. Mirrors
     /// `Row::arrivals`, which the board draws inline on the STEP column as
-    /// `↻<n>` from the second arrival on.
+    /// `↻ <n>` from the second arrival on.
     arrivals: u32,
     next: String,
     resumable: bool,

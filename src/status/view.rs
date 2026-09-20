@@ -778,11 +778,11 @@ fn task_label(row: &Row) -> String {
 const ARRIVAL_FLOOR: u32 = 2;
 
 /// The STEP column's counter suffix, on its own — `None` below
-/// [`ARRIVAL_FLOOR`]. The one place the threshold and the ` ↻<n>` spelling
+/// [`ARRIVAL_FLOOR`]. The one place the threshold and the ` ↻ <n>` spelling
 /// are written, so `step_text` and `table`'s painted branch can never drift
 /// onto different text for the same row.
 fn arrival_suffix(arrivals: u32) -> Option<String> {
-    (arrivals >= ARRIVAL_FLOOR).then(|| format!(" ↻{arrivals}"))
+    (arrivals >= ARRIVAL_FLOOR).then(|| format!(" ↻ {arrivals}"))
 }
 
 /// The STEP column's plain text, counter included where there is one — the
@@ -829,7 +829,7 @@ pub(super) fn table(
     // every board, since a project's pipeline names are usually shorter than
     // the header naming them.
     let pipeline_w = width(&|r| r.pipeline.chars().count(), 8);
-    // Two widths: the bare step id, and the id with its `↻<n>` counter where
+    // Two widths: the bare step id, and the id with its `↻ <n>` counter where
     // a row has one. `show_loop`, below, decides which the column actually
     // draws at any given pane width — narrow enough and the counter goes,
     // same as any other shed column, and STEP returns to `step_w_bare`.
@@ -1213,7 +1213,7 @@ pub(super) fn table(
             false,
         );
         // The counter draws `DIM` in every case — the step id itself is
-        // never dimmed, only the `↻<n>` beside it is, and nothing about the
+        // never dimmed, only the `↻ <n>` beside it is, and nothing about the
         // count is coloured since it reads against no ceiling. Gone whole
         // once `show_loop` has shed, so the column reads exactly as it did
         // before the counter existed. A `Done` row skips this and takes the
@@ -2109,15 +2109,15 @@ mod tests {
         let totals = BTreeMap::new();
         let painted = table(&rows, Style::board(200), &totals, None);
 
-        // Two arrivals: the `↻2` is wrapped in its own dim, apart from the
+        // Two arrivals: the `↻ 2` is wrapped in its own dim, apart from the
         // step id beside it.
         assert!(
-            painted.contains(&format!("review{DIM} ↻2{RESET}")),
+            painted.contains(&format!("review{DIM} ↻ 2{RESET}")),
             "{painted}"
         );
         // Any higher count: still dim, not full weight.
         assert!(
-            painted.contains(&format!("documenting-a-longer-name{DIM} ↻4{RESET}")),
+            painted.contains(&format!("documenting-a-longer-name{DIM} ↻ 4{RESET}")),
             "{painted}"
         );
         // One arrival: no suffix at all, bare step id.
@@ -2156,7 +2156,7 @@ mod tests {
             ..row("spinner")
         };
         let plain = plain_table(&[spinner]);
-        assert!(plain.contains("review ↻2"), "{plain}");
+        assert!(plain.contains("review ↻ 2"), "{plain}");
         assert!(!plain.contains('\x1b'), "{plain}");
     }
 
@@ -2181,7 +2181,7 @@ mod tests {
         let totals = BTreeMap::new();
 
         let wide = strip(&table(&rows, Style::board(200), &totals, None));
-        assert!(wide.contains("review ↻2"), "{wide}");
+        assert!(wide.contains("review ↻ 2"), "{wide}");
 
         // Shrink the pane one column at a time from a width nothing has to
         // give at, and stop at the first width where the counter is gone.
@@ -2191,7 +2191,7 @@ mod tests {
         // reliable way to find it, rather than guessing a pane width by hand.
         let mut pane = 200;
         let mut narrow = wide.clone();
-        while narrow.contains("↻2") {
+        while narrow.contains("↻ 2") {
             pane -= 1;
             narrow = strip(&table(&rows, Style::board(pane), &totals, None));
         }
