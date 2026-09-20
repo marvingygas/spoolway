@@ -117,6 +117,26 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         return Ok(EXIT_ALREADY_RUNNING);
     }
 
+    // Board::new() is what takes the terminal — hidden cursor, raw enough
+    // mode — and it is built here, ahead of every check below, rather than
+    // once the loop starts: nothing used to be drawn until the loop's first
+    // frame, so every check before it was dead screen time. Building it
+    // early is what gives the checklist below somewhere to write, and what
+    // makes its guard the one the three gates further down reuse instead of
+    // nesting a second one of their own — see `own_term`, below.
+    //
+    // Not for `--plain`, which keeps its own one-line-per-pass log and gains
+    // none of this: no board, no terminal taken, no checklist printed.
+    let mut board = match args.plain {
+        true => None,
+        false => Some(crate::status::Board::new()),
+    };
+    let mut out = std::io::stdout();
+    let checklist = board.is_some();
+    if checklist {
+        print_checklist_header(&mut out)?;
+    }
+
     // Whether the run has already said, this spell of empty queue, that a job
     // is keeping it resident. Reset every time the queue is not empty, so the
     // next drain says it again.
@@ -131,7 +151,19 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // Not counted: a repo with nothing to do is not a storm, and restarting
     // into an empty queue forever is a caller's own choice to make, not
     // something this guard has any business refusing.
-    let live_tasks = repo.tasks()?;
+    let live_tasks = checklist_row(
+        &mut out,
+        checklist,
+        "queue read",
+        "reading the queue",
+        || repo.tasks(),
+    )?;
+    checklist_done(
+        &mut out,
+        checklist,
+        "queue read",
+        &plural(live_tasks.len(), "task"),
+    )?;
     if live_tasks.is_empty() {
         if crate::jobs::enabled_count(repo) == 0 {
             println!("nothing is queued, so there is nothing to dispatch.");
@@ -149,7 +181,19 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // Refused here, ahead of the lock, for the same reason as the three
     // checks below: found and fixed by a person reading this line, not
     // discovered mid-run and left for someone to stop by hand.
-    check_task_routes(pipelines, &live_tasks)?;
+    checklist_row(
+        &mut out,
+        checklist,
+        "task routes",
+        "checking routes",
+        || check_task_routes(pipelines, &live_tasks),
+    )?;
+    checklist_done(
+        &mut out,
+        checklist,
+        "task routes",
+        &task_route_names(&live_tasks),
+    )?;
 
     // A start that gets this far can actually run. Whatever the guard above
     // was counting, it was counting starts that could not — this is not one
@@ -157,9 +201,17 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     crate::lock::Restarts::clear(&repo.restarts_file())?;
 
     let mux = crate::mux::backend(repo)?;
-    if !mux.is_available() {
-        bail!("{}", mux.unavailable());
-    }
+    checklist_row(
+        &mut out,
+        checklist,
+        "backend available",
+        &format!("starting {}", mux.name()),
+        || match mux.is_available() {
+            true => Ok(()),
+            false => bail!("{}", mux.unavailable()),
+        },
+    )?;
+    checklist_done(&mut out, checklist, "backend available", mux.name())?;
 
     // The three things that certainly break a run, refused here rather than
     // left for a lane to discover mid-turn: no git identity where something
@@ -171,9 +223,30 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // has to be found and stopped by hand. `doctor` reports the same three
     // as rows, off the same functions, so the fix here and the fix there
     // never drift apart.
-    refuse(check_git_identity(repo, pipelines, &repo.config)).context("refusing to start")?;
-    refuse(check_index_lock(repo)).context("refusing to start")?;
-    refuse(check_backend_checkout(repo, mux.as_ref())).context("refusing to start")?;
+    checklist_row(
+        &mut out,
+        checklist,
+        "git identity",
+        "checking git identity",
+        || refuse(check_git_identity(repo, pipelines, &repo.config)).context("refusing to start"),
+    )?;
+    checklist_done(&mut out, checklist, "git identity", "")?;
+    checklist_row(
+        &mut out,
+        checklist,
+        "index lock",
+        "checking the index lock",
+        || refuse(check_index_lock(repo)).context("refusing to start"),
+    )?;
+    checklist_done(&mut out, checklist, "index lock", "")?;
+    checklist_row(
+        &mut out,
+        checklist,
+        "backend checkout",
+        "checking the checkout",
+        || refuse(check_backend_checkout(repo, mux.as_ref())).context("refusing to start"),
+    )?;
+    checklist_done(&mut out, checklist, "backend checkout", "")?;
 
     // There is one way to start a run and it is visible: refused here, in the
     // same early group as the three checks above, so a run begun in a
@@ -196,15 +269,27 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // nesting a second one — see `commands::queue::confirm_start`, which
     // builds its own copy of `unattended_lines` rather than reading this
     // one, since it never runs this block at all.
+    //
+    // `own_term` is false whenever a board is up: its own guard, taken above
+    // when the board was built, already has the cursor hidden and the tty
+    // deaf, and a gate constructing a second one of its own here would be a
+    // nested `TermGuard` — one whose `Drop`, firing the moment a gate
+    // returns, shows the cursor and restores cooked mode while the board's
+    // own guard is still held underneath it (`gate.rs` takes exactly this
+    // shape for the one blocking read it owns, and drops it deliberately —
+    // right there because nothing else is still holding the terminal when it
+    // does). `--plain` has no board to reuse, so its own gates still take
+    // their own guard, exactly as before this task.
+    let own_term = board.is_none();
     if !args.confirmed {
-        if !overview_gate(repo)? {
+        if !overview_gate(repo, own_term)? {
             return Ok(0);
         }
-        if !overrides_gate(repo)? {
+        if !overrides_gate(repo, own_term)? {
             return Ok(0);
         }
         let unattended_lines = unattended_block_lines(unattended, &repo.config);
-        if !warnings_gate(repo, pipelines, &unattended_lines)? {
+        if !warnings_gate(repo, pipelines, &unattended_lines, own_term)? {
             return Ok(0);
         }
     }
@@ -239,19 +324,35 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // A failure here is held for `workspace_open_notice`, just below, rather
     // than printed on the spot — this is the one notice `warnings_gate`,
     // above, could not carry: this is only attempted once the lock is held,
-    // past the point `esc` could still mean "nothing happened yet".
+    // past the point `esc` could still mean "nothing happened yet". Its own
+    // pending row is printed and cleared here rather than through
+    // `checklist_row`, because its error must not abort the run the way
+    // every other row's does — it is reported through `workspace_open_notice`
+    // and stepped over instead.
+    checklist_pending(&mut out, checklist, "workspace", "opening the workspace")?;
     let mut workspace_open_error = None;
-    if let Err(err) = mux.dispatch_workspace(&repo.root, true) {
-        workspace_open_error = Some(format!("could not open this run's own workspace: {err:#}"));
+    let mut workspace_id = None;
+    match mux.dispatch_workspace(&repo.root, true) {
+        Ok(id) => workspace_id = id,
+        Err(err) => {
+            workspace_open_error = Some(format!("could not open this run's own workspace: {err:#}"))
+        }
     }
+    checklist_clear(&mut out, checklist)?;
 
     // The one notice `warnings_gate` ran too early to carry — see just
     // above. Held on screen the same way, but with only `[enter]` to
     // dismiss it: by now the lock is held, so there is no earlier screen
     // left for `esc` to mean "back to" — see `workspace_open_notice`'s own
     // doc.
-    if let Some(err) = &workspace_open_error {
-        workspace_open_notice(err)?;
+    match &workspace_open_error {
+        Some(err) => workspace_open_notice(err, own_term)?,
+        None => checklist_done(
+            &mut out,
+            checklist,
+            "workspace",
+            workspace_id.as_deref().unwrap_or("—"),
+        )?,
     }
 
     // The run watches itself. A resident dispatcher spends almost all of its
@@ -266,12 +367,6 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // than left to kill the process where it stands — see
     // `crate::dispatch::Dispatcher::sweep_on_stop`.
     crate::platform::stop::catch_interrupt();
-
-    let mut board = match args.plain {
-        true => None,
-        false => Some(crate::status::Board::new()),
-    };
-    let mut out = std::io::stdout();
 
     // Consecutive passes that skipped the wait because the one before it
     // moved a task — see the check ahead of the wait, below. Reset the
@@ -589,6 +684,144 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     }
 }
 
+/// The checklist's own opening lines — the banner and the "starting"
+/// heading — pulled into its own function so [`dispatch`] and the 200ms
+/// acceptance test below (`the_first_checklist_write_lands_within_200ms`)
+/// run the exact same code, rather than the test re-typing a copy of it that
+/// could drift from the real first-write path and stop proving anything.
+fn print_checklist_header(out: &mut impl std::io::Write) -> Result<()> {
+    write!(out, "{}", crate::status::banner("dispatch"))?;
+    writeln!(out)?;
+    writeln!(out, "  starting")?;
+    Ok(())
+}
+
+/// The "starting" checklist's label column, sized to its own longest label
+/// (`backend available`) rather than borrowed from an unrelated table such
+/// as [`overview_cell`]'s — that one pads a queue row, not a check.
+const CHECKLIST_LABEL_W: usize = 22;
+
+fn checklist_label(label: &str) -> String {
+    format!("{label:<CHECKLIST_LABEL_W$}")
+}
+
+/// The still-running mark — the mockup's own "the pending one is an
+/// ellipsis", spelled out here as the real glyph rather than the two dots
+/// the mockup falls back to only so its own doc stays readable in a plain
+/// terminal (`fit` in `src/gate.rs` already uses this same character for the
+/// same reason: an ellipsis, not three periods).
+const CHECKLIST_PENDING: char = '…';
+
+/// The done mark — the mockup's own "the `OK` column is a check mark", the
+/// same glyph `status::view`'s own `Verdict::Pass` already draws for "this
+/// passed" rather than a second one invented for this checklist alone.
+const CHECKLIST_DONE: char = '✓';
+
+/// Print a check's pending row — [`CHECKLIST_PENDING`], `label`, then what
+/// it is waiting on — with no trailing newline, so [`checklist_clear`] can
+/// wipe exactly this one line once the check returns. A no-op under
+/// `--plain`: `checklist` is `board.is_some()` at the one call site in
+/// [`dispatch`], and every checklist function here takes the same flag
+/// rather than each re-deriving it.
+fn checklist_pending(
+    out: &mut impl std::io::Write,
+    checklist: bool,
+    label: &str,
+    waiting: &str,
+) -> Result<()> {
+    if !checklist {
+        return Ok(());
+    }
+    write!(
+        out,
+        "    {CHECKLIST_PENDING} {}{waiting}",
+        checklist_label(label)
+    )?;
+    out.flush()?;
+    Ok(())
+}
+
+/// Wipe the pending row [`checklist_pending`] printed, back to column zero —
+/// `\x1b[2K` clears the whole line rather than only what is left of it, so a
+/// short done row written over a longer pending one leaves nothing behind.
+fn checklist_clear(out: &mut impl std::io::Write, checklist: bool) -> Result<()> {
+    if !checklist {
+        return Ok(());
+    }
+    write!(out, "\r\x1b[2K")?;
+    Ok(())
+}
+
+/// Print a check's own [`CHECKLIST_DONE`] row, once it has returned
+/// successfully — `detail` is whatever the mockup draws beside it, or empty
+/// for the checks that draw nothing there.
+fn checklist_done(
+    out: &mut impl std::io::Write,
+    checklist: bool,
+    label: &str,
+    detail: &str,
+) -> Result<()> {
+    if !checklist {
+        return Ok(());
+    }
+    match detail.is_empty() {
+        true => writeln!(out, "    {CHECKLIST_DONE} {label}")?,
+        false => writeln!(
+            out,
+            "    {CHECKLIST_DONE} {}{detail}",
+            checklist_label(label)
+        )?,
+    }
+    Ok(())
+}
+
+/// One row of the "starting" checklist: a pending line naming what `check`
+/// is waiting on, replaced by its done row the moment it returns — or, on
+/// failure, left as a bare newline so the error `?` propagates lands on a
+/// fresh line rather than run into the pending text.
+///
+/// Only for a check whose own failure must abort the whole start — see the
+/// workspace-open row in [`dispatch`], which prints its pending and cleared
+/// rows the same way but by hand, because its own failure is reported and
+/// stepped over instead of raised.
+fn checklist_row<T>(
+    out: &mut impl std::io::Write,
+    checklist: bool,
+    label: &str,
+    waiting: &str,
+    check: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    checklist_pending(out, checklist, label, waiting)?;
+    match check() {
+        Ok(value) => {
+            checklist_clear(out, checklist)?;
+            Ok(value)
+        }
+        Err(err) => {
+            if checklist {
+                writeln!(out)?;
+            }
+            Err(err)
+        }
+    }
+}
+
+/// The unique `pipeline:` names a batch of live tasks routes through, in the
+/// order each is first seen — the "starting" checklist's own detail for
+/// `task routes`, drawn from the same tasks [`check_task_routes`] just
+/// validated rather than a second read of the queue.
+fn task_route_names(tasks: &[Task]) -> String {
+    let mut names: Vec<&str> = Vec::new();
+    for task in tasks {
+        if let Some(name) = task.front.pipeline.as_deref()
+            && !names.contains(&name)
+        {
+            names.push(name);
+        }
+    }
+    names.join(", ")
+}
+
 /// The first step, if any, whose `run:` calls `spoolway stack` — the one
 /// command in this project that builds a commit (`commit-tree`, for its
 /// squash) whether or not `dispatch.auto_commit` is on. Named rather than a
@@ -630,13 +863,17 @@ fn commit_reason(pipelines: &Pipelines, config: &Config) -> Option<String> {
 /// A thin wrapper over [`overview_gate_with`] — see [`overrides_gate`]'s own
 /// doc comment for why this split exists at all; the two gates share it for
 /// the same reason.
-fn overview_gate(repo: &Repo) -> Result<bool> {
+///
+/// `own_term` is false whenever `dispatch`'s own board is already holding
+/// the terminal — see its own doc comment on the call site for why a second,
+/// nested `TermGuard` here would be a bug.
+fn overview_gate(repo: &Repo, own_term: bool) -> Result<bool> {
     overview_gate_with(
         repo,
         crate::ask::interactive(),
         &mut crate::screen::RawStdin,
         &mut std::io::stdout(),
-        Some(crate::platform::TermGuard::new as fn() -> _),
+        own_term.then_some(crate::platform::TermGuard::new as fn() -> _),
     )
 }
 
@@ -846,13 +1083,16 @@ fn plural(n: usize, noun: &str) -> String {
 /// `drain_stdin`). A test hands over `TermGuard::inert` instead, so it never
 /// fights another test over the real terminal (see `TermGuard`'s own `inert`
 /// field) even while driving the branch that would otherwise construct one.
-fn overrides_gate(repo: &Repo) -> Result<bool> {
+///
+/// `own_term` is false whenever `dispatch`'s own board is already holding
+/// the terminal — see [`overview_gate`]'s own doc comment on the pair.
+fn overrides_gate(repo: &Repo, own_term: bool) -> Result<bool> {
     overrides_gate_with(
         repo,
         crate::ask::interactive(),
         &mut crate::screen::RawStdin,
         &mut std::io::stdout(),
-        Some(crate::platform::TermGuard::new as fn() -> _),
+        own_term.then_some(crate::platform::TermGuard::new as fn() -> _),
     )
 }
 
@@ -1011,7 +1251,15 @@ pub(crate) fn unattended_block_lines(unattended: bool, config: &Config) -> Vec<S
 /// is held — so it gets its own, smaller one instead; see
 /// [`workspace_open_notice`], which is why this takes only `unattended` and
 /// no workspace-open error of its own.
-fn warnings_gate(repo: &Repo, pipelines: &Pipelines, unattended: &[String]) -> Result<bool> {
+///
+/// `own_term` is false whenever `dispatch`'s own board is already holding
+/// the terminal — see [`overview_gate`]'s own doc comment on the pair.
+fn warnings_gate(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    unattended: &[String],
+    own_term: bool,
+) -> Result<bool> {
     warnings_gate_with(
         repo,
         pipelines,
@@ -1019,7 +1267,7 @@ fn warnings_gate(repo: &Repo, pipelines: &Pipelines, unattended: &[String]) -> R
         unattended,
         &mut crate::screen::RawStdin,
         &mut std::io::stdout(),
-        Some(crate::platform::TermGuard::new as fn() -> _),
+        own_term.then_some(crate::platform::TermGuard::new as fn() -> _),
     )
 }
 
@@ -1124,13 +1372,18 @@ pub(crate) fn warnings_gate_with(
 /// to here, so `[enter]` is the only key this reads, and nothing is
 /// fingerprinted: opening a workspace either works or it does not, once,
 /// this run — there is no standing state worth hiding until it changes.
-fn workspace_open_notice(err: &str) -> Result<()> {
+///
+/// `own_term` is false whenever `dispatch`'s own board is already holding
+/// the terminal — see [`overview_gate`]'s own doc comment on the pair. This
+/// is a fourth gate-shaped screen reached the same way the other three are,
+/// so it needs the same guard.
+fn workspace_open_notice(err: &str, own_term: bool) -> Result<()> {
     workspace_open_notice_with(
         err,
         crate::ask::interactive(),
         &mut crate::screen::RawStdin,
         &mut std::io::stdout(),
-        Some(crate::platform::TermGuard::new as fn() -> _),
+        own_term.then_some(crate::platform::TermGuard::new as fn() -> _),
     )
 }
 
@@ -1623,6 +1876,138 @@ fn print_staying_up(jobs: &crate::jobs::StayingUp) {
 mod tests {
     use super::*;
     use crate::commands::testutil::fixture;
+
+    /// A check that returns at once prints its pending row and its done row
+    /// back to back, the pending one wiped by the same `\r\x1b[2K` a slow
+    /// check would otherwise leave standing alone — acceptance criterion:
+    /// each check prints its own line as it returns.
+    #[test]
+    fn checklist_row_prints_pending_then_wipes_it_for_done() {
+        let mut out = Vec::new();
+        let value = checklist_row(&mut out, true, "queue read", "reading the queue", || {
+            Ok::<_, anyhow::Error>(3)
+        })
+        .unwrap();
+        assert_eq!(value, 3);
+        let printed = String::from_utf8(out).unwrap();
+        assert!(
+            printed.starts_with(&format!("    {CHECKLIST_PENDING} queue read")),
+            "no pending row for the still-running check: {printed:?}"
+        );
+        assert!(printed.contains("reading the queue"), "{printed:?}");
+        assert!(
+            printed.contains("\r\x1b[2K"),
+            "the pending row must be wiped, not left standing: {printed:?}"
+        );
+    }
+
+    /// A check that fails prints its pending row and nothing past a bare
+    /// newline — the error itself is reported once the board's own
+    /// `TermGuard` has already restored the terminal on the way out through
+    /// `?`, not raced with a checklist row still open on the same line.
+    #[test]
+    fn checklist_row_leaves_a_clean_line_on_failure() {
+        let mut out = Vec::new();
+        let result = checklist_row(
+            &mut out,
+            true,
+            "git identity",
+            "checking git identity",
+            || Err::<(), _>(anyhow::anyhow!("no identity")),
+        );
+        assert!(result.is_err());
+        let printed = String::from_utf8(out).unwrap();
+        assert!(
+            printed.starts_with(&format!("    {CHECKLIST_PENDING} git identity")),
+            "{printed:?}"
+        );
+        assert!(printed.ends_with('\n'), "{printed:?}");
+        assert!(!printed.contains("\x1b[2K"), "{printed:?}");
+    }
+
+    /// `--plain` (and `args.confirmed`, through the same flag) prints
+    /// nothing at all — the checklist is the board's own setup, and
+    /// `checklist_row` must be a plain pass-through with `checklist: false`.
+    #[test]
+    fn checklist_row_prints_nothing_when_the_checklist_is_off() {
+        let mut out = Vec::new();
+        let value = checklist_row(&mut out, false, "queue read", "reading the queue", || {
+            Ok::<_, anyhow::Error>(7)
+        })
+        .unwrap();
+        assert_eq!(value, 7);
+        assert!(out.is_empty(), "{out:?}");
+    }
+
+    /// `checklist_done`'s own two shapes: a bare done row when there is
+    /// nothing to say beside it, and one with a detail column when there is
+    /// — the mockup's own two row shapes (`git identity` vs `queue read`).
+    #[test]
+    fn checklist_done_omits_the_gap_with_no_detail() {
+        let mut out = Vec::new();
+        checklist_done(&mut out, true, "git identity", "").unwrap();
+        checklist_done(&mut out, true, "queue read", "12 tasks").unwrap();
+        let printed = String::from_utf8(out).unwrap();
+        assert_eq!(
+            printed,
+            format!(
+                "    {CHECKLIST_DONE} git identity\n    {CHECKLIST_DONE} {}12 tasks\n",
+                checklist_label("queue read")
+            )
+        );
+    }
+
+    /// The checklist's own detail for `task routes`: every distinct
+    /// `pipeline:` a batch of tasks names, in the order each is first seen —
+    /// the mockup's own "impl_ui, impl, release", not an alphabetised list.
+    #[test]
+    fn task_route_names_lists_each_pipeline_once_in_first_seen_order() {
+        let a = crate::task::Task::parse(
+            std::path::PathBuf::from("a.md"),
+            "---\nid: a\nstage: queued\npipeline: impl_ui\n---\nbody\n",
+        )
+        .unwrap();
+        let b = crate::task::Task::parse(
+            std::path::PathBuf::from("b.md"),
+            "---\nid: b\nstage: queued\npipeline: impl\n---\nbody\n",
+        )
+        .unwrap();
+        let c = crate::task::Task::parse(
+            std::path::PathBuf::from("c.md"),
+            "---\nid: c\nstage: queued\npipeline: impl_ui\n---\nbody\n",
+        )
+        .unwrap();
+        let d = crate::task::Task::parse(
+            std::path::PathBuf::from("d.md"),
+            "---\nid: d\nstage: queued\npipeline: release\n---\nbody\n",
+        )
+        .unwrap();
+        assert_eq!(task_route_names(&[a, b, c, d]), "impl_ui, impl, release");
+    }
+
+    /// The 200ms acceptance bound: the board struct's own construction,
+    /// followed by the real [`print_checklist_header`] `dispatch` itself
+    /// calls, must land well inside it. This cannot exercise the real
+    /// `spoolway dispatch` entry point, which needs a live repo and backend;
+    /// it instead proves the construction and the print path together add
+    /// nothing that could ever cost 200ms on their own, which is the one
+    /// thing a future change to either could break. `Board::for_test`'s
+    /// guard is inert and calls neither `hide_cursor` nor `raw_mode` — see
+    /// its own doc — so the terminal-setup syscalls a real `Board::new`
+    /// would make are not, and cannot be, timed here; this bound covers only
+    /// the board struct itself and the print path.
+    #[test]
+    fn the_first_checklist_write_lands_within_200ms() {
+        let start = std::time::Instant::now();
+        let _board = crate::status::Board::for_test();
+        let mut out = Vec::new();
+        print_checklist_header(&mut out).unwrap();
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(200),
+            "took {:?}",
+            start.elapsed()
+        );
+    }
 
     /// A dispatcher already running for this repo must send `spoolway
     /// dispatch` down [`already_running`], never through
@@ -2443,7 +2828,7 @@ mod tests {
     #[test]
     fn overrides_gate_with_no_layer_proceeds_without_asking() {
         let repo = fixture("overrides-gate-no-layer");
-        assert!(overrides_gate(&repo).unwrap());
+        assert!(overrides_gate(&repo, true).unwrap());
     }
 
     /// A fixture with a real layer on it, forked the same way `spoolway

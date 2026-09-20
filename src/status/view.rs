@@ -1420,14 +1420,16 @@ pub(super) fn masthead(header: &str, pane: usize, frame: usize) -> String {
 /// The lockup with one line of prose beside it, for a command that introduces
 /// itself before it does anything.
 ///
-/// `init` is the only caller, and the reason it goes through the board's own
-/// [`masthead`] rather than printing `LOCKUP` itself is that there is one piece
-/// of art here: whatever the generator draws next, and whatever the header does
-/// at a narrow width, both surfaces do the same thing without either knowing
+/// `init` and `commands::dispatch`'s own "starting" checklist are the two
+/// callers, and the reason either goes through the board's own [`masthead`]
+/// rather than printing `LOCKUP` itself is that there is one piece of art
+/// here: whatever the generator draws next, and whatever the header does at
+/// a narrow width, both surfaces do the same thing without either knowing
 /// about the other.
 ///
-/// Empty when stdout is not a terminal. The escapes it carries are noise in a
-/// pipe, and `init`'s output is read by scripts.
+/// Empty when stdout is not a terminal. The escapes it carries are noise in
+/// a pipe, and `init`'s output is read by scripts; `dispatch` never reaches
+/// this call at all under `--plain`, which keeps its own log instead.
 pub fn banner(header: &str) -> String {
     use std::io::IsTerminal;
     match std::io::stdout().is_terminal() {

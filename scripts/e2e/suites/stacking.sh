@@ -61,8 +61,16 @@ publish plan/live
 # ------------------------------------------------------- a step the stack runs once
 # A command step carrying `last:`, between `review` and `document`. It appends a
 # line to a file in the control plane rather than in a worktree, so what it
-# writes outlives the worktree cleanup that archives each task — and a count of
-# lines is then the whole question: one run for a two-task chain, not two.
+# writes outlives the worktree cleanup that archives each task — and the file
+# is then the whole question: one line for a two-task chain, not two, and that
+# line naming the task at the top of it.
+#
+# The line is `$SPOOLWAY_TASK` rather than a bare `ran` because *which* task
+# wrote it is what this suite is about, and the count alone could only be read
+# while nothing else was running. Nothing stands still for that any more: the
+# dispatcher wakes on a change instead of waiting out its interval, so `base`
+# being archived and `top` running this step to the end are one moment, not
+# two, however early the read is taken.
 #
 # The `0,/…/` range keeps the rewiring to the first match, which is `review`'s
 # `on_pass: document`, not the `on_pass: document` in the step appended just
@@ -71,7 +79,7 @@ RUNS="$LIVE/proj/suite-runs.txt"
 {
   printf '\n  - id: suite\n'
   printf '    description: A stand-in for a check the whole stack needs once.\n'
-  printf '    run: echo ran >> "$SPOOLWAY_REPO/suite-runs.txt"\n'
+  printf '    run: echo "$SPOOLWAY_TASK" >> "$SPOOLWAY_REPO/suite-runs.txt"\n'
   printf '    last: true\n'
   printf '    on_pass: document\n    on_fail: blocked\n'
 } >> .spoolway/pipelines/default.yml
@@ -158,20 +166,26 @@ has "with a real documenting lane" \
   "$SPOOLWAY_PROJECT_HOME/system-prompts/base · document.md"
 
 # The bottom of the stack is not the last task of it, so the step was walked
-# past rather than run. Two readings of the one fact: nothing was written, and
-# no run was ever started to write it — a command that had started and failed
-# would leave a log behind either way.
-if [ ! -e "$RUNS" ]; then
+# past rather than run. Two readings of the one fact: `base` wrote no line,
+# and no run was ever started for it to write one with — a command that had
+# started and failed would have said so either way.
+#
+# Both are asked of what `base` left behind rather than of what exists right
+# now. `top` is free the instant `base` is archived and runs this same step
+# itself, so a check that read "is the file there" or "is the log there" was
+# reading a race, and `commands/base · suite.log` could not have survived
+# `base`'s own archive to be read at all.
+if ! grep -qx base "$RUNS" 2>/dev/null; then
   ok "the bottom of the chain never ran the \`last:\` step"
 else
   bad "the bottom of the chain never ran the \`last:\` step"
-  cat "$RUNS" | sed 's/^/        /'
+  sed 's/^/        /' "$RUNS"
 fi
-if [ ! -e "$SPOOLWAY_PROJECT_HOME/commands/base · suite.log" ]; then
+if ! grep -q "base: running \`suite\`" "$E2E_DISPATCH_LOG" 2>/dev/null; then
   ok "and no run was started for it at all"
 else
   bad "and no run was started for it at all"
-  sed 's/^/        /' "$SPOOLWAY_PROJECT_HOME/commands/base · suite.log"
+  grep "base: running" "$E2E_DISPATCH_LOG" | sed 's/^/        /'
 fi
 # The dispatcher's own account, not the task file's: walking past a step is a
 # fact about a pass, and the task file records where a task went rather than
@@ -181,12 +195,19 @@ has "and the pass says why it walked past" \
   "$E2E_DISPATCH_LOG"
 
 # ------------------------------------------------ cut on top, not beside it
-# Held at `handover`, well after the cut and well before it blocks — `top`'s
+# Read where `top` settles rather than caught somewhere on the way: `top`'s
 # worktree and `base`'s own branch both exist for `top`'s whole run, from the
-# cut through to the moment `handover` runs, so any stage in between shows
-# the same thing the instant of the cut itself did: the ancestry is a fact
-# of the cut, not something built afterwards.
-if drive_and_hold top handover 150; then ok "the task above it is cut once the one below is in"
+# cut through to the moment `handover` refuses, so any stage shows the same
+# thing the instant of the cut itself did — the ancestry is a fact of the
+# cut, not something built afterwards.
+#
+# It used to hold at `handover` for that, and `handover` is not a stage a
+# poll can be sure of seeing any more. The dispatcher wakes on a change
+# rather than waiting out the interval it announces, so a step that routes
+# on a command's own exit is arrived at and left inside a single 0.2s read —
+# `top` walked from `queued` to `blocked` between two of them. `blocked` is
+# where it stops, and this suite already says so twice below.
+if drive_and_hold top blocked 150; then ok "the task above it is cut once the one below is in"
 else bad "the task above it is cut once the one below is in (at \`$(stage_of top)\`)"; fi
 
 if git rev-parse --verify -q task/base >/dev/null; then
@@ -271,11 +292,11 @@ fi
 # The task at the top carries every change beneath it, so its one run is the
 # run the whole stack gets. A line per run, and a chain of two that answered
 # "last" twice would show two.
-if [ -e "$RUNS" ] && [ "$(wc -l < "$RUNS")" -eq 1 ]; then
+if [ -e "$RUNS" ] && [ "$(wc -l < "$RUNS")" -eq 1 ] && grep -qx top "$RUNS"; then
   ok "the top of the chain ran the \`last:\` step, once for the stack"
 else
   bad "the top of the chain ran the \`last:\` step, once for the stack"
-  printf '        %s\n' "$([ -e "$RUNS" ] && wc -l < "$RUNS" || echo 'no file at all')"
+  sed 's/^/        /' "$RUNS" 2>/dev/null || printf '        no file at all\n'
 fi
 if [ -e "$SPOOLWAY_PROJECT_HOME/commands/top · suite.log" ]; then
   ok "and it was the top's own run that did it"
@@ -311,7 +332,10 @@ says "check_dependencies_set puts the parent that reaches the other one first" \
 # `apex` is still in the queue naming it.
 sed -i 's/^stage: blocked$/stage: done/' "$SPOOLWAY_PROJECT_HOME/queue/top.md"
 
-if drive_and_hold apex handover 150; then ok "apex is cut once both its parents are in"
+# `blocked`, and for the reason the `top` case above gives: `apex`'s own
+# handover refuses on the same call, and the stage in between is not one a
+# poll can be sure of seeing.
+if drive_and_hold apex blocked 150; then ok "apex is cut once both its parents are in"
 else bad "apex is cut once both its parents are in (at \`$(stage_of apex)\`)"; fi
 
 says "and it was cut from the deeper parent" "cut_from: task/top" \
