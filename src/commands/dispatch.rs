@@ -296,13 +296,70 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
             let _ = board.draw(repo, pipelines, crate::status::Phase::Passing, &mut out);
         }
 
+        // Stdin, and whether it is still worth reading. Declared once per
+        // pass rather than separately for the callback below and the wait
+        // loop further down, so a descriptor found gone (a closed pipe, no
+        // controlling terminal) while a pass was still working is not asked
+        // again a moment later by the wait that follows it — one direction
+        // only, within this one iteration: the next iteration's own pass
+        // starts the question over, the same as it always has.
+        //
+        // `listening` is set once, the moment stdin is found to have gone
+        // away, and never asked again this iteration. `poll_ready` reports
+        // a closed descriptor "ready" exactly as it does a real keystroke,
+        // since the read that follows either way returns promptly; without
+        // this guard, whichever of the callback or the wait loop reads next
+        // would keep taking that as a key, get `None` back from `read_key`
+        // every time, and spin down to nothing for the rest of the run
+        // (jobs review finding 8).
+        //
+        // Starts false on a target with no raw mode to listen through
+        // (`!cfg!(unix)`) or in `--plain` (`board.is_none()`, which never
+        // reads a key at all): a cooked stdin answers `byte_pending` with
+        // `false` at once (see `RawStdin`), and starting out listening
+        // there would spin on that answer with no sleep in it.
+        let mut stdin = crate::screen::RawStdin;
+        let mut listening = cfg!(unix) && board.is_some();
+
         let mut spent_out = None;
         // Whether this pass moved a task and so has more ready to try at
         // once — see the wait below, and `dispatch::skip_wait`. A pass that
         // errored outright never sets this: a transient failure should cost
         // one wait, not be retried with no pause at all.
         let mut worked = false;
-        match dispatcher.pass() {
+
+        // The callback a pass calls between its own units of work — see
+        // `Dispatcher::pass`. Draining whatever is already on stdin
+        // and applying it here is what keeps the board's own keys answering
+        // at the same rate through a busy run as an idle one: a pass used
+        // to hold the keyboard dead for its whole duration, and
+        // `consecutive_working` below could run a hundred of those back to
+        // back before the wait loop this used to live in alone was ever
+        // reached again.
+        //
+        // Scoped to this block so its borrow of `board`/`out` ends the
+        // moment the pass returns, freeing both for the rest of the loop
+        // body below.
+        let pass_result = {
+            let mut tick = || {
+                let Some(board) = board.as_mut() else { return };
+                let mut changed = false;
+                while listening && stdin.byte_pending(std::time::Duration::ZERO) {
+                    match crate::screen::read_key(&mut stdin) {
+                        Some(key) => {
+                            let _ = board.on_key(repo, pipelines, key);
+                            changed = true;
+                        }
+                        None => listening = false,
+                    }
+                }
+                if changed {
+                    let _ = board.draw(repo, pipelines, crate::status::Phase::Passing, &mut out);
+                }
+            };
+            dispatcher.pass(&mut tick)
+        };
+        match pass_result {
             Ok(report) => {
                 worked = skip_wait(&report, consecutive_working);
                 // The ceiling drains rather than kills: the run is over, but not
@@ -430,23 +487,10 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
             // run a fresh pass at once, in place of the tick that used to
             // read it here instead.
             Some(board) => {
-                let mut stdin = crate::screen::RawStdin;
-                // Set once, the moment stdin is found to have gone away —
-                // a closed pipe, or no controlling terminal at all — and
-                // never asked again after that. `poll_ready` reports a
-                // closed descriptor "ready" exactly as it does a real
-                // keystroke, since the read that follows either way returns
-                // promptly; without this guard the loop would keep taking
-                // that as a key, get `None` back from `read_key` every time,
-                // and spin the wait down to nothing for the rest of the run.
-                //
-                // Never on where there is no raw mode to listen through: a
-                // cooked stdin answers `byte_pending` with `false` at once
-                // (see `RawStdin`), and starting out listening there would
-                // spin on that answer with no sleep in it. Off from the start,
-                // the wait falls back to the plain sleep below and
-                // `read_key` is never reached (jobs review finding 8).
-                let mut listening = cfg!(unix);
+                // `stdin` and `listening`, declared once above rather than
+                // here, so a descriptor the pass's own callback already
+                // found gone this iteration is not asked again the moment
+                // this wait starts — see that declaration's own comment.
                 let _ = board.draw(repo, pipelines, crate::status::Phase::Waiting, &mut out);
                 let until = std::time::Instant::now() + interval;
                 'wait: while let Some(left) =

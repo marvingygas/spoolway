@@ -101,6 +101,10 @@ flowchart TD
   G --> A
 ```
 
+A key also answers inside a pass, not only during the wait between passes: the dispatcher checks
+stdin between each task, each lane start, the sweep and the archive, so a busy run reads the
+keyboard at the same rate as an idle one.
+
 Between two passes the wait is not empty. On Linux, the dispatcher watches the queue directory
 and the commands directory for the whole wait, alongside the keystroke it already listens for.
 A file landing in the queue directory redraws the board at once. A file landing in the commands
