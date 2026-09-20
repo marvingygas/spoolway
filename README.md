@@ -67,6 +67,13 @@ From source instead, in a clone of this repository:
 cargo install --path .
 ```
 
+…or, inside herdr:
+
+```
+herdr plugin install marvingygas/spoolway
+spoolway herdr bind        # optional: four keys
+```
+
 Platform notes and requirements in full: **[Installation and setup](docs/installation.md)**.
 
 ## Quick start

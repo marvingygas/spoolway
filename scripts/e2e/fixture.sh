@@ -151,7 +151,10 @@ publish() {
 configure_project() {
   local branch=${1:-plan/demo} worktrees=${2:-}
   shift $(( $# > 2 ? 2 : $# ))
-  must "spoolway init" "$SPOOLWAY" init "$@"
+  # `--yes` answers the confirmation `init` opens with: there is no
+  # terminal here, so without it the question takes its default — no —
+  # and nothing is scaffolded at all.
+  must "spoolway init" "$SPOOLWAY" init --yes "$@"
   project_home_after_init
   # Fresh init deliberately writes only the selected profile and points every
   # scaffolded step at it. The dispatcher suites also exercise the older

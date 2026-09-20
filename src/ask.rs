@@ -71,6 +71,23 @@ pub fn line(question: &str, hint: &str) -> Result<Option<String>> {
     Ok(Some(answer).filter(|a| !a.is_empty()))
 }
 
+/// A yes/no question, defaulting `default` when there is nobody to answer —
+/// the same rule as every question above, but spelled out separately because
+/// a plain empty answer (just pressing Enter) also takes `default`, the way a
+/// terminal `[y/N]` prompt always has, rather than being read as neither.
+pub fn confirm(question: &str, default: bool) -> Result<bool> {
+    if !interactive() {
+        return Ok(default);
+    }
+    let hint = if default { "Y/n" } else { "y/N" };
+    let answer = read(&format!("{question} [{hint}]"))?;
+    Ok(match answer.trim().to_ascii_lowercase().as_str() {
+        "" => default,
+        "y" | "yes" => true,
+        _ => false,
+    })
+}
+
 /// Write the prompt, flush it — an unflushed prompt is an invisible one, and a
 /// person waiting at a blank screen cannot tell that from a hang — and take the
 /// line.

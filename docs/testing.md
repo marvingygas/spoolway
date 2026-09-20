@@ -217,3 +217,6 @@ Daily CI and the release workflow share `.github/workflows/verify.yml`. See
 [Releasing spoolway](releasing.md). Every pipeline that opens a pull request ends in a
 `checks` step that waits on those runs (`gh pr checks --watch --fail-fast`) and blocks the
 task if they come back red. Daily CI checks the integrated tree.
+
+`verify.yml`'s `test` job also fails when [`herdr-plugin.toml`](../herdr-plugin.toml)'s
+`version` differs from `Cargo.toml`'s. See [Installation and setup](installation.md).

@@ -40,7 +40,7 @@ impl Project {
     }
 
     fn init(&self, provider: &str) -> Output {
-        self.run(&["init", "--provider", provider, "--tracker", "none"])
+        self.run(&["init", "--yes", "--provider", provider, "--tracker", "none"])
     }
 }
 
@@ -209,7 +209,7 @@ fn repeat_init_that_adds_skills_omits_project_success() {
         std::fs::read(project.as_ref().join(".spoolway/pipelines/default.yml")).unwrap();
 
     let paths = scaffold_paths(&project);
-    let out = stdout(&project.run(&["init", "--provider", "codex"]));
+    let out = stdout(&project.run(&["init", "--yes", "--provider", "codex"]));
 
     // Nothing was missing, so every file gets a `kept` row rather than a
     // `wrote` one, and the run closes by saying so — no tracker flag was
@@ -250,7 +250,7 @@ fn repeat_init_that_restores_only_a_missing_prompt_asset_writes_that_one_path_an
     let mut kept = scaffold_paths(&project);
     kept.retain(|p| p != ".spoolway/prompts/archivist/assets/document.md");
 
-    let out = stdout(&project.run(&["init", "--provider", "claude"]));
+    let out = stdout(&project.run(&["init", "--yes", "--provider", "claude"]));
 
     assert!(
         out.contains(&row(
@@ -275,7 +275,14 @@ fn repeat_init_still_refuses_a_bare_project_key() {
     let project = Project::new("bare-project-key");
     project.init("claude");
 
-    let out = stdout(&project.run(&["init", "--provider", "codex", "--project-key", "acme/app"]));
+    let out = stdout(&project.run(&[
+        "init",
+        "--yes",
+        "--provider",
+        "codex",
+        "--project-key",
+        "acme/app",
+    ]));
     assert!(
         out.contains("--project-key was not applied without --tracker"),
         "{out}"
@@ -295,6 +302,7 @@ fn repeat_init_with_a_tracker_value_applies_it_to_an_existing_config() {
 
     let out = stdout(&project.run(&[
         "init",
+        "--yes",
         "--provider",
         "codex",
         "--tracker",
@@ -341,10 +349,17 @@ fn repeat_init_with_a_tracker_value_applies_it_to_an_existing_config() {
 #[test]
 fn repeat_init_with_a_bare_tracker_flag_and_nobody_to_ask_leaves_an_established_config_alone() {
     let project = Project::new("tracker-bare");
-    project.run(&["init", "--provider", "claude", "--tracker", "github"]);
+    project.run(&[
+        "init",
+        "--yes",
+        "--provider",
+        "claude",
+        "--tracker",
+        "github",
+    ]);
     let config_before = std::fs::read(project.as_ref().join(".spoolway/config.toml")).unwrap();
 
-    let out = stdout(&project.run(&["init", "--provider", "claude", "--tracker"]));
+    let out = stdout(&project.run(&["init", "--yes", "--provider", "claude", "--tracker"]));
     assert!(
         out.contains("nobody to answer its picker") && out.contains("[issue_tracking] was left"),
         "{out}"
@@ -374,6 +389,7 @@ fn repeat_init_with_tracker_github_never_overwrites_an_existing_workflow_file() 
 
     let out = stdout(&project.run(&[
         "init",
+        "--yes",
         "--provider",
         "claude",
         "--tracker",
@@ -400,6 +416,7 @@ fn a_bare_repeat_init_reports_the_workflow_kept_from_the_tracker_already_on_disk
     let project = Project::new("workflow-kept-from-disk");
     project.run(&[
         "init",
+        "--yes",
         "--provider",
         "claude",
         "--tracker",
@@ -408,7 +425,7 @@ fn a_bare_repeat_init_reports_the_workflow_kept_from_the_tracker_already_on_disk
         "acme/app",
     ]);
 
-    let out = stdout(&project.run(&["init", "--provider", "claude"]));
+    let out = stdout(&project.run(&["init", "--yes", "--provider", "claude"]));
     assert!(
         out.contains(&row("kept", ".github/workflows/spoolway-issues.yml")),
         "{out}"
@@ -422,6 +439,7 @@ fn forced_init_reprints_every_wrote_row_and_closes_like_a_fresh_run() {
 
     let result = project.run(&[
         "init",
+        "--yes",
         "--force",
         "--provider",
         "codex",
@@ -575,7 +593,7 @@ fn a_re_stamped_checkout_prints_exactly_one_line_when_the_old_one_moved_on() {
     // `old_id` is now stale, though the checkout on record for it still
     // exists right where it was.
     let restamp = Command::new(env!("CARGO_BIN_EXE_spoolway"))
-        .args(["init", "--new-id"])
+        .args(["init", "--yes", "--new-id"])
         .current_dir(&root)
         .env("HOME", &home)
         .output()

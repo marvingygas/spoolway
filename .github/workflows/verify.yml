@@ -42,6 +42,22 @@ jobs:
       - name: formatting
         run: cargo fmt --check
 
+      # herdr-plugin.toml ships to `main` unstamped — scripts/build-npm.mjs
+      # only stamps package.json at build time — so its `version` has to be
+      # kept equal to Cargo.toml's own by hand, and checked here rather than
+      # trusted. This lands in `test` rather than a job of its own beside
+      # `verify` in ci.yml: only `verify / test` and `verify / audit` are
+      # required status contexts on `main`, and a sibling job would not gate
+      # a merge.
+      - name: herdr-plugin.toml version matches Cargo.toml
+        run: |
+          cargo_version="$(awk -F'"' '/^version *= *"/{print $2; exit}' Cargo.toml)"
+          plugin_version="$(awk -F'"' '/^version *= *"/{print $2; exit}' herdr-plugin.toml)"
+          if [ "$cargo_version" != "$plugin_version" ]; then
+            echo "herdr-plugin.toml version ($plugin_version) does not match Cargo.toml ($cargo_version)" >&2
+            exit 1
+          fi
+
       # The tree is kept clippy-clean, so any warning here is new — and a
       # warning nobody is made to look at is one that gets shipped.
       - name: clippy
@@ -89,7 +105,9 @@ jobs:
           # is not this repo's control plane and does not check out. So drop
           # what it added: the checkout is pristine here, which makes
           # "untracked under .spoolway/" exactly "written by the line above".
-          ./target/release/spoolway init
+          # `--yes` because a runner is nobody to answer the confirmation
+          # `init` opens with, and unanswered it declines and writes nothing.
+          ./target/release/spoolway init --yes
           git clean -fd .spoolway
           git diff --exit-code
           ./target/release/spoolway pipeline check

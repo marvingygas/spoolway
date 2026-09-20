@@ -64,9 +64,9 @@ use std::path::PathBuf;
 use anyhow::Result;
 
 use cli::{
-    AgentCommand, Cli, Command, ConfigCommand, GroupCommand, HookCommand, IssueCommand,
-    JobsCommand, ModelsCommand, OverrideCommand, PipelineCommand, PromptCommand, QueueCommand,
-    TaskCommand, TemplateCommand,
+    AgentCommand, Cli, Command, ConfigCommand, GroupCommand, HerdrCommand, HookCommand,
+    IssueCommand, JobsCommand, ModelsCommand, OverrideCommand, PipelineCommand, PromptCommand,
+    QueueCommand, TaskCommand, TemplateCommand,
 };
 use pipeline::Pipelines;
 use repo::Repo;
@@ -152,6 +152,12 @@ fn run() -> Result<()> {
         // is the file work `update` used to also do, and that still needs a
         // real checkout to land in.
         Command::Update(_) => update::run(&cwd),
+
+        // A machine-wide fact — which key runs this plugin's panes, in
+        // `~/.config/herdr/config.toml` — not a project one: like `update`,
+        // this runs before a project is even looked for.
+        Command::Herdr(HerdrCommand::Bind(args)) => commands::herdr_bind(args),
+        Command::Herdr(HerdrCommand::Unbind(args)) => commands::herdr_unbind(args),
 
         // The one command that has to survive a config it cannot read, because
         // it is the command you run to find out what is wrong with it. Every
@@ -333,7 +339,8 @@ fn run() -> Result<()> {
                 | Command::Doctor(_)
                 | Command::WhatsNew(_)
                 | Command::VersionCheck
-                | Command::Update(_) => {
+                | Command::Update(_)
+                | Command::Herdr(_) => {
                     unreachable!("handled above")
                 }
 
@@ -558,7 +565,16 @@ fn notify(cli: &Cli, cwd: &std::path::Path) {
     // installing as it installs it, and a line telling somebody to run what
     // they are already running is noise — twice over, since the process an
     // upgrade re-execs would print it again on the way through.
-    if matches!(cli.command, Command::Update(_) | Command::WhatsNew(_)) {
+    //
+    // `herdr` is machine-wide too. Its command arms deliberately run before a
+    // project is looked for, so the best-effort config read below must not do
+    // that lookup first: discovery binds an otherwise-unclaimed checkout,
+    // making a keybinding edit silently stamp whichever git repository the
+    // caller happened to be standing in.
+    if matches!(
+        cli.command,
+        Command::Update(_) | Command::WhatsNew(_) | Command::Herdr(_)
+    ) {
         return;
     }
 

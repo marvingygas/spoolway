@@ -1,6 +1,6 @@
 ---
 domain: installation
-covers: ["src/install.rs", "src/update.rs", "src/sync.rs", "src/release.rs", "src/release_notes.rs", "CHANGELOG.md", "src/assets.rs", "src/ask.rs", "src/gitignore.rs", "npm/**", "scripts/build-npm.mjs"]
+covers: ["src/install.rs", "src/update.rs", "src/sync.rs", "src/release.rs", "src/release_notes.rs", "CHANGELOG.md", "src/assets.rs", "src/ask.rs", "src/gitignore.rs", "npm/**", "scripts/build-npm.mjs", "herdr-plugin.toml", "scripts/fetch-or-build.sh"]
 ---
 
 # Installation and setup
@@ -33,6 +33,31 @@ cargo install --path .
 By hand: every GitHub release has one archive per platform and a `SHA256SUMS` file. Unpack the
 archive and put the binary on your `PATH`.
 
+As a herdr plugin:
+
+```
+herdr plugin install marvingygas/spoolway
+```
+
+`herdr-plugin.toml` at the repository root declares spoolway's id, version, minimum herdr
+version, description, platforms, one `[[build]]` step and four panes and actions, one pair per
+command: `init`, `queue`, `dispatch` and `doctor`. The `[[build]]` step runs
+`scripts/fetch-or-build.sh`, which maps the host's platform onto one of the triples in
+[`npm/targets.json`](../npm/targets.json), downloads that platform's release archive and its
+`SHA256SUMS`, verifies the checksum, and unpacks the binary to `./bin/spoolway` inside the
+plugin's own directory. `herdr plugin uninstall` deletes that directory, so nothing the script
+writes lands anywhere else, such as `~/.local/bin` or `~/.cargo/bin`. If the host's platform has
+no matching triple, no release matches the manifest's version, or the checksum fails to verify,
+the script falls back to `cargo build --release` and copies the result into place instead of
+failing the install.
+
+See [The herdr plugin](herdr-plugin.md) for the manifest's panes and actions, what
+`spoolway herdr bind`/`unbind` write, and the rehearsal run before the repository is listed
+in herdr's marketplace.
+
+`herdr-plugin.toml`'s `version` is kept equal to `Cargo.toml`'s by hand; CI fails the build when
+the two disagree. See [Testing](testing.md).
+
 ## What spoolway needs
 
 | Requirement | What it means |
@@ -52,11 +77,16 @@ Run this inside a git repository:
 spoolway init
 ```
 
-At a terminal it asks three questions. Each one has a flag, and a given flag skips its question.
-Without a terminal, the defaults apply: `claude` and no tracker.
+It opens by printing the project directory it resolved and waiting for a yes — check the path
+is the one you meant, especially when `init` was reached from a keybinding rather than typed
+where you were standing. Answering no writes nothing and exits 0.
+
+Then, at a terminal, it asks three more questions. Each one has a flag, and a given flag skips
+its question. Without a terminal, the defaults apply: `claude` and no tracker.
 
 | Question | Flag | Default |
 |---|---|---|
+| Set up this project? | `--yes` | no — so a script or CI runner passes `--yes` |
 | The coding agent you plan in | `--provider claude\|codex` | `claude` |
 | The issue tracker | `--tracker github\|jira\|none` | `none` |
 | The tracker's project | `--project-key <KEY>` | none |
