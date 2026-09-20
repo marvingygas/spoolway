@@ -214,6 +214,6 @@ gh run view <run-id> --json headSha,conclusion,jobs
 ```
 
 Daily CI and the release workflow share `.github/workflows/verify.yml`. See
-[Releasing spoolway](releasing.md). `impl`'s `checks` step waits on those runs
-(`gh pr checks --watch --fail-fast`) and fails the task if they come back red. Daily CI
-checks the integrated tree.
+[Releasing spoolway](releasing.md). Every pipeline that opens a pull request ends in a
+`checks` step that waits on those runs (`gh pr checks --watch --fail-fast`) and blocks the
+task if they come back red. Daily CI checks the integrated tree.
