@@ -290,7 +290,7 @@ names a tracker.
 | `hook` | blank | A bare file name inside `.spoolway/hooks/`, such as `github.sh`. Blank runs no hook. A path is refused. |
 | `project_key` | blank | Handed to the script as `SPOOLWAY_PROJECT_KEY`, unparsed. `owner/repo` on GitHub, a project key on Jira. |
 | `on_fail` | `ignore` | What a failing hook does to its task. `ignore` records the failure. `pause` also holds the task: on `queued` it lands on `paused`, on `done` it stays out of the archive. |
-| `key_in_names` | `false` | Prefix the `group:`, the branch (`task/<slug>-<id>`) and the worktree directory with the slug the `open` hook returns. |
+| `key_in_names` | `false` | Prefix the `group:`, the branch (`task/<slug>-<id>`) and the worktree directory with the slug the `open` hook returns. A group already carrying the slug gains it exactly once. |
 
 The script is called once per task per event.
 
