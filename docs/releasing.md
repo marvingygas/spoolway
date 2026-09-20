@@ -8,7 +8,7 @@ merge it, and once on the notes.
 ```mermaid
 flowchart LR
   R[ready] -->|red| X[fix] -->|gate: you merge| R
-  R -->|green| A[preflight] --> B[notes] -->|gate: you approve| C[publish] --> V[released]
+  R -->|green| A[preflight] --> B[notes] -->|gate: you approve| C[publish] --> V[released] --> Z[fixture]
   C --> D[release commit on main] --> E[rehearsal run] --> F[tag] --> G[npm + GitHub release]
 ```
 
@@ -20,6 +20,7 @@ flowchart LR
 | `notes` | Writes one changelog section. Stops at a gate until you approve it. |
 | `publish` | Commits the version bump and the section, rehearses the workflow, tags, and checks what npm and GitHub received. |
 | `released` | `scripts/release-verify.sh`. Proves the tag, the six packages, the archives and the published body exist. A command step, so nothing can be credited with it — see below. |
+| `fixture` | `scripts/release-fixture.sh`. Scaffolds the released version's upgrade fixture from its own tag and pushes it to `main`. A command step for the same reason `released` is one. |
 
 `fix` does not merge. `main` is protected and every pull request is gated on `ci`, so a
 repair lands the way any other change does — you merge it. The step parks on `paused` with
@@ -114,8 +115,20 @@ missing fixture — not while it is being cut, and not when the release workflow
 again from the tag it has just pushed — and the first bump past a released version turns the
 exemption into a failing check.
 
-Scaffold the released version's fixture once the tag is out — before the next bump, which is
-when the suite starts asking:
+The `fixture` step does this, straight after `released`. It builds the binary at the tag just
+pushed, scaffolds a throwaway project with it, sets `housekeeping.retention_days`, hand-adds the
+one line of prose below the pipeline file's generated key block, and pushes the tree to `main` —
+the same commit a person would have made. It is idempotent, so a fixture already on `main` costs
+it one lookup.
+
+It is a pipeline step rather than a line in this runbook because it was a line in this runbook
+and that did not hold: 0.4.0 was tagged and published without one, nothing asked until
+`Cargo.toml` moved past 0.4.0, and main's daily dress rehearsal then failed for two days reading
+like a regression. The gap is structural — the fixture is impossible to make before the tag and
+not demanded until the next bump — so the only place it can be caught is the release that owes
+it.
+
+To scaffold one by hand — an older release that was missed, or a `fixture` step that blocked:
 
 ```sh
 npx spoolway@<version> init                        # in a scratch git repo
@@ -124,7 +137,8 @@ npx spoolway@<version> config set housekeeping.retention_days 45
 
 Copy that `.spoolway/` to `scripts/e2e/fixtures/<version>/`, hand-add one line of prose below
 the pipeline file's generated key block, and commit it. The suite's own header says what each
-part is for.
+part is for. The published binary and one built from the tag scaffold the same tree, so either
+will do.
 
 ## When it fails
 

@@ -78,4 +78,22 @@ steps:
     description: Prove the tag, the seven packages, the archives and the published body actually exist.
     run: scripts/release-verify.sh
     timeout: 15m
+    on_pass: fixture
+
+  # The closing step of docs/releasing.md, which was prose nobody was gated on
+  # until 0.4.0 shipped without its fixture and main's dress rehearsal went red
+  # for two days. It can only run here: `scripts/e2e/suites/upgrade.sh` asks for
+  # `scripts/e2e/fixtures/<version>/` once the tag is out *and* Cargo.toml has
+  # moved past it, so the fixture is impossible to make before the tag and is
+  # not demanded until the next bump. A command step, for the same reason
+  # `released` is one — an agent step can be carried past by a cleared block,
+  # and this is the last thing the release owes.
+  #
+  # Thirty minutes because it builds the tagged binary to scaffold from, on
+  # whatever cache the lane's machine has. Idempotent, so a re-run after a
+  # failure costs one lookup when the fixture already landed.
+  - id: fixture
+    description: Scaffold the released version's upgrade fixture from its own tag and land it on main.
+    run: scripts/release-fixture.sh
+    timeout: 30m
     on_pass: done

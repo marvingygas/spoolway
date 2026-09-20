@@ -61,6 +61,9 @@ commands, provenance, and contributing pull requests clear.
 - the GitHub release body is created by the workflow from the tagged changelog section and reads back
   byte-for-byte identical to the approved notes
 - a fresh public npm install selects one platform package and reports the approved version
+- the released version's upgrade fixture is on `main` under `scripts/e2e/fixtures/<version>/`,
+  scaffolded by that version's own binary at its own tag — the one thing the release owes that
+  cannot be made before the tag and is not demanded until the next bump
 - every partial failure and recovery is recorded
 - once a release stops publishing a platform, a person runs `npm deprecate` against every version
   of that platform's package that is still on the registry, pointing installers at the replacement:
