@@ -145,15 +145,20 @@ BODY="$LIVE/body.md"
 task_body "$BODY"
 
 # --------------------------------------------------------------- scaffolding
-# `init` asks three questions at a terminal and none anywhere else, which is
-# exactly the distinction a shell suite is the right place to hold: everything
-# below runs with no tty, so an `init` that ever read stdin here would hang the
-# suite rather than fail it. In its own directory — this is a project being
-# created, and the suite's own is already one.
+# `init` asks four questions at a terminal — the `Set up this project?`
+# confirmation it opens with, then the agent, the tracker and the project key
+# — and none anywhere else, which is exactly the distinction a shell suite is
+# the right place to hold: everything below runs with no tty, so an `init`
+# that ever read stdin here would hang the suite rather than fail it. Nobody
+# being there means every one of those four takes its own default, and the
+# confirmation's is no — so every run below that wants a project passes
+# `--yes`, and the one that does not is the declined case asserted with it.
+# In its own directory — this is a project being created, and the suite's
+# own is already one.
 INITDIR="$LIVE/init"
 mkdir -p "$INITDIR/asked" && (cd "$INITDIR/asked" && git init -q -b main .)
 works "init scaffolds a project with the answers given as flags" \
-  env -C "$INITDIR/asked" "$SPOOLWAY" init \
+  env -C "$INITDIR/asked" "$SPOOLWAY" init --yes \
   --provider codex --tracker none
 
 has "the selected provider names the fresh profile" '[agents.codex]' \
@@ -174,7 +179,7 @@ works "in that provider's directory alone" \
 # fill before dispatching.
 mkdir -p "$INITDIR/unasked" && (cd "$INITDIR/unasked" && git init -q -b main .)
 works "init with no terminal asks nothing and takes the defaults" \
-  env -C "$INITDIR/unasked" "$SPOOLWAY" init
+  env -C "$INITDIR/unasked" "$SPOOLWAY" init --yes
 has "so the model choice is visibly blank" 'model: ""' \
   "$INITDIR/unasked/.spoolway/pipelines/default.yml"
 
@@ -196,13 +201,33 @@ works "spoolway-tasks lands beside it" \
 works "and spoolway-calibrate lands too" \
   test -f "$INITDIR/unasked/.claude/skills/spoolway-calibrate/SKILL.md"
 
+# The other side of `--yes`: with nobody to answer, the confirmation `init`
+# opens with takes its own default — no — and the command exits 0 having
+# written nothing at all. Nothing here is a `.spoolway/` tree this suite
+# has to clean up afterwards, which is the point: a declined `init` leaves
+# the directory exactly as it found it, and claims no home either.
+DECLINED="$INITDIR/declined"
+mkdir -p "$DECLINED" && (cd "$DECLINED" && git init -q -b main .)
+works "init with no terminal and no --yes declines rather than scaffolding" \
+  env -C "$DECLINED" "$SPOOLWAY" init
+# Matched on the trailing component rather than on `$DECLINED` whole: the
+# path `init` prints is `git rev-parse --show-toplevel`'s own, which on a
+# machine whose temporary directory is a symlink is the resolved one and
+# not the string this suite built.
+says "and it says which directory it was asking about" "/declined" \
+  env -C "$DECLINED" "$SPOOLWAY" init
+works "no .spoolway/ was created" test ! -e "$DECLINED/.spoolway"
+works "no skills were installed" test ! -e "$DECLINED/.claude"
+works "and no home was claimed under ~/.spoolway/" \
+  test -z "$(find "$HOME/.spoolway" -maxdepth 1 -name 'declined-*' 2>/dev/null)"
+
 refuses "the retired agent answer is no longer accepted" \
   "unexpected argument '--agent'" env -C "$INITDIR/unasked" "$SPOOLWAY" init --agent gemini
 
 # Run again for a second provider: the skills land, and the config the project
 # has been running on is not rewritten around it.
 works "a second init installs another provider's skills" \
-  env -C "$INITDIR/asked" "$SPOOLWAY" init --provider claude
+  env -C "$INITDIR/asked" "$SPOOLWAY" init --yes --provider claude
 works "without disturbing the first" \
   test -f "$INITDIR/asked/.agents/skills/spoolway-plan/SKILL.md"
 works "and spoolway-tasks is among the second provider's skills too" \
@@ -225,14 +250,14 @@ says "Pi remains available through standalone install for established projects" 
 # `task contract` answers again on the very next call.
 RESTORE="$INITDIR/restore"
 mkdir -p "$RESTORE" && (cd "$RESTORE" && git init -q -b main .)
-must "the project to repair scaffolds" env -C "$RESTORE" "$SPOOLWAY" init
+must "the project to repair scaffolds" env -C "$RESTORE" "$SPOOLWAY" init --yes
 printf '\n# a line this project wrote itself\n' >> "$RESTORE/.spoolway/config.toml"
 
 rm -rf "$RESTORE/.spoolway/pipelines"
 refuses "a project whose pipelines went missing says so rather than borrowing" \
   "no pipelines defined" env -C "$RESTORE" "$SPOOLWAY" task contract
 
-RESTORE_OUT=$(env -C "$RESTORE" "$SPOOLWAY" init 2>&1)
+RESTORE_OUT=$(env -C "$RESTORE" "$SPOOLWAY" init --yes 2>&1)
 if grep -qE '^[[:space:]]*wrote[[:space:]]+\.spoolway/pipelines/default\.yml' <<<"$RESTORE_OUT"; then
   ok "the re-run writes the shipped pipelines back"
 else
@@ -261,7 +286,7 @@ works "and task contract answers again on the next call" \
 # `init`.
 mkdir -p "$INITDIR/github" && (cd "$INITDIR/github" && git init -q -b main .)
 works "init --tracker github --project-key answers both questions with no prompt" \
-  env -C "$INITDIR/github" "$SPOOLWAY" init --tracker github --project-key acme/app
+  env -C "$INITDIR/github" "$SPOOLWAY" init --yes --tracker github --project-key acme/app
 has "the hook it names" 'hook = "github.sh"' "$INITDIR/github/.spoolway/config.toml"
 has "and the project it files into" 'project_key = "acme/app"' \
   "$INITDIR/github/.spoolway/config.toml"
@@ -495,7 +520,7 @@ must "a git identity for the explicit-base case" \
 must "a git identity for the explicit-base case" \
   env -C "$BASECHECK" git config user.name t
 must "a project scaffolded fresh for the explicit-base case" \
-  env -C "$BASECHECK" "$SPOOLWAY" init --provider claude --tracker none
+  env -C "$BASECHECK" "$SPOOLWAY" init --yes --provider claude --tracker none
 must "a seed commit, so a second branch has something to point at" \
   env -C "$BASECHECK" git commit -q --allow-empty -m seed
 must "a second local branch --base could point at instead" \
@@ -581,7 +606,7 @@ says "and names this project's own agent profiles" '"pi"' \
 PICHECK="$LIVE/picheck"
 mkdir -p "$PICHECK" && (cd "$PICHECK" && git init -q -b main .)
 must "a project scaffolded fresh for this case" \
-  env -C "$PICHECK" "$SPOOLWAY" init --provider claude --tracker none
+  env -C "$PICHECK" "$SPOOLWAY" init --yes --provider claude --tracker none
 rm -f "$PICHECK/.spoolway/pipelines/bugfix.yml"
 rm -rf "$PICHECK/.spoolway/prompts/reproducer"
 must "filling in the three models its own pipeline needs" \

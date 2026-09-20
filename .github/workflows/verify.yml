@@ -105,7 +105,9 @@ jobs:
           # is not this repo's control plane and does not check out. So drop
           # what it added: the checkout is pristine here, which makes
           # "untracked under .spoolway/" exactly "written by the line above".
-          ./target/release/spoolway init
+          # `--yes` because a runner is nobody to answer the confirmation
+          # `init` opens with, and unanswered it declines and writes nothing.
+          ./target/release/spoolway init --yes
           git clean -fd .spoolway
           git diff --exit-code
           ./target/release/spoolway pipeline check

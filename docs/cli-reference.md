@@ -747,6 +747,12 @@ Scaffold `.spoolway/` in a repository: config, pipelines, prompts, templates, ho
 skills. At a terminal it asks for the agent, the tracker and the project key. With no terminal
 it takes the defaults.
 
+Before any of that, it prints the project directory it resolved and waits for a yes — a path you
+do not recognise is the whole of the check, and it matters most when `init` was reached from a
+keybinding rather than typed in a directory you were looking at. Answering no writes nothing and
+exits 0. With nobody there to answer, that question takes its default, which is no, so a script
+or CI runner passes `--yes`.
+
 `init` also binds this checkout to its home under `~/.spoolway/`. The binding is two files that
 must agree: an id stamped into the checkout's `.git`, and a `project.toml` in the home holding
 that id and the checkout's path. A fresh clone binds itself on whatever command it runs first.
@@ -755,7 +761,7 @@ state](configuration.md#runtime-state).
 
 ```
 spoolway init
-spoolway init --provider codex --tracker github --project-key owner/repo
+spoolway init --yes --provider codex --tracker github --project-key owner/repo
 ```
 
 | Flag | Default | What it does |
@@ -763,6 +769,7 @@ spoolway init --provider codex --tracker github --project-key owner/repo
 | `--provider <claude\|codex>` | `claude` | The coding agent whose skills are installed and which becomes the project's agent profile |
 | `--tracker <github\|jira\|none>` | `none` | The tracker `[issue_tracking]` names |
 | `--project-key <KEY>` | | Where tickets open: `owner/repo` on github, a project key on jira |
+| `--yes` | | Answer `Set up this project?` yes without asking. Required of any run with nobody to answer it, which otherwise declines and writes nothing |
 | `--force` | | Overwrite existing config, pipeline and prompt files |
 | `--adopt <NAME>` | | Bind this checkout to the home already at `~/.spoolway/<NAME>/` and stamp it with that home's id. `NAME` is the home's directory name, such as `api-8w4r2c`. Prints what that home already holds |
 | `--new-id` | | Mint this checkout a fresh id and bind it to the fresh home that id keys |

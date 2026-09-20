@@ -213,7 +213,7 @@ stage() {
   # not just scaffold itself, so it is the one place that can prove `place`
   # reaches a *real* past release's own files rather than only ones this
   # suite's own fixtures were built by today's binary.
-  if "$SPOOLWAY" init >"$WORK/$version/init.out" 2>&1; then
+  if "$SPOOLWAY" init --yes >"$WORK/$version/init.out" 2>&1; then
     :
   else
     printf '  \033[31mSETUP\033[0m the project claims its state directory\n' >&2

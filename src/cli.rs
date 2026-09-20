@@ -658,10 +658,20 @@ pub struct SpendArgs {
 // person who is not there and then to the default. That is the same shape a
 // script gets, which is what makes a test written this way test the path a
 // script takes.
+//
+// Note what that now means for `--yes`: a default `InitArgs` is a script that
+// did *not* say yes, so the opening `Set up this project?` confirmation takes
+// its own declared default — decline — and `init` writes nothing. A test that
+// wants a scaffold on disk sets `yes: true`, exactly as the scripts that want
+// one pass `--yes`.
 #[derive(Debug, Args, Default)]
 #[command(
     long_about = "Scaffold a project: config, pipelines, prompts, skeletons, ignore rules \
         — and the three answers that would otherwise be edited in afterwards.\n\n\
+        Every run prints the project directory it resolved and waits for a yes before it \
+        writes anything: a path you do not recognise is the whole of the check. With nobody \
+        there to answer, that question takes its default — no — and nothing is written, so a \
+        script or CI runner that means it passes `--yes`.\n\n\
         `--project-key` alone is asked at a terminal and skipped everywhere else, so a \
         script that runs `init` gets the defaults and no prompt; give it as a flag and it \
         is not asked either. `--tracker` differs: with no value it opens the tracker \
@@ -682,6 +692,13 @@ pub struct SpendArgs {
         closes a mirrored issue once its pull request merges."
 )]
 pub struct InitArgs {
+    /// Answer the opening `Set up this project?` confirmation yes without
+    /// asking — for a script, or a terminal nobody is at. Without it, a run
+    /// with nobody to answer takes that question's default, which is no,
+    /// and `init` writes nothing at all.
+    #[arg(long)]
+    pub yes: bool,
+
     /// Overwrite existing config, pipeline, and prompt files.
     #[arg(long)]
     pub force: bool,

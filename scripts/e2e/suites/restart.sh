@@ -25,7 +25,7 @@ source "$HERE/../agents.sh"
 WORK=${WORK:-$(mktemp -d)}
 new_repo "$WORK/proj"
 
-works "init scaffolds .spoolway" "$SPOOLWAY" init
+works "init scaffolds .spoolway" "$SPOOLWAY" init --yes
 project_home_after_init
 agent_models
 # Pin the backend. Every start below is meant to be answered by the restart

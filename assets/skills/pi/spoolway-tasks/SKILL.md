@@ -40,8 +40,8 @@ reading the file whole.
    skeleton `body`.
 
    **A project with no pipelines is not a dead end.** Where this reports `no pipelines
-   defined`, install the shipped ones yourself: a bare `spoolway init` — `--provider` takes
-   only `claude` or `codex`, not `pi`, so this is the same mechanical fix
+   defined`, install the shipped ones yourself: a bare `spoolway init --yes` — `--provider`
+   takes only `claude` or `codex`, not `pi`, so this is the same mechanical fix
    **spoolway-doctor**'s own pi copy reaches for. Re-runnable, and it writes only what is
    absent, so it restores just the missing pipelines and prompts and leaves everything else
    in the project untouched. Then re-run `spoolway task contract` and carry on with what it

@@ -1002,7 +1002,17 @@ mod tests {
             root.file_name().unwrap().to_string_lossy()
         ));
         crate::platform::test_home::with_home(&home, || {
-            init(root, &InitArgs::default()).expect("init")
+            init(
+                root,
+                &InitArgs {
+                    // The opening confirmation, answered — a default
+                    // `InitArgs` declines it and writes nothing. See
+                    // `commands::init`'s own `confirmed` helper.
+                    yes: true,
+                    ..InitArgs::default()
+                },
+            )
+            .expect("init")
         });
     }
 

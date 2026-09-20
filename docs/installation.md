@@ -73,11 +73,16 @@ Run this inside a git repository:
 spoolway init
 ```
 
-At a terminal it asks three questions. Each one has a flag, and a given flag skips its question.
-Without a terminal, the defaults apply: `claude` and no tracker.
+It opens by printing the project directory it resolved and waiting for a yes — check the path
+is the one you meant, especially when `init` was reached from a keybinding rather than typed
+where you were standing. Answering no writes nothing and exits 0.
+
+Then, at a terminal, it asks three more questions. Each one has a flag, and a given flag skips
+its question. Without a terminal, the defaults apply: `claude` and no tracker.
 
 | Question | Flag | Default |
 |---|---|---|
+| Set up this project? | `--yes` | no — so a script or CI runner passes `--yes` |
 | The coding agent you plan in | `--provider claude\|codex` | `claude` |
 | The issue tracker | `--tracker github\|jira\|none` | `none` |
 | The tracker's project | `--project-key <KEY>` | none |

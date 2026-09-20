@@ -40,9 +40,10 @@ reading the file whole.
    skeleton `body`.
 
    **A project with no pipelines is not a dead end.** Where this reports `no pipelines
-   defined`, install the shipped ones yourself: `spoolway init --provider codex` — re-runnable,
-   and it writes only what is absent, so it restores just the missing pipelines and prompts and
-   leaves everything else in the project untouched. Then re-run `spoolway task contract` and
+   defined`, install the shipped ones yourself: `spoolway init --provider codex --yes` —
+   re-runnable, and it writes only what is absent, so it restores just the missing pipelines
+   and prompts and leaves everything else in the project untouched. Then re-run `spoolway
+   task contract` and
    carry on with what it now reports, without asking the person first — say one line about it,
    `Installed the two shipped pipelines; routing against them.`, ahead of the ballot in step 2.
 

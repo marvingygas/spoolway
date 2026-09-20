@@ -240,11 +240,12 @@ fn pad_to_value_column(path: &str) -> String {
     }
 }
 
-/// One row of the mockup's report block: `verb` (`wrote`, `kept` or `set`)
-/// against `what`, either a path relative to the project root or — for
-/// `set` — a `key = value` pair. Every verb is left-padded to nine columns
-/// — `wrote` plus four spaces, `kept` plus five, `set` plus six — so the
-/// three line up whichever one a row starts with.
+/// One row of the mockup's report block: `verb` (`project`, `wrote`, `kept`
+/// or `set`) against `what` — the resolved root for `project`, a path
+/// relative to the project root for `wrote`/`kept`, or — for `set` — a
+/// `key = value` pair. Every verb is left-padded to nine columns — `project`
+/// plus two spaces, `wrote` plus four, `kept` plus five, `set` plus six — so
+/// all four line up whichever one a row starts with.
 fn report_row(verb: &str, what: &str) -> String {
     format!("  {verb:<9}{what}")
 }
@@ -303,6 +304,27 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     // Before anything is written or asked, because this is the one command a
     // person runs without knowing yet what they have got hold of.
     print!("{}", crate::status::banner("setting up a project"));
+
+    // A key pressed in a herdr pane opens this popup in whatever directory
+    // herdr handed it — usually the one you are looking at, but there is no
+    // way to be certain of that from in here. So every caller gets told the
+    // root `init_root` resolved before anything below writes to it, and a
+    // real terminal on the other end waits for a yes before going on: a
+    // path you do not recognise is the whole of the check.
+    //
+    // The question goes through `crate::ask::confirm` like every other one
+    // in this file, so a run with nobody to answer takes its declared
+    // default rather than hanging — and that default is `false`, decline.
+    // A silent `init` therefore writes nothing unless it was told to: a
+    // script or CI runner that means it passes `--yes`, the same shape
+    // `spoolway herdr bind --yes` already uses. An `init` reached from a
+    // herdr keybinding never passes it, because the whole point of the
+    // popup is that nobody has confirmed which project it opened in.
+    println!();
+    println!("{}", report_row("project", &root.display().to_string()));
+    if !args.yes && !crate::ask::confirm("Set up this project?", false)? {
+        return Ok(());
+    }
 
     // A repeat run is how a project adds another provider's skills. Keep that
     // successful outcome distinct from creating (or deliberately replacing)
@@ -647,6 +669,21 @@ mod tests {
         ))
     }
 
+    /// `InitArgs::default()` with the opening confirmation already
+    /// answered — what a script that means it passes as `--yes`.
+    ///
+    /// Every test below that expects a project on disk starts from this
+    /// rather than from `InitArgs::default()`, because a default `InitArgs`
+    /// with nobody to answer takes `Set up this project?`'s own default,
+    /// which is no: it writes nothing, which is precisely what
+    /// [`init_with_nobody_to_ask_and_no_yes_writes_nothing`] asserts.
+    fn confirmed() -> InitArgs {
+        InitArgs {
+            yes: true,
+            ..InitArgs::default()
+        }
+    }
+
     /// `init`, with `$HOME` pointed at `root`'s own scratch home. See
     /// [`home_for`].
     fn run_init(root: &Path, args: &InitArgs) -> Result<()> {
@@ -684,7 +721,7 @@ mod tests {
     /// forever, and the suite reports a timeout somewhere unrelated.
     #[test]
     fn init_with_nobody_to_ask_takes_every_default() {
-        let root = scaffold("defaults", &InitArgs::default());
+        let root = scaffold("defaults", &confirmed());
 
         let config = Config::load(&root).unwrap();
         assert_eq!(config.agents.len(), 1);
@@ -707,7 +744,7 @@ mod tests {
     /// write, so the stamp says so without a sync ever having run.
     #[test]
     fn init_writes_a_sync_stamp() {
-        let root = scaffold("sync-stamp", &InitArgs::default());
+        let root = scaffold("sync-stamp", &confirmed());
         let stamp = crate::platform::test_home::with_home(&home_for(&root), || {
             let home = crate::mux::project_home(&root).unwrap();
             crate::sync::read_stamp(&home, &root)
@@ -726,7 +763,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
 
-        let err = run_init(&root, &InitArgs::default()).expect_err("no .git here at all");
+        let err = run_init(&root, &confirmed()).expect_err("no .git here at all");
         let said = format!("{err:#}");
         assert!(
             said.contains("git repository"),
@@ -750,7 +787,7 @@ mod tests {
         perms.set_mode(0o500); // read + execute, no write
 
         std::fs::set_permissions(&git_dir, perms.clone()).unwrap();
-        let err = run_init(&root, &InitArgs::default());
+        let err = run_init(&root, &confirmed());
 
         // Restore before asserting, so a failed assertion still leaves this
         // test's own directory cleanup able to remove it.
@@ -772,7 +809,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         crate::scratch::git_init(&root, &["-b", "plan/demo"]);
 
-        run_init(&root, &InitArgs::default()).expect("init");
+        run_init(&root, &confirmed()).expect("init");
 
         let on_disk = std::fs::read_to_string(root.join(".git").join("spoolway-id")).unwrap();
         let id = on_disk.trim();
@@ -792,7 +829,7 @@ mod tests {
             "answered",
             &InitArgs {
                 provider: Some(PlanningAgent::Codex),
-                ..InitArgs::default()
+                ..confirmed()
             },
         );
 
@@ -825,7 +862,7 @@ mod tests {
             "twice",
             &InitArgs {
                 provider: Some(PlanningAgent::Claude),
-                ..InitArgs::default()
+                ..confirmed()
             },
         );
         let before = std::fs::read_to_string(Config::path_in(&root)).unwrap();
@@ -834,7 +871,7 @@ mod tests {
             &root,
             &InitArgs {
                 provider: Some(PlanningAgent::Codex),
-                ..InitArgs::default()
+                ..confirmed()
             },
         )
         .expect("second init");
@@ -862,7 +899,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         crate::scratch::git_init(&root, &["-b", "plan/demo"]);
 
-        run_init(&root, &InitArgs::default()).expect("init");
+        run_init(&root, &confirmed()).expect("init");
         let home = root.join(".home");
         let repo = Repo {
             checkout: root.clone(),
@@ -911,14 +948,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         crate::scratch::git_init(&root, &["-b", "plan/demo"]);
-        run_init(&root, &InitArgs::default()).expect("first init");
+        run_init(&root, &confirmed()).expect("first init");
         let before = std::fs::read_to_string(root.join(".git").join("spoolway-id")).unwrap();
 
         run_init(
             &root,
             &InitArgs {
                 new_id: true,
-                ..InitArgs::default()
+                ..confirmed()
             },
         )
         .expect("--new-id");
@@ -951,7 +988,7 @@ mod tests {
         let original = base.join("original");
         std::fs::create_dir_all(&original).unwrap();
         crate::scratch::git_init(&original, &["-b", "plan/demo"]);
-        crate::platform::test_home::with_home(&home_root, || init(&original, &InitArgs::default()))
+        crate::platform::test_home::with_home(&home_root, || init(&original, &confirmed()))
             .expect("stamp and bind the original checkout");
         let id = std::fs::read_to_string(original.join(".git").join("spoolway-id"))
             .unwrap()
@@ -975,7 +1012,7 @@ mod tests {
                 &fresh,
                 &InitArgs {
                     adopt: Some(name.clone()),
-                    ..InitArgs::default()
+                    ..confirmed()
                 },
             )
         })
@@ -1106,7 +1143,7 @@ mod tests {
                 &root,
                 &InitArgs {
                     adopt: Some("../../evil".to_string()),
-                    ..InitArgs::default()
+                    ..confirmed()
                 },
             )
         })
@@ -1144,7 +1181,7 @@ mod tests {
                 &root,
                 &InitArgs {
                     adopt: Some("-abc123".to_string()),
-                    ..InitArgs::default()
+                    ..confirmed()
                 },
             )
         })
@@ -1179,7 +1216,7 @@ mod tests {
             &InitArgs {
                 tracker: Some("github".into()),
                 project_key: Some("acme/app".into()),
-                ..InitArgs::default()
+                ..confirmed()
             },
         );
 
@@ -1210,7 +1247,7 @@ mod tests {
             &InitArgs {
                 tracker: Some("none".into()),
                 project_key: Some("should-be-ignored".into()),
-                ..InitArgs::default()
+                ..confirmed()
             },
         );
 
@@ -1232,7 +1269,7 @@ mod tests {
             &InitArgs {
                 tracker: Some("github".into()),
                 project_key: Some("acme/app".into()),
-                ..InitArgs::default()
+                ..confirmed()
             },
         );
         let hook = root
@@ -1290,5 +1327,55 @@ mod tests {
             padded.ends_with(' '),
             "a path this long must still be followed by a separator: {padded:?}"
         );
+    }
+
+    /// The mockup's `project  ~/code/billing-svc` row is `report_row`'s own
+    /// column, not a one-off — `"project"` is seven characters, same as
+    /// `"wrote"` plus its four spaces of padding, so it lines up with every
+    /// other row this same helper produces.
+    #[test]
+    fn the_project_row_matches_the_mockups_column() {
+        assert_eq!(
+            report_row("project", "~/code/billing-svc"),
+            "  project  ~/code/billing-svc"
+        );
+    }
+
+    /// With nobody to answer and no `--yes`, `Set up this project?` takes
+    /// its own declared default — no — and `init` writes nothing at all:
+    /// no `.spoolway/`, no skills, and no home claimed under `$HOME`. It
+    /// does not hang either, which is the other half of the contract
+    /// `init_with_nobody_to_ask_takes_every_default` proves for the two
+    /// questions this one sits in front of: a suite that gave `init` no
+    /// stdin and got a hang would time out somewhere unrelated.
+    #[test]
+    fn init_with_nobody_to_ask_and_no_yes_writes_nothing() {
+        let root = crate::scratch::root("init-confirm-declined");
+        let _ = std::fs::remove_dir_all(&root);
+        let home = home_for(&root);
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&root).unwrap();
+        crate::scratch::git_init(&root, &["-b", "plan/demo"]);
+
+        run_init(&root, &InitArgs::default()).expect("a declined init is not an error");
+
+        assert!(!Config::path_in(&root).exists(), "no config was written");
+        assert!(!root.join(STATE_DIR).exists(), "no .spoolway/ at all");
+        assert!(!root.join(".claude").exists(), "no skills were installed");
+        assert!(
+            !home.join(".spoolway").exists(),
+            "no home was claimed under ~/.spoolway/"
+        );
+    }
+
+    /// The same run with `--yes`: the confirmation is answered without
+    /// asking, and the scaffold lands exactly where it always has. The pair
+    /// is what makes the flag the thing that decides, rather than the
+    /// presence of a terminal.
+    #[test]
+    fn init_with_yes_writes_the_scaffold_without_asking() {
+        let root = scaffold("confirm-yes", &confirmed());
+        assert!(Config::path_in(&root).exists());
+        assert!(root.join(".claude").join("skills").is_dir());
     }
 }
