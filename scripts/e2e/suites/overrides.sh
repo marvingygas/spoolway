@@ -178,7 +178,7 @@ must "forking a knob again, for the gate" \
 
 gate_run
 has "dispatch prints the layer's notice with no tty to ask" \
-  "overrides are active for this project" "$GATE_LOG"
+  "overrides are active" "$GATE_LOG"
 has "naming the pipeline it touches" \
   "pipelines/default.yml" "$GATE_LOG"
 has "and proceeds without anybody there to answer" \
@@ -189,21 +189,22 @@ has "and proceeds without anybody there to answer" \
 # above and is proved the same way: `src/commands/dispatch.rs`'s own unit
 # tests cover `warnings_gate_with`'s render and its print-and-proceed path
 # against a scripted reader, but only a real process piped the way every
-# script here pipes it can show that doctor's cheap findings and the
-# unattended block, once they are real data rather than a fixture, still
-# never block a `spoolway dispatch` with nothing there to answer. Turning on
-# `unattended.enabled` and leaving both ceilings at their default of 0 is
-# also the mockup's own example line — "no ceiling in tokens or dollars" —
-# so this is the one config shape in this file guaranteed to give the new
-# screen something to say.
+# script here pipes it can show that doctor's cheap findings, once they are
+# real data rather than a fixture, still never block a `spoolway dispatch`
+# with nothing there to answer. Turning on `unattended.enabled` and leaving
+# both ceilings at their default of 0 is also the mockup's own example line
+# — doctor's own `unattended.enabled` note, which the gate now carries
+# under `settings` with nothing of its own added — so this is the one
+# config shape in this file guaranteed to give the new screen something to
+# say.
 must "unattended, with neither ceiling set — the mockup's own case" \
   "$SPOOLWAY" config set unattended.enabled true
 
 gate_run
 has "dispatch prints the warnings screen's own heading with no tty to ask" \
   "before this run starts" "$GATE_LOG"
-has "and the unattended block the mockup draws" \
-  "no unattended.max_output_tokens is set" "$GATE_LOG"
+has "and doctor's own unattended note the mockup draws" \
+  "unattended.enabled is on with no unattended.max_output_tokens" "$GATE_LOG"
 has "and proceeds without anybody there to answer, same as the overrides gate beside it" \
   "$PAST_THE_GATES" "$GATE_LOG"
 

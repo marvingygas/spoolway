@@ -53,7 +53,7 @@ the front instead of starting a second one. See [`spoolway queue`](cli-reference
 
 Before the first pass, `enter` on the queue screen and an [overrides
 layer](configuration.md#the-overrides-layer) screen, in turn, a warnings screen holds `spoolway
-doctor`'s cheap findings and, for an unattended run, its own notice, until a key answers it. See
+doctor`'s cheap findings until a key answers it. See
 [`spoolway dispatch`](cli-reference.md#spoolway-dispatch). Once the run has taken the lock, a
 failure to find or open its own workspace gets a notice of its own.
 

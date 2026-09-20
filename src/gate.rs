@@ -241,10 +241,8 @@ fn confirm_sync_gate_with(
     }
 }
 
-/// Truncate `line` to [`MAX_LINE`] characters, the way `commands::doctor`'s
-/// own `ellipsis` does for a report line — a distinct copy rather than a
-/// shared one, since that one keeps no room for the trailing mark it adds
-/// and this one is sized for a whole panel row, borders included.
+/// Truncate `line` to [`MAX_LINE`] characters, with a trailing mark where it
+/// was cut — sized for a whole panel row, borders included.
 fn fit(line: String) -> String {
     if line.chars().count() <= MAX_LINE {
         return line;

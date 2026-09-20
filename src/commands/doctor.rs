@@ -496,9 +496,7 @@ fn doctor_home_unavailable(
     let mut report = Report::default();
     report.record_all(home_unavailable_findings(repo, config_error, &home_error));
     report.note(format!(
-        "every check that reads this project's own runtime state — the queue, the archive, \
-         the dispatcher's lock, whether a lane can even be started — is skipped until its \
-         stamped home resolves: {home_error:#}"
+        "this project's stamped home has not resolved: {home_error:#}"
     ));
     finish(&report, verbose, json)
 }
@@ -586,8 +584,7 @@ fn doctor_unconfigured(
         None => report.note_verbose("no dispatcher running"),
     }
     report.note(format!(
-        "every other check reads a setting, so they are skipped until {} parses (this \
-         checkout's own copy)",
+        "{} does not parse (this checkout's own copy)",
         relative(&repo.checkout, &Config::path_in(&repo.checkout))
     ));
 
@@ -687,9 +684,8 @@ fn current_price_table_age_note(max_age_days: u64) -> Option<String> {
 fn price_table_age_note(max_age_days: u64, age_days: u64) -> Option<String> {
     (max_age_days > 0 && age_days > max_age_days).then(|| {
         format!(
-            "the price table was generated {} days ago, past the {max_age_days} in \
-             `housekeeping.price_max_age_days` — `spoolway models refresh` takes litellm's current prices",
-            age_days
+            "the price table is {age_days} days old, past the {max_age_days} in \
+             `housekeeping.price_max_age_days`"
         )
     })
 }
@@ -904,15 +900,15 @@ fn tool_version_finding(
     // still name something that does not parse as a plain version.
     let Some(floor) = parse_version(&required.floor) else {
         return Some(Finding::Note(format!(
-            "{hook_display} declares `spoolway-requires: {} >= {}`, whose version does not read \
-             as `<number>.<number>...` — this cannot be checked",
+            "{hook_display} declares `spoolway-requires: {} >= {}`, which does not read as a \
+             version",
             required.tool, required.floor
         )));
     };
     let Some(found) = parse_version(answered) else {
         return Some(Finding::Note(format!(
             "{hook_display} requires `{}` >= {}, but `{} --version` answered \"{}\", which does \
-             not read as a version — this cannot be checked",
+             not read as a version",
             required.tool,
             required.floor,
             required.tool,
@@ -984,8 +980,7 @@ fn required_tool_checks(checkout: &Path, hook_name: &str) -> Vec<Finding> {
                 ));
             }
             Err(raw) => findings.push(Finding::Note(format!(
-                "{hook_display} has an unreadable `# spoolway-requires:` line (`{raw}`) — only \
-                 `<tool> >= <version>` is understood, so this line is ignored"
+                "{hook_display} has an unreadable `# spoolway-requires:` line (`{raw}`)"
             ))),
         }
     }
@@ -1011,8 +1006,7 @@ fn override_layer_note(repo: &Repo) -> Vec<Finding> {
     }
     let names: Vec<&str> = rows.iter().map(|row| row.target.as_str()).collect();
     vec![Finding::Note(format!(
-        "overrides are active for this project: {} — `spoolway override list` to read them, \
-         `override promote` to keep them, `override drop` to clear them",
+        "overrides are active: {}",
         names.join(", ")
     ))]
 }
@@ -1026,8 +1020,7 @@ fn retired_key_notes(checkout: &Path) -> Vec<Finding> {
     if names_key(checkout, "max_attempts") || names_key(checkout, "max_launches") {
         vec![Finding::Note(
             "dispatch.max_launches (and its old name, max_attempts) is retired in this \
-             checkout's config — the launch guard it sized is a constant now, always one launch \
-             before a person is asked. The key still parses; it is dropped on the next save."
+             checkout's config"
                 .into(),
         )]
     } else {
@@ -1058,11 +1051,7 @@ fn pipeline_graph_checks(pipelines: &Pipelines, config: &Config, graph: &Graph) 
     {
         findings.push(Finding::Note(
             "unattended.enabled is on with no unattended.max_output_tokens and no \
-             unattended.max_cost_usd, so nothing bounds this project's runs: a task that \
-             blocks starts a lane on `blocked` with no per-task bound on how many times it \
-             round-trips, and two agents that will not agree keep going until you stop them. \
-             Set a ceiling in output tokens or in dollars — both are reported by `spoolway \
-             spend` and the board's footer — or leave both deliberately at 0"
+             unattended.max_cost_usd"
                 .into(),
         ));
     }
@@ -1132,11 +1121,7 @@ fn branch_and_forge_checks(
         // fail. Saying which it is here would be guessing, and reporting a
         // deliberate setup as a fault sends somebody to add a remote nothing
         // would use.
-        findings.push(Finding::Note(
-            "no git remote — a `handover` that pushes or opens a pull request has nowhere to \
-             send it"
-                .into(),
-        ));
+        findings.push(Finding::Note("no git remote".into()));
     }
 
     // `spoolway stack` shells out to `gh` for everything past the push — the
@@ -1152,10 +1137,7 @@ fn branch_and_forge_checks(
             gh_status(),
         ));
     } else if let Err(err) = gh_status() {
-        findings.push(Finding::Note(format!(
-            "`gh` is not usable ({err:#}), but nothing here calls it: no step runs `spoolway \
-             stack`, and issue tracking does not name the `github` hook"
-        )));
+        findings.push(Finding::Note(format!("`gh` is not usable ({err:#})")));
     }
 
     findings
@@ -1215,7 +1197,7 @@ fn live_check(mux: &dyn Mux, no_live: bool) -> Finding {
     match live_pane(mux) {
         Ok(Some(note)) => Finding::Check("a lane really starts".into(), Ok(Some(note))),
         Ok(None) => Finding::NoteVerbose(format!(
-            "no live pane check: {} has no real pane to run a command in",
+            "no live pane check: {} has no real pane",
             mux.name()
         )),
         Err(err) => Finding::Check("a lane really starts".into(), Err(err)),
@@ -1391,9 +1373,7 @@ fn model_health_checks(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
     if !unresolved.is_empty() {
         for (model, steps) in &unresolved {
             findings.push(Finding::Note(format!(
-                "model `{model}` resolves to nothing — {} will run unpriced and unsized. \
-                 `spoolway models` lists every model this way; price it with `spoolway config \
-                 set models.'{model}'.input <usd per 1M>`",
+                "model `{model}` resolves to nothing, and {} will run it",
                 steps.join(", ")
             )));
         }
@@ -1451,9 +1431,7 @@ fn model_health_checks(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
     }
     for ((agent, model), steps) in &uncapped {
         findings.push(Finding::Note(format!(
-            "nothing caps `{model}` on agent `{agent}` — the model sets no `slots` and the \
-             profile no `concurrency`, so {} run as many lanes at once as the queue offers. Set \
-             the model's count with `spoolway config set models.'{model}'.slots <n>`",
+            "nothing caps `{model}` on agent `{agent}`, and {} will run on it",
             steps.join(", ")
         )));
     }
@@ -1474,9 +1452,7 @@ fn model_health_checks(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
         .collect();
     for (model, steps) in &exclusive_no_slots {
         findings.push(Finding::Note(format!(
-            "model `{model}` is `exclusive` with no `slots` — {} falls back to its profile's \
-             `concurrency`, which a local profile does not set. Give it its own count with \
-             `spoolway config set models.'{model}'.slots <n>`",
+            "model `{model}` is `exclusive` with no `slots`, and {} will run on it",
             steps.join(", ")
         )));
     }
@@ -1504,8 +1480,7 @@ fn model_health_checks(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
             "`exclusive`"
         };
         findings.push(Finding::Note(format!(
-            "model `{glob}` sets {which} but not `local` — set it with `spoolway config set \
-             models.'{glob}'.local true` to say plainly it runs on hardware you own"
+            "model `{glob}` sets {which} but not `local`"
         )));
     }
 
@@ -1515,10 +1490,7 @@ fn model_health_checks(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
     // was not. Silent otherwise: an unrouted row costs nothing to leave, but
     // it is dead config a person should be told about rather than stumble on.
     for glob in crate::models::unrouted(pipelines, &config.models) {
-        findings.push(Finding::Note(format!(
-            "model `{glob}` is configured but no step in this project's pipelines routes to \
-             it — remove the row, or point a step at it"
-        )));
+        findings.push(Finding::Note(format!("model `{glob}` routes to no step")));
     }
 
     // `agents.<profile>.session_blocked_ctx` only ever fires against the
@@ -1559,8 +1531,7 @@ fn model_health_checks(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
         let ceiling = config.agents[*agent].session_blocked_ctx;
         findings.push(Finding::Note(format!(
             "agents.{agent}: session_blocked_ctx = {ceiling}, but `{model}` resolves to no \
-             context_window — the ceiling never fires for this profile. Set: `spoolway config \
-             set models.'{model}'.context_window <tokens>`"
+             context_window"
         )));
     }
 
@@ -1599,12 +1570,8 @@ fn agent_kind_checks(config: &Config) -> Vec<Finding> {
         // stay silent about it.
         if adapter.is_some_and(|a| !a.meters()) {
             findings.push(Finding::Note(format!(
-                "agent `{name}` runs kind `{}`, which spoolway cannot account for: no \
-                 ledger lines, so `spoolway spend` will not see its lanes; no session reuse, so \
-                 every step starts fresh; and silence read from the pane rather than the \
-                 transcript. It launches and runs regardless — `spoolway agent verify {}` \
-                 reports it clause by clause",
-                profile.kind, profile.kind
+                "agent `{name}` runs kind `{}`, which spoolway cannot account for",
+                profile.kind
             )));
         }
     }
@@ -1662,22 +1629,9 @@ fn prompt_checks(repo: &Repo, pipelines: &Pipelines) -> Vec<Finding> {
             if used.contains_key(&entry.name) {
                 continue;
             }
-            // The directory for the directory shape, the file itself for a
-            // legacy flat `<name>.md` — whichever a person would delete.
-            let unit = match entry.path.parent() {
-                Some(dir)
-                    if entry.path.file_name().and_then(|f| f.to_str())
-                        == Some(crate::assets::PROMPT_FILE) =>
-                {
-                    dir.to_path_buf()
-                }
-                _ => entry.path.clone(),
-            };
             findings.push(Finding::Note(format!(
-                "prompt `{}` is run by no step in this project's pipelines — delete `{}`, or \
-                 point a step at it; `spoolway prompt list` shows what each one runs on",
-                entry.name,
-                crate::platform::relative(&repo.root, &unit)
+                "prompt `{}` is run by no step",
+                entry.name
             )));
         }
     }
@@ -1814,18 +1768,22 @@ fn doctor_sync(repo: &Repo, report: &mut Report) {
     }
 }
 
-/// The notes [`doctor_sync`] records for a dry `sync` scan.
+/// The notes [`doctor_sync`] records for a dry `sync` scan — one line per
+/// file, the mockup's own wording, with the reason `sync` would rewrite it
+/// left out: that reason is often a list of every setting a config has
+/// gained since it was written, which has no room on a screen naming files
+/// to scan before pressing `enter`.
 ///
 /// A file that is missing altogether from a project that was never
 /// initialised — no `config.toml` at all — is not *behind*: nothing was ever
 /// written for `sync` to bring forward, and pointing at `sync` there
 /// sends a person to the wrong command. Those files get a note of their own
-/// naming `spoolway init`; the "behind" note keeps only what `sync` is
-/// actually for. In an initialised project a missing file is an ordinary
-/// thing for `sync` to restore, and stays where it was.
+/// naming that fact; the "behind" note keeps only what `sync` is actually
+/// for. In an initialised project a missing file is an ordinary thing for
+/// `sync` to restore, and stays where it was.
 fn sync_notes(outcomes: &[crate::sync::Outcome], initialised: bool) -> Vec<String> {
     let mut notes = Vec::new();
-    let mut behind: Vec<(&str, &str)> = Vec::new();
+    let mut behind: Vec<&str> = Vec::new();
     let mut never_written: Vec<&str> = Vec::new();
     for outcome in outcomes {
         match outcome {
@@ -1838,63 +1796,31 @@ fn sync_notes(outcomes: &[crate::sync::Outcome], initialised: bool) -> Vec<Strin
             }
             // One file can be behind for several reasons at once — a config
             // gains a setting and has a note rewritten in the same pass — and
-            // this is a count of files, not of reasons.
-            crate::sync::Outcome::Wrote { path, detail } => {
-                if !behind.iter().any(|(known, _)| *known == path.as_str()) {
-                    behind.push((path, detail));
+            // this is one line per file, not per reason.
+            crate::sync::Outcome::Wrote { path, .. }
+            | crate::sync::Outcome::Removed { path, .. } => {
+                if !behind.contains(&path.as_str()) {
+                    behind.push(path);
                 }
             }
             crate::sync::Outcome::Blocked { path, why } => {
                 notes.push(format!("{path}: {why}"));
             }
-            crate::sync::Outcome::Removed { path, why } => {
-                if !behind.iter().any(|(known, _)| *known == path.as_str()) {
-                    behind.push((path, why));
-                }
-            }
             crate::sync::Outcome::Kept => {}
         }
     }
 
-    if !never_written.is_empty() {
-        let mut note = format!(
-            "{} file(s) here have never been written — this project was not initialised; \
-             `spoolway init` writes them",
-            never_written.len()
-        );
-        for path in &never_written {
-            note += &format!("\n          {path}");
-        }
-        notes.push(note);
-    }
-
-    if !behind.is_empty() {
-        // One note, carrying its own continuation lines, so that the short
-        // report and the full listing print the same block.
-        let mut note = format!(
-            "{} file(s) here are behind this spoolway — `spoolway sync` takes them",
-            behind.len()
-        );
-        for (path, detail) in &behind {
-            // Bounded, because one of these reasons is a list of every setting
-            // a config has gained since it was written, and a note that fills
-            // a screen is a note nobody reads to the end of.
-            note += &format!("\n          {path} ({})", ellipsis(detail, 72));
-        }
-        notes.push(note);
-    }
+    notes.extend(
+        never_written
+            .iter()
+            .map(|path| format!("{path} has never been written")),
+    );
+    notes.extend(
+        behind
+            .iter()
+            .map(|path| format!("{path} is behind this spoolway")),
+    );
     notes
-}
-
-/// `text`, cut to `width` on a word boundary, with an ellipsis where it was
-/// cut.
-fn ellipsis(text: &str, width: usize) -> String {
-    if text.chars().count() <= width {
-        return text.to_string();
-    }
-    let head: String = text.chars().take(width).collect();
-    let cut = head.rfind(' ').unwrap_or(head.len());
-    format!("{}…", &head[..cut])
 }
 
 /// Both keys `retire-warmth` retired, named for a project that still writes
@@ -1939,16 +1865,13 @@ fn warmth_notes(repo: &Repo, pipelines: &Pipelines, config: &Config, report: &mu
                     Some((model, idle))
                 });
             match idle {
-                Some((model, idle)) => report.note(format!(
-                    "agents.{name}.session_reuse_uncached retired in this checkout's config — \
-                     the horizon is now models.'{model}'.session_reuse_idle, which is set \
-                     ({}). Drop the line.",
-                    crate::config::human_duration::format(idle)
+                Some((model, _idle)) => report.note(format!(
+                    "agents.{name}.session_reuse_uncached is retired in this checkout's \
+                     config, and models.'{model}'.session_reuse_idle is set"
                 )),
                 None => report.note(format!(
-                    "agents.{name}.session_reuse_uncached retired in this checkout's config — \
-                     no model this profile runs sets session_reuse_idle, so nothing was being \
-                     refused. Drop it."
+                    "agents.{name}.session_reuse_uncached is retired in this checkout's \
+                     config, and no model this profile runs sets session_reuse_idle"
                 )),
             }
         }
@@ -1958,8 +1881,8 @@ fn warmth_notes(repo: &Repo, pipelines: &Pipelines, config: &Config, report: &mu
         for (glob, entry) in models {
             if entry.get("cache_ttl").is_some() {
                 report.note(format!(
-                    "models.'{glob}'.cache_ttl renamed session_reuse_idle in this checkout's \
-                     config; still read, rewritten on the next save."
+                    "models.'{glob}'.cache_ttl is retired in this checkout's config, renamed \
+                     session_reuse_idle"
                 ));
             }
         }
@@ -1998,8 +1921,7 @@ mod tests {
         assert_eq!(
             price_table_age_note(30, 31).as_deref(),
             Some(
-                "the price table was generated 31 days ago, past the 30 in \
-                 `housekeeping.price_max_age_days` — `spoolway models refresh` takes litellm's current prices"
+                "the price table is 31 days old, past the 30 in `housekeeping.price_max_age_days`"
             )
         );
     }
@@ -2149,10 +2071,10 @@ mod tests {
     }
 
     /// One note per `[models]` entry that sets `slots` or `exclusive` without
-    /// saying whether it is `local`, naming the `config set` command that
-    /// answers it. A model that has set `local`, and one that sets neither
-    /// `slots` nor `exclusive`, draw nothing. The note names `slots` whenever
-    /// it is set — the task mockup's wording — and `exclusive` only for an
+    /// saying whether it is `local`. A model that has set `local`, and one
+    /// that sets neither `slots` nor `exclusive`, draw nothing. The note
+    /// names `slots` whenever it is set — the task mockup's wording — and
+    /// `exclusive` only for an
     /// entry that carries it alone.
     #[test]
     fn a_sized_model_that_has_not_set_local_is_noted() {
@@ -2214,12 +2136,6 @@ mod tests {
             "{}",
             note("*Qwen3.6-35B-A3B")
         );
-        assert!(
-            note("*Qwen3.6-35B-A3B")
-                .contains("spoolway config set models.'*Qwen3.6-35B-A3B'.local true"),
-            "{}",
-            note("*Qwen3.6-35B-A3B")
-        );
         // `exclusive` alone is the only case that names `exclusive`.
         assert!(
             note("*Muse-*").contains("sets `exclusive` but not `local`"),
@@ -2251,7 +2167,7 @@ mod tests {
         let notes: Vec<String> = model_health_checks(&pipelines, &config)
             .iter()
             .filter_map(|f| match f {
-                Finding::Note(text) if text.contains("routes to it") => Some(text.clone()),
+                Finding::Note(text) if text.contains("routes to no step") => Some(text.clone()),
                 _ => None,
             })
             .collect();
@@ -2833,17 +2749,17 @@ mod tests {
         assert!(report.render(false).ends_with("1 of 3 checks passed.\n"));
     }
 
-    /// A note that carries its own continuation lines — the list of files
-    /// `spoolway sync` would take — prints the same block in both modes.
+    /// `render` prints whatever a note's own text holds, embedded newlines
+    /// included, in both modes — nothing here assumes a note is one line,
+    /// even though every note this project writes now is one.
     #[test]
     fn a_multi_line_note_keeps_its_continuation_lines() {
         let mut report = Report::default();
-        report.note("2 file(s) here are behind this spoolway\n          a.md (rewritten)\n          b.md (rewritten)");
+        report.note("first line\n          second line");
         assert_eq!(
             report.render(false),
-            "  note  2 file(s) here are behind this spoolway\n\
-             \x20         a.md (rewritten)\n\
-             \x20         b.md (rewritten)\n\n\
+            "  note  first line\n\
+             \x20         second line\n\n\
              0 checks passed. Everything checks out.\n"
         );
     }
@@ -2894,8 +2810,9 @@ mod tests {
     }
 
     /// A file missing from a project `init` never wrote is not *behind* —
-    /// `sync` has nothing to bring forward there — so the note names
-    /// `init` for it and keeps the "behind" note for files `sync` is for.
+    /// `sync` has nothing to bring forward there — so it gets its own note
+    /// naming that fact, one line per file, apart from the "behind" note the
+    /// files `sync` is actually for get.
     #[test]
     fn a_never_initialised_project_is_sent_to_init_not_sync() {
         use crate::sync::Outcome;
@@ -2911,24 +2828,24 @@ mod tests {
         ];
 
         let notes = sync_notes(&outcomes, false);
-        assert_eq!(notes.len(), 2, "{notes:?}");
-        assert!(
-            notes[0].contains("`spoolway init` writes them")
-                && notes[0].contains(".spoolway/config.toml")
-                && !notes[0].contains("prompts/a.md"),
-            "{notes:?}"
-        );
-        assert!(
-            notes[1].starts_with("1 file(s) here are behind this spoolway")
-                && notes[1].contains("prompts/a.md")
-                && !notes[1].contains("config.toml"),
-            "{notes:?}"
+        assert_eq!(
+            notes,
+            vec![
+                ".spoolway/config.toml has never been written".to_string(),
+                ".spoolway/prompts/a.md is behind this spoolway".to_string(),
+            ]
         );
 
-        // In an initialised project a missing file is `sync`'s to restore.
+        // In an initialised project a missing file is `sync`'s to restore,
+        // so it lands under "behind" like any other.
         let notes = sync_notes(&outcomes, true);
-        assert_eq!(notes.len(), 1, "{notes:?}");
-        assert!(notes[0].starts_with("2 file(s) here are behind this spoolway"));
+        assert_eq!(
+            notes,
+            vec![
+                ".spoolway/config.toml is behind this spoolway".to_string(),
+                ".spoolway/prompts/a.md is behind this spoolway".to_string(),
+            ]
+        );
     }
 
     /// A file `sync` refused — hand-edited where only a machine reads — is
