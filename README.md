@@ -11,7 +11,7 @@
   <a href="https://github.com/marvingygas/spoolway/releases/latest"><img alt="release" src="https://img.shields.io/github/v/release/marvingygas/spoolway?style=flat-square&label=release&labelColor=3f3f46&color=18181b"></a>
 </p>
 
-Descriptive agent workflow builder ran by a minimalistic command line state machine for turning coding agents into a pipeline you can actually reason about. Determinism where possible. Terminal native. Built for herdr.
+Descriptive agent workflow builder ran by a minimalistic command line state machine for turning coding agents into a pipeline you can actually reason about. Determinism where possible. **Terminal native. Built for herdr**.
 Create yaml pipelines, mixing agents and commands, cloud and local models. Create a implemenation plan in any way you want and cut spoolway tasks which get linked to the best matched pipline. Measurable, comparable, repeatable. 
 
 Supported providers:
