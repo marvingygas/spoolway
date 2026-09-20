@@ -166,8 +166,15 @@ records() {
   dispatcher_start
   for ((i = 0; i < 600; i++)); do
     if grep -qF -- "$want" "$file" 2>/dev/null; then
-      sleep 0.3                                  # let the rest of the line land
+      # Kept twice: once now, for what is definitely there, and again after
+      # the pause that lets the rest of the line land. The pause alone was a
+      # window of its own — a task archived inside it took the log with it,
+      # `cp` found nothing to copy, and the caller's next `has` on `.kept`
+      # failed against a file that had never been written, with nothing to
+      # print for itself.
       cp "$file" "$file.kept" 2>/dev/null || true
+      sleep 0.3                                  # let the rest of the line land
+      [ -e "$file" ] && cp "$file" "$file.kept" 2>/dev/null
       ok "$what"; return
     fi
     [ -s "$file" ] && cp "$file" "$file.kept" 2>/dev/null
@@ -464,6 +471,21 @@ dispatcher_stop() {
   kill -TERM -- "-$pid" 2>/dev/null
   poll_while 5 kill -0 -- "-$pid"
   kill -KILL -- "-$pid" 2>/dev/null
+  # `KILL` cannot be caught, so anything still standing a moment later is not
+  # this dispatcher at all — and a suite that goes on believing the queue is
+  # held while something is still walking it fails somewhere else entirely,
+  # with nothing in its output pointing back here.
+  if ! poll_while 5 kill -0 -- "-$pid"; then
+    printf '  \033[31mstuck\033[0m   the dispatcher would not stop (group %s):\n' "$pid" >&2
+    ps -o pid,ppid,stat,cmd --sort=pid -g "$pid" 2>/dev/null | sed 's/^/        /' >&2
+  fi
+  # The other half of `--- dispatcher up ---`, and the reason a postmortem can
+  # tell a pass that ran from one that only looks like it did: every line
+  # between an `up` and the `down` below it belongs to one dispatcher, so a
+  # scenario whose claim is about a *held* queue can be read off the log
+  # rather than inferred from how far a task got.
+  [ -n "${E2E_DISPATCH_LOG:-}" ] \
+    && printf -- '--- dispatcher down ---\n' >> "$E2E_DISPATCH_LOG"
   return 0
 }
 

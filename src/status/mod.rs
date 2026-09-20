@@ -42,13 +42,14 @@ use view::{
 };
 pub(crate) use view::{DIM, GUTTER, RESET};
 
-/// How often the board re-reads the state while it waits for the next pass.
-/// File reads and one multiplexer call — cheap enough that nothing needs to be
-/// event-driven.
+/// The redraw rate the jobs screen and the queue screen's own waits still
+/// poll stdin at — the dispatcher board's own wait is event-driven now (see
+/// `crate::screen::DirWatch`) and only falls back to this as its per-slice
+/// cadence on a target with nothing to watch with.
 ///
 /// One second, not two, because it is also the rate the lockup's mark is
 /// sampled at — see [`view::spool_frame`], which turns on every whole second. A
-/// redraw slower than that turn would alias it: the board would sample the
+/// redraw slower than that turn would alias it: the screen would sample the
 /// same phase every time and the mark would sit still while the run moved.
 pub const POLL: Duration = Duration::from_secs(1);
 
@@ -1563,8 +1564,8 @@ fn render(
     let (tasks, load_problems) = repo.tasks_and_problems()?;
     let graph = Graph::build_for_run(&tasks, pipelines, &repo.archive_dir(), repo.unattended());
     let mux = crate::mux::backend(repo)?;
-    // Read once and passed down: this is a call out to the multiplexer, and the
-    // board makes it about once a second already.
+    // Read once and passed down: this is a call out to the multiplexer, and
+    // `render` is already the one place `draw` makes it from.
     let lanes = mux.list_lanes().unwrap_or_default();
 
     // The ticker sees the queue move: a stage that changed. A task entering

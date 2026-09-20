@@ -192,6 +192,24 @@ Run the pipeline. It draws the live board and keeps running until the queue is e
 `spoolway dispatch` asks herdr which pane it is running in and refuses to start outside one.
 No flag exempts it, `--plain` included. See [The dispatcher](dispatcher.md#running-it).
 
+Before anything else, each pre-loop check prints its own line as it returns:
+
+```
+  spoolway dispatch
+
+  starting
+    ✓ queue read            12 tasks
+    ✓ task routes           impl_ui, impl, release
+    ✓ backend available     herdr
+    ✓ git identity
+    ✓ index lock
+    ✓ backend checkout
+```
+
+A check still running names what it is waiting on, in place of the `✓`. `--plain` prints none
+of this; it keeps its own one-line-per-pass log instead. `backend available` names the backend,
+with no version.
+
 Before it starts, it checks every live task's `pipeline:` field. A missing or unknown pipeline
 refuses the whole start and dispatches nothing:
 
@@ -293,8 +311,9 @@ as soon as any line differs from it.
 `esc` on any of the three screens ends the command. From the queue screen's own `enter`, `esc`
 on any of the three screens returns to browsing instead.
 
-A failure to find or open this run's own workspace is shown afterward, once the run has already
-taken the lock, on its own notice with only `[enter] continue` to press.
+Once the lock is taken, a last checklist row, `workspace`, prints once the run's own workspace
+is found or opened. A failure to find or open it is shown instead, on its own notice with only
+`[enter] continue` to press.
 
 | Exit code | Meaning |
 |---|---|

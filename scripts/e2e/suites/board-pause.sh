@@ -11,12 +11,17 @@
 # since pausing is the one panel that can also abort a live lane; `U` and a
 # `p` of a task that never started each get one pass through the same
 # `enter`/`esc` answers near the bottom, to cover the other panels and the
-# `parked_from` record a park off `queued` leaves; `R`, last of all, proves
-# it sends that same kind of row straight back to `queued`, dependency or
-# not, still gating on a real one beside it.
+# `parked_from` record a park off `queued` leaves; `R` proves it sends that
+# same kind of row straight back to `queued`, dependency or not, still
+# gating on a real one beside it. Last of all is the pass-yields section,
+# which queues six more hang lanes of its own — placed after `R` simply so
+# it does not disturb the state `R`'s own assertions read, not because
+# anything here is scarce enough to make the order matter.
 #
-# How a key gets in. The board reads stdin itself, between redraws, only
-# while the dispatcher is waiting out its interval — so this suite runs a
+# How a key gets in. The board reads stdin itself, between redraws — both
+# while the dispatcher is waiting out its interval and, since the pass-yields
+# task, between a pass's own units of work too, so a key answers at the same
+# rate whether the queue is busy or idle — so this suite runs a
 # dispatcher of its own with the board drawn rather than `lib.sh`'s shared
 # `--plain` supervisor, with a fifo on its stdin. The fifo is opened
 # read-write here (`exec 9<>`) so opening it does not block on a reader, and
@@ -581,11 +586,13 @@ has "and the stdin content lands on disk" "read from stdin" \
 # `busy` — still paused itself, and never resumed by anything above — so
 # neither dependency has finished. `gate-edit` is still paused too, a real
 # gate, so this also proves `R`'s panel still gates on it the same as ever
-# while the queued parks beside it need no such asking. Last in the suite on
-# purpose: `mid-turn` and `busy` go past `R`'s own panel back onto
-# `implement` here too, and their lanes are `hang`-mode ones that never
-# report, so nothing after this point may still need the worker slots they
-# take back.
+# while the queued parks beside it need no such asking. `mid-turn` and
+# `busy` go past `R`'s own panel back onto `implement` here too, so their
+# `hang`-mode lanes are running again once this section ends — the
+# pass-race section after this one queues six more of its own regardless,
+# since nothing in this fixture caps `agents.<profile>.concurrency` or a
+# model's `slots` (both default to `0`, uncapped — `src/config.rs`), so
+# there is no worker-slot budget here for a later section to run short of.
 press R
 draws "\`R\` still gates on the one real gate among the parks" "resume all"
 draws "naming it, not the queued parks beside it" "gate-edit"
@@ -595,6 +602,54 @@ stage_reaches "a row parked off \`queued\` goes back to \`queued\`, dependency o
 stage_reaches "and every other queued park along with it" behind queued 25
 lacks "carrying no leftover \`parked_from\`" "parked_from:" \
   "$SPOOLWAY_PROJECT_HOME/queue/late.md"
+
+# --------------------------------- a park typed while six lanes race to start
+# `pass` now calls back into the board between its own units of work — see
+# `Dispatcher::pass` — so a keypress can land while a pass is still working
+# through the queue, not only once it returns and the run settles into its
+# interval wait. Six lanes launching in the very same pass (each a real
+# worktree cut and a real, if fake, agent start) makes a mid-pass read
+# likely, but this cannot *prove* the dispatcher was still busy the moment
+# `P` was read — `Phase::Passing` and `Phase::Waiting` draw identically on
+# purpose (`src/status/mod.rs`), so nothing on screen tells the two apart,
+# and the task itself is why: no suite can time a keypress against a pass's
+# own read. What this does cover end to end is the park itself, landing
+# either way without being lost — the mid-pass overwrite that could lose it
+# — `persist_task`'s own later write of a task it read before the park
+# lands — is proven at the unit level, by
+# `persist_task_does_not_overwrite_a_park_typed_mid_pass` in
+# `src/dispatch.rs`; this is a real keystroke, read off a real pipe,
+# answered by a real dispatcher, reaching a real task document either way.
+#
+# `P` rather than a single row's `p`, so this does not also depend on the
+# cursor's position among the dozens of rows the suite has already built —
+# `on_key` routes both through the same `park_under_lock`, so the write
+# path this is proving is identical either way.
+for n in 0 1 2 3 4 5; do
+  queue_hang "pass-race-$n"
+done
+# Whether any of the six is already confirmed live by the moment this lands
+# is exactly the race this section exists to not care about: nothing live
+# yet parks the whole run on `P` alone, same as the "nothing live" case
+# above; anything already live opens the same confirm panel the "one lane
+# live" case above does, and the `enter` right behind `P` answers it. Both
+# are read either way — in one drain by the pass's own callback if `P`
+# lands mid-pass, a poll slice apart by the wait loop (which reads at most
+# one key per slice) if it lands during the wait instead — so sending them
+# back to back is not a bet on which of the two reads it.
+press P
+press $'\r'
+# The longest wait in this suite, and the one place the default `20` is too
+# thin: the park lands only once the key is read, and the pass it has to be
+# read inside is cutting six real worktrees. `30` on the first assertion,
+# which is the one that waits on the read at all; `25` — the margin every
+# other park here already takes — on the five that follow, since one `P`
+# parks them all and they are on disk by the time the first one is.
+stage_reaches "\`P\`, typed the instant six lanes race to start, still parks them" \
+  pass-race-0 paused 30
+for n in 1 2 3 4 5; do
+  stage_reaches "and every lane racing to start beside it" "pass-race-$n" paused 25
+done
 
 board_stop
 finish

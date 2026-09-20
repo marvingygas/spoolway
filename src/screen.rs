@@ -108,16 +108,219 @@ impl PollableRead for RawStdin {
 /// terminal or hijacking the test process's own stdin.
 #[cfg(unix)]
 fn fd_has_byte_within(fd: std::os::unix::io::RawFd, timeout: std::time::Duration) -> bool {
-    let mut fds = [libc::pollfd {
-        fd,
-        events: libc::POLLIN,
-        revents: 0,
-    }];
+    poll_ready(&[fd], timeout).first().copied().unwrap_or(false)
+}
+
+/// Polls every descriptor in `fds` together and says which of them had
+/// something waiting within `timeout` — a byte on stdin, a [`DirWatch`]
+/// event — in one kernel call rather than one poll per descriptor checked in
+/// turn. This is the join `commands::dispatch`'s wait loop makes: a
+/// keystroke and a file landing in the queue or commands directory answer
+/// the exact same `poll`, at the same moment, so neither has to wait behind
+/// the other's own timeout.
+///
+/// Ready means a real event (`POLLIN`) or the far end going away
+/// (`POLLHUP`/`POLLERR`) — see [`fd_has_byte_within`]'s own doc on why a
+/// closed descriptor counts as ready too.
+#[cfg(unix)]
+pub(crate) fn poll_ready(
+    fds: &[std::os::unix::io::RawFd],
+    timeout: std::time::Duration,
+) -> Vec<bool> {
+    let mut pollfds: Vec<libc::pollfd> = fds
+        .iter()
+        .map(|&fd| libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        })
+        .collect();
     let ms = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
-    // SAFETY: `fds` holds one well-formed `pollfd` on a descriptor the
-    // caller keeps alive for the duration of the call.
-    let ready = unsafe { libc::poll(fds.as_mut_ptr(), 1, ms) };
-    ready > 0 && fds[0].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0
+    // SAFETY: `pollfds` holds one well-formed `pollfd` per descriptor, each
+    // kept alive by its caller for the duration of this call.
+    let n = unsafe { libc::poll(pollfds.as_mut_ptr(), pollfds.len() as libc::nfds_t, ms) };
+    // POSIX leaves every `revents` unspecified when `poll` itself returns
+    // -1 (an interrupting signal, most often here — see `stop::
+    // catch_interrupt`) — trusting them without this guard would read
+    // whatever `revents` happened to be initialised to as a real answer.
+    // `n == 0` (the timeout ran out with nothing ready) already reads every
+    // `revents` back as zero on its own, so this only ever changes the
+    // `n < 0` case.
+    if n < 0 {
+        return vec![false; fds.len()];
+    }
+    pollfds
+        .iter()
+        .map(|pfd| pfd.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0)
+        .collect()
+}
+
+/// Which of the two directories a [`DirWatch`] wake belongs to — a lane's own
+/// `spoolway report` landing in the queue, or a background command step
+/// finishing in the commands directory. `commands::dispatch`'s wait loop
+/// answers the two differently: a queue change only redraws the board, since
+/// the next draw already reads the queue fresh; a commands change is what a
+/// finished background step is routed on, so it breaks the wait to run a
+/// fresh pass at once instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Changed {
+    Queue,
+    Commands,
+}
+
+/// Watches the queue directory and the commands directory for anything that
+/// used to be learned only by rereading them — see
+/// [`crate::dispatch::PROBE_INTERVAL`]'s own doc. Built once, outside
+/// `commands::dispatch`'s own loop, and polled alongside stdin every time
+/// that loop waits — see [`poll_ready`].
+///
+/// Backed by [`inotify(7)`](https://man7.org/linux/man-pages/man7/inotify.7.html),
+/// a Linux-only kernel facility with no portable equivalent — see
+/// [`open_dir_watch`]'s own split for what every other target falls back to.
+#[cfg(target_os = "linux")]
+pub(crate) struct DirWatch {
+    fd: std::os::unix::io::RawFd,
+    watches: Vec<(libc::c_int, Changed)>,
+}
+
+#[cfg(target_os = "linux")]
+impl DirWatch {
+    /// `None` on any failure to open the instance or watch either directory
+    /// — the caller falls back to the plain interval wait it already has,
+    /// rather than fail a whole run over a watch it can live without.
+    fn new(queue_dir: &std::path::Path, commands_dir: &std::path::Path) -> Option<Self> {
+        use std::os::unix::ffi::OsStrExt;
+
+        // A new file (`IN_CREATE`, how a directly-created task file lands),
+        // one written and closed (`IN_CLOSE_WRITE` — the command wrapper's
+        // own exit-code file, a plain open/write/close with no rename),
+        // one replaced in place (`IN_MOVED_TO`, how `task::write_atomic`'s
+        // temp-file-then-rename lands a save) or removed (`IN_DELETE`, an
+        // archived task or a forgotten run) — everything either side of
+        // this watch actually does to one of these two directories.
+        const MASK: u32 =
+            libc::IN_CREATE | libc::IN_CLOSE_WRITE | libc::IN_MOVED_TO | libc::IN_DELETE;
+
+        // SAFETY: no arguments borrow anything. `IN_NONBLOCK` keeps a read
+        // issued only after `poll` says ready from ever blocking on one that
+        // lost the race with a concurrent drain.
+        let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK) };
+        if fd < 0 {
+            return None;
+        }
+        let mut watches = Vec::new();
+        for (dir, changed) in [
+            (queue_dir, Changed::Queue),
+            (commands_dir, Changed::Commands),
+        ] {
+            let Ok(path) = std::ffi::CString::new(dir.as_os_str().as_bytes()) else {
+                // SAFETY: `fd` was opened by this same call, above, and
+                // nothing else holds it yet.
+                unsafe { libc::close(fd) };
+                return None;
+            };
+            // SAFETY: `fd` is the instance opened above; `path` is a valid
+            // NUL-terminated buffer for the duration of this call.
+            let wd = unsafe { libc::inotify_add_watch(fd, path.as_ptr(), MASK) };
+            if wd < 0 {
+                // SAFETY: as above.
+                unsafe { libc::close(fd) };
+                return None;
+            }
+            watches.push((wd, changed));
+        }
+        Some(Self { fd, watches })
+    }
+
+    pub(crate) fn fd(&self) -> std::os::unix::io::RawFd {
+        self.fd
+    }
+
+    /// Drain every event `poll_ready` just found waiting on [`Self::fd`],
+    /// and say which of the two watched directories any of them belonged
+    /// to — coalesced to at most one [`Changed::Queue`] and one
+    /// [`Changed::Commands`], since a pass can rewrite a dozen task files in
+    /// one go and the caller only needs to know it should act, not how many
+    /// times.
+    pub(crate) fn drain(&self) -> Vec<Changed> {
+        // `libc::inotify_event` needs 4-byte alignment — inotify(7) spells
+        // this out under NOTES as a `struct` a caller must declare "suitably
+        // aligned" itself, since the kernel packs records at aligned offsets
+        // only *within* whatever buffer it is handed. A `[u8; _]` has an
+        // alignment of 1, so a reference built straight over one is
+        // misaligned and reading it is undefined behaviour whatever a given
+        // architecture happens to tolerate — review finding 2. `[u64; _]`
+        // gives 8-byte alignment for free; only its byte length matters
+        // below.
+        let mut buf = [0u64; 512];
+        let base: *const u8 = buf.as_ptr().cast();
+        let cap = std::mem::size_of_val(&buf);
+        let mut seen = Vec::new();
+        loop {
+            // SAFETY: `buf` is a valid, appropriately sized and aligned
+            // buffer for the duration of this call, and `self.fd` is open
+            // for the life of `self`.
+            let n = unsafe { libc::read(self.fd, buf.as_mut_ptr().cast(), cap) };
+            if n <= 0 {
+                break;
+            }
+            let mut offset = 0usize;
+            while offset + std::mem::size_of::<libc::inotify_event>() <= n as usize {
+                // SAFETY: `offset` leaves at least one whole `inotify_event`
+                // header inside the `n` bytes just read, the kernel only
+                // ever writes complete, correctly aligned records here, and
+                // `base` itself is 8-byte aligned — see `buf`'s own doc.
+                let event = unsafe { &*(base.add(offset).cast::<libc::inotify_event>()) };
+                if let Some((_, changed)) = self.watches.iter().find(|(wd, _)| *wd == event.wd)
+                    && !seen.contains(changed)
+                {
+                    seen.push(*changed);
+                }
+                offset += std::mem::size_of::<libc::inotify_event>() + event.len as usize;
+            }
+        }
+        seen
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for DirWatch {
+    fn drop(&mut self) {
+        // SAFETY: `self.fd` was opened by `Self::new` and nothing else holds
+        // it.
+        unsafe { libc::close(self.fd) };
+    }
+}
+
+/// The non-Linux half of [`DirWatch`]: [`Self::new`] never returns anything
+/// to watch, since `inotify` is Linux-only — a target that lands here falls
+/// back to `commands::dispatch`'s plain interval wait alone, exactly as it
+/// behaved before this task.
+#[cfg(not(target_os = "linux"))]
+pub(crate) struct DirWatch;
+
+#[cfg(not(target_os = "linux"))]
+impl DirWatch {
+    fn new(_queue_dir: &std::path::Path, _commands_dir: &std::path::Path) -> Option<Self> {
+        None
+    }
+
+    pub(crate) fn fd(&self) -> std::os::unix::io::RawFd {
+        unreachable!("DirWatch::new never returns Some off this target")
+    }
+
+    pub(crate) fn drain(&self) -> Vec<Changed> {
+        Vec::new()
+    }
+}
+
+/// Open a [`DirWatch`] on `queue_dir` and `commands_dir`, or `None` where
+/// there is nothing to watch with — see [`DirWatch::new`] on each target.
+pub(crate) fn open_dir_watch(
+    queue_dir: &std::path::Path,
+    commands_dir: &std::path::Path,
+) -> Option<DirWatch> {
+    DirWatch::new(queue_dir, commands_dir)
 }
 
 /// Read one key off `input`, blocking until it can. `None` at end of input —
@@ -495,5 +698,87 @@ mod tests {
             Some(Key::Down),
             "a burst \\x1b[B must decode as Down, not a bare Esc with the rest dropped"
         );
+    }
+
+    #[test]
+    fn poll_ready_answers_each_fd_independently() {
+        let (read_a, write_a) = pipe();
+        let (read_b, write_b) = pipe();
+        // SAFETY: `write_a` is this test's own live pipe fd.
+        unsafe {
+            libc::write(write_a, c"x".as_ptr().cast(), 1);
+        }
+
+        let start = std::time::Instant::now();
+        let ready = poll_ready(&[read_a, read_b], std::time::Duration::from_millis(50));
+        let elapsed = start.elapsed();
+
+        close(read_a);
+        close(write_a);
+        close(read_b);
+        close(write_b);
+
+        assert_eq!(
+            ready,
+            vec![true, false],
+            "only the fd a byte was actually written to should read ready"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(50),
+            "a fd that is already ready must not wait out the timeout: took {elapsed:?}"
+        );
+    }
+
+    /// Two scratch directories stand in for the queue and commands
+    /// directories a real [`DirWatch`] joins — see `commands::dispatch`'s
+    /// own wait loop. Writing into one must wake `poll_ready` on the
+    /// watch's own fd and [`DirWatch::drain`] must name only that
+    /// directory, never the other.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dir_watch_names_which_of_the_two_directories_changed() {
+        let queue_dir = crate::scratch::root("dir-watch-queue");
+        let commands_dir = crate::scratch::root("dir-watch-commands");
+        let _ = std::fs::remove_dir_all(&queue_dir);
+        let _ = std::fs::remove_dir_all(&commands_dir);
+        std::fs::create_dir_all(&queue_dir).unwrap();
+        std::fs::create_dir_all(&commands_dir).unwrap();
+
+        let watch = DirWatch::new(&queue_dir, &commands_dir).expect("inotify must be available");
+
+        std::fs::write(queue_dir.join("demo.md"), "hello").unwrap();
+        let ready = poll_ready(&[watch.fd()], std::time::Duration::from_millis(500));
+        assert_eq!(
+            ready,
+            vec![true],
+            "a write into the queue dir must wake the watch"
+        );
+        assert_eq!(
+            watch.drain(),
+            vec![Changed::Queue],
+            "only the queue directory changed"
+        );
+
+        std::fs::write(commands_dir.join("demo.exit"), "0").unwrap();
+        let ready = poll_ready(&[watch.fd()], std::time::Duration::from_millis(500));
+        assert_eq!(
+            ready,
+            vec![true],
+            "a write into the commands dir must wake the watch"
+        );
+        assert_eq!(
+            watch.drain(),
+            vec![Changed::Commands],
+            "only the commands directory changed"
+        );
+
+        // Nothing pending: a poll with no writes since the last drain must
+        // time out rather than report a stale wake.
+        let ready = poll_ready(&[watch.fd()], std::time::Duration::from_millis(50));
+        assert_eq!(ready, vec![false]);
+        assert!(watch.drain().is_empty());
+
+        let _ = std::fs::remove_dir_all(&queue_dir);
+        let _ = std::fs::remove_dir_all(&commands_dir);
     }
 }

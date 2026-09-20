@@ -482,6 +482,28 @@ cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
 add_command_step default bench \
   "sleep 240; echo 'never finishes in time' > \"\$SPOOLWAY_REPO/bench-done.txt\"" \
   review --background
+# An ordinary waiting step immediately behind it, held on a release file the
+# suite touches once it has read what spoolway wrote about the background
+# run. Everything asserted below — the pid under `commands/`, and the
+# process that pid names — lives only as long as the task does, and
+# `teardown.rs` reclaims `commands/` on the archive.
+#
+# `quick` used to be watched by hand for that, on the reasoning that its walk
+# from `bench` to `done` cost a real interval per transition and so could be
+# sampled on the way. It cannot any more: the dispatcher wakes on a change
+# rather than waiting out the interval it announces, and this suite's own
+# dispatch log shows `bench` starting and the task reaching `handover` inside
+# a single pass — the whole window closed between two 0.2s reads, and the
+# pid was read as empty.
+#
+# It holds the task, never the background command: `bench` is already gone
+# about its own business by the time this step starts, which is the claim
+# below about `bench-done.txt`.
+BENCH_RELEASE="$LIVE/bench.release"
+rm -f "$BENCH_RELEASE"
+add_command_step default hold \
+  "for _ in \$(seq 1 1200); do [ -e \"$BENCH_RELEASE\" ] && break; sleep 0.1; done" \
+  review
 works "a background command step checks out" "$SPOOLWAY" pipeline check
 says "and show says it does not wait" "bench      command   background" \
   "$SPOOLWAY" pipeline show
@@ -490,24 +512,22 @@ dispatcher_restart   # the pipeline it is holding has no `bench` step in it
 task_doc "$LIVE/quick.md" quick "$BODY" "group: live" "touches: [notes/quick.md]"
 must "a task with a background step" "$SPOOLWAY" queue add --from "$LIVE/quick.md"
 
-# Watched by hand rather than with `drive`, for one reason: the pid has to be
-# read while the run is still going, and the whole claim under test is that the
-# task does not stop there long enough to be caught waiting. The rest of the
-# pipeline (review, document, handover, checks) has no --interval knob left to
-# speed it up, so each of its transitions costs up to a real PROBE_INTERVAL —
-# the budget below has to clear that whole walk, not the old sub-second one.
+# Read while `hold` keeps the task in the queue, so `commands/` is still
+# there to read from. What spoolway wrote, not what the command wrote about
+# itself: that a pid was recorded at all is half of what this case is about.
 BENCH_PID=""
-for _ in $(seq 1 1500); do
-  if [ -z "$BENCH_PID" ] && [ -s "$SPOOLWAY_PROJECT_HOME/commands/quick · bench.pid" ]; then
-    BENCH_PID=$(cat "$SPOOLWAY_PROJECT_HOME/commands/quick · bench.pid")
-  fi
-  [ -z "$(stage_of quick)" ] && break
-  sleep 0.2
-done
+if poll_until 300 test -s "$SPOOLWAY_PROJECT_HOME/commands/quick · bench.pid"; then
+  BENCH_PID=$(cat "$SPOOLWAY_PROJECT_HOME/commands/quick · bench.pid")
+fi
 
 if [ -n "$BENCH_PID" ]; then ok "the background command really was started"
 else bad "the background command really was started"; fi
-if [ -z "$(stage_of quick)" ]; then
+
+# Read, so `hold` may let go and the task go on to `done`. `bench` itself is
+# four minutes from finishing and nothing below waits for it — which is the
+# next thing asserted.
+touch "$BENCH_RELEASE"
+if drive quick gone 300; then
   ok "the task ran the whole pipeline without waiting for it"
 else
   bad "the task ran the whole pipeline without waiting for it (at \`$(stage_of quick)\`)"
@@ -643,6 +663,14 @@ cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
 add_command_step default nosetsid \
   "sleep 240; echo 'no-setsid done' > \"\$SPOOLWAY_REPO/no-setsid-done.txt\"" \
   review --background
+# The same hold the `bench` case above takes, for the same reason and with
+# the same reasoning behind it: the pid this case is entirely about is
+# written under `commands/`, and `commands/` goes when the task does.
+NO_SETSID_RELEASE="$LIVE/no-setsid.release"
+rm -f "$NO_SETSID_RELEASE"
+add_command_step default hold \
+  "for _ in \$(seq 1 1200); do [ -e \"$NO_SETSID_RELEASE\" ] && break; sleep 0.1; done" \
+  review
 must "marking it headless: true" \
   sed -i 's|^    background: true$|    background: true\n    headless: true|' \
   .spoolway/pipelines/default.yml
@@ -656,20 +684,14 @@ task_doc "$LIVE/nosetsid.md" nosetsid "$BODY" "group: live" \
 must "a task with a headless step, dispatched with no setsid on PATH" \
   "$SPOOLWAY" queue add --from "$LIVE/nosetsid.md"
 
-# Watched by hand for the same reason `bench` above is: the pid has to be
-# read while the run is still going. Stopped the moment the pid file
-# appears, rather than waiting for the task to finish — a background step's
-# whole task can archive inside the same pass that started it, and cleanup
-# at archival is what takes the process down (see the `bench` case above),
-# so waiting past that point would be checking the wrong thing.
+# Read while `hold` keeps the task in the queue — the same window the
+# `bench` case above makes, and made for the same reason: a background
+# step's whole task can archive inside the same pass that started it,
+# taking `commands/` and this pid file with it.
 NOSETSID_PID=""
-for _ in $(seq 1 300); do
-  if [ -s "$SPOOLWAY_PROJECT_HOME/commands/nosetsid · nosetsid.pid" ]; then
-    NOSETSID_PID=$(cat "$SPOOLWAY_PROJECT_HOME/commands/nosetsid · nosetsid.pid")
-    break
-  fi
-  sleep 0.2
-done
+if poll_until 60 test -s "$SPOOLWAY_PROJECT_HOME/commands/nosetsid · nosetsid.pid"; then
+  NOSETSID_PID=$(cat "$SPOOLWAY_PROJECT_HOME/commands/nosetsid · nosetsid.pid")
+fi
 
 if [ -n "$NOSETSID_PID" ]; then
   ok "a headless command step still starts and writes its pid with no setsid on PATH"
@@ -685,9 +707,9 @@ else
   bad "and it outlives the pass that started it (pid $NOSETSID_PID)"
 fi
 # Cleaned up the same way `bench` is, rather than left running into whatever
-# this suite does next. The task still has to walk review, document, handover
-# and checks to reach `done` first — no --interval knob left to speed that
-# up, so this needs the same wide budget `bench`'s own wait does.
+# this suite does next — so `hold` is let go first, and the task still has
+# to walk review, document, handover and checks to reach `done` after that.
+touch "$NO_SETSID_RELEASE"
 if [ -n "$NOSETSID_PID" ] && poll_while 300 test -d "/proc/$NOSETSID_PID"; then
   ok "and cleanup stops it once the task is done, same as any other background run"
 else
@@ -847,21 +869,35 @@ must "the pane-gate task is taken back out" "$SPOOLWAY" queue unqueue paneless
 export SPOOLWAY_E2E_PANE_ENV_MARKER="from-the-dispatchers-own-environment"
 
 # The visible half: no `headless:` key, so the command gets a pane of its
-# own — long enough that a poll can catch it standing while the command
-# runs, and short enough that the suite is not built around a sleep.
+# own, and it stands until this suite lets it go.
+#
+# A made window, not a caught one — the same release-file shape the herdr
+# pane case below uses, and for the same reason: this is a one-step pipeline
+# routing straight to `done`, so `queued → visible → archived` is over
+# inside a moment and `teardown.rs` reclaims `commands/` on the archive.
+# Everything read below — the pane file, the log, and the `.kept` copy the
+# env-marker check greps — is written while the step is running, and a
+# `sleep 2` was only ever a guess at how long that would take. It stopped
+# being long enough once a pass got fast: the log was reclaimed out from
+# under `records`, whose `cp` then left no `.kept` at all. `timeout:` is the
+# backstop, so a suite that dies before releasing it does not leave a pane
+# waiting forever.
 #
 # A one-step pipeline of its own, like `herdrpane.yml` below — not the
 # `default` pipeline's `implement` → this step chain the tmux-backed version
 # of this case used, because that starts on an agent lane, and
 # `herdr-stub.sh` answers no `agent start` verb at all: it is here for the
 # handover, not for a full agent lifecycle. See its own header.
-cat > .spoolway/pipelines/panevisible.yml <<'YML'
+VISIBLE_RELEASE="$LIVE/visible.release"
+rm -f "$VISIBLE_RELEASE"
+sed "s|@RELEASE@|$VISIBLE_RELEASE|" > .spoolway/pipelines/panevisible.yml <<'YML'
 description: One paned command step, for whether it opens a pane at all.
 
 steps:
   - id: visible
-    description: Run long enough for a poll to catch the pane standing.
-    run: 'sleep 2; echo visible-pane-marker; echo "env:$SPOOLWAY_E2E_PANE_ENV_MARKER"'
+    description: Stand in a pane until the suite has read everything it writes.
+    run: 'echo visible-pane-marker; echo "env:$SPOOLWAY_E2E_PANE_ENV_MARKER"; while [ ! -e "@RELEASE@" ]; do sleep 0.1; done'
+    timeout: 120s
     on_pass: done
     on_fail: blocked
 YML
@@ -910,6 +946,9 @@ has "a variable only the dispatcher's own environment carried reached the herdr 
   "env:from-the-dispatchers-own-environment" \
   "$SPOOLWAY_PROJECT_HOME/commands/paned · visible.log.kept"
 
+# Everything above has been read, so the command may finish and the task may
+# go on to be archived — which is the next thing asserted.
+touch "$VISIBLE_RELEASE"
 if drive paned gone 180; then ok "the task carries on once the command has passed"
 else bad "the task carries on once the command has passed (at \`$(stage_of paned)\`)"; fi
 unset SPOOLWAY_E2E_PANE_ENV_MARKER
@@ -920,14 +959,24 @@ else
 fi
 
 # The hidden half: the same shape, with `headless: true` added — today's
-# silent, detached run, and no pane ever asked for.
-cat > .spoolway/pipelines/panehidden.yml <<'YML'
+# silent, detached run, and no pane ever asked for. Held open by a release
+# file of its own for the same reason the visible half is: its log is read
+# while it runs, and the archive reclaims that log the moment the one step
+# it has routes to `done`.
+#
+# The wait bounds itself rather than taking a `timeout:` key the way the
+# visible half and `herdrpane.yml` do — `show marks it` just below reads
+# this step's *resolved* timeout, and the whole point of that check is that
+# it says the headless default, 30m, with nothing written here to say it.
+HIDDEN_RELEASE="$LIVE/hidden.release"
+rm -f "$HIDDEN_RELEASE"
+sed "s|@RELEASE@|$HIDDEN_RELEASE|" > .spoolway/pipelines/panehidden.yml <<'YML'
 description: One headless command step, for whether it ever opens a pane.
 
 steps:
   - id: hidden
-    description: Run detached, with no pane.
-    run: sleep 2; echo hidden-command-marker
+    description: Run detached, with no pane, until the suite has read its log.
+    run: 'echo hidden-command-marker; for _ in $(seq 1 1200); do [ -e "@RELEASE@" ] && break; sleep 0.1; done'
     headless: true
     on_pass: done
     on_fail: blocked
@@ -941,10 +990,12 @@ task_doc "$LIVE/hiddenc.md" hiddenc "$BODY" "group: live" \
   "pipeline: panehidden" "touches: [notes/hiddenc.md]"
 must "a task through a headless command step" \
   "$SPOOLWAY" queue add --from "$LIVE/hiddenc.md"
-# Caught in flight, ahead of the archive step that reclaims this log.
+# Read while the step is still held, ahead of the archive that reclaims
+# this log.
 records "and its output is on the record just the same" "hidden-command-marker" \
   "$SPOOLWAY_PROJECT_HOME/commands/hiddenc · hidden.log" hiddenc
 
+touch "$HIDDEN_RELEASE"
 if drive hiddenc gone 180; then ok "a headless command step still routes on its exit code"
 else bad "a headless command step still routes on its exit code (at \`$(stage_of hiddenc)\`)"; fi
 if [ -f "$SPOOLWAY_PROJECT_HOME/commands/hiddenc · hidden.pane" ]; then
@@ -1149,18 +1200,21 @@ unset HERDR_STUB_STATE
 PATH="$PATH_BEFORE_HERDR_STUB"; export PATH
 dispatcher_restart
 
-# --------------------------------------------------- the tick: acted on fast
-# The split this task makes: a background step's own `.exit` file is read by
-# the cheap tick — `status::POLL`'s own one second — not only by the slower
-# probe (`dispatch::PROBE_INTERVAL`, ten seconds, fixed rather than
-# `dispatch.interval` now but no faster than it ever was), which still owns
-# starting a lane and asking the multiplexer anything. Proven by reaching
-# `blocked` well under the thirty seconds a probe with no tick at all would
-# routinely need — see the timing comment below.
+# --------------------------------------------------- the wake: acted on fast
+# The split this task makes: a background step's own `.exit` file lands in
+# the commands directory, which wakes `spoolway dispatch`'s own wait the
+# moment it is written — see `crate::screen::DirWatch` — rather than sitting
+# there until the next `dispatch::PROBE_INTERVAL` (ten seconds, fixed rather
+# than `dispatch.interval` now but no faster than it ever was) probe happens
+# to look. There is no tick in the loop any more: the wake breaks the wait
+# outright and lets a fresh pass — the only thing that ever starts a lane or
+# asks the multiplexer anything — run at once. Proven by reaching `blocked`
+# well under the thirty seconds a run with no wake at all would routinely
+# need — see the timing comment below.
 cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
 {
   printf '\n  - id: tick-check\n'
-  printf '    description: A background step that fails at once, to prove the tick alone reroutes it.\n'
+  printf '    description: A background step that fails at once, to prove the wake alone reroutes it.\n'
   printf '    run: exit 1\n'
   printf '    background: true\n'
   printf '    on_pass: tick-check-landed\n'
@@ -1185,20 +1239,20 @@ must "a task behind the tick-check step queues" \
 # needs two of its passes to get `tick-check` started at all — settling
 # `implement`, then starting the background run and moving on to the dead
 # end — so this cannot be timed against zero. What it is timed against is
-# the *third* pass a probe with no tick would need, to notice the
+# the *third* pass a run with no wake would need, to notice the
 # meanwhile-finished exit code on its own: thirty seconds, worst case,
 # against this cap's twenty-five.
 if drive tick-check blocked 150; then
   ELAPSED=$(( $(date +%s) - START_TS ))
   if [ "$ELAPSED" -lt 25 ]; then
-    ok "a tick alone reroutes the finished background step, well inside the ten-second probe \
+    ok "the wake alone reroutes the finished background step, well inside the ten-second probe \
 (${ELAPSED}s)"
   else
-    bad "a tick alone reroutes the finished background step, well inside the ten-second probe \
+    bad "the wake alone reroutes the finished background step, well inside the ten-second probe \
 (took ${ELAPSED}s — no faster than the probe alone would have)"
   fi
 else
-  bad "a tick alone reroutes the finished background step, well inside the ten-second probe \
+  bad "the wake alone reroutes the finished background step, well inside the ten-second probe \
 (never reached blocked; at \`$(stage_of tick-check)\`)"
 fi
 

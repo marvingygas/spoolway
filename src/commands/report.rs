@@ -4324,15 +4324,18 @@ mod tests {
             crate::headless::Headless::new(&repo.root, &repo.config.dispatch, repo.headless_dir())
                 .unwrap();
         headless
-            .start_lane(&crate::mux::LaneSpec {
-                name: &crate::mux::lane_name("implement", "stuck"),
-                label: "implementer",
-                kind: "pi",
-                pane_id: "p1",
-                args: &[],
-                env: &std::collections::BTreeMap::new(),
-                path_prefix: None,
-            })
+            .start_lane(
+                &crate::mux::LaneSpec {
+                    name: &crate::mux::lane_name("implement", "stuck"),
+                    label: "implementer",
+                    kind: "pi",
+                    pane_id: "p1",
+                    args: &[],
+                    env: &std::collections::BTreeMap::new(),
+                    path_prefix: None,
+                },
+                &mut || {},
+            )
             .unwrap();
 
         resume(
@@ -4429,15 +4432,18 @@ mod tests {
             crate::headless::Headless::new(&repo.root, &repo.config.dispatch, repo.headless_dir())
                 .unwrap();
         headless
-            .start_lane(&crate::mux::LaneSpec {
-                name: "stuck · handover",
-                label: "github",
-                kind: "pi",
-                pane_id: "p1",
-                args: &[],
-                env: &std::collections::BTreeMap::new(),
-                path_prefix: None,
-            })
+            .start_lane(
+                &crate::mux::LaneSpec {
+                    name: "stuck · handover",
+                    label: "github",
+                    kind: "pi",
+                    pane_id: "p1",
+                    args: &[],
+                    env: &std::collections::BTreeMap::new(),
+                    path_prefix: None,
+                },
+                &mut || {},
+            )
             .unwrap();
 
         resume(

@@ -32,19 +32,18 @@ use crate::task::Task;
 
 pub(crate) const LANES_FILE: &str = "lanes.json";
 
-/// The fixed rate a full probe repeats at — [`Dispatcher::pass`], the slow
-/// half `commands::dispatch`'s wait loop spends [`crate::status::POLL`]-sized
-/// ticks waiting out. The tick's own rate needs no constant of its own here:
-/// it already has one, [`crate::status::POLL`], which [`Dispatcher::tick`]
-/// names directly.
+/// The fixed rate a full probe repeats at — [`Dispatcher::pass`] — when
+/// nothing wakes `commands::dispatch`'s wait loop early. A change that lands
+/// in the queue or commands directory wakes that wait the moment it is
+/// written (see `crate::screen::DirWatch`), so this is a floor under how
+/// often a pass runs, not the rate anything is actually learned at.
 ///
 /// Ten seconds — what `dispatch.interval` defaulted to before this task
-/// removed it. Kept at that size on purpose: c7b80f8 split a pass into this
-/// probe and the cheap tick precisely so the number of multiplexer calls and
-/// full task rereads per unit of wall-clock time would stay where it was —
-/// fixing this at the tick's own one-second rate instead would run every one
-/// of those ten times as often, which is the cost that split existed to
-/// avoid, not reintroduce.
+/// removed it. Kept at that size on purpose, on the same grounds
+/// [`MAX_REMINDERS`] is a constant rather than a setting: a full probe still
+/// costs a multiplexer call and a full task reread, and nothing has needed
+/// that to run more often than a wake, or the floor beneath it, already
+/// makes it.
 pub const PROBE_INTERVAL: Duration = Duration::from_secs(10);
 
 /// How many times a task's lane may be *launched* at the step it is on
@@ -517,13 +516,16 @@ pub struct Dispatcher<'a> {
     /// rather than triggering a second read. `None` until something in the
     /// pass first needs the ledger, for the same reason `usage_banked` is.
     ledger: Option<std::sync::Arc<Vec<crate::usage::Entry>>>,
-    /// Each task's `last_report.at` as this pass first read it, by task id.
-    /// A lane's `spoolway report` is the only thing that ever advances that
-    /// field, so a disk copy whose value is higher than this means a report
-    /// landed mid-pass — and [`Dispatcher::persist`] must not then write the
-    /// pass's stale in-memory copy over it. Rebuilt at the top of every
-    /// [`Dispatcher::run_pass`]. See review finding 2.
-    report_seen: HashMap<String, i64>,
+    /// A fingerprint of each task's whole rendered file, as this pass first
+    /// read it, by task id — not `last_report.at` alone: a key typed on the
+    /// board mid-pass (`p`, `r`, `u` — see `status::on_key`) writes the file
+    /// too, and none of them touch `last_report`. Comparing the whole file
+    /// is what [`Dispatcher::persist`] needs to tell *any* mid-pass write
+    /// apart from its own stale in-memory copy, not just a lane's `spoolway
+    /// report`. Rebuilt at the top of every [`Dispatcher::run_pass`]. See
+    /// review finding 2, and the pass-yields task that widened this from
+    /// `last_report` alone to the file itself.
+    file_seen: HashMap<String, u64>,
     /// The command run [`Dispatcher::run_command`]'s `Exited` arm most
     /// recently read a destination off, set there and taken by its caller
     /// right after — never inferred by re-reading [`command_step::Runs::state`]
@@ -533,13 +535,6 @@ pub struct Dispatcher<'a> {
     /// the run could easily have finished on its own in the background.
     /// Only the arm that actually consumed a code for routing may set this.
     pending_command_forget: Option<String>,
-    /// [`Dispatcher::tick`]'s own memory of every task file it has parsed —
-    /// see [`crate::task::TaskCache`]. Lives on the dispatcher rather than
-    /// the tick itself so it survives from one tick to the next across a
-    /// whole probe interval; a fresh [`Dispatcher::new`] at the next probe
-    /// starts it empty again, which costs one pass's worth of reparsing
-    /// every interval rather than every second.
-    task_cache: crate::task::TaskCache,
 }
 
 /// What one session has banked to the usage ledger so far — the running
@@ -707,145 +702,36 @@ impl<'a> Dispatcher<'a> {
             unattended: repo.unattended(),
             usage_banked: None,
             ledger: None,
-            report_seen: HashMap::new(),
+            file_seen: HashMap::new(),
             pending_command_forget: None,
-            task_cache: crate::task::TaskCache::new(),
         }
     }
 
-    /// The cheap half of a pass, run at `status::POLL`'s own one-second
-    /// cadence between the slower [`Dispatcher::pass`] that keeps
-    /// everything else — see this task's own `group_description` for the
-    /// split. Spawns nothing: no `mux.list_lanes`, no `sweep_anchor_tabs`,
-    /// no pane capture, no git call. Only file reads — the queue by mtime
-    /// (see [`Dispatcher::task_cache`]), `reap_stale_runs`'s own routing
-    /// off one `commands/` directory read, and [`Dispatcher::persist`].
+    /// Save `task`, but only under its per-task lock and only if nothing —
+    /// a lane's `spoolway report`, a `p`/`r`/`u` typed on the board — has
+    /// landed on the file since this pass last read or wrote it itself; see
+    /// [`Dispatcher::file_seen`] and review finding 2. When something has
+    /// landed, the pass's in-memory copy is stale: the write is dropped and
+    /// the next pass redoes this pass's bookkeeping against what actually
+    /// reached the file.
     ///
-    /// Narrower than [`Dispatcher::run_pass`] on purpose: it never touches
-    /// `owned` lanes, never starts a candidate, and never fires the
-    /// `[issue_tracking]` hook — all three need to know what the
-    /// multiplexer or a process is doing, which is exactly the work the
-    /// probe still owns. What a tick *can* settle on its own is a
-    /// `headless: true` background command step — or any background step
-    /// on the headless backend, which never hands one a pane at all — that
-    /// finished since the last time anything looked: `reap_stale_runs`
-    /// reads that off the filesystem alone, and routing the task that
-    /// follows is a stage change and a save, neither of which asks
-    /// anything external.
-    ///
-    /// A step run in a pane (`headless: false`, the default, on herdr or
-    /// tmux) is left to the probe even once it has exited: closing that
-    /// pane is a multiplexer call — `Mux::close_pane`, a process on tmux —
-    /// which is exactly what a tick must never spawn. Routing the task
-    /// without closing the pane first would either leak it or read the
-    /// exit code a second time once the probe got to it, so
-    /// `reap_stale_runs`'s own `may_touch_mux` flag skips a paned run
-    /// whole rather than half-finish it. The `≤ 1s` this task's own
-    /// Mockup draws holds for a headless command step; a paned one still
-    /// waits out the probe's own interval, same as before this task.
-    pub fn tick(&mut self) -> Result<Report> {
-        let mut report = Report::default();
-        let (mut tasks, load_problems) =
-            self.repo.tasks_and_problems_cached(&mut self.task_cache)?;
-        // Same reason `run_pass` populates this from its own load, at
-        // [`Dispatcher::run_pass`]: without it, every task carrying a
-        // `last_report` — any task past its first `spoolway report` — reads
-        // as `disk_at > 0` against an empty map inside `persist`, which
-        // drops the write outright. That silently discarded every tick's
-        // own reroute for exactly the tasks a real run has the most of.
-        // Review finding 1.
-        self.report_seen = tasks
-            .iter()
-            .map(|task| {
-                (
-                    task.id().to_string(),
-                    task.front
-                        .last_report
-                        .as_ref()
-                        .map_or(0, |report| report.at),
-                )
-            })
-            .collect();
-        for problem in &load_problems {
-            report.problems.push(format!(
-                "{} did not parse and was skipped: {}",
-                problem.path.display(),
-                problem.error
-            ));
-        }
-
-        // One `commands/` directory read for every task this tick looks
-        // at — see [`crate::command_step::Runs::keys_by_task`].
-        let command_keys = crate::command_step::Runs::new(&self.repo.commands_dir()).keys_by_task();
-        let no_keys: Vec<String> = Vec::new();
-
-        for task in tasks.iter_mut() {
-            // Not because a reserved stage (`queued`, `done`, `blocked`,
-            // `paused`) can never have a background command left running
-            // under it — a `background: true` step started earlier can
-            // easily outlive a task moving on to one of these, which is
-            // exactly why `reap_stale_runs` exists at all (see
-            // `Dispatcher::collect_candidates`'s own comment on it, a few
-            // hundred lines down, about a background command a task
-            // blocked on the way past). The real reason: `route_reserved_
-            // stage`'s own `RESERVED` guard, right at its top, already
-            // returns before a probe would ever reach its `reap_stale_runs`
-            // call for a task sitting on one of these four — a tick matches
-            // that existing gap rather than closing it. Review finding 3,
-            // corrected per finding 8.
-            if crate::pipeline::RESERVED.contains(&task.stage()) {
-                continue;
-            }
-            let pipeline = match self.pipelines.for_task(task) {
-                Ok(pipeline) => pipeline.clone(),
-                Err(err) => {
-                    report.problems.push(format!("{err:#}"));
-                    continue;
-                }
-            };
-            let keys = command_keys.get(task.id()).unwrap_or(&no_keys);
-            // `may_touch_mux: false` — a tick cannot close a finished
-            // background run's pane without spawning a process on tmux
-            // (`Dispatcher::reap_stale_runs`'s own doc). A run left with a
-            // recorded pane is skipped here and picked up by the next
-            // probe, which already owns every other pane-touching thing a
-            // pass does. Review finding 2.
-            if let Some(key) = self.reap_stale_runs(task, &pipeline, &mut report, keys, false) {
-                // Same discipline as the probe's own caller — see
-                // `Dispatcher::run_pass` and review finding 3: the exit
-                // code is only forgotten once the move it caused has
-                // actually reached disk.
-                if self.persist(task)? {
-                    crate::command_step::Runs::new(&self.repo.commands_dir()).forget(&key)?;
-                }
-            }
-        }
-
-        // `Report::quiet` means "nothing is running and nothing is waiting
-        // to run" at `Dispatcher::run_pass`, which folds in `owned` — the
-        // lanes a probe's own `mux.list_lanes` just read. A tick never asks
-        // the multiplexer anything, so it has no way to answer that
-        // question and is left at the default rather than answer it wrong.
-        // Review finding 5.
-        Ok(report)
-    }
-
-    /// Save `task`, but only under its per-task lock and only if no lane's
-    /// `spoolway report` has landed on the file since this pass read it —
-    /// see [`Dispatcher::report_seen`] and review finding 2. When a report
-    /// has landed, the pass's in-memory copy is stale: the write is dropped
-    /// and the next pass redoes this pass's bookkeeping against what the
-    /// lane actually wrote.
+    /// A task can be persisted more than once in the same pass — `queued`
+    /// moving to its first step, then that step's own lane launching — so a
+    /// successful write updates `file_seen` to what was just written,
+    /// rather than leaving it at this pass's very first read. Without that,
+    /// the pass's own second write would find the disk copy it made with
+    /// its first one no longer matching the pass-start snapshot and drop
+    /// itself as if a stranger had landed it.
     ///
     /// The lock is held only around the reload check and the write — never
     /// across a multiplexer call, which every caller already sequences
     /// before or after its own `persist`.
     ///
-    /// Answers whether the write happened: `false` when a report landing
+    /// Answers whether the write happened: `false` when something landing
     /// mid-pass had it dropped, for the one caller that has already changed
     /// something else on the strength of it — see [`Self::reap_stale_runs`].
-    fn persist(&self, task: &mut Task) -> Result<bool> {
-        persist_task(self.repo, task, &self.report_seen)
+    fn persist(&mut self, task: &mut Task) -> Result<bool> {
+        persist_task(self.repo, task, &mut self.file_seen)
     }
 
     /// The whole usage ledger, parsed once per pass and shared thereafter.
@@ -881,8 +767,30 @@ impl<'a> Dispatcher<'a> {
     /// either settles it on the spot or turns it into a raw candidate to
     /// start a lane, and [`Dispatcher::rank_candidates`], which turns that
     /// raw list into the order `start_lanes` spends its budget in.
-    pub fn pass(&mut self) -> Result<Report> {
-        let outcome = self.run_pass();
+    /// `tick` is called between this pass's own units of work — after the
+    /// anchor-tab sweep, after each task `collect_candidates` settles or
+    /// turns into a candidate, after each lane `start_lanes` starts or
+    /// skips, and after each task `clean_up` archives — and, inside a lane
+    /// start itself, once every `VACATE_POLL` for as long as
+    /// `Mux::start_lane`'s own herdr call is waiting on a spawned child, up
+    /// to the two minutes `agent start` is bounded at. That last one is not
+    /// a checkpoint between units of work the way the others are; it is
+    /// `Mux::start_lane`'s own wait handing `tick` back mid-launch, so the
+    /// keyboard is never dead for the one stretch of a pass that can run
+    /// the longest.
+    ///
+    /// This is `commands::dispatch`'s run loop's own hook: a pass moving a
+    /// handful of tasks used to hold the keyboard dead for its whole
+    /// duration, and a run that kept finding work to do (`skip_wait`'s
+    /// streak) could run a hundred of those back to back before the wait
+    /// loop the board's own keys used to live in was ever reached again.
+    /// `tick` is what drains stdin and repaints between passes now, so a
+    /// key applies at the same rate whether the queue is busy or idle — see
+    /// its caller for what it actually does. A caller with nothing to do
+    /// between units of work — every test here included — passes `&mut ||
+    /// {}`.
+    pub fn pass(&mut self, tick: &mut dyn FnMut()) -> Result<Report> {
+        let outcome = self.run_pass(tick);
         // `lanes.json` is written whatever came of the pass — error paths
         // included. A `?` partway through `run_pass` used to return before
         // its final save, discarding every lane record built earlier in the
@@ -898,7 +806,7 @@ impl<'a> Dispatcher<'a> {
         outcome
     }
 
-    fn run_pass(&mut self) -> Result<Report> {
+    fn run_pass(&mut self, tick: &mut dyn FnMut()) -> Result<Report> {
         let mut report = Report::default();
         let step_ids = self.pipelines.all_step_ids();
         let all_lanes = self.mux.list_lanes()?;
@@ -924,20 +832,13 @@ impl<'a> Dispatcher<'a> {
         // with its own before, with no id map needed.
         let stage_before: Vec<String> = tasks.iter().map(|t| t.stage().to_string()).collect();
 
-        // What each task's `last_report` reads as right now, so a `persist`
-        // later this pass can tell a report that landed while the pass was
-        // working from the pass's own stale copy. See [`Dispatcher::persist`].
-        self.report_seen = tasks
+        // What each task's file fingerprints as right now, so a `persist`
+        // later this pass can tell any mid-pass write — a `spoolway report`,
+        // a board keypress — from the pass's own stale copy. See
+        // [`Dispatcher::persist`].
+        self.file_seen = tasks
             .iter()
-            .map(|task| {
-                (
-                    task.id().to_string(),
-                    task.front
-                        .last_report
-                        .as_ref()
-                        .map_or(0, |report| report.at),
-                )
-            })
+            .map(|task| (task.id().to_string(), file_fingerprint(task)))
             .collect();
         // A queue file that will not parse no longer fails the pass — it is
         // skipped and named here, so a person sees which file to fix rather
@@ -963,6 +864,7 @@ impl<'a> Dispatcher<'a> {
         // a tab that no longer exists, which is why `sweep_anchor_tabs` never
         // closes a workspace's only tab — see its own doc.
         self.sweep_anchor_tabs(&tasks, &mine, &mut report);
+        tick();
 
         // Only sessions we named, in a directory that is ours, are ours.
         // Anything else in this multiplexer belongs to a person or to another
@@ -1000,8 +902,14 @@ impl<'a> Dispatcher<'a> {
         let freed = self.free_finished_lanes(&owned, &mut tasks, &mut handovers, &mut report)?;
         owned.retain(|(_, _, lane)| !freed.contains(&lane.name));
 
-        let (candidates, archived) =
-            self.collect_candidates(&mut tasks, &owned, &graph, &mut handovers, &mut report)?;
+        let (candidates, archived) = self.collect_candidates(
+            &mut tasks,
+            &owned,
+            &graph,
+            &mut handovers,
+            &mut report,
+            tick,
+        )?;
         let candidates = self.rank_candidates(candidates, &tasks, &archived, &graph);
 
         // The two things that end an unattended run short of an empty queue —
@@ -1020,9 +928,14 @@ impl<'a> Dispatcher<'a> {
                 report.actions.push(note.clone());
                 report.ceiling = Some(note);
             }
-            None => {
-                self.start_lanes(&mut tasks, &owned, candidates, &mut handovers, &mut report)?
-            }
+            None => self.start_lanes(
+                &mut tasks,
+                &owned,
+                candidates,
+                &mut handovers,
+                &mut report,
+                tick,
+            )?,
         }
 
         // Whatever no step took. A pane handed on is only worth keeping if
@@ -1148,6 +1061,7 @@ impl<'a> Dispatcher<'a> {
     /// archived.
     #[allow(clippy::needless_range_loop)]
     // `tasks[index]` is borrowed and re-borrowed across helper calls
+    #[allow(clippy::too_many_arguments)]
     fn collect_candidates(
         &mut self,
         tasks: &mut [Task],
@@ -1155,6 +1069,7 @@ impl<'a> Dispatcher<'a> {
         graph: &Graph,
         handovers: &mut HashMap<String, PaneHandover>,
         report: &mut Report,
+        tick: &mut dyn FnMut(),
     ) -> Result<(Vec<Candidate>, Vec<String>)> {
         let mut archived: Vec<String> = Vec::new();
         let mut candidates: Vec<Candidate> = Vec::new();
@@ -1165,6 +1080,11 @@ impl<'a> Dispatcher<'a> {
         let no_keys: Vec<String> = Vec::new();
 
         'tasks: for index in 0..tasks.len() {
+            // Between each task — see [`Dispatcher::pass`]'s own
+            // doc — so a pass walking a long queue still answers a keypress
+            // at every task rather than only once it is entirely done.
+            tick();
+
             // A base is chosen now — by a document's own `base:` or
             // `queue add --base` — never invented here from whichever branch
             // this dispatcher's own checkout happens to have out. A task
@@ -1212,6 +1132,7 @@ impl<'a> Dispatcher<'a> {
                     &mut candidates,
                     &mut archived,
                     report,
+                    tick,
                 )? {
                     Routed::NextTask => continue 'tasks,
                     Routed::RetryStep => continue,
@@ -1240,8 +1161,7 @@ impl<'a> Dispatcher<'a> {
                 // is only halfway through; the loop re-reads the stage on
                 // `continue`, same as the `FallThrough::To` arm below.
                 let keys = command_keys.get(tasks[index].id()).unwrap_or(&no_keys);
-                if let Some(key) =
-                    self.reap_stale_runs(&mut tasks[index], &pipeline, report, keys, true)
+                if let Some(key) = self.reap_stale_runs(&mut tasks[index], &pipeline, report, keys)
                 {
                     // The exit code goes only once the move is written: a
                     // write `persist` dropped leaves the task where the lane's
@@ -1383,8 +1303,9 @@ impl<'a> Dispatcher<'a> {
                         }),
                         false => {
                             tasks[index].set_stage(&destination, None);
-                            // `persist` answers `false` when a `spoolway
-                            // report` landed mid-pass and dropped this
+                            // `persist` answers `false` when something —
+                            // a `spoolway report`, a `p`/`r`/`u` on the
+                            // board — landed mid-pass and dropped this
                             // write — the same discipline `reap_stale_runs`'
                             // own caller keeps, a few dozen lines above.
                             // Forgetting anyway on that path is the exact
@@ -1667,6 +1588,7 @@ impl<'a> Dispatcher<'a> {
         candidates: &mut Vec<Candidate>,
         archived: &mut Vec<String>,
         report: &mut Report,
+        tick: &mut dyn FnMut(),
     ) -> Result<Routed> {
         if !crate::pipeline::RESERVED.contains(&stage) {
             return Ok(Routed::NotReserved);
@@ -1799,6 +1721,9 @@ impl<'a> Dispatcher<'a> {
             // only correct value was the one it always had.
             if self.clean_up(task, owned, report)? {
                 archived.push(task.id().to_string());
+                // Tearing a worktree down is one of the slower things a
+                // pass does — see [`Dispatcher::pass`]'s own doc.
+                tick();
             }
             return Ok(Routed::NextTask);
         }
@@ -3180,6 +3105,7 @@ impl<'a> Dispatcher<'a> {
     ///
     /// Every lane that exists is counted, not only the ones the multiplexer
     /// calls busy this second — see the counting loop for what that cost.
+    #[allow(clippy::too_many_arguments)]
     fn start_lanes(
         &mut self,
         tasks: &mut [Task],
@@ -3187,6 +3113,7 @@ impl<'a> Dispatcher<'a> {
         candidates: Vec<Candidate>,
         handovers: &mut HashMap<String, PaneHandover>,
         report: &mut Report,
+        tick: &mut dyn FnMut(),
     ) -> Result<()> {
         // Count what is already running against each profile's cap, and
         // against each named model's own — a live lane is counted by the
@@ -3254,6 +3181,10 @@ impl<'a> Dispatcher<'a> {
             .map(|(model, _)| model.clone());
 
         for candidate in candidates {
+            // Between each lane start — see [`Dispatcher::pass`]'s
+            // own doc.
+            tick();
+
             let Ok(pipeline) = self.pipelines.get(&candidate.pipeline).cloned() else {
                 continue;
             };
@@ -3537,8 +3468,9 @@ impl<'a> Dispatcher<'a> {
                 &step,
                 &profile,
                 inherited.as_deref(),
-                &self.report_seen,
+                &mut self.file_seen,
                 &ledger,
+                tick,
             );
             if let Some(stuck) = handover.filter(|handover| !handover.ready) {
                 match outcome.is_ok() {
@@ -3600,8 +3532,9 @@ impl<'a> Dispatcher<'a> {
                     report.actions.push(action);
                     // `Ok(Started)` alone does not say the stage move
                     // landed — `start_one`'s own `persist_task` answers
-                    // `false`, not an error, when a `spoolway report`
-                    // landed mid-pass and dropped it. `started.persisted`
+                    // `false`, not an error, when something (a `spoolway
+                    // report`, a board keypress) landed mid-pass and
+                    // dropped it. `started.persisted`
                     // is that answer, carried out for exactly this: a
                     // command run's exit code is only safe to clear once
                     // the move it produced is actually on disk. See the
@@ -3879,7 +3812,8 @@ impl<'a> Dispatcher<'a> {
             }
 
             crate::command_step::RunState::Fresh => {
-                let (worktree, _) = ensure_workspace(self.repo, self.mux, task, &self.report_seen)?;
+                let (worktree, _) =
+                    ensure_workspace(self.repo, self.mux, task, &mut self.file_seen)?;
                 let env = BTreeMap::from([
                     (crate::commands::TASK_ENV.to_string(), id.clone()),
                     (ENV_STEP.to_string(), step.id.clone()),
@@ -4093,27 +4027,18 @@ impl<'a> Dispatcher<'a> {
     /// for the pass that follows to pick up against the new stage. The exit
     /// code behind that key is left on disk for the caller to forget once
     /// the move has actually been written — `persist` drops its write when
-    /// a report landed mid-pass, and an exit code forgotten before that is a
-    /// failure nothing will ever route on again.
+    /// something landed mid-pass ahead of it, and an exit code forgotten
+    /// before that is a failure nothing will ever route on again.
     /// `keys` is this task's own slice of one `commands/` directory read —
-    /// [`crate::command_step::Runs::keys_by_task`] — taken once per tick or
-    /// pass by the caller rather than reread here per task, so a queue of a
-    /// hundred tasks costs one `read_dir` and not a hundred.
-    ///
-    /// `may_touch_mux` is `false` from [`Dispatcher::tick`] and `true` from
-    /// the probe (`Dispatcher::collect_candidates`): closing a finished
-    /// background run's own pane is a multiplexer call, which on tmux is a
-    /// process (`Mux::close_pane`) — the one thing a tick must never spawn.
-    /// A run whose `Exited` arm would need that close is left exactly as it
-    /// is when `may_touch_mux` is `false`, for the next probe to reap
-    /// instead. Review finding 2.
+    /// [`crate::command_step::Runs::keys_by_task`] — taken once per pass by
+    /// the caller rather than reread here per task, so a queue of a hundred
+    /// tasks costs one `read_dir` and not a hundred.
     fn reap_stale_runs(
         &self,
         task: &mut Task,
         pipeline: &Pipeline,
         report: &mut Report,
         keys: &[String],
-        may_touch_mux: bool,
     ) -> Option<String> {
         let runs = crate::command_step::Runs::new(&self.repo.commands_dir());
         // A key is `<task> · <step>` — see `crate::command_step::Runs::key`.
@@ -4150,13 +4075,6 @@ impl<'a> Dispatcher<'a> {
                     // is zero, since this is the only place a background
                     // run's code is ever read at all.
                     if let Some(pane) = runs.pane(key) {
-                        if !may_touch_mux {
-                            // Left exactly as it is — see this function's
-                            // own doc on `may_touch_mux` — rather than
-                            // routed on now and closed later, which would
-                            // read the same exit code twice for no reason.
-                            continue;
-                        }
                         let _ = self.mux.close_pane(&pane);
                         runs.forget_pane(key);
                     }
@@ -4414,16 +4332,37 @@ pub const ENV_STEP: &str = "SPOOLWAY_STEP";
 /// future kind that needs it some other way costs no new plumbing.
 pub const ENV_SESSION: &str = "SPOOLWAY_SESSION";
 
+/// A fingerprint of `task`'s whole rendered file — frontmatter and body
+/// alike — for [`persist_task`] to compare a pass's own first read against
+/// whatever is on disk when it goes to write. Semantic rather than a raw
+/// byte hash: two loads of the very same content always render identically,
+/// however the file on disk happens to be formatted, so this never flags a
+/// write as stale over whitespace or field order it never actually changed.
+fn file_fingerprint(task: &Task) -> u64 {
+    hash_of(&task.render().unwrap_or_default())
+}
+
 /// [`Dispatcher::persist`] for the free functions in the launch path, which
-/// have no `self` to reach the pass's `report_seen` through. Same rule: take
-/// the task's per-task lock, and skip the write when a lane's `spoolway
-/// report` has advanced `last_report` past what this pass first read — the
-/// lost-update review finding 2 guards against. `Ok(false)` is that dropped
-/// write; `Ok(true)` is a save that reached the disk.
-fn persist_task(repo: &Repo, task: &mut Task, report_seen: &HashMap<String, i64>) -> Result<bool> {
+/// have no `self` to reach the pass's `file_seen` through. Same rule: take
+/// the task's per-task lock, and skip the write when the file on disk no
+/// longer matches what this pass last read or wrote itself — a lane's
+/// `spoolway report` most often, but just as much a `p`, `r` or `u` typed on
+/// the board mid-pass (see `status::on_key`), since none of those touch
+/// `last_report` either — the lost-update review finding 2 guards against,
+/// widened from `last_report` alone to the whole file. `Ok(false)` is that
+/// dropped write; `Ok(true)` is a save that reached the disk, with
+/// `file_seen` updated to match so a second persist of the same task later
+/// in the same pass is compared against what this call just wrote, not the
+/// pass's original read.
+fn persist_task(
+    repo: &Repo,
+    task: &mut Task,
+    file_seen: &mut HashMap<String, u64>,
+) -> Result<bool> {
     // Bound to a name, not discarded: an `Ok` holds the lock in it until
     // this function returns, which is what keeps the reload check and the
-    // write below atomic against a lane's `spoolway report`.
+    // write below atomic against a lane's `spoolway report` or a board
+    // keypress, both of which take the same lock to write.
     let lock = crate::lock::TaskLock::acquire(&repo.task_lock_file(task.id()));
     if lock.is_err() {
         // A live holder that never let go in three seconds. Rare enough to
@@ -4434,14 +4373,28 @@ fn persist_task(repo: &Repo, task: &mut Task, report_seen: &HashMap<String, i64>
             &format!("{}: task lock still held, saving without it", task.id()),
         );
     }
-    let disk_at = Task::load(&task.path)
-        .ok()
-        .and_then(|disk| disk.front.last_report.map(|report| report.at))
-        .unwrap_or(0);
-    if disk_at > report_seen.get(task.id()).copied().unwrap_or(0) {
+    // A load failure here (the file gone, or briefly unreadable mid-write by
+    // someone else) is optimistic on purpose, the same as it always was: with
+    // nothing to compare against, the pass's own write proceeds rather than
+    // being dropped on a transient read error.
+    //
+    // A task missing from `file_seen` is a different case from the guard's
+    // old shape, not the same one carried forward: comparing `last_report`
+    // alone, a task absent from the map read as a baseline of `0`, so any
+    // disk copy that already carried a report had its write *dropped*. Here
+    // it is read as "nothing to compare against" instead, so the write
+    // proceeds — every production caller passes the pass's own snapshot
+    // (built from the very tasks it is about to route, in `run_pass`), so
+    // this only ever fires for a test calling `persist_task` or
+    // `ensure_workspace` directly, beneath no `Dispatcher::pass` at all.
+    if let Some(seen) = file_seen.get(task.id())
+        && let Ok(disk) = Task::load(&task.path)
+        && file_fingerprint(&disk) != *seen
+    {
         return Ok(false);
     }
     task.save()?;
+    file_seen.insert(task.id().to_string(), file_fingerprint(task));
     Ok(true)
 }
 
@@ -4456,7 +4409,7 @@ fn ensure_workspace(
     repo: &Repo,
     mux: &dyn Mux,
     task: &mut Task,
-    report_seen: &HashMap<String, i64>,
+    file_seen: &mut HashMap<String, u64>,
 ) -> Result<(PathBuf, Option<String>)> {
     // Where a task's lane sits — its worktree, workspace and panes — is a fact
     // about one machine, and the only part of a task file that is. A task file
@@ -4474,7 +4427,7 @@ fn ensure_workspace(
         task.front.workspace_id = None;
         task.front.pane_id = None;
         task.front.tab_id = None;
-        persist_task(repo, task, report_seen)?;
+        persist_task(repo, task, file_seen)?;
     }
 
     // The directory can survive a restart of the multiplexer fronting it even
@@ -4545,7 +4498,7 @@ fn ensure_workspace(
                 fresh_pane = tab.opened_pane;
             }
         }
-        persist_task(repo, task, report_seen)?;
+        persist_task(repo, task, file_seen)?;
     }
 
     // `collect_candidates` refuses a task with no `base:` before it ever
@@ -4612,7 +4565,7 @@ fn ensure_workspace(
                 // touched it, at a moment nothing here witnessed, so there is
                 // no honest commit to pin.
                 task.front.run = Some(crate::usage::new_run_id());
-                persist_task(repo, task, report_seen)?;
+                persist_task(repo, task, file_seen)?;
             }
             // Cut. One worktree per task, created once and reused by every
             // later step.
@@ -4687,7 +4640,7 @@ fn ensure_workspace(
                 task.front.cut_from = Some(cut_from);
                 task.front.base_commit = base_commit;
                 task.front.run = Some(crate::usage::new_run_id());
-                persist_task(repo, task, report_seen)?;
+                persist_task(repo, task, file_seen)?;
             }
         }
     }
@@ -4794,10 +4747,15 @@ fn start_one(
     // step of a task, on a kind with no way to leave a pane behind, and on a
     // backend whose pane is the agent itself.
     inherited: Option<&str>,
-    report_seen: &HashMap<String, i64>,
+    file_seen: &mut HashMap<String, u64>,
     // The pass's one usage-ledger snapshot, for the session lookups below —
     // see [`Dispatcher::ledger`] and review finding 33.
     ledger: &[crate::usage::Entry],
+    // Handed straight to `Mux::start_lane` — see its own doc. `agent start`
+    // is the one call in this function that can run for the whole two
+    // minutes herdr bounds it at, and this is what keeps a busy pass's
+    // keyboard-reading callback reaching the board through that span.
+    tick: &mut dyn FnMut(),
 ) -> Result<Started> {
     let name = lane_name(&step.id, task.id());
 
@@ -4807,7 +4765,7 @@ fn start_one(
     // has just been replaced, the pane id names something in a workspace that
     // is gone, and splitting a fresh one is the only correct answer.
     let placement = task.front.workspace_id.clone();
-    let (_, fresh_pane) = ensure_workspace(repo, mux, task, report_seen)?;
+    let (_, fresh_pane) = ensure_workspace(repo, mux, task, file_seen)?;
     let inherited: Option<String> = inherited
         .filter(|_| placement.is_some() && placement == task.front.workspace_id)
         .map(str::to_string)
@@ -5056,7 +5014,7 @@ fn start_one(
                 task.front.workspace_id = None;
                 task.front.pane_id = None;
                 task.front.tab_id = None;
-                persist_task(repo, task, report_seen)?;
+                persist_task(repo, task, file_seen)?;
                 return Err(err.context(format!(
                     "tab `{tab}` is not in this multiplexer; the task's placement has \
                      been cleared and the next pass will cut it a workspace of its own"
@@ -5064,17 +5022,20 @@ fn start_one(
             }
         },
     };
-    let launched = mux.start_lane(&LaneSpec {
-        name: &name,
-        // The lane's own name, on its own pane — a grid of panes is only
-        // readable if each says what it is.
-        label: &label,
-        kind: &profile.kind,
-        pane_id: &pane_id,
-        args: &args,
-        env: &env,
-        path_prefix: None,
-    });
+    let launched = mux.start_lane(
+        &LaneSpec {
+            name: &name,
+            // The lane's own name, on its own pane — a grid of panes is only
+            // readable if each says what it is.
+            label: &label,
+            kind: &profile.kind,
+            pane_id: &pane_id,
+            args: &args,
+            env: &env,
+            path_prefix: None,
+        },
+        tick,
+    );
     if let Err(err) = launched {
         // Taking a pane back rather than leaving it behind means the same
         // step retries into a fresh one instead of the tab filling up over a
@@ -5151,12 +5112,13 @@ fn start_one(
     if let Some(note) = &session_miss {
         task.log_status(&format!("`{}`: {note}", step.id));
     }
-    // Answers `false` rather than erroring when a `spoolway report` landed
-    // mid-pass and this write was dropped in its favour — see `persist_task`'s
-    // own doc. Carried out to `Started` rather than swallowed by a bare `?`
+    // Answers `false` rather than erroring when something — a `spoolway
+    // report`, a board keypress — landed mid-pass and this write was
+    // dropped in its favour — see `persist_task`'s own doc. Carried out to
+    // `Started` rather than swallowed by a bare `?`
     // here: a caller that forgets a command run's exit code on the strength
     // of this stage move having landed needs to know whether it actually did.
-    let persisted = persist_task(repo, task, report_seen)?;
+    let persisted = persist_task(repo, task, file_seen)?;
 
     // `parked` takes the match before `via_session` gets a say: `resuming` is
     // always true for a park (see the note beside it above), so without this
@@ -5248,8 +5210,9 @@ struct Started {
     /// way, because neither is worth a person's attention.
     note: Option<String>,
     /// Whether `start_one`'s own stage-move write actually landed, or was
-    /// dropped in favour of a `spoolway report` that beat it to the task
-    /// document — see `persist_task`. A caller cannot tell an `Ok(Started)`
+    /// dropped in favour of something — a `spoolway report`, a board
+    /// keypress — that beat it to the task document — see `persist_task`.
+    /// A caller cannot tell an `Ok(Started)`
     /// apart from a dropped write any other way, since `persist_task`
     /// answering `false` is not an error.
     persisted: bool,
@@ -6054,7 +6017,7 @@ mod tests {
             self.log(format!("close_pane {pane_id}"));
             Ok(())
         }
-        fn start_lane(&self, spec: &LaneSpec<'_>) -> Result<()> {
+        fn start_lane(&self, spec: &LaneSpec<'_>, _tick: &mut dyn FnMut()) -> Result<()> {
             self.log(format!("start {}", spec.name));
             // The real backend labels the pane as the last thing `start_lane`
             // does; mirroring it here keeps the label assertable.
@@ -6587,12 +6550,14 @@ mod tests {
 
     fn run_pass(repo: &Repo, mux: &FakeMux) -> Report {
         Dispatcher::new(repo, &Pipelines::builtin(), mux)
-            .pass()
+            .pass(&mut || {})
             .unwrap()
     }
 
     fn run_pass_with(repo: &Repo, mux: &FakeMux, pipelines: &Pipelines) -> Report {
-        Dispatcher::new(repo, pipelines, mux).pass().unwrap()
+        Dispatcher::new(repo, pipelines, mux)
+            .pass(&mut || {})
+            .unwrap()
     }
 
     /// The shipped pipelines, minus their `blocked` step — the shape every
@@ -7990,7 +7955,9 @@ mod tests {
         add_task(&repo, "demo", "queued");
 
         let mux = FakeMux::new(vec![]);
-        let report = Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
+        let report = Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
 
         assert!(mux.did("start").is_empty(), "no lane should have started");
         // Below the launch-failure ceiling this is a bounded notice on
@@ -8026,7 +7993,7 @@ mod tests {
 
         let mux = FakeMux::new(vec![]);
         let report = Dispatcher::new(&repo, &pipelines, &mux)
-            .pass()
+            .pass(&mut || {})
             .expect("an undefined profile does not abort the pass");
 
         assert!(mux.did("start").is_empty(), "no lane should have started");
@@ -8040,8 +8007,8 @@ mod tests {
     /// The lost-update review finding 2: a lane's `spoolway report` lands
     /// while the pass holds a stale in-memory copy, and the pass's next
     /// save must not overwrite the report. `persist_task` reloads under the
-    /// per-task lock and drops its write when `last_report` has moved past
-    /// what the pass first read.
+    /// per-task lock and drops its write when the file on disk no longer
+    /// matches the fingerprint the pass first read.
     #[test]
     fn persist_task_does_not_overwrite_a_report_that_landed_mid_pass() {
         let repo = fixture("persist-guards-a-report");
@@ -8049,7 +8016,9 @@ mod tests {
 
         // What the pass read: no report yet.
         let mut stale = Task::load(&path).unwrap();
-        let seen: HashMap<String, i64> = [("demo".to_string(), 0)].into_iter().collect();
+        let mut seen: HashMap<String, u64> = [("demo".to_string(), file_fingerprint(&stale))]
+            .into_iter()
+            .collect();
 
         // A lane reports: `last_report` is stamped and the stage moves.
         let mut reported = Task::load(&path).unwrap();
@@ -8064,7 +8033,7 @@ mod tests {
         // The pass now writes its stale copy back — an escalation for a step
         // the task has already left.
         stale.set_stage(crate::pipeline::BLOCKED, Some("stale escalation"));
-        persist_task(&repo, &mut stale, &seen).unwrap();
+        persist_task(&repo, &mut stale, &mut seen).unwrap();
 
         let on_disk = Task::load(&path).unwrap();
         assert_eq!(
@@ -8073,6 +8042,65 @@ mod tests {
             "the report's move stands, not the pass's stale one"
         );
         assert_eq!(on_disk.front.last_report.unwrap().at, 5_000);
+    }
+
+    /// The pass-yields task's own reason for widening this guard: a `p`
+    /// typed on the board mid-pass calls `status::park`, which never
+    /// touches `last_report` at all — so a guard that only ever compared
+    /// that one field would let the pass's own later write silently
+    /// overwrite the park. Comparing the whole file catches this the same
+    /// way it already catches a `spoolway report`.
+    #[test]
+    fn persist_task_does_not_overwrite_a_park_typed_mid_pass() {
+        let repo = fixture("persist-guards-a-park");
+        let path = add_task(&repo, "demo", "implement");
+
+        // What the pass read: still running, nobody has touched it.
+        let mut stale = Task::load(&path).unwrap();
+        let mut seen: HashMap<String, u64> = [("demo".to_string(), file_fingerprint(&stale))]
+            .into_iter()
+            .collect();
+
+        // A `p` on the board, mid-pass: parked and saved under the task's
+        // own lock, exactly as `status::park_under_lock` does.
+        let mut parked = Task::load(&path).unwrap();
+        crate::status::park(&mut parked, "paused from the board", false);
+        parked.save().unwrap();
+
+        // The pass now writes its stale copy back — a stage move the park
+        // never saw coming.
+        stale.set_stage("review", Some("done"));
+        persist_task(&repo, &mut stale, &mut seen).unwrap();
+
+        let on_disk = Task::load(&path).unwrap();
+        assert_eq!(
+            on_disk.stage(),
+            crate::pipeline::PAUSED,
+            "the park stands, not the pass's stale move"
+        );
+    }
+
+    /// `pass` calls the callback it is handed between each task —
+    /// acceptance criterion 1 of the pass-yields task. Two tasks on
+    /// `paused` cost nothing but a `Routed::NextTask` each, so a count of
+    /// at least one tick per task proves the loop calls it per iteration
+    /// rather than once for the whole pass.
+    #[test]
+    fn pass_ticks_between_each_task() {
+        let repo = fixture("pass-ticks-between-tasks");
+        add_task(&repo, "alpha", crate::pipeline::PAUSED);
+        add_task(&repo, "beta", crate::pipeline::PAUSED);
+
+        let mux = FakeMux::new(vec![]);
+        let mut ticks = 0u32;
+        Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
+            .pass(&mut || ticks += 1)
+            .unwrap();
+
+        assert!(
+            ticks >= 2,
+            "expected at least one tick per task, got {ticks}"
+        );
     }
 
     /// Review finding 38: a backend that reports a lane's `cwd` with its
@@ -8324,7 +8352,7 @@ mod tests {
 
         let mux = FakeMux::new(vec![]);
         Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
-            .pass()
+            .pass(&mut || {})
             .expect("a corrupt lanes.json does not fail the pass");
 
         let bad = lanes.with_extension("json.bad");
@@ -8539,7 +8567,9 @@ mod tests {
         add_task(&repo, "waiting", "document");
 
         let mux = FakeMux::new(vec![lane(&repo, "busy · implement", LaneStatus::Working)]);
-        let report = Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
+        let report = Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
 
         assert!(mux.did("start").is_empty(), "no lane should have started");
         assert!(
@@ -9270,7 +9300,7 @@ mod tests {
 
         let mux = FakeMux::new(vec![]);
         let report = Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
-            .pass()
+            .pass(&mut || {})
             .unwrap();
 
         let task = reload(&path);
@@ -9301,7 +9331,7 @@ mod tests {
 
         let mux = FakeMux::new(vec![]);
         Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
-            .pass()
+            .pass(&mut || {})
             .unwrap();
 
         assert!(!mux.did("start").is_empty(), "the retry never happened");
@@ -9650,20 +9680,26 @@ mod tests {
         // comment on the same pattern in
         // `a_lane_waiting_on_a_person_is_left_completely_alone`.
         let mux = FakeMux::new(vec![lane(&repo, "demo · release", LaneStatus::Done)]);
-        Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
+        Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
         // Freshly settled is not yet a fault — the report may have landed while
         // the pass was reading.
         assert_eq!(reload(&path).stage(), "release");
 
         age_lane(&repo, "demo · release", Duration::from_secs(86_400));
         mux.clear_calls();
-        Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
+        Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
         assert_eq!(reload(&path).stage(), "release", "reminded, not paused");
 
         // Nothing follows the reminder, and there is no clock left to wait
         // out: the very next pass pauses it.
         mux.clear_calls();
-        Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
+        Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
         let task = reload(&path);
         assert_eq!(task.stage(), crate::pipeline::PAUSED);
         assert_eq!(task.front.parked_from.as_deref(), Some("release"));
@@ -10681,7 +10717,7 @@ mod tests {
         let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]);
         with_home(&home, || {
             Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
-                .pass()
+                .pass(&mut || {})
                 .unwrap();
         });
 
@@ -10752,7 +10788,7 @@ mod tests {
 
         let mux = FakeMux::new(vec![]);
         let report = Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
-            .pass()
+            .pass(&mut || {})
             .unwrap();
 
         // `handover` is a command step now — `run: spoolway stack` — which
@@ -10808,7 +10844,9 @@ mod tests {
         add_task(&repo, "later", crate::pipeline::QUEUED);
 
         let mux = FakeMux::new(vec![lane(&repo, "gated · release", LaneStatus::Done)]);
-        let report = Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
+        let report = Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
         assert_eq!(
             mux.did("start").len(),
             2,
@@ -10890,7 +10928,7 @@ mod tests {
 
         let mux = FakeMux::new(vec![]);
         let report = Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
-            .pass()
+            .pass(&mut || {})
             .unwrap();
 
         let task = reload(&path);
@@ -11398,7 +11436,7 @@ mod tests {
         let mux = FakeMux::new(vec![]);
         let pipelines = Pipelines::builtin();
         let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
-        dispatcher.pass().unwrap();
+        dispatcher.pass(&mut || {}).unwrap();
         assert!(
             dispatcher.ledger.is_none(),
             "a pass with nothing to bank must never read the ledger at all"
@@ -11505,7 +11543,9 @@ mod tests {
         let pipelines = Pipelines::builtin();
         let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]);
         with_home(&home, || {
-            Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
+            Dispatcher::new(&repo, &pipelines, &mux)
+                .pass(&mut || {})
+                .unwrap();
         });
         assert_eq!(
             reload(&path).stage(),
@@ -11528,7 +11568,9 @@ mod tests {
 
         let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]);
         with_home(&home, || {
-            Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
+            Dispatcher::new(&repo, &pipelines, &mux)
+                .pass(&mut || {})
+                .unwrap();
         });
         assert_eq!(
             reload(&path).stage(),
@@ -11540,7 +11582,9 @@ mod tests {
         // out: the very next pass pauses it.
         let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]);
         with_home(&home, || {
-            Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
+            Dispatcher::new(&repo, &pipelines, &mux)
+                .pass(&mut || {})
+                .unwrap();
         });
         assert_eq!(reload(&path).stage(), crate::pipeline::PAUSED);
     }
@@ -11686,7 +11730,7 @@ mod tests {
         let home = pi_home_with("carried-session", 10);
         with_home(&home, || {
             Dispatcher::new(&repo, &session_pipelines(), &FakeMux::new(vec![]))
-                .pass()
+                .pass(&mut || {})
                 .unwrap();
         });
         std::fs::remove_dir_all(&home).ok();
@@ -11722,7 +11766,7 @@ mod tests {
         );
 
         let report = Dispatcher::new(&repo, &session_pipelines(), &FakeMux::new(vec![]))
-            .pass()
+            .pass(&mut || {})
             .unwrap();
 
         assert_ne!(
@@ -11761,7 +11805,7 @@ mod tests {
         add_task(&repo, "demo", "fix");
 
         let report = Dispatcher::new(&repo, &session_pipelines(), &FakeMux::new(vec![]))
-            .pass()
+            .pass(&mut || {})
             .unwrap();
 
         assert!(!load_lane_records(&repo)["demo · fix"].session.is_empty());
@@ -11788,7 +11832,7 @@ mod tests {
         write_entry(&repo, "demo", "fix", &kind, "test-model", "carried-session");
 
         Dispatcher::new(&repo, &session_pipelines(), &FakeMux::new(vec![]))
-            .pass()
+            .pass(&mut || {})
             .unwrap();
 
         assert_ne!(
@@ -11819,7 +11863,7 @@ mod tests {
         );
 
         Dispatcher::new(&repo, &session_pipelines(), &FakeMux::new(vec![]))
-            .pass()
+            .pass(&mut || {})
             .unwrap();
 
         assert_eq!(
@@ -12303,7 +12347,7 @@ mod tests {
         let home = pi_home_with("ceiling-session", 900);
         let report = with_home(&home, || {
             Dispatcher::new(&repo, &session_pipelines(), &mux)
-                .pass()
+                .pass(&mut || {})
                 .unwrap()
         });
         std::fs::remove_dir_all(&home).ok();
@@ -12431,7 +12475,9 @@ mod tests {
         // 1000-token window — 90%, past the 80% ceiling just set.
         let home = claude_home_with("ceiling-session-reported", 10, 800);
         let report = with_home(&home, || {
-            Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap()
+            Dispatcher::new(&repo, &pipelines, &mux)
+                .pass(&mut || {})
+                .unwrap()
         });
         std::fs::remove_dir_all(&home).ok();
 
@@ -12879,7 +12925,7 @@ mod tests {
         let mut task = reload(&add_task(&repo, "demo", "implement"));
         let mux = FakeMux::new(vec![]);
 
-        ensure_workspace(&repo, &mux, &mut task, &Default::default()).unwrap();
+        ensure_workspace(&repo, &mux, &mut task, &mut Default::default()).unwrap();
 
         assert!(
             task.front.run.is_some(),
@@ -12907,7 +12953,7 @@ mod tests {
         let mut task = reload(&add_task(&repo, "demo", "implement"));
         let mux = FakeMux::new(vec![]);
 
-        ensure_workspace(&repo, &mux, &mut task, &Default::default()).unwrap();
+        ensure_workspace(&repo, &mux, &mut task, &mut Default::default()).unwrap();
 
         assert!(task.front.borrowed);
         assert!(
@@ -12947,7 +12993,7 @@ mod tests {
         // answer `false` off the workspace half alone.
         let mux = FakeMux::new(vec![]).forgetting("w1");
 
-        ensure_workspace(&repo, &mux, &mut task, &Default::default()).unwrap();
+        ensure_workspace(&repo, &mux, &mut task, &mut Default::default()).unwrap();
 
         assert_eq!(
             task.front.worktree_path,
@@ -12999,7 +13045,7 @@ mod tests {
         }));
         let mux = FakeMux::new(vec![]);
 
-        ensure_workspace(&repo, &mux, &mut task, &Default::default()).unwrap();
+        ensure_workspace(&repo, &mux, &mut task, &mut Default::default()).unwrap();
 
         assert_eq!(task.front.workspace_id.as_deref(), Some("w1"));
         assert_eq!(task.front.pane_id.as_deref(), Some("w1:p1"));
@@ -13174,7 +13220,7 @@ mod tests {
         // the point here is what the worktree actually contains.
         let mux = FakeMux::new(vec![]).tabs_in_one_workspace();
 
-        ensure_workspace(&repo, &mux, &mut task, &Default::default()).unwrap();
+        ensure_workspace(&repo, &mux, &mut task, &mut Default::default()).unwrap();
 
         assert_eq!(task.front.cut_from.as_deref(), Some("task/first"));
         assert_eq!(
@@ -13225,7 +13271,7 @@ mod tests {
         }));
         let mux = FakeMux::new(vec![]).tabs_in_one_workspace();
 
-        let err = ensure_workspace(&repo, &mux, &mut task, &Default::default())
+        let err = ensure_workspace(&repo, &mux, &mut task, &mut Default::default())
             .expect_err("an unresolvable dependency must not silently reach the worktree cut");
         let err = format!("{err:#}");
 
@@ -13250,7 +13296,7 @@ mod tests {
         let mut task = reload(&add_task(&repo, "demo", "implement"));
         let mux = FakeMux::new(vec![]);
 
-        ensure_workspace(&repo, &mux, &mut task, &Default::default()).unwrap();
+        ensure_workspace(&repo, &mux, &mut task, &mut Default::default()).unwrap();
 
         assert_eq!(task.front.cut_from.as_deref(), Some("work"));
         assert_eq!(task.front.base.as_deref(), Some("work"));
@@ -13750,7 +13796,7 @@ mod tests {
         let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Working)]);
         with_home(&home, || {
             Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
-                .pass()
+                .pass(&mut || {})
                 .unwrap();
         });
 
@@ -13853,7 +13899,9 @@ mod tests {
     fn drive(repo: &Repo, pipelines: &Pipelines, mux: &FakeMux, path: &Path, want: &str) -> Report {
         let started = std::time::Instant::now();
         loop {
-            let report = Dispatcher::new(repo, pipelines, mux).pass().unwrap();
+            let report = Dispatcher::new(repo, pipelines, mux)
+                .pass(&mut || {})
+                .unwrap();
             if reload(path).stage() == want {
                 return report;
             }
@@ -13972,7 +14020,9 @@ mod tests {
                 started.elapsed() < Duration::from_secs(5),
                 "the command never exited"
             );
-            Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
+            Dispatcher::new(&repo, &pipelines, &mux)
+                .pass(&mut || {})
+                .unwrap();
             std::thread::sleep(Duration::from_millis(20));
         }
 
@@ -13981,7 +14031,9 @@ mod tests {
         // every pass after that, since the destination never gets a slot to
         // move on to.
         for _ in 0..5 {
-            Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
+            Dispatcher::new(&repo, &pipelines, &mux)
+                .pass(&mut || {})
+                .unwrap();
         }
 
         assert_eq!(
@@ -14069,7 +14121,9 @@ mod tests {
                 started.elapsed() < Duration::from_secs(5),
                 "the command never exited"
             );
-            Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
+            Dispatcher::new(&repo, &pipelines, &mux)
+                .pass(&mut || {})
+                .unwrap();
             std::thread::sleep(Duration::from_millis(20));
         }
 
@@ -14078,7 +14132,9 @@ mod tests {
         // `mux.prompt` refuses the briefing — attempt 1 of `MAX_LAUNCH_
         // FAILURES`, well below the ceiling that would make this arm move
         // the stage a second time itself.
-        Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
+        Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
 
         assert_eq!(
             reload(&path).stage(),
@@ -14289,7 +14345,9 @@ mod tests {
         reloaded.save().unwrap();
         mux.clear_calls();
 
-        Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
+        Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
 
         assert!(
             mux.did("close_pane").is_empty(),
@@ -14328,7 +14386,9 @@ mod tests {
         let ran = repo.root.join("the-entry-ran");
         let pipelines = pipelines_running(&format!("touch {}", ran.display()), false);
 
-        let report = Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
+        let report = Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
         assert_eq!(
             reload(&path).stage(),
             "implement",
@@ -14369,7 +14429,9 @@ mod tests {
         add_task(&repo, "demo", crate::pipeline::QUEUED);
 
         let mux = FakeMux::new(vec![]);
-        let report = Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
+        let report = Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
 
         assert!(mux.did("start").is_empty(), "no lane should have started");
         assert_eq!(report.problems.len(), 1, "{:?}", report.problems);
@@ -14477,7 +14539,9 @@ mod tests {
 
         // And it is still there a pass later, rather than having been sent back
         // round by a lane nobody should have started.
-        let report = Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
+        let report = Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
         assert_eq!(
             reload(&path).stage(),
             crate::pipeline::BLOCKED,
@@ -14564,7 +14628,9 @@ mod tests {
         let pipelines = pipelines_failing_to_blocked();
 
         drive(&repo, &pipelines, &mux, &path, crate::pipeline::BLOCKED);
-        Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
+        Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
 
         assert!(
             mux.calls().iter().any(|call| call.contains("blocked")),
@@ -14584,10 +14650,14 @@ mod tests {
         let pipelines = pipelines_running("sleep 30", false);
 
         let started = std::time::Instant::now();
-        Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
+        Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
         let first = started.elapsed();
         // And a second pass, which finds it still going and leaves it alone.
-        Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
+        Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
 
         assert!(
             started.elapsed() < Duration::from_secs(10),
@@ -14615,7 +14685,9 @@ mod tests {
         let mux = FakeMux::new(vec![]);
         let pipelines = pipelines_running("sleep 30", true);
 
-        Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
+        Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
 
         assert_eq!(
             reload(&path).stage(),
@@ -14661,7 +14733,9 @@ mod tests {
             .unwrap()
             .on_fail = Some(crate::pipeline::BLOCKED.to_string());
 
-        Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
+        Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
         let mut task = reload(&path);
         assert_eq!(
             task.stage(),
@@ -14691,7 +14765,6 @@ mod tests {
             pipeline,
             &mut report,
             &keys,
-            true,
         );
 
         assert_eq!(
@@ -14724,198 +14797,6 @@ mod tests {
         );
     }
 
-    /// The split this task makes, end to end: a `tick` alone — never a full
-    /// `pass` — reads a background step's exit off disk and reroutes the
-    /// task, without asking the multiplexer anything. This is the
-    /// acceptance criterion itself, not only `reap_stale_runs`'s own unit
-    /// test a few lines up: `Dispatcher::tick` has to be the thing that
-    /// calls it, off its own cached queue reload and its own directory
-    /// read, and it has to spawn nothing doing it.
-    #[test]
-    fn tick_routes_a_finished_background_step_with_no_mux_calls() {
-        let repo = fixture("tick-background-reroute");
-        let path = add_task_with_worktree(&repo, "demo", "implement");
-        let mux = FakeMux::new(vec![]);
-        let mut pipelines = pipelines_running("exit 1", true);
-        pipelines
-            .pipelines
-            .get_mut("default")
-            .unwrap()
-            .steps
-            .iter_mut()
-            .find(|s| s.id == "implement")
-            .unwrap()
-            .on_fail = Some(crate::pipeline::BLOCKED.to_string());
-
-        // Starting the background run is the probe's own job, spawning
-        // included — a tick never starts one.
-        Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
-        assert_eq!(reload(&path).stage(), "review");
-
-        let key = crate::command_step::Runs::key("implement", "demo");
-        let runs = crate::command_step::Runs::new(&repo.commands_dir());
-        for _ in 0..50 {
-            if runs.state(&key) != crate::command_step::RunState::Running {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        assert_eq!(runs.state(&key), crate::command_step::RunState::Exited(1));
-
-        // Moved on further still, by hand and saved to disk — proving a
-        // tick reads the queue fresh rather than some state it cached from
-        // the pass above, and reroutes wherever the task actually is.
-        let mut task = reload(&path);
-        task.set_stage("document", None);
-        task.save().unwrap();
-
-        let baseline = mux.calls().len();
-        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
-        let mut settled = false;
-        for _ in 0..50 {
-            dispatcher.tick().unwrap();
-            if reload(&path).stage() == "blocked" {
-                settled = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        assert!(
-            settled,
-            "a tick alone never rerouted the finished background step — \
-             stuck on `{}`",
-            reload(&path).stage()
-        );
-        assert_eq!(
-            reload(&path).front.blocked_from.as_deref(),
-            Some("document"),
-            "blocked_from must name the step the task was actually pulled out of"
-        );
-        assert_eq!(
-            mux.calls().len(),
-            baseline,
-            "a tick must spawn nothing at all — unexpected calls: {:?}",
-            &mux.calls()[baseline..]
-        );
-    }
-
-    /// Review finding 1: `Dispatcher::tick` used to leave `report_seen`
-    /// empty, so `persist` read every task's real, on-disk `last_report.at`
-    /// as newer than the `0` it found there and dropped the write — silently
-    /// discarding a tick's own reroute for any task that had ever had a
-    /// lane report at all. `add_task_with_worktree`'s own task carries no
-    /// `last_report`, which is exactly why the test above never caught it;
-    /// this one gives the task a report before the tick ever runs.
-    #[test]
-    fn tick_reroutes_a_task_that_already_carries_a_last_report() {
-        let repo = fixture("tick-with-last-report");
-        let path = add_task_with_worktree(&repo, "demo", "implement");
-        let mux = FakeMux::new(vec![]);
-        let mut pipelines = pipelines_running("exit 1", true);
-        pipelines
-            .pipelines
-            .get_mut("default")
-            .unwrap()
-            .steps
-            .iter_mut()
-            .find(|s| s.id == "implement")
-            .unwrap()
-            .on_fail = Some(crate::pipeline::BLOCKED.to_string());
-
-        Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
-        assert_eq!(reload(&path).stage(), "review");
-
-        let key = crate::command_step::Runs::key("implement", "demo");
-        let runs = crate::command_step::Runs::new(&repo.commands_dir());
-        for _ in 0..50 {
-            if runs.state(&key) != crate::command_step::RunState::Running {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        assert_eq!(runs.state(&key), crate::command_step::RunState::Exited(1));
-
-        // A `last_report` already on disk — the thing an ordinary task past
-        // its first `spoolway report` always carries, and the one shape the
-        // fixture above never exercises.
-        let mut task = reload(&path);
-        task.front.last_report = Some(crate::task::LastReport {
-            step: "review".into(),
-            outcome: "pass".into(),
-            at: 1,
-        });
-        task.save().unwrap();
-
-        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
-        let mut settled = false;
-        for _ in 0..50 {
-            dispatcher.tick().unwrap();
-            if reload(&path).stage() == "blocked" {
-                settled = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        assert!(
-            settled,
-            "a tick never rerouted a task that already carried a last_report — \
-             stuck on `{}`",
-            reload(&path).stage()
-        );
-    }
-
-    /// Review finding 2: closing a background run's own pane is a
-    /// multiplexer call — `Mux::close_pane`, a process on tmux — so a tick
-    /// must never do it. A run that landed in a pane is left exactly as it
-    /// is by every tick, and only a real probe closes it.
-    #[test]
-    fn tick_leaves_a_paned_background_run_for_the_probe_to_close() {
-        let repo = fixture("tick-paned-background");
-        let path = add_task_with_worktree(&repo, "demo", "implement");
-        let mux = FakeMux::new(vec![]).offering_panes();
-        let pipelines = pipelines_running("exit 0", true);
-
-        Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
-        assert_eq!(reload(&path).stage(), "review");
-
-        let key = crate::command_step::Runs::key("implement", "demo");
-        let runs = crate::command_step::Runs::new(&repo.commands_dir());
-        for _ in 0..50 {
-            if runs.state(&key) != crate::command_step::RunState::Running {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        assert_eq!(runs.state(&key), crate::command_step::RunState::Exited(0));
-        assert!(
-            runs.pane(&key).is_some(),
-            "the background run must have landed in a pane of its own"
-        );
-
-        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
-        for _ in 0..5 {
-            dispatcher.tick().unwrap();
-        }
-        assert!(
-            runs.pane(&key).is_some(),
-            "a tick must leave a paned run's pane record alone rather than close it"
-        );
-        assert!(
-            mux.did("close_pane").is_empty(),
-            "a tick must never call close_pane — that is a process on tmux: {:?}",
-            mux.calls()
-        );
-
-        // The probe still owns this: an ordinary pass closes the pane
-        // exactly as it always has, same as `a_background_commands_pane_
-        // closes_at_reap` above proves for it directly.
-        Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
-        assert!(
-            runs.pane(&key).is_none(),
-            "the probe's own pass must still close the pane once it runs"
-        );
-    }
-
     /// The other half: a background command that passes, or one still going,
     /// changes nothing about where the task is — a zero exit is left exactly
     /// as unread as a step with no `on_fail` leaves every code.
@@ -14936,7 +14817,9 @@ mod tests {
             .unwrap()
             .on_fail = Some(crate::pipeline::BLOCKED.to_string());
 
-        Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
+        Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
         let mut task = reload(&path);
         assert_eq!(task.stage(), "review");
 
@@ -14958,7 +14841,6 @@ mod tests {
             pipeline,
             &mut report,
             &keys,
-            true,
         );
 
         assert!(
@@ -14988,7 +14870,9 @@ mod tests {
         // this exit code at all.
         let pipelines = pipelines_running("exit 0", true);
 
-        Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
+        Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
         let mut task = reload(&path);
         assert_eq!(task.stage(), "review");
 
@@ -15015,7 +14899,6 @@ mod tests {
             pipeline,
             &mut report,
             &keys,
-            true,
         );
 
         assert!(
@@ -15045,7 +14928,9 @@ mod tests {
         let mux = FakeMux::new(vec![]);
         let pipelines = pipelines_running("sleep 30", true);
 
-        Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
+        Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
         assert_eq!(reload(&path).stage(), "review");
 
         // The destination could not be placed: the task is back on the
@@ -15057,7 +14942,9 @@ mod tests {
         let key = crate::command_step::Runs::key("implement", "demo");
         assert_eq!(runs.state(&key), crate::command_step::RunState::Running);
 
-        Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
+        Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
         assert_eq!(
             reload(&path).stage(),
             "review",
@@ -15106,7 +14993,9 @@ mod tests {
 
         // The first pass starts it; the timeout has not passed yet, so the task
         // stays exactly where it is.
-        let first = Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
+        let first = Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
         assert_eq!(reload(&path).stage(), "implement", "{first:?}");
 
         let key = crate::command_step::Runs::key("implement", "demo");
@@ -15114,7 +15003,9 @@ mod tests {
         let pid = runs.read_pid(&key).unwrap();
 
         std::thread::sleep(Duration::from_millis(400));
-        let report = Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
+        let report = Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
 
         assert!(
             report
@@ -15145,7 +15036,9 @@ mod tests {
         let mux = FakeMux::new(vec![]);
         let pipelines = pipelines_running_for("sleep 300", true, Duration::from_millis(300));
 
-        Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
+        Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
         assert_ne!(
             reload(&path).stage(),
             "implement",
@@ -15157,7 +15050,9 @@ mod tests {
         let pid = runs.read_pid(&key).unwrap();
 
         std::thread::sleep(Duration::from_millis(400));
-        let report = Dispatcher::new(&repo, &pipelines, &mux).pass().unwrap();
+        let report = Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
 
         assert!(
             report

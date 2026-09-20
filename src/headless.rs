@@ -751,7 +751,7 @@ impl Mux for Headless {
 
     /// Write the lane down. Nothing is spawned yet — a turn is a process, and
     /// the lane has not been given anything to answer.
-    fn start_lane(&self, spec: &LaneSpec<'_>) -> Result<()> {
+    fn start_lane(&self, spec: &LaneSpec<'_>, _tick: &mut dyn FnMut()) -> Result<()> {
         // Refused here rather than at the first prompt: a kind nobody has
         // established headless flags for would otherwise be launched with a
         // guessed one, and a guess at `--resume` loses a lane's context without
@@ -1043,15 +1043,18 @@ mod tests {
             let pane = new_pane_id(&self.root);
             let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
             self.mux
-                .start_lane(&LaneSpec {
-                    name,
-                    label: "implementer",
-                    kind,
-                    pane_id: &pane,
-                    args: &args,
-                    env: &BTreeMap::new(),
-                    path_prefix: Some(&self.bin),
-                })
+                .start_lane(
+                    &LaneSpec {
+                        name,
+                        label: "implementer",
+                        kind,
+                        pane_id: &pane,
+                        args: &args,
+                        env: &BTreeMap::new(),
+                        path_prefix: Some(&self.bin),
+                    },
+                    &mut || {},
+                )
                 .unwrap();
             pane
         }
@@ -1423,15 +1426,18 @@ mod tests {
     fn a_kind_that_cannot_run_headless_is_refused_at_the_start() {
         let f = Fixture::new("unknown-kind");
         let pane = new_pane_id(&f.root);
-        let refused = f.mux.start_lane(&LaneSpec {
-            name: "implement-demo",
-            label: "implementer",
-            kind: "gemini",
-            pane_id: &pane,
-            args: &[],
-            env: &BTreeMap::new(),
-            path_prefix: None,
-        });
+        let refused = f.mux.start_lane(
+            &LaneSpec {
+                name: "implement-demo",
+                label: "implementer",
+                kind: "gemini",
+                pane_id: &pane,
+                args: &[],
+                env: &BTreeMap::new(),
+                path_prefix: None,
+            },
+            &mut || {},
+        );
 
         let message = refused.unwrap_err().to_string();
         assert!(message.contains("cannot run headless"), "{message}");
@@ -1453,15 +1459,18 @@ mod tests {
         ]);
         let pane = new_pane_id(&f.root);
         f.mux
-            .start_lane(&LaneSpec {
-                name: "implement-demo",
-                label: "implementer",
-                kind: "pi",
-                pane_id: &pane,
-                args: &["--session-id".to_string(), "s1".to_string()],
-                env: &env,
-                path_prefix: Some(&f.bin),
-            })
+            .start_lane(
+                &LaneSpec {
+                    name: "implement-demo",
+                    label: "implementer",
+                    kind: "pi",
+                    pane_id: &pane,
+                    args: &["--session-id".to_string(), "s1".to_string()],
+                    env: &env,
+                    path_prefix: Some(&f.bin),
+                },
+                &mut || {},
+            )
             .unwrap();
         f.mux.prompt("implement-demo", "go").unwrap();
         f.settle("implement-demo");
@@ -1623,15 +1632,18 @@ mod tests {
 
         let pane = new_pane_id(&f.root);
         f.mux
-            .start_lane(&LaneSpec {
-                name: "implement-live",
-                label: "implementer",
-                kind,
-                pane_id: &pane,
-                args: &args,
-                env: &BTreeMap::new(),
-                path_prefix: None,
-            })
+            .start_lane(
+                &LaneSpec {
+                    name: "implement-live",
+                    label: "implementer",
+                    kind,
+                    pane_id: &pane,
+                    args: &args,
+                    env: &BTreeMap::new(),
+                    path_prefix: None,
+                },
+                &mut || {},
+            )
             .unwrap();
 
         f.mux
