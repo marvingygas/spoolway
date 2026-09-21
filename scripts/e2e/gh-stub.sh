@@ -72,7 +72,7 @@ next_number() {
   for f in "$PRS"/[0-9]*; do
     [ -e "$f" ] || continue
     b=$(basename "$f")
-    case "$b" in *.body) continue ;; esac
+    case "$b" in *.body|*.no_checks) continue ;; esac
     [ "$b" -gt "$n" ] && n=$b
   done
   echo $((n + 1))
@@ -82,7 +82,7 @@ pr_for_branch() {
   local branch=$1 f n
   for f in "$PRS"/[0-9]*; do
     [ -e "$f" ] || continue
-    case "$f" in *.body) continue ;; esac
+    case "$f" in *.body|*.no_checks) continue ;; esac
     n=$(basename "$f")
     [ "$(field "$n" head)" = "$branch" ] && { echo "$n"; return 0; }
   done
@@ -103,14 +103,26 @@ case "${1:-}" in
         # all — `gh pr checks --watch --fail-fast` — so, like real `gh`, the
         # pull request is whichever one belongs to the current branch. Never
         # asked to actually watch anything real: this sandbox forge runs no
-        # CI, so finding the pull request at all is the whole of what this
-        # answers for, the same shrug `e2e-fake-gh.sh`'s own `checks` case
-        # gives.
+        # CI, so a pull request that exists answers with either of two
+        # states below — never a real check run's own pass or fail, the
+        # same shrug `e2e-fake-gh.sh`'s own `checks` case gives.
         branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
-        pr_for_branch "$branch" >/dev/null || {
+        pr=$(pr_for_branch "$branch") || {
           echo "no pull requests found for branch \"$branch\"" >&2
           exit 1
         }
+        # The one state a bounded self-route exists for: `handover` opened
+        # this pull request a moment ago, and GitHub has not registered a
+        # first check run against it yet. Real `gh` answers this with the
+        # same wording (`no checks reported on the '%s' branch`) and a
+        # non-zero exit rather than waiting it out — there is nothing yet
+        # for `--watch` to watch. A caller marks a pull request this way with
+        # `<n>.no_checks` under $GH_STUB_PRS; nothing here ever writes that
+        # file itself.
+        if [ -e "$PRS/$pr.no_checks" ]; then
+          echo "no checks reported on the '$branch' branch" >&2
+          exit 1
+        fi
         echo "All checks were successful"
         ;;
       view)

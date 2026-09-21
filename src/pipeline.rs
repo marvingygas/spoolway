@@ -2420,9 +2420,12 @@ mod tests {
     /// rebase — and its failure routes straight to `blocked`: `spoolway
     /// stack` calls `gh pr view` first, so re-running `handover` from
     /// `blocked` is safe and there is no second, LLM-run escalation step to
-    /// fall back to any more. A red `checks` routes straight to `blocked`
-    /// too, since nothing about a failed check is fixed by handing the
-    /// change over again.
+    /// fall back to any more. `checks` instead routes a failure back to
+    /// itself, bounded at 3 — `gh pr checks --watch --fail-fast` answers "no
+    /// checks reported" outright when `handover` just opened the pull
+    /// request a moment too soon for GitHub to have registered one yet, and
+    /// a bounded retry a poll interval apart is what lets that registration
+    /// catch up. See `crate::dispatch::skip_wait`.
     // covers: step.end — a terminal step is where a pipeline stops, and every route has to reach one
     #[test]
     fn both_pipelines_end_at_document_then_handover() {
@@ -2462,8 +2465,13 @@ mod tests {
             assert_eq!(checks.on_pass.as_deref(), Some(DONE), "pipeline `{name}`");
             assert_eq!(
                 checks.destination(Outcome::Fail),
-                Some(BLOCKED),
-                "pipeline `{name}`: a red check is a person's call, not another handover"
+                Some("checks"),
+                "pipeline `{name}`: a red check retries against itself before falling through"
+            );
+            assert_eq!(
+                checks.round_limit("checks"),
+                Some(3),
+                "pipeline `{name}`: the self-route is bounded"
             );
         }
     }

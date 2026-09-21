@@ -145,8 +145,10 @@ The dispatcher draws the board in the terminal it runs in and runs a pass every 
 That rate is not configurable, and stays the floor under how long a quiet run can go without a
 pass: a change in the queue or commands directory wakes the board or the next pass sooner, as
 described above. A pass that moves a task to a new stage, frees a lane or archives a task runs
-the next pass at once instead of waiting for the next one. A long run of such passes in a row
-eventually waits anyway.
+the next pass at once instead of waiting for the next one. A task sent back to the step it
+just left is the exception: that pass waits out the full interval, so a bounded self-route
+gets its tries spread apart instead of firing every one inside the same second. A long run of
+such passes in a row eventually waits anyway.
 
 <img src="screenshots/dispatch.png" alt="the dispatcher board">
 
