@@ -28,8 +28,8 @@ keys in the header are ignored.
 ### How a document gets updated
 
 Both shipped pipelines give every task a `document` step. Its lane runs the archivist prompt
-on that one task's diff, before the handover. The documentation lands in the same pull
-request as the code. The prompt also keeps `README.md` and `DOCS.md` correct. See
+on that one task's diff before the publishing commands. The documentation lands in the same
+pull request as the code. The prompt also keeps `README.md` and `DOCS.md` correct. See
 `assets/prompts/archivist/PROMPT.md`.
 
 ### Documents describe the system as it is

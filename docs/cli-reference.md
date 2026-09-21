@@ -975,9 +975,10 @@ spoolway report --fail -m "review found a missing migration" --handoff "add the 
 
 ### `spoolway stack [<task>]`
 
-Hand a task's change over with git and `gh`. No model, no rebase. Run in the task's worktree,
-usually as the `handover` step's `run:` line. See [`spoolway stack` hands the change
-over](pipelines.md#spoolway-stack-hands-the-change-over).
+Optionally hand a task's change to GitHub with git and `gh`. The command makes no model call
+and spends no tokens. It does not impose a pipeline step, step name or position; where or
+whether you call it is up to you. See
+[`spoolway stack`](pipelines.md#spoolway-stack).
 
 ```mermaid
 flowchart LR

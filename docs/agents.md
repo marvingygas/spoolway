@@ -39,14 +39,14 @@ context window is a `[models]` key. The argv is fixed per kind.
 ## Agent kinds
 
 A kind is one row in spoolway's adapter table. The row says how the binary is launched, which
-permission modes it accepts, how it takes an effort level, whether it runs headless, and where
-its transcripts are read from.
+permission modes it accepts, how it takes an effort level, and where its transcripts are read
+from.
 
-| Kind | Permission modes | Effort | Headless | Skills directory | Transcripts |
-|---|---|---|---|---|---|
-| `pi` | none | none | yes | `.pi/skills` | `~/.pi/agent/sessions` |
-| `claude` | `auto` (default), `acceptEdits`, `dontAsk`, `bypassPermissions`, `plan`, `manual` | `--effort <level>` | yes | `.claude/skills` | `~/.claude/projects` |
-| `codex` | `never` (default), `on-request`, `untrusted` | `-c model_reasoning_effort=<level>` | yes, via `exec` | `.agents/skills` | `$CODEX_HOME/sessions` |
+| Kind | Permission modes | Effort | Skills directory | Transcripts |
+|---|---|---|---|---|
+| `pi` | none | none | `.pi/skills` | `~/.pi/agent/sessions` |
+| `claude` | `auto` (default), `acceptEdits`, `dontAsk`, `bypassPermissions`, `plan`, `manual` | `--effort <level>` | `.claude/skills` | `~/.claude/projects` |
+| `codex` | `never` (default), `on-request`, `untrusted` | `-c model_reasoning_effort=<level>` | `.agents/skills` | `$CODEX_HOME/sessions` |
 
 `spoolway agent list` prints this table for the installed binaries.
 
@@ -219,4 +219,4 @@ not the pane.
 ## What confines a profile
 
 Nothing. A lane runs with the privileges of whoever started the dispatcher. Confine it with
-the agent's own settings if you need to. See [Reach](concepts.md#reach).
+the agent's own settings if you need to.

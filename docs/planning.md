@@ -151,22 +151,9 @@ A job queues a routine on a cron schedule. See [Jobs](jobs.md).
 
 ## Closing a plan out
 
-There is no closing step. Every task documents its own diff and hands over its own change:
-
-```yaml
-  - id: document
-    agent: pi
-    prompt: archivist
-    on_pass: handover
-
-  - id: handover
-    run: spoolway stack
-    on_pass: done
-```
-
-The `document` step updates the documents whose `covers` match the task's `touches`, so the
-documentation lands in the same pull request. The `handover` step opens one pull request per
-task. See [`spoolway stack` hands the change over](pipelines.md#spoolway-stack-hands-the-change-over).
+spoolway does not prescribe how a finished task is published. The optional [`spoolway
+stack`](pipelines.md#spoolway-stack) command can open one GitHub pull request per task without
+using a model, but where or whether a pipeline calls it is up to you.
 
 A command step with `last:` runs once for the chain. See
 [`last:`](pipelines.md#last--a-step-the-chain-runs-once).

@@ -4,7 +4,7 @@ description: >-
   spoolway is a command-line state machine that drives coding agents through
   defined pipelines. A dispatcher with no model in it: every scheduling decision
   is a counter, a timestamp, or a position in the pipeline file. A git worktree
-  per task, stacked pull requests, and any mix of local and cloud models.
+  per task, optional model-free GitHub pull requests, and any mix of local and cloud models.
 url: https://marvingygas.github.io
 baseurl: /spoolway
 repository: marvingygas/spoolway

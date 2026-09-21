@@ -65,7 +65,7 @@ steps:
     description: Write the code to satisfy the task's acceptance criteria.
     agent: claude
     prompt: implementer
-    model: claude-sonnet-5
+    model: claude-opus-5
     effort: medium
     session: true
     on_pass: review

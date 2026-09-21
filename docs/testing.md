@@ -79,14 +79,14 @@ with a `// covers:` line.
 
 | Suite | Covers |
 |---|---|
-| `flow` | A task's whole life: queued, implement, review, handover, archived |
+| `flow` | A task's whole life: queued, agent steps, command steps, archived |
 | `commands` | CLI behaviour that belongs to no domain of its own: `init` and `sync`, the three contracts, the queue screen read off a real pipe, the archive's rows, `config`'s checkout/project asymmetry, the overrides layer through a linked worktree, housekeeping's retention sweep, a confirm dialog over a real pty |
 | `command-steps` | A `run:` step's own mechanics: exit-code routing, `background:`, `timeout:`, `loop:`, headless and paned steps, the environment a step is handed |
 | `issue-tracking` | `[issue_tracking]`'s hook on `queued`, `blocked`, `paused`, `done` and `open`, the shipped `github.sh` against the `gh` double, and `key_in_names` |
 | `stacking` | Three chained tasks, each pull request on the branch it is cut from |
 | `stack` | `spoolway stack`: the squash, a refused lease, an empty diff, a bad `branch:`, the body from the task file, a base branch that exists locally and nowhere else |
 | `conflicts` | A base that moves under a waiting branch, and the rebase |
-| `forge` | The `gh` test double, and a hand-off with nothing to hand over |
+| `forge` | The `gh` test double, including an empty change |
 | `disaster` | A hard kill with lanes live, a stale lock, a restart over a running lane, a stop with live lanes, retention |
 | `lock` | A second `--tier pr` run waits for the first |
 | `trials` | The `t` picker on the queue screen, the arms it queues, and their cleanup |

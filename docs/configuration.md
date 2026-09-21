@@ -111,7 +111,7 @@ auto_commit = true
 
 | Key | Default | What it controls |
 |---|---|---|
-| `backend` | `herdr` | Where lanes run: `herdr` or `headless`. `herdr` puts each agent in a pane you can watch and take over. `headless` is spoolway's own test backend; `spoolway dispatch` refuses to run it unless `SPOOLWAY_TEST_BACKEND` is set in the environment. |
+| `backend` | `herdr` | Where lanes run. `herdr` is the supported runtime and puts each agent in a pane you can watch and take over. `headless` is an internal test backend; dispatch refuses it unless the test harness sets `SPOOLWAY_TEST_BACKEND`. |
 | `herdr_mode` | `split` | Layout under `backend = "herdr"`. `split` gives each task its own workspace named `spoolway/<task>`. `grouped` puts every project in the shared `spoolway-dispatcher` workspace, one tab per project, one pane per task. See [the dispatcher](dispatcher.md#one-home-for-every-run-in-every-project). |
 | `worktree_root` | blank | Where a task's worktree is created. Blank means `~/.spoolway/<project>/worktrees`. The directory is `task-<id>`, or `task-<slug>-<id>` with a tracker slug. |
 | `lane_quiet` | `15m` | How long a lane may stay silent before the dispatcher reminds it to report. After three reminders the task is escalated. Not how often a pass looks — the dispatcher polls at a fixed rate nobody sets. |
@@ -122,9 +122,7 @@ auto_commit = true
 `priority` and `lane_child_ceiling` are not written to a fresh `config.toml`. Add them by hand
 or with `config set`.
 
-Handover and gates are not configured here. `gate:` is a step key in the pipeline. The
-handover is `spoolway stack`: it commits, squashes, pushes and opens a pull request titled with
-the task's `title:` and bodied with the task file. See [Pipelines](pipelines.md).
+Gates are not configured here. `gate:` is a step key in the pipeline.
 
 ## `[unattended]` — the overnight run
 
@@ -364,8 +362,10 @@ refuses.
 
 ### The shipped hook scripts
 
-`spoolway init` writes `github.sh` and `jira.sh` into `.spoolway/hooks/`. `spoolway sync`
-never changes them. Switch trackers with
+`spoolway init` writes sample `github.sh` and `jira.sh` files into `.spoolway/hooks/`.
+They are project-owned starting points, not required integrations: edit either script, replace
+it with any executable that follows `spoolway hook contract`, or leave `hook` blank. `spoolway
+sync` never changes them. Switch trackers with
 `spoolway config set issue_tracking.hook <file>`.
 
 A hook script names the tools it needs with a `# spoolway-requires: <tool> >= <version>`
@@ -384,11 +384,19 @@ prints the same notice and proceeds. See [`spoolway queue`](cli-reference.md#spo
 | `github.sh` | `gh` >= 2.97.0, logged in | Reads an issue on `fetch`. Creates the epic and ticket on `open`, nests them under the issue in `SPOOLWAY_SOURCE`, and returns `slug=gh-<number>` and `url=`. The epic is titled with the group's name and its body leads with the full `group_description:`, followed by the rendered epic template. Comments with the task file on `blocked` and `paused`. On `done` it leaves a `<!-- spoolway-issue: URL -->` marker comment on the task's pull request, swaps the `spoolway:in-progress` label for `spoolway:review`, and comments that the ticket is ready for review. It closes nothing itself. |
 | `jira.sh` | `acli` >= 1.3.30 and `jq` >= 1.6 | The same events. Returns the lowercased key as the slug. Comments name the task without attaching the file. Check the link type, epic status and JSON field names named in the script's header against your site. |
 
-### How a GitHub issue gets closed
+### How the sample GitHub workflow works
 
-The shipped hook never closes an issue itself. A task reaches `done` when `spoolway stack`
-has opened that task's pull request, and nobody has merged or reviewed anything at that
-point. Closing there would mark work as delivered before it was.
+At a high level, the sample connects four things: a source issue, a group issue, one child
+issue per task, and the pull request that delivers each task. The `open` event creates the
+group and task issues. Later events add progress comments. The `done` event marks a task issue
+ready for review and leaves a marker on its pull request. The sample GitHub Actions workflow
+uses that marker after a merge to close the task issue, then closes the group issue once all
+of its children are closed.
+
+The shipped hook never closes an issue itself. It expects the task's branch to have a pull
+request by the time the task reaches `done`, however that pull request was created. Nobody has
+necessarily merged or reviewed anything at that point, so closing there would mark work as
+delivered before it was. A custom hook can give `done` any behavior that suits its pipeline.
 
 Instead the `done` branch leaves a comment on the pull request carrying a
 `<!-- spoolway-issue: URL -->` marker, and on the issue it swaps the `spoolway:in-progress`
