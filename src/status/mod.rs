@@ -42,10 +42,12 @@ use view::{
 };
 pub(crate) use view::{DIM, GUTTER, RESET};
 
-/// The redraw rate the jobs screen and the queue screen's own waits still
-/// poll stdin at — the dispatcher board's own wait is event-driven now (see
-/// `crate::screen::DirWatch`) and only falls back to this as its per-slice
-/// cadence on a target with nothing to watch with.
+/// The redraw rate every screen's own wait polls stdin at — the jobs screen,
+/// the queue screen, and the dispatcher board, whose wait slices its whole
+/// interval into stretches of this on every target. The board's wait also
+/// watches the queue and commands directories (see
+/// `crate::screen::DirWatch`), which ends a slice early; it never lengthens
+/// one.
 ///
 /// One second, not two, because it is also the rate the lockup's mark is
 /// sampled at — see [`view::spool_frame`], which turns on every whole second. A
@@ -218,9 +220,6 @@ pub struct Row {
     /// that step once it is not — every round of it, the same as OUT and
     /// COST. `None` where neither answers: no live lane and nothing banked.
     pub lane_time: Option<i64>,
-    /// The part of the three figures above that nothing has banked yet. See
-    /// [`Unbanked`].
-    pub unbanked: Unbanked,
     /// What happens to this task next: the step it goes to, or — when it is
     /// stuck — what has to happen before it goes anywhere.
     pub next: String,
@@ -326,6 +325,20 @@ pub struct Board {
     /// redraw does not re-scan the calendar for every enabled cron job — see
     /// [`crate::jobs::active_jobs_cached`].
     jobs_next: Option<crate::jobs::ActiveJobsMemo>,
+    /// The id of every row the last frame drew, in the order it drew them —
+    /// the live queue and the archived rows beside it, exactly as [`render`]
+    /// composed them. This is what `↑`/`↓` walk, so a cursor move is a step
+    /// through a list already in memory rather than a fresh read of every
+    /// task file: the board reads keys while a pass is rewriting and
+    /// archiving those very files, and a read caught mid-write used to lose
+    /// the keypress outright. The cost is that the marker can sit for one
+    /// frame on a row the queue has already moved — the next draw puts it
+    /// right, the same way [`render`] already re-seeds a cursor whose row has
+    /// left the board.
+    ///
+    /// Empty until the first frame, which is drawn before any key is read —
+    /// see the dispatch loop's own draw ahead of its first pass.
+    drawn: Vec<String>,
 }
 
 impl Board {
@@ -343,6 +356,7 @@ impl Board {
             cursor: None,
             mode: BoardMode::Browsing,
             jobs_next: None,
+            drawn: Vec::new(),
         }
     }
 
@@ -390,6 +404,7 @@ impl Board {
             &mut self.recent,
             &mut self.cursor,
             &mut self.jobs_next,
+            &mut self.drawn,
         )?;
         if !self.adopted {
             self.recent.clear();
@@ -500,14 +515,11 @@ impl Board {
     ) -> Result<()> {
         use crate::screen::Key;
         match key {
-            Key::Up => {
-                self.cursor =
-                    shift_cursor(&cursor_rows(repo, pipelines)?, self.cursor.as_deref(), -1)
-            }
-            Key::Down => {
-                self.cursor =
-                    shift_cursor(&cursor_rows(repo, pipelines)?, self.cursor.as_deref(), 1)
-            }
+            // Off the last frame's own rows, with no read of any task file
+            // behind it — see [`Board::drawn`]. An arrow is the one key that
+            // cannot fail, whatever a pass is doing to the queue right now.
+            Key::Up => self.cursor = shift_cursor(&self.drawn, self.cursor.as_deref(), -1),
+            Key::Down => self.cursor = shift_cursor(&self.drawn, self.cursor.as_deref(), 1),
             Key::Char('o') => self.open_cursor(repo)?,
             Key::Char('r') => self.resume_cursor(repo, pipelines)?,
             Key::Char('R') => self.begin_resume_all(repo, pipelines)?,
@@ -524,8 +536,9 @@ impl Board {
     /// multiplexer opens — a no-op with no cursor or a cursor on a row the
     /// board no longer draws. `repo.task` reads both the queue and the
     /// archive, so this reaches a done row's document exactly as it does a
-    /// live one — [`cursor_rows`] is what lets the cursor land on that row
-    /// in the first place. Never blocks: the pane runs the editor on its
+    /// live one — [`render`]'s own composed row list, which [`Board::drawn`]
+    /// is taken from, is what lets the cursor land on that row in the first
+    /// place. Never blocks: the pane runs the editor on its
     /// own, and the board keeps redrawing and the pass loop keeps running
     /// while it is open, exactly as if nothing had happened.
     ///
@@ -840,7 +853,10 @@ impl Board {
                 // else queued the walk comes back around to the chain's own
                 // head, at which point the cursor clears instead of pointing
                 // at a task the board no longer shows.
-                let before = rows(repo, pipelines)?;
+                let before: Vec<String> = rows(repo, pipelines)?
+                    .into_iter()
+                    .map(|row| row.id)
+                    .collect();
                 let next = next_cursor_after_chain(&before, &chain);
                 for entry in &chain {
                     unqueue_task(repo, &entry.id)?;
@@ -1465,23 +1481,27 @@ pub(crate) fn running_command_steps(
 }
 
 /// Where the cursor lands after moving `delta` rows from `current` among
-/// `rows`, wrapping at either end. `None` only when there is nowhere to put
+/// `ids`, wrapping at either end. `None` only when there is nowhere to put
 /// it — an empty board. Landing on the first row rather than nowhere both
 /// when `current` is `None` — the cursor has never moved — and when it names
 /// a task the board no longer shows, so a resort or a task's own state
 /// change never strands the cursor on a row that is gone.
-fn shift_cursor(rows: &[Row], current: Option<&str>, delta: i32) -> Option<String> {
-    if rows.is_empty() {
+///
+/// Row ids alone, rather than the rows themselves: a cursor move needs an
+/// ordered list and nothing else, and the list it is given is the one the
+/// last frame drew — see [`Board::drawn`].
+fn shift_cursor(ids: &[String], current: Option<&str>, delta: i32) -> Option<String> {
+    if ids.is_empty() {
         return None;
     }
-    let next = match current.and_then(|id| rows.iter().position(|r| r.id == id)) {
+    let next = match current.and_then(|id| ids.iter().position(|row| row == id)) {
         Some(at) => {
-            let len = rows.len() as i32;
+            let len = ids.len() as i32;
             (((at as i32 + delta) % len) + len) % len
         }
         None => 0,
     };
-    Some(rows[next as usize].id.clone())
+    Some(ids[next as usize].clone())
 }
 
 /// Where the cursor lands once a `u` chain leaves the table together — the
@@ -1490,12 +1510,12 @@ fn shift_cursor(rows: &[Row], current: Option<&str>, delta: i32) -> Option<Strin
 /// until it lands outside `chain`, or wraps back onto the chain's own head,
 /// at which point nothing in the table survives and the cursor clears —
 /// see [`Board::on_key_unqueue_confirm`].
-fn next_cursor_after_chain(rows: &[Row], chain: &[ChainEntry]) -> Option<String> {
+fn next_cursor_after_chain(ids: &[String], chain: &[ChainEntry]) -> Option<String> {
     let head = chain.first()?.id.as_str();
     let removed: HashSet<&str> = chain.iter().map(|e| e.id.as_str()).collect();
     let mut cursor = head.to_string();
     loop {
-        let next = shift_cursor(rows, Some(&cursor), 1)?;
+        let next = shift_cursor(ids, Some(&cursor), 1)?;
         if !removed.contains(next.as_str()) {
             return Some(next);
         }
@@ -1530,22 +1550,6 @@ pub fn rows(repo: &Repo, pipelines: &Pipelines) -> Result<Vec<Row>> {
     build_rows(repo, &tasks, pipelines, &graph, &lanes, &ledger, None)
 }
 
-/// Every row the board actually draws: [`rows`]'s live queue plus whatever
-/// archived rows [`render`] appends alongside it, in the same order. The
-/// cursor walks this — not `rows()` alone — so `↑`/`↓` and the row it starts
-/// on reach a done task exactly as far as the table drawn under them does,
-/// letting `o` open its document too. `rows()` itself stays the live-queue
-/// list it always was, since `spoolway queue list` reads it too and archived
-/// tasks are not that command's business.
-fn cursor_rows(repo: &Repo, pipelines: &Pipelines) -> Result<Vec<Row>> {
-    let active = rows(repo, pipelines)?;
-    let active_groups: BTreeSet<String> = active.iter().filter_map(|r| r.group.clone()).collect();
-    let mut all = active;
-    all.extend(done_rows(repo, pipelines, &active_groups)?);
-    all.sort_by(|a, b| a.key().cmp(&b.key()));
-    Ok(all)
-}
-
 // Every argument is a distinct piece of the board's own state that `frame`
 // holds and this builds one frame from; bundling them into a struct just to
 // pass one reference would hide that. The same call the codebase's other
@@ -1560,6 +1564,7 @@ fn render(
     recent: &mut VecDeque<RecentEvent>,
     cursor: &mut Option<String>,
     jobs_next: &mut Option<crate::jobs::ActiveJobsMemo>,
+    drawn: &mut Vec<String>,
 ) -> Result<String> {
     let (tasks, load_problems) = repo.tasks_and_problems()?;
     let graph = Graph::build_for_run(&tasks, pipelines, &repo.archive_dir(), repo.unattended());
@@ -1640,6 +1645,11 @@ fn render(
     if !cursor_still_shown {
         *cursor = rows.first().map(|row| row.id.clone());
     }
+    // What `↑`/`↓` will walk until the next frame replaces it — see
+    // [`Board::drawn`]. Taken here, after the sort and from the same composed
+    // list `table` draws below, so the order on screen and the order a cursor
+    // move steps through are the same list by construction.
+    *drawn = rows.iter().map(|row| row.id.clone()).collect();
     let totals = group_totals(&ledger, &rows);
 
     // Slots: how many live lanes each profile is paying for, against its cap
@@ -1912,27 +1922,6 @@ struct SlotsUsed<'a> {
     /// further model named by some task's own pipeline for that profile's
     /// step. See [`slots_used`].
     agent_model: BTreeMap<&'a str, Vec<&'a str>>,
-}
-
-/// What a row shows that the ledger does not hold yet: the spend of the step
-/// in flight, which is banked only when that step settles.
-///
-/// Carried on the row rather than read a second time, because reading it is a
-/// pass over a live transcript that [`build_rows`] has already made. A group's
-/// total adds this to the ledger's own sum; without it a running lane's whole
-/// bill is missing from the line that closes its group, and the total reads
-/// smaller than the row right above it.
-#[derive(Default)]
-pub struct Unbanked {
-    /// Output tokens the live lane has produced at this step, `0` where there
-    /// is no live reading to take.
-    pub out: u64,
-    /// What those tokens have cost, `None` where nothing could be priced.
-    pub cost: Option<f64>,
-    /// How long the live lane has been open at this step. Unbanked for the
-    /// same reason the rest is: the ledger learns a round's `wall_s` when the
-    /// round ends.
-    pub lane_time: Option<i64>,
 }
 
 /// Where a pass out of `blocked` would carry this task, prefixed for the NEXT
@@ -2301,23 +2290,11 @@ fn build_rows(
             // still runs.
             // A command run's clock comes off its own pid file rather than
             // `launched_at`, which is the last *lane*'s launch and would date
-            // a running `gate` to whatever agent step ran before it. It stays
-            // out of `unbanked` below: the ledger records lanes, so a
-            // command's time is in no total either before or after it ends,
-            // and adding it here alone would have a group's total shrink the
-            // moment the command finished.
+            // a running `gate` to whatever agent step ran before it.
             lane_time: match (command_run, live) {
                 (Some(key), _) => runs.elapsed(key).map(|ran| ran.as_secs() as i64),
                 (None, true) => elapsed,
                 (None, false) => lane_time_at(ledger, task.id(), task.stage()),
-            },
-            // Exactly the figures above that came off the live lane rather
-            // than the ledger — a row falling back to the ledger has nothing
-            // here, because the ledger's own sum already holds it.
-            unbanked: Unbanked {
-                out: session.map(|session| session.output).unwrap_or(0),
-                cost: session.and_then(|session| session.cost),
-                lane_time: elapsed,
             },
             next,
             resumable,
@@ -2454,7 +2431,6 @@ fn done_rows(
                 out: None,
                 cost: None,
                 lane_time: None,
-                unbanked: Unbanked::default(),
                 next: String::new(),
                 resumable: false,
             })
@@ -4089,11 +4065,17 @@ mod tests {
 
     // ---- board-resume: cursor, resume key, forward-looking ticker ----
 
+    /// The row ids of one drawn frame, in order — what [`shift_cursor`]
+    /// walks. See [`Board::drawn`].
+    fn ids<const N: usize>(names: [&str; N]) -> Vec<String> {
+        names.iter().map(|id| id.to_string()).collect()
+    }
+
     /// `↓` from no cursor at all lands on the first row rather than the
     /// second — there is nothing to move away from yet.
     #[test]
     fn moving_the_cursor_with_nothing_selected_lands_on_the_first_row() {
-        let rows = vec![row("a"), row("b"), row("c")];
+        let rows = ids(["a", "b", "c"]);
         assert_eq!(shift_cursor(&rows, None, 1), Some("a".to_string()));
         assert_eq!(shift_cursor(&rows, None, -1), Some("a".to_string()));
     }
@@ -4102,7 +4084,7 @@ mod tests {
     /// end, rather than sticking or landing off the table.
     #[test]
     fn the_cursor_steps_through_rows_and_wraps_at_either_end() {
-        let rows = vec![row("a"), row("b"), row("c")];
+        let rows = ids(["a", "b", "c"]);
         assert_eq!(shift_cursor(&rows, Some("a"), 1), Some("b".to_string()));
         assert_eq!(shift_cursor(&rows, Some("c"), 1), Some("a".to_string()));
         assert_eq!(shift_cursor(&rows, Some("a"), -1), Some("c".to_string()));
@@ -4113,7 +4095,7 @@ mod tests {
     /// press lands on the first row still there rather than nowhere.
     #[test]
     fn the_cursor_resets_to_the_first_row_when_its_own_row_is_gone() {
-        let rows = vec![row("a"), row("b")];
+        let rows = ids(["a", "b"]);
         assert_eq!(shift_cursor(&rows, Some("gone"), 1), Some("a".to_string()));
     }
 
@@ -4135,6 +4117,36 @@ mod tests {
         let mut board = Board::for_test();
         assert_eq!(board.cursor, None, "nothing has drawn a frame yet");
         board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
+        assert_eq!(board.cursor.as_deref(), Some("login"));
+    }
+
+    /// `↑`/`↓` walk the last frame's own rows and read nothing off disk, so
+    /// an arrow answers even while a pass is rewriting and archiving the
+    /// very task files the cursor used to be worked out from. The queue
+    /// emptying under the board here stands in for that window: the rows are
+    /// gone from disk, and the marker still steps through the frame that is
+    /// on screen.
+    #[test]
+    fn an_arrow_walks_the_last_frame_even_with_the_queue_gone_from_disk() {
+        let repo = fixture("cursor-walks-the-drawn-frame");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "login", &[], Some("implement"));
+        add(&repo, "signup", &[], Some("implement"));
+
+        let mut board = Board::for_test();
+        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
+        assert_eq!(board.drawn, vec!["login".to_string(), "signup".to_string()]);
+
+        std::fs::remove_dir_all(repo.queue_dir()).unwrap();
+        assert!(repo.tasks().unwrap().is_empty(), "the queue is gone");
+
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Down)
+            .unwrap();
+        assert_eq!(board.cursor.as_deref(), Some("signup"));
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Up)
+            .unwrap();
         assert_eq!(board.cursor.as_deref(), Some("login"));
     }
 
@@ -4336,6 +4348,9 @@ mod tests {
         task.save().unwrap();
 
         let mut board = Board::for_test();
+        // The cursor walks the last frame's own rows, so the board has to
+        // have drawn one — the dispatch loop draws before it reads a key.
+        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -4363,6 +4378,9 @@ mod tests {
         task.save().unwrap();
 
         let mut board = Board::for_test();
+        // The cursor walks the last frame's own rows, so the board has to
+        // have drawn one — the dispatch loop draws before it reads a key.
+        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -4391,6 +4409,9 @@ mod tests {
         task.save().unwrap();
 
         let mut board = Board::for_test();
+        // The cursor walks the last frame's own rows, so the board has to
+        // have drawn one — the dispatch loop draws before it reads a key.
+        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -4469,6 +4490,9 @@ mod tests {
         task.save().unwrap();
 
         let mut board = Board::for_test();
+        // The cursor walks the last frame's own rows, so the board has to
+        // have drawn one — the dispatch loop draws before it reads a key.
+        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -4494,6 +4518,9 @@ mod tests {
         task.save().unwrap();
 
         let mut board = Board::for_test();
+        // The cursor walks the last frame's own rows, so the board has to
+        // have drawn one — the dispatch loop draws before it reads a key.
+        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -4637,9 +4664,9 @@ mod tests {
             .unwrap();
 
         let mut board = Board::for_test();
-        board
-            .on_key(&repo, &pipelines, crate::screen::Key::Down)
-            .unwrap();
+        // The cursor walks the last frame's own rows, so the board has to
+        // have drawn one — the dispatch loop draws before it reads a key.
+        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
         assert_eq!(board.cursor.as_deref(), Some("login"));
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Char('p'))
@@ -4736,6 +4763,9 @@ mod tests {
         let (_mux, _name) = live_headless_lane(&repo);
 
         let mut board = Board::for_test();
+        // The cursor walks the last frame's own rows, so the board has to
+        // have drawn one — the dispatch loop draws before it reads a key.
+        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -4779,6 +4809,9 @@ mod tests {
         let (mux, name) = live_headless_lane(&repo);
 
         let mut board = Board::for_test();
+        // The cursor walks the last frame's own rows, so the board has to
+        // have drawn one — the dispatch loop draws before it reads a key.
+        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -4809,6 +4842,9 @@ mod tests {
         let (_mux, _name) = live_headless_lane(&repo);
 
         let mut board = Board::for_test();
+        // The cursor walks the last frame's own rows, so the board has to
+        // have drawn one — the dispatch loop draws before it reads a key.
+        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -4896,6 +4932,9 @@ mod tests {
         let before = std::fs::read_to_string(repo.task("login").unwrap().path).unwrap();
 
         let mut board = Board::for_test();
+        // The cursor walks the last frame's own rows, so the board has to
+        // have drawn one — the dispatch loop draws before it reads a key.
+        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -4928,6 +4967,9 @@ mod tests {
         let (_mux, _name) = live_headless_lane(&repo);
 
         let mut board = Board::for_test();
+        // The cursor walks the last frame's own rows, so the board has to
+        // have drawn one — the dispatch loop draws before it reads a key.
+        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -5195,6 +5237,9 @@ mod tests {
         assert_eq!(repo.task("chain-refusals").unwrap().stage(), "queued");
 
         let mut board = Board::for_test();
+        // The cursor walks the last frame's own rows, so the board has to
+        // have drawn one — the dispatch loop draws before it reads a key.
+        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -5254,6 +5299,9 @@ mod tests {
         add(&repo, "solo", &[], None);
 
         let mut board = Board::for_test();
+        // The cursor walks the last frame's own rows, so the board has to
+        // have drawn one — the dispatch loop draws before it reads a key.
+        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -5278,6 +5326,9 @@ mod tests {
         add(&repo, "under-way", &[], Some("implement"));
 
         let mut board = Board::for_test();
+        // The cursor walks the last frame's own rows, so the board has to
+        // have drawn one — the dispatch loop draws before it reads a key.
+        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -5301,11 +5352,11 @@ mod tests {
         add(&repo, "chain-refusals", &["drop-walk"], None);
 
         let mut board = Board::for_test();
-        // `drop-walk` is the dependency, so it sorts first — one `Down` from
-        // no cursor at all reaches it directly.
-        board
-            .on_key(&repo, &pipelines, crate::screen::Key::Down)
-            .unwrap();
+        // The cursor walks the last frame's own rows, so the board has to
+        // have drawn one — the dispatch loop draws before it reads a key.
+        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
+        // `drop-walk` is the dependency, so it sorts first, and the frame
+        // above already landed the cursor on it.
         assert_eq!(board.cursor.as_deref(), Some("drop-walk"));
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Char('u'))
@@ -5351,9 +5402,9 @@ mod tests {
         add(&repo, "unrelated", &[], None);
 
         let mut board = Board::for_test();
-        board
-            .on_key(&repo, &pipelines, crate::screen::Key::Down)
-            .unwrap();
+        // The cursor walks the last frame's own rows, so the board has to
+        // have drawn one — the dispatch loop draws before it reads a key.
+        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
         assert_eq!(board.cursor.as_deref(), Some("alpha"));
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Char('u'))
@@ -5390,9 +5441,9 @@ mod tests {
         add(&repo, "month-instant", &[], None);
 
         let mut board = Board::for_test();
-        board
-            .on_key(&repo, &pipelines, crate::screen::Key::Down)
-            .unwrap();
+        // The cursor walks the last frame's own rows, so the board has to
+        // have drawn one — the dispatch loop draws before it reads a key.
+        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
         assert_eq!(board.cursor.as_deref(), Some("chain-refusals"));
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Char('u'))
@@ -5416,6 +5467,9 @@ mod tests {
         add(&repo, "solo", &[], None);
 
         let mut board = Board::for_test();
+        // The cursor walks the last frame's own rows, so the board has to
+        // have drawn one — the dispatch loop draws before it reads a key.
+        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
