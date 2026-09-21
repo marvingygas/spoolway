@@ -36,9 +36,9 @@ inside, so it never surprises you with a bill or an opinion.
   implementation, a cloud model for review, a shell command for the tests.
 - **A worktree per task.** Every task works on its own branch in its own checkout.
   Parallel tasks never touch each other's files.
-- **Stacked pull requests built-in.** A dependent task's branch is cut from its dependency's
-  branch. A chain of tasks arrives as one ordered stack of PRs. You land the stack.
-  Optional, driven by **`spoolway stack`**.
+- **Optional, token-free GitHub pull requests.** **`spoolway stack`** commits, squashes,
+  pushes and opens a pull request without an LLM call. Dependent tasks can become an ordered
+  stack of pull requests. Where or whether you call the command is up to you.
 - **Session reuse.** A step can resume its prompt's earlier conversation. It stops
   reusing when the model's window is too full.
 - **Unattended runs.** Blocked agents won't need you, the unblocker agent takes over
@@ -208,22 +208,7 @@ steps:
     agent: pi
     prompt: archivist
     model: Ornith-1.5-35B-A3B
-    on_pass: handover
-
-  - id: handover
-    description: Commit, squash, push and open this task's pull request — no model,
-      no rebase. Nothing is merged here; a person lands it.
-    run: spoolway stack
-    on_pass: checks
-
-  - id: checks
-    description: Wait for the pull request's checks, and fail if they are red.
-    run: gh pr checks --watch --fail-fast
-    timeout: 45m
-    loop:
-      checks: 3
     on_pass: done
-    on_fail: checks
 ```
 
 **You do not have to write one by hand.** The `/spoolway-config` skill writes and edits
@@ -276,7 +261,8 @@ the last arm finishes, every arm's copy is removed. The source group and the led
 
 ## Issue tracker
 
-Event hooks sync tasks with an issue tracker. Sample scripts for GitHub and Jira ship with `spoolway init`.
+Event hooks can sync tasks with an issue tracker. Sample scripts for GitHub and Jira ship with
+`spoolway init`; neither integration is required.
 
 | Event | When it fires |
 |---|---|
@@ -287,8 +273,15 @@ Event hooks sync tasks with an issue tracker. Sample scripts for GitHub and Jira
 | `paused` | A task arrives on the persisted `paused` stage |
 | `done` | A task finishes |
 
-**The two shipped scripts are samples.** `spoolway init` writes `github.sh` and `jira.sh` into
-`.spoolway/hooks/`.
+The sample GitHub flow creates one group issue and one child issue per task, comments when a
+task blocks or pauses, and marks the task issue ready for review when the pipeline hands it to
+a pull request. A sample GitHub Actions workflow closes that task issue after the pull request
+merges, then closes the group issue when all of its children are done.
+
+**The two shipped scripts are editable samples.** `spoolway init` copies `github.sh` and
+`jira.sh` into `.spoolway/hooks/`, where they belong to your project. Change them, replace
+them, or leave issue tracking disabled; `spoolway hook contract` describes the events and
+environment available to any custom script.
 
 See **[Issue Tracking](docs/configuration.md#issue_tracking--a-hook-fired-on-four-task-events)**.
 
@@ -300,7 +293,6 @@ See **[Issue Tracking](docs/configuration.md#issue_tracking--a-hook-fired-on-fou
 
 ```toml
 [dispatch]
-backend = "herdr"            # herdr, or headless
 herdr_mode = "split"         # "split": a workspace per task; "grouped": one shared tab, a pane per task
 worktree_root = ""           # where a task's worktree is cut; blank is ~/.spoolway/<project>/worktrees
 lane_quiet = "15m"           # silence before a lane is reminded to report

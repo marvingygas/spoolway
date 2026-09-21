@@ -34,8 +34,15 @@ for f in "$SRC"/*.md; do
     echo "layout: default"
     printf 'title: %s\n' "$(printf '%s' "$title" | sed 's/"/\\"/g; s/^/"/; s/$/"/')"
     echo "---"
-    sed -e 's:](README\.md):](index.html):g' \
-        -e 's:](\([A-Za-z0-9_-]\+\)\.md\(#[^)]*\)\?):](\1.html\2):g' "$f"
+    # Domain metadata guides the archivist inside the repository. It is not
+    # page content, so strip a source file's leading front matter before
+    # handing the page to Jekyll (which already has the front matter above).
+    awk '
+      NR == 1 && $0 == "---" { source_front_matter = 1; next }
+      source_front_matter && $0 == "---" { source_front_matter = 0; next }
+      !source_front_matter { print }
+    ' "$f" | sed -e 's:](README\.md):](index.html):g' \
+        -e 's:](\([A-Za-z0-9_-]\+\)\.md\(#[^)]*\)\?):](\1.html\2):g'
   } > "$dest"
 done
 

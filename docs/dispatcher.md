@@ -29,9 +29,8 @@ spoolway: a dispatcher has to be visible, and this is not a herdr pane.
     spoolway dispatch
 ```
 
-`backend = headless` refuses the same way unless `SPOOLWAY_TEST_BACKEND` is set in the
-environment. Nothing draws a headless run, so only the end-to-end harness sets that marker.
-See [`dispatch.backend`](configuration.md#dispatch--the-run-loop).
+An internal headless backend exists for automated tests only. It is not a supported runtime
+or an alternative to installing herdr. See [Testing](testing.md).
 
 One dispatcher serves the whole project. Every pass re-reads the queue, so a task queued
 while it runs is picked up on the next pass. A second `spoolway dispatch` on the same project
@@ -337,19 +336,17 @@ back to the step it blocked on.
 
 A blocked task keeps its pane open until it is resumed.
 
-## Backends: where a lane lives
+## Where a lane lives
 
 ```toml
 [dispatch]
-backend = "herdr"     # or "headless"
 herdr_mode = "split"  # or "grouped"
 ```
 
-| Backend | Mode | Where a lane runs |
-|---|---|---|
-| `herdr` | `grouped` | One tab per project in the shared `spoolway-dispatcher` workspace. One pane per running task. |
-| `herdr` | `split` | One herdr workspace per task, nested under the project's row as `spoolway/<task>`. |
-| `headless` | | No panes. Each turn is a detached process that logs to a file. |
+| Mode | Where a lane runs |
+|---|---|
+| `grouped` | One tab per project in the shared `spoolway-dispatcher` workspace. One pane per running task. |
+| `split` | One herdr workspace per task, nested under the project's row as `spoolway/<task>`. |
 
 Under a multiplexer every lane is a real pane you can watch and type into. A task holds one
 pane for its whole life. See [Vacating a pane](#vacating-a-pane). A lane is named
@@ -376,24 +373,11 @@ tab.
 ### Vacating a pane
 
 When a step finishes, the dispatcher asks its session to leave the pane, so the next step can
-start in the same pane. Only herdr can send that request, and only `claude` has a quit gesture.
-See [Leaving a pane without closing it](agents.md#leaving-a-pane-without-closing-it). Headless
-closes the pane instead.
+start in the same pane. Only `claude` has a quit gesture. See [Leaving a pane without closing
+it](agents.md#leaving-a-pane-without-closing-it).
 
 The next step waits up to two minutes for the earlier lane to leave. After that it splits its
-own pane and the old one is closed. The pane goes blank during the handover.
-
-### Headless
-
-```toml
-[dispatch]
-backend = "headless"
-```
-
-Every scheduling decision is the same. Each turn is a detached process that logs to a file,
-and a reminder reopens the lane's pinned session. `spoolway lane <lane>` reads the log, which
-outlives the lane, and `spoolway lane <lane> --attach` reopens the session in your terminal.
-Both work over SSH. Only `pi`, `claude` and `codex` can run headless.
+own pane and the old one is closed. The pane goes blank during the transition.
 
 ## Looking into a lane
 
@@ -401,7 +385,6 @@ Both work over SSH. Only `pi`, `claude` and `codex` can run headless.
 spoolway lane                       # the lanes there are
 spoolway lane "login · implement"   # that lane's output
 spoolway lane "login · implement" -n 500
-spoolway lane "login · implement" --attach   # headless: reopen the session in your terminal
 ```
 
 Quote the lane name. It holds a space.

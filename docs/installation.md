@@ -62,7 +62,7 @@ the two disagree. See [Testing](testing.md).
 
 | Requirement | What it means |
 |---|---|
-| A multiplexer | `herdr`. The `headless` backend needs none. |
+| A multiplexer | `herdr`. |
 | Agent binaries | `claude`, `codex` or `pi`, whichever your pipeline steps name. |
 | `git` | Always. Plus `gh` if your pipeline opens pull requests. |
 
@@ -145,48 +145,6 @@ checkout still carries a stamp no home holds. Run `spoolway init --new-id` to st
 `init` does not write to `.gitignore`. `spoolway sync` removes the marked block an older
 version wrote there.
 
-### Upgrading from 0.2
-
-Under 0.2 a project's home was filed under the checkout's plain name, at
-`~/.spoolway/<name>/`, with no id involved. The first command you run after upgrading moves
-that home onto the id-keyed path for you, once, and prints the two paths and what came
-across:
-
-```
-  moved  ~/.spoolway/api/  ->  ~/.spoolway/api-k7f2q9/
-         queue 2 . archive 37 . ledger . worktrees 1
-```
-
-The queue, the archive, the ledger and any dispatched worktrees all move with it. Nothing is
-deleted, and no later command moves anything again.
-
-The move is refused while work is live — while a dispatcher is running over that home, or
-while a process is still working in one of its worktrees. The refusal names the old path and
-leaves it exactly where it is, so it is safe to hit:
-
-```
-spoolway: ~/.spoolway/api/ cannot move while work is live
-  dispatcher running   pid 48120
-  the old home is untouched at ~/.spoolway/api/
-  run this again once the dispatch finishes
-```
-
-Run the same command again once the dispatch has finished and it moves.
-
-**If you renamed the checkout's folder before upgrading, spoolway cannot find its old home.**
-That home records the path the checkout used to have, nothing on disk links it to the new
-one, and spoolway will not guess — so the checkout binds itself a fresh, empty home instead,
-and your old queue is left untouched under its old name. Recover it by naming it yourself:
-
-```
-spoolway init --adopt api
-```
-
-That carries the old home onto this checkout the same way the automatic move would, with the
-same refusal while work is live. Run `ls ~/.spoolway/` to see the name it is still filed
-under. If you would rather start clean and leave the old home alone, `spoolway init --new-id`
-mints a fresh one.
-
 ### The pipeline skills
 
 `init` installs the skills. Run this to add another provider or to take newer skills:
@@ -257,8 +215,9 @@ spoolway whats-new                 # this release
 spoolway whats-new --since 0.1.0   # every later release, oldest first
 ```
 
-The source is [`CHANGELOG.md`](../CHANGELOG.md). Its contract is written at the top of the
-file.
+The source is [`CHANGELOG.md`](https://github.com/marvingygas/spoolway/blob/main/CHANGELOG.md).
+Its contract is written at the top of the file. See the [Migration guide](migrations.md) for
+the actions required between released versions.
 
 Two things stop the binary update:
 
@@ -346,13 +305,13 @@ or print the line.
 
 ### Linux
 
-The reference platform. Both backends run here.
+The reference platform.
 
 ### macOS
 
-The same as Linux. The headless backend reads a lane's liveness from a lock file.
+The same as Linux.
 
 ### Windows
 
 Not supported. The last release carrying a Windows binary is 0.3.x. Under WSL you get the
-Linux build, including the headless backend.
+Linux build.

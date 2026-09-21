@@ -14,16 +14,16 @@ The file name is the pipeline name. There is no `name:` key.
 
 ```
 .spoolway/pipelines/
-  default.yml        # implement, review, document, hand over
-  bugfix.yml         # reproduce, fix, review, reproduce again, document, hand over
+  default.yml        # implement, review, document
+  bugfix.yml         # reproduce, fix, review, reproduce again, document
   hotfix.yml         # yours
 ```
 
-A complete pipeline:
+A complete example pipeline:
 
 ```yaml
 # .spoolway/pipelines/default.yml
-description: One unit of work: implement, review, document, then hand over.
+description: One unit of work: implement, review, then document.
 
 steps:
   - id: implement          # the first step is where a task starts
@@ -48,16 +48,6 @@ steps:
     agent: claude
     prompt: archivist
     model: claude-sonnet-5
-    on_pass: handover
-
-  - id: handover
-    run: spoolway stack    # a command step: the exit code is the outcome
-    headless: true
-    on_pass: checks
-
-  - id: checks
-    run: gh pr checks --watch --fail-fast
-    timeout: 45m
     on_pass: done
 ```
 
@@ -111,7 +101,7 @@ never written to.
 There is no `kind:` key. A step with `agent:` runs a prompt on a model. A step with `run:` runs
 a command, and its exit code is the outcome. A step with `end: true` stops the task.
 
-Steps further down the file are scheduled first. A task on `handover` gets a slot before a
+Steps further down the file are scheduled first. A task on `document` gets a slot before a
 task on `implement`.
 
 ### Reserved stages
@@ -147,7 +137,7 @@ back. In the shipped pipeline `review` fails back to `implement`, so `review` ca
     session: true
     loop:
       fix: 3          # three arrivals from fix
-      handover: 5     # five arrivals from handover
+      verify: 5       # five arrivals from verify
     on_loop_max: blocked
 ```
 
@@ -270,10 +260,10 @@ A build, a test suite, a formatter or a deploy script is a command step.
 | Routing | exit 0 takes `on_pass`, else `on_fail` | `on_pass` at once. A later non-zero exit sends the task to `on_fail` from wherever it is. |
 | `timeout` | routes to `on_fail` | kills the run, nothing routes |
 
-A command step runs in its own pane under the herdr backend. `headless: true` runs
-it with no pane. A pane closes the moment its exit code is judged, on a pass and on a failure
-alike. Only a timed-out run's pane stands, until the task reaches the step again or is cleaned
-up. Under `backend = "headless"` no command step has a pane.
+A command step runs in its own pane. `headless: true` runs that command with no pane; this
+step option is separate from the internal test-only dispatcher backend. A pane closes the
+moment its exit code is judged, on a pass and on a failure alike. Only a timed-out run's pane
+stands, until the task reaches the step again or is cleaned up.
 
 ### `last:` — a step the chain runs once
 
@@ -282,11 +272,13 @@ runs once, there. A task is last when no unfinished task depends on it. Any othe
 past the step to its `on_pass`. In a fan, every task is last. `last:` is allowed on command
 steps only.
 
-## `spoolway stack` hands the change over
+## `spoolway stack`
 
 `spoolway stack` commits what is uncommitted, squashes to one commit, pushes with
-`--force-with-lease`, opens or reuses the pull request against the branch the worktree was cut
-from, and registers the GitHub stack. It uses git and `gh` only. No model runs.
+`--force-with-lease`, opens or reuses the GitHub pull request against the branch the worktree
+was cut from, and registers the GitHub stack. It uses git and `gh` only, so no model runs and
+no tokens are spent. The command does not impose a step name or pipeline position; where or
+whether you call it is up to you.
 
 ```mermaid
 flowchart LR
@@ -301,13 +293,6 @@ flowchart LR
   F --> G
 ```
 
-```yaml
-  - id: handover
-    run: spoolway stack
-    headless: true
-    on_pass: checks
-```
-
 - The pull request's title is the task's `title:`. Its body is the task file's body plus a
   trailer that lists files outside `touches` and predicted conflicts with open `parallel: true`
   tasks.
@@ -315,7 +300,7 @@ flowchart LR
   request is opened. A base that cannot be published refuses before the task's own branch is
   force-pushed, so a failed run leaves nothing published.
 - An empty diff against the cut point opens no pull request.
-- A git or `gh` failure routes to `on_fail`. Resuming `handover` reuses the existing pull
+- A git or `gh` failure exits non-zero. Calling the command again reuses the existing pull
   request.
 - Two tasks that depend on the same task are siblings. A GitHub stack is one line, so only the
   first sibling joins it. The second passes and reports `none — <task> is a sibling of #<n>`
@@ -350,7 +335,7 @@ spoolway resume <task> --stage implement -m "why"  # send it back to a step you 
 - No shipped step is gated. A pull request is already a checkpoint. Gate a step that changes
   something without leaving a pull request behind, such as a deploy.
 
-## The shipped `default` pipeline
+## The agent path in the shipped `default` pipeline
 
 ```mermaid
 flowchart LR
@@ -358,20 +343,15 @@ flowchart LR
   I -->|pass| R[review]
   R -->|pass| D[document]
   R -->|fail, 2 laps| I
-  D -->|pass| H[handover<br/>run: spoolway stack]
-  H -->|pass| C[checks<br/>run: gh pr checks]
-  C -->|pass| Z([done])
-  I & D & H & C -->|fail| B([blocked])
+  I & D -->|fail| B([blocked])
 ```
 
-| Step | Runs | Uses the forge |
-|---|---|---|
-| `implement` | the `implementer` prompt, session kept | no |
-| `review` | the `reviewer` prompt, session kept. A fail goes back to `implement`, twice at most. | no |
-| `document` | the `archivist` prompt, on this task's diff | no |
-| `handover` | `spoolway stack`, headless | yes |
-| `checks` | `gh pr checks --watch --fail-fast`, `timeout: 45m` | yes |
-| `blocked` | the unblocker, in an unattended run | no |
+| Step | Runs |
+|---|---|
+| `implement` | the `implementer` prompt, session kept |
+| `review` | the `reviewer` prompt, session kept. A fail goes back to `implement`, twice at most. |
+| `document` | the `archivist` prompt, on this task's diff |
+| `blocked` | the unblocker, in an unattended run |
 
 Every agent step ships with a blank `model` and `effort`. `spoolway init` rewrites `agent:
 claude` to the profile you pick. Fill in the models before the first run.
@@ -384,7 +364,7 @@ on its hosted checks. See [Local gates and daily CI](testing.md#local-gates-and-
 `test` and `suite`, but `test` runs `scripts/gate-quick.sh` instead of `scripts/gate.sh`, and
 `suite` runs the `smoke` tier instead of `pr`.
 
-## The shipped `bugfix` pipeline
+## The agent path in the shipped `bugfix` pipeline
 
 ```mermaid
 flowchart LR
@@ -395,13 +375,11 @@ flowchart LR
   R -->|fail, 2 laps| F
   A -->|pass: the repro passes| D[document]
   A -->|fail| F
-  D --> H[handover] --> C[checks] --> Z([done])
   P -->|fail| B([blocked])
 ```
 
 Both `reproduce` steps run the same `reproducer` prompt. Before the fix, a failing repro is the
-pass. After the fix, a passing repro is the pass. The steps from `document` on are the same as
-in `default`.
+pass. After the fix, a passing repro is the pass. Its agent path joins `default` at `document`.
 
 | Step | Runs |
 |---|---|
@@ -447,8 +425,8 @@ The `spoolway-config` skill writes and edits pipelines with you, starting from t
 | A handoff that only tells a person the last stage finished | Nothing. Delete it. |
 
 There is no nesting. A stage with three parts is three steps, or one step whose prompt
-describes all three. A pipeline says nothing about what a lane may reach. See
-[Reach](concepts.md#reach).
+describes all three. A pipeline says nothing about what a lane may reach. See [What confines
+a profile](agents.md#what-confines-a-profile).
 
 The `spoolway-config` skill does the conversion with you and writes the prompts the steps need.
 See [Writing your own](prompts.md#writing-your-own).

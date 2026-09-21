@@ -7,17 +7,6 @@ covers: ["src/repo.rs", "src/platform.rs"]
 
 The terms spoolway uses. Every other page assumes them.
 
-```mermaid
-flowchart TB
-  P[project<br/>a git repository with .spoolway/] --> Q[queue<br/>~/.spoolway/project/queue/]
-  Q --> T[task<br/>one Markdown file]
-  T -->|pipeline:| PL[pipeline<br/>.spoolway/pipelines/name.yml]
-  PL --> S[step<br/>agent + prompt, or a command]
-  T --> W[worktree + branch task/id]
-  S --> L[lane<br/>one agent, one task, one step]
-  L --> W
-```
-
 | Term | Meaning |
 |---|---|
 | Project | A git repository with a `.spoolway/` directory. |
@@ -30,7 +19,6 @@ flowchart TB
 | Prompt | A Markdown file a step runs its lane with. |
 | Outcome | What a step reports: `pass`, `fail`, `block` or `pause`. |
 | Gate | A step whose pass a person must let through. |
-| Handover | The command step that pushes the branch and opens the pull request. |
 
 ## Project
 
@@ -98,13 +86,9 @@ and never a destination.
 
 ## Lane
 
-A lane is one running agent on one task at one step. It is named `<task> · <step>`, so
-`login · implement` is the implementer working on `login`.
-
-| Backend | What a lane is |
-|---|---|
-| herdr | A terminal pane. You can watch it, type into it and take over. |
-| headless | A detached process writing to a log file. |
+A lane is one running agent on one task at one step. It is a terminal pane in herdr that you
+can watch, type into and take over. It is named `<task> · <step>`, so `login · implement` is
+the implementer working on `login`.
 
 A lane takes one turn. When it reports an outcome, the task moves on. A lane that stops
 without reporting is usually asking a question. See [The dispatcher](dispatcher.md).
@@ -118,12 +102,6 @@ Each agent profile declares a `concurrency`: how many of its lanes run at once. 
 
 A prompt is a Markdown file named by a step's `prompt:` field. It says what the lane's role is.
 The dispatcher composes it into the lane's system prompt. See [Prompts](prompts.md).
-
-## Reach
-
-A lane runs as you, on your machine, with your credentials. spoolway does not confine it.
-Confinement is your own agent's settings. See
-[what confines a profile](agents.md#what-confines-a-profile).
 
 ## Outcome
 
@@ -147,19 +125,12 @@ sends a caught block or loop-max to `blocked`, the same place it would have reac
 A gate holds in unattended runs too. Use it for a step no pull request shows first, such as a
 deploy or a release.
 
-## Handover
+## Branches and pull requests
 
-`handover` is a command step that runs `spoolway stack`. It commits what is uncommitted,
-squashes to one commit, pushes, and opens the pull request against the branch the worktree was
-cut from. When git or `gh` refuse, the step routes to `blocked`. See
-[`spoolway stack` hands the change over](pipelines.md#spoolway-stack-hands-the-change-over).
-
-## How a change reaches the mainline
-
-Task branches never merge on their own. Each task's `handover` opens one pull request. A
-dependent task's worktree is cut from its dependency's branch, so a chain of tasks arrives as
-one stack of pull requests. A person merges the stack bottom-up. See
-[Closing a plan out](planning.md#closing-a-plan-out).
+A dependent task's worktree is cut from its dependency's branch. The optional `spoolway stack`
+command can turn that chain into one stack of GitHub pull requests without calling a model or
+spending tokens. spoolway never merges branches. Where or whether you call the command is up
+to you. See [`spoolway stack`](pipelines.md#spoolway-stack).
 
 ## The design rule underneath all of it
 
