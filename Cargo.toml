@@ -1,6 +1,6 @@
 [package]
 name = "spoolway"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 description = "Descriptive agent workflow builder run by a minimalistic command line state machine for turning coding agents into a pipeline you can actually reason about"
 license = "MIT"
