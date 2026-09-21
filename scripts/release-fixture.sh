@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Scaffold the fixture the nightly upgrade suite will start asking for, and
-# land it on `main`. Run by the `fixture` step of the release pipeline, after
-# `released`.
+# open the pull request that lands it. Run by the `fixture` step of the release
+# pipeline, after `released`.
 #
 # `scripts/e2e/suites/upgrade.sh` runs a project a *past* release actually
 # wrote through the new binary. It asks for `scripts/e2e/fixtures/<version>/`
@@ -95,7 +95,14 @@ cd "$SCRATCH/proj"
 git init --quiet .
 printf '# scratch\n' >README.md
 git add -A && git commit --quiet -m scratch
-spool init >/dev/null || die "$tag's own binary could not init a scratch project"
+# `--yes` is load-bearing, not politeness. Without it `init` puts its opening
+# `Set up this project?` question to a terminal nobody is at, takes the
+# default of no, writes nothing at all — and still exits 0. v0.5.0's fixture
+# run got that far and failed on the next line instead, with `config set`
+# reporting no project.
+spool init --yes >/dev/null || die "$tag's own binary could not init a scratch project"
+[ -f ".spoolway/config.toml" ] \
+  || die "$tag's own binary reported success but wrote no .spoolway/config.toml"
 
 # One value set with that same binary, under whatever table that release calls
 # it — the point of the fixture is to carry a real setting across the upgrade,
@@ -119,7 +126,7 @@ p.write_text(text.replace(
 PY
 
 # Committed in a worktree of its own so the lane's checkout is never touched,
-# and pushed straight to main the way the release commit before it was.
+# and pushed to a branch of its own, the way the release commit before it was.
 git -C "$REPO" worktree add --quiet --detach "$SCRATCH/main" origin/main
 # Cleared rather than merged into. The guard above only proves there is no
 # `config.toml` there; a half-written fixture from an interrupted run would
@@ -133,7 +140,26 @@ git -C "$SCRATCH/main" commit --quiet -m "test(e2e): scaffold $version's upgrade
 Scaffolded by $tag's own binary, at $tag, by scripts/release-fixture.sh. The
 nightly upgrade suite asks for it from the first bump past $version."
 
-git -C "$SCRATCH/main" push --quiet origin "HEAD:main" \
-  || die "could not push $dest/ to main — main has moved since this step started; re-run it"
+# `main` is protected and takes no direct push, exactly as docs/releasing.md
+# now says of the release commit: the required contexts are only recorded
+# against a check suite whose head branch is `main`, and `ci.yml` has no push
+# trigger, so a commit that is not yet on `main` can never have one. The
+# fixture lands the way every other change does, through a pull request. This
+# step opens it and stops; merging is the owner's.
+branch="fixture/v$version"
+git -C "$SCRATCH/main" push --quiet --force-with-lease origin "HEAD:refs/heads/$branch" \
+  || die "could not push $dest/ to $branch"
 
-say "release-fixture: $dest/ is on main, scaffolded by $tag's own binary"
+if gh pr view "$branch" --repo "$(git -C "$REPO" remote get-url origin)" >/dev/null 2>&1; then
+  say "release-fixture: $dest/ is on $branch and its pull request is already open"
+else
+  gh pr create --repo "$(git -C "$REPO" remote get-url origin)" \
+    --base main --head "$branch" \
+    --title "test(e2e): scaffold $version's upgrade fixture" \
+    --body "Scaffolded by \`$tag\`'s own binary, at \`$tag\`, by \`scripts/release-fixture.sh\`.
+
+The nightly upgrade suite asks for \`$dest/\` from the first bump past $version, so this has to land before the next release." \
+    || die "could not open the pull request for $branch"
+fi
+
+say "release-fixture: $dest/ is on $branch, scaffolded by $tag's own binary — merge its pull request to land it"
