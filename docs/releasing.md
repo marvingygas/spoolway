@@ -80,8 +80,24 @@ change, with subject `chore(release): v<version>`. `herdr-plugin.toml` carries i
 cargo check --offline                              # refreshes the lock entry
 cargo test --locked release_notes::tests
 cargo build --release --locked && ./target/release/spoolway whats-new
-git push origin main
 ```
+
+Landing it. `main` is protected and takes no direct push: the required `verify / test`
+and `verify / audit` contexts are only ever recorded against a check suite whose head
+branch is `main`, and `ci.yml` has no push trigger, so a commit that is not yet on
+`main` can never have one. `enforce_admins` is on, so this holds for a person too. The
+release commit lands the way every other change does, through a pull request:
+
+```sh
+git push origin HEAD:release/v<version>
+gh pr create --base main --head release/v<version> --fill
+# the owner merges it; squash is fine, and the subject arrives as
+# `chore(release): v<version> (#<pr>)`
+```
+
+Squash merging rewrites the commit, so **read the landed SHA off `origin/main`
+afterwards** and treat that as the release SHA from then on. The pre-merge object is
+not on `main` and must not be tagged.
 
 Rehearsal, on the release commit, with publication off:
 
