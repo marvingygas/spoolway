@@ -220,7 +220,10 @@ steps:
     description: Wait for the pull request's checks, and fail if they are red.
     run: gh pr checks --watch --fail-fast
     timeout: 45m
+    loop:
+      checks: 3
     on_pass: done
+    on_fail: checks
 ```
 
 **You do not have to write one by hand.** The `/spoolway-config` skill writes and edits

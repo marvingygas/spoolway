@@ -153,8 +153,14 @@ pub const MAX_CONSECUTIVE_WORKING_PASSES: u32 = 100;
 /// own drain note — and none of those mean the next pass has anything new
 /// to try. A pass that failed outright never reaches here at all — see the
 /// loop, which treats that the same as an empty report.
+///
+/// [`Report::self_route`] overrides `moved` outright: a task sent back to
+/// the step it just left is, from the outside, indistinguishable pass to
+/// pass — nothing beyond the run has had a chance to change — so a bounded
+/// retry needs the wait spent even though the pass that made the move
+/// counts as progress everywhere else `moved` is read.
 pub fn skip_wait(report: &Report, consecutive_working: u32) -> bool {
-    report.moved && consecutive_working < MAX_CONSECUTIVE_WORKING_PASSES
+    !report.self_route && report.moved && consecutive_working < MAX_CONSECUTIVE_WORKING_PASSES
 }
 
 /// How long a task's next step waits for the step before it to let go of the
@@ -247,6 +253,28 @@ pub struct Report {
     /// will be different next pass. Only an actual stage change, a freed
     /// lane or an archive is that.
     pub moved: bool,
+    /// Whether this pass sent a task back to the very step it was already
+    /// sitting on — a command step whose `on_fail` names its own id, the
+    /// shape a bounded retry is built on.
+    ///
+    /// Kept apart from [`Report::moved`] on purpose: a stage that reads
+    /// `checks` before this pass and `checks` again after it looks exactly
+    /// like a pass that changed nothing at all, from a before/after diff
+    /// alone. Only the code making the move — where `destination` is read
+    /// straight off `step.id`, in the `StepKind::Command` arm of
+    /// `Dispatcher::collect_candidates` — knows the difference, and
+    /// [`skip_wait`], this field's only reader, is what needs to.
+    ///
+    /// Command steps only. An agent step's own self-route happens outside
+    /// this pass entirely — `commands::report::apply_loop_budget`, run by
+    /// the lane's own `spoolway report` — so a lane that reports itself
+    /// back to its own step never sets this, and the pass that later frees
+    /// its settled lane still reads `moved` true from that free alone.
+    /// `skip_wait` skips the wait in that case exactly as it did before
+    /// this field existed. Not a gap this task closes: the `checks` step
+    /// this task exists for is a command step, and every acceptance
+    /// criterion here is proved against that shape.
+    pub self_route: bool,
 }
 
 /// Per-lane bookkeeping the multiplexer does not keep for us: when a lane
@@ -1263,6 +1291,15 @@ impl<'a> Dispatcher<'a> {
                         destination,
                         self.unattended,
                     );
+
+                    // `destination` reads straight off `step.id` when this
+                    // step's own `on_fail` names itself — the shape a
+                    // bounded retry is built on, and the one case a plain
+                    // before/after stage diff cannot tell from a pass that
+                    // moved nothing at all. See [`Report::self_route`].
+                    if destination == step.id {
+                        report.self_route = true;
+                    }
 
                     if launch_failed {
                         report.actions.push(format!(
@@ -9392,6 +9429,32 @@ mod tests {
         assert!(skip_wait(&moved, 0));
     }
 
+    /// A task sent back to the very step it just left is the one shape
+    /// [`Report::moved`] cannot tell from real progress on its own — the
+    /// stage reads the same before and after, so nothing outside the pass
+    /// that made the move has changed. Skipping the wait here is what fires
+    /// a bounded retry every attempt inside the same second, against the
+    /// same unsettled state a poll interval exists to let something else
+    /// change. See [`Report::self_route`].
+    #[test]
+    fn skip_wait_is_false_for_a_self_route_even_though_it_moved() {
+        let self_routed = Report {
+            actions: vec!["`checks` exited 1 — moving to `checks`".into()],
+            moved: true,
+            self_route: true,
+            ..Report::default()
+        };
+        assert!(!skip_wait(&self_routed, 0));
+
+        // The same report, minus the self-route, still skips — this is not
+        // a blanket change to what `moved` alone already decided.
+        let same_report_without_self_route = Report {
+            self_route: false,
+            ..self_routed
+        };
+        assert!(skip_wait(&same_report_without_self_route, 0));
+    }
+
     /// However long a queue keeps reporting movement, the streak of skipped
     /// waits has a ceiling — see [`MAX_CONSECUTIVE_WORKING_PASSES`] — past
     /// which the loop is made to wait it out once, same as an idle pass.
@@ -14458,6 +14521,63 @@ mod tests {
             report.actions.iter().any(|a| a.contains("exited 2")),
             "the exit code is what the decision was made on, so it is said: {:?}",
             report.actions
+        );
+    }
+
+    /// A pipeline whose command step's own `on_fail` names itself, bounded by
+    /// a `loop:` keyed the same way — the shape a bounded retry is built on,
+    /// and the one `checks` takes on in the shipped pipelines.
+    fn pipelines_self_routing(run: &str, bound: u32) -> Pipelines {
+        let mut pipelines = pipelines_running(run, false);
+        let name = "default".to_string();
+        let pipeline = pipelines.pipelines.get_mut(&name).unwrap();
+        let step = pipeline
+            .steps
+            .iter_mut()
+            .find(|s| s.id == "implement")
+            .unwrap();
+        step.on_fail = Some("implement".to_string());
+        step.r#loop =
+            crate::pipeline::Loop::PerRoute(BTreeMap::from([("implement".to_string(), bound)]));
+        step.on_loop_max = Some(crate::pipeline::BLOCKED.to_string());
+        pipelines
+    }
+
+    /// A task a self-routing step sends back to itself is, from the pass
+    /// that made the move, indistinguishable from one that never went
+    /// anywhere at all — the acceptance criterion `skip_wait` exists to
+    /// answer without a stage diff to read. See [`Report::self_route`].
+    // covers: Report::self_route — a command step's own `on_fail` naming
+    // itself is what the pass loop must not race
+    #[test]
+    fn a_command_step_that_routes_back_to_itself_reports_self_route() {
+        let repo = fixture("command-self-route");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]);
+        let pipelines = pipelines_self_routing("exit 1", 3);
+
+        let started = std::time::Instant::now();
+        let report = loop {
+            let report = Dispatcher::new(&repo, &pipelines, &mux)
+                .pass(&mut || {})
+                .unwrap();
+            if report.self_route {
+                break report;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(20),
+                "the pass never reported a self-route; last report: {report:?}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        assert_eq!(
+            reload(&path).stage(),
+            "implement",
+            "the task is still sitting exactly where it left off"
+        );
+        assert!(
+            !skip_wait(&report, 0),
+            "a self-route must not skip the interval wait: {report:?}"
         );
     }
 
