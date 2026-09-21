@@ -386,6 +386,10 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
 
         // Drawn before the pass rather than only after it, so a pass that takes
         // a while is a board saying "pass running" instead of a blank terminal.
+        //
+        // When it was last drawn, so the callback below can keep the same
+        // once-a-second cadence the wait keeps — see the tick's own comment.
+        let mut drawn_at = std::time::Instant::now();
         if let Some(board) = board.as_mut() {
             let _ = board.draw(repo, pipelines, crate::status::Phase::Passing, &mut out);
         }
@@ -398,14 +402,16 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         // only, within this one iteration: the next iteration's own pass
         // starts the question over, the same as it always has.
         //
-        // `listening` is set once, the moment stdin is found to have gone
-        // away, and never asked again this iteration. `poll_ready` reports
-        // a closed descriptor "ready" exactly as it does a real keystroke,
-        // since the read that follows either way returns promptly; without
-        // this guard, whichever of the callback or the wait loop reads next
-        // would keep taking that as a key, get `None` back from `read_key`
-        // every time, and spin down to nothing for the rest of the run
-        // (jobs review finding 8).
+        // `listening` is cleared once stdin is found to have gone away, and
+        // never asked again this iteration. `poll_ready` reports a closed
+        // descriptor "ready" exactly as it does a real keystroke, since the
+        // read that follows either way returns promptly; without this guard,
+        // whichever of the callback or the wait loop reads next would keep
+        // taking that as a key, get `None` back from `read_key` every time,
+        // and spin down to nothing for the rest of the run (jobs review
+        // finding 8). What counts as "gone away" is a run of empty reads
+        // rather than one — see [`EMPTY_READS_BEFORE_DEAF`], which is also
+        // why a single interrupted read no longer costs the keyboard.
         //
         // Starts false on a target with no raw mode to listen through
         // (`!cfg!(unix)`) or in `--plain` (`board.is_none()`, which never
@@ -447,18 +453,36 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         let pass_result = {
             let mut tick = || {
                 let Some(board) = board.as_mut() else { return };
-                let mut changed = false;
-                while listening && stdin.byte_pending(std::time::Duration::ZERO) {
-                    match crate::screen::read_key(&mut stdin) {
-                        Some(key) => {
-                            let _ = board.on_key(repo, pipelines, key);
-                            changed = true;
-                        }
-                        None => listening = false,
-                    }
-                }
-                if changed {
+                let keyed = drain_keys(repo, pipelines, board, &mut stdin, &mut listening);
+                // A pass is not a pause in the run, and the board must not
+                // read as one. Under a real multiplexer a pass runs for
+                // whole seconds at a stretch, and the one frame drawn above
+                // it would be the only thing on screen for all of them: the
+                // lockup stuck on the phase it was drawn at, the header's
+                // `up` and every row's TIME standing still, while the run
+                // moves on underneath. So a frame is owed here on the same
+                // once-a-second cadence the wait keeps, and one straight
+                // away wherever a key has just changed what it would show —
+                // a person who pressed something should not wait out the
+                // rest of the pass to see it land.
+                //
+                // What that covers is exactly what `Dispatcher::pass` calls
+                // this from, and no more — its own doc has the list. The
+                // long stretch it reaches is a lane start's wait on the
+                // herdr child it spawned, which hands `tick` back every
+                // `VACATE_POLL`; the rest are the checkpoints between units
+                // of work. Cutting the worktree is not among them:
+                // `dispatch::ensure_workspace` takes no `tick` and runs
+                // before the lane start that does, so the board still holds
+                // its last frame for as long as that takes.
+                //
+                // Capped by the clock rather than drawn at every tick point:
+                // a pass walking a long queue calls this between each task,
+                // and a frame per task would be a redraw storm that also
+                // asks the multiplexer for its lane list every time.
+                if tick_owes_a_frame(keyed, drawn_at.elapsed()) {
                     let _ = board.draw(repo, pipelines, crate::status::Phase::Passing, &mut out);
+                    drawn_at = std::time::Instant::now();
                 }
             };
             dispatcher.pass(&mut tick)
@@ -569,34 +593,47 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         // streak hit its ceiling — the count starts over from here.
         if worked {
             consecutive_working += 1;
+            // The wait this pass is skipping is where the keyboard used to be
+            // read, so a streak of up to `MAX_CONSECUTIVE_WORKING_PASSES`
+            // passes left the board deaf between the first and the hundredth.
+            // Reading here costs the streak nothing: this takes only what is
+            // already sitting in the terminal's input buffer and returns at
+            // once. The frame that goes with it is the one the top of the
+            // next iteration draws, a moment from now.
+            if let Some(board) = board.as_mut() {
+                drain_keys(repo, pipelines, board, &mut stdin, &mut listening);
+            }
             continue;
         }
         consecutive_working = 0;
 
         match board.as_mut() {
-            // The wait: blocks in one `poll` on however many of stdin and
-            // `watch`'s own fd this run actually has, for up to the whole
-            // remaining interval at a stretch — not sliced into
-            // one-second frames the way it used to have to be to run a
-            // tick between them. A keystroke or a file landing wakes it at
-            // once, same as it always answered a keystroke; ten quiet
-            // seconds now cost exactly the one draw below and one at the
-            // top of the next pass, not ten redraws finding nothing new
-            // each time.
+            // The wait: one frame per slice, and a slice never longer than
+            // `status::POLL`. The board's own clocks — the lockup's frame,
+            // the header's `up`, every running row's TIME — are all read at
+            // draw time off the wall clock, so a board that does not draw
+            // once a second stands still on screen while the run moves on
+            // underneath it. `view::spool_frame` is the sharpest case: it
+            // takes its frame from `secs % 2`, so at two draws per ten
+            // seconds the lockup samples the same phase every time and stops
+            // turning altogether.
             //
-            // A key applies to the board and it redraws to show it. A
-            // queue change redraws too — the next draw already rereads the
-            // queue fresh, so nothing else is owed it. A commands change
-            // is what a finished background step is routed on, so that one
-            // breaks the wait outright and lets the top of the outer loop
-            // run a fresh pass at once, in place of the tick that used to
-            // read it here instead.
+            // The watch stays inside the same `poll` — only the ceiling on a
+            // single slice comes down. A keystroke or a file landing still
+            // wakes the wait the instant it happens rather than at the end of
+            // the second it landed in.
+            //
+            // A key applies to the board and the next slice's own draw shows
+            // it. A queue change needs nothing beyond that draw, which
+            // already rereads the queue fresh. A commands change is what a
+            // finished background step is routed on, so that one breaks the
+            // wait outright and lets the top of the outer loop run a fresh
+            // pass at once.
             Some(board) => {
                 // `stdin` and `listening`, declared once above rather than
                 // here, so a descriptor the pass's own callback already
                 // found gone this iteration is not asked again the moment
                 // this wait starts — see that declaration's own comment.
-                let _ = board.draw(repo, pipelines, crate::status::Phase::Waiting, &mut out);
                 let until = std::time::Instant::now() + interval;
                 'wait: while let Some(left) =
                     until.checked_duration_since(std::time::Instant::now())
@@ -604,6 +641,11 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
                     if crate::platform::stop::asked() {
                         break;
                     }
+                    // Ahead of the block rather than after it, so the frame a
+                    // slice is drawn for is up while that slice waits, not
+                    // after it has already elapsed.
+                    let _ = board.draw(repo, pipelines, crate::status::Phase::Waiting, &mut out);
+                    let slice = crate::status::POLL.min(left);
                     let mut fds = Vec::new();
                     if listening {
                         fds.push(libc::STDIN_FILENO);
@@ -611,58 +653,42 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
                     if let Some(watch) = &watch {
                         fds.push(watch.fd());
                     }
+                    // Nothing to poll on: no watch this run could open, and
+                    // stdin already found gone. The slice is the same second
+                    // either way, spent asleep instead.
                     if fds.is_empty() {
-                        std::thread::sleep(crate::status::POLL.min(left));
+                        std::thread::sleep(slice);
                         continue;
                     }
 
-                    // With a watch, the whole remaining interval is one
-                    // poll — a key or a file landing wakes it, and this is
-                    // the one wait per quiet interval criterion 2 asks for.
-                    // With no watch to wake it early (`open_dir_watch`
-                    // found nothing to watch with — see its own doc), this
-                    // falls back to the plain per-second cadence the board
-                    // always redrew at, so a target that is not Linux keeps
-                    // behaving as it does today rather than freezing for
-                    // the whole interval — review finding 1.
-                    let slice = match &watch {
-                        Some(_) => left,
-                        None => crate::status::POLL.min(left),
-                    };
                     let ready = crate::screen::poll_ready(&fds, slice);
                     let mut idx = 0;
-                    // With no watch, every slice redraws regardless of what
-                    // `poll_ready` found — the countdown and every row need
-                    // to move even when nothing changed. With one, a redraw
-                    // is owed only for what actually woke this slice.
-                    let mut redraw = watch.is_none();
                     if listening {
                         if ready[idx] {
-                            match crate::screen::read_key(&mut stdin) {
-                                Some(key) => {
-                                    let _ = board.on_key(repo, pipelines, key);
-                                    redraw = true;
-                                }
-                                None => listening = false,
-                            }
+                            drain_keys(repo, pipelines, board, &mut stdin, &mut listening);
                         }
                         idx += 1;
                     }
                     if let Some(watch) = &watch
                         && ready[idx]
                     {
+                        // Drained whatever this slice then decides to do
+                        // with it. `DirWatch::drain` is the only read of the
+                        // inotify
+                        // fd, so a slice that polls it ready and leaves it
+                        // unread leaves it ready: every slice after it would
+                        // return from `poll_ready` at once and the wait would
+                        // spin through the rest of its interval, drawing a
+                        // full frame — and asking the multiplexer for its
+                        // lane list — as fast as the terminal would take it.
+                        // Testing `just_self_routed` before the drain rather
+                        // than after is exactly that bug, because `&&`
+                        // short-circuits.
                         let changed = watch.drain();
                         if !just_self_routed && changed.contains(&crate::screen::Changed::Commands)
                         {
                             break 'wait;
                         }
-                        if changed.contains(&crate::screen::Changed::Queue) {
-                            redraw = true;
-                        }
-                    }
-                    if redraw {
-                        let _ =
-                            board.draw(repo, pipelines, crate::status::Phase::Waiting, &mut out);
                     }
                 }
             }
@@ -696,6 +722,80 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
             }
         }
     }
+}
+
+/// Whether the pass's own callback owes the board a frame: at once wherever a
+/// key has just changed what one would show, and otherwise no faster than
+/// [`crate::status::POLL`], the same cadence the wait draws at.
+///
+/// Its own function so the rule can be read and tested apart from the
+/// closure it is used in — see the tests below.
+fn tick_owes_a_frame(keyed: bool, since_last_frame: std::time::Duration) -> bool {
+    keyed || since_last_frame >= crate::status::POLL
+}
+
+/// How many reads in a row may come back with nothing before the board stops
+/// listening to stdin for the rest of one loop iteration.
+///
+/// [`crate::screen::read_key`] answers `None` both for a descriptor that has
+/// gone away — a closed pipe, no controlling terminal — and for a read the
+/// kernel interrupted, and nothing under `crate::screen` tells the two apart.
+/// A gone descriptor polls "ready" forever and reads back empty every time,
+/// so a single `None` used to latch the keyboard off for the iteration to
+/// keep that from spinning down to nothing (jobs review finding 8). That also
+/// left one interrupted read — a window resize, the stop handler firing —
+/// costing the board every key for the rest of the iteration. Three in a row
+/// still catch the spin within a handful of turns, and one on its own no
+/// longer costs anything.
+const EMPTY_READS_BEFORE_DEAF: u32 = 3;
+
+/// Apply whatever is already sitting on stdin to `board`, and say whether any
+/// of it changed what the next frame would draw.
+///
+/// Never waits: it reads only what is pending (`Duration::ZERO`), so it is
+/// safe both between two passes of a streak that is deliberately not waiting
+/// and inside a pass between its own units of work.
+///
+/// `listening` is this loop iteration's own answer to whether stdin is still
+/// worth reading at all, and is cleared for good once
+/// [`EMPTY_READS_BEFORE_DEAF`] reads in a row come back empty.
+///
+/// A key that fails goes to the problem log rather than nowhere. A `p` or an
+/// `r` that could not be carried out used to be discarded here without a
+/// word, so a keypress that failed looked exactly like one that was never
+/// read at all. The board itself carries no trouble — see
+/// [`crate::problem_log`] — which is why this goes to the log under it.
+///
+/// Takes any [`crate::screen::PollableRead`] rather than `RawStdin` itself,
+/// the same seam [`crate::screen::read_key`] already reads through, so the
+/// tests below can script the reads this has to get right: an empty read
+/// that is only an interruption, and the run of them that means the
+/// descriptor has gone.
+fn drain_keys(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    board: &mut crate::status::Board,
+    stdin: &mut impl crate::screen::PollableRead,
+    listening: &mut bool,
+) -> bool {
+    let mut changed = false;
+    let mut empty: u32 = 0;
+    while *listening && stdin.byte_pending(std::time::Duration::ZERO) {
+        match crate::screen::read_key(stdin) {
+            Some(key) => {
+                empty = 0;
+                if let Err(err) = board.on_key(repo, pipelines, key) {
+                    crate::problem_log::append(repo, &format!("board key {key:?}: {err:#}"));
+                }
+                changed = true;
+            }
+            None => {
+                empty += 1;
+                *listening = empty < EMPTY_READS_BEFORE_DEAF;
+            }
+        }
+    }
+    changed
 }
 
 /// The checklist's own opening lines — the banner and the "starting"
@@ -1858,6 +1958,158 @@ fn print_staying_up(jobs: &crate::jobs::StayingUp) {
 mod tests {
     use super::*;
     use crate::commands::testutil::fixture;
+
+    /// A pass draws on the same once-a-second cadence the wait does, so the
+    /// lockup keeps turning and the clocks keep moving while a pass spends
+    /// whole seconds cutting a worktree or opening a pane.
+    #[test]
+    fn a_pass_owes_a_frame_once_a_second_and_no_faster() {
+        use std::time::Duration;
+
+        assert!(
+            !tick_owes_a_frame(false, Duration::ZERO),
+            "two tick points in the same instant are one frame, not two"
+        );
+        assert!(
+            !tick_owes_a_frame(false, crate::status::POLL - Duration::from_millis(1)),
+            "just under the cadence still owes nothing"
+        );
+        assert!(
+            tick_owes_a_frame(false, crate::status::POLL),
+            "a second since the last frame owes the next one"
+        );
+    }
+
+    /// A key that changed the board is drawn straight away rather than at the
+    /// next second: a person who pressed something must not wait out the rest
+    /// of the pass to see it land.
+    #[test]
+    fn a_key_owes_a_frame_whatever_the_clock_says() {
+        assert!(tick_owes_a_frame(true, std::time::Duration::ZERO));
+    }
+
+    /// Stdin as a script: what each read answers, oldest first. `Some(byte)`
+    /// is a byte a key decodes from; `None` is a read that came back with
+    /// nothing, which is what [`crate::screen::read_key`] reports both for an
+    /// interrupted read and for a descriptor that has gone away.
+    ///
+    /// `byte_pending` answers for whatever is left of the script, so a
+    /// scripted empty read at the very end reads as "nothing more waiting"
+    /// — an interruption on an otherwise live terminal — while a run of them
+    /// reads as a descriptor that keeps polling ready and keeps coming back
+    /// empty, the shape [`EMPTY_READS_BEFORE_DEAF`] is there for.
+    struct ScriptedStdin(std::collections::VecDeque<Option<u8>>);
+
+    impl ScriptedStdin {
+        fn new(reads: impl IntoIterator<Item = Option<u8>>) -> ScriptedStdin {
+            ScriptedStdin(reads.into_iter().collect())
+        }
+    }
+
+    impl std::io::Read for ScriptedStdin {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            match self.0.pop_front() {
+                Some(Some(byte)) => {
+                    buf[0] = byte;
+                    Ok(1)
+                }
+                // An empty read: `Ok(0)`, the same answer a closed
+                // descriptor gives.
+                _ => Ok(0),
+            }
+        }
+    }
+
+    impl crate::screen::PollableRead for ScriptedStdin {
+        fn byte_pending(&self, _timeout: std::time::Duration) -> bool {
+            !self.0.is_empty()
+        }
+    }
+
+    /// One empty read is an interruption — a window resize, the stop handler
+    /// firing — not a descriptor that has gone. The board keeps listening,
+    /// and the key typed after it still lands.
+    #[test]
+    fn a_lone_empty_read_leaves_the_board_still_listening() {
+        let repo = fixture("drain-keys-one-empty-read");
+        let pipelines = Pipelines::builtin();
+        let mut board = crate::status::Board::for_test();
+        let mut stdin = ScriptedStdin::new([None, Some(b'x')]);
+        let mut listening = true;
+
+        let changed = drain_keys(&repo, &pipelines, &mut board, &mut stdin, &mut listening);
+
+        assert!(listening, "one empty read must not cost the keyboard");
+        assert!(
+            changed,
+            "the key behind the empty read still reached the board"
+        );
+    }
+
+    /// A descriptor that has gone away polls ready for ever and reads back
+    /// empty every time. [`EMPTY_READS_BEFORE_DEAF`] in a row is what stops
+    /// the board spinning on it for the rest of the loop iteration.
+    #[test]
+    fn a_run_of_empty_reads_stops_the_board_listening() {
+        let repo = fixture("drain-keys-dead-descriptor");
+        let pipelines = Pipelines::builtin();
+        let mut board = crate::status::Board::for_test();
+        let empties = std::iter::repeat_n(None, EMPTY_READS_BEFORE_DEAF as usize + 5);
+        let mut stdin = ScriptedStdin::new(empties);
+        let mut listening = true;
+
+        let changed = drain_keys(&repo, &pipelines, &mut board, &mut stdin, &mut listening);
+
+        assert!(!listening, "a descriptor that only reads empty is gone");
+        assert!(!changed, "nothing was read, so nothing changed");
+        assert_eq!(
+            stdin.0.len(),
+            5,
+            "it gave up after {EMPTY_READS_BEFORE_DEAF} rather than reading the rest"
+        );
+    }
+
+    /// The run has to be unbroken: a key that lands between two empty reads
+    /// puts the count back to nothing, so a terminal interrupted now and
+    /// again never reads as one that has gone away.
+    #[test]
+    fn a_key_between_empty_reads_starts_the_count_over() {
+        let repo = fixture("drain-keys-interleaved");
+        let pipelines = Pipelines::builtin();
+        let mut board = crate::status::Board::for_test();
+        let mut stdin = ScriptedStdin::new([None, None, Some(b'x'), None, None, Some(b'x')]);
+        let mut listening = true;
+
+        drain_keys(&repo, &pipelines, &mut board, &mut stdin, &mut listening);
+
+        assert!(listening, "two in a row, twice over, is not a run of three");
+    }
+
+    /// A key that fails reaches the problem log under the board. It used to
+    /// be discarded without a word, so a `p` or an `r` that could not be
+    /// carried out looked exactly like one that was never read.
+    #[test]
+    fn a_key_that_fails_is_written_to_the_problem_log() {
+        let repo = fixture("drain-keys-failed-key");
+        let pipelines = Pipelines::builtin();
+        let mut board = crate::status::Board::for_test();
+        // `P` reads the whole queue to find what it would abort. A queue
+        // directory that is a plain file fails that read, which is the one
+        // thing about this test that has to be arranged — every other way a
+        // key fails is a race this cannot stage.
+        let queue = repo.queue_dir();
+        let _ = std::fs::remove_dir_all(&queue);
+        std::fs::write(&queue, "not a directory").unwrap();
+
+        let mut stdin = ScriptedStdin::new([Some(b'P')]);
+        let mut listening = true;
+        drain_keys(&repo, &pipelines, &mut board, &mut stdin, &mut listening);
+
+        let log = std::fs::read_to_string(crate::problem_log::path(&repo))
+            .expect("the failed key wrote no problem log at all");
+        assert!(log.contains("board key"), "{log}");
+        assert!(log.contains("'P'"), "{log}");
+    }
 
     /// A check that returns at once prints its pending row and its done row
     /// back to back, the pending one wiped by the same `\r\x1b[2K` a slow

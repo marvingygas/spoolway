@@ -68,8 +68,10 @@ pub fn open(repo: &Repo) {
 }
 
 /// Appends one problem, timestamped now. Swallowed the same way [`open`] is
-/// — see both call sites in `src/commands/dispatch.rs`, which write here
-/// whether or not a board is drawn and never let this stop a pass.
+/// — see the call sites in `src/commands/dispatch.rs`, none of which ever
+/// let this stop a pass. A pass's own trouble is written here whether or not
+/// a board is drawn; `drain_keys`' failed keypress only where one is, since
+/// there are no keys to read without a board to read them for.
 pub fn append(repo: &Repo, message: &str) {
     let _ = write_line(&path(repo), message);
 }
@@ -86,9 +88,9 @@ fn write_line(path: &Path, message: &str) -> Result<()> {
         .open(path)
         .with_context(|| format!("opening {}", path.display()))?;
     // One `write_all` of an assembled buffer, not `writeln!` — see the same
-    // fix and its reasoning in `usage::append`. Two calls to `dispatch.rs`
-    // land in this file whether or not a board is drawn, so it is appended
-    // to from more than one place in a single pass, let alone across runs.
+    // fix and its reasoning in `usage::append`. Several calls in `dispatch.rs`
+    // land in this file, so it is appended to from more than one place in a
+    // single pass, let alone across runs.
     let line = format!("{now}  {message}\n");
     file.write_all(line.as_bytes())
         .with_context(|| format!("appending to {}", path.display()))?;

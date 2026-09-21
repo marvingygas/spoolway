@@ -104,13 +104,15 @@ A key also answers inside a pass, not only during the wait between passes: the d
 stdin between each task, during and between each lane start, the sweep and the archive, so a busy
 run reads the keyboard at the same rate as an idle one.
 
-Between two passes the wait is not empty. On Linux, the dispatcher watches the queue directory
-and the commands directory for the whole wait, alongside the keystroke it already listens for.
-A file landing in the queue directory redraws the board at once. A file landing in the commands
-directory, such as a background command step finishing, ends the wait immediately and starts the
-next pass, which is what routes that step. On a target that is not Linux, or if the watch cannot
-be opened, the dispatcher falls back to a plain per-second sleep for the rest of the wait, and the
-board redraws every second.
+Between two passes the wait is not empty. The dispatcher slices the wait into one-second
+stretches and draws a frame at the top of each one, so the board redraws every second on every
+target. On Linux, the dispatcher also watches the queue directory and the commands directory for
+the whole wait, alongside the keystroke it already listens for. A file landing in the queue
+directory ends the current stretch early, so the board redraws at once instead of waiting out the
+second. A file landing in the commands directory, such as a background command step finishing,
+ends the wait immediately and starts the next pass, which is what routes that step. A pass also
+draws on the same once-a-second cadence between the checkpoints in its own work, so the board
+keeps redrawing through a slow pass too.
 
 A model's `slots` caps lanes on that model, and a profile's `concurrency` caps lanes on that
 profile. A model marked `exclusive` never runs beside a different exclusive model. See

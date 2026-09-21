@@ -153,7 +153,6 @@ pub fn row(id: &str) -> Row {
         out: None,
         cost: None,
         lane_time: None,
-        unbanked: Unbanked::default(),
         next: String::new(),
         resumable: false,
     }
