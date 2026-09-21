@@ -69,8 +69,8 @@ commands, provenance, and contributing pull requests clear.
 - once a release stops publishing a platform, a person runs `npm deprecate` against every version
   of that platform's package that is still on the registry, pointing installers at the replacement:
 
-      npm deprecate "@spoolway/win32-x64@<=0.3.0" \
-        "Windows support ended after 0.3.x. Run the Linux build under WSL:
+      npm deprecate "@spoolway/win32-x64@<=0.4.0" \
+        "Windows support ended after 0.4.x. Run the Linux build under WSL:
          wsl npm install -g spoolway"
 
   This is a manual registry write outside the release workflow — nothing in CI runs it and nothing
