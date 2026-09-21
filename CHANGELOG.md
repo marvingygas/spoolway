@@ -17,6 +17,43 @@ the following contract so the binary can parse and replay them:
 The highlights, migrations, and release URL are public copy. Keep internal task
 bookkeeping out of them and describe user-visible outcomes.
 
+## 0.5.0
+
+### Highlights
+- GitHub issue tracking now closes itself: `spoolway init` installs `.github/workflows/spoolway-issues.yml`, and once a task's pull request merges, the workflow closes that task's issue and, once every task in a group has closed, the group's own epic too — the shipped hook itself only leaves a `<!-- spoolway-issue: URL -->` marker comment at `done`, since nothing has actually shipped before the merge. (#157, #194, #195, #199)
+- A required tool below its version floor, or missing from `PATH`, now stops a ticket from opening instead of failing partway through it: `spoolway doctor` reads each hook script's own `# spoolway-requires: <tool> >= <version>` lines, and every submit route — the queue screen's `enter`, `queue add --from`, and a routine — checks the same lines and gates the submission on them. (#172, #176)
+- spoolway is now installable as a herdr plugin: `herdr plugin install marvingygas/spoolway` downloads the matching release binary and falls back to a source build on any miss, and `spoolway herdr bind`/`unbind` write or remove its four keybindings straight into herdr's own `config.toml`. `init` run from a herdr popup now prints the project directory it resolved and waits for confirmation before writing anything. (#283, #284, #287)
+- `spoolway sync` takes over the file-bringing-forward half of `update`: it rewrites `config.toml`'s values in place while keeping every comment, refreshes each pipeline file's generated key-reference block without touching the prose around it, and refreshes installed skills. `--dry-run` previews the change and `--replace <path>` takes a shipped file back wholesale, saving your version beside it as `.bak`; everything it writes is tracked in git, so `git diff` is the review. (#193)
+
+### Breaking changes and migration
+- `dispatch.interval` is retired: the dispatcher now polls at one fixed rate and there is nothing to configure. `spoolway config get dispatch.interval` and `spoolway config set dispatch.interval <value>` now fail with a retirement hint instead of resolving it. Delete any `dispatch.interval = ...` line from `.spoolway/config.toml`; a config that still sets it loads with a note and drops the key on the next save. (#251)
+- The tmux backend is deleted along with `dispatch.tmux_mode`. `dispatch.backend = "tmux"` now loads as `herdr` with a migration note, and both the rewritten `backend` value and the dropped `tmux_mode` key are written back on the next save. Run `spoolway config set dispatch.backend herdr` (or `headless`) to make the switch explicit. (#250)
+- `dispatch.default_pipeline` is gone, and `spoolway dispatch` no longer falls back to it: every task document must set its own `pipeline:` naming one of the project's pipelines, and the dispatcher's start preflight refuses the whole run if one is missing. Add `pipeline: <name>` to any task document that relied on the old default. (#174)
+- A task no longer inherits `base:` from the checkout's currently-checked-out branch. It must be set on the task document, or with `queue add --base <branch>`; a submission giving neither is refused, naming the document. Set one of the two explicitly on any task that relied on the old fallback. (#143)
+- `spoolway pipeline gen` and the `[pipeline_gen]` config table it read are removed, along with the fallback that answered a missing `.spoolway/pipelines/` directory from the pipelines built into the binary — a missing directory now reports the same `no pipelines defined` error an empty one already gave, and the `spoolway-tasks` skill no longer offers to generate a pipeline for a plan. Run `spoolway init --provider <name>` to install the two shipped pipelines into a project that has none. (#267, #272)
+- `spoolway update` no longer brings a project's files forward — it only checks npm for a newer release and reinstalls the binary. Use `spoolway sync` (`--dry-run` to preview first) for `config.toml`, tracked pipeline docs and installed skills. (#193)
+- The last release to publish a Windows binary is 0.4.x; `npm/targets.json` no longer builds `win32-x64` and the release workflow no longer publishes it. Run the Linux build under WSL: `wsl npm install -g spoolway`. (#153, #154, #156)
+
+### Features
+- `spoolway queue unqueue <task>` (and the board's `u`/`U`) carries a not-started task's document back to the pending directory, with `--force` able to tear down and unqueue a task that already started; `queue add --from` takes the result back unchanged. (#130, #139)
+- Before a run starts, the queue screen now runs `doctor`'s cheap checks and shows a warnings screen — naming a `config.toml` behind this binary's own version, or a missing prompt — and waits for a key instead of starting straight into a run that might fail immediately. (#197, #240, #246)
+
+### Reliability
+- The board cursor no longer points at nothing when its row leaves the board, such as its group finishing — it falls back to the first row instead. (#280)
+- The wait between dispatcher passes now redraws the board once a second on every platform, not only when the Linux-only directory watch is active, and a slow pass keeps redrawing on the same cadence instead of freezing until it finishes. (#317)
+- A group's spend total on the board now counts only work that has actually finished, instead of also adding a running lane's own unbanked spend on top. (#317)
+- A task routed back to the step it just left now waits out the full poll interval before its next try, so a bounded self-route's attempts land spread apart instead of firing inside the same second. (#313)
+
+### Documentation
+- Docs now publish to a GitHub Pages site at https://marvingygas.github.io/spoolway/, built by `.github/workflows/pages.yml` from `docs/`. (#309)
+
+### Upgrading
+- Install or update with `npm install -g spoolway@0.5.0`, or run it without installing via `npx spoolway@0.5.0`.
+- The `spoolway` wrapper package now selects one of five platform packages at install time: linux-x64-gnu, linux-arm64-gnu, linux-x64-musl, darwin-arm64 and darwin-x64. `@spoolway/win32-x64` stops at 0.4.0 and is not published for this release.
+- After upgrading, run `spoolway whats-new` to read this record back from the installed binary.
+
+Release: https://github.com/marvingygas/spoolway/releases/tag/v0.5.0
+
 ## 0.4.0
 
 ### Highlights
