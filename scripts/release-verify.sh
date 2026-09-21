@@ -82,9 +82,16 @@ say "verifying $tag"
 sha="$(git rev-list -n1 "$tag" 2>/dev/null)" || die "$tag does not exist locally after a --tags fetch"
 git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null \
   || die "$tag is not on origin"
+# The trailing ` (#123)` is not optional sloppiness: `main` is protected and
+# takes no direct push, so a release commit can only arrive through a pull
+# request, and squash merging appends the pull request number to the subject
+# it lands. Requiring the bare subject made this script reject the only
+# commit this repository is able to produce.
 subject="$(git log -1 --format=%s "$sha")"
-[ "$subject" = "chore(release): $tag" ] \
-  || die "$tag names $sha, whose subject is '$subject', not 'chore(release): $tag'"
+case "$subject" in
+  "chore(release): $tag" | "chore(release): $tag (#"*")") ;;
+  *) die "$tag names $sha, whose subject is '$subject', not 'chore(release): $tag'" ;;
+esac
 git merge-base --is-ancestor "$sha" origin/main \
   || die "the commit $tag names is not on origin/main"
 
@@ -92,7 +99,10 @@ git merge-base --is-ancestor "$sha" origin/main \
 #    wreckage the publisher leaves when a rehearsal goes red after the
 #    release commit is pushed: it reverts rather than force-pushing, so the
 #    bump is gone from the tree while the commit stays in the history.
-if git log --format=%s "$sha..origin/main" | grep -qxF "Revert \"chore(release): $tag\""; then
+# Matched with the same tolerance as the subject above, since GitHub names a
+# revert after the subject it reverts, pull request number and all.
+if git log --format=%s "$sha..origin/main" \
+  | grep -qE "^Revert \"chore\(release\): ${tag//./\\.}( \(#[0-9]+\))?\"\$"; then
   die "$tag was reverted on origin/main — the bump is not in effect"
 fi
 
