@@ -70,8 +70,11 @@ cargo build --release --locked
 ./target/release/spoolway pipeline check
 ```
 
-Release commit. Only `Cargo.toml`, `Cargo.lock` and `CHANGELOG.md` change, with subject
-`chore(release): v<version>`:
+Release commit. Only `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md` and `herdr-plugin.toml`
+change, with subject `chore(release): v<version>`. `herdr-plugin.toml` carries its own
+`version` and is not stamped at build time, so it is bumped by hand with `Cargo.toml`:
+`verify.yml`'s `test` job fails the release rehearsal when the two disagree, and
+`scripts/fetch-or-build.sh` reads that `version` to pick the release tag it downloads.
 
 ```sh
 cargo check --offline                              # refreshes the lock entry

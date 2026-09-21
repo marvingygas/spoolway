@@ -12,7 +12,7 @@ install the current release and run `spoolway init`; none of the earlier-version
 
 | Upgrade | What changes | What you need to do |
 |---|---|---|
-| 0.3.x to 0.4.x | Retired config, template and pipeline-generation features are removed. Windows packages stop at 0.3.x. | Remove the retired entries described below and use WSL on Windows. |
+| 0.3.x to 0.4.x | Retired config, template and pipeline-generation features are removed. | Remove the retired entries described below. |
 | 0.2.x to 0.3.x | Project state moves from a checkout-name directory to an id-keyed home. | Stop live work, then run any spoolway command and let the automatic move finish. |
 | 0.1.x to 0.2.x | Projects must be claimed; commands and state names change. | Run `spoolway init` and update old scripts and config keys. |
 
@@ -26,6 +26,16 @@ spoolway whats-new --since <your-current-version>
 The [changelog](https://github.com/marvingygas/spoolway/blob/main/CHANGELOG.md) is the complete
 release record. This guide collects only the steps that may require action.
 
+## Windows
+
+The last native Windows release is 0.4.x. `@spoolway/win32-x64` was published up to 0.4.0, and
+`npm/targets.json` no longer carries that target, so no release after 0.4.x has a Windows
+package. On Windows, install the Linux package under WSL:
+
+```
+wsl npm install -g spoolway
+```
+
 ## 0.3.x to 0.4.x
 
 - Delete `unattended.skip_blocked_lane` from `.spoolway/config.toml`. A config that still has
@@ -33,8 +43,6 @@ release record. This guide collects only the steps that may require action.
 - Delete `.spoolway/templates/task-log.md`; task status wording is now built in.
 - Remove `[pipeline_gen]` from the config and replace any `spoolway pipeline gen` call. If the
   project has no pipelines, run `spoolway init` to restore the two shipped samples.
-- Windows is no longer a native target. Use the Linux package under WSL. The last native
-  Windows release is 0.3.x.
 
 The behavior of a staffed `blocked` step also changed. A pass follows that step's `on_pass`;
 a pause, failure or block returns the task to the step that originally blocked after you run

@@ -22,18 +22,20 @@ are the tagged bytes.
 2. Insert the recorded scratch `release-notes.md` into `CHANGELOG.md` as a new section, byte-for-byte
    as handed off, separated from its neighbours by one blank line. Leave the file's contract preamble
    and every older section exactly as they are; `git diff` on `CHANGELOG.md` must show additions and
-   nothing else. Follow the runbook to write the recorded version only in `Cargo.toml` and
-   refresh the package's entry in `Cargo.lock`. Never edit an npm package version by hand.
+   nothing else. Follow the runbook to write the recorded version into `Cargo.toml` and
+   `herdr-plugin.toml`, and refresh the package's entry in `Cargo.lock`. `herdr-plugin.toml` is
+   not stamped at build time, and `verify.yml`'s `test` job fails the rehearsal when its version
+   does not equal `Cargo.toml`'s. Never edit an npm package version by hand.
 3. Prove the record before committing it. Run `cargo test --locked release_notes::tests`, confirm the
    parser tests actually ran, and resolve any changelog contract failure. Full verification belongs
    to the mandatory rehearsal gate. Then build and run the binary's own `whats-new` with no
    `--since`, and confirm it prints the new version and the recorded section rather than an older
    release or an empty result. That agreement between `Cargo.toml` and the changelog is what the
    tag build and the release page both rely on, so a failure here has to stop you, not just draw a
-   warning. Only once it passes, commit the version bump, the lock refresh, and the changelog
+   warning. Only once it passes, commit both version bumps, the lock refresh, and the changelog
    section together with the repository's release subject, and push main.
    Record the full release commit SHA separately from the recorded source SHA. Prove its parent
-   is the recorded source commit and its diff contains only the three expected release files.
+   is the recorded source commit and its diff contains only the four expected release files.
 4. Dispatch `release.yml` on main with `publish=false`, as described in the runbook. Record the run id
    and require its `headSha` to equal the release commit SHA. Watch it to completion, then inspect
    actual job conclusions: shared Linux checks, nightly end-to-end tests, advisories,
@@ -79,16 +81,18 @@ leaving any of it behind is how the next attempt ends up publishing notes for th
 
 - **Before the release commit is pushed** — the push is rejected, or step 1 finds main already
   advanced. Remove only this attempt's unpushed release commit and restore `Cargo.toml`,
-  `Cargo.lock`, and `CHANGELOG.md` to the new `origin/main`. Preserve unrelated work and block if
-  cleanup would overwrite it. Delete the recorded `release-notes.md` from scratch so no later lane
-  can mistake it for a current record. Confirm the tree is clean and matches `origin/main` before
-  you report. Then fail to preflight, naming the new tip commit and what changed.
+  `Cargo.lock`, `CHANGELOG.md` and `herdr-plugin.toml` to the new `origin/main`. Preserve
+  unrelated work and block if cleanup would overwrite it. Delete the recorded
+  `release-notes.md` from scratch so no later lane can mistake it for a current record.
+  Confirm the tree is clean and matches `origin/main` before you report. Then fail to
+  preflight, naming the new tip commit and what changed.
 - **After the release commit is pushed but before the tag exists** — main now carries a version bump
   and a changelog section for a version that will never be tagged as recorded. Do not force-push and
   do not rewrite anyone else's commits. Add a revert of your release commit on top of the current
   tip, so the bump and the section come back out through ordinary history, and push that. Verify
-  afterwards that `Cargo.toml` is back at the previous version and `CHANGELOG.md` holds no section
-  for the abandoned one. Delete the recorded scratch record as above, then fail to preflight.
+  afterwards that `Cargo.toml` and `herdr-plugin.toml` are back at the previous version and
+  `CHANGELOG.md` holds no section for the abandoned one. Delete the recorded scratch record as
+  above, then fail to preflight.
 - **If that cleanup cannot land** — the revert conflicts, the push is rejected again, or the
   verification disagrees — stop and block with the exact state you left behind. A tracked untagged
   version bump is a genuine block; guessing at it risks a phantom release or a duplicate section,
