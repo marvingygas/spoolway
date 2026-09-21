@@ -152,6 +152,14 @@ jobs:
           sed -i "0,/^version = \".*\"/s//version = \"$next\"/" Cargo.toml
           test "$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml)" = "$next"
 
+          # herdr-plugin.toml ships unstamped and is bumped by hand with
+          # Cargo.toml, so a release commit moves it too. verify.yml's `test`
+          # job fails when the two disagree — this job never calls verify.yml,
+          # but rehearsing the wrong file set is how a release commit that
+          # cannot pass its own rehearsal goes unnoticed until the release.
+          sed -i "0,/^version = \".*\"/s//version = \"$next\"/" herdr-plugin.toml
+          test "$(awk -F'"' '/^version = /{print $2; exit}' herdr-plugin.toml)" = "$next"
+
           python3 - "$next" <<'PY'
           import pathlib, sys
           version = sys.argv[1]
@@ -176,12 +184,13 @@ jobs:
       - name: refresh the lock entry
         run: cargo check --offline
 
-      # Nothing outside the three files a release commit is allowed to touch may
+      # Nothing outside the four files a release commit is allowed to touch may
       # have moved. If this trips, the bump above is wrong, not the repo.
+      # The list is the one docs/releasing.md gives for the release commit.
       - name: only a release commit's own files changed
         run: |
           changed="$(git diff --name-only | sort | tr '\n' ' ')"
-          expected="CHANGELOG.md Cargo.lock Cargo.toml "
+          expected="CHANGELOG.md Cargo.lock Cargo.toml herdr-plugin.toml "
           if [ "$changed" != "$expected" ]; then
             echo "dress rehearsal touched [$changed], expected [$expected]" >&2
             exit 1

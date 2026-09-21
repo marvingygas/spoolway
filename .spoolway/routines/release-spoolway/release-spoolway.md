@@ -7,6 +7,7 @@ touches:
   - "Cargo.toml"
   - "Cargo.lock"
   - "CHANGELOG.md"
+  - "herdr-plugin.toml"
   - ".github/workflows/release.yml"
 ---
 
