@@ -17,9 +17,8 @@ and do not wait for a person to approve it.
 
 ## How to do it here
 
-1. Decide the next semver version from the evidence. Challenge the preflight recommendation when a
-   changed default, renamed key, removed flag, compatibility break, or new behaviour points to a
-   different bump under the repository's major-zero policy.
+1. Use the exact version preflight recorded from the person's gate decision. Never recalculate its
+   semver class, challenge it or substitute another version.
 2. Write `release-notes.md` in the scratch directory named under WHAT YOU HAVE. It holds exactly one
    changelog section and nothing else — no preamble, no trailing commentary — because the publisher
    inserts the file's bytes into `CHANGELOG.md` unchanged. Follow the contract at the top of that
@@ -52,7 +51,7 @@ and do not wait for a person to approve it.
    before the long detail.
 7. Re-read the notes against the complete diff. Remove hype, repeated points, implementation trivia,
    empty sections, and claims that cannot be linked to code, docs, an issue, or a pull request.
-8. Give the proposed version, candidate commit, scratch-file path, and every migration item the
+8. Give the selected version, candidate commit, scratch-file path, and every migration item the
    publisher must preserve. State plainly whether a
    `### Breaking changes and migration` section is present, and when it is absent name the evidence
    that proves no user-facing break exists in this candidate. This exact text becomes the committed

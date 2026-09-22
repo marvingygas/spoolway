@@ -39,7 +39,8 @@ and prove the public bytes are the tagged bytes.
    If a workflow fix is required after a failed partial release, record the old and new SHAs and
    reason, rehearse the corrected commit with publication disabled, and require all checks to pass
    before moving the tag to it. A rerun alone uses the old tagged workflow. Product changes require
-   fresh readiness, preflight and notes passes; never move a successful release tag.
+   fresh readiness, version decision, preflight and notes passes; never move a successful release
+   tag.
 5. Verify the registry directly: all six package names must report the recorded version. Verify the
    GitHub release directly: five platform archives plus `SHA256SUMS` must exist.
 6. Read the published release body back with `gh release view` and prove it is the recorded section.
@@ -61,8 +62,8 @@ Main moving after the release commit lands but before its tag invalidates the re
 Do not tag an older commit, fold the new commits into it, force-push or rewrite `main`. Open one
 revert pull request that removes only the four-file release commit, require its protected checks,
 review its final diff, and merge it normally. Verify both version files and `CHANGELOG.md` are back
-at the previous release, delete scratch `release-notes.md`, then return the task to preflight with
-both the abandoned release SHA and new main SHA. If the revert conflicts or its checks cannot go
+at the previous release, delete scratch `release-notes.md`, then return the task for a fresh version
+decision with both the abandoned release SHA and new main SHA. If the revert conflicts or its checks cannot go
 green, that exact unreconciled state is a genuine block.
 
 ## Never

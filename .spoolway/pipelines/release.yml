@@ -1,8 +1,8 @@
 # Full reference: docs/pipelines.md
 
 description: >-
-  Make main release-ready, repair and merge any blockers, then cut, publish and
-  verify a spoolway release without waiting for a person.
+  Make main release-ready, suggest the next version for a person to approve or
+  override, then cut, publish and verify the release.
 
 task_template: default
 
@@ -17,7 +17,7 @@ steps:
     loop:
       fix: 3
     on_loop_max: blocked
-    on_pass: preflight
+    on_pass: version
     on_fail: fix
 
   - id: fix
@@ -37,8 +37,21 @@ steps:
     effort: high
     on_pass: ready
 
+  - id: version
+    description: Recommend the next version and pause for a person's approval or override.
+    agent: claude
+    prompt: release-version
+    model: claude-opus-5
+    effort: high
+    gate: true
+    loop:
+      ready: 1
+    on_loop_max: blocked
+    on_pass: preflight
+    on_fail: ready
+
   - id: preflight
-    description: Freeze the release candidate and assemble its diff, pull requests, contributors, version and changelog state.
+    description: Freeze the chosen release version and assemble its diff, pull requests, contributors and changelog state.
     agent: claude
     prompt: release-preflight
     model: claude-opus-5
@@ -70,10 +83,10 @@ steps:
     model: claude-opus-5
     effort: high
     loop:
-      preflight: 1
+      version: 1
     on_loop_max: blocked
     on_pass: merge-release
-    on_fail: preflight
+    on_fail: version
 
   - id: merge-release
     description: Independently review and merge the exact release commit without changing its candidate.
@@ -82,10 +95,10 @@ steps:
     model: claude-opus-5
     effort: high
     loop:
-      preflight: 1
+      version: 1
     on_loop_max: blocked
     on_pass: publish
-    on_fail: preflight
+    on_fail: version
 
   - id: publish
     description: Rehearse the merged release commit, tag it, publish it, and verify every public artifact.
@@ -94,10 +107,10 @@ steps:
     model: claude-opus-5
     effort: high
     loop:
-      preflight: 1
+      version: 1
     on_loop_max: blocked
     on_pass: released
-    on_fail: preflight
+    on_fail: version
 
   - id: released
     description: Prove the tag, the six packages, the archives and the published body actually exist.

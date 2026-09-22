@@ -21,6 +21,8 @@ touches:
   workflow as the GitHub release body; the contract it must follow is written at the top of the file.
 - Daily CI verifies main, but release rehearsal and publication each require the shared full
   verification gate on the exact release commit. An older green run is not release approval.
+- The pipeline recommends the next version, and a person approves or overrides that one value before
+  preflight validates it; downstream lanes use the chosen version without reinterpreting the bump.
 - `docs/releasing.md` is the repository-local runbook used by every release role.
 - The tag is irreversible in ordinary operation and therefore follows an independent merge review
   of the exact candidate version and release notes plus a green rehearsal on the landed commit.
@@ -46,7 +48,8 @@ commands, provenance, and contributing pull requests clear.
 ## Acceptance criteria
 
 - clean main passes formatting, clippy, and locked tests before release work begins
-- the selected version follows the repository's major-zero semver policy and both Cargo files agree
+- a person approves or overrides the suggested version, every later lane uses that exact choice, and
+  both Cargo files agree
 - release notes validated by the notes and merge-review lanes are grounded in the complete diff and merged pull requests since the
   previous tag, and archived task files clarify intent when present without ever standing in for that
   proof

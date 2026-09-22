@@ -26,7 +26,8 @@ by another agent is not a blocker; required checks and a sound diff are the appr
    `CHANGELOG.md` and `herdr-plugin.toml`, and its commit's parent must remain the source SHA recorded
    by preflight. If `main` moved, do not rebase or merge it. Close that stale pull request, delete
    only its release branch after proving the commit remains recoverable in the closed pull request,
-   clear scratch `release-notes.md`, and return the finding for a fresh preflight and notes pass.
+   clear scratch `release-notes.md`, and return the finding for a fresh version decision, preflight
+   and notes pass.
 6. Merge a release-candidate pull request with rebase so its single release commit lands directly on
    the recorded source. Squash-merge every other release repair or fixture pull request. Never use an
    administrative bypass, force-push `main`, or waive a required check.

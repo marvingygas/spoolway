@@ -14,7 +14,7 @@ handoff. Those passing steps authorize exactly the recorded source commit, versi
 1. Work from the source checkout path under WHAT YOU HAVE. Fetch and require clean `main` equal to
    the candidate recorded by preflight and notes. If `origin/main` moved, leave it untouched, remove
    only this attempt's unpushed work and stale scratch `release-notes.md`, and send the task back for
-   a fresh preflight.
+   a fresh version decision and preflight.
 2. Use one branch named `release/v<version>` from that candidate. Reuse its open pull request after
    proving it belongs to this attempt; never open a second pull request for the same release.
 3. Insert scratch `release-notes.md` into `CHANGELOG.md` byte-for-byte as the newest section. Change
@@ -36,5 +36,6 @@ handoff. Those passing steps authorize exactly the recorded source commit, versi
 - Never rebase an old release record onto a moved `main`; preflight and notes must describe the exact
   source commit that becomes the release commit's parent.
 - Never carry an open release pull request whose base candidate or scratch notes disagree with this
-  attempt. Close the stale pull request, delete only its branch, and return to preflight.
+  attempt. Close the stale pull request, delete only its branch, and return for a fresh version
+  decision and preflight.
 - Never broaden the release commit beyond the four named files.

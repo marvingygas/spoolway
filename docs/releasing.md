@@ -1,13 +1,15 @@
 # Releasing spoolway
 
-A release is a `v*` tag. The `release` pipeline cuts it unattended. Queue the routine and it
-does the rest: repair `main`, review and merge every pull request it creates, write the release
-record, publish, verify the public artifacts, and land the upgrade fixture.
+A release is a `v*` tag. The `release` pipeline asks a person to choose the version, then cuts it
+without another planned stop. Queue the routine, approve or override its recommendation, and it does
+the rest: repair `main`, review and merge every pull request it creates, write the release record,
+publish, verify the public artifacts, and land the upgrade fixture.
 
 ```mermaid
 flowchart LR
   R[ready] -->|red| X[fix] --> M[review + merge] --> R
-  R -->|green| A[preflight] --> B[notes] --> C[candidate PR] --> N[review + merge] --> P[publish]
+  R -->|green| S[version suggestion] -->|gate: approve or override| A[preflight] --> B[notes]
+  B --> C[candidate PR] --> N[review + merge] --> P[publish]
   P --> E[rehearsal run] --> F[tag] --> G[npm + GitHub release] --> V[released] --> Z[fixture PR] --> Q[review + merge]
 ```
 
@@ -16,7 +18,8 @@ flowchart LR
 | `ready` | Runs the whole local gate and a fresh nightly CI run on the candidate. Verifies only — it never edits. |
 | `fix` | Repairs a release blocker in one pull request and drives its checks green. Product code included. |
 | `merge-fix` | Independently reviews the repair, corrects the same branch if needed, and squash-merges it. |
-| `preflight` | Checks `main` is clean and green. Lists every change since the last tag. Proposes the version. |
+| `version` | Recommends the next version, explains the bump, and waits for a person to approve or override it. |
+| `preflight` | Checks `main` is clean and green, accepts the version gate's choice, and validates that exact version. |
 | `notes` | Writes and validates the one changelog section used by the binary and release page. |
 | `candidate` | Builds the exact four-file release commit and opens its pull request. |
 | `merge-release` | Reviews that exact commit and rebase-merges it without changing the recorded candidate. |
@@ -31,6 +34,11 @@ same branch, and merges only the reviewed head. A repair then returns to `ready`
 `main` invalidates the earlier exact-SHA proof. Failures in the post-publication verifier or fixture
 script use the same repair-review-merge loop and retry the command that found them.
 
+The `version` gate is the one planned human stop. Its lane records a recommendation in the task,
+then a resume message either accepts it or names the version to use instead. Preflight and every
+later lane treat that choice as final; they may report a mechanically impossible version, but they
+do not change its semver class or argue for the earlier recommendation.
+
 `released` is not ceremony. `publish` is an agent step, and a `--pass` out of `blocked` carries
 the task one step *past* it — so a release could reach `done` with nothing published if
 `publish` were the last word. A command step is never carried past, so `released` is what makes
@@ -39,7 +47,10 @@ the task one step *past* it — so a release could reach `done` with nothing pub
 ## Cutting a release
 
 1. Open `spoolway queue`, press `r`, and queue `release-spoolway`.
-2. Wait for `done`. The task reports the tag, the workflow runs, the registry versions and the
+2. When the task pauses after `version`, read its recommendation in the task handoff.
+3. Approve it with `spoolway resume <task> -m "Approve X.Y.Z"`, or override it with
+   `spoolway resume <task> -m "Use X.Y.Z"`.
+4. Wait for `done`. The task reports the tag, the workflow runs, the registry versions and the
    result of a real install.
 
 The routine is `.spoolway/routines/release-spoolway/release-spoolway.md`. The prompts are
@@ -57,7 +68,8 @@ contract is written at the top of the file.
 ## Version rule
 
 While the major version is `0`: a change in user-facing shape bumps minor. Fixes and internal
-changes alone bump patch.
+changes alone bump patch. This controls the pipeline's recommendation; the version named by the
+person at the gate is the version every later step uses.
 
 ## Commands the pipeline runs
 
@@ -164,8 +176,8 @@ will do.
 ## When it fails
 
 - A red rehearsal leaves an untagged candidate. Fix the cause, then rehearse again. A product
-  change needs a fresh readiness, preflight and notes pass.
+  change needs a fresh readiness, version decision, preflight and notes pass.
 - If `main` moves before the tag, the publisher removes or reverts its release commit and the
-  task goes back to `preflight`.
+  task goes back to the version gate.
 - A partial publish is retried with `gh run rerun <run-id> --failed`. Published npm versions
   are never replaced. A successful release tag is never moved.
