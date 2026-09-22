@@ -315,6 +315,14 @@ printf '#!/bin/sh\necho mine\n' > "$HOOK"
 must "sync runs over the tracker project" env -C "$INITDIR/github" "$SPOOLWAY" sync
 has "the hook this project edited is exactly as it left it" "echo mine" "$HOOK"
 
+# `--replace` takes the whole shipped hook back — and must leave it
+# executable, the same as `init` did, even though `write_atomic` itself has
+# no opinion about permissions (issue #331).
+chmod -x "$HOOK"
+must "--replace takes the shipped hook back" \
+  env -C "$INITDIR/github" "$SPOOLWAY" sync --replace .spoolway/hooks/github.sh
+works "the replaced hook is executable again" test -x "$HOOK"
+
 # ------------------------------------------------------------ lane-prompts.md
 # The seven typed pane messages are spoolway's own now, with no project
 # override left to resolve against them — `init` no longer seeds one, and a

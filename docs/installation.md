@@ -263,8 +263,9 @@ What `sync` replaces, file by file:
 `sync` never merges. A marked block you edited by hand stops the sync on that file.
 `spoolway sync --replace <path>` writes the shipped file over yours and saves your version
 beside it as `.bak`. That is also how to take a newer default prompt or skeleton on purpose.
-`spoolway doctor` reports files that are behind. `spoolway pipeline check` reports a prompt
-that names a command or flag this binary does not have.
+Replacing a hook script under `.spoolway/hooks/` also leaves it executable on Unix, whether or
+not its text changed. `spoolway doctor` reports files that are behind. `spoolway pipeline check`
+reports a prompt that names a command or flag this binary does not have.
 
 On success, `sync` records this binary's version and a fingerprint of the text it would write
 in a stamp under the project's home, one line per checkout. `spoolway init` writes the same
