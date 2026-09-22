@@ -33,9 +33,15 @@ are the tagged bytes.
    release or an empty result. That agreement between `Cargo.toml` and the changelog is what the
    tag build and the release page both rely on, so a failure here has to stop you, not just draw a
    warning. Only once it passes, commit both version bumps, the lock refresh, and the changelog
-   section together with the repository's release subject, and push main.
-   Record the full release commit SHA separately from the recorded source SHA. Prove its parent
-   is the recorded source commit and its diff contains only the four expected release files.
+   section together with the repository's release subject. `main` is protected and takes no direct
+   push, so land it the way the runbook describes: push the commit to `release/v<version>`, open a
+   pull request against main, drive its checks green, and stop there. Merging is the owner's, and
+   you must not merge it yourself. Once they have merged, read the landed SHA off `origin/main` —
+   squash merging rewrites the commit, so the object you pushed is not the one on main and must
+   never be tagged. Record that landed SHA as the release commit SHA, separately from the recorded
+   source SHA. Prove its parent is the recorded source commit and its diff contains only the four
+   expected release files. Its subject arrives as `chore(release): v<version> (#<pr>)`; the
+   trailing pull request number is expected and `scripts/release-verify.sh` accepts it.
 4. Dispatch `release.yml` on main with `publish=false`, as described in the runbook. Record the run id
    and require its `headSha` to equal the release commit SHA. Watch it to completion, then inspect
    actual job conclusions: shared Linux checks, nightly end-to-end tests, advisories,
