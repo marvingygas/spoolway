@@ -1,8 +1,8 @@
 # Full reference: docs/pipelines.md
 
 description: >-
-  Make main release-ready, repair and merge any blockers, then cut, publish and
-  verify a spoolway release without waiting for a person.
+  Make main release-ready, suggest the next version for a person to approve or
+  override, then cut, publish and verify the release.
 
 task_template: default
 
@@ -17,26 +17,41 @@ steps:
     loop:
       fix: 3
     on_loop_max: blocked
-    on_pass: preflight
+    on_pass: version
     on_fail: fix
 
-  # Gated, because this step no longer merges. `main` is protected and every pull
-  # request is gated on `ci`, so the repair lands when the owner merges it — and
-  # an ungated pass would hand a readiness run the same `main` it just failed on,
-  # which re-finds the identical blocker and spends a lap of the loop doing it.
-  # The pause is where the merge happens.
   - id: fix
-    description: Repair every readiness blocker in one pull request and hand its number to the owner to merge.
+    description: Repair every release blocker in one pull request and drive its checks green.
     agent: claude
     prompt: release-fixer
     model: claude-opus-5
     effort: high
-    gate: true
+    session: true
+    on_pass: merge-fix
+
+  - id: merge-fix
+    description: Independently review the repair, correct its existing branch if needed, and merge it.
+    agent: claude
+    prompt: release-merger
+    model: claude-opus-5
+    effort: high
     on_pass: ready
+
+  - id: version
+    description: Recommend the next version and pause for a person's approval or override.
+    agent: claude
+    prompt: release-version
+    model: claude-opus-5
+    effort: high
+    gate: true
+    loop:
+      ready: 1
+    on_loop_max: blocked
+    on_pass: preflight
     on_fail: ready
 
   - id: preflight
-    description: Freeze the release candidate and assemble its diff, pull requests, contributors, version and changelog state.
+    description: Freeze the chosen release version and assemble its diff, pull requests, contributors and changelog state.
     agent: claude
     prompt: release-preflight
     model: claude-opus-5
@@ -49,36 +64,80 @@ steps:
     on_fail: fix
 
   - id: notes
-    description: Write the one recorded changelog section that ships as the entry, the embedded notes and the release body.
+    description: Write and validate the changelog section that ships everywhere.
     agent: claude
     prompt: release-notes
     model: claude-sonnet-5
     effort: high
     session: true
-    gate: true
     loop:
       notes: 2
     on_loop_max: blocked
-    on_pass: publish
+    on_pass: candidate
     on_fail: notes
 
+  - id: candidate
+    description: Build the exact four-file release commit and open one green pull request for it.
+    agent: claude
+    prompt: release-candidate
+    model: claude-opus-5
+    effort: high
+    loop:
+      version: 1
+    on_loop_max: blocked
+    on_pass: merge-release
+    on_fail: version
+
+  - id: merge-release
+    description: Independently review and merge the exact release commit without changing its candidate.
+    agent: claude
+    prompt: release-merger
+    model: claude-opus-5
+    effort: high
+    loop:
+      version: 1
+    on_loop_max: blocked
+    on_pass: publish
+    on_fail: version
+
   - id: publish
-    description: Commit the section with the version bump, rehearse, tag, publish, and verify the published body against it.
+    description: Rehearse the merged release commit, tag it, publish it, and verify every public artifact.
     agent: claude
     prompt: release-publisher
     model: claude-opus-5
     effort: high
     loop:
-      preflight: 1
+      version: 1
     on_loop_max: blocked
     on_pass: released
-    on_fail: preflight
+    on_fail: version
 
   - id: released
-    description: Prove the tag, the seven packages, the archives and the published body actually exist.
+    description: Prove the tag, the six packages, the archives and the published body actually exist.
     run: scripts/release-verify.sh
     timeout: 15m
     on_pass: fixture
+    on_fail: repair-released
+    loop:
+      repair-released: 2
+    on_loop_max: blocked
+
+  - id: repair-released
+    description: Repair a failed post-publication verification in one green pull request.
+    agent: claude
+    prompt: release-fixer
+    model: claude-opus-5
+    effort: high
+    session: true
+    on_pass: merge-released-repair
+
+  - id: merge-released-repair
+    description: Review and merge the post-publication verifier repair, then rerun the verifier.
+    agent: claude
+    prompt: release-merger
+    model: claude-opus-5
+    effort: high
+    on_pass: released
 
   # The closing step of docs/releasing.md, which was prose nobody was gated on
   # until 0.4.0 shipped without its fixture and main's dress rehearsal went red
@@ -86,14 +145,43 @@ steps:
   # `scripts/e2e/fixtures/<version>/` once the tag is out *and* Cargo.toml has
   # moved past it, so the fixture is impossible to make before the tag and is
   # not demanded until the next bump. A command step, for the same reason
-  # `released` is one — an agent step can be carried past by a cleared block,
-  # and this is the last thing the release owes.
+  # `released` is one — an agent step can be carried past by a cleared block.
+  # Its following merge step makes landing the fixture the last thing owed.
   #
   # Thirty minutes because it builds the tagged binary to scaffold from, on
   # whatever cache the lane's machine has. Idempotent, so a re-run after a
   # failure costs one lookup when the fixture already landed.
   - id: fixture
-    description: Scaffold the released version's upgrade fixture from its own tag and land it on main.
+    description: Scaffold the released version's upgrade fixture from its own tag and open its pull request.
     run: scripts/release-fixture.sh
     timeout: 30m
+    on_pass: merge-fixture
+    on_fail: repair-fixture
+    loop:
+      repair-fixture: 2
+    on_loop_max: blocked
+
+  - id: repair-fixture
+    description: Repair a failed fixture scaffold in one green pull request.
+    agent: claude
+    prompt: release-fixer
+    model: claude-opus-5
+    effort: high
+    session: true
+    on_pass: merge-fixture-repair
+
+  - id: merge-fixture-repair
+    description: Review and merge the fixture machinery repair, then rerun the scaffold.
+    agent: claude
+    prompt: release-merger
+    model: claude-opus-5
+    effort: high
+    on_pass: fixture
+
+  - id: merge-fixture
+    description: Review and merge the generated upgrade fixture so the release leaves main complete.
+    agent: claude
+    prompt: release-merger
+    model: claude-opus-5
+    effort: high
     on_pass: done

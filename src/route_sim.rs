@@ -30,7 +30,7 @@ mod tests {
     use crate::commands::route;
     use crate::pipeline::{Outcome, Pipeline, Pipelines, StepKind};
     use crate::task::Task;
-    use std::collections::{BTreeMap, HashMap};
+    use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
     /// A tiny, deterministic generator — `splitmix64` — so a failing walk can
     /// be reproduced from the one number it prints. Nothing here needs a real
@@ -278,6 +278,63 @@ mod tests {
         unattended: bool,
         /// Lane bound — property 4's own "stated bound". See [`lane_bound`].
         cap: usize,
+        /// The bounded route counters that can still affect routing from each
+        /// step. Historical counters behind a one-way phase boundary cannot
+        /// change a later decision, so keeping them in [`State`] would split
+        /// one routing state into many identical copies.
+        relevant_rounds: HashMap<String, Vec<String>>,
+    }
+
+    /// Build the part of `rounds` that can still affect a future routing
+    /// decision from each step. `route` reads only counters for bounded moves,
+    /// and only sources reachable before a resting state can run again.
+    fn relevant_rounds(pipeline: &Pipeline) -> HashMap<String, Vec<String>> {
+        let mut by_step = HashMap::new();
+
+        for origin in pipeline.step_ids() {
+            let mut reachable = HashSet::new();
+            let mut pending = vec![origin];
+            let mut keys = BTreeSet::new();
+
+            while let Some(current) = pending.pop() {
+                if !reachable.insert(current) {
+                    continue;
+                }
+                let Some(step) = pipeline.step(current) else {
+                    continue;
+                };
+
+                for destination in pipeline.destinations(step) {
+                    if step.round_limit(destination).is_some() {
+                        keys.insert(crate::task::route_key(current, destination));
+                    }
+                    if !is_resting(pipeline, destination) {
+                        pending.push(destination);
+                    }
+                }
+            }
+
+            by_step.insert(origin.to_string(), keys.into_iter().collect());
+        }
+
+        by_step
+    }
+
+    fn state_key(ctx: &Walk<'_>, task: &Task, current: &str) -> State {
+        let rounds = ctx
+            .relevant_rounds
+            .get(current)
+            .into_iter()
+            .flatten()
+            .filter_map(|key| {
+                task.front
+                    .rounds
+                    .get(key)
+                    .copied()
+                    .map(|count| (key.clone(), count))
+            })
+            .collect();
+        (current.to_string(), rounds)
     }
 
     /// Walk every outcome at every step reachable from `current`. `Err`
@@ -306,7 +363,7 @@ mod tests {
         path: &mut Vec<String>,
         seen: &mut HashMap<State, Seen>,
     ) -> Result<(), String> {
-        let state: State = (current.to_string(), task.front.rounds.clone());
+        let state = state_key(ctx, task, current);
         match seen.get(&state) {
             Some(Seen::Explored) => return Ok(()),
             Some(Seen::OnStack) => {
@@ -572,6 +629,7 @@ mod tests {
                     pipeline,
                     unattended,
                     cap,
+                    relevant_rounds: relevant_rounds(pipeline),
                 };
                 // Shared across every starting step: a state this walk has
                 // already proven safe from one start is exactly as safe
