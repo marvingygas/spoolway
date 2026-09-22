@@ -84,6 +84,19 @@ RUNS="$LIVE/proj/suite-runs.txt"
   printf '    on_pass: document\n    on_fail: blocked\n'
 } >> .spoolway/pipelines/default.yml
 sed -i "0,/^    on_pass: document\$/s//    on_pass: suite/" .spoolway/pipelines/default.yml
+
+# Hold the bottom after its real handover, before it reaches `done`. That
+# leaves its dependent gated without stopping a dispatcher in the middle of
+# the dependent's workspace cut — the race this suite is specifically meant
+# not to introduce into its own setup.
+sed -i "/^  - id: handover\$/,/^    on_pass: done\$/s/^    on_pass: done\$/    on_pass: hold/" \
+  .spoolway/pipelines/default.yml
+{
+  printf '\n  - id: hold\n'
+  printf '    description: Hold a handed-over dependency before cleanup.\n'
+  printf '    agent: pi\n    prompt: closer\n    model: fake-local\n    effort: ""\n'
+  printf '    gate: true\n    on_pass: done\n'
+} >> .spoolway/pipelines/default.yml
 works "a pipeline whose stack-wide step declares \`last:\` checks out" \
   "$SPOOLWAY" pipeline check
 
@@ -140,15 +153,15 @@ else
 fi
 
 # --------------------------------------------------------- the bottom lands first
-# Held, not just driven. Everything asserted below is about the moment `base`
-# finished and nothing else had started, and the dispatcher left running would
-# take `top` straight on — through `top`'s own `suite` step, which really is
-# the last of the chain and really does write the line the check two screens
-# down reads as `base` having written it. That is how this went red once four
-# suites started sharing a machine: the checks in between spawn `spoolway` of
-# their own, and under that load `top` gets there first.
-if drive_and_hold base gone 200; then ok "the bottom of the chain runs and is archived"
-else bad "the bottom of the chain runs and is archived (at \`$(stage_of base)\`)"; fi
+# The test-only gated `hold` step catches the bottom after `handover` succeeds
+# but before it reaches `done`, so the dependency gate keeps `top` queued while
+# the assertions below run. Waiting until `base` disappeared and only then
+# stopping the dispatcher left a kill window: under load the next pass could
+# already be halfway through cutting `top`, and TERM could land between Git
+# creating its worktree and the dispatcher recording that placement in the
+# task file.
+if drive_and_hold base paused 200; then ok "the bottom of the chain hands over and is held"
+else bad "the bottom of the chain hands over and is held (at \`$(stage_of base)\`)"; fi
 
 if handed_over base; then ok "and hands its change over as a branch and a pull request"
 else bad "and hands its change over as a branch and a pull request"; ls "$FORGE/prs" | sed 's/^/        /'; fi
@@ -157,7 +170,7 @@ else bad "and hands its change over as a branch and a pull request"; ls "$FORGE/
 if stacked_on base plan/live; then ok "targeting its own \`base:\`"
 else bad "targeting its own \`base:\`"; cat "$FORGE"/prs/[0-9]* | sed 's/^/        /'; fi
 
-has "it documented its own change on the way" "→ \`document\`" $SPOOLWAY_PROJECT_HOME/archive/base.md
+has "it documented its own change on the way" "→ \`document\`" $SPOOLWAY_PROJECT_HOME/queue/base.md
 # The pane label a lane's transcript is headed by is its own name now
 # (`<task> · <step>`, acceptance criterion 6), not the prompt — so which
 # prompt actually ran is read from the composed prompt file it was handed.
@@ -193,6 +206,10 @@ fi
 has "and the pass says why it walked past" \
   "\`suite\` does not run for this task (not last in its chain)" \
   "$E2E_DISPATCH_LOG"
+
+# Release the gate with the dispatcher still down. The next drive can clean up
+# `base` and cut `top` without a stop arriving in the middle of that cut.
+must "the held bottom resumes to done" "$SPOOLWAY" resume base
 
 # ------------------------------------------------ cut on top, not beside it
 # Read where `top` settles rather than caught somewhere on the way: `top`'s

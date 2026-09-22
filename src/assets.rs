@@ -552,65 +552,6 @@ mod tests {
         }
     }
 
-    /// `checks` runs `gh pr checks --watch --fail-fast`, and the one answer
-    /// that command has no other way to wait out is "nothing has been
-    /// registered yet" — a pull request `spoolway stack` only just opened,
-    /// with the branch's first check run still a few seconds off. A bare
-    /// `on_fail:` there would park every task that lands on that window;
-    /// naming `checks` itself, bounded by a `loop:` keyed the same way,
-    /// tries again instead — and [`crate::dispatch::skip_wait`] is what
-    /// makes that retry wait out a full poll interval rather than firing
-    /// again inside the same second against the same unsettled state.
-    ///
-    /// Every pipeline that ships a `checks` step is held to this — both
-    /// `assets/pipelines/*.yml`, what `spoolway init` writes into a new
-    /// project, and this repository's own `.spoolway/pipelines/*.yml`,
-    /// which run its own tasks. `release.yml` names no `checks` step at
-    /// all — its own gate is `ci`, not this — so it is not among the eight
-    /// checked here.
-    #[test]
-    fn checks_declares_a_bounded_self_route_everywhere_it_ships() {
-        let mut found = 0;
-        let mut pipelines: Vec<(String, crate::pipeline::Pipeline)> = Vec::new();
-
-        let shipped = crate::pipeline::Pipelines::shipped(&crate::config::Config::default())
-            .expect("assets/pipelines/*.yml must parse and validate");
-        for (name, pipeline) in shipped.pipelines {
-            pipelines.push((format!("assets/pipelines/{name}.yml"), pipeline));
-        }
-
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let tracked =
-            crate::pipeline::Pipelines::load_tracked(root, &crate::config::Config::default())
-                .expect(".spoolway/pipelines/*.yml must parse and validate");
-        for (name, pipeline) in tracked.pipelines {
-            pipelines.push((format!(".spoolway/pipelines/{name}.yml"), pipeline));
-        }
-
-        for (file, pipeline) in &pipelines {
-            let Some(step) = pipeline.step("checks") else {
-                continue;
-            };
-            found += 1;
-            assert_eq!(
-                step.round_limit("checks"),
-                Some(3),
-                "{file}: `checks` must bound its own route to itself at 3"
-            );
-            assert_eq!(
-                step.on_fail.as_deref(),
-                Some("checks"),
-                "{file}: `checks` must fail back to itself, not straight to `blocked`"
-            );
-        }
-
-        assert_eq!(
-            found, 8,
-            "expected a `checks` step in both assets/pipelines/*.yml and six of the seven \
-             .spoolway/pipelines/*.yml (release.yml has none): found {found}"
-        );
-    }
-
     /// The crate description npm and crates.io display is a sentence from the
     /// README, not a flow (`implement -> review -> e2e -> PR -> merge`) that no
     /// shipped pipeline runs (finding 73).

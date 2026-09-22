@@ -60,9 +60,9 @@ if [ -e "$LIVE/worktrees/task-land" ]; then bad "the task's worktree is gone aft
 else ok "the task's worktree is gone after cleanup"; fi
 if git rev-parse --verify -q task/land >/dev/null; then bad "the task's branch is gone after cleanup"
 else ok "the task's branch is gone after cleanup"; fi
-# The command-step run files (`handover`'s `spoolway stack`, `checks`) leave
-# with the task: nothing routes on a run of an archived task, and a stray
-# `.log` per task per step would otherwise pile up for the life of the project.
+# The command-step run file (`handover`'s `spoolway stack`) leaves with the
+# task: nothing routes on a run of an archived task, and a stray `.log` per
+# task per step would otherwise pile up for the life of the project.
 CMD_LEFT=$(ls "$SPOOLWAY_PROJECT_HOME/commands/" 2>/dev/null | grep -c '^land · ' || true)
 if [ "${CMD_LEFT:-0}" -eq 0 ]; then
   ok "the archived task's command run files are reclaimed"

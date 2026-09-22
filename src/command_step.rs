@@ -660,9 +660,24 @@ mod tests {
         let f = Fixture::new("lifecycle");
         assert_eq!(f.runs.state("build-demo"), RunState::Fresh);
 
-        f.start("build-demo", "sleep 1; echo built");
+        // The run waits on a file this test creates rather than on a fixed
+        // `sleep`. A timed sleep makes `Running` a race against the clock:
+        // under load the gap between `start` returning and the read below can
+        // outlast the sleep, so the run has already reached `Exited(0)` and
+        // the state this test exists to observe never gets seen — the failure
+        // it actually hit. A gate the test opens itself cannot close early,
+        // which makes `Running` a fact rather than a guess about timing.
+        let gate = f.root.join("release");
+        f.start(
+            "build-demo",
+            &format!(
+                "while [ ! -f '{}' ]; do sleep 0.05; done; echo built",
+                gate.display()
+            ),
+        );
         assert_eq!(f.runs.state("build-demo"), RunState::Running);
 
+        std::fs::write(&gate, "go").unwrap();
         assert_eq!(f.settle("build-demo"), RunState::Exited(0));
         let log = std::fs::read_to_string(f.runs.log_path("build-demo")).unwrap();
         assert!(log.contains("built"), "the run's output is its log: {log}");

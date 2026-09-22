@@ -127,6 +127,10 @@ pipeline picks the destination.
 | `done` | The task finishes. |
 | `blocked` | The task parks for a person, or for the unblocker in an unattended run. |
 
+A step never names its own id in `on_pass`, `on_fail` or `on_loop_max` — a lap goes through
+another step or not at all. `spoolway pipeline check` refuses a file that tries it, naming the
+step and the key.
+
 ### Loops
 
 `loop` counts arrivals at this step from a given step. Put it on the step that sends work
@@ -244,6 +248,8 @@ A build, a test suite, a formatter or a deploy script is a command step.
   the dispatcher.
 - Exit code zero takes `on_pass`. Anything else takes `on_fail`. Running out of `timeout` is a
   failure, and the whole process group is killed. `timeout: 0s` is refused.
+- A `run:` means one thing by each exit code. A command that answers the same code for two
+  different outcomes cannot be routed on, and fixing that is the command's job, not spoolway's.
 - `prompt`, `model`, `effort`, `session` and `gate` are refused. The step takes no slot.
 - Output goes to `<task> · <step>.log` under the project's home.
 - Other tasks keep moving while the command runs.
@@ -357,8 +363,9 @@ Every agent step ships with a blank `model` and `effort`. `spoolway init` rewrit
 claude` to the profile you pick. Fill in the models before the first run.
 
 This repository's own `.spoolway/pipelines/impl.yml` adds an end-to-end step, a `test` command
-step and a `suite` step with `last: true`. Every pipeline that opens a pull request then waits
-on its hosted checks. See [Local gates and daily CI](testing.md#local-gates-and-daily-ci).
+step and a `suite` step with `last: true`. No pipeline waits on a pull request's hosted checks;
+`handover` opens it and the task is done. See
+[Local gates and daily CI](testing.md#local-gates-and-daily-ci).
 
 `.spoolway/pipelines/impl_lite.yml` sits between `impl` and `impl_fast`: it keeps `review`,
 `test` and `suite`, but `test` runs `scripts/gate-quick.sh` instead of `scripts/gate.sh`, and

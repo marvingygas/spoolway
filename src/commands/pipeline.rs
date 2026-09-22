@@ -243,7 +243,7 @@ const FIELD_SENTENCES: &[(&str, &str)] = &[
     ),
 ];
 
-/// The four things refused when a pipeline file is loaded — [`Pipeline::validate`]'s
+/// The things refused when a pipeline file is loaded — [`Pipeline::validate`]'s
 /// own checks, worded for a reader with no access to its source.
 fn rules() -> Vec<&'static str> {
     vec![
@@ -254,6 +254,10 @@ fn rules() -> Vec<&'static str> {
         "prefer a script the repo already holds over a multi-command `run:` — a chain more \
          than one pipeline runs belongs in a file, named by relative path from the worktree \
          root",
+        "a step never names its own id in `on_pass`, `on_fail` or `on_loop_max` — a lap goes \
+         through another step or not at all",
+        "a `run:` means one thing by each exit code — a command that answers the same code \
+         for two different outcomes cannot be routed on, and is not spoolway's to fix",
     ]
 }
 

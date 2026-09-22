@@ -118,20 +118,10 @@ must "and redirected straight back to the same bare forge" \
 export SPOOLWAY_GH="$HERE/../gh-stub.sh"
 export GH_STUB_PRS="$LIVE/tracked-prs"
 export GH_STUB_URL="file://$ORIGIN"
-# `handover` (`spoolway stack`) reads $SPOOLWAY_GH for its own `gh` calls, but
-# the `checks` step right behind it is a plain `run: gh pr checks` — no
-# override of its own, so it resolves `gh` off PATH like any other command.
-# Left at `new_forge`'s own double there, it would ask a `gh` that never
-# heard of the pull request `spoolway stack` just opened through this one —
-# two different pull-request stores, and a wrong answer only because the
-# other store still happened to hold something left over from an earlier
-# task. So this double goes on PATH too, ahead of `new_forge`'s, for exactly
-# as long as $SPOOLWAY_GH points at it.
-TRACKED_GH_BIN="$LIVE/tracked-gh-bin"
-mkdir -p "$TRACKED_GH_BIN"
-install -m 755 "$HERE/../gh-stub.sh" "$TRACKED_GH_BIN/gh"
-PATH_BEFORE_TRACKED_GH="$PATH"
-PATH="$TRACKED_GH_BIN:$PATH"; export PATH
+# `handover` (`spoolway stack`) reads $SPOOLWAY_GH for its own `gh` calls —
+# the only ones this pipeline makes any more, `checks` having gone with it —
+# so there is no bare `gh` left to resolve off PATH, and no second double to
+# put ahead of `new_forge`'s own.
 # The dispatcher inherited its environment when it started, before any of
 # that existed — restarted, so the `handover` it runs sees all three.
 dispatcher_restart
@@ -174,7 +164,6 @@ must "origin is the bare forge again" \
 must "and the redirect is dropped with it" \
   git -C "$LIVE/proj" config --unset "url.$ORIGIN.insteadOf"
 unset SPOOLWAY_GH
-PATH="$PATH_BEFORE_TRACKED_GH"; export PATH
 dispatcher_restart
 
 # --------------------------------------------------------------- open hook

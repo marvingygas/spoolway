@@ -3340,8 +3340,8 @@ mod tests {
             "the verdict token should start in the same column on both rows: {short_line:?} / {long_line:?}"
         );
         assert_eq!(
-            short_line.find("2/5"),
-            long_line.find("1/5"),
+            short_line.find("2/4"),
+            long_line.find("1/4"),
             "the position should start in the same column on both rows: {short_line:?} / {long_line:?}"
         );
     }
@@ -3372,10 +3372,10 @@ mod tests {
         let raw = ticker(&recent, 120, 5);
         assert!(raw.contains(&format!("{GREEN}✓ pass{RESET}")), "{raw}");
         let block = strip(&raw);
-        // implement is the first step (index 0) of four still ahead of it —
-        // review, document, handover, checks — so 0 + 1 over 1 + 4.
+        // implement is the first step (index 0) of three still ahead of it —
+        // review, document, handover — so 0 + 1 over 1 + 3.
         assert!(
-            block.contains("14:22   gate-board   implement   ✓ pass   1/5"),
+            block.contains("14:22   gate-board   implement   ✓ pass   1/4"),
             "{block}"
         );
     }
@@ -3406,10 +3406,10 @@ mod tests {
         let raw = ticker(&recent, 120, 5);
         assert!(raw.contains(&format!("{RED}✗ fail{RESET}")), "{raw}");
         let block = strip(&raw);
-        // review is index 1, with document, handover, checks (3) still ahead:
-        // 1 + 1 over 2 + 3.
+        // review is index 1, with document, handover (2) still ahead:
+        // 1 + 1 over 2 + 2.
         assert!(
-            block.contains("14:22   gate-board   review   ✗ fail   2/5"),
+            block.contains("14:22   gate-board   review   ✗ fail   2/4"),
             "{block}"
         );
     }
@@ -3449,7 +3449,7 @@ mod tests {
         );
         let block = strip(&raw);
         assert!(
-            block.contains("14:22   gate-board   implement   ● paused   1/5"),
+            block.contains("14:22   gate-board   implement   ● paused   1/4"),
             "{block}"
         );
     }
@@ -3483,9 +3483,10 @@ mod tests {
         );
         let raw = ticker(&recent, 120, 5);
         let block = strip(&raw);
-        // handover is index 3, with checks (1) still ahead: 3 + 1 over 4 + 1.
+        // handover is index 3, the last step, with nothing still ahead:
+        // 3 + 1 over 4 + 0.
         assert!(
-            block.contains("09:44   billing   handover   ● paused   4/5"),
+            block.contains("09:44   billing   handover   ● paused   4/4"),
             "{block}"
         );
     }
@@ -3524,7 +3525,7 @@ mod tests {
         );
         let block = strip(&raw);
         assert!(
-            block.contains("14:22   wall   review   ● blocked   2/5"),
+            block.contains("14:22   wall   review   ● blocked   2/4"),
             "{block}"
         );
     }
@@ -3555,7 +3556,7 @@ mod tests {
         );
         let block = strip(&ticker(&recent, 120, 5));
         assert!(
-            block.contains("14:22   gate-board   implement      1/5"),
+            block.contains("14:22   gate-board   implement      1/4"),
             "{block}"
         );
         assert!(

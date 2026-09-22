@@ -12,8 +12,9 @@
 # with what moved, because GitHub computes a pull request's diff against the
 # base's live tip and never needed a local rebase to do it.
 #
-# `clash` is held at `handover`, the base moves under it with a change to the
-# same file, and the lane hands the change over anyway without touching it.
+# `clash` is held after `document`, immediately before `handover`; the base
+# moves under it with a change to the same file, and the command hands the
+# change over anyway without touching it.
 #
 # This is the one scenario that wants a real conflict, which is why every other
 # suite's stand-in agent writes to a file of the task's own.
@@ -40,7 +41,8 @@ publish plan/live
 BODY="$LIVE/body.md"
 task_body "$BODY"
 
-task_doc "$LIVE/clash.md" clash "$BODY" "group: live" "touches: [src/main.rs]"
+task_doc "$LIVE/clash.md" clash "$BODY" "group: live" \
+  "touches: [src/main.rs]" "gate_at: document"
 must "the task queues" "$SPOOLWAY" queue add --from "$LIVE/clash.md"
 # A second rung, queued and never driven. Its only job is to still be open when
 # `clash` hands over, so that handover opens a pull request and stops instead of
@@ -50,10 +52,12 @@ task_doc "$LIVE/spare.md" spare "$BODY" "group: live" \
   "touches: [src/spare.rs]" "depends_on: [clash]"
 must "and one above it, to keep the plan open" "$SPOOLWAY" queue add --from "$LIVE/spare.md"
 
-# Driven to the hand-off and no further: its work is committed on its own
-# branch, and nothing has been pushed anywhere yet.
-if drive_and_hold clash handover 60; then ok "a finished task reaches the handover step"
-else bad "a finished task reaches the handover step (at \`$(stage_of clash)\`)"; fi
+# Driven through its last agent step and held before the final command: its
+# work is committed on its own branch, and nothing has been pushed anywhere
+# yet. Waiting for `handover` itself is a race now that it is the final step:
+# a fast command can run and archive the task between two polling reads.
+if drive_and_hold clash paused 60; then ok "a finished task is held before the handover step"
+else bad "a finished task is held before the handover step (at \`$(stage_of clash)\`)"; fi
 
 # The base moves with a change to the same file the lane wrote in its own
 # worktree, with different content — the one scenario an actual rebase would
@@ -64,6 +68,11 @@ echo "the base's own idea" > work-clash.txt
 must "the base moves" git add work-clash.txt
 must "the base moves" git commit -qm "the base moves under clash"
 must "and the forge hears about it" git push -q origin plan/live
+
+# Spend the one-shot schedule that held `document`'s report. With the
+# dispatcher still down, this advances the task to `handover` without giving
+# that command a chance to run until the drive below starts it deliberately.
+must "the held task resumes into handover" "$SPOOLWAY" resume clash
 
 # Driven to the end of its own pipeline. `spare` is still open, so the handover
 # opens the pull request and stops there rather than landing the stack — which

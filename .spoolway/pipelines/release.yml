@@ -70,11 +70,7 @@ steps:
     model: claude-sonnet-5
     effort: high
     session: true
-    loop:
-      notes: 2
-    on_loop_max: blocked
     on_pass: candidate
-    on_fail: notes
 
   - id: candidate
     description: Build the exact four-file release commit and open one green pull request for it.
