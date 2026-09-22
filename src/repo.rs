@@ -4041,7 +4041,19 @@ mod tests {
         // Renamed to a basename `is_valid_label` refuses outright — a raw
         // `\` is legal in a Unix filename but is not one path component to
         // `is_bare_filename`, which treats it the same as `/`.
-        let weird = base.parent().unwrap().join("api\\copy");
+        //
+        // The new name is the root's own basename with `-api\copy` appended,
+        // not a bare `api\copy` beside it. A bare name sits directly in the
+        // shared temporary directory, where every concurrent `cargo test`
+        // process picks the identical path — one run's `remove_dir_all` then
+        // races the other's `rename`, which fails `ENOTEMPTY`. Appending to
+        // the root keeps the pid and sequence number that make the path this
+        // process's alone, and `scratch::finished_run_pid` still reclaims it,
+        // since it allows exactly this trailing word.
+        let weird = base.with_file_name(format!(
+            "{}-api\\copy",
+            base.file_name().unwrap().to_string_lossy()
+        ));
         let _ = std::fs::remove_dir_all(&weird);
         std::fs::rename(&base, &weird).unwrap();
 

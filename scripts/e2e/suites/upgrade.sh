@@ -336,4 +336,84 @@ works "the 0.3.0 fixture's dead pull request template is swept" \
 works "the 0.3.0 fixture's dead lane-prompts template is swept" \
   test ! -e .spoolway/templates/lane-prompts.md
 
+# --------------------------------------- 0.5.0: a self-route it can no longer load
+#
+# 0.5.0 is the first release whose own `spoolway init` scaffolded a step that
+# routes back to its own id: `checks`, whose `on_fail` names `checks`. Both
+# shipped pipelines carry it. A step may not do that any more — `Pipeline::
+# validate` refuses it at load, naming the step and the key — and that
+# refusal was landed with no migration on purpose: a project carrying a
+# self-route is refused, and its owner edits the file.
+#
+# That decision is exactly the kind this suite exists to price before a tag,
+# because it is invisible everywhere else. `init` and `sync` both run to
+# completion against such a project and report nothing wrong: `sync` swaps
+# the generated key block and copies every byte around it through unread, so
+# the self-routing step comes back untouched. The project is only refused the
+# next time something loads a pipeline. No unit test reaches this — it needs
+# a whole `.spoolway/` tree a past release really wrote, upgraded in place.
+#
+# So what is asserted here is the break itself, deliberately: that the
+# upgrade succeeds, that the refusal then names the step the owner has to
+# edit, and that editing it is enough. If a migration is ever written, this
+# section is what should go red.
+stage 0.5.0
+assert_init_reused_everything 0.5.0
+PIPELINE=".spoolway/pipelines/default.yml"
+cp "$PIPELINE" "$WORK/0.5.0/before-default.yml"
+has "the 0.5.0 fixture really does carry that release's own self-routing checks step" \
+  "    on_fail: checks" "$WORK/0.5.0/before-default.yml"
+
+must "spoolway sync runs against the 0.5.0 project" "$SPOOLWAY" sync
+
+has "the housekeeping value already in place survives the sync" \
+  "retention_days = 45" .spoolway/config.toml
+byte_for_byte_outside_block "the prose around the refreshed block came back byte for byte" \
+  "$WORK/0.5.0/before-default.yml" "$PIPELINE"
+
+# The upgrade reports nothing wrong, and leaves the step it can no longer
+# load exactly where it found it. Asserted rather than assumed: if `sync`
+# ever does start rewriting steps, the two assertions below are the ones
+# that should say so first.
+has "sync leaves the self-routing step exactly where it found it" \
+  "    on_fail: checks" "$PIPELINE"
+has "and leaves the second pipeline's copy of it alone too" \
+  "    on_fail: checks" .spoolway/pipelines/bugfix.yml
+
+refuses "a fully upgraded 0.5.0 project is then refused at load" \
+  "may not route back to its own id" \
+  "$SPOOLWAY" pipeline check
+refuses "and the refusal names the step whose file the owner has to edit" \
+  "step .checks." \
+  "$SPOOLWAY" pipeline check
+
+# The edit the message asks for, made to the staged copy — never to the
+# fixture, which is a record of what 0.5.0 really wrote. Deleting the
+# `on_fail` alone is not the whole fix: the `loop:` map that bounded the
+# self-route then names a route the step no longer has, and is refused in
+# its turn. Worth having on the record, because the refusal names only the
+# first of the two edits.
+sed -i '/^    on_fail: checks$/d' "$PIPELINE" .spoolway/pipelines/bugfix.yml
+refuses "deleting the self-route alone leaves the loop that bounded it behind" \
+  "sets .loop. for moves to .checks., but it never routes to .checks." \
+  "$SPOOLWAY" pipeline check
+
+sed -i '/^    loop:$/{N;/\n      checks: 3$/d}' "$PIPELINE" .spoolway/pipelines/bugfix.yml
+silent_about "deleting that loop as well is the whole of the fix" \
+  "may not route back to its own id" \
+  "$SPOOLWAY" pipeline check
+silent_about "and the loop it bounded is settled with it" \
+  "but it never routes to" \
+  "$SPOOLWAY" pipeline check
+
+# The positive half of the two above, which on their own only prove an
+# absence. `pipeline check` reaches its per-step model checks only once every
+# pipeline in the directory has loaded, so being told about a missing `model:`
+# is proof the routing was accepted. The fixture configures no agents, so that
+# is the complaint left standing here, and it is the same one every other
+# fixture in this suite would draw.
+says "the pipelines load far enough for the per-step checks to run at all" \
+  "names no model" \
+  "$SPOOLWAY" pipeline check
+
 finish

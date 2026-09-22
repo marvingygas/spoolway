@@ -427,16 +427,6 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         // errored outright never sets this: a transient failure should cost
         // one wait, not be retried with no pause at all.
         let mut worked = false;
-        // Whether this pass just routed a task back to the step it left —
-        // see `dispatch::Report::self_route`. `skip_wait` already keeps such
-        // a pass from skipping the wait outright, but the wait itself used
-        // to wake early anyway: a command step's own exit is a `Commands`
-        // change, so the retry this pass just queued would relaunch,
-        // finish, and be noticed the moment its own exit file landed —
-        // often inside the same second — defeating the wait `skip_wait` was
-        // there to guarantee. Read below to hold that one wait to its full
-        // interval regardless of what the watch sees.
-        let mut just_self_routed = false;
 
         // The callback a pass calls between its own units of work — see
         // `Dispatcher::pass`. Draining whatever is already on stdin
@@ -490,7 +480,6 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         match pass_result {
             Ok(report) => {
                 worked = skip_wait(&report, consecutive_working);
-                just_self_routed = report.self_route;
                 // The ceiling drains rather than kills: the run is over, but not
                 // until whatever is mid-turn has had its chance to report. A
                 // lane torn down halfway spent its tokens and produced nothing.
@@ -681,12 +670,8 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
                         // spin through the rest of its interval, drawing a
                         // full frame — and asking the multiplexer for its
                         // lane list — as fast as the terminal would take it.
-                        // Testing `just_self_routed` before the drain rather
-                        // than after is exactly that bug, because `&&`
-                        // short-circuits.
                         let changed = watch.drain();
-                        if !just_self_routed && changed.contains(&crate::screen::Changed::Commands)
-                        {
+                        if changed.contains(&crate::screen::Changed::Commands) {
                             break 'wait;
                         }
                     }
@@ -712,10 +697,7 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
                         continue;
                     };
                     let ready = crate::screen::poll_ready(&[watch.fd()], left);
-                    if !just_self_routed
-                        && ready[0]
-                        && watch.drain().contains(&crate::screen::Changed::Commands)
-                    {
+                    if ready[0] && watch.drain().contains(&crate::screen::Changed::Commands) {
                         break;
                     }
                 }

@@ -1325,6 +1325,30 @@ impl Pipeline {
             }
         }
 
+        // A step may not name itself as where its own `on_pass`, `on_fail`
+        // or `on_loop_max` leads. That shape used to be legal as long as
+        // `loop:` bounded the lap — `Report::self_route` and
+        // `just_self_routed` existed only to keep such a pass from spinning
+        // the dispatcher's wait loop. Refusing the route outright at load
+        // retires all of that: a retry now has to go through a step that
+        // actually leaves, or not happen at all.
+        for step in &self.steps {
+            for (key, target) in [
+                ("on_pass", step.on_pass.as_deref()),
+                ("on_fail", step.on_fail.as_deref()),
+                ("on_loop_max", step.on_loop_max.as_deref()),
+            ] {
+                if target == Some(step.id.as_str()) {
+                    bail!(
+                        "step `{}`: `{key}` names `{}` itself — a step may not route back to \
+                         its own id. Send the failure to a step that leaves, or delete the step.",
+                        step.id,
+                        step.id
+                    );
+                }
+            }
+        }
+
         // A `session:` step's conversation is keyed on its prompt — every
         // step in this pipeline running that prompt is the same
         // conversation — so two `session:` steps that resolve to the same
@@ -2655,6 +2679,37 @@ mod tests {
         }
     }
 
+    /// A step may not name itself as where its own `on_pass`, `on_fail` or
+    /// `on_loop_max` leads — the shape a bounded retry used to be built on,
+    /// now refused outright at load rather than raced by the dispatcher's
+    /// wait loop.
+    #[test]
+    fn a_step_may_not_route_back_to_its_own_id() {
+        let cases: &[(&str, &str)] = &[
+            ("on_pass: a\n", "on_pass"),
+            ("on_pass: z\n    on_fail: a\n", "on_fail"),
+            (
+                "on_pass: z\n    loop: 2\n    on_loop_max: a\n",
+                "on_loop_max",
+            ),
+        ];
+        for (keys, key) in cases {
+            let err = parse(&format!(
+                "steps:\n  - id: a\n    agent: pi\n    {keys}  \
+                 - id: z\n    end: true\n"
+            ))
+            .unwrap_err();
+            let message = err.to_string();
+            assert!(message.contains("step `a`"), "{key}: {message}");
+            assert!(message.contains(&format!("`{key}`")), "{key}: {message}");
+            assert!(message.contains("names `a` itself"), "{key}: {message}");
+            assert!(
+                message.contains("may not route back to its own id"),
+                "{key}: {message}"
+            );
+        }
+    }
+
     /// `blocked` is exempt from the on_pass-required check every other agent
     /// step is held to, and from the unbounded-loop check — it has no
     /// declared destinations at all, so it cannot self-edge into one.
@@ -3190,13 +3245,17 @@ mod tests {
         assert!(err.to_string().contains("unknown step `nowhere`"));
     }
 
-    /// A step that only ever routes to itself. Both routes are explicit, so it
-    /// never falls through to the reserved `blocked` either — which is the one
-    /// way a graph can still strand a task now that both endings are built in.
+    /// Two steps that only ever route to each other. Both routes are
+    /// explicit on both, so neither ever falls through to the reserved
+    /// `blocked` either — which is the one way a graph can still strand a
+    /// task now that both endings are built in.
     #[test]
     fn rejects_a_cycle_with_no_way_out() {
-        let err = parse("steps:\n  - id: a\n    agent: pi\n    on_pass: a\n    on_fail: a\n")
-            .unwrap_err();
+        let err = parse(
+            "steps:\n  - id: a\n    agent: pi\n    on_pass: b\n    on_fail: b\n  \
+             - id: b\n    agent: pi\n    on_pass: a\n    on_fail: a\n",
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("can never reach a terminal step"),
             "{err}"
@@ -3346,7 +3405,7 @@ mod tests {
     #[test]
     fn on_loop_max_must_name_a_real_step_and_answer_for_a_budget() {
         let unknown = parse(
-            "steps:\n  - id: a\n    agent: pi\n    on_pass: z\n    on_fail: a\n    \
+            "steps:\n  - id: a\n    agent: pi\n    on_pass: z\n    on_fail: z\n    \
              loop: 2\n    on_loop_max: nowhere\n  - id: z\n    end: true\n",
         )
         .unwrap_err()

@@ -127,6 +127,10 @@ pipeline picks the destination.
 | `done` | The task finishes. |
 | `blocked` | The task parks for a person, or for the unblocker in an unattended run. |
 
+A step never names its own id in `on_pass`, `on_fail` or `on_loop_max` — a lap goes through
+another step or not at all. `spoolway pipeline check` refuses a file that tries it, naming the
+step and the key.
+
 ### Loops
 
 `loop` counts arrivals at this step from a given step. Put it on the step that sends work
@@ -244,6 +248,8 @@ A build, a test suite, a formatter or a deploy script is a command step.
   the dispatcher.
 - Exit code zero takes `on_pass`. Anything else takes `on_fail`. Running out of `timeout` is a
   failure, and the whole process group is killed. `timeout: 0s` is refused.
+- A `run:` means one thing by each exit code. A command that answers the same code for two
+  different outcomes cannot be routed on, and fixing that is the command's job, not spoolway's.
 - `prompt`, `model`, `effort`, `session` and `gate` are refused. The step takes no slot.
 - Output goes to `<task> · <step>.log` under the project's home.
 - Other tasks keep moving while the command runs.

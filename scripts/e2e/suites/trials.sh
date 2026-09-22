@@ -57,12 +57,17 @@ pending_doc beta "$BODY" "group: audits" "touches: [src/main.rs]" "pipeline:" \
 # instead — one press to the same first-sorting `bugfix`, a second to cycle
 # past it. `enter` then advances to the skips screen. There the flattened
 # cursor opens on `alpha`'s first checkbox: one `j` reaches its second,
-# `fix`, and `space` ticks it; nine more `j`s walk past the rest of
+# `fix`, and `space` ticks it; eight more `j`s walk past the rest of
 # `alpha`'s own checkboxes onto `beta`'s third one, `document`, and `space`
-# ticks that too. `enter` mints and writes both arms and reaches the
-# overview; the trailing `n` is noise the overview ignores, and the pipe
-# running dry after it declines the same way `esc` would.
-printf '\tt\x1b[Dj\x1b[C\x1b[C\rj jjjjjjjjj \rn' | "$SPOOLWAY" queue >/dev/null 2>&1
+# ticks that too. Both runs are counted off the flattened checkbox list, so
+# they have to be recounted whenever either built-in pipeline gains or
+# loses a step. `alpha` contributes seven checkboxes, not the six steps
+# `bugfix` declares, because every pipeline is loaded with a `blocked` step
+# appended to it; `beta` contributes five the same way. `enter` mints and
+# writes both arms and reaches the overview; the trailing `n` is noise the
+# overview ignores, and the pipe running dry after it declines the same way
+# `esc` would.
+printf '\tt\x1b[Dj\x1b[C\x1b[C\rj jjjjjjjj \rn' | "$SPOOLWAY" queue >/dev/null 2>&1
 
 works "the alpha arm reaches the queue" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/alpha-1.md"
