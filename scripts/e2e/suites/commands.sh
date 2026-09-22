@@ -315,6 +315,17 @@ printf '#!/bin/sh\necho mine\n' > "$HOOK"
 must "sync runs over the tracker project" env -C "$INITDIR/github" "$SPOOLWAY" sync
 has "the hook this project edited is exactly as it left it" "echo mine" "$HOOK"
 
+# A second sync right after has nothing left to do — the project's own hook
+# is untouched by the first sync, so this scan writes and removes nothing.
+# Claiming files were overwritten here is a lie the moment anyone runs
+# `git status`.
+says "an empty sync says so honestly" \
+  "Nothing updating." \
+  env -C "$INITDIR/github" "$SPOOLWAY" sync
+silent_about "and does not claim files were overwritten" \
+  "Files were overwritten" \
+  env -C "$INITDIR/github" "$SPOOLWAY" sync
+
 # `--replace` takes the whole shipped hook back — and must leave it
 # executable, the same as `init` did, even though `write_atomic` itself has
 # no opinion about permissions (issue #331).
