@@ -697,41 +697,38 @@ impl Style {
     }
 }
 
-/// What one group has finished: every ledger entry banked against a task the
-/// board draws as [`State::Done`], grouped by the ledger's own `plan` field,
-/// which carries a task's `group:` verbatim. A row's OUT, COST and TIME are
-/// the step it is on; a total is what the group has already landed — every
-/// finished task, every step, every round it ran.
+/// What one group has banked: every ledger entry for a task the board is
+/// drawing, grouped by the ledger's own `plan` field, which carries a task's
+/// `group:` verbatim. A row's OUT, COST and TIME are the step it is on; a
+/// total is what the group has already banked — every settled step, every
+/// round it ran, whether or not its task has since reached `done`. The ledger
+/// only ever gains a line once a lane settles (see the module doc on
+/// `usage.rs`), so every entry here is already banked spend, never a running
+/// step's live figures.
 ///
-/// Nothing in flight counts. A total used to add each row's unbanked spend on
-/// top so it could never read smaller than the running row printed above it,
-/// and that made it a second copy of that row, climbing in step with it. A
-/// total is for watching a group's bill accumulate as tasks land, so it may
-/// well read lower than the row above it, and a group with nothing finished
-/// has no figures at all.
+/// A total used to add each row's unbanked spend on top so it could never
+/// read smaller than the running row printed above it, and that made it a
+/// second copy of that row, climbing in step with it. A total is for
+/// watching a group's bill accumulate as steps settle, so it may well read
+/// lower than the row above it, and a group with nothing banked has no
+/// figures at all.
 pub(super) struct GroupTotal {
     out: Option<u64>,
     cost: Option<f64>,
     lane_time: Option<i64>,
 }
 
-/// Every group with a finished task on the board, summed. Groups with
-/// nothing done — including one whose lanes are all still running — simply
-/// have no total to print, which [`table`] reads the same as any other empty
-/// figure.
+/// Every group with a banked step on the board, summed. Groups with nothing
+/// banked — including one whose lanes are all still running — simply have no
+/// total to print, which [`table`] reads the same as any other empty figure.
 pub(super) fn group_totals(
     ledger: &[crate::usage::Entry],
     rows: &[Row],
 ) -> BTreeMap<String, GroupTotal> {
-    // The tasks whose spend has landed. `rows` is the composed list the board
-    // draws — its live queue plus the archived rows beside it — so a task
-    // that has finished is here carrying `State::Done`, and one still in
-    // flight is here carrying anything else.
-    let finished: BTreeSet<&str> = rows
-        .iter()
-        .filter(|row| row.state == State::Done)
-        .map(|row| row.id.as_str())
-        .collect();
+    // The tasks the board is drawing at all — its live queue plus the
+    // archived rows beside it. A ledger entry for a task not here belongs to
+    // no row this board prints, so it is not this board's business either.
+    let visible: BTreeSet<&str> = rows.iter().map(|row| row.id.as_str()).collect();
     let mut groups: BTreeSet<String> = BTreeSet::new();
     let mut out: BTreeMap<String, u64> = BTreeMap::new();
     let mut cost: BTreeMap<String, f64> = BTreeMap::new();
@@ -740,11 +737,10 @@ pub(super) fn group_totals(
         // `entry.plan` is the ledger's own field name — it carries a task's
         // `group:` verbatim.
         let Some(group) = &entry.plan else { continue };
-        // A step of a task that has not finished is spend the group has not
-        // landed yet, however many rounds of it the ledger already holds —
-        // see [`GroupTotal`]. A task the board is not drawing at all is not
-        // this board's business either, so it is left out by the same test.
-        if !finished.contains(entry.task.as_str()) {
+        // A ledger line only exists once its lane has settled — see
+        // [`GroupTotal`] — so the one thing left to rule out is a task this
+        // board is not drawing at all.
+        if !visible.contains(entry.task.as_str()) {
             continue;
         }
         groups.insert(group.clone());
@@ -1791,9 +1787,9 @@ mod tests {
         all.extend(done_rows(&repo, &pipelines, &active_groups).unwrap());
         all.sort_by(|a, b| a.key().cmp(&b.key()));
 
-        // Banked against `signup`, the archived row: a total counts what a
-        // group has finished, so a ledger line for the live `login` row
-        // would close the group with nothing at all.
+        // Banked against `signup`, which appears here only as its archived
+        // row in `all` (from `done_rows`, folded in above) — not among the
+        // live queue's own rows.
         let mut entry = banked("signup", "implement", "s1", Some(1.25));
         entry.plan = Some("auth".into());
         entry.wall_s = 42;
@@ -1946,14 +1942,14 @@ mod tests {
         assert_eq!(strip_ansi(&band), "   ▌proj-12-auth-rework");
     }
 
-    /// A group's total counts the tasks that have finished, and nothing that
-    /// is still in flight. The total used to add every running lane's
-    /// unbanked spend on top of the ledger, which turned it into a second
-    /// copy of the running row, climbing in step with it. A settled step of a
-    /// task that has not finished does not count either — the ledger holds
-    /// it, but the group has not landed it.
+    /// A group's total counts a settled step the moment it banks, whether or
+    /// not the task it belongs to has finished — and never a running row's
+    /// unbanked spend. The total used to add every running lane's unbanked
+    /// spend on top of the ledger, which turned it into a second copy of the
+    /// running row, climbing in step with it; a task later reaching `done`
+    /// must not bank its already-counted step a second time.
     #[test]
-    fn the_total_line_counts_only_tasks_that_have_finished() {
+    fn the_total_line_counts_settled_steps_not_running_ones() {
         let mut entry = banked("login", "implement", "s1", Some(1.25));
         entry.plan = Some("auth".into());
         entry.wall_s = 42;
@@ -1984,16 +1980,21 @@ mod tests {
         let rows = vec![running, parked];
 
         let totals = group_totals(&[entry.clone()], &rows);
-        assert!(
-            !totals.contains_key("auth"),
-            "nothing in `auth` has finished — {totals:?}",
-            totals = totals.keys().collect::<Vec<_>>()
-        );
+        let auth = totals
+            .get("auth")
+            .expect("the settled `implement` step should have banked into `auth`");
+        assert_eq!(auth.out, Some(500));
+        assert_eq!(auth.cost, Some(1.25));
+        assert_eq!(auth.lane_time, Some(42));
+
+        // `checkout`'s running spend never lands: $9.75 unbanked plus $1.25
+        // banked would print as $11.00.
         let board = strip(&table(&rows, Style::board(200), &totals, None));
         assert!(!board.contains("$11.00"), "{board}");
+        assert!(board.contains("$1.25"), "{board}");
 
-        // The same board once `login` finishes: its banked step, and only
-        // that, closes the group.
+        // The same board once `login` finishes too: the ledger is unchanged,
+        // so the banked step's figures must not be counted twice.
         let done = Row {
             state: State::Done,
             ..rows.into_iter().nth(1).expect("the parked row")
@@ -2017,6 +2018,74 @@ mod tests {
 
         let board = strip(&table(&rows, Style::board(200), &totals, None));
         assert!(board.contains("$1.25"), "{board}");
+    }
+
+    /// A step settles into the ledger the moment it is banked, whether or
+    /// not the task it belongs to has finished. The group total must land
+    /// that step's figures right away, not wait for the whole task to reach
+    /// `done` — a task still parked on its next step already has spend the
+    /// group has landed.
+    #[test]
+    fn a_settled_step_banks_into_the_group_total_before_the_task_finishes() {
+        let mut entry = banked("login", "implement", "s1", Some(1.25));
+        entry.plan = Some("auth".into());
+        entry.wall_s = 42;
+        entry.tokens.output = 500;
+
+        let parked = Row {
+            group: Some("auth".into()),
+            state: State::Paused,
+            out: Some(500),
+            cost: Some(1.25),
+            lane_time: Some(42),
+            next: "→ review".into(),
+            ..row("login")
+        };
+        let rows = vec![parked];
+
+        let totals = group_totals(&[entry], &rows);
+        let auth = totals
+            .get("auth")
+            .expect("the settled `implement` step should have banked into `auth`");
+        assert_eq!(auth.out, Some(500));
+        assert_eq!(auth.cost, Some(1.25));
+        assert_eq!(auth.lane_time, Some(42));
+    }
+
+    /// Every banked entry for a group adds to its total exactly once,
+    /// whether it is a second arrival at a step already counted — a loop
+    /// round — or a later step entirely.
+    #[test]
+    fn every_banked_entry_adds_to_the_group_total_once() {
+        let mut first_pass = banked("login", "implement", "s1", Some(1.25));
+        first_pass.plan = Some("auth".into());
+        first_pass.wall_s = 42;
+        first_pass.tokens.output = 500;
+
+        // A loop sent `login` back to `implement`, which banked again under
+        // a fresh session.
+        let mut second_pass = banked("login", "implement", "s2", Some(0.50));
+        second_pass.plan = Some("auth".into());
+        second_pass.wall_s = 18;
+        second_pass.tokens.output = 200;
+
+        // `login` then settled its next step too.
+        let mut review = banked("login", "review", "s3", Some(2.00));
+        review.plan = Some("auth".into());
+        review.wall_s = 30;
+        review.tokens.output = 300;
+
+        let rows = vec![Row {
+            group: Some("auth".into()),
+            state: State::Paused,
+            ..row("login")
+        }];
+
+        let totals = group_totals(&[first_pass, second_pass, review], &rows);
+        let auth = totals.get("auth").expect("no total for `auth`");
+        assert_eq!(auth.out, Some(500 + 200 + 300));
+        assert_eq!(auth.cost, Some(1.25 + 0.50 + 2.00));
+        assert_eq!(auth.lane_time, Some(42 + 18 + 30));
     }
 
     /// `queue list` marks a declared-parallel task within its group, so a

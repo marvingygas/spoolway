@@ -154,6 +154,10 @@ such passes in a row eventually waits anyway.
 <img src="screenshots/dispatch.png" alt="the dispatcher board">
 
 Rows are grouped by `group:`. A `▌<group>` line opens each block, and a total line closes it.
+The total is the group's banked spend: every step that has settled, across every task in the
+group, added up as soon as each one banks. It does not include a running step's unbanked
+figures, so it can read lower than the row above it. A group with nothing banked yet closes
+with no figures at all.
 When the group has an issue behind it, the group name is a link to that issue. A `∥` after a
 task id marks `parallel: true`.
 
