@@ -120,6 +120,11 @@ const KEPT: &str =
 /// above it are what a sync *would* take, and nothing was touched.
 const DRY_RUN: &str = "Dry run: nothing was written. Run without --dry-run to take it.";
 
+/// What a non-dry sync says when the scan wrote or removed nothing: `KEPT`
+/// talks about files being overwritten, which is false when there were none
+/// to overwrite and reads as the tool lying about having touched the tree.
+const NOOP: &str = "Nothing updating.";
+
 pub fn run(repo: &Repo, args: &SyncArgs, json: bool) -> Result<()> {
     if !args.replace.is_empty() {
         return replace(repo, args);
@@ -156,9 +161,10 @@ pub fn run(repo: &Repo, args: &SyncArgs, json: bool) -> Result<()> {
     }
 
     println!();
-    match args.dry_run {
-        true => println!("{DRY_RUN}"),
-        false => println!("{KEPT}"),
+    match (args.dry_run, wrote.is_empty() && removed.is_empty()) {
+        (true, _) => println!("{DRY_RUN}"),
+        (false, true) => println!("{NOOP}"),
+        (false, false) => println!("{KEPT}"),
     }
 
     // Only once the write has actually happened: the stamp records what a
