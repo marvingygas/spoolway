@@ -708,7 +708,7 @@ else
 fi
 # Cleaned up the same way `bench` is, rather than left running into whatever
 # this suite does next — so `hold` is let go first, and the task still has
-# to walk review, document, handover and checks to reach `done` after that.
+# to walk review, document and handover to reach `done` after that.
 touch "$NO_SETSID_RELEASE"
 if [ -n "$NOSETSID_PID" ] && poll_while 300 test -d "/proc/$NOSETSID_PID"; then
   ok "and cleanup stops it once the task is done, same as any other background run"

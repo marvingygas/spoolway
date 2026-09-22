@@ -6620,24 +6620,24 @@ mod tests {
         assert!(queue_pause(&repo, &pipelines, "ghost", false).is_err());
     }
 
-    /// A task sitting on a real `Command`-kind step (`checks`, in the builtin
-    /// `default` pipeline) with a run genuinely in flight: `queue pause`
-    /// without `--force` refuses rather than stopping it out from under
-    /// whatever it was doing, and the run is left exactly as it was. With
-    /// `--force` it kills the run, the task still lands on `paused`, and a
-    /// second call to `state` — reading the pid file back off disk — proves
-    /// the process is actually gone, not just forgotten about.
+    /// A task sitting on a real `Command`-kind step (`handover`, in the
+    /// builtin `default` pipeline) with a run genuinely in flight: `queue
+    /// pause` without `--force` refuses rather than stopping it out from
+    /// under whatever it was doing, and the run is left exactly as it was.
+    /// With `--force` it kills the run, the task still lands on `paused`,
+    /// and a second call to `state` — reading the pid file back off disk —
+    /// proves the process is actually gone, not just forgotten about.
     #[test]
     fn queue_pause_refuses_a_running_command_step_without_force() {
         let repo = fixture("queue-pause-running");
         let pipelines = Pipelines::builtin();
         add(&repo, "solo", &[]);
         let mut task = queued(&repo, "solo");
-        task.set_stage_unbanked("checks", "test setup");
+        task.set_stage_unbanked("handover", "test setup");
         task.save().unwrap();
 
         let runs = crate::command_step::Runs::new(&repo.commands_dir());
-        let key = crate::command_step::Runs::key("checks", "solo");
+        let key = crate::command_step::Runs::key("handover", "solo");
         let sleep = "sleep 20";
         let pid = runs
             .start(&key, sleep, &repo.checkout, &BTreeMap::new())
@@ -6651,7 +6651,7 @@ mod tests {
         );
         assert_eq!(
             queued(&repo, "solo").stage(),
-            "checks",
+            "handover",
             "a refused pause must not have moved the task"
         );
         assert_eq!(
@@ -8494,7 +8494,7 @@ mod tests {
             .skip
             .entry(task_key(&group.tasks[0]))
             .or_default()
-            .insert("checks".to_string());
+            .insert("handover".to_string());
 
         let panel = trial_panel(
             &groups,
@@ -8508,8 +8508,8 @@ mod tests {
         assert!(flat.contains("choose steps to skip"), "{flat}");
         assert!(flat.contains("alpha · bugfix"), "{flat}");
         assert!(flat.contains("beta · default"), "{flat}");
-        assert!(flat.contains("[x] checks"), "{flat}");
-        // `beta`'s own `checks` — the same step id, a different task — is
+        assert!(flat.contains("[x] handover"), "{flat}");
+        // `beta`'s own `handover` — the same step id, a different task — is
         // never ticked by alpha's own skip set.
         assert_eq!(flat.matches("[x]").count(), 1, "{flat}");
         assert!(
@@ -9215,21 +9215,25 @@ mod tests {
         let groups = listed(&repo);
         let pipelines = Pipelines::builtin();
         let bugfix = pipelines.get("bugfix").unwrap();
-        let checks_at = bugfix.steps.iter().position(|s| s.id == "checks").unwrap();
+        let handover_at = bugfix
+            .steps
+            .iter()
+            .position(|s| s.id == "handover")
+            .unwrap();
 
         // `t` opens the picker straight from the groups pane — no `Tab`
         // needed, since the whole group forks regardless of which pane has
         // focus. One `→` cycles `solo`'s own assignment from the project
         // default to `bugfix` (the two builtin pipelines sort `bugfix`
-        // first), `enter` advances to the skip screen, `checks_at` more `↓`
-        // walks onto its last step, `space` ticks it, `enter` launches, `n`
-        // declines the dispatcher.
-        let keys = format!("t\x1b[C\r{} \rn", "\x1b[B".repeat(checks_at));
+        // first), `enter` advances to the skip screen, `handover_at` more
+        // `↓` walks onto its last step, `space` ticks it, `enter` launches,
+        // `n` declines the dispatcher.
+        let keys = format!("t\x1b[C\r{} \rn", "\x1b[B".repeat(handover_at));
         screen(&repo, groups, &keys);
 
         let arm = queued(&repo, "solo-1");
         assert_eq!(arm.front.pipeline.as_deref(), Some("bugfix"));
-        assert_eq!(arm.front.skip, vec!["checks".to_string()]);
+        assert_eq!(arm.front.skip, vec!["handover".to_string()]);
         assert_eq!(arm.front.group.as_deref(), Some("audits"));
         assert_eq!(arm.front.branch.as_deref(), Some("task/solo-1"));
         assert!(

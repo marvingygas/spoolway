@@ -511,8 +511,8 @@ pub struct DispatchConfig {
     ///
     /// Ten seconds is not a stuck lane; it is a lane thinking. The case that
     /// forced this apart is an agent step that ends its turn and waits minutes
-    /// on a background job — a build, a suite, a `gh pr checks --watch` like the
-    /// shipped `checks` step's 45-minute one. A settled lane and a lane that
+    /// on a background job — a build, or the same 45-minute `scripts/gate.sh`
+    /// the shipped `test` step runs. A settled lane and a lane that
     /// forgot to report look identical from outside, so the only honest answer
     /// is to wait long enough that silence means something.
     ///
@@ -676,9 +676,10 @@ impl Default for DispatchConfig {
             // key entirely, which is not this.
             herdr_mode: MuxMode::Split,
             // Four of these (`MAX_REMINDERS` + 1) comfortably outlast the 45
-            // minutes the shipped `checks` step waits on `gh pr checks
-            // --watch`, so an agent step parked behind a long background job is
-            // never the thing this catches; a lane that is really dead still
+            // minutes the shipped pipelines allow their longest command —
+            // `scripts/gate.sh` and `scripts/e2e-pr.sh` both carry
+            // `timeout: 45m` — so an agent step running that same gate by hand
+            // is never the thing this catches; a lane that is really dead still
             // escalates, four of these later.
             lane_quiet: Duration::from_secs(15 * 60),
             lane_child_ceiling: Duration::from_secs(3600),

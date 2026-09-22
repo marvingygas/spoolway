@@ -56,11 +56,7 @@ steps:
     effort: high
     session: true
     gate: true
-    loop:
-      notes: 2
-    on_loop_max: blocked
     on_pass: publish
-    on_fail: notes
 
   - id: publish
     description: Commit the section with the version bump, rehearse, tag, publish, and verify the published body against it.

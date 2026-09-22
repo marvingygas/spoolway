@@ -546,8 +546,8 @@ pub struct Step {
     /// command step used to run.
     ///
     /// `false`, the default, gives the command a pane of its own — split off
-    /// the task's own tab, under the herdr backend — so a suite or
-    /// a `gh pr checks --watch` is something a person can look at while it
+    /// the task's own tab, under the herdr backend — so a long suite like
+    /// `scripts/e2e-pr.sh` is something a person can look at while it
     /// runs. A backend with no pane to offer, headless, runs it detached
     /// either way: this key only ever turns a pane *off*, never demands one
     /// a backend cannot give.
@@ -2411,21 +2411,19 @@ mod tests {
     }
 
     /// Both shipped pipelines end the same way, and end unconditionally: every
-    /// task documents its own diff, hands it over, then waits for its checks
-    /// — the wait a lane used to do itself, in prose no prompt carries any
-    /// more. `checks` is the last step either one runs. `land` is not a step
-    /// any more, and nothing in a pipeline decides whether a step runs.
+    /// task documents its own diff, then hands it over. `handover` is the
+    /// last step either one runs — there is no `checks` step waiting behind
+    /// it any more, since `gh pr checks --watch --fail-fast`'s exit code
+    /// cannot tell a red build from GitHub not having registered a check yet,
+    /// and that is not a thing spoolway tries to route on. A red build after
+    /// handover is a person's to pick up. `land` is not a step any more, and
+    /// nothing in a pipeline decides whether a step runs.
     ///
     /// `handover` is a command step — `run: spoolway stack`, no model and no
     /// rebase — and its failure routes straight to `blocked`: `spoolway
     /// stack` calls `gh pr view` first, so re-running `handover` from
     /// `blocked` is safe and there is no second, LLM-run escalation step to
-    /// fall back to any more. `checks` instead routes a failure back to
-    /// itself, bounded at 3 — `gh pr checks --watch --fail-fast` answers "no
-    /// checks reported" outright when `handover` just opened the pull
-    /// request a moment too soon for GitHub to have registered one yet, and
-    /// a bounded retry a poll interval apart is what lets that registration
-    /// catch up. See `crate::dispatch::skip_wait`.
+    /// fall back to any more.
     // covers: step.end — a terminal step is where a pipeline stops, and every route has to reach one
     #[test]
     fn both_pipelines_end_at_document_then_handover() {
@@ -2434,6 +2432,10 @@ mod tests {
             assert!(
                 pipeline.step("land").is_none(),
                 "pipeline `{name}` still has a `land` step"
+            );
+            assert!(
+                pipeline.step("checks").is_none(),
+                "pipeline `{name}` still has a `checks` step"
             );
             let document = pipeline.step("document").expect("`document`");
             assert_eq!(
@@ -2446,11 +2448,7 @@ mod tests {
                 handover.agent.is_none() && handover.run.is_some(),
                 "pipeline `{name}`: `handover` should be a command step running `spoolway stack`"
             );
-            assert_eq!(
-                handover.on_pass.as_deref(),
-                Some("checks"),
-                "pipeline `{name}`"
-            );
+            assert_eq!(handover.on_pass.as_deref(), Some(DONE), "pipeline `{name}`");
             // `on_fail` is absent, not `blocked`: that key is redundant with
             // no `on_fail` at all — see `Pipeline::redundant_on_fail_warnings`
             // — so the routing this test cares about is read from
@@ -2460,18 +2458,6 @@ mod tests {
                 Some(BLOCKED),
                 "pipeline `{name}`: a failed `spoolway stack` is a person's call, not \
                  another agent step"
-            );
-            let checks = pipeline.step("checks").expect("`checks`");
-            assert_eq!(checks.on_pass.as_deref(), Some(DONE), "pipeline `{name}`");
-            assert_eq!(
-                checks.destination(Outcome::Fail),
-                Some("checks"),
-                "pipeline `{name}`: a red check retries against itself before falling through"
-            );
-            assert_eq!(
-                checks.round_limit("checks"),
-                Some(3),
-                "pipeline `{name}`: the self-route is bounded"
             );
         }
     }
@@ -2560,9 +2546,8 @@ mod tests {
         assert_eq!(pipeline.next_running_step("implement"), Some("review"));
         assert_eq!(pipeline.next_running_step("review"), Some("document"));
         assert_eq!(pipeline.next_running_step("document"), Some("handover"));
-        assert_eq!(pipeline.next_running_step("handover"), Some("checks"));
-        // `checks` is the last thing that runs — `done` is not a step.
-        assert_eq!(pipeline.next_running_step("checks"), None);
+        // `handover` is the last thing that runs — `done` is not a step.
+        assert_eq!(pipeline.next_running_step("handover"), None);
         assert_eq!(pipeline.next_running_step("nowhere"), None);
     }
 

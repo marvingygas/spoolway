@@ -357,8 +357,9 @@ Every agent step ships with a blank `model` and `effort`. `spoolway init` rewrit
 claude` to the profile you pick. Fill in the models before the first run.
 
 This repository's own `.spoolway/pipelines/impl.yml` adds an end-to-end step, a `test` command
-step and a `suite` step with `last: true`. Every pipeline that opens a pull request then waits
-on its hosted checks. See [Local gates and daily CI](testing.md#local-gates-and-daily-ci).
+step and a `suite` step with `last: true`. No pipeline waits on a pull request's hosted checks;
+`handover` opens it and the task is done. See
+[Local gates and daily CI](testing.md#local-gates-and-daily-ci).
 
 `.spoolway/pipelines/impl_lite.yml` sits between `impl` and `impl_fast`: it keeps `review`,
 `test` and `suite`, but `test` runs `scripts/gate-quick.sh` instead of `scripts/gate.sh`, and

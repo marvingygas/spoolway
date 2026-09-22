@@ -3466,8 +3466,8 @@ mod tests {
     fn a_command_step_reads_as_running_while_its_own_run_is_in_flight() {
         let repo = fixture("command-step-running");
         let pipelines = Pipelines::builtin();
-        // `checks` is the default pipeline's command step.
-        add(&repo, "login", &[], Some("checks"));
+        // `handover` is the default pipeline's command step.
+        add(&repo, "login", &[], Some("handover"));
 
         let tasks = repo.tasks().unwrap();
         let graph = Graph::build(&tasks, &pipelines, &repo.archive_dir());
@@ -3482,7 +3482,7 @@ mod tests {
         // The wrapper's own two files as `Runs::start` leaves them: a pid that
         // is alive — this test's own — and no exit code written yet.
         let runs = crate::command_step::Runs::new(&repo.commands_dir());
-        let key = crate::command_step::Runs::key("checks", "login");
+        let key = crate::command_step::Runs::key("handover", "login");
         let dir = runs.log_path(&key).parent().unwrap().to_path_buf();
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
@@ -3916,9 +3916,9 @@ mod tests {
         // Nothing holds this task back — no dependency, no lane of its own —
         // so the resume key is offered, key first, then the command that
         // does the same thing, and the step passing the gate would carry it
-        // to, `checks`.
+        // to, `done` — `handover` is the last step in the pipeline now.
         assert!(row.resumable);
-        assert_eq!(row.next, "[r] → checks — `spoolway resume ship`");
+        assert_eq!(row.next, "[r] → done — `spoolway resume ship`");
     }
 
     /// Keeps only [`RECENT`] of them, oldest first out — each its own task, so
@@ -4605,11 +4605,11 @@ mod tests {
     fn pressing_shift_p_with_a_command_step_running_opens_a_kill_or_leave_panel() {
         let repo = fixture("pause-command-step");
         let pipelines = Pipelines::builtin();
-        // `checks` is the default pipeline's command step.
-        add(&repo, "login", &[], Some("checks"));
+        // `handover` is the default pipeline's command step.
+        add(&repo, "login", &[], Some("handover"));
 
         let runs = crate::command_step::Runs::new(&repo.commands_dir());
-        let key = crate::command_step::Runs::key("checks", "login");
+        let key = crate::command_step::Runs::key("handover", "login");
         runs.start(&key, "sleep 30", &repo.root, &BTreeMap::new())
             .unwrap();
 
@@ -4619,7 +4619,7 @@ mod tests {
             .unwrap();
         let frame = strip(&board.frame(&repo, &pipelines, Phase::Waiting).unwrap());
         assert!(frame.contains("pause all"), "{frame}");
-        assert!(frame.contains("login · checks"), "{frame}");
+        assert!(frame.contains("login · handover"), "{frame}");
         assert!(frame.contains("command"), "{frame}");
 
         // Declining: nothing about the run or the task changes.
@@ -4627,7 +4627,7 @@ mod tests {
             .on_key(&repo, &pipelines, crate::screen::Key::Esc)
             .unwrap();
         assert_eq!(runs.state(&key), crate::command_step::RunState::Running);
-        assert_eq!(repo.task("login").unwrap().stage(), "checks");
+        assert_eq!(repo.task("login").unwrap().stage(), "handover");
 
         // Asking again and confirming this time kills the run and parks the
         // task on `parked_from`, the same record an interrupt leaves.
@@ -4640,7 +4640,7 @@ mod tests {
         assert_ne!(runs.state(&key), crate::command_step::RunState::Running);
         let task = repo.task("login").unwrap();
         assert_eq!(task.stage(), crate::pipeline::PAUSED);
-        assert_eq!(task.front.parked_from.as_deref(), Some("checks"));
+        assert_eq!(task.front.parked_from.as_deref(), Some("handover"));
         assert_eq!(task.front.blocked_from, None);
         assert_eq!(task.front.paused_at, None);
 
@@ -4654,12 +4654,12 @@ mod tests {
     fn pressing_p_on_the_cursor_with_a_command_step_running_opens_a_panel_scoped_to_it() {
         let repo = fixture("pause-cursor-command-step");
         let pipelines = Pipelines::builtin();
-        // `checks` is the default pipeline's command step.
-        add(&repo, "login", &[], Some("checks"));
+        // `handover` is the default pipeline's command step.
+        add(&repo, "login", &[], Some("handover"));
         add(&repo, "other", &[], Some("implement"));
 
         let runs = crate::command_step::Runs::new(&repo.commands_dir());
-        let key = crate::command_step::Runs::key("checks", "login");
+        let key = crate::command_step::Runs::key("handover", "login");
         runs.start(&key, "sleep 30", &repo.root, &BTreeMap::new())
             .unwrap();
 
@@ -4674,7 +4674,7 @@ mod tests {
         let frame = strip(&board.frame(&repo, &pipelines, Phase::Waiting).unwrap());
         assert!(frame.contains("pause login"), "{frame}");
         assert!(!frame.contains("pause all"), "{frame}");
-        assert!(frame.contains("checks"), "{frame}");
+        assert!(frame.contains("handover"), "{frame}");
         assert!(frame.contains("command"), "{frame}");
         assert!(frame.contains("[enter] pause it"), "{frame}");
 
@@ -4684,7 +4684,7 @@ mod tests {
         assert_ne!(runs.state(&key), crate::command_step::RunState::Running);
         let task = repo.task("login").unwrap();
         assert_eq!(task.stage(), crate::pipeline::PAUSED);
-        assert_eq!(task.front.parked_from.as_deref(), Some("checks"));
+        assert_eq!(task.front.parked_from.as_deref(), Some("handover"));
 
         // The other task never entered the picture.
         assert_eq!(repo.task("other").unwrap().stage(), "implement");
@@ -4875,11 +4875,11 @@ mod tests {
     fn pressing_s_on_shift_p_schedules_the_live_task_and_parks_the_rest() {
         let repo = fixture("schedule-pause-all");
         let pipelines = Pipelines::builtin();
-        add(&repo, "login", &[], Some("checks"));
+        add(&repo, "login", &[], Some("handover"));
         add(&repo, "idle", &[], Some("implement"));
 
         let runs = crate::command_step::Runs::new(&repo.commands_dir());
-        let key = crate::command_step::Runs::key("checks", "login");
+        let key = crate::command_step::Runs::key("handover", "login");
         runs.start(&key, "sleep 30", &repo.root, &BTreeMap::new())
             .unwrap();
 
@@ -4894,8 +4894,8 @@ mod tests {
         assert!(matches!(board.mode, BoardMode::Browsing));
         assert_eq!(runs.state(&key), crate::command_step::RunState::Running);
         let login = repo.task("login").unwrap();
-        assert_eq!(login.stage(), "checks");
-        assert_eq!(login.front.gate_at.as_deref(), Some("checks"));
+        assert_eq!(login.stage(), "handover");
+        assert_eq!(login.front.gate_at.as_deref(), Some("handover"));
         assert_eq!(repo.task("idle").unwrap().stage(), crate::pipeline::PAUSED);
 
         runs.stop(&key);
@@ -5190,11 +5190,11 @@ mod tests {
     fn pressing_shift_p_with_one_live_and_one_idle_task_parks_both() {
         let repo = fixture("pause-all-mixed");
         let pipelines = Pipelines::builtin();
-        add(&repo, "login", &[], Some("checks"));
+        add(&repo, "login", &[], Some("handover"));
         add(&repo, "idle", &[], Some("implement"));
 
         let runs = crate::command_step::Runs::new(&repo.commands_dir());
-        let key = crate::command_step::Runs::key("checks", "login");
+        let key = crate::command_step::Runs::key("handover", "login");
         runs.start(&key, "sleep 30", &repo.root, &BTreeMap::new())
             .unwrap();
 
@@ -5203,7 +5203,7 @@ mod tests {
             .on_key(&repo, &pipelines, crate::screen::Key::Char('P'))
             .unwrap();
         let frame = strip(&board.frame(&repo, &pipelines, Phase::Waiting).unwrap());
-        assert!(frame.contains("login · checks"), "{frame}");
+        assert!(frame.contains("login · handover"), "{frame}");
         assert!(!frame.contains("more task"), "{frame}");
         assert!(!frame.contains("nothing"), "{frame}");
 

@@ -123,13 +123,4 @@ steps:
       `gh` — no model, no rebase. Nothing is merged here; a person lands it.
     run: spoolway stack
     headless: true
-    on_pass: checks
-
-  - id: checks
-    description: Wait for the pull request's checks, and fail if they are red.
-    run: gh pr checks --watch --fail-fast
-    timeout: 45m
-    loop:
-      checks: 3
     on_pass: done
-    on_fail: checks
