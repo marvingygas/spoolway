@@ -35,13 +35,13 @@ publish anything.
    section will need.
 7. Recommend a semver bump using the runbook's rule for major zero: changed user-facing shape
    means minor, while fixes and internals alone mean patch. Name each fact that controls the choice.
-8. Prove the version itself before the notes gate, not after it. Readiness tested `main`, where
+8. Prove the version itself before the notes step, not after it. Readiness tested `main`, where
    `Cargo.toml` still holds the *old* version, so nothing it ran has seen the number you just
    recommended. In a scratch copy of the checkout, write that version into `Cargo.toml` and
    `Cargo.lock`, run the runbook's local gate and `scripts/e2e/run.sh --suite upgrade`, and then
    throw the copy away. Anything that only goes red once the version moves — a test coupled to
    the manifest, a suite demanding `scripts/e2e/fixtures/<version>/` — is a `fail` for the fixer
-   now. Reaching `publish` before it is found costs a full lap and an owner's merge; three of the
+   now. Reaching the candidate step before it is found costs a full lap and another pull request; three of the
    four releases before this one paid it. Report the commands, the exit codes and the version you
    ran them at. Never leave the bump behind in the real checkout.
 9. Check that the release workflow still describes six platform binaries, seven npm packages, the

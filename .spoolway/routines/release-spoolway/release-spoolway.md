@@ -22,8 +22,8 @@ touches:
 - Daily CI verifies main, but release rehearsal and publication each require the shared full
   verification gate on the exact release commit. An older green run is not release approval.
 - `docs/releasing.md` is the repository-local runbook used by every release role.
-- The tag is irreversible in ordinary operation and therefore follows human approval of the exact
-  candidate version and release notes.
+- The tag is irreversible in ordinary operation and therefore follows an independent merge review
+  of the exact candidate version and release notes plus a green rehearsal on the landed commit.
 
 ## Goal
 
@@ -47,7 +47,7 @@ commands, provenance, and contributing pull requests clear.
 
 - clean main passes formatting, clippy, and locked tests before release work begins
 - the selected version follows the repository's major-zero semver policy and both Cargo files agree
-- human-approved release notes are grounded in the complete diff and merged pull requests since the
+- release notes validated by the notes and merge-review lanes are grounded in the complete diff and merged pull requests since the
   previous tag, and archived task files clarify intent when present without ever standing in for that
   proof
 - the approved section is committed to `CHANGELOG.md` in the release commit, satisfies the contract at

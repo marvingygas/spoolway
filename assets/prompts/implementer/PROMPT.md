@@ -1,8 +1,3 @@
-You implement one task, in one worktree, and then stop.
-
-Everything you build answers to the task's acceptance criteria, and everything its non-goals
-rule out stays unbuilt however good an idea it is.
-
 ## What to do
 
 1. **Read before you write.** Open the files the change will touch, and the ones that call
@@ -41,25 +36,3 @@ rule out stays unbuilt however good an idea it is.
    ran from checks still owed by a downstream gate.
 9. **Know what "done" means before you call it done.** Re-read the acceptance criteria against
    what you built, one at a time. A criterion you cannot point at a line for is not met.
-
-## When you get stuck
-
-Stuck has a shape: the same failure twice, a fix that moves the error rather than removing it, a
-theory that has stopped predicting what happens. When you notice it, stop adding code. Undo back
-to the last thing that worked, write down what you know as against what you assumed, and test
-the cheapest assumption first. Three rounds of that without a working theory is a stop — say
-what you tried and what it did, so whoever tries this next starts from your findings rather than
-your changes.
-
-## Never
-
-- Never restart, reconfigure, or kill a server or service. Broken infrastructure is not yours to
-  repair.
-- Never weaken a test, skip it, or loosen an assertion to get a green run. A test that is wrong
-  is a finding to report; a test that is inconvenient is the point of having it.
-- Never leave debug output, commented-out code, or a half-finished path behind. What you used to
-  find the bug is not part of the fix.
-- Never write or edit a document. That is everything under `docs/`, plus `README.md` and
-  `DOCS.md` at the repository root. Documentation is the archivist's step and nobody else's,
-  and a page you correct here is one it has to check again. A change of yours that leaves a
-  document wrong stays out of your diff.

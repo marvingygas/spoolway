@@ -1,32 +1,35 @@
 # Releasing spoolway
 
-A release is a `v*` tag. The `release` pipeline cuts it. Queue the routine, approve the
-release notes at the gate, and the pipeline does the rest — including repairing `main`
-itself if the readiness suite comes back red. It stops for you twice: once per repair, to
-merge it, and once on the notes.
+A release is a `v*` tag. The `release` pipeline cuts it unattended. Queue the routine and it
+does the rest: repair `main`, review and merge every pull request it creates, write the release
+record, publish, verify the public artifacts, and land the upgrade fixture.
 
 ```mermaid
 flowchart LR
-  R[ready] -->|red| X[fix] -->|gate: you merge| R
-  R -->|green| A[preflight] --> B[notes] -->|gate: you approve| C[publish] --> V[released] --> Z[fixture]
-  C --> D[release commit on main] --> E[rehearsal run] --> F[tag] --> G[npm + GitHub release]
+  R[ready] -->|red| X[fix] --> M[review + merge] --> R
+  R -->|green| A[preflight] --> B[notes] --> C[candidate PR] --> N[review + merge] --> P[publish]
+  P --> E[rehearsal run] --> F[tag] --> G[npm + GitHub release] --> V[released] --> Z[fixture PR] --> Q[review + merge]
 ```
 
 | Step | What it does |
 |---|---|
 | `ready` | Runs the whole local gate and a fresh nightly CI run on the candidate. Verifies only — it never edits. |
-| `fix` | Repairs whatever `ready` found, in one pull request, and drives its checks green. Product code included. Stops at a gate: you merge it, then release the gate. |
+| `fix` | Repairs a release blocker in one pull request and drives its checks green. Product code included. |
+| `merge-fix` | Independently reviews the repair, corrects the same branch if needed, and squash-merges it. |
 | `preflight` | Checks `main` is clean and green. Lists every change since the last tag. Proposes the version. |
-| `notes` | Writes one changelog section. Stops at a gate until you approve it. |
-| `publish` | Commits the version bump and the section, rehearses the workflow, tags, and checks what npm and GitHub received. |
+| `notes` | Writes and validates the one changelog section used by the binary and release page. |
+| `candidate` | Builds the exact four-file release commit and opens its pull request. |
+| `merge-release` | Reviews that exact commit and rebase-merges it without changing the recorded candidate. |
+| `publish` | Rehearses the landed release commit, tags it, and checks what npm and GitHub received. |
 | `released` | `scripts/release-verify.sh`. Proves the tag, the six packages, the archives and the published body exist. A command step, so nothing can be credited with it — see below. |
-| `fixture` | `scripts/release-fixture.sh`. Scaffolds the released version's upgrade fixture from its own tag and pushes it to `main`. A command step for the same reason `released` is one. |
+| `fixture` | `scripts/release-fixture.sh`. Scaffolds the released version's upgrade fixture from its own tag and opens its pull request. |
+| `merge-fixture` | Reviews and squash-merges that generated fixture before the task can finish. |
 
-`fix` does not merge. `main` is protected and every pull request is gated on `ci`, so a
-repair lands the way any other change does — you merge it. The step parks on `paused` with
-the pull request number in its handoff; merge it, release the gate, and `ready` runs again
-against the `main` that now carries it. Releasing the gate without merging just re-finds
-the same blocker and spends a lap of `ready`'s loop.
+`main` is protected and every pull request is gated on `ci`. Producer lanes never merge their own
+work. A separate landing lane reads the complete diff and required checks, corrects findings on the
+same branch, and merges only the reviewed head. A repair then returns to `ready`, because changing
+`main` invalidates the earlier exact-SHA proof. Failures in the post-publication verifier or fixture
+script use the same repair-review-merge loop and retry the command that found them.
 
 `released` is not ceremony. `publish` is an agent step, and a `--pass` out of `blocked` carries
 the task one step *past* it — so a release could reach `done` with nothing published if
@@ -36,8 +39,7 @@ the task one step *past* it — so a release could reach `done` with nothing pub
 ## Cutting a release
 
 1. Open `spoolway queue`, press `r`, and queue `release-spoolway`.
-2. When the task pauses at `notes`, read the section and approve it or send it back.
-3. Wait for `done`. The task reports the tag, the workflow runs, the registry versions and the
+2. Wait for `done`. The task reports the tag, the workflow runs, the registry versions and the
    result of a real install.
 
 The routine is `.spoolway/routines/release-spoolway/release-spoolway.md`. The prompts are
@@ -91,13 +93,13 @@ release commit lands the way every other change does, through a pull request:
 ```sh
 git push origin HEAD:release/v<version>
 gh pr create --base main --head release/v<version> --fill
-# the owner merges it; squash is fine, and the subject arrives as
-# `chore(release): v<version> (#<pr>)`
+gh pr checks <number> --watch
+gh pr merge <number> --rebase
 ```
 
-Squash merging rewrites the commit, so **read the landed SHA off `origin/main`
-afterwards** and treat that as the release SHA from then on. The pre-merge object is
-not on `main` and must not be tagged.
+The candidate producer stops at the pull request. A separate merge lane performs the final review,
+requires fresh protected checks, and runs the merge. It then **reads the landed SHA off
+`origin/main`** and records that as the release SHA; no pre-merge object is tagged.
 
 Rehearsal, on the release commit, with publication off:
 
@@ -136,9 +138,9 @@ exemption into a failing check.
 
 The `fixture` step does this, straight after `released`. It builds the binary at the tag just
 pushed, scaffolds a throwaway project with it, sets `housekeeping.retention_days`, hand-adds the
-one line of prose below the pipeline file's generated key block, and pushes the tree to `main` —
-the same commit a person would have made. It is idempotent, so a fixture already on `main` costs
-it one lookup.
+one line of prose below the pipeline file's generated key block, and opens a pull request. The
+following merge lane reviews and lands it. The script is idempotent, so a fixture already on `main`
+costs it one lookup.
 
 It is a pipeline step rather than a line in this runbook because it was a line in this runbook
 and that did not hold: 0.4.0 was tagged and published without one, nothing asked until
@@ -162,7 +164,7 @@ will do.
 ## When it fails
 
 - A red rehearsal leaves an untagged candidate. Fix the cause, then rehearse again. A product
-  change needs a new preflight and a new approval.
+  change needs a fresh readiness, preflight and notes pass.
 - If `main` moves before the tag, the publisher removes or reverts its release commit and the
   task goes back to `preflight`.
 - A partial publish is retried with `gh run rerun <run-id> --failed`. Published npm versions

@@ -6,14 +6,14 @@ Write the release record for the exact candidate proven by preflight. You produc
 that single section becomes three things: the entry committed to `CHANGELOG.md`, the notes compiled
 into every binary built from the tag, and the body of the GitHub release. There is no second, looser
 copy anywhere, so this is the public explanation of why someone should upgrade — not a commit dump
-and not internal project minutes. What the owner releases is what ships byte-for-byte, so hand
-them a section that is ready to ship.
+and not internal project minutes. What this lane records is what the pipeline ships byte-for-byte,
+so hand the candidate lane a section that is ready to publish.
 
 Read `docs/releasing.md` and every preflight's findings. Read the contract at the top of
 `CHANGELOG.md` in full before drafting; the binary parses that structure and a section that breaks
 it fails the repository's own tests. Verify important claims against the diff from the previous tag
-to the recorded main commit. The runbook's approval gate is this step's own — do not ask for
-approval inside your turn.
+to the recorded main commit. This lane is the editorial decision: validate the section yourself
+and do not wait for a person to approve it.
 
 ## How to do it here
 
