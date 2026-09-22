@@ -502,9 +502,20 @@ fn replace(repo: &Repo, args: &SyncArgs) -> Result<()> {
             continue;
         };
 
+        let is_hook = path.starts_with(repo.checkout.join(".spoolway/hooks"));
+
         let on_disk = std::fs::read_to_string(&path).unwrap_or_default();
         if on_disk == shipped {
-            println!("  kept    {shown} (already ours)");
+            // The text is already ours, but a hook's execute bit is not part
+            // of that comparison — a stale checkout or an editor save can
+            // still have stripped it. Repair the mode here too, or the early
+            // return below would report the file "already ours" while it
+            // stays non-executable (issue #331).
+            if is_hook && !args.dry_run && repair_hook_mode(&path)? {
+                println!("  wrote   {shown} (execute bit repaired)");
+            } else {
+                println!("  kept    {shown} (already ours)");
+            }
             continue;
         }
         let discarded = on_disk.lines().count();
@@ -526,6 +537,13 @@ fn replace(repo: &Repo, args: &SyncArgs) -> Result<()> {
             );
         }
         write_atomic(&path, &shipped)?;
+        if is_hook {
+            // `write_atomic` has no opinion about permissions, so a hook
+            // replaced here would land back at the writer's default mode —
+            // not executable — and the next hook call would exit 126.
+            // `init` ships hooks at `0755`; match that here too.
+            repair_hook_mode(&path)?;
+        }
         println!("  wrote   {shown} (whole file, discarding your changes)");
     }
 
@@ -541,6 +559,26 @@ fn replace(repo: &Repo, args: &SyncArgs) -> Result<()> {
         false => println!("`git diff` shows exactly what changed."),
     }
     Ok(())
+}
+
+/// Set a replaced hook back to the executable mode `init` ships it with.
+/// Returns whether the mode actually changed, so callers can tell a real
+/// repair from a no-op. A no-op everywhere but Unix: there is no execute bit
+/// to lose elsewhere.
+#[cfg(unix)]
+fn repair_hook_mode(path: &Path) -> Result<bool> {
+    use std::os::unix::fs::PermissionsExt;
+    let perms = std::fs::metadata(path)?.permissions();
+    let changed = perms.mode() & 0o777 != 0o755;
+    if changed {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(changed)
+}
+
+#[cfg(not(unix))]
+fn repair_hook_mode(_path: &Path) -> Result<bool> {
+    Ok(false)
 }
 
 /// The text spoolway would write at `path`, if it writes anything there at all.
@@ -1386,6 +1424,115 @@ mod tests {
                 "no provider's skills directory should exist under repo.root"
             );
         }
+    }
+
+    /// A hook script is a command, not prose — `spoolway init` writes it
+    /// `0755` so it can run at all. `--replace` writes its bytes through the
+    /// same atomic writer everything else in this module uses, but that
+    /// writer has no opinion about permissions: a hook replaced from a stale
+    /// copy lands back at the writer's default mode, not executable, and the
+    /// next hook call exits 126. Repairing a hook whose text already matches
+    /// what we ship has to work too, since `on_disk == shipped` returns
+    /// early today and never looks at the mode bit at all.
+    #[cfg(unix)]
+    #[test]
+    fn replacing_a_shipped_hook_leaves_it_executable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let repo = fixture("replace-hook-executable");
+        let hook = repo.checkout.join(".spoolway/hooks/github.sh");
+        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+
+        let shipped = crate::assets::HOOK_SCRIPTS
+            .iter()
+            .find(|(name, _)| *name == "github.sh")
+            .unwrap()
+            .1;
+
+        // A stale hook, saved with no execute bit at all — the shape a
+        // checkout picks up from a plain `git clone` or a non-executable
+        // editor save.
+        std::fs::write(&hook, "#!/bin/sh\necho stale\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        replace(
+            &repo,
+            &SyncArgs {
+                replace: vec![".spoolway/hooks/github.sh".to_string()],
+                ..args()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&hook).unwrap(),
+            shipped,
+            "replace must write the shipped hook's text"
+        );
+        let mode = std::fs::metadata(&hook).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o755,
+            "a replaced hook must be executable, not left at the writer's default mode"
+        );
+
+        // Now the text already matches what we ship, but the execute bit is
+        // missing again — the `on_disk == shipped` early return must still
+        // repair the mode rather than reporting the file as already current
+        // and leaving it non-executable.
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        replace(
+            &repo,
+            &SyncArgs {
+                replace: vec![".spoolway/hooks/github.sh".to_string()],
+                ..args()
+            },
+        )
+        .unwrap();
+
+        let mode = std::fs::metadata(&hook).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o755,
+            "a hook already at the shipped text must still have its execute bit repaired"
+        );
+    }
+
+    /// A dry run only ever says what it would do — the hook mode repair added
+    /// alongside the content write must stay behind that same gate, or
+    /// `--replace --dry-run` would quietly fix a hook's permissions while
+    /// claiming to have changed nothing.
+    #[cfg(unix)]
+    #[test]
+    fn a_dry_run_replace_repairs_neither_a_hooks_text_nor_its_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let repo = fixture("replace-hook-dry-run");
+        let hook = repo.checkout.join(".spoolway/hooks/github.sh");
+        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+
+        let stale = "#!/bin/sh\necho stale\n";
+        std::fs::write(&hook, stale).unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        replace(
+            &repo,
+            &SyncArgs {
+                replace: vec![".spoolway/hooks/github.sh".to_string()],
+                dry_run: true,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&hook).unwrap(),
+            stale,
+            "a dry run must not write the shipped hook's text"
+        );
+        let mode = std::fs::metadata(&hook).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o644,
+            "a dry run must not repair the execute bit either"
+        );
     }
 
     /// A task skeleton is the project's outright, so a sync must not read it,
