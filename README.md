@@ -139,7 +139,6 @@ Every task on the board is in one of a few states:
 | `prompt` | A lane's pane is holding a permission prompt. Press a key in the pane. |
 | `paused` | Waiting for you on purpose: a gated step, or an unresolvable issue. |
 | `blocked` | A step reported a block and for a person. An unattended run hands it to the unblocker prompt instead. |
-| `unreachable` | A task it depends on is blocked, so it cannot start until you clear that one. |
 | `done` | Finished: the worktree removed, the task archived. |
 
 ### 5. Calibrate

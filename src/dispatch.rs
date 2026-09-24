@@ -1774,9 +1774,10 @@ impl<'a> Dispatcher<'a> {
     ///
     /// A cycle in `depends_on` is a deadlock, not a wait: none of its
     /// members will ever be ready. Not reported to the ticker either —
-    /// every task in it already reads `Unreachable` on the board, through
-    /// the same `dependency_note` a dead or missing dependency does above,
-    /// and a deadlock that is still a deadlock next pass is not news. This
+    /// every task in it already names the cycle on the board, in the NEXT
+    /// column, through the same `dependency_note` a dead or missing
+    /// dependency does above, and a deadlock that is still a deadlock next
+    /// pass is not news. This
     /// is a standalone remark, not a description of the retain below it —
     /// `graph.cycles()` used to be walked here to build that line, and
     /// nothing has taken its place.
@@ -12907,10 +12908,10 @@ mod tests {
         let report = run_pass(&repo, &mux);
 
         // Neither task starts — nothing in a cycle can ever be ready. Not
-        // reported to the ticker either: both rows already read `Unreachable`
-        // on the board, through the same `dependency_note` that names the
-        // cycle, and a deadlock that is still a deadlock next pass is not
-        // news.
+        // reported to the ticker either: both rows already name the cycle
+        // in the board's NEXT column, through the same `dependency_note`
+        // that writes it, and a deadlock that is still a deadlock next pass
+        // is not news.
         assert!(mux.did("start").is_empty());
         assert!(
             report.problems.is_empty(),

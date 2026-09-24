@@ -119,11 +119,11 @@ pub(super) const AMBER: &str = "\x1b[33m";
 const RED: &str = "\x1b[31m";
 
 // Blocked's own colour, apart from `RED`: a block is a task waiting on a
-// person, the same *kind* of stop `Paused` is, and red is reserved for a
-// dead end nothing here can move past on its own — the graph's own
-// `Unreachable`, the state a dependency cycle or a missing dependency reads
-// as. Orange rather than amber too, so a block and a `Paused` row never read
-// as the same colour from across a room.
+// person, the same *kind* of stop `Paused` is, and red stays for a verdict
+// that came back bad — `Verdict::Fail` and `Verdict::Blocked` in the
+// ticker, which no state on this board shares. Orange rather than amber
+// too, so a block and a `Paused` row never read as the same colour from
+// across a room.
 const ORANGE: &str = "\x1b[38;5;208m";
 
 /// The two halves of an OSC 8 terminal hyperlink: `OSC8 <url> ST <label> OSC8
@@ -142,7 +142,6 @@ impl State {
             State::Running => "● running",
             State::Blocked => "● blocked",
             State::Prompt => "● prompt",
-            State::Unreachable => "● unreachable",
             State::Queued => "○ queued",
             State::Done => "● done",
         }
@@ -160,7 +159,6 @@ impl State {
             // A live lane, not a stop, so it takes `Running`'s own colour —
             // the task has not left its step, only paused for a keystroke.
             State::Prompt => format!("{GREEN}{word}{RESET}"),
-            State::Unreachable => format!("{RED}{word}{RESET}"),
             State::Queued => format!("{DIM}{word}{RESET}"),
             State::Done => format!("{DIM}{word}{RESET}"),
         }
@@ -1687,19 +1685,26 @@ mod tests {
     use crate::status::testutil::*;
     use crate::status::{Row, State, arrival_event, done_rows, push_recent, rows};
 
-    /// `Blocked` reads apart from a genuine dead end: orange, not the red
-    /// `Unreachable` carries — a block is a task waiting on a person, the
-    /// same kind of stop `Paused` is, and red stays for what nothing here
-    /// can move past on its own.
+    /// `Blocked` reads apart from every other stop: orange, its own colour
+    /// — a block is a task waiting on a person, the same kind of stop
+    /// `Paused` is, and no state on this board is red at all now that the
+    /// dead-end state is gone.
     #[test]
     fn blocked_is_orange_and_no_other_state_changed_colour() {
         assert_eq!(State::Blocked.dot(), format!("{ORANGE}● blocked{RESET}"));
-        assert_eq!(
-            State::Unreachable.dot(),
-            format!("{RED}● unreachable{RESET}")
-        );
         assert_eq!(State::Paused.dot(), format!("{AMBER}{BOLD}● paused{RESET}"));
         assert_eq!(State::Running.dot(), format!("{GREEN}● running{RESET}"));
+        assert_eq!(State::Queued.dot(), format!("{DIM}○ queued{RESET}"));
+        for state in [
+            State::Paused,
+            State::Running,
+            State::Blocked,
+            State::Prompt,
+            State::Queued,
+            State::Done,
+        ] {
+            assert!(!state.dot().contains(RED), "{}", state.word());
+        }
     }
 
     /// The outer order is the group's name and nothing else, so a group

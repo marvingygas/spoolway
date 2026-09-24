@@ -130,7 +130,6 @@ fn state_label(state: crate::status::State) -> &'static str {
         Running => "running",
         Blocked => "blocked",
         Prompt => "prompt",
-        Unreachable => "unreachable",
         Queued => "queued",
         Done => "done",
     }
@@ -5900,6 +5899,61 @@ mod tests {
         let rendered = serde_json::to_string(&json[1]).unwrap();
         assert!(!rendered.contains("waiting_on_you"), "{rendered}");
         assert!(!rendered.contains("parked"), "{rendered}");
+    }
+
+    /// A task stranded behind a block is `"state": "queued"` like every
+    /// other wait, and nothing was added to `--json` to carry what the old
+    /// `unreachable` state used to say. The NEXT column is where a reader
+    /// finds out *what* the wait is on, and `dependency_note` still writes
+    /// it.
+    #[test]
+    fn queue_json_calls_a_stranded_task_queued_with_no_field_in_its_place() {
+        use crate::status::testutil::{add, fixture};
+
+        let repo = fixture("stranded-json");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "search-typo", &[], Some(crate::pipeline::BLOCKED));
+        add(
+            &repo,
+            "search-facets",
+            &["search-typo"],
+            Some(crate::pipeline::QUEUED),
+        );
+
+        let rows = crate::status::rows(&repo, &pipelines).unwrap();
+        let row = rows.iter().find(|r| r.id == "search-facets").unwrap();
+        let json = QueueRowJson::from(row);
+
+        assert_eq!(json.state, "queued");
+        // `next` still carries the old wording — `dependency_note` writes
+        // it, and the next task in this group is the one that owns it — so
+        // this looks at the keys rather than the whole line: nothing was
+        // added to say what the state stopped saying.
+        let rendered = serde_json::to_value(&json).unwrap();
+        let keys: Vec<&str> = rendered
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "id",
+                "group",
+                "parallel",
+                "stage",
+                "pipeline",
+                "state",
+                "arrivals",
+                "next",
+                "resumable",
+                "ctx_pct",
+                "out_tokens",
+                "cost_usd",
+                "lane_time_s",
+            ]
+        );
     }
 
     #[test]

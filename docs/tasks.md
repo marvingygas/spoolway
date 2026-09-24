@@ -192,7 +192,7 @@ Tasks of different groups are independent. Inside a group, `depends_on` sets the
 
 A task stays `queued` until every task it names has reached `done`. A dependency is refused
 when it names a task that does not exist, names itself, closes a cycle, crosses two bases, or
-crosses two groups. If a dependency is blocked, every task behind it shows `unreachable`.
+crosses two groups. If a dependency is blocked, every task behind it stays `queued`.
 
 ```
 TASK       STEP       NOTE

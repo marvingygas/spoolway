@@ -106,8 +106,6 @@ pub enum State {
     /// not moved and is not `paused`: this is a live turn waiting on a
     /// keystroke in its pane, not a stop, so nothing here is resumable.
     Prompt,
-    /// Waiting on a dependency that can never arrive.
-    Unreachable,
     /// In the queue, waiting for a slot or a dependency.
     Queued,
     /// Archived — its pipeline finished and its file moved to the project's
@@ -2076,31 +2074,27 @@ fn build_rows(
             // — a fixed description said the same thing at every one of them.
             _ if task.stage() == crate::pipeline::QUEUED => {
                 let dependency = crate::commands::dependency_note(graph, task.id());
-                // Asked of the graph, never read back out of the note's own
-                // English. This used to substring-match the rendered
-                // sentence — `starts_with("unreachable")`,
-                // `contains("cycle")`, `contains("itself")` — which made
-                // every task id containing one of those words its own bug
-                // report: `waiting on: park-lifecycle` contains "cycle", so
-                // an ordinary unmet dependency was drawn in red as a
-                // dependency cycle. The graph is asked the same two
-                // questions `dependency_note` asks it, and answers about the
-                // shape of the queue rather than about the spelling of a
-                // task's name.
-                let state = match graph.cycle_with(task.id()).is_some()
-                    || graph.unreachable(task.id()).is_some()
-                {
-                    true => State::Unreachable,
-                    false => State::Queued,
-                };
+                // Every task on `queued` reads `queued`, whatever it is
+                // waiting for. A dependency that can never arrive — one
+                // that is blocked, one that ended at a terminal step, or a
+                // cycle — used to be drawn apart, but the dispatcher has
+                // never treated it apart: `graph.ready()` passes over any
+                // task whose dependencies are not all `done`, so a dead
+                // wait and an ordinary one sit on the same step for the
+                // same reason. The graph is not asked here at all, which
+                // also retires the substring-matching that once decided
+                // this — `starts_with("unreachable")`, `contains("cycle")`
+                // over the rendered note made `waiting on: park-lifecycle`
+                // report itself as a dependency cycle.
+                //
                 // The gate only ranks a candidate now, it does not drop one
                 // — so a task it has ranked behind another group is not
                 // held apart from every other task waiting on a worker
                 // slot, and reads the same line the rest of them do.
                 match dependency {
-                    Some(d) => (state, d, false),
+                    Some(d) => (State::Queued, d, false),
                     None => (
-                        state,
+                        State::Queued,
                         "waiting for a worker slot to free up".to_string(),
                         false,
                     ),
@@ -3402,11 +3396,12 @@ mod tests {
     /// A dependency whose id happens to contain one of the words the state
     /// used to be sniffed out of is still an ordinary dependency.
     ///
-    /// The `queued` state was decided by substring-matching the rendered
-    /// note: `contains("cycle")` over `waiting on: park-lifecycle` is true,
-    /// so a task waiting on a perfectly healthy dependency was drawn in red
-    /// as one caught in a dependency cycle. Real trouble is a question for
-    /// the graph, and this asks it there.
+    /// The `queued` state was once decided by substring-matching the
+    /// rendered note: `contains("cycle")` over `waiting on: park-lifecycle`
+    /// is true, so a task waiting on a perfectly healthy dependency was
+    /// drawn in red as one caught in a dependency cycle. Nothing is read
+    /// back out of the note now — a task on `queued` reads `queued` — and
+    /// this holds that line against the id that first broke it.
     #[test]
     fn a_dependency_named_for_a_lifecycle_is_not_a_dependency_cycle() {
         let repo = fixture("cycle-in-the-name");
@@ -3426,7 +3421,7 @@ mod tests {
         let row = rows.iter().find(|r| r.id == "paused-board").unwrap();
         assert!(
             matches!(row.state, State::Queued),
-            "an unmet dependency is `queued`, not `unreachable`: {}",
+            "an unmet dependency is `queued`: {}",
             row.next
         );
         assert!(
@@ -3434,6 +3429,38 @@ mod tests {
             "{}",
             row.next
         );
+    }
+
+    /// A wait that can never end is still a wait, and reads like one.
+    ///
+    /// `search-facets` depends on a task parked on `blocked`, so nothing
+    /// will ever make it ready — the shape the board used to draw apart, in
+    /// red, as `unreachable`. The dispatcher never told the two apart:
+    /// `graph.ready()` passes over any task whose dependencies are not all
+    /// `done`, so a dead wait sits on `queued` exactly as an ordinary one
+    /// does, and the board now says so.
+    #[test]
+    fn a_dependency_that_can_never_arrive_still_reads_queued() {
+        let repo = fixture("dead-dependency");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "search-typo", &[], Some(crate::pipeline::BLOCKED));
+        add(
+            &repo,
+            "search-facets",
+            &["search-typo"],
+            Some(crate::pipeline::QUEUED),
+        );
+
+        let tasks = repo.tasks().unwrap();
+        let graph = Graph::build(&tasks, &pipelines, &repo.archive_dir());
+        // The premise: the graph does call this dependency a dead end. The
+        // board draws it `queued` anyway.
+        assert!(graph.unreachable("search-facets").is_some());
+
+        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+        let row = rows.iter().find(|r| r.id == "search-facets").unwrap();
+        assert!(matches!(row.state, State::Queued), "{}", row.next);
+        assert_eq!(row.state.word(), "○ queued");
     }
 
     /// A live lane's clock is its own: `now - launched_at`, not whatever the
@@ -3887,7 +3914,7 @@ mod tests {
         let row = frame.lines().find(|l| l.contains("login")).unwrap();
 
         // `○ queued` is the widest state here, so CTX starts right after it
-        // rather than out where a longer state like `● unreachable` would end.
+        // rather than out where a longer state like `● running` would end.
         let ctx_at = header.find("CTX").unwrap() - header.find("STATE").unwrap();
         assert_eq!(
             ctx_at,
