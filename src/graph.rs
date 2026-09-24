@@ -4,9 +4,8 @@
 //! The edges themselves live in the task files (`depends_on:`), and a task's
 //! `queued` step is the only place they are enforced — a task starts when every
 //! task it names has finished. This module is what turns that edge set into a
-//! graph: it answers whether a task is ready, what it is still waiting on,
-//! whether it is waiting on something that can never finish, and how much other
-//! work finishing it would release.
+//! graph: it answers whether a task is ready, what it is still waiting on, and
+//! how much other work finishing it would release.
 //!
 //! Nothing here touches git. A dependent's worktree is cut straight from its
 //! first dependency's branch — see `ensure_workspace` in `src/dispatch.rs` —
@@ -22,7 +21,6 @@ use std::path::Path;
 
 use anyhow::{Result, bail};
 
-use crate::pipeline::{Pipelines, StepKind};
 use crate::task::Task;
 
 /// Where a task stands, seen from something waiting on it.
@@ -31,19 +29,12 @@ pub enum DepState {
     /// Finished. Its changes are on the group's base branch, so a dependent cut from
     /// that branch will contain them.
     Done,
-    /// Sitting on the pipeline's `blocked` step, parked for a person. Terminal,
-    /// so it will never advance on its own: everything downstream is stranded
-    /// until a person runs `spoolway resume`.
-    ///
-    /// Not what an unattended run's own block reaches, on a pipeline that does
-    /// not staff `blocked` — that road resumes the lane that hit it instead of
-    /// parking, so the task never actually sits here. And not what a *staffed*
-    /// `blocked` step reaches either, whatever the run: a lane is running
-    /// there, or about to be, so a dependent is still moving and waits
-    /// quietly rather than being reported as stranded. See
-    /// [`crate::pipeline::Pipeline::blocked_is_staffed`].
-    Dead,
-    /// Still moving through the pipeline.
+    /// Still moving through the pipeline — including a task parked on
+    /// `blocked`, or sitting on a project's own declared ending such as
+    /// `superseded` or `rejected`. Neither of those will ever become `Done`
+    /// on its own, but nothing here has to say so: a dependent only ever
+    /// asks whether this is `Done`, so anything short of it is treated the
+    /// same. See [`Graph::ready`].
     Pending,
     /// Named by a `depends_on` but present in neither the queue nor the
     /// archive. Almost always a typo, and permanent if left alone.
@@ -68,40 +59,13 @@ pub struct Graph {
 }
 
 impl Graph {
-    /// Build against no run in particular: a `blocked` task always classifies
-    /// as [`DepState::Dead`], which is right when there is no dispatcher to
-    /// ask whether it staffs that step — `spoolway queue show`, tests, and any
-    /// other caller with no run in progress. [`Graph::build_for_run`] is the
-    /// one to use from inside a pass, where that answer actually depends on
-    /// whether this run is unattended.
-    pub fn build(tasks: &[Task], pipelines: &Pipelines, archive_dir: &Path) -> Graph {
-        Graph::build_inner(tasks, pipelines, archive_dir, false)
-    }
-
-    /// Same as [`Graph::build`], but told whether this run is unattended —
-    /// needed to classify a dependency sitting on a staffed `blocked` step as
-    /// still moving rather than dead. See
-    /// [`crate::pipeline::Pipeline::blocked_is_staffed`].
-    pub fn build_for_run(
-        tasks: &[Task],
-        pipelines: &Pipelines,
-        archive_dir: &Path,
-        unattended: bool,
-    ) -> Graph {
-        Graph::build_inner(tasks, pipelines, archive_dir, unattended)
-    }
-
-    fn build_inner(
-        tasks: &[Task],
-        pipelines: &Pipelines,
-        archive_dir: &Path,
-        unattended: bool,
-    ) -> Graph {
+    /// Resolve every queued task's dependencies against each other.
+    pub fn build(tasks: &[Task], archive_dir: &Path) -> Graph {
         let mut state: BTreeMap<String, DepState> = BTreeMap::new();
         let mut edges: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
         for task in tasks {
-            state.insert(task.front.id.clone(), classify(task, pipelines, unattended));
+            state.insert(task.front.id.clone(), classify(task));
             edges.insert(task.front.id.clone(), task.front.depends_on.clone());
         }
 
@@ -218,6 +182,15 @@ impl Graph {
     }
 
     /// Every dependency has finished, so this task may start.
+    ///
+    /// Asks for [`DepState::Done`] specifically, not merely "not moving" —
+    /// the guarantee that keeps a project's own declared ending safe to add.
+    /// A third terminal name — `superseded`, `rejected`, `abandoned` — would
+    /// release every dependent the moment a task reached it, silently, if
+    /// this accepted anything short of the one reserved name that actually
+    /// means finished. Everything else, including a task parked on
+    /// `blocked`, reads as [`DepState::Pending`] and holds its dependents
+    /// exactly the same way.
     pub fn ready(&self, id: &str) -> bool {
         self.deps(id).all(|dep| self.state(dep) == DepState::Done)
     }
@@ -227,32 +200,6 @@ impl Graph {
         self.deps(id)
             .filter(|dep| self.state(dep) != DepState::Done)
             .collect()
-    }
-
-    /// The nearest dependency, transitively, that can never finish on its own.
-    ///
-    /// A blocked or missing task strands everything downstream of it, however
-    /// far downstream. Finding it is what makes the difference between "this
-    /// task is waiting" and "this task will wait forever".
-    ///
-    /// Stops at a finished dependency: whatever *it* once waited on no longer
-    /// matters.
-    pub fn unreachable(&self, id: &str) -> Option<(&str, DepState)> {
-        let mut seen: BTreeSet<&str> = BTreeSet::new();
-        let mut queue: VecDeque<&str> = self.deps(id).collect();
-
-        while let Some(dep) = queue.pop_front() {
-            if !seen.insert(dep) {
-                continue;
-            }
-            match self.state(dep) {
-                DepState::Dead => return Some((dep, DepState::Dead)),
-                DepState::Unknown => return Some((dep, DepState::Unknown)),
-                DepState::Done => {}
-                DepState::Pending => queue.extend(self.deps(dep)),
-            }
-        }
-        None
     }
 
     /// Whether `from` waits on `to`, directly or through other tasks.
@@ -378,46 +325,16 @@ pub fn render_cycle(cycle: &[String]) -> String {
 
 /// Where a task stands, from the dispatcher's point of view.
 ///
-/// One stage means finished, and it is a reserved one: `done`. Everything else
-/// is either still going or stopped without finishing, and both hold dependents
-/// where they are.
-///
-/// This used to read "any terminal that is not `blocked` is done", which was
-/// the footgun that made terminals worth reserving: a third declared ending —
-/// `superseded`, `rejected`, `abandoned` — would have released dependents on a
-/// task that never finished, silently. Keyed off the one reserved name, a
-/// project's own ending is `Dead` like any other stop, which is the safe answer
-/// rather than the convenient one.
-fn classify(task: &Task, pipelines: &Pipelines, unattended: bool) -> DepState {
+/// One stage means finished, and it is a reserved one: `done`. Everything
+/// else — still moving, parked on `blocked`, or sitting on a project's own
+/// declared ending such as `superseded` or `rejected` — is `Pending`.
+/// [`Graph::ready`] is where that flattening is made safe: it releases a
+/// dependent only once every dependency is `Done`, so a declared ending that
+/// will never reach `done` on its own holds its dependents exactly as a
+/// `blocked` task does, without this needing to tell the two apart.
+fn classify(task: &Task) -> DepState {
     match task.stage() {
-        crate::pipeline::DONE => return DepState::Done,
-        crate::pipeline::BLOCKED => {
-            // A staffed `blocked` step has a lane running on it, or about to —
-            // still moving, not stranded. See [`DepState::Dead`].
-            let staffed = pipelines
-                .for_task(task)
-                .is_ok_and(|p| p.blocked_is_staffed(unattended));
-            return if staffed {
-                DepState::Pending
-            } else {
-                DepState::Dead
-            };
-        }
-        // Waiting on an approval, which is a wait and not a stop: the work at
-        // the gated step succeeded and a person has only to let it past. Said
-        // out loud rather than left to the fall-through below, because `Dead` is
-        // the tempting reading and it is the wrong one twice over — it would
-        // report every dependent as stranded behind a block, and it would tell
-        // the person to run `spoolway resume` on a task that was never blocked.
-        crate::pipeline::PAUSED => return DepState::Pending,
-        _ => {}
-    }
-    let Ok(pipeline) = pipelines.for_task(task) else {
-        return DepState::Pending;
-    };
-    match pipeline.step(task.stage()) {
-        // A project's own declared ending. It stopped, and it is not `done`.
-        Some(step) if step.kind() == StepKind::Terminal => DepState::Dead,
+        crate::pipeline::DONE => DepState::Done,
         _ => DepState::Pending,
     }
 }
@@ -619,7 +536,7 @@ mod tests {
     }
 
     fn graph(tasks: &[Task]) -> Graph {
-        Graph::build(tasks, &Pipelines::builtin(), Path::new("/nonexistent"))
+        Graph::build(tasks, Path::new("/nonexistent"))
     }
 
     #[test]
@@ -636,59 +553,26 @@ mod tests {
         assert_eq!(graph.state("first"), DepState::Pending);
     }
 
+    /// A `blocked` dependency will never advance on its own, but the graph
+    /// draws no distinction: it is `Pending` exactly like a task still
+    /// moving through its pipeline, and holds its dependents the same way.
     #[test]
-    fn a_blocked_dependency_is_terminal_but_never_counts_as_done() {
+    fn a_blocked_dependency_is_pending_but_never_counts_as_done() {
         let tasks = [
             task("first", "blocked", &[], None),
             task("second", "queued", &["first"], None),
         ];
         let graph = graph(&tasks);
 
-        assert_eq!(graph.state("first"), DepState::Dead);
+        assert_eq!(graph.state("first"), DepState::Pending);
         assert!(!graph.ready("second"));
-        assert_eq!(graph.unreachable("second"), Some(("first", DepState::Dead)));
+        assert_eq!(graph.waiting_on("second"), ["first"]);
     }
 
-    /// A staffed `blocked` step — materialised from `[unattended]`, and this
-    /// run is unattended — has a lane running there or about to be, so it is
-    /// still moving. Only `Graph::build_for_run` can tell: `Graph::build`
-    /// always answers `Dead`, which is what the same task reads as under
-    /// `Graph::build` with no run in particular.
-    ///
-    /// Nothing is added to the pipelines here: `Pipelines::builtin()` goes
-    /// through `Pipelines::assemble`, which gives every pipeline a `blocked`
-    /// step built from the config's `blocked_*` keys.
+    /// `c` names only `b` in `depends_on` — `waiting_on` never walks past a
+    /// direct dependency, whatever is holding it further up the chain.
     #[test]
-    fn a_staffed_blocked_dependency_is_pending_not_dead() {
-        let pipelines = Pipelines::builtin();
-        assert!(
-            pipelines
-                .pipelines
-                .values()
-                .all(|p| p.step(crate::pipeline::BLOCKED).is_some())
-        );
-
-        let tasks = [
-            task("first", "blocked", &[], None),
-            task("second", "queued", &["first"], None),
-        ];
-
-        let unattended = Graph::build_for_run(&tasks, &pipelines, Path::new("/nonexistent"), true);
-        assert_eq!(unattended.state("first"), DepState::Pending);
-        // Still not ready — `first` has not finished — but waiting quietly
-        // rather than reported as stranded behind a block.
-        assert!(!unattended.ready("second"));
-        assert_eq!(unattended.unreachable("second"), None);
-
-        let attended = Graph::build_for_run(&tasks, &pipelines, Path::new("/nonexistent"), false);
-        assert_eq!(attended.state("first"), DepState::Dead);
-
-        let no_run = graph(&tasks);
-        assert_eq!(no_run.state("first"), DepState::Dead);
-    }
-
-    #[test]
-    fn a_blocked_task_strands_everything_downstream_of_it() {
+    fn waiting_on_names_only_the_direct_dependency() {
         let tasks = [
             task("a", "blocked", &[], None),
             task("b", "queued", &["a"], None),
@@ -696,23 +580,18 @@ mod tests {
         ];
         let graph = graph(&tasks);
 
-        // `c` names only `b`, which is merely waiting — the dead end is two
-        // hops away and still has to be found.
         assert_eq!(graph.waiting_on("c"), ["b"]);
-        assert_eq!(graph.unreachable("c"), Some(("a", DepState::Dead)));
+        assert!(!graph.ready("c"));
     }
 
     #[test]
-    fn a_dependency_on_a_task_that_does_not_exist_is_unreachable() {
+    fn a_dependency_on_a_task_that_does_not_exist_is_unknown() {
         let tasks = [task("only", "queued", &["lgoin"], None)];
         let graph = graph(&tasks);
 
         assert_eq!(graph.state("lgoin"), DepState::Unknown);
         assert!(!graph.ready("only"));
-        assert_eq!(
-            graph.unreachable("only"),
-            Some(("lgoin", DepState::Unknown))
-        );
+        assert_eq!(graph.waiting_on("only"), ["lgoin"]);
         assert!(
             graph
                 .validate()
@@ -733,7 +612,7 @@ mod tests {
 
         // `b` merged, so `a`'s state stopped mattering the moment it did.
         assert!(graph.ready("c"));
-        assert_eq!(graph.unreachable("c"), None);
+        assert!(graph.waiting_on("c").is_empty());
     }
 
     #[test]
@@ -917,7 +796,7 @@ mod tests {
         std::fs::create_dir_all(&archive).unwrap();
         std::fs::write(archive.join("earlier.md"), "").unwrap();
 
-        let graph = Graph::build(&tasks, &Pipelines::builtin(), &archive);
+        let graph = Graph::build(&tasks, &archive);
         assert_eq!(graph.state("earlier"), DepState::Done);
         assert!(graph.group_is_open("chain"));
     }

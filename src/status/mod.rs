@@ -1537,7 +1537,7 @@ impl Default for Board {
 /// task files and the live lane list, and writes nothing.
 pub fn rows(repo: &Repo, pipelines: &Pipelines) -> Result<Vec<Row>> {
     let tasks = repo.tasks()?;
-    let graph = Graph::build_for_run(&tasks, pipelines, &repo.archive_dir(), repo.unattended());
+    let graph = Graph::build(&tasks, &repo.archive_dir());
     let mux = crate::mux::backend(repo)?;
     let lanes = mux.list_lanes().unwrap_or_default();
     let ledger = crate::usage::read_cached(repo);
@@ -1565,7 +1565,7 @@ fn render(
     drawn: &mut Vec<String>,
 ) -> Result<String> {
     let (tasks, load_problems) = repo.tasks_and_problems()?;
-    let graph = Graph::build_for_run(&tasks, pipelines, &repo.archive_dir(), repo.unattended());
+    let graph = Graph::build(&tasks, &repo.archive_dir());
     let mux = crate::mux::backend(repo)?;
     // Read once and passed down: this is a call out to the multiplexer, and
     // `render` is already the one place `draw` makes it from.
@@ -3345,7 +3345,7 @@ mod tests {
         add(&repo, "login", &[], Some("implement"));
 
         let tasks = repo.tasks().unwrap();
-        let graph = Graph::build(&tasks, &pipelines, &repo.archive_dir());
+        let graph = Graph::build(&tasks, &repo.archive_dir());
 
         let mut working = lane("login · implement", &repo.root);
         working.status = crate::mux::LaneStatus::Working;
@@ -3374,7 +3374,7 @@ mod tests {
         add(&repo, "login", &[], Some("implement"));
 
         let tasks = repo.tasks().unwrap();
-        let graph = Graph::build(&tasks, &pipelines, &repo.archive_dir());
+        let graph = Graph::build(&tasks, &repo.archive_dir());
 
         let mut prompting = lane("login · implement", &repo.root);
         prompting.status = crate::mux::LaneStatus::Blocked;
@@ -3415,7 +3415,7 @@ mod tests {
         );
 
         let tasks = repo.tasks().unwrap();
-        let graph = Graph::build(&tasks, &pipelines, &repo.archive_dir());
+        let graph = Graph::build(&tasks, &repo.archive_dir());
         let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
 
         let row = rows.iter().find(|r| r.id == "paused-board").unwrap();
@@ -3438,7 +3438,8 @@ mod tests {
     /// red, as `unreachable`. The dispatcher never told the two apart:
     /// `graph.ready()` passes over any task whose dependencies are not all
     /// `done`, so a dead wait sits on `queued` exactly as an ordinary one
-    /// does, and the board now says so.
+    /// does, and the NEXT column names the direct dependency rather than
+    /// diagnosing it as stranded.
     #[test]
     fn a_dependency_that_can_never_arrive_still_reads_queued() {
         let repo = fixture("dead-dependency");
@@ -3452,15 +3453,16 @@ mod tests {
         );
 
         let tasks = repo.tasks().unwrap();
-        let graph = Graph::build(&tasks, &pipelines, &repo.archive_dir());
-        // The premise: the graph does call this dependency a dead end. The
-        // board draws it `queued` anyway.
-        assert!(graph.unreachable("search-facets").is_some());
+        let graph = Graph::build(&tasks, &repo.archive_dir());
+        // The premise: the dependency really is stuck — nothing will ever
+        // ready it. The board draws `search-facets` `queued` anyway.
+        assert!(!graph.ready("search-facets"));
 
         let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
         let row = rows.iter().find(|r| r.id == "search-facets").unwrap();
         assert!(matches!(row.state, State::Queued), "{}", row.next);
         assert_eq!(row.state.word(), "○ queued");
+        assert_eq!(row.next, "waiting on: search-typo");
     }
 
     /// A live lane's clock is its own: `now - launched_at`, not whatever the
@@ -3475,7 +3477,7 @@ mod tests {
         task.save().unwrap();
 
         let tasks = repo.tasks().unwrap();
-        let graph = Graph::build(&tasks, &pipelines, &repo.archive_dir());
+        let graph = Graph::build(&tasks, &repo.archive_dir());
         let lanes = [lane("login · implement", &repo.root)];
         let rows = build_rows(&repo, &tasks, &pipelines, &graph, &lanes, &[], None).unwrap();
 
@@ -3497,7 +3499,7 @@ mod tests {
         add(&repo, "login", &[], Some("handover"));
 
         let tasks = repo.tasks().unwrap();
-        let graph = Graph::build(&tasks, &pipelines, &repo.archive_dir());
+        let graph = Graph::build(&tasks, &repo.archive_dir());
 
         // Nothing started yet: the step is where the task sits, not what it is
         // doing, so this half is what the running half below is measured
@@ -3540,7 +3542,7 @@ mod tests {
         add(&repo, "login", &[], Some("implement"));
 
         let tasks = repo.tasks().unwrap();
-        let graph = Graph::build(&tasks, &pipelines, &repo.archive_dir());
+        let graph = Graph::build(&tasks, &repo.archive_dir());
         let window = HANDOFF_GRACE;
 
         // Just arrived: well inside the window, no lane anywhere.
@@ -3579,7 +3581,7 @@ mod tests {
         task.save().unwrap();
 
         let tasks = repo.tasks().unwrap();
-        let graph = Graph::build(&tasks, &pipelines, &repo.archive_dir());
+        let graph = Graph::build(&tasks, &repo.archive_dir());
         let lanes = [lane("login · implement", &repo.root)];
         let rows = build_rows(&repo, &tasks, &pipelines, &graph, &lanes, &[], None).unwrap();
 
@@ -4265,7 +4267,7 @@ mod tests {
         task.save().unwrap();
 
         let tasks = repo.tasks().unwrap();
-        let graph = Graph::build(&tasks, &pipelines, &repo.archive_dir());
+        let graph = Graph::build(&tasks, &repo.archive_dir());
         let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
         let row = rows.iter().find(|r| r.id == "gate-board").unwrap();
 
@@ -4288,7 +4290,7 @@ mod tests {
         task.save().unwrap();
 
         let tasks = repo.tasks().unwrap();
-        let graph = Graph::build(&tasks, &pipelines, &repo.archive_dir());
+        let graph = Graph::build(&tasks, &repo.archive_dir());
 
         // Held pane, still working — the lane keeps the name of the step it
         // paused at, not `paused` itself, which never starts a lane of its
@@ -4325,7 +4327,7 @@ mod tests {
         task.save().unwrap();
 
         let tasks = repo.tasks().unwrap();
-        let graph = Graph::build(&tasks, &pipelines, &repo.archive_dir());
+        let graph = Graph::build(&tasks, &repo.archive_dir());
         let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
         let row = rows.iter().find(|r| r.id == "wall").unwrap();
 
@@ -4351,7 +4353,7 @@ mod tests {
         task.save().unwrap();
 
         let tasks = repo.tasks().unwrap();
-        let graph = Graph::build(&tasks, &pipelines, &repo.archive_dir());
+        let graph = Graph::build(&tasks, &repo.archive_dir());
         let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
         let row = rows.iter().find(|r| r.id == "wall").unwrap();
 
@@ -4470,7 +4472,7 @@ mod tests {
         task.save().unwrap();
 
         let tasks = repo.tasks().unwrap();
-        let graph = Graph::build(&tasks, &pipelines, &repo.archive_dir());
+        let graph = Graph::build(&tasks, &repo.archive_dir());
         let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
         let row = rows.iter().find(|r| r.id == "never-run").unwrap();
 
@@ -4940,7 +4942,7 @@ mod tests {
         task.save().unwrap();
 
         let tasks = repo.tasks().unwrap();
-        let graph = Graph::build(&tasks, &pipelines, &repo.archive_dir());
+        let graph = Graph::build(&tasks, &repo.archive_dir());
         let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
         let row = rows.iter().find(|r| r.id == "login").unwrap();
         assert_eq!(row.next, "→ paused after implement");
@@ -5027,7 +5029,7 @@ mod tests {
         assert!(!log.to_lowercase().contains("unblocked"), "{log}");
 
         let tasks = repo.tasks().unwrap();
-        let graph = Graph::build(&tasks, &pipelines, &repo.archive_dir());
+        let graph = Graph::build(&tasks, &repo.archive_dir());
         let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
         let row = rows.iter().find(|r| r.id == "login").unwrap();
         assert!(!row.next.contains("loop"), "{}", row.next);

@@ -198,7 +198,7 @@ crosses two groups. If a dependency is blocked, every task behind it stays `queu
 TASK       STEP       NOTE
 login      implement  writes the code
 sessions   queued     waiting on: login
-profile    queued     unreachable — login is blocked
+profile    queued     waiting on: sessions
 ```
 
 ## Finding the edges you are missing

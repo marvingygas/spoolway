@@ -232,9 +232,9 @@ pub const BLOCKED: &str = "blocked";
 /// the column a person scans for failures, and resume it into a lane that has
 /// nothing left to do.
 ///
-/// Not a terminal either, and this is what keeps `graph.rs` honest about it: a
-/// paused task is `DepState::Pending`, still moving, so its dependents wait
-/// quietly rather than being reported as stranded behind a block.
+/// Not a terminal either: the work finished cleanly, so there is nothing
+/// behind it that could ever fail to arrive — a person only has to let it
+/// past.
 pub const PAUSED: &str = "paused";
 
 /// Stage names a pipeline may not give a step, because the dispatcher already
