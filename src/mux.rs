@@ -2541,8 +2541,18 @@ pub fn cut_worktree(repo: &Path, path: &Path, branch: &str, base: &str) -> Resul
 /// a real directory from before this existed, or a symlink already sitting
 /// there — is left alone rather than clobbered, and a platform with no
 /// symlinks just keeps building from cold.
+///
+/// Only made when the worktree root holds a `Cargo.toml`: that is the exact
+/// condition under which Cargo builds into `<worktree>/target`, so a repo
+/// without one gets no `target/` and no shared `.cargo-target` at all — a
+/// link into a build directory Cargo never uses is dead weight the
+/// leftover-work backstop in `src/commands/report.rs` can sweep into a
+/// branch as a stray absolute-path symlink (gh-343).
 #[cfg(unix)]
 fn link_shared_target(worktrees_dir: &Path, worktree: &Path) {
+    if !worktree.join("Cargo.toml").is_file() {
+        return;
+    }
     let Some(shared_root) = worktrees_dir.parent() else {
         return;
     };
@@ -3996,7 +4006,8 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         crate::scratch::git_init(&root, &["-b", "main"]);
         std::fs::write(root.join("README"), "seed").unwrap();
-        run(&root, "git", &["add", "README"]).unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"seed\"\n").unwrap();
+        run(&root, "git", &["add", "README", "Cargo.toml"]).unwrap();
         run(&root, "git", &["commit", "-q", "-m", "seed"]).unwrap();
 
         let worktrees_dir = root.join("worktrees");
@@ -4061,7 +4072,8 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         crate::scratch::git_init(&root, &["-b", "main"]);
         std::fs::write(root.join("README"), "seed").unwrap();
-        run(&root, "git", &["add", "README"]).unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"seed\"\n").unwrap();
+        run(&root, "git", &["add", "README", "Cargo.toml"]).unwrap();
         run(&root, "git", &["commit", "-q", "-m", "seed"]).unwrap();
 
         let worktrees_dir = root.join("worktrees");
@@ -4093,6 +4105,36 @@ mod tests {
             std::fs::canonicalize(two.join("target").join("debug")).unwrap()
                 == std::fs::canonicalize(&shared_debug).unwrap(),
             "and the lane still running is still pointed at it"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A repo with no `Cargo.toml` at its root gets no `target/` at all —
+    /// [`link_shared_target`] is a Cargo convenience, and a link into a
+    /// build directory Cargo never uses is dead weight the leftover-work
+    /// backstop in `src/commands/report.rs` can sweep into a branch as a
+    /// stray absolute-path symlink (gh-343).
+    #[test]
+    fn a_worktree_cut_from_a_repo_with_no_cargo_toml_gets_no_target_link() {
+        let root = crate::scratch::root("mux-shared-target-no-cargo");
+        std::fs::create_dir_all(&root).unwrap();
+        crate::scratch::git_init(&root, &["-b", "main"]);
+        std::fs::write(root.join("README"), "seed").unwrap();
+        run(&root, "git", &["add", "README"]).unwrap();
+        run(&root, "git", &["commit", "-q", "-m", "seed"]).unwrap();
+
+        let worktrees_dir = root.join("worktrees");
+        let one = worktrees_dir.join("task-one");
+        cut_worktree(&root, &one, "task/one", "main").unwrap();
+
+        assert!(
+            !one.join("target").exists(),
+            "a non-Cargo worktree gets no `target/` directory at all"
+        );
+        assert!(
+            !root.join(".cargo-target").exists(),
+            "and no shared `.cargo-target` is created beside the worktree root"
         );
 
         std::fs::remove_dir_all(&root).ok();
