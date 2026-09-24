@@ -642,9 +642,9 @@ spoolway task contract --from ~/.spoolway/<project>/pending/
 | `--from <PATH>` | | A document, a directory of `*.md` files, or `-` for stdin. Repeatable. Checked as one set. Writes nothing |
 | `--base <BRANCH>` | | The base to check a document against when it sets none of its own. Same rule as `queue add --base` |
 
-The contract holds every pipeline's id budget and body skeleton, the sizing guidance, the
-output directory, the allowed and refused keys, one sentence per key, and the rules that hold
-across a set. `--from` runs the same validation as `queue add --from`
+The contract holds every pipeline's longest agent step and body skeleton, the sizing guidance,
+the output directory, the allowed and refused keys, one sentence per key, and the rules that
+hold across a set. `--from` runs the same validation as `queue add --from`
 and exits non-zero on a refusal.
 
 ### `spoolway template contract`

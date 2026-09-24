@@ -204,15 +204,6 @@ fn set_rules() -> Vec<String> {
     ]
 }
 
-/// The longest id a task on this pipeline may have — [`crate::mux::lane_name`]'s
-/// own budget, worked out the same way [`crate::mux::check_task_id`] checks
-/// it rather than a copy of its arithmetic: [`crate::mux::LANE_NAME_MAX`]
-/// minus what an empty id's own lane name already costs, which is exactly the
-/// separator [`crate::mux::tab_label`] puts between the two halves.
-fn id_budget(longest_step: &str) -> usize {
-    crate::mux::LANE_NAME_MAX.saturating_sub(crate::mux::tab_label("", longest_step).len())
-}
-
 /// Where a finished document goes, and what happens to it there — the half
 /// of the contract that is not about a document's own content.
 ///
@@ -227,14 +218,18 @@ struct ContractOutput {
     queue: &'static str,
 }
 
-/// One pipeline's own slice of the contract: the constraint an id has to fit
-/// under, the steps a `gate_at` may name, which of them is `last-of-chain`,
-/// this pipeline's own `description:`, and the body a task on it is written
-/// from.
+/// One pipeline's own slice of the contract: its longest agent step, the
+/// steps a `gate_at` may name, which of them is `last-of-chain`, this
+/// pipeline's own `description:`, and the body a task on it is written from.
+///
+/// `longest_agent_step` no longer bounds a task id's length — see gh-359 and
+/// [`crate::mux::check_task_id`] — but is kept here as information: a lane
+/// name too long for herdr's own wire spelling still gets a short internal
+/// alias rather than a name change, and a person sizing a task id may still
+/// want to know which step it will run longest against.
 #[derive(Debug, serde::Serialize)]
 struct PipelineContract {
     longest_agent_step: String,
-    id_budget: usize,
     gate_at: Vec<String>,
     /// The step a `run:` chain treats as the top of the chain — `None` when
     /// this pipeline marks no step `last: true`, the same case `pipeline
@@ -289,7 +284,6 @@ fn build_contract(repo: &Repo, pipelines: &Pipelines) -> Contract {
                 name.clone(),
                 PipelineContract {
                     longest_agent_step: longest.to_string(),
-                    id_budget: id_budget(longest),
                     gate_at: pipeline.steps.iter().map(|s| s.id.clone()).collect(),
                     last_of_chain,
                     description: pipeline.description.clone(),
@@ -351,9 +345,10 @@ fn print_check_report(tasks: &[Task], repo: &Repo, pipelines: &Pipelines) -> Res
             .pipeline
             .as_deref()
             .expect("validate_batch refuses a document with no `pipeline:`");
-        let pipeline = pipelines.get(pipeline_name)?;
-        let budget = id_budget(super::queue::longest_agent_step(pipeline));
-        let spare = budget.saturating_sub(task.id().len());
+        // Only checked for existing — `validate_batch` runs the same check
+        // before ever writing a document, and this report exists to say what
+        // that check already confirmed, not to run a second one.
+        pipelines.get(pipeline_name)?;
 
         // The same overlap `queue conflicts` reports, against the queue as
         // it stands today — advisory, like that command, and never a reason
@@ -391,14 +386,7 @@ fn print_check_report(tasks: &[Task], repo: &Repo, pipelines: &Pipelines) -> Res
                  itself is set"
                     .to_string(),
             ),
-            (
-                "id",
-                format!(
-                    "`{}` fits a lane name at `{pipeline_name}`'s longest step, with \
-                     {spare} characters to spare",
-                    task.id()
-                ),
-            ),
+            ("id", format!("`{}` is a path-safe task id", task.id())),
             (
                 "depends_on",
                 "every name resolves, in this set or in the queue".to_string(),
@@ -657,8 +645,11 @@ mod tests {
             "{value}"
         );
         assert!(
-            value["pipelines"]["default"]["id_budget"].is_u64(),
-            "{value}"
+            !value["pipelines"]["default"]
+                .as_object()
+                .unwrap()
+                .contains_key("id_budget"),
+            "gh-359: no pipeline-dependent task-id budget to advertise: {value}"
         );
         assert!(
             value["pipelines"]["default"]["gate_at"].is_array(),
@@ -739,21 +730,6 @@ mod tests {
             "the check command has to name the directory: {}",
             contract.output.verify
         );
-    }
-
-    /// The id budget in the printed contract is the same one
-    /// `check_task_id` actually enforces — a document trusting the printed
-    /// number and one over it is refused, right at that boundary.
-    #[test]
-    fn the_printed_id_budget_matches_check_task_id() {
-        let pipeline = Pipelines::builtin();
-        let longest = super::super::queue::longest_agent_step(pipeline.get("default").unwrap());
-        let budget = id_budget(longest);
-
-        let fits = "a".repeat(budget);
-        assert!(crate::mux::check_task_id(&fits, longest).is_ok(), "{fits}");
-        let over = "a".repeat(budget + 1);
-        assert!(crate::mux::check_task_id(&over, longest).is_err(), "{over}");
     }
 
     /// A document `queue add --from` would accept is reported with no

@@ -88,12 +88,14 @@ mine.md sets `run:`, which spoolway sets on every task itself — remove it from
 
 Every other dispatcher field in a document is dropped.
 
-### Two constraints no key can express
+### One constraint no key can express
 
-- An id must fit a lane name, `<task> · <step>`, of at most 34 bytes. `spoolway task contract`
-  prints each pipeline's id budget under `.pipelines.<name>.id_budget`.
-- `gate_at` must name a step of the task's pipeline. `spoolway task contract` lists them under
-  the same entry.
+`gate_at` must name a step of the task's pipeline. `spoolway task contract` lists them under
+`.pipelines.<name>.gate_at`.
+
+An id follows the same path-safe rule as every other id on this project: lowercase letters,
+digits and hyphens, starting with a letter. No length budget applies. A lane whose name would
+outgrow the multiplexer's own limit gets a short internal alias instead of a refusal.
 
 ### What only holds across a set
 

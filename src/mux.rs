@@ -881,6 +881,15 @@ pub struct Herdr {
     /// is what keeps a second project — or a second run of this one — from
     /// closing a tab it never opened.
     root_tab: RefCell<Option<String>>,
+
+    /// Where this project's [`crate::lane_alias`] records live — read and
+    /// written whenever a lane's full name outgrows herdr's own 32-character
+    /// rule. Resolved leniently ([`project_home_lenient`]) rather than
+    /// propagating a resolution failure out of every constructor: a project
+    /// this cannot be resolved for has bigger problems than a missing alias
+    /// file, and every lane whose name already fits never touches this path
+    /// at all.
+    project_home: PathBuf,
 }
 
 impl Herdr {
@@ -896,6 +905,7 @@ impl Herdr {
             mode: config.herdr_mode,
             worktree_root: worktree_root(cwd, config)?,
             root_tab: RefCell::new(None),
+            project_home: project_home_lenient(cwd).0,
         })
     }
 
@@ -1097,6 +1107,37 @@ impl Herdr {
     /// git, in the repository this backend was built on.
     fn git(&self, args: &[&str]) -> Result<String> {
         run(&self.cwd, "git", args)
+    }
+
+    /// The name herdr knows `lane` by: its own readable wire spelling,
+    /// [`to_agent_name`], when that already fits herdr's 32-character rule —
+    /// exactly what every lane crossed the wire as before this — or the short
+    /// alias [`Herdr::start_lane`] reserved for it in [`crate::lane_alias`]
+    /// when it does not.
+    ///
+    /// `Err` only for a lane whose name has never fit and was never started
+    /// through this backend either — there is no alias on record and no
+    /// readable spelling to fall back to. Every caller past a real
+    /// `start_lane` reaches a lane that is at least one of the two.
+    fn wire_name(&self, lane: &str) -> Result<String> {
+        let alias = crate::lane_alias::alias_for(&self.project_home, lane);
+        resolve_wire_name(lane, alias.as_deref()).with_context(|| {
+            format!(
+                "no herdr alias is on record for lane `{lane}`, and its full name is too long \
+                 for herdr's own wire spelling — has this lane actually been started?"
+            )
+        })
+    }
+
+    /// Every wire name a live `agent list` answers with right now — read
+    /// fresh immediately before [`crate::lane_alias::reserve`] mints a new
+    /// alias, so a collision with a session this project's own records know
+    /// nothing about (a human's own scratch session, or another project's
+    /// lane sharing the same multiplexer) is refused before it is ever asked
+    /// for, rather than only noticed once herdr itself refuses the launch.
+    fn live_wire_names(&self) -> Result<HashSet<String>> {
+        let list: AgentList = self.call(&["agent", "list"])?;
+        Ok(list.agents.into_iter().filter_map(|raw| raw.name).collect())
     }
 
     /// The workspace already open on this checkout, if one is.
@@ -1798,7 +1839,10 @@ impl Mux for Herdr {
                 // window in the same multiplexer. Never count it, never
                 // prompt it, and above all never close its pane.
                 let kind = raw.agent?;
-                let name = from_agent_name(&raw.name?);
+                let wire = raw.name?;
+                let alias_lane =
+                    crate::lane_alias::lane_for(&self.project_home, &wire, &raw.pane_id);
+                let name = resolve_lane_name(&wire, alias_lane.as_deref());
 
                 Some(Lane {
                     name,
@@ -2063,7 +2107,21 @@ impl Mux for Herdr {
         // rather than leaving it to `PaneBusy` below on every occurrence.
         self.wait_for_pane_shell(spec.pane_id, tick);
 
-        let handle = to_agent_name(spec.name);
+        // A lane's own readable wire spelling when it still fits herdr's
+        // 32-character rule; a short opaque alias, reserved and recorded
+        // *before* `agent start` is ever called below, when it does not (see
+        // `crate::lane_alias`). The record has to land first: a crash right
+        // after this point still leaves a durable pane→lane mapping for the
+        // next restart's `list_lanes` to recover, and a crash before it
+        // leaves nothing for that restart to misread as a lane that never
+        // actually launched.
+        let readable = to_agent_name(spec.name);
+        let handle = if readable.chars().count() <= AGENT_NAME_MAX {
+            readable
+        } else {
+            let taken = self.live_wire_names()?;
+            crate::lane_alias::reserve(&self.project_home, spec.name, spec.pane_id, &taken)?
+        };
         let mut args: Vec<&str> = vec![
             "agent",
             "start",
@@ -2092,7 +2150,7 @@ impl Mux for Herdr {
     }
 
     fn prompt(&self, lane: &str, text: &str) -> Result<()> {
-        let name = &to_agent_name(lane);
+        let name = &self.wire_name(lane)?;
         // Bounded, and only long enough to see the turn *start*. Not a wait for
         // the lane to finish — that would serialise every lane behind whichever
         // was prompted first, which is why this used to pass no `--wait` at all.
@@ -2169,7 +2227,7 @@ impl Mux for Herdr {
     /// string every pass, so no lane ever looked like it was making progress,
     /// and an escalation's "last 15 lines" were fifteen lines of nothing.
     fn read(&self, lane: &str, lines: usize) -> Result<String> {
-        let name = &to_agent_name(lane);
+        let name = &self.wire_name(lane)?;
         let lines = lines.to_string();
         run(
             &self.cwd,
@@ -2179,7 +2237,8 @@ impl Mux for Herdr {
     }
 
     fn interrupt_lane(&self, name: &str) -> Result<()> {
-        self.call_ignoring_result(&["agent", "send-keys", &to_agent_name(name), "Escape"])
+        let wire = self.wire_name(name)?;
+        self.call_ignoring_result(&["agent", "send-keys", &wire, "Escape"])
     }
 
     fn stop_lane(&self, _name: &str, pane_id: &str) -> Result<()> {
@@ -2231,7 +2290,7 @@ impl Mux for Herdr {
     }
 
     fn focus_lane(&self, lane: &str) -> Result<()> {
-        let name = &to_agent_name(lane);
+        let name = &self.wire_name(lane)?;
         // By agent name rather than pane id: `agent focus` walks the workspace
         // and tab the pane lives in, which is the difference between the pane
         // being focused somewhere off-screen and it being what you are looking
@@ -2575,54 +2634,25 @@ fn link_shared_target(_worktrees_dir: &Path, _worktree: &Path) {}
 
 /// herdr's own bound on an agent name: 1–32 characters, refused outright by
 /// `agent start` with `invalid_agent_name` (herdr 0.8.2). It is not spoolway's
-/// choice and cannot be argued with, so [`LANE_NAME_MAX`] is derived from it
-/// rather than picked.
+/// choice and cannot be argued with — but unlike before gh-359, it no longer
+/// bounds how long a task id may be either: [`Herdr::start_lane`] spells a
+/// lane's wire name out reversibly, [`to_agent_name`], only while that still
+/// fits this; past it, [`crate::lane_alias`] hands out a short opaque alias
+/// instead, recorded durably so every other wire call and a restart's own
+/// [`Mux::list_lanes`] can still resolve the lane's full name back from it.
 const AGENT_NAME_MAX: usize = 32;
 
-/// What the wire spelling saves against a lane's own name: `" · "` is four
-/// bytes and [`AGENT_NAME_SEPARATOR`] is two.
-const AGENT_NAME_SAVING: usize = LANE_NAME_SEPARATOR.len() - AGENT_NAME_SEPARATOR.len();
-
-/// The bound on a lane's own name, `<task> · <step>`, checked when the task is
-/// queued — because the alternative is a lane that refuses to start somewhere
-/// in the middle of a pipeline, after earlier steps have already done their
-/// work.
+/// Is `id` usable as a task id? The one length-independent rule left once
+/// herdr's own 32-character name limit stopped gating it — see
+/// [`AGENT_NAME_MAX`]'s own doc for why a task id no longer has to fit a lane
+/// name at all, on any pipeline.
 ///
-/// It is [`AGENT_NAME_MAX`] and not a round number of spoolway's own choosing.
-/// A lane crosses the wire as [`to_agent_name`] spells it, which is this name
-/// with its separator swapped, so the wire name is always [`AGENT_NAME_SAVING`]
-/// bytes shorter. Every id a task is allowed to carry therefore names an agent
-/// herdr will accept, with nothing spare. Both counts agree here: a task id and
-/// a step id are ASCII (see [`crate::config::check_id`]), so the wire name's
-/// bytes are its characters, and the only multi-byte character in the lane name
-/// is the `·` this arithmetic removes.
-///
-/// Raising it means raising what herdr accepts first. There is no spelling that
-/// buys more room: at anything above this, a task queues and then fails to
-/// start a lane mid-pipeline, which is the failure the queue-time check exists
-/// to prevent.
-pub const LANE_NAME_MAX: usize = AGENT_NAME_MAX + AGENT_NAME_SAVING;
-
-/// Is `id` usable as a task id for a pipeline whose longest step is
-/// `longest_step`? Returns the reason it is not, so the caller can say which of
-/// the two constraints was missed.
-pub fn check_task_id(id: &str, longest_step: &str) -> Result<()> {
-    // The character rule is not the multiplexer's alone — it is what keeps every
-    // id a single path component — so it is stated once, in
-    // [`crate::config::check_id`], and applied here as well as when a task file
-    // is read. What is only true here is the length, below.
-    crate::config::check_id("task id", id)?;
-
-    let longest = lane_name(longest_step, id).len();
-    if longest > LANE_NAME_MAX {
-        bail!(
-            "task id `{id}` is {} characters too long: its lane at the `{longest_step}` step \
-             would be `{}`, and a lane name stops at {LANE_NAME_MAX}",
-            longest - LANE_NAME_MAX,
-            lane_name(longest_step, id)
-        );
-    }
-    Ok(())
+/// The character rule is not the multiplexer's alone — it is what keeps every
+/// id a single path component — so it is stated once, in
+/// [`crate::config::check_id`], and applied here as well as when a task file
+/// is read.
+pub fn check_task_id(id: &str) -> Result<()> {
+    crate::config::check_id("task id", id)
 }
 
 /// Split a lane name back into its step and task, if it is one of ours.
@@ -2657,9 +2687,8 @@ pub fn lane_task(name: &str) -> &str {
 /// What spoolway writes between a lane's two halves, everywhere except the
 /// wire — see [`AGENT_NAME_SEPARATOR`] for what herdr gets instead.
 ///
-/// Named rather than spelled out at each use, because [`LANE_NAME_MAX`] does
-/// arithmetic on its length and a literal there would be a number nobody could
-/// check.
+/// Named rather than spelled out at each use, so every place that measures or
+/// strips it says so rather than repeating a literal nobody could check.
 const LANE_NAME_SEPARATOR: &str = " · ";
 
 /// The label a lane's own name is built from: task first, since a lane's pane
@@ -2683,8 +2712,9 @@ pub fn tab_label(task: &str, step: &str) -> String {
 /// hold hyphens, and neither can hold an underscore — [`crate::config::check_id`]
 /// allows lowercase letters, digits and hyphens and nothing else — so this is
 /// the one spelling that maps both ways without knowing the pipeline's steps.
-/// It is also shorter than what it replaces, so [`LANE_NAME_MAX`] still bounds
-/// it.
+/// It is also shorter than what it replaces, which is exactly what lets a lane
+/// name a little past [`AGENT_NAME_MAX`] still cross the wire this way rather
+/// than needing an alias.
 const AGENT_NAME_SEPARATOR: &str = "__";
 
 /// A lane's name as herdr will accept it — see [`AGENT_NAME_SEPARATOR`].
@@ -2697,6 +2727,43 @@ fn to_agent_name(lane: &str) -> String {
 /// [`parse_lane_name`] is what refuses it.
 fn from_agent_name(name: &str) -> String {
     name.replace(AGENT_NAME_SEPARATOR, LANE_NAME_SEPARATOR)
+}
+
+/// The wire name `lane` should cross herdr's socket as: its own readable
+/// spelling when that already fits [`AGENT_NAME_MAX`], or `alias` — whatever
+/// [`crate::lane_alias::alias_for`] found on record for it — when it does
+/// not. `None` only when the name does not fit and no alias was found either.
+///
+/// Pulled out of [`Herdr::wire_name`] as a pure function of its inputs, so the
+/// one decision that matters — readable spelling first, alias only past
+/// [`AGENT_NAME_MAX`] — is checkable on its own, without a live `Herdr` or a
+/// project's own home directory to read an alias record out of.
+fn resolve_wire_name(lane: &str, alias: Option<&str>) -> Option<String> {
+    let wire = to_agent_name(lane);
+    if wire.chars().count() <= AGENT_NAME_MAX {
+        return Some(wire);
+    }
+    alias.map(str::to_string)
+}
+
+/// The lane name `wire` should be reported as, in [`Mux::list_lanes`]:
+/// `alias_lane` — whatever [`crate::lane_alias::lane_for`] found on record for
+/// this exact wire name and pane — when there is one, or the plain reversible
+/// decode otherwise.
+///
+/// The record wins whenever it matches, rather than being tried only when the
+/// reversible decode looks wrong: a long lane's wire spelling is opaque by
+/// construction and cannot be told apart from a plausible name any other way,
+/// so there is nothing about `wire` alone this could safely decide instead.
+/// A record that does not match this pane at all — [`crate::lane_alias::lane_for`]
+/// already refused it — is exactly the case this falls through to the decode
+/// for, which is what makes a short lane's name, and any session that is not
+/// one of spoolway's own alias records at all, keep resolving exactly as it
+/// always has.
+fn resolve_lane_name(wire: &str, alias_lane: Option<&str>) -> String {
+    alias_lane
+        .map(str::to_string)
+        .unwrap_or_else(|| from_agent_name(wire))
 }
 
 #[cfg(test)]
@@ -3444,38 +3511,89 @@ mod tests {
         assert_eq!(parse_lane_name(" · implement", &steps), None);
     }
 
-    /// The bound exists to keep every id herdr will ever be handed inside its
-    /// own 1–32 character rule. So the longest id the queue accepts must still
-    /// name an agent herdr takes — with nothing to spare, or the bound is
-    /// costing ids room for no reason.
+    /// `check_task_id` no longer measures an id against any lane it might
+    /// build — see [`AGENT_NAME_MAX`]'s own doc for why a lane too long for
+    /// herdr's wire spelling gets an alias instead of a refusal. What is left
+    /// is the same path-safety rule [`crate::config::check_id`] already
+    /// applies everywhere else an id is read.
     #[test]
-    fn the_longest_id_the_queue_accepts_still_names_an_agent_herdr_takes() {
-        for step in ["pr", "implement", "review", "look", "blocked"] {
-            let longest = "a".repeat(LANE_NAME_MAX - lane_name(step, "").len());
-            assert!(check_task_id(&longest, step).is_ok());
-
-            let wire = to_agent_name(&lane_name(step, &longest));
-            assert_eq!(
-                wire.chars().count(),
-                AGENT_NAME_MAX,
-                "`{wire}` should sit exactly on herdr's cap"
-            );
-        }
+    fn check_task_id_only_enforces_path_safe_syntax() {
+        assert!(check_task_id("slug-subcommand").is_ok());
+        // Long enough that its `implement` lane would have overrun the old
+        // budget by a wide margin — no longer this function's business.
+        let long = "a".repeat(200);
+        assert!(check_task_id(&long).is_ok());
+        assert!(check_task_id("Capitalised").is_err());
+        assert!(check_task_id("3rd-task").is_err());
+        assert!(check_task_id("has_underscore").is_err());
+        assert!(check_task_id("").is_err());
     }
 
+    /// The release pipeline's `merge-released-repair` step is long enough
+    /// that a perfectly ordinary task id — `release-spoolway-2`, the one
+    /// gh-359 reports — used to be refused before it ever queued, because the
+    /// queue measured the id against the full, unaliased lane name. Once
+    /// herdr gets a short internal alias instead, nothing about a lane's
+    /// length is this function's business at all, so this id must queue on
+    /// every pipeline whatever its longest step is.
     #[test]
-    fn a_task_id_is_refused_when_its_lane_could_never_be_named() {
-        assert!(check_task_id("slug-subcommand", "implement").is_ok());
-        // One character past the limit, once its lane at `implement` is built.
-        let over = "a".repeat(LANE_NAME_MAX - lane_name("implement", "").len() + 1);
-        assert!(check_task_id(&over, "implement").is_err());
-        // The same id is fine on a pipeline whose longest agent step is shorter.
-        let short_step = "a".repeat(LANE_NAME_MAX - lane_name("pr", "").len());
-        assert!(check_task_id(&short_step, "pr").is_ok());
-        assert!(check_task_id("Capitalised", "implement").is_err());
-        assert!(check_task_id("3rd-task", "implement").is_err());
-        assert!(check_task_id("has_underscore", "implement").is_err());
-        assert!(check_task_id("", "implement").is_err());
+    fn a_task_based_on_a_long_release_step_is_not_refused_for_its_lane_name() {
+        assert!(
+            check_task_id("release-spoolway-2").is_ok(),
+            "gh-359: a lane name that only herdr needs to fit into should no \
+             longer gate the task id"
+        );
+    }
+
+    /// A lane whose own reversible spelling already fits herdr's 32-character
+    /// rule keeps crossing the wire exactly as it always has — no alias, no
+    /// dependence on a project's own record.
+    #[test]
+    fn a_short_lane_resolves_to_its_readable_wire_name_with_no_alias_needed() {
+        let lane = lane_name("pr-review", "add-health-endpoint");
+        assert_eq!(
+            resolve_wire_name(&lane, None),
+            Some("add-health-endpoint__pr-review".to_string())
+        );
+    }
+
+    /// A lane whose reversible spelling overruns herdr's own rule has no wire
+    /// name of its own to fall back to: it is only ever reached through
+    /// whatever alias a record already carries for it — gh-359's own case,
+    /// once herdr gets a short internal alias instead of a refusal.
+    #[test]
+    fn a_long_lane_resolves_only_through_its_alias() {
+        let lane = lane_name("merge-released-repair", "release-spoolway-2");
+        assert!(to_agent_name(&lane).chars().count() > AGENT_NAME_MAX);
+        assert_eq!(resolve_wire_name(&lane, None), None);
+        assert_eq!(
+            resolve_wire_name(&lane, Some("lalias123")),
+            Some("lalias123".to_string())
+        );
+    }
+
+    /// [`Mux::list_lanes`] trusts an alias record over the reversible decode
+    /// whenever one matches this pane — the only way a long lane's opaque
+    /// wire spelling is ever read back as its real name.
+    #[test]
+    fn list_lanes_prefers_a_matching_alias_record_over_the_reversible_decode() {
+        assert_eq!(
+            resolve_lane_name(
+                "lalias123",
+                Some("release-spoolway-2 · merge-released-repair")
+            ),
+            "release-spoolway-2 · merge-released-repair"
+        );
+    }
+
+    /// No alias record at all — every lane whose name already fit, and every
+    /// session that is not one of spoolway's own aliases — falls back to the
+    /// plain reversible decode, exactly as it always has.
+    #[test]
+    fn list_lanes_falls_back_to_the_reversible_decode_with_no_alias_record() {
+        let lane = lane_name("pr-review", "add-health-endpoint");
+        let wire = to_agent_name(&lane);
+        assert_eq!(resolve_lane_name(&wire, None), lane);
     }
 
     /// The `code` a stalled submission is told apart by has to come from the

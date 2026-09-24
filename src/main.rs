@@ -26,6 +26,7 @@ mod graph;
 mod headless;
 mod install;
 mod jobs;
+mod lane_alias;
 mod lock;
 mod models;
 mod mux;

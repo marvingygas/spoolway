@@ -814,11 +814,15 @@ pub(crate) fn validate_batch(
             .pipeline
             .as_deref()
             .expect("parse_submission refuses a document with no `pipeline:`");
-        let pipeline = pipelines.get(pipeline_name)?;
-        // A task id becomes a lane name, a branch and a file name. The lane
-        // is the strictest of the three, and the only one that would fail
-        // late.
-        crate::mux::check_task_id(&task.front.id, longest_agent_step(pipeline))?;
+        // Only checked for existing here, never read further: a lane's own
+        // wire name no longer has to fit inside anything this pipeline
+        // decides — see gh-359 — so a task id needs no pipeline at all to be
+        // checked against, just the plain path-safety rule below.
+        pipelines.get(pipeline_name)?;
+        // A task id becomes a branch and a file name too. Both are checked
+        // here rather than only when a document's value happens to differ,
+        // the same as `check_document_base` above.
+        crate::mux::check_task_id(&task.front.id)?;
 
         task.path = repo.queue_dir().join(format!("{}.md", task.front.id));
         if let Some(existing) = existing_task_path(repo, &task.front.id) {
@@ -5467,11 +5471,10 @@ fn begin_trial(
             }
         };
 
-        // A task id becomes a lane name, a branch and a file name — the same
-        // check an ordinary submission runs in `validate_batch`, against the
-        // pipeline this particular arm names rather than a document's own.
+        // A task id becomes a branch and a file name — the same check an
+        // ordinary submission runs in `validate_batch`.
         let id = mint_id(repo, &task.id, &minted);
-        if let Err(err) = crate::mux::check_task_id(&id, longest_agent_step(pipeline)) {
+        if let Err(err) = crate::mux::check_task_id(&id) {
             return SubmitOutcome::Mode(Mode::Outcome(format!("trial refused: {err:#}")));
         }
         minted.insert(id.clone());
@@ -9440,21 +9443,14 @@ mod tests {
         );
     }
 
-    /// An id that would fit its lane budget bare can still be refused once a
-    /// trial's own suffix pushes it over — named with the budget and the
-    /// overage, and nothing written for the arm.
+    /// gh-359: an id long enough that its lane at the pipeline's longest step
+    /// would have overrun herdr's own 32-character rule by a wide margin used
+    /// to be refused here even before a trial's own suffix was added — the
+    /// queue no longer measures a task id against any lane at all.
     #[test]
-    fn a_trial_arm_over_its_id_budget_is_refused() {
-        let repo = fixture("screen-trial-budget");
-        let pipelines = Pipelines::builtin();
-        let default = pipelines.get("default").unwrap();
-        let longest = longest_agent_step(default);
-        // The shortest bare id whose `-1` arm already overflows the lane
-        // budget by exactly one character — the same arithmetic
-        // `crate::mux`'s own `check_task_id` test uses, just short two
-        // characters for the suffix a mint adds.
-        let overflow = crate::mux::LANE_NAME_MAX - crate::mux::lane_name(longest, "").len() + 1;
-        let base_id = "a".repeat(overflow.saturating_sub(2));
+    fn a_long_task_id_is_not_refused_for_its_lane_name() {
+        let repo = fixture("screen-trial-long-id");
+        let base_id = "a".repeat(60);
         write_pending(
             &repo,
             &base_id,
@@ -9463,12 +9459,12 @@ mod tests {
         let groups = listed(&repo);
 
         // `t`, `enter` twice past both screens — the task keeps its own
-        // default assignment, which is what `overflow` was sized against.
+        // default assignment.
         screen(&repo, groups, "t\r\r");
 
         assert!(
-            repo.queue_dir().read_dir().unwrap().next().is_none(),
-            "a refused trial writes nothing"
+            repo.queue_dir().read_dir().unwrap().next().is_some(),
+            "gh-359: a long task id must still queue"
         );
     }
 
