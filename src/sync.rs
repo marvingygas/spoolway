@@ -716,8 +716,10 @@ fn provider_installed(
             .any(|name| provider.skills_dir(checkout).join(name).is_dir())
 }
 
-/// Skills carry no local edits by design, so they are rewritten — but only where
-/// a project installed them. Writing them into a project that never ran
+/// Skills are rewritten to the shipped copy where a project installed them —
+/// unless the skill stamp says a person changed one by hand, which is
+/// reported and left alone the same way a hand-edited skeleton block is; see
+/// [`read_skill_fingerprint`]. Writing them into a project that never ran
 /// `install` would be this command choosing an agent on someone's behalf.
 ///
 /// Every provider, not just `claude`: `init` and `install` write the same
@@ -749,18 +751,63 @@ fn skills(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<(
 
         for planned in planned {
             let shown = crate::platform::relative(&repo.checkout, &planned.path);
-            let detail = match std::fs::read_to_string(&planned.path) {
+            match std::fs::read_to_string(&planned.path) {
                 Ok(on_disk) if on_disk == planned.contents => {
                     outcomes.push(Outcome::Kept);
+                    if !args.dry_run {
+                        record_skill_fingerprint(
+                            &repo.home,
+                            &planned.path,
+                            &crate::skeleton::fingerprint(planned.contents),
+                        )?;
+                    }
                     continue;
                 }
-                Ok(_) => "rewritten",
-                Err(_) => "added",
-            };
-            if !args.dry_run {
-                write_atomic(&planned.path, planned.contents)?;
+                Ok(on_disk) => {
+                    // Ours only if the fingerprint spoolway itself last
+                    // recorded here still matches what is on disk now — the
+                    // same distinction `BlockState` draws for a skeleton's
+                    // block, kept the other way round because a skill file
+                    // has no hand-curated `history` of every shape it has
+                    // ever shipped. No record at all is not proof either
+                    // way, so it reads as a hand edit too — see
+                    // [`read_skill_fingerprint`].
+                    let last_shipped = read_skill_fingerprint(&repo.home, &planned.path);
+                    if last_shipped.as_deref()
+                        != Some(crate::skeleton::fingerprint(&on_disk).as_str())
+                    {
+                        outcomes.push(Outcome::blocked(
+                            &shown,
+                            format!(
+                                "was changed by hand, so it was left alone — `spoolway install \
+                                 {} --force` takes the shipped skills back",
+                                provider.name()
+                            ),
+                        ));
+                        continue;
+                    }
+                    if !args.dry_run {
+                        write_atomic(&planned.path, planned.contents)?;
+                        record_skill_fingerprint(
+                            &repo.home,
+                            &planned.path,
+                            &crate::skeleton::fingerprint(planned.contents),
+                        )?;
+                    }
+                    outcomes.push(Outcome::wrote(&shown, "rewritten"));
+                }
+                Err(_) => {
+                    if !args.dry_run {
+                        write_atomic(&planned.path, planned.contents)?;
+                        record_skill_fingerprint(
+                            &repo.home,
+                            &planned.path,
+                            &crate::skeleton::fingerprint(planned.contents),
+                        )?;
+                    }
+                    outcomes.push(Outcome::wrote(&shown, "added"));
+                }
             }
-            outcomes.push(Outcome::wrote(&shown, detail));
         }
 
         if migrate_codex {
@@ -1091,6 +1138,71 @@ pub fn stamp_behind(home: &Path, checkout: &Path) -> bool {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The skill stamp: what spoolway itself last wrote at each installed skill
+// file. [`skeleton::BlockState`] tells a block an earlier release shipped
+// from one a person edited by keeping a hand-curated `history` of every
+// fingerprint that block has ever had. A skill file has no such curated list
+// — nobody appends to one every time a `SKILL.md` changes — so this keeps the
+// same fact the other way round: not every fingerprint a file has ever had,
+// but the one fingerprint spoolway itself put there last. A mismatch against
+// that recorded value, not against today's shipped copy, is what a hand edit
+// looks like; a mismatch that agrees with it is exactly a shipped copy this
+// project has not been brought current yet.
+// ---------------------------------------------------------------------------
+
+/// The skill stamp's file name, under [`Repo::home`] — beside [`STAMP_FILE`]
+/// for the same reason: a home is shared by every worktree cut from it, and
+/// each keeps its own lines rather than fighting over shared ones.
+pub const SKILL_STAMP_FILE: &str = "skill-stamp";
+
+/// Where the skill stamp lives, given a project's home directory.
+pub fn skill_stamp_path(home: &Path) -> PathBuf {
+    home.join(SKILL_STAMP_FILE)
+}
+
+/// Record that spoolway itself last wrote `fingerprint` at `path` — one line,
+/// `<fingerprint> <path>`, replacing any earlier line for the same path.
+/// `path` is the absolute path a [`crate::install::Planned`] entry carries,
+/// which already encodes the checkout: no separate key is needed the way
+/// [`write_stamp_line`] needs one for a checkout with several tracked files.
+pub(crate) fn record_skill_fingerprint(home: &Path, path: &Path, fingerprint: &str) -> Result<()> {
+    let stamp = skill_stamp_path(home);
+    let existing = std::fs::read_to_string(&stamp).unwrap_or_default();
+    let shown = path.display().to_string();
+    let mut lines: Vec<String> = existing
+        .lines()
+        .filter(|line| line.split_once(' ').map(|(_, path)| path) != Some(shown.as_str()))
+        .map(str::to_string)
+        .collect();
+    lines.push(format!("{fingerprint} {shown}"));
+    lines.sort();
+    let mut body = lines.join("\n");
+    body.push('\n');
+    write_atomic(&stamp, body)
+}
+
+/// What the skill stamp says spoolway last wrote at `path`, if anything.
+/// [`crate::install::install`] records one here for every file it actually
+/// writes, and so does [`skills`] itself, so an ordinary install followed by
+/// an ordinary sync always has one. No record at all — a project installed
+/// by a spoolway old enough not to keep this stamp — is not proof the file
+/// on disk is ours, so [`skills`] treats it the same as a fingerprint that
+/// disagrees: blocked, not silently rewritten. The one place this bites is
+/// the first sync after upgrading such a project to a spoolway that keeps
+/// this stamp: every one of its skill files reads as blocked once,
+/// `spoolway install <provider> --force` takes them back, and every sync
+/// after that — like every sync on a project that installed fresh — tells a
+/// real hand edit apart from a stale shipped copy correctly.
+fn read_skill_fingerprint(home: &Path, path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(skill_stamp_path(home)).ok()?;
+    let shown = path.display().to_string();
+    text.lines().find_map(|line| {
+        let (fingerprint, recorded_path) = line.split_once(' ')?;
+        (recorded_path == shown).then(|| fingerprint.to_string())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1373,6 +1485,15 @@ mod tests {
             .unwrap();
         std::fs::create_dir_all(first.path.parent().unwrap()).unwrap();
         std::fs::write(&first.path, "stale, from an older release\n").unwrap();
+        // The skill stamp is what tells this apart from a hand edit: record
+        // it as spoolway's own last write, the way an earlier sync actually
+        // would have.
+        record_skill_fingerprint(
+            &repo.home,
+            &first.path,
+            &crate::skeleton::fingerprint("stale, from an older release\n"),
+        )
+        .unwrap();
 
         // `retired_skills`: a directory this binary no longer ships.
         let retired = claude_dir.join(crate::install::RETIRED_SKILLS[0]);
@@ -1816,6 +1937,15 @@ mod tests {
             let first = provider.plan(&repo.root).into_iter().next().unwrap();
             std::fs::create_dir_all(first.path.parent().unwrap()).unwrap();
             std::fs::write(&first.path, "stale, from an older release\n").unwrap();
+            // Recorded as spoolway's own last write, standing in for the
+            // earlier sync that would really have put it there — without
+            // this, an unrecognised fingerprint reads as a hand edit.
+            record_skill_fingerprint(
+                &repo.home,
+                &first.path,
+                &crate::skeleton::fingerprint("stale, from an older release\n"),
+            )
+            .unwrap();
         }
 
         let mut outcomes = Vec::new();
@@ -1845,6 +1975,14 @@ mod tests {
         let plan = claude_dir.join("spoolway-plan").join("SKILL.md");
         std::fs::create_dir_all(plan.parent().unwrap()).unwrap();
         std::fs::write(&plan, "stale, from an older release\n").unwrap();
+        // Recorded as spoolway's own last write, standing in for the earlier
+        // sync that would really have put it there.
+        record_skill_fingerprint(
+            &repo.home,
+            &plan,
+            &crate::skeleton::fingerprint("stale, from an older release\n"),
+        )
+        .unwrap();
 
         let mut outcomes = Vec::new();
         skills(&repo, &args(), &mut outcomes).unwrap();
@@ -1867,6 +2005,98 @@ mod tests {
         assert!(
             !crate::cli::Provider::Pi.skills_dir(&repo.root).exists(),
             "a provider the project never installed gets nothing"
+        );
+    }
+
+    /// The module doc promises "Anything a person has changed is reported
+    /// and left exactly as it is" — `templates()` keeps that promise via
+    /// `BlockState::HandEdited`; `skills()` now does too, via the skill
+    /// stamp. This fixture stands for the legacy case: a project whose
+    /// skills predate the stamp, so nothing was ever recorded for this
+    /// path — `install` now records one for every file it writes, so an
+    /// ordinary install-then-sync never lands here. No fingerprint recorded
+    /// is not proof the file on disk is ours, so it is reported as blocked
+    /// and left alone rather than rewritten like a stale one. See the next
+    /// test for the sharper case, where a recorded fingerprint disagrees
+    /// with what is on disk.
+    #[test]
+    fn a_hand_edited_skill_file_is_reported_as_blocked_and_left_alone() {
+        let repo = fixture("skills-hand-edited");
+        let planned = crate::cli::Provider::Claude.plan(&repo.root);
+        let first = planned.into_iter().next().unwrap();
+        std::fs::create_dir_all(first.path.parent().unwrap()).unwrap();
+        let edited = format!("{}\na line a person added by hand\n", first.contents);
+        std::fs::write(&first.path, &edited).unwrap();
+
+        let mut outcomes = Vec::new();
+        skills(&repo, &args(), &mut outcomes).unwrap();
+        let lines = outcome_lines(&outcomes);
+
+        assert_eq!(
+            std::fs::read_to_string(&first.path).unwrap(),
+            edited,
+            "a hand-edited skill file must be left exactly as it is: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.starts_with("blocked")
+                && l.contains("spoolway install")
+                && l.contains("--force")),
+            "{lines:?}"
+        );
+    }
+
+    /// The discrimination the fix is actually built on: a file whose
+    /// recorded fingerprint agrees with what is on disk, exactly as
+    /// `install` or an earlier `sync` would have left it, is stale and
+    /// gets rewritten — the same file, edited by hand afterwards, is
+    /// blocked instead, even though both start from a real recorded
+    /// fingerprint rather than no record at all.
+    #[test]
+    fn a_recorded_fingerprint_tells_a_stale_copy_from_a_later_hand_edit() {
+        let repo = fixture("skills-recorded-then-edited");
+        let planned = crate::cli::Provider::Claude.plan(&repo.root);
+        let first = planned.into_iter().next().unwrap();
+        std::fs::create_dir_all(first.path.parent().unwrap()).unwrap();
+
+        // An older release's text, recorded as spoolway's own — the shape
+        // `install` leaves a file in when it writes it.
+        let old_release = "an older release's text\n";
+        std::fs::write(&first.path, old_release).unwrap();
+        record_skill_fingerprint(
+            &repo.home,
+            &first.path,
+            &crate::skeleton::fingerprint(old_release),
+        )
+        .unwrap();
+
+        let mut outcomes = Vec::new();
+        skills(&repo, &args(), &mut outcomes).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&first.path).unwrap(),
+            first.contents,
+            "a recorded fingerprint that matches what is on disk is a stale copy, not a hand edit: {:?}",
+            outcome_lines(&outcomes)
+        );
+
+        // Now a person edits the file this sync just brought current.
+        // Its fingerprint still matches, but the text it matches is no
+        // longer what is on disk.
+        let edited = format!("{}\na line a person added by hand\n", first.contents);
+        std::fs::write(&first.path, &edited).unwrap();
+
+        let mut outcomes = Vec::new();
+        skills(&repo, &args(), &mut outcomes).unwrap();
+        let lines = outcome_lines(&outcomes);
+        assert_eq!(
+            std::fs::read_to_string(&first.path).unwrap(),
+            edited,
+            "a recorded fingerprint that no longer matches what is on disk is a hand edit: {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("blocked") && l.contains("--force")),
+            "{lines:?}"
         );
     }
 
@@ -2179,6 +2409,55 @@ mod tests {
 
         // The sibling's own line is still there, untouched.
         assert!(read_stamp(&repo.home, &other).is_some());
+    }
+
+    /// The skill stamp's own version of the same guarantee: written for one
+    /// path, re-readable straight back, a later write for that same path
+    /// replacing rather than duplicating its line, and a sibling path's own
+    /// line kept untouched.
+    #[test]
+    fn a_skill_fingerprint_reads_back_and_keeps_a_siblings_line() {
+        let repo = fixture("skill-stamp-roundtrip");
+        let path = repo.checkout.join(".claude/skills/spoolway-plan/SKILL.md");
+        let sibling = repo.checkout.join(".claude/skills/spoolway-tasks/SKILL.md");
+
+        record_skill_fingerprint(&repo.home, &sibling, "sibling-fingerprint").unwrap();
+        record_skill_fingerprint(&repo.home, &path, "first-fingerprint").unwrap();
+        assert_eq!(
+            read_skill_fingerprint(&repo.home, &path).as_deref(),
+            Some("first-fingerprint")
+        );
+
+        // A later write for the same path replaces its line rather than
+        // adding a second one — a stamp with two lines for one path would
+        // leave `find_map` picking whichever happened to come first.
+        record_skill_fingerprint(&repo.home, &path, "second-fingerprint").unwrap();
+        assert_eq!(
+            read_skill_fingerprint(&repo.home, &path).as_deref(),
+            Some("second-fingerprint")
+        );
+        let stamp = std::fs::read_to_string(skill_stamp_path(&repo.home)).unwrap();
+        assert_eq!(
+            stamp
+                .lines()
+                .filter(|l| l.ends_with(&path.display().to_string()))
+                .count(),
+            1,
+            "{stamp}"
+        );
+
+        // The sibling's own line is still there, untouched.
+        assert_eq!(
+            read_skill_fingerprint(&repo.home, &sibling).as_deref(),
+            Some("sibling-fingerprint")
+        );
+
+        // A path with nothing ever recorded for it reads as no evidence
+        // either way, not as an empty string.
+        let never_written = repo
+            .checkout
+            .join(".claude/skills/spoolway-doctor/SKILL.md");
+        assert_eq!(read_skill_fingerprint(&repo.home, &never_written), None);
     }
 
     /// `text_fingerprint` has to agree with `skills()` about which providers

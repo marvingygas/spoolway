@@ -600,21 +600,26 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     if let Some(line) = &stamped_line {
         println!("{line}");
     }
+    // Resolved once and shared: the skill install below records each file it
+    // writes here, the same fact `write_stamp` below records for the whole
+    // checkout. Best-effort, and never printed: a project's home resolving
+    // is not this command's own concern to fail over, and `bind` above has
+    // already settled it for every ordinary case.
+    let home = crate::mux::project_home(root).ok();
+
     // The skills, in the provider's own convention. Run from here rather than
     // suggested, because "and now run this other command" is the manual step
     // this exists to remove — and a project that skipped it had skills that
     // were shipped, documented, and never installed.
-    let installed = crate::install::install(root, answers.provider, args.force)?;
+    let installed = crate::install::install(root, home.as_deref(), answers.provider, args.force)?;
     crate::install::report(installed);
     // A fresh (or freshly `--force`d) project is, by construction, exactly
     // what this binary would write — so it is stamped the same fact
     // `spoolway sync` would have recorded had it run here instead: this
     // checkout, at this binary's version, matching what it would still
-    // write today. Best-effort, and never printed: a project's home
-    // resolving is not this command's own concern to fail over, and
-    // `bind` above has already settled it for every ordinary case.
-    if let Ok(home) = crate::mux::project_home(root) {
-        let _ = crate::sync::write_stamp(&home, root);
+    // write today.
+    if let Some(home) = &home {
+        let _ = crate::sync::write_stamp(home, root);
     }
     // The mockup above ends its transcript at `crate::install::report`'s
     // line, but it is an excerpt of the run this task changes, not a
