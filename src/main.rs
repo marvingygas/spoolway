@@ -426,7 +426,14 @@ fn run() -> Result<()> {
                 }
                 Command::Queue {
                     command: Some(QueueCommand::Conflicts),
-                } => commands::queue_conflicts(&repo, routing(&graph)?),
+                } => {
+                    // `queue_conflicts` no longer needs a `Pipelines` itself, but a
+                    // broken `pipelines.yml` should still refuse this the same as
+                    // every other queue command — so the value is checked and
+                    // dropped rather than left unpassed.
+                    routing(&graph)?;
+                    commands::queue_conflicts(&repo)
+                }
                 Command::Queue {
                     command: Some(QueueCommand::Pause(args)),
                 } => commands::queue_pause(&repo, routing(&graph)?, &args.task, args.force),

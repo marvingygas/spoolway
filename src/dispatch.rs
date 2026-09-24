@@ -880,12 +880,7 @@ impl<'a> Dispatcher<'a> {
 
         // The dependency graph, resolved once for the whole pass. It owns its
         // data, so the rest of the pass is free to keep writing task files.
-        let graph = Graph::build_for_run(
-            &tasks,
-            self.pipelines,
-            &self.repo.archive_dir(),
-            self.unattended,
-        );
+        let graph = Graph::build(&tasks, &self.repo.archive_dir());
 
         // The list is read once at the top of the pass, so a pane closed during
         // it would otherwise be looked at again by the rest of the pass as if it
@@ -1678,12 +1673,13 @@ impl<'a> Dispatcher<'a> {
                     }
                 }
             }
-            // A task waiting on a dependency that will never finish —
-            // dead or simply not there — is left exactly where it is:
-            // unblocking the root revives the whole subtree, and moving
-            // it here would mean unblocking each of them by hand
-            // instead. Not reported to the ticker: the row's own NEXT
-            // column already says this, by the same
+            // A task waiting on a dependency that has not finished —
+            // whether it is still moving or stuck behind something that
+            // will never end — is left exactly where it is: unblocking
+            // the root revives the whole subtree, and moving it here
+            // would mean unblocking each of them by hand instead. Not
+            // reported to the ticker: the row's own NEXT column already
+            // names what it is waiting on, by the same
             // `crate::commands::dependency_note` the row reads, and a
             // wait that is still waiting next pass, and the pass after
             // that, is not news.
@@ -1774,9 +1770,10 @@ impl<'a> Dispatcher<'a> {
     ///
     /// A cycle in `depends_on` is a deadlock, not a wait: none of its
     /// members will ever be ready. Not reported to the ticker either —
-    /// every task in it already reads `Unreachable` on the board, through
-    /// the same `dependency_note` a dead or missing dependency does above,
-    /// and a deadlock that is still a deadlock next pass is not news. This
+    /// every task in it already reads `waiting on: <the other member>` on
+    /// the board, in the NEXT column, the same line `dependency_note` writes
+    /// for any dependency that has not finished, and a deadlock that is
+    /// still a deadlock next pass is not news. This
     /// is a standalone remark, not a description of the retain below it —
     /// `graph.cycles()` used to be walked here to build that line, and
     /// nothing has taken its place.
@@ -12882,9 +12879,9 @@ mod tests {
         let report = run_pass(&repo, &mux);
 
         // Not reported to the ticker: the leaf's own row already reads
-        // `waiting on root, which is blocked — spoolway resume root` in the
-        // board's NEXT column, through the same `dependency_note`, and a wait
-        // that is still waiting next pass is not news.
+        // `waiting on: root` in the board's NEXT column, through the same
+        // `dependency_note`, and a wait that is still waiting next pass is
+        // not news.
         assert!(mux.did("start").is_empty());
         assert!(
             report.problems.is_empty(),
@@ -12907,10 +12904,10 @@ mod tests {
         let report = run_pass(&repo, &mux);
 
         // Neither task starts — nothing in a cycle can ever be ready. Not
-        // reported to the ticker either: both rows already read `Unreachable`
-        // on the board, through the same `dependency_note` that names the
-        // cycle, and a deadlock that is still a deadlock next pass is not
-        // news.
+        // reported to the ticker either: both rows already read
+        // `waiting on: <the other>` in the board's NEXT column, through the
+        // same `dependency_note` that writes it, and a deadlock that is
+        // still a deadlock next pass is not news.
         assert!(mux.did("start").is_empty());
         assert!(
             report.problems.is_empty(),

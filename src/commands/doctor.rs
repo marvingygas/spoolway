@@ -253,7 +253,7 @@ pub(crate) enum Warning {
 pub(crate) fn cheap_findings(repo: &Repo, pipelines: &Pipelines, config: &Config) -> Vec<Warning> {
     let mux = crate::mux::backend(repo);
     let tasks = repo.tasks().unwrap_or_default();
-    let graph = Graph::build_for_run(&tasks, pipelines, &repo.archive_dir(), repo.unattended());
+    let graph = Graph::build(&tasks, &repo.archive_dir());
 
     let mut report = Report::default();
     report.record_all(config_checks(repo, None, config));
@@ -419,7 +419,7 @@ pub fn doctor(
     // A task file can be hand-edited into a graph nothing can get through, and
     // the only symptom is tasks that quietly never start.
     let tasks = repo.tasks().unwrap_or_default();
-    let graph = Graph::build_for_run(&tasks, pipelines, &repo.archive_dir(), repo.unattended());
+    let graph = Graph::build(&tasks, &repo.archive_dir());
 
     report.record_all(config_checks(repo, config_error, &config));
     report.record_all(issue_tracking_checks(repo, &config.issue_tracking));

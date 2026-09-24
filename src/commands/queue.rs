@@ -7,30 +7,11 @@ use super::*;
 use crate::platform::PathExt;
 use crate::screen::{Key, PollableRead, key_hint, overlay, pad_to, panel, read_key};
 
-/// Why a task on a wait step has not started yet, worst news first.
+/// Which dependencies a task on a wait step is still waiting for.
 ///
 /// `None` means nothing in the graph is holding it: it is simply waiting for a
 /// worker slot, and the step's own description is the better thing to print.
 pub(crate) fn dependency_note(graph: &Graph, id: &str) -> Option<String> {
-    if let Some(cycle) = graph.cycle_with(id) {
-        let others: Vec<&str> = cycle
-            .iter()
-            .map(String::as_str)
-            .filter(|member| *member != id)
-            .collect();
-        return Some(match others.is_empty() {
-            true => "depends on itself — nothing can ever start it".to_string(),
-            false => format!("in a dependency cycle with {}", others.join(", ")),
-        });
-    }
-
-    if let Some((dep, state)) = graph.unreachable(id) {
-        return Some(match state {
-            DepState::Unknown => format!("unreachable — no task named {dep}"),
-            _ => format!("unreachable — {dep} is blocked"),
-        });
-    }
-
     let waiting = graph.waiting_on(id);
     if waiting.is_empty() {
         return None;
@@ -130,7 +111,6 @@ fn state_label(state: crate::status::State) -> &'static str {
         Running => "running",
         Blocked => "blocked",
         Prompt => "prompt",
-        Unreachable => "unreachable",
         Queued => "queued",
         Done => "done",
     }
@@ -859,7 +839,7 @@ pub(crate) fn validate_batch(
     }
 
     require_group_description(repo, &tasks)?;
-    check_dependencies_set(repo, pipelines, &mut tasks)?;
+    check_dependencies_set(repo, &mut tasks)?;
     Ok(tasks)
 }
 
@@ -2021,10 +2001,10 @@ fn ends_with_newline(mut body: String) -> String {
 /// a parent's commits. Rejecting them here is what keeps the graph acyclic
 /// and fully resolved by construction — `spoolway doctor` is the backstop
 /// for hand-edited files.
-fn check_dependencies_set(repo: &Repo, pipelines: &Pipelines, batch: &mut [Task]) -> Result<()> {
+fn check_dependencies_set(repo: &Repo, batch: &mut [Task]) -> Result<()> {
     let mut tasks = repo.tasks()?;
     tasks.extend(batch.iter().cloned());
-    let graph = Graph::build(&tasks, pipelines, &repo.archive_dir());
+    let graph = Graph::build(&tasks, &repo.archive_dir());
 
     for task in batch.iter_mut() {
         let id = task.id().to_string();
@@ -2250,9 +2230,9 @@ fn conflicts<'a>(tasks: &'a [Task], graph: &Graph) -> Vec<Conflict<'a>> {
 /// screen no longer runs any check of its own before writing — see
 /// `begin_submission` — so this is the only place left that reads `conflicts`
 /// at all.
-fn conflicts_report(repo: &Repo, pipelines: &Pipelines) -> Result<String> {
+fn conflicts_report(repo: &Repo) -> Result<String> {
     let tasks = repo.tasks()?;
-    let graph = Graph::build(&tasks, pipelines, &repo.archive_dir());
+    let graph = Graph::build(&tasks, &repo.archive_dir());
     let found = conflicts(&tasks, &graph);
 
     if found.is_empty() {
@@ -2292,8 +2272,8 @@ fn conflicts_report(repo: &Repo, pipelines: &Pipelines) -> Result<String> {
     Ok(lines.join("\n"))
 }
 
-pub fn queue_conflicts(repo: &Repo, pipelines: &Pipelines) -> Result<()> {
-    println!("{}", conflicts_report(repo, pipelines)?);
+pub fn queue_conflicts(repo: &Repo) -> Result<()> {
+    println!("{}", conflicts_report(repo)?);
     Ok(())
 }
 
@@ -4986,9 +4966,7 @@ fn begin_submission(
         }
     };
     let selected = state.selected.clone();
-    match finish_submit(
-        repo, pipelines, groups, pending, &documents, base, &selected,
-    ) {
+    match finish_submit(repo, groups, pending, &documents, base, &selected) {
         Ok(_msg) => {
             state.selected.clear();
             state.gates.clear();
@@ -5160,7 +5138,6 @@ fn join_running_dispatcher(
 /// deletion walks the groups it was handed rather than the directory.
 fn finish_submit(
     repo: &Repo,
-    pipelines: &Pipelines,
     groups: &mut Vec<Group>,
     mut pending: Vec<Task>,
     documents: &[(String, String)],
@@ -5173,7 +5150,7 @@ fn finish_submit(
     // guarantee rather than a borrowed one: whatever calls `finish_submit`
     // next, with whatever batch, saves nothing without this check standing
     // between it and disk.
-    check_dependencies_set(repo, pipelines, &mut pending)?;
+    check_dependencies_set(repo, &mut pending)?;
     // `interactive: true` unconditionally: the queue screen already blocks
     // on a key for every other prompt it draws — `confirm_start`'s own
     // overview and overrides gate, `Mode::SaveRoutine` — whether or not the
@@ -5542,7 +5519,7 @@ fn begin_trial(
         arms.push(arm);
     }
 
-    match finish_trial(repo, pipelines, arms) {
+    match finish_trial(repo, arms) {
         Ok(()) => after_write(repo),
         Err(err) => SubmitOutcome::Mode(Mode::Outcome(format!("trial refused: {err:#}"))),
     }
@@ -5552,8 +5529,8 @@ fn begin_trial(
 /// failure. Mirrors [`finish_submit`]'s own all-or-nothing write, minus the
 /// pending-directory deletion that function makes: a trial's source
 /// documents are never among the tasks being written.
-fn finish_trial(repo: &Repo, pipelines: &Pipelines, mut arms: Vec<Task>) -> Result<()> {
-    check_dependencies_set(repo, pipelines, &mut arms)?;
+fn finish_trial(repo: &Repo, mut arms: Vec<Task>) -> Result<()> {
+    check_dependencies_set(repo, &mut arms)?;
     for arm in &arms {
         arm.save()?;
     }
@@ -5902,6 +5879,61 @@ mod tests {
         assert!(!rendered.contains("parked"), "{rendered}");
     }
 
+    /// A task stranded behind a block is `"state": "queued"` like every
+    /// other wait, and nothing was added to `--json` to carry what the old
+    /// `unreachable` state used to say. The NEXT column is where a reader
+    /// finds out *what* the wait is on, and `dependency_note` still writes
+    /// it.
+    #[test]
+    fn queue_json_calls_a_stranded_task_queued_with_no_field_in_its_place() {
+        use crate::status::testutil::{add, fixture};
+
+        let repo = fixture("stranded-json");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "search-typo", &[], Some(crate::pipeline::BLOCKED));
+        add(
+            &repo,
+            "search-facets",
+            &["search-typo"],
+            Some(crate::pipeline::QUEUED),
+        );
+
+        let rows = crate::status::rows(&repo, &pipelines).unwrap();
+        let row = rows.iter().find(|r| r.id == "search-facets").unwrap();
+        let json = QueueRowJson::from(row);
+
+        assert_eq!(json.state, "queued");
+        // `next` now reads `waiting on: search-typo` — an ordinary wait
+        // line, not the diagnosis `unreachable` used to spell out — so this
+        // looks at the keys rather than the whole line: nothing was added to
+        // say what the state stopped saying.
+        let rendered = serde_json::to_value(&json).unwrap();
+        let keys: Vec<&str> = rendered
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "id",
+                "group",
+                "parallel",
+                "stage",
+                "pipeline",
+                "state",
+                "arrivals",
+                "next",
+                "resumable",
+                "ctx_pct",
+                "out_tokens",
+                "cost_usd",
+                "lane_time_s",
+            ]
+        );
+    }
+
     #[test]
     fn strip_slug_prefix_removes_only_a_recognised_prefix() {
         assert_eq!(
@@ -6139,8 +6171,7 @@ mod tests {
         sessions.front.id = "sessions".into();
         sessions.front.depends_on = vec!["login".into()];
         sessions.front.base = Some("plan/other".into());
-        let err =
-            check_dependencies_set(&repo, &Pipelines::builtin(), &mut [sessions]).unwrap_err();
+        let err = check_dependencies_set(&repo, &mut [sessions]).unwrap_err();
 
         assert!(
             err.to_string().contains("would never put it in reach"),
@@ -6206,8 +6237,7 @@ mod tests {
         std::fs::remove_file(repo.archive_dir().join("login.md")).unwrap();
 
         let mut sessions = queued(&repo, "sessions");
-        let err = check_dependencies_set(&repo, &Pipelines::builtin(), &mut [sessions.clone()])
-            .unwrap_err();
+        let err = check_dependencies_set(&repo, &mut [sessions.clone()]).unwrap_err();
         assert!(
             err.to_string().contains("housekeeping.retention_days"),
             "the age was not named: {err:#}"
@@ -6222,8 +6252,7 @@ mod tests {
             ..repo.clone()
         };
         sessions.front.depends_on = vec!["login".into()];
-        let err =
-            check_dependencies_set(&repo_off, &Pipelines::builtin(), &mut [sessions]).unwrap_err();
+        let err = check_dependencies_set(&repo_off, &mut [sessions]).unwrap_err();
         assert!(
             !err.to_string().contains("housekeeping.retention_days"),
             "retention off must not be blamed: {err:#}"
@@ -6240,7 +6269,7 @@ mod tests {
         // rejected by editing `a`'s file, which is the only way to express it.
         let mut a = queued(&repo, "a");
         a.front.depends_on = vec!["b".into()];
-        let err = check_dependencies_set(&repo, &Pipelines::builtin(), &mut [a]).unwrap_err();
+        let err = check_dependencies_set(&repo, &mut [a]).unwrap_err();
 
         assert!(err.to_string().contains("a → b → a"), "{err:#}");
     }
@@ -6428,7 +6457,7 @@ mod tests {
 
     fn found(repo: &Repo) -> Vec<String> {
         let tasks = repo.tasks().unwrap();
-        let graph = Graph::build(&tasks, &Pipelines::builtin(), &repo.archive_dir());
+        let graph = Graph::build(&tasks, &repo.archive_dir());
         conflicts(&tasks, &graph)
             .iter()
             .map(|c| {
@@ -6473,7 +6502,7 @@ mod tests {
         theirs.save().unwrap();
 
         let tasks = repo.tasks().unwrap();
-        let graph = Graph::build(&tasks, &Pipelines::builtin(), &repo.archive_dir());
+        let graph = Graph::build(&tasks, &repo.archive_dir());
         let found = conflicts(&tasks, &graph);
 
         assert_eq!(found.len(), 1, "the overlap is real and still reported");
@@ -6492,7 +6521,7 @@ mod tests {
         touching_with(&repo, "right", &["src/api/**"], &[], true);
 
         let tasks = repo.tasks().unwrap();
-        let graph = Graph::build(&tasks, &Pipelines::builtin(), &repo.archive_dir());
+        let graph = Graph::build(&tasks, &repo.archive_dir());
         let found = conflicts(&tasks, &graph);
 
         assert_eq!(found.len(), 1);
@@ -6516,7 +6545,7 @@ mod tests {
         theirs.save().unwrap();
 
         let tasks = repo.tasks().unwrap();
-        let graph = Graph::build(&tasks, &Pipelines::builtin(), &repo.archive_dir());
+        let graph = Graph::build(&tasks, &repo.archive_dir());
         let found = conflicts(&tasks, &graph);
 
         assert_eq!(found.len(), 1);
@@ -6548,7 +6577,7 @@ mod tests {
         touching(&repo, "broad", &["src/**"], &[]);
         touching(&repo, "narrow", &["src/api/**"], &[]);
 
-        let report = conflicts_report(&repo, &Pipelines::builtin()).unwrap();
+        let report = conflicts_report(&repo).unwrap();
         assert_eq!(
             report,
             "broad and narrow both touch src/** ~ src/api/** \
@@ -7892,7 +7921,6 @@ mod tests {
         let selected = state.selected.clone();
         let msg = finish_submit(
             &repo,
-            &pipelines,
             &mut groups,
             pending,
             &documents,
@@ -7947,7 +7975,6 @@ mod tests {
         let selected = state.selected.clone();
         let msg = finish_submit(
             &repo,
-            &pipelines,
             &mut groups,
             pending,
             &documents,

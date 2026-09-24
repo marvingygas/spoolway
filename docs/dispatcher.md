@@ -181,8 +181,6 @@ task id marks `parallel: true`.
 stateDiagram-v2
   [*] --> queued
   queued --> running: dependencies done, slot free
-  queued --> unreachable: a dependency is blocked
-  unreachable --> queued: that dependency is resumed
   running --> running: step passes or fails, next step starts
   running --> prompt: a permission prompt in its pane
   prompt --> running: the prompt is answered
@@ -201,7 +199,6 @@ stateDiagram-v2
 | `prompt` | A live lane's pane is holding a permission prompt. Read fresh off the lane list every redraw, and gone the instant the prompt is answered. Not resumable: the task has not stopped. |
 | `paused` | The task's own stage is `paused`: a gate, or a park from `p`. |
 | `blocked` | A step reported a block, a launch failed, or a loop budget ran out. Read `## Blocker` in the task file. |
-| `unreachable` | A task it depends on is blocked. |
 | `done` | Finished and archived. The row stays, dimmed, until the whole group is done. |
 
 `RECENT` lists the last task moves. Errors from a pass go to `~/.spoolway/logs/<project>.log`.
