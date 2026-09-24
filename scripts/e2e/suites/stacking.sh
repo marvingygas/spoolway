@@ -39,6 +39,12 @@
 # The chain is also what `last:` is about, so the second half of this suite adds
 # a step carrying it and asks which of the two tasks actually ran the command.
 # covers: step.last — only the top of a chain runs it; the task below walks past without starting the command
+#
+# `first:` asks the opposite question of the same chain, read off a task's own
+# `depends_on` rather than the graph: the bottom of the stack declares none, so
+# it is the root and runs a step carrying `first:`; the task above it declares
+# one and walks past.
+# covers: step.first — only a chain's declared root runs it; a dependent walks past without starting the command
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=../lib.sh
@@ -85,6 +91,23 @@ RUNS="$LIVE/proj/suite-runs.txt"
 } >> .spoolway/pipelines/default.yml
 sed -i "0,/^    on_pass: document\$/s//    on_pass: suite/" .spoolway/pipelines/default.yml
 
+# ------------------------------------------------------- a step the root runs once
+# A command step carrying `first:`, between `implement` and `review`. Same
+# technique as `suite` above — one line per real run, in the control plane so
+# it outlives the worktree it ran in — but bound to a task's own `depends_on`
+# rather than to what is still open above it: the bottom of the stack declares
+# none and runs this for real, and the task above it declares one and walks
+# past without starting the command at all.
+BOOT="$LIVE/proj/bootstrap-runs.txt"
+{
+  printf '\n  - id: bootstrap\n'
+  printf "    description: A stand-in for setup work only a chain's root does once.\n"
+  printf '    run: echo "$SPOOLWAY_TASK" >> "$SPOOLWAY_REPO/bootstrap-runs.txt"\n'
+  printf '    first: true\n'
+  printf '    on_pass: review\n    on_fail: blocked\n'
+} >> .spoolway/pipelines/default.yml
+sed -i "0,/^    on_pass: review\$/s//    on_pass: bootstrap/" .spoolway/pipelines/default.yml
+
 # Hold the bottom after its real handover, before it reaches `done`. That
 # leaves its dependent gated without stopping a dispatcher in the middle of
 # the dependent's workspace cut — the race this suite is specifically meant
@@ -97,7 +120,7 @@ sed -i "/^  - id: handover\$/,/^    on_pass: done\$/s/^    on_pass: done\$/    o
   printf '    agent: pi\n    prompt: closer\n    model: fake-local\n    effort: ""\n'
   printf '    gate: true\n    on_pass: done\n'
 } >> .spoolway/pipelines/default.yml
-works "a pipeline whose stack-wide step declares \`last:\` checks out" \
+works "a pipeline whose stack-wide step declares \`last:\` and \`first:\` checks out" \
   "$SPOOLWAY" pipeline check
 
 BODY="$LIVE/body.md"
@@ -206,6 +229,16 @@ fi
 has "and the pass says why it walked past" \
   "\`suite\` does not run for this task (not last in its chain)" \
   "$E2E_DISPATCH_LOG"
+
+# The bottom of the stack is the root of it — an empty `depends_on` — so
+# `bootstrap` is the opposite story: `base` really ran it, once, before it
+# ever reached `suite`.
+if grep -qx base "$BOOT" 2>/dev/null; then
+  ok "the bottom of the chain really ran the \`first:\` step"
+else
+  bad "the bottom of the chain really ran the \`first:\` step"
+  sed 's/^/        /' "$BOOT" 2>/dev/null || printf '        no file at all\n'
+fi
 
 # Release the gate with the dispatcher still down. The next drive can clean up
 # `base` and cut `top` without a stop arriving in the middle of that cut.
@@ -321,6 +354,23 @@ else
   bad "and it was the top's own run that did it"
   ls $SPOOLWAY_PROJECT_HOME/commands/ 2>/dev/null | sed 's/^/        /'
 fi
+
+# `top` declares a dependency, so it is never the root — the opposite of
+# `suite` above: exactly one line in `$BOOT`, and it names `base`, not `top`.
+if [ -e "$BOOT" ] && [ "$(wc -l < "$BOOT")" -eq 1 ] && grep -qx base "$BOOT"; then
+  ok "the task above it walked past the \`first:\` step, which stayed the root's alone"
+else
+  bad "the task above it walked past the \`first:\` step, which stayed the root's alone"
+  sed 's/^/        /' "$BOOT" 2>/dev/null || printf '        no file at all\n'
+fi
+if [ ! -e "$SPOOLWAY_PROJECT_HOME/commands/top · bootstrap.log" ]; then
+  ok "and no run was ever started for \`top\` at \`bootstrap\`"
+else
+  bad "and no run was ever started for \`top\` at \`bootstrap\`"
+fi
+has "and the pass says why it walked past" \
+  "\`bootstrap\` does not run for this task (not first in its chain)" \
+  "$E2E_DISPATCH_LOG"
 
 # -------------------------------------------------- a third link, joining both
 # A task naming both `base` and `top` in its own `depends_on` — the case

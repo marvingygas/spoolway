@@ -588,6 +588,37 @@ pub struct Step {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub last: bool,
 
+    /// Run this step only on a chain's declared root: a task whose own
+    /// `depends_on` is empty. Every dependent task walks past it to
+    /// `on_pass` without starting the command.
+    ///
+    /// `last:` asks whether anything is still open above a task, through the
+    /// live graph, because an archived task's dependents have to keep
+    /// counting it as finished. `first:` asks a simpler question that the
+    /// graph cannot answer at all: a task's declared `depends_on` survives
+    /// in its own file after whatever it named is archived, but the graph's
+    /// edges are built from the open queue and drop that name the moment the
+    /// dependency leaves it — see [`crate::graph`]. So this reads the task's
+    /// own `depends_on` directly rather than asking the graph, and an
+    /// archived dependency still keeps the dependent from being first.
+    ///
+    /// What falls out of asking it that way:
+    ///
+    /// - A **chain** names exactly one task, the root, whatever order the
+    ///   rest were declared in.
+    /// - A **fan** of independent roots names every one of them — none
+    ///   declares a dependency, so none walks past.
+    /// - A task with **no declared dependency at all** runs it. There is no
+    ///   chain above it to have already run this for.
+    ///
+    /// A command step's key, exactly as `last:` is — [`Pipeline::validate`]
+    /// refuses it on an agent step for the same reason: a lane walked past
+    /// is a prompt that never reports. It also refuses a command step that
+    /// declares both `first:` and `last:`, since a step naming both has no
+    /// single command left to be, root or not.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub first: bool,
+
     /// Retired: used to tear the task's worktree and branch down, and archive
     /// its file, on arrival at a declared terminal step — reaching the
     /// reserved `done` stage does this unconditionally now, at
@@ -1319,6 +1350,26 @@ impl Pipeline {
                         step.id
                     );
                 }
+                // Same reasoning as `last:` above, for the opposite end of a
+                // chain.
+                if step.first {
+                    bail!(
+                        "step `{}` declares `first:` but runs no command — a step every task \
+                         but the root walks past has to be a `run:`, since a lane nobody \
+                         started reports nothing",
+                        step.id
+                    );
+                }
+            }
+            // `first:` and `last:` ask opposite questions about a chain, so a
+            // command step naming both has no single command left to be, root
+            // or not.
+            if step.first && step.last {
+                bail!(
+                    "step `{}` declares both `first:` and `last:` — a command step can be the \
+                     one a chain's root runs or the one only its top runs, not both",
+                    step.id
+                );
             }
         }
 
@@ -1769,6 +1820,7 @@ fn blocked_step_from_config(unattended: &crate::config::UnattendedConfig) -> Ste
         background: false,
         headless: false,
         last: false,
+        first: false,
         cleanup: None,
         blocked_on_write: Vec::new(),
     }
@@ -2461,6 +2513,7 @@ mod tests {
             "background",
             "headless",
             "last",
+            "first",
         ] {
             assert!(
                 block.contains(&format!("#   {key} ")),
@@ -2939,6 +2992,58 @@ mod tests {
             assert!(message.contains("`last:`"), "{message}");
             assert!(message.contains("runs no command"), "{message}");
         }
+    }
+
+    /// `first:` runs a command step for a chain's declared root and walks
+    /// every other task past it — the same shape as `last:`, so it is
+    /// refused wherever `last:` is: a lane nobody started reports nothing.
+    #[test]
+    fn rejects_first_on_a_step_that_runs_no_command() {
+        for kind in [
+            "steps:\n  - id: a\n    agent: pi\n    model: m\n    first: true\n    \
+             on_pass: z\n  - id: z\n    end: true\n",
+            "steps:\n  - id: a\n    agent: pi\n    model: m\n    on_pass: z\n  \
+             - id: z\n    end: true\n    first: true\n",
+        ] {
+            let err = parse(kind).unwrap_err();
+            let message = err.to_string();
+            assert!(message.contains("`first:`"), "{message}");
+            assert!(message.contains("runs no command"), "{message}");
+        }
+    }
+
+    /// `first:` and `last:` ask opposite questions about the same chain, so a
+    /// command step declaring both has no single command left to be, root or
+    /// not.
+    #[test]
+    fn rejects_a_command_step_that_declares_both_first_and_last() {
+        let err = parse(
+            "steps:\n  - id: a\n    run: make\n    first: true\n    last: true\n    \
+             on_pass: z\n  - id: z\n    end: true\n",
+        )
+        .unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("`first:`"), "{message}");
+        assert!(message.contains("`last:`"), "{message}");
+    }
+
+    /// `first` parses and round-trips as a boolean, defaulting to false the
+    /// same way `last` does.
+    #[test]
+    fn first_parses_and_defaults_to_false() {
+        let pipeline = parse(
+            "steps:\n  - id: a\n    run: make\n    first: true\n    on_pass: z\n  \
+             - id: z\n    end: true\n",
+        )
+        .unwrap();
+        assert!(pipeline.step("a").unwrap().first);
+        assert!(
+            !pipeline.step("z").unwrap().first,
+            "absent defaults to false"
+        );
+
+        let rendered = serde_norway::to_string(&pipeline).unwrap();
+        assert!(rendered.contains("first: true"), "{rendered}");
     }
 
     /// `handover:` marked which step opened the pull request and `credentials:`

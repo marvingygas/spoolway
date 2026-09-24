@@ -670,11 +670,20 @@ enum FallThrough {
 /// A chain names one task. A fan names all of them, because no branch there
 /// contains another and each pull request stands alone. A task with no
 /// dependents and no group runs it too: there is no chain to be last in.
+///
+/// `first: true` asks the opposite question, and asks it a different way: is
+/// this task itself the declared root, rather than whether anything is open
+/// above it? A root has an empty `depends_on`, read straight off the task's
+/// own file rather than the graph — the graph's edges live in the open
+/// queue, so a dependency named in `depends_on` drops out of it the moment
+/// that dependency is archived, and `first:` has to keep seeing it: a task
+/// naming an archived dependency is still not the root of its chain.
 fn fall_through(step: &Step, task: &Task, dependents: usize) -> FallThrough {
     let skipped_by_name = task.front.skip.iter().any(|named| named == &step.id);
     let walked_past_as_not_last = step.last && dependents > 0;
+    let walked_past_as_not_first = step.first && !task.front.depends_on.is_empty();
 
-    if !skipped_by_name && !walked_past_as_not_last {
+    if !skipped_by_name && !walked_past_as_not_last && !walked_past_as_not_first {
         return FallThrough::Runs;
     }
     match step.on_pass.clone() {
@@ -683,8 +692,10 @@ fn fall_through(step: &Step, task: &Task, dependents: usize) -> FallThrough {
             destination,
             why: if skipped_by_name {
                 "skip"
-            } else {
+            } else if walked_past_as_not_last {
                 "not last in its chain"
+            } else {
+                "not first in its chain"
             },
         },
     }
@@ -7772,6 +7783,153 @@ mod tests {
                 .iter()
                 .any(|a| a.contains("alone") && a.contains("running `suite`")),
             "a task with no group should have started `suite`: {:?}",
+            report.actions
+        );
+    }
+
+    /// A pipeline whose one command step carries `first: true`, so a task
+    /// either runs it or walks past it depending on its own declared
+    /// `depends_on`. `setup` is a `run:` for the same reason `suite` is
+    /// above: `first:` is only ever a command step's key.
+    fn first_pipelines() -> Pipelines {
+        let yaml = "steps:\n  \
+             - id: setup\n    run: true\n    first: true\n    on_pass: work\n  \
+             - id: work\n    end: true\n";
+        let pipeline = crate::pipeline::Pipeline::parse("default", yaml).unwrap();
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert("default".into(), pipeline);
+        pipelines
+    }
+
+    /// In a chain, only the task with an empty `depends_on` — the root —
+    /// runs a `first:` step. The one below it declares a dependency, so it
+    /// walks past to `on_pass` without the command being started at all.
+    #[test]
+    fn only_the_root_of_a_chain_runs_a_first_step() {
+        let repo = fixture("first-chain");
+        let pipelines = first_pipelines();
+        let mux = FakeMux::new(vec![]);
+
+        add_task_with(&repo, "root", "setup", |f| {
+            f.group = Some("stack".into());
+        });
+        add_task_with(&repo, "next", "setup", |f| {
+            f.group = Some("stack".into());
+            f.depends_on = vec!["root".into()];
+        });
+
+        let report = run_pass_with(&repo, &mux, &pipelines);
+
+        assert!(
+            report
+                .actions
+                .iter()
+                .any(|a| a.contains("root") && a.contains("running `setup`")),
+            "the root of the chain should have started `setup` for real: {:?}",
+            report.actions
+        );
+        assert!(
+            report
+                .actions
+                .iter()
+                .any(|a| a.contains("next") && a.contains("not first in its chain")),
+            "`next` should have walked past `setup`: {:?}",
+            report.actions
+        );
+    }
+
+    /// A fan is not a stack. Nobody depends on anybody, so every independent
+    /// root runs a `first:` step — the same shape `last:` gets right for a
+    /// fan, mirrored for the opposite end of the chain.
+    #[test]
+    fn every_independent_root_of_a_fan_runs_a_first_step() {
+        let repo = fixture("first-fan");
+        let pipelines = first_pipelines();
+        let mux = FakeMux::new(vec![]);
+
+        for id in ["one", "two", "three"] {
+            add_task_with(&repo, id, "setup", |f| {
+                f.group = Some("spread".into());
+                f.parallel = true;
+            });
+        }
+
+        let report = run_pass_with(&repo, &mux, &pipelines);
+
+        for id in ["one", "two", "three"] {
+            assert!(
+                report
+                    .actions
+                    .iter()
+                    .any(|a| a.contains(id) && a.contains("running `setup`")),
+                "`{id}` should have started `setup`: {:?}",
+                report.actions
+            );
+        }
+    }
+
+    /// A task belonging to no group runs it too. There is no chain above it,
+    /// so its own empty `depends_on` makes it first.
+    #[test]
+    fn a_task_with_no_group_runs_a_first_step() {
+        let repo = fixture("first-lone");
+        let pipelines = first_pipelines();
+        let mux = FakeMux::new(vec![]);
+        add_task(&repo, "alone", "setup");
+
+        let report = run_pass_with(&repo, &mux, &pipelines);
+
+        assert!(
+            report
+                .actions
+                .iter()
+                .any(|a| a.contains("alone") && a.contains("running `setup`")),
+            "a task with no group should have started `setup`: {:?}",
+            report.actions
+        );
+    }
+
+    /// `first:` reads a task's own declared `depends_on`, not the graph's
+    /// open edges — so a dependency already archived still keeps the
+    /// dependent from being first, the opposite of how `last:`'s dependents
+    /// count works. Without that, an archived dependency would vanish from
+    /// the graph and its former dependent would wrongly look like a root.
+    #[test]
+    fn an_archived_dependency_still_keeps_a_task_from_running_a_first_step() {
+        let repo = fixture("first-archived-dep");
+        std::fs::create_dir_all(repo.archive_dir()).unwrap();
+        std::fs::write(
+            repo.archive_dir().join("root.md"),
+            "---\nid: root\nstage: done\n---\n",
+        )
+        .unwrap();
+        add_task_with(&repo, "next", "setup", |f| {
+            f.depends_on = vec!["root".into()];
+        });
+
+        let pipelines = first_pipelines();
+        let mux = FakeMux::new(vec![]);
+        let report = run_pass_with(&repo, &mux, &pipelines);
+
+        assert!(
+            report
+                .actions
+                .iter()
+                .any(|a| a.contains("next") && a.contains("not first in its chain")),
+            "`next` names an archived dependency, so it should still walk past `setup`: {:?}",
+            report.actions
+        );
+        // A command step's pane goes through `run_in_pane`, not `start` —
+        // that is only ever a lane's — so `mux.did("start")` would pass here
+        // whether or not the command ran. What actually proves it never
+        // started is the dispatcher's own account: nothing in the report
+        // says `next` ran the command it walked past.
+        assert!(
+            !report
+                .actions
+                .iter()
+                .any(|a| a.contains("next") && a.contains("running `setup`")),
+            "`next` should never have started `setup`: {:?}",
             report.actions
         );
     }
