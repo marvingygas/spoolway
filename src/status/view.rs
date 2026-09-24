@@ -192,10 +192,10 @@ pub(crate) enum RecentEvent {
 
 /// How a RECENT line's move classifies, read off [`Step::destination`] for
 /// the step that reported rather than the one arrived at — see
-/// [`arrival_event`]. `None` is a move nothing here explains: a loop's
-/// `on_loop_max`, or any other jump that is not the reporting step's own
-/// `on_pass` or `on_fail`. Drawn with no verdict word at all rather than a
-/// guess.
+/// [`arrival_event`]. `None` is a move nothing here explains: a spent loop
+/// budget parking the task on `blocked`, or any other jump that is not the
+/// reporting step's own `on_pass` or `on_fail`. Drawn with no verdict word at
+/// all rather than a guess.
 ///
 /// [`Step::destination`]: crate::pipeline::Step::destination
 #[derive(Clone, Copy)]
@@ -3536,8 +3536,8 @@ mod tests {
     }
 
     /// A move that lands on neither the reporting step's `on_pass` nor its
-    /// `on_fail` — a loop's `on_loop_max`, or any other jump — is not a
-    /// guess: it draws dim, naming the step, with no verdict word at all.
+    /// `on_fail` — a spent loop budget, or any other jump — is not a guess:
+    /// it draws dim, naming the step, with no verdict word at all.
     #[test]
     fn a_move_matching_neither_route_draws_dim_with_no_verdict_word() {
         let repo = fixture("verdict-neither");

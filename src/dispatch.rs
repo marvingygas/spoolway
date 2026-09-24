@@ -14598,7 +14598,6 @@ mod tests {
             "review".to_string(),
             1,
         )]));
-        implement.on_loop_max = Some(crate::pipeline::BLOCKED.to_string());
 
         // That one lap already taken, so the failure below is the one over.
         let mut task = reload(&path);

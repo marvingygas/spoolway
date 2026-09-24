@@ -40,7 +40,7 @@ steps:
     effort: high
     session: true
     loop:
-      implement: 2         # two laps back to implement, then on_loop_max (on_pass)
+      implement: 2         # two laps back to implement, then blocked
     on_pass: document
     on_fail: implement
 
@@ -88,7 +88,6 @@ steps:
 | `on_pass` | none | Where a pass goes. `done` finishes the task. Absent means the task stays put. |
 | `on_fail` | `blocked` | Where a failure goes. Writing `blocked` outright is redundant; `spoolway pipeline check` warns and leaving the key absent does the same thing. |
 | `loop` | unbounded | How many times a task may arrive here from a given step. A number, or a map keyed by step. |
-| `on_loop_max` | `on_pass` | Where the task goes when `loop` is spent. |
 | `timeout` | `30m` | Command steps only. How long the command may run before it is killed. |
 | `background` | `false` | Command steps only. `true` lets the task move on while the command runs. |
 | `headless` | `false` | Command steps only. `true` runs the command with no pane. |
@@ -127,9 +126,9 @@ pipeline picks the destination.
 | `done` | The task finishes. |
 | `blocked` | The task parks for a person, or for the unblocker in an unattended run. |
 
-A step never names its own id in `on_pass`, `on_fail` or `on_loop_max` — a lap goes through
-another step or not at all. `spoolway pipeline check` refuses a file that tries it, naming the
-step and the key.
+A step never names its own id in `on_pass` or `on_fail` — a lap goes through another step or
+not at all. `spoolway pipeline check` refuses a file that tries it, naming the step and the
+key.
 
 ### Loops
 
@@ -142,13 +141,12 @@ back. In the shipped pipeline `review` fails back to `implement`, so `review` ca
     loop:
       fix: 3          # three arrivals from fix
       verify: 5       # five arrivals from verify
-    on_loop_max: blocked
 ```
 
 - A bare number bounds every route into the step. A route left out of a map is unbounded.
 - A step named in the map that never routes here is refused.
-- A spent loop goes to `on_loop_max`. Absent, the task carries on to `on_pass` and the round
-  count is written to `## Status Log`.
+- A spent loop parks the task on `blocked`. The round count is written to `## Status Log`.
+- A file still declaring `on_loop_max:` is refused, naming the pipeline, the step and the key.
 - Every cycle needs a `loop` whose exit leaves the cycle. `spoolway pipeline check` refuses the
   file otherwise.
 

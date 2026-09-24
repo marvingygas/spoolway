@@ -482,23 +482,21 @@ pub struct Step {
     #[allow(dead_code)]
     pub max_rounds: Option<serde_norway::Value>,
 
-    /// Where a task goes when this step's `loop:` is spent. Absent carries the
-    /// task on to `on_pass`, exactly as an ordinary pass would — a review that
-    /// has argued four times has said what it has to say, and running it a
-    /// fifth time buys nothing, so the default is to let the change through
-    /// with its findings attached rather than park it for a person.
+    /// Retired `on_loop_max:` key, kept only so that a file still naming it is
+    /// refused by [`refuse_retired_step_keys`] — which, unlike a
+    /// `deserialize_with` on this field, knows which pipeline and which step
+    /// the key is on, and a project whose files `spoolway sync` will not edit
+    /// has to be told both. See that function for why it is neither a
+    /// `deserialize_with` nor a check inside [`Pipeline::validate`].
     ///
-    /// On the step rather than in config.toml because a review loop and a
-    /// rebase loop want different endings in the same installation: findings a
-    /// reviewer could not get fixed are read at the pull request anyway, so
-    /// carrying on is right there, while a rebase that will not converge, or a
-    /// tree that will not build, has nowhere useful to go but a person —
-    /// `on_loop_max: blocked` says so explicitly. It sits beside the budget it
-    /// answers for, and [`Pipeline::destinations`] returns it when it differs
-    /// from `on_pass`, so the loop checker and the terminal-reachability walk
-    /// both see the edge.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub on_loop_max: Option<String>,
+    /// A spent loop budget parks on `blocked` and nowhere else now, so the key
+    /// chooses nothing, and a key that is parsed and dropped is how a file goes
+    /// on believing it was honoured — which is why
+    /// [`crate::overrides::apply_step_patch`] refuses it on the override layer
+    /// too, where this field's `skip_serializing` would otherwise drop it
+    /// unmentioned.
+    #[serde(default, skip_serializing)]
+    pub on_loop_max: Option<serde_norway::Value>,
 
     /// The command line a `kind: command` step runs, and refused on every other
     /// kind. Run through the environment's own shell — `sh -c` on Unix, the
@@ -842,16 +840,21 @@ impl Step {
         self.r#loop.limit(to)
     }
 
-    /// Where a spent loop sends a task from this step: `on_loop_max` if the
-    /// step named one, otherwise `on_pass` — the same place an ordinary pass
-    /// goes, since carrying on is the default. `blocked` only if neither is
-    /// set, which is not a shape `Pipeline::validate` lets an agent or command
-    /// step take.
+    /// Where a spent loop sends a task from this step: `blocked`, always.
+    ///
+    /// A step used to be able to name somewhere else with `on_loop_max:`, and
+    /// across seven pipelines and twenty-eight bounded steps nobody ever named
+    /// anything but `blocked` — a loop that will not converge has nowhere
+    /// useful to go but a person, whatever it was looping over. The key is
+    /// retired, and a file still carrying it is refused by name at parse, in
+    /// [`refuse_retired_step_keys`].
+    ///
+    /// Still a method rather than a bare constant at every call site, because
+    /// what a spent budget does is a property of the step, and the one caller
+    /// that matters — [`crate::commands::apply_loop_budget`] — reads it as
+    /// one.
     pub fn loop_exit(&self) -> &str {
-        self.on_loop_max
-            .as_deref()
-            .or(self.on_pass.as_deref())
-            .unwrap_or(BLOCKED)
+        BLOCKED
     }
 
     /// How long this step's command may run. There is no "no limit" here, and
@@ -958,6 +961,7 @@ impl Pipeline {
     pub fn parse(name: &str, raw: &str) -> Result<Pipeline> {
         let mut pipeline: Pipeline = serde_norway::from_str(raw).context("parsing pipeline")?;
         pipeline.name = name.to_string();
+        refuse_retired_step_keys(&pipeline)?;
         pipeline.validate()?;
         Ok(pipeline)
     }
@@ -1147,13 +1151,6 @@ impl Pipeline {
                          itself; delete `on_fail:`"
                     );
                 }
-                if step.on_loop_max.is_some() {
-                    bail!(
-                        "step `blocked` declares `on_loop_max:` — there is no per-task bound on \
-                         how many times it may round-trip; delete `on_loop_max:` (and `loop:`, \
-                         if that is what it was answering for)"
-                    );
-                }
                 if step.gate {
                     bail!(
                         "step `blocked` declares `gate:` — nobody approves a block clearing, \
@@ -1325,8 +1322,8 @@ impl Pipeline {
             }
         }
 
-        // A step may not name itself as where its own `on_pass`, `on_fail`
-        // or `on_loop_max` leads. That shape used to be legal as long as
+        // A step may not name itself as where its own `on_pass` or `on_fail`
+        // leads. That shape used to be legal as long as
         // `loop:` bounded the lap — `Report::self_route` and
         // `just_self_routed` existed only to keep such a pass from spinning
         // the dispatcher's wait loop. Refusing the route outright at load
@@ -1336,7 +1333,6 @@ impl Pipeline {
             for (key, target) in [
                 ("on_pass", step.on_pass.as_deref()),
                 ("on_fail", step.on_fail.as_deref()),
-                ("on_loop_max", step.on_loop_max.as_deref()),
             ] {
                 if target == Some(step.id.as_str()) {
                     bail!(
@@ -1412,28 +1408,6 @@ impl Pipeline {
                             step.id
                         );
                     }
-                }
-            }
-        }
-
-        // An `on_loop_max` naming nothing is a spent budget with nowhere to
-        // land, and it would only be discovered by a task actually spending
-        // one. Refused with the budget too: a destination for a limit no
-        // route has reads as a handled case and handles nothing.
-        for step in &self.steps {
-            if let Some(target) = step.on_loop_max.as_deref() {
-                if !known(target) {
-                    bail!(
-                        "step `{}`: on_loop_max points at unknown step `{target}`",
-                        step.id
-                    );
-                }
-                if step.r#loop.is_unbounded() {
-                    bail!(
-                        "step `{}` declares `on_loop_max:` but no `loop:` — there is no budget \
-                         for it to answer for",
-                        step.id
-                    );
                 }
             }
         }
@@ -1535,28 +1509,29 @@ impl Pipeline {
         }
     }
 
-    /// Refuse a cycle that nothing bounds, or that a bounded route only ever
-    /// leads back into.
+    /// Refuse a cycle that nothing bounds.
     ///
     /// Reaching a terminal step is not enough on its own: `review → fix →
     /// review` reaches `done` on every pass, and still spins forever on a pair
     /// of agents that keep saying fail. A person only ever hears about it from
     /// the bill.
     ///
-    /// A cycle terminates if any one of its routes is bounded *and its exit
-    /// actually leaves* — that route escalates, carries on to `loop_exit()`,
-    /// and the task is gone. So the check is not "enumerate the cycles", which
-    /// is exponential, but the same statement inside out: redirect every
-    /// bounded route to where its budget sends the task, and what is left must
-    /// be acyclic. A bounded route whose exit re-enters the very cycle it was
-    /// meant to break bounds nothing — the task just goes round again, however
-    /// it got there.
+    /// A cycle terminates if any one of its routes is bounded: that route
+    /// escalates to [`Step::loop_exit`], which is `blocked` and so leaves
+    /// every cycle there is. So the check is not "enumerate the cycles", which
+    /// is exponential, but the same statement inside out: drop every bounded
+    /// route from the graph, and what is left must be acyclic.
+    ///
+    /// A bounded route used to be able to give up back into the very loop it
+    /// was meant to break, when `on_loop_max:` could name a step inside it.
+    /// That shape is gone with the key, and with it the suggestion this
+    /// message used to carry about which member of the cycle to move `loop:`
+    /// to: a budget anywhere along the cycle now breaks it.
     ///
     /// A route is bounded by the step it *leaves*, not the one it reaches:
-    /// `loop: { implement: 2 }` on `review` bounds `review → implement`, and
-    /// `review`'s own `loop_exit()` is where that budget sends the task. So
-    /// the edge this walk redirects is the one the budget actually stops
-    /// being taken — see [`Loop`].
+    /// `loop: { implement: 2 }` on `review` bounds `review → implement`, so
+    /// the edge this walk drops is the one the budget actually stops being
+    /// taken — see [`Loop`].
     fn check_bounded_loops(&self) -> Result<()> {
         // Grey while on the current path, black once explored. A route back to
         // something grey closes a cycle, and the path holds its steps.
@@ -1565,32 +1540,24 @@ impl Pipeline {
 
         for step in &self.steps {
             if let Some(cycle) = self.find_unbounded_cycle(&step.id, &mut state, &mut path) {
-                let suggestion = self
-                    .suggest_loop_step(&cycle)
-                    .map(|(id, back)| {
-                        format!(
-                            " Move `loop:` to `{id}`, keyed on `{back}` — that is the move \
-                             `{id}` makes back into the loop, and what follows `{id}` is \
-                             `{}`, which leaves it.",
-                            self.step(id).map(Step::loop_exit).unwrap_or(BLOCKED)
-                        )
-                    })
-                    .unwrap_or_default();
                 bail!(
-                    "steps {} form a loop that gives up into itself — a spent budget carries on \
-                     to a step still inside the loop, so a task could go round it forever.{}",
+                    "steps {} form a loop nothing bounds — no step along it limits the move \
+                     that keeps the task in, so a task could go round it forever. Give one of \
+                     them a `loop:`, keyed on the step it sends the task back to: a spent \
+                     budget parks on `blocked`, which leaves the loop from wherever it is.",
                     cycle
                         .iter()
                         .map(|id| format!("`{id}`"))
                         .collect::<Vec<_>>()
-                        .join(" → "),
-                    suggestion
+                        .join(" → ")
                 );
             }
         }
         Ok(())
     }
 
+    /// One depth-first walk of [`check_bounded_loops`], returning the first
+    /// cycle it closes over routes no budget stops being taken.
     fn find_unbounded_cycle<'a>(
         &'a self,
         id: &'a str,
@@ -1617,7 +1584,20 @@ impl Pipeline {
         path.push(&step.id);
 
         for next in self.destinations(step) {
-            if let Some(cycle) = self.walk_edge(&step.id, next, state, path) {
+            // A bounded route is not walked at all: once `step` has spent its
+            // budget for that move it stops making it, and the task goes to
+            // `blocked` instead — so the edge cannot be what holds a loop
+            // open, and `next` is never reached by way of it. Colouring it
+            // here would mark a step visited on a route nothing takes.
+            //
+            // `blocked` is walked like any other destination, and harmlessly:
+            // it has no [`Pipeline::destinations`] of its own, so the walk
+            // turns straight back out of it. No guard for it here, because
+            // there is nothing for one to prevent.
+            if step.round_limit(next).is_some() {
+                continue;
+            }
+            if let Some(cycle) = self.find_unbounded_cycle(next, state, path) {
                 return Some(cycle);
             }
         }
@@ -1627,91 +1607,16 @@ impl Pipeline {
         None
     }
 
-    /// Walk one edge, `from` → `next`, in the bounded-loop check: once `from`
-    /// has spent its budget for that move it stops making it, so the edge
-    /// cannot be what holds a loop open and the walk follows `from`'s own exit
-    /// instead of the route as written.
+    /// Every step this one can move a task to: its two outcomes, and the
+    /// implicit route to `blocked`.
     ///
-    /// Exactly one redirect, never a chain, because that is what
-    /// [`crate::commands::apply_loop_budget`] does — it returns `loop_exit()`
-    /// without asking the budget a second question, so a task really does
-    /// arrive there. The exit is therefore walked as an ordinary arrival, and
-    /// `next` is not walked at all: the task never reaches it, so colouring it
-    /// here would mark a step visited on a route nothing takes.
+    /// Where a spent loop lands needs no edge of its own: it is `blocked`,
+    /// which an agent or command step already routes to here for an unrouted
+    /// failure, and which is a terminal for every walk that reads this list
+    /// anyway.
     ///
-    /// An exit that *is* `next` bounds nothing — the task lands there either
-    /// way — so that edge falls through and is walked as the ordinary route it
-    /// has turned out to be, which is how a budget pointed back at the very
-    /// move it refuses gets reported as the open loop it leaves behind.
-    fn walk_edge<'a>(
-        &'a self,
-        from: &'a str,
-        next: &'a str,
-        state: &mut BTreeMap<&'a str, u8>,
-        path: &mut Vec<&'a str>,
-    ) -> Option<Vec<&'a str>> {
-        if let Some(source) = self.step(from)
-            && source.round_limit(next).is_some()
-        {
-            let exit = source.loop_exit();
-            if exit != next {
-                return self.find_unbounded_cycle(exit, state, path);
-            }
-        }
-        self.find_unbounded_cycle(next, state, path)
-    }
-
-    /// A step in `cycle` to move `loop:` to instead, and the route out of it
-    /// to key that `loop:` on: a member of the cycle whose own `on_pass`
-    /// already leaves it, paired with the destination that keeps it in.
-    ///
-    /// The graph does not know which step the author meant to ask "has this
-    /// gone round too many times" — only that wherever it is now, the answer
-    /// carries the task straight back in. A step whose ordinary pass already
-    /// exits the cycle is where a loop bound would carry the same task the
-    /// same way on the round where it gives up, which is the property a
-    /// bound placed anywhere else in the cycle cannot have.
-    ///
-    /// The key comes back with it because a budget now names where the task
-    /// is *sent*: a `loop:` on the right step keyed on the wrong route is the
-    /// same unbounded cycle with a number written beside it.
-    fn suggest_loop_step<'a>(&'a self, cycle: &[&'a str]) -> Option<(&'a str, &'a str)> {
-        for step in &self.steps {
-            if !cycle.contains(&step.id.as_str()) {
-                continue;
-            }
-            let leaves = step
-                .on_pass
-                .as_deref()
-                .is_some_and(|target| !cycle.contains(&target));
-            if !leaves {
-                continue;
-            }
-            if let Some(back) = self
-                .destinations(step)
-                .into_iter()
-                .find(|next| cycle.contains(next))
-            {
-                return Some((step.id.as_str(), back));
-            }
-        }
-        None
-    }
-
-    /// Every step this one can move a task to: its two outcomes, the implicit
-    /// route to `blocked`, and wherever a spent loop sends it if that differs
-    /// from `on_pass`.
-    ///
-    /// `on_loop_max` is an edge like the other two when it names somewhere —
-    /// a task really does arrive there, and a graph walk that cannot see it
-    /// would judge reachability and cycles against a smaller pipeline than the
-    /// one that runs. Left out when absent or when it agrees with `on_pass`:
-    /// the default carries a spent loop to `on_pass`, which is already in this
-    /// list, and repeating it would not add an edge the walks do not already
-    /// see.
-    ///
-    /// `blocked` itself has none: `validate` refuses it `on_pass`, `on_fail`
-    /// and `on_loop_max`, so there is nothing declared to report, and its real
+    /// `blocked` itself has none: `validate` refuses it both `on_pass` and
+    /// `on_fail`, so there is nothing declared to report, and its real
     /// routing — read from the step the task blocked on for a pass, back to
     /// itself on a block — is decided at runtime from task state and the
     /// reported verb, not from the graph. Reporting a self-edge here would
@@ -1729,11 +1634,6 @@ impl Pipeline {
             Some(target) => out.push(target),
             None if step.kind() != StepKind::Terminal => out.push(BLOCKED),
             None => {}
-        }
-        if let Some(target) = step.on_loop_max.as_deref()
-            && !out.contains(&target)
-        {
-            out.push(target);
         }
         out
     }
@@ -1769,13 +1669,9 @@ impl Pipeline {
                 continue;
             }
             if let Some(step) = self.step(&id) {
-                for next in [
-                    step.on_pass.as_deref(),
-                    step.on_fail.as_deref(),
-                    step.on_loop_max.as_deref(),
-                ]
-                .into_iter()
-                .flatten()
+                for next in [step.on_pass.as_deref(), step.on_fail.as_deref()]
+                    .into_iter()
+                    .flatten()
                 {
                     stack.push(next.to_string());
                 }
@@ -1811,7 +1707,36 @@ impl Pipeline {
 fn parse_unchecked(name: &str, raw: &str) -> Result<Pipeline> {
     let mut pipeline: Pipeline = serde_norway::from_str(raw).context("parsing pipeline")?;
     pipeline.name = name.to_string();
+    refuse_retired_step_keys(&pipeline)?;
     Ok(pipeline)
+}
+
+/// Refuse a step key that is retired but still deserialises, checked against
+/// the file exactly as it was written.
+///
+/// Here rather than in [`Pipeline::validate`], and rather than in a
+/// `deserialize_with` on the field itself, because each of those loses
+/// something this needs. A `deserialize_with` fails before there is a
+/// `Pipeline` to ask which file or which step the key was on — and for a
+/// project whose pipeline files `spoolway sync` will not edit, that pair is
+/// the whole of the migration. `validate()` knows both, but runs after
+/// [`crate::overrides::apply_pipeline_patch`] has round-tripped every
+/// patched step through serde, and a `skip_serializing` field does not
+/// survive that trip: the key would be dropped, unmentioned, on exactly the
+/// steps an installation had bothered to override. Parse time is the one
+/// place that has the names and still has the key.
+fn refuse_retired_step_keys(pipeline: &Pipeline) -> Result<()> {
+    for step in &pipeline.steps {
+        if step.on_loop_max.is_some() {
+            bail!(
+                "{}: step `{}` declares `on_loop_max:` — a spent loop budget now always parks \
+                 on `blocked`, so the key no longer chooses anything; delete it.",
+                pipeline.name,
+                step.id
+            );
+        }
+    }
+    Ok(())
 }
 
 /// A `blocked` step for a pipeline that declares none of its own, built
@@ -2532,7 +2457,6 @@ mod tests {
             "on_pass",
             "on_fail",
             "loop",
-            "on_loop_max",
             "timeout",
             "background",
             "headless",
@@ -2658,14 +2582,13 @@ mod tests {
         }
     }
 
-    /// Each of the five keys `blocked` routes itself with is refused by name,
+    /// Each of the four keys `blocked` routes itself with is refused by name,
     /// with a message that says what actually decides it.
     #[test]
     fn blocked_refuses_the_keys_it_routes_itself_with() {
         let cases: &[(&str, &str)] = &[
             ("on_pass: z\n", "on_pass"),
             ("on_fail: z\n", "on_fail"),
-            ("loop: 3\n    on_loop_max: z\n", "on_loop_max"),
             ("gate: true\n", "gate"),
             ("end: true\n", "end"),
         ];
@@ -2679,19 +2602,14 @@ mod tests {
         }
     }
 
-    /// A step may not name itself as where its own `on_pass`, `on_fail` or
-    /// `on_loop_max` leads — the shape a bounded retry used to be built on,
-    /// now refused outright at load rather than raced by the dispatcher's
-    /// wait loop.
+    /// A step may not name itself as where its own `on_pass` or `on_fail`
+    /// leads — the shape a bounded retry used to be built on, now refused
+    /// outright at load rather than raced by the dispatcher's wait loop.
     #[test]
     fn a_step_may_not_route_back_to_its_own_id() {
         let cases: &[(&str, &str)] = &[
             ("on_pass: a\n", "on_pass"),
             ("on_pass: z\n    on_fail: a\n", "on_fail"),
-            (
-                "on_pass: z\n    loop: 2\n    on_loop_max: a\n",
-                "on_loop_max",
-            ),
         ];
         for (keys, key) in cases {
             let err = parse(&format!(
@@ -3272,10 +3190,7 @@ mod tests {
         )
         .unwrap_err();
         let message = err.to_string();
-        assert!(
-            message.contains("form a loop that gives up into itself"),
-            "{message}"
-        );
+        assert!(message.contains("form a loop nothing bounds"), "{message}");
         assert!(message.contains("`a`"), "{message}");
         assert!(message.contains("`b`"), "{message}");
     }
@@ -3291,56 +3206,18 @@ mod tests {
         .unwrap();
     }
 
-    /// A bounded route only breaks a cycle if its exit actually leaves. One
-    /// that carries straight back inside bounds nothing: `fix` bounds its move
-    /// to `build`, and gives up to `build` — the very move it just refused —
-    /// so the task goes round again however it got there.
+    /// A bounded route used to break a cycle only if its exit left it, and
+    /// `fix` bounding its move to `build` and giving up straight back into
+    /// `build` was the shape that refusal existed for. A spent budget parks on
+    /// `blocked` now, which leaves every cycle from wherever it is spent, so
+    /// this same file is a bounded loop and the check accepts it.
     #[test]
-    fn rejects_a_bounded_route_whose_exit_re_enters_the_loop() {
-        let err = parse(
+    fn a_bounded_route_breaks_its_cycle_wherever_the_bound_sits() {
+        parse(
             "steps:\n  - id: fix\n    agent: pi\n    loop:\n      build: 3\n    on_pass: build\n    on_fail: blocked\n  \
              - id: build\n    agent: pi\n    on_pass: fix\n    on_fail: blocked\n",
         )
-        .unwrap_err();
-        let message = err.to_string();
-        assert!(
-            message.contains("form a loop that gives up into itself"),
-            "{message}"
-        );
-    }
-
-    /// The plan's own canonical mistake: the loop is on `fix`, which bounds
-    /// the one move `fix` makes and then gives up straight back into it — its
-    /// exit *is* `build` — so the walk never even names `fix`, only the closed
-    /// ring behind it. The fix is to move `loop:` to `review`, the one member
-    /// of that ring whose own `on_pass` already leaves it, keyed on the move
-    /// that keeps it in — and the message has to say both.
-    #[test]
-    fn a_refused_loop_names_the_cycle_member_whose_own_pass_leaves_it() {
-        let err = parse(
-            "steps:\n  \
-             - id: review\n    agent: pi\n    on_pass: checkpoint\n    on_fail: fix\n  \
-             - id: fix\n    agent: pi\n    loop:\n      build: 3\n    on_pass: build\n    \
-             on_fail: blocked\n  \
-             - id: build\n    agent: pi\n    on_pass: verify\n    on_fail: blocked\n  \
-             - id: verify\n    agent: pi\n    on_pass: review\n    on_fail: blocked\n  \
-             - id: checkpoint\n    end: true\n",
-        )
-        .unwrap_err();
-        let message = err.to_string();
-        assert!(
-            message.contains("form a loop that gives up into itself"),
-            "{message}"
-        );
-        assert!(
-            message.contains("Move `loop:` to `review`, keyed on `fix`"),
-            "the only ring member whose own pass leaves is `review`, and `fix` is the move \
-             that keeps it in: {message}"
-        );
-        assert!(
-            message.contains("what follows `review` is `checkpoint`"),
-            "{message}"
-        );
+        .unwrap();
     }
 
     /// A limit for a route that does not exist bounds nothing while looking
@@ -3399,49 +3276,117 @@ mod tests {
         assert!(err.contains("session_reuse_ctx"), "{err}");
     }
 
-    /// An `on_loop_max` naming nothing would only be discovered by a task
-    /// actually spending a budget, which is the worst moment to find out.
-    // covers: step.on_loop_max — where a spent loop sends the task, and that it must name a step that exists
+    /// `on_loop_max:` chose where a spent loop budget went, and across seven
+    /// pipelines and twenty-eight bounded steps nobody ever chose anything but
+    /// `blocked`. The key is retired, and a file still carrying it is refused
+    /// by name — `spoolway sync` rewrites a pipeline file's key reference and
+    /// never a step, so this message is the whole of the migration for a
+    /// project that has one, and it has to name the file to open and the step
+    /// to find in it without a reader going to the release notes.
+    // covers: step.on_loop_max — retired, and refused by name rather than by `deny_unknown_fields`
     #[test]
-    fn on_loop_max_must_name_a_real_step_and_answer_for_a_budget() {
-        let unknown = parse(
-            "steps:\n  - id: a\n    agent: pi\n    on_pass: z\n    on_fail: z\n    \
-             loop: 2\n    on_loop_max: nowhere\n  - id: z\n    end: true\n",
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(
-            unknown.contains("on_loop_max points at unknown step"),
-            "{unknown}"
-        );
-
-        let budgetless = parse(
-            "steps:\n  - id: a\n    agent: pi\n    on_pass: z\n    on_loop_max: z\n  \
+    fn the_retired_on_loop_max_key_is_refused_by_name() {
+        let err = Pipeline::parse(
+            "impl_ui",
+            "steps:\n  - id: implement\n    agent: pi\n    on_pass: review\n  \
+             - id: review\n    agent: pi\n    loop:\n      implement: 2\n    \
+             on_loop_max: blocked\n    on_pass: z\n    on_fail: implement\n  \
              - id: z\n    end: true\n",
         )
         .unwrap_err()
         .to_string();
-        assert!(budgetless.contains("no `loop:`"), "{budgetless}");
+        assert!(err.contains("impl_ui"), "the pipeline to open: {err}");
+        assert!(err.contains("step `review`"), "the step to edit: {err}");
+        assert!(err.contains("`on_loop_max:`"), "the key by name: {err}");
+        assert!(err.contains("delete it"), "what to do about it: {err}");
+        // Not serde's own list of every other key a step may carry, which is
+        // what `deny_unknown_fields` would have answered with.
+        assert!(!err.contains("unknown field"), "{err}");
     }
 
-    /// `on_loop_max` is a route a task really takes, so the walks that decide
-    /// reachability and cycles have to see it like any other edge — and a
-    /// step that names none still carries on to `on_pass` rather than falling
-    /// to `blocked`.
+    /// And refused on a step an installation's own override also patches.
+    /// The refusal cannot wait for `validate()`: `apply_pipeline_patch` merges
+    /// a patch by round-tripping the step through serde, and `on_loop_max` is
+    /// `skip_serializing`, so by then the key has been dropped — silently, on
+    /// exactly the steps somebody cared enough about to override. Refused at
+    /// parse instead, before any patch runs.
     #[test]
-    fn on_loop_max_is_an_edge_the_graph_walks_see() {
+    fn the_retired_on_loop_max_key_is_refused_under_an_override_too() {
+        with_override_fixture("retired-on-loop-max", |root| {
+            std::fs::write(
+                Pipelines::file_in(root, "impl"),
+                "steps:\n  \
+                 - id: implement\n    agent: pi\n    model: base-model\n    on_pass: review\n  \
+                 - id: review\n    agent: pi\n    model: base-model\n    loop:\n      \
+                 implement: 1\n    on_loop_max: blocked\n    on_pass: done\n    \
+                 on_fail: implement\n",
+            )
+            .unwrap();
+            let overrides = crate::overrides::dir_for(root).unwrap();
+            std::fs::create_dir_all(overrides.join("pipelines")).unwrap();
+            std::fs::write(
+                overrides.join("pipelines").join("impl.yml"),
+                "steps:\n  review:\n    model: claude-opus-5\n",
+            )
+            .unwrap();
+
+            // `{:#}` rather than `to_string()`: the refusal is raised inside
+            // the directory loop and wears two layers of `with_context`, so
+            // the bare display is only the file it came from.
+            let err = format!(
+                "{:#}",
+                Pipelines::load(root, &crate::config::Config::default()).unwrap_err()
+            );
+            assert!(err.contains("step `review`"), "{err}");
+            assert!(err.contains("`on_loop_max:`"), "{err}");
+        });
+    }
+
+    /// And refused when the key is in the override file itself rather than
+    /// the tracked one — the half `apply_step_patch` owns, since serde would
+    /// drop it on the way through and the layer would sit there doing nothing.
+    #[test]
+    fn the_retired_on_loop_max_key_is_refused_in_an_override_file() {
+        with_override_fixture("retired-on-loop-max-patch", |root| {
+            let overrides = crate::overrides::dir_for(root).unwrap();
+            std::fs::create_dir_all(overrides.join("pipelines")).unwrap();
+            std::fs::write(
+                overrides.join("pipelines").join("impl.yml"),
+                "steps:\n  review:\n    on_loop_max: blocked\n",
+            )
+            .unwrap();
+
+            let err = format!(
+                "{:#}",
+                Pipelines::load(root, &crate::config::Config::default()).unwrap_err()
+            );
+            assert!(err.contains("step `review`"), "{err}");
+            assert!(err.contains("`on_loop_max:`"), "{err}");
+        });
+    }
+
+    /// A spent loop budget parks on `blocked` from every step, whatever the
+    /// step routes a pass or a failure to — and `blocked` is not an edge the
+    /// graph walks need to see, since an agent or command step already routes
+    /// there for an unrouted failure.
+    // covers: Step::loop_exit — where a spent loop budget lands
+    #[test]
+    fn a_spent_loop_budget_parks_on_blocked_from_every_step() {
         let pipeline = parse(
             "steps:\n  - id: a\n    agent: pi\n    on_pass: b\n    on_fail: b\n  \
              - id: b\n    agent: pi\n    loop:\n      a: 2\n    \
-             on_loop_max: z\n    on_pass: a\n  - id: z\n    end: true\n",
+             on_pass: a\n    on_fail: z\n  - id: z\n    end: true\n",
         )
         .unwrap();
-        let b = pipeline.step("b").unwrap();
-        assert!(pipeline.destinations(b).contains(&"z"));
-        assert_eq!(b.loop_exit(), "z");
-        // And a step that names none carries on to its own `on_pass`.
-        let a = pipeline.step("a").unwrap();
-        assert_eq!(a.loop_exit(), "b");
+        for id in ["a", "b", "z"] {
+            assert_eq!(pipeline.step(id).unwrap().loop_exit(), BLOCKED);
+        }
+        // `b` routes a pass to `a` and a failure to `z`, and those are the
+        // whole of its edges: the spent budget adds none.
+        assert_eq!(
+            pipeline.destinations(pipeline.step("b").unwrap()),
+            vec!["a", "z"]
+        );
     }
 
     /// The whole point of counting per route: a step may send work back to

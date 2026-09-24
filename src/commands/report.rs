@@ -575,7 +575,7 @@ pub fn route(
 /// takes `review`'s own `loop_exit()`. Bounding the arrival instead — which
 /// is what this did — spent the budget one edge too early: the third passing
 /// `implement` was redirected before `review` had seen the fix it was
-/// reporting, and `on_loop_max` then answered for a step that never ran.
+/// reporting, so the exit answered for a step that never ran.
 /// Nothing about a pipeline file changed; the same `from -> to` counter in
 /// [`Task::rounds_via`] is read off the other end of it.
 ///
@@ -589,19 +589,16 @@ pub fn route(
 /// be re-prompted as often as its session survives, with an optional separate
 /// bound — `session_reuse_ctx` on the agent profile.
 ///
-/// An unattended run still takes this exit. `on_loop_max` is where the
-/// pipeline said the loop goes, and most of what it can say needs nobody: the
-/// default carries the task on to `on_pass` with its findings attached, which
-/// is a destination rather than a request for a person, and `on_loop_max:
-/// handover` reads the same way. The one reading that does need one is an
-/// exit resolving to `blocked` — and in a run with nobody staffing `blocked`,
-/// that exit is answered by the run itself, which sends the task straight
-/// back to the step it stopped on. The budget would then be spent again on
-/// the very next transition, and every one after it, with nobody to clear it:
-/// the same loop, one lane more expensive per lap. So that one reading is
-/// skipped here, and the task file does not fill with rounds bought by a
-/// wall the run can only walk into. [`resume_at`] no longer refunds anything
-/// for either self-resume, so this is the whole of the carve-out.
+/// The exit is `blocked`, always — a loop that will not converge is a request
+/// for a person, and a pipeline no longer gets to say otherwise. So an
+/// unattended run with nobody staffing `blocked` has nothing to hand the task
+/// to: the run answers that exit itself, sending the task straight back to the
+/// step it stopped on, and the budget would then be spent again on the very
+/// next transition, and every one after it, with nobody to clear it — the same
+/// loop, one lane more expensive per lap. The bound is skipped outright in
+/// that one configuration, so the task file does not fill with rounds bought
+/// by a wall the run can only walk into. [`resume_at`] no longer refunds
+/// anything for either self-resume, so this is the whole of the carve-out.
 pub fn apply_loop_budget(
     pipeline: &Pipeline,
     task: &mut Task,
@@ -613,9 +610,9 @@ pub fn apply_loop_budget(
         return destination;
     };
     let exit = step.loop_exit().to_string();
-    let limit = step.round_limit(&destination).filter(|_| {
-        !unattended || exit != crate::pipeline::BLOCKED || pipeline.blocked_is_staffed(unattended)
-    });
+    let limit = step
+        .round_limit(&destination)
+        .filter(|_| !unattended || pipeline.blocked_is_staffed(unattended));
     if limit.is_some_and(|limit| task.rounds_via(current, &destination) >= limit) {
         // The move it is not making, counted the way a reader counts: the
         // budget is spent, so the one being refused is the next one after it.
@@ -2779,17 +2776,14 @@ mod tests {
         assert_eq!(queued(&repo, "stuck").stage(), "work");
     }
 
-    /// A spent budget whose exit is `blocked` is a request for a person, on a
-    /// pipeline that does not stage `blocked` itself. `review`'s own `loop:`
-    /// carries no `on_loop_max:`, so its default exit is its own `on_pass` —
-    /// `document`, not `blocked` — so this test gives it `on_loop_max:
-    /// blocked` by hand, the one case worth testing here. It also strips the
-    /// shipped `blocked` step so that exit is unstaffed. Unattended there is
-    /// no person to hand either of those to, only the run's own resume
-    /// straight back onto `review` — which hands nothing back, so the same
-    /// wall would be hit on every transition after this one. The bound is
-    /// skipped outright instead, and the task file does not fill up with
-    /// rounds bought against a wall nothing can clear.
+    /// A spent budget is a request for a person — its exit is `blocked` from
+    /// every step — on a pipeline that does not stage `blocked` itself, which
+    /// is what this test strips out of the shipped set. Unattended there is no
+    /// person to hand the task to, only the run's own resume straight back
+    /// onto `review` — which hands nothing back, so the same wall would be hit
+    /// on every transition after this one. The bound is skipped outright
+    /// instead, and the task file does not fill up with rounds bought against
+    /// a wall nothing can clear.
     #[test]
     fn a_budget_bound_for_a_person_does_not_bind_an_unattended_run_with_no_staffed_blocked_step() {
         let repo = unattended_fixture("unattended-rounds");
@@ -2801,19 +2795,10 @@ mod tests {
 
         // The shipped `default` pipeline, minus its `blocked` step — the case
         // this test is about, and the shape every project's pipeline had
-        // before this one could declare it. `review`'s own `loop:` carries no
-        // `on_loop_max:`, so its exit is `review`'s own `on_pass` — `document`
-        // — which is not `blocked` either; swap it in for this test alone so
-        // the exit really is the default `blocked`.
+        // before this one could declare it.
         let mut pipelines = Pipelines::builtin();
         for pipeline in pipelines.pipelines.values_mut() {
             pipeline.steps.retain(|s| s.id != crate::pipeline::BLOCKED);
-            let review = pipeline
-                .steps
-                .iter_mut()
-                .find(|s| s.id == "review")
-                .unwrap();
-            review.on_loop_max = Some(crate::pipeline::BLOCKED.to_string());
         }
 
         // Spent right up to `review`'s limit on the route back to `implement`:
@@ -2840,10 +2825,7 @@ mod tests {
     }
 
     /// The same spent budget, on the shipped pipeline as it actually ships —
-    /// staffing `blocked` with its own sample prompt, and `review` naming no
-    /// `on_loop_max:` of its own so its default exit is `document`, which is
-    /// not `blocked` — so this test names `on_loop_max: blocked` by hand, the
-    /// one case where an exit resolving to a staffed `blocked` is a real
+    /// staffing `blocked` with its own sample prompt. The exit is a real
     /// destination again, staffed by a lane rather than a person, and the
     /// limit binds exactly as it would in an attended run.
     #[test]
@@ -2855,15 +2837,7 @@ mod tests {
         git(&["commit", "-q", "--allow-empty", "-m", "root"]);
         add(&repo, "stuck", &[]);
 
-        let mut pipelines = Pipelines::builtin();
-        for pipeline in pipelines.pipelines.values_mut() {
-            let review = pipeline
-                .steps
-                .iter_mut()
-                .find(|s| s.id == "review")
-                .unwrap();
-            review.on_loop_max = Some(crate::pipeline::BLOCKED.to_string());
-        }
+        let pipelines = Pipelines::builtin();
 
         let spent = review_limit(&pipelines);
         let mut task = queued(&repo, "stuck");
@@ -2892,15 +2866,7 @@ mod tests {
         git(&["commit", "-q", "--allow-empty", "-m", "root"]);
         add(&repo, "stuck", &[]);
 
-        let mut pipelines = Pipelines::builtin();
-        for pipeline in pipelines.pipelines.values_mut() {
-            let review = pipeline
-                .steps
-                .iter_mut()
-                .find(|s| s.id == "review")
-                .unwrap();
-            review.on_loop_max = Some(crate::pipeline::BLOCKED.to_string());
-        }
+        let pipelines = Pipelines::builtin();
 
         let mut task = queued(&repo, "stuck");
         task.set_stage("review", None);
@@ -2969,12 +2935,15 @@ mod tests {
         let task = queued(&repo, "spinner");
         assert_eq!(
             task.stage(),
-            "document",
-            "`review`'s own exit, which with no `on_loop_max:` is its `on_pass`"
+            crate::pipeline::BLOCKED,
+            "a spent budget parks on `blocked`, never on `review`'s own `on_pass`"
         );
         let log = task.section("## Status Log").unwrap_or_default();
         assert!(
-            log.contains("`review` may not send this back to `implement` a 3rd time"),
+            log.contains(
+                "`review` may not send this back to `implement` a 3rd time — carrying on to \
+                 `blocked`"
+            ),
             "{log}"
         );
     }
@@ -3117,14 +3086,15 @@ mod tests {
     }
 
     /// A pipeline for one bounded loop — `work` fails to `retry`, `retry`
-    /// passes back — with `work`'s budget for that failure and its exit both
-    /// spelled out. The budget sits on `work` because `work` is what sends
-    /// the task to `retry`; the counter it reads is still `work->retry`.
-    fn looping_pipelines(limit: u32, on_loop_max: &str) -> Pipelines {
+    /// passes back — with `work`'s budget for that failure spelled out. The
+    /// budget sits on `work` because `work` is what sends the task to `retry`;
+    /// the counter it reads is still `work->retry`. Where the spent budget
+    /// lands is not the file's to say: it is `blocked`.
+    fn looping_pipelines(limit: u32) -> Pipelines {
         let yaml = format!(
             "steps:\n  \
              - id: work\n    agent: pi\n    loop:\n      retry: {limit}\n    \
-             on_loop_max: {on_loop_max}\n    on_pass: ship\n    on_fail: retry\n  \
+             on_pass: ship\n    on_fail: retry\n  \
              - id: retry\n    agent: pi\n    on_pass: work\n  \
              - id: ship\n    end: true\n"
         );
@@ -3136,14 +3106,15 @@ mod tests {
         pipelines
     }
 
-    /// The whole point of `on_loop_max`: a loop that will not converge can be
-    /// told to carry on rather than stop. The findings ride along in the
-    /// status log note, and the pull request is where a person reads them.
+    /// The whole point of a loop budget: a loop that will not converge stops,
+    /// and stops on `blocked`, where a person reads what it could not settle.
+    /// `work`'s own `on_pass` is `ship`, and a spent budget does not take it —
+    /// which is the change this replaced a per-step `on_loop_max:` with.
     #[test]
-    fn a_spent_budget_takes_the_exit_the_step_named() {
+    fn a_spent_budget_parks_the_task_on_blocked() {
         let repo = fixture("on-max-routes");
         add(&repo, "stuck", &[]);
-        let pipelines = looping_pipelines(1, "ship");
+        let pipelines = looping_pipelines(1);
 
         let mut task = queued(&repo, "stuck");
         task.set_stage("work", None);
@@ -3153,47 +3124,18 @@ mod tests {
         report_outcome(&repo, &pipelines, "stuck", Outcome::Fail);
 
         let task = queued(&repo, "stuck");
-        assert_eq!(task.stage(), "ship");
+        assert_eq!(task.stage(), crate::pipeline::BLOCKED);
+        assert_eq!(
+            task.front.blocked_from.as_deref(),
+            Some("work"),
+            "a person picking this up resumes at the step that could not settle it"
+        );
         assert!(
             task.section("## Status Log").unwrap_or_default().contains(
                 "`work` may not send this back to `retry` a 2nd time — carrying on \
-                           to `ship`"
+                           to `blocked`"
             ),
             "the move it refused, and what carried it on, have to travel with it"
-        );
-    }
-
-    /// A default budget — no `on_loop_max:` at all — carries the task on to
-    /// the step's own `on_pass`, exactly as an ordinary pass would.
-    #[test]
-    fn a_default_spent_budget_carries_on_to_on_pass() {
-        let repo = fixture("default-loop-max");
-        add(&repo, "stuck", &[]);
-        // `work`'s own `on_pass` is `ship` — the same destination the other
-        // `looping_pipelines` tests name explicitly with `on_loop_max:` — so
-        // leaving it out here checks that the default really does take it.
-        let yaml = "steps:\n  \
-             - id: work\n    agent: pi\n    loop:\n      retry: 1\n    on_pass: ship\n    \
-             on_fail: retry\n  \
-             - id: retry\n    agent: pi\n    on_pass: work\n  \
-             - id: ship\n    end: true\n";
-        let mut pipelines = Pipelines::builtin();
-        pipelines.pipelines.insert(
-            "default".into(),
-            crate::pipeline::Pipeline::parse("default", yaml).unwrap(),
-        );
-
-        let mut task = queued(&repo, "stuck");
-        task.set_stage("work", None);
-        task.front.rounds.insert("work->retry".into(), 1);
-        task.save().unwrap();
-
-        report_outcome(&repo, &pipelines, "stuck", Outcome::Fail);
-
-        assert_eq!(
-            queued(&repo, "stuck").stage(),
-            "ship",
-            "`work`'s own `on_pass` is `ship`, and that is where the default carries on to"
         );
     }
 
@@ -3205,7 +3147,7 @@ mod tests {
     fn backward_moves_not_conversations_spend_the_budget() {
         let repo = fixture("warm-loop");
         add(&repo, "stuck", &[]);
-        let pipelines = looping_pipelines(2, "blocked");
+        let pipelines = looping_pipelines(2);
 
         let mut task = queued(&repo, "stuck");
         task.set_stage("work", None);
@@ -3223,34 +3165,12 @@ mod tests {
         );
     }
 
-    /// An `on_loop_max` naming a real step needs nobody, so an unattended run
-    /// takes it exactly as an attended one does. This is what separates it
-    /// from an exit resolving to `blocked`, which asks for a person and is
-    /// skipped below.
-    #[test]
-    fn an_unattended_run_still_takes_an_exit_that_needs_nobody() {
-        let repo = unattended_fixture("unattended-on-max-routes");
-        add(&repo, "stuck", &[]);
-        let pipelines = looping_pipelines(1, "ship");
-
-        let mut task = queued(&repo, "stuck");
-        task.set_stage("work", None);
-        task.front.rounds.insert("work->retry".into(), 1);
-        task.save().unwrap();
-
-        report_outcome(&repo, &pipelines, "stuck", Outcome::Fail);
-
-        assert_eq!(
-            queued(&repo, "stuck").stage(),
-            "ship",
-            "the pipeline named where this loop goes, and getting there needs no person"
-        );
-    }
-
-    /// And the other half of that: an `on_loop_max` that resolves to `blocked`
-    /// is a request for a person, so unattended the budget is skipped outright
-    /// rather than spent against a wall the run's own resume can only walk
-    /// back into — it hands nothing back now.
+    /// A spent budget parks on `blocked`, which is a request for a person, so
+    /// an unattended run with nobody staffing `blocked` skips the budget
+    /// outright rather than spending it against a wall the run's own resume
+    /// can only walk back into — it hands nothing back now. The other half,
+    /// where a lane does staff `blocked` and the bound binds, is
+    /// `a_budget_bound_does_bind_an_unattended_run_that_staffs_blocked`.
     #[test]
     fn an_unattended_run_skips_a_budget_whose_exit_is_a_person() {
         let repo = unattended_fixture("unattended-on-max-blocked");
@@ -3259,7 +3179,7 @@ mod tests {
         git(&["config", "user.name", "t"]);
         git(&["commit", "-q", "--allow-empty", "-m", "root"]);
         add(&repo, "stuck", &[]);
-        let pipelines = looping_pipelines(1, "blocked");
+        let pipelines = looping_pipelines(1);
 
         let mut task = queued(&repo, "stuck");
         task.set_stage("work", None);
@@ -3288,7 +3208,7 @@ mod tests {
         let yaml = "steps:\n  \
              - id: build\n    agent: pi\n    prompt: implementer\n    \
                model: test-model\n    on_pass: deploy\n    \
-               loop:\n      deploy: 2\n    on_loop_max: announce\n  \
+               loop:\n      deploy: 2\n  \
              - id: deploy\n    agent: pi\n    prompt: implementer\n    \
                model: test-model\n    gate: true\n    on_pass: announce\n    \
                on_fail: build\n  \
@@ -3954,19 +3874,14 @@ mod tests {
         git(&["commit", "-q", "--allow-empty", "-m", "root"]);
         add(&repo, "stuck", &[]);
 
-        // The shipped `default` pipeline, minus its `blocked` step, with
-        // `review`'s loop exit pointed at `blocked` by hand — the same shape
+        // The shipped `default` pipeline, minus its `blocked` step — the same
+        // shape
         // `a_budget_bound_for_a_person_does_not_bind_an_unattended_run_with_no_staffed_blocked_step`
-        // builds, for an attended run instead.
+        // builds, for an attended run instead, where the bound binds whether
+        // or not a lane staffs `blocked`.
         let mut pipelines = Pipelines::builtin();
         for pipeline in pipelines.pipelines.values_mut() {
             pipeline.steps.retain(|s| s.id != crate::pipeline::BLOCKED);
-            let review = pipeline
-                .steps
-                .iter_mut()
-                .find(|s| s.id == "review")
-                .unwrap();
-            review.on_loop_max = Some(crate::pipeline::BLOCKED.to_string());
         }
 
         let spent = review_limit(&pipelines);

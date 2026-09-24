@@ -44,7 +44,7 @@
       "id": "loops",
       "context": [
         "This task is a test of spoolway: the behaviour asked for below is the work.",
-        "The `review` step of this pipeline carries `loop: {fix: 2}` and `on_loop_max: blocked`, so the third arrival from `fix` escalates instead of going round again.",
+        "The `review` step of this pipeline carries `loop: {fix: 2}`, and a spent budget parks the task on `blocked`, so the third arrival from `fix` escalates instead of going round again.",
         "The reviewer is a real local model reading a real diff, and it will not hold a line it has to *judge*: watched against a small local model it failed this file twice for exactly the right reason and then, on a fresh conversation, passed the identical file with \"already returns twice as intended\". So failing here is mechanical. The criteria below require a line in the file, and this task tells the implementer never to write it \u2014 the verdict is a `grep`, and a small model gets a `grep` right every time."
       ],
       "goal": "Add `src/loops.rs` declaring `pub fn twice(n: i32) -> i32` that returns `n * 2`. Do NOT write the `// approved: escalation` line the criteria below require \u2014 leave it out, on this turn and on every fix turn after it. Leaving it out is the work: this task exists to fail review over and over until the route runs out of conversations.",

@@ -40,8 +40,6 @@
 #   loop              <n>                Laps allowed, per step sent back to.
 #                     <step>: <n>        The same limit, one destination at a time.
 #                                        Absent: unbounded.
-#   on_loop_max       <step id>          Where a spent loop sends the task.
-#                     on_pass <default>  It carries on, findings and all.
 #   timeout           <duration>         How long a command step may run, e.g. `90s`.
 #                                        Absent: 30m.
 #   background        true               The task moves on; `on_fail` routes it later.
@@ -81,7 +79,6 @@ steps:
     session: true
     loop:
       implement: 2
-    on_loop_max: blocked
     on_pass: test
     on_fail: implement
 
@@ -93,7 +90,6 @@ steps:
     # edge back into `implement` unbounded too, for the same reason.
     loop:
       implement: 1
-    on_loop_max: blocked
     on_pass: suite
     on_fail: implement
 
@@ -109,7 +105,6 @@ steps:
     # `suite` bound their own fail edge back into `e2e`.
     loop:
       implement: 1
-    on_loop_max: blocked
     on_pass: document
     on_fail: implement
 

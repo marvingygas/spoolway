@@ -91,7 +91,6 @@ const STEP_KEYS: &[&str] = &[
     "on_pass",
     "on_fail",
     "loop",
-    "on_loop_max",
     "run",
     "timeout",
     "background",
@@ -100,12 +99,13 @@ const STEP_KEYS: &[&str] = &[
     "end",
 ];
 
-/// Keys `deny_unknown_fields` refuses outright: two retired spellings of
-/// `loop:` and the retired `cleanup:`, kept on [`Step`] only so a file still
-/// naming them gets a message pointing at the replacement — or, for
-/// `cleanup:`, saying why there is none — rather than serde's own "unknown
-/// field", and two struct fields that answer a fact about where a `Pipeline`
-/// came from rather than something a file could ever set —
+/// Keys a file may still name and be refused by name for: two retired
+/// spellings of `loop:`, the retired `cleanup:` and the retired
+/// `on_loop_max:`, kept on [`Step`] only so a file still naming them gets a
+/// message pointing at the replacement — or, for `cleanup:` and
+/// `on_loop_max:`, saying why there is none — rather than serde's own
+/// "unknown field", and two struct fields that answer a fact about where a
+/// `Pipeline` came from rather than something a file could ever set —
 /// [`Pipeline::name`], because the file name is the name, and
 /// [`Pipeline::blocked_declared`], set only by [`Pipelines::assemble`] once a
 /// file is read.
@@ -115,6 +115,7 @@ const REFUSED_KEYS: &[&str] = &[
     "max_new_sessions",
     "max_rounds",
     "cleanup",
+    "on_loop_max",
 ];
 
 /// One sentence per key a pipeline file may actually set — [`PIPELINE_KEYS`]
@@ -202,14 +203,10 @@ const FIELD_SENTENCES: &[(&str, &str)] = &[
         "loop",
         "Laps allowed per route out — backward moves this step makes, not \
          arrivals at it. A bare number bounds every route; the map form bounds \
-         one at a time, keyed by where the task is sent. Three is the ceiling \
-         worth reaching for; a flow that needs more is welcome to say so, and \
+         one at a time, keyed by where the task is sent. A spent budget parks \
+         the task on `blocked` for a person. Three is the ceiling worth \
+         reaching for; a flow that needs more is welcome to say so, and \
          nothing refuses it.",
-    ),
-    (
-        "on_loop_max",
-        "Where a spent loop sends the task. Absent carries it on to `on_pass`, \
-         findings and all.",
     ),
     (
         "run",
@@ -248,14 +245,15 @@ const FIELD_SENTENCES: &[(&str, &str)] = &[
 fn rules() -> Vec<&'static str> {
     vec![
         "the file name is the pipeline's name, and a task starts on the first step",
-        "every cycle carries a `loop`, and the exit it names must leave the cycle",
+        "every cycle carries a `loop`, wherever along it the bound sits — a spent budget \
+         parks on `blocked`",
         "`blocked` may be declared to staff it; `queued`, `done`, `paused` never",
         "a step is what it carries — `agent:`, `run:` or `end: true`",
         "prefer a script the repo already holds over a multi-command `run:` — a chain more \
          than one pipeline runs belongs in a file, named by relative path from the worktree \
          root",
-        "a step never names its own id in `on_pass`, `on_fail` or `on_loop_max` — a lap goes \
-         through another step or not at all",
+        "a step never names its own id in `on_pass` or `on_fail` — a lap goes through another \
+         step or not at all",
         "a `run:` means one thing by each exit code — a command that answers the same code \
          for two different outcomes cannot be routed on, and is not spoolway's to fix",
     ]
@@ -436,7 +434,6 @@ fn template() -> String {
          \x20\x20\x20\x20effort: high\n\
          \x20\x20\x20\x20loop:\n\
          \x20\x20\x20\x20\x20\x20fix: 3\n\
-         \x20\x20\x20\x20# on_loop_max: blocked     where a spent loop lands; `on_pass` by default\n\
          \x20\x20\x20\x20on_pass: handover\n\
          \x20\x20\x20\x20on_fail: fix\n\
          \n\
@@ -1727,6 +1724,27 @@ mod tests {
         with_repo_and_pipeline("id-key", "demo", DEMO_PIPELINE, |repo| {
             let err = pipeline_override(repo, "demo", "implement.id=other").unwrap_err();
             assert!(format!("{err:#}").contains("rename"), "{err:#}");
+        });
+    }
+
+    /// The retired key, refused at `--set` rather than accepted and then
+    /// ignored for the life of the layer. It is the probe above that catches
+    /// it — the same `apply_step_patch` the loader runs — which is what keeps
+    /// the promise that nothing accepted here is rejected, or silently
+    /// dropped, on the next dispatcher pass.
+    #[test]
+    fn pipeline_override_refuses_the_retired_on_loop_max_key() {
+        with_repo_and_pipeline("retired-key", "demo", DEMO_PIPELINE, |repo| {
+            let err = pipeline_override(repo, "demo", "implement.on_loop_max=blocked").unwrap_err();
+            let message = format!("{err:#}");
+            assert!(message.contains("`on_loop_max:`"), "{message}");
+            assert!(message.contains("`blocked`"), "{message}");
+            assert!(
+                crate::overrides::read_pipeline_patch(&repo.overrides_dir(), "demo")
+                    .unwrap()
+                    .is_none(),
+                "a refused `--set` must leave no patch behind"
+            );
         });
     }
 
