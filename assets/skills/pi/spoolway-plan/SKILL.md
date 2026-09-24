@@ -40,6 +40,9 @@ Then stop and write nothing further — the person answers in their next prompt,
 in their own words. Never answer your own question, and never carry on past one on an
 assumed answer.
 
+- **Nothing is deferred silently.** Raise every topic you would leave aside, and get a clear
+  decision on it. The page never says something will be done later: a thing is decided, or
+  the person puts it out of scope explicitly.
 - **Ask only what the code cannot answer** — read what the codebase settles; where one option is
   plainly better, take it and say so in a line. Ask what is left, if it would change the shape.
 - **2–3 concrete options per question**, each a real route with its own consequence — "What do
@@ -57,7 +60,7 @@ Every plan is written on the same spine, in this order:
 |---|---|
 | **Intend** | The outcome this plan means to produce, in one sentence a person can approve or reject — the page's lead, with nothing above it but the name, the tagline and the path. |
 | **Context** | What is true today, and the pressure on it. One drawing of the system as it is. |
-| **Decisions** | One record per decision, each led by a figure and closed by what it costs. |
+| **Decisions** | One record per decision, each led by a figure, then what it costs, then one highlighted sentence stating the change that will now happen. |
 | **Mockup** | The finished thing, drawn: the walkthrough, or the run end to end. One heading and figure per step, no prose. |
 **The page ends at the Mockup.** The breakdown is not on it: a task is a document, written into
 the pending directory at step 7, and the page argues the shape those documents were cut from.
@@ -81,6 +84,8 @@ in prose about functions and line edits.
   A screen goes in `.raw` and paints its own colours; a diagram never does.
 - **Four sentences per record before the cost line**, and the cost line is never skipped — a
   record with nothing to say it costs was not a decision.
+- **Every record ends on one highlighted sentence stating the change that will now happen** —
+  what is different once it lands, never a restatement of the choice.
 - **The mockup section carries headings and figures, nothing else** — a two-or-three-word `h3`
   per step over the figure that shows it; a figure needing a sentence to land is not drawn yet.
 - **Draw in the medium the thing actually lives in.** Work out what the person builds on

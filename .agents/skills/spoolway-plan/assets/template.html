@@ -230,6 +230,12 @@ figcaption { font-size: 0.875rem; color: var(--ink-faint); max-width: var(--meas
 }
 .dec .cost { color: var(--ink-soft); }
 .dec .cost::before { content: "Costs: "; color: var(--ink-faint); }
+.dec .change {
+  max-width: var(--measure); margin: 0; padding: 0.7rem 1rem;
+  border-left: 3px solid var(--accent); border-radius: 0 4px 4px 0;
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+  color: var(--ink); font-weight: 600;
+}
 
 .refs { margin: 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 0.25rem 1.25rem; font-size: 0.8rem; color: var(--ink-faint); }
 .refs code { font-family: var(--mono); color: var(--ink-soft); }
@@ -362,6 +368,7 @@ td code { font-family: var(--mono); font-size: 0.85em; color: var(--accent); }
       </ul>
 
       <p class="cost">[[What this decision costs, in one sentence.]]</p>
+      <p class="change">[[The change that will now happen, in one sentence.]]</p>
     </section>
     <!-- /dec -->
 
@@ -386,6 +393,7 @@ td code { font-family: var(--mono); font-size: 0.85em; color: var(--accent); }
       </figure>
 
       <p class="cost">[[What this decision costs, in one sentence.]]</p>
+      <p class="change">[[The change that will now happen, in one sentence.]]</p>
     </section>
     <!-- /dec -->
 
