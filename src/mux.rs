@@ -165,8 +165,11 @@ pub struct LaneSpec<'a> {
     pub name: &'a str,
     /// What the pane is labelled. Purely for the person looking at it: the
     /// lane's identity is [`LaneSpec::name`], which is the multiplexer's own
-    /// session name and is what [`Mux::list_lanes`] reads back. The tab already
-    /// carries the task, so this carries the role.
+    /// session name and is what [`Mux::list_lanes`] reads back. Under
+    /// `MuxMode::Split` the task's own tab already carries the task — see
+    /// [`Mux::rename_tab`] — so this carries the step alone; under
+    /// `MuxMode::Grouped`, where several tasks share one tab, this carries
+    /// both, the same as [`LaneSpec::name`].
     pub label: &'a str,
     /// herdr agent kind: `pi`, `claude`, `codex`, …
     pub kind: &'a str,
@@ -473,6 +476,13 @@ pub trait Mux {
     /// contract a step actually asks for, not everything this process
     /// happens to be carrying.
     ///
+    /// `key` and `label` split apart what used to be one string: `key` is the
+    /// run's own `<task> · <step>` identity, unseen by anyone, that names the
+    /// handover file this writes so two tasks running the same step at once
+    /// never collide over it; `label` is what the pane is actually renamed
+    /// to, which is `key` itself under `MuxMode::Grouped` but the step alone
+    /// under `MuxMode::Split`, where the tab already carries the task.
+    ///
     /// The default refuses nothing, the same shape [`Mux::open_tab`] takes:
     /// it declines outright rather than half-answering. headless inherits it
     /// unchanged — its panes are not real, so there is nothing to split.
@@ -480,6 +490,7 @@ pub trait Mux {
         &self,
         _tab_id: &str,
         _cwd: &Path,
+        _key: &str,
         _label: &str,
         _script: &str,
         _env: &BTreeMap<String, String>,
@@ -602,6 +613,24 @@ pub trait Mux {
         Ok(())
     }
     fn rename_pane(&self, pane_id: &str, label: &str) -> Result<()>;
+    /// Rename a tab in place, by id.
+    ///
+    /// Only ever called under [`Mux::task_owns_workspace`], on the tab a task
+    /// cut for itself — a shared tab under `MuxMode::Grouped` is never a
+    /// single task's to rename, per [`Mux::task_owns_workspace`]'s own doc.
+    /// Called both the moment such a tab is opened, whose default label is
+    /// unhelpfully numeric, and again on every later pass that finds the task
+    /// still sitting on it — a resumed dispatcher rediscovers the tab id from
+    /// the task file, never from a rename that outlived the process that made
+    /// it, so re-asserting the label costs nothing and is the only way a
+    /// resumed task's tab reliably shows its slug too.
+    ///
+    /// The default does nothing and never fails: headless records no tab to
+    /// rename, and a test double with no visible tab has nothing to assert
+    /// about this beyond what it chooses to log.
+    fn rename_tab(&self, _tab_id: &str, _label: &str) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// The backend this project dispatches through.
@@ -1992,6 +2021,7 @@ impl Mux for Herdr {
         &self,
         tab_id: &str,
         cwd: &Path,
+        key: &str,
         label: &str,
         script: &str,
         env: &BTreeMap<String, String>,
@@ -2008,9 +2038,13 @@ impl Mux for Herdr {
         // large enough that a herdr pane has cut it mid-value before, and a
         // shell left waiting on the unterminated quote that leaves behind
         // never gets as far as the script line below it.
+        //
+        // Named off `key`, never `label`: under `MuxMode::Split` `label` is
+        // the step alone, and two tasks running the same step at once would
+        // otherwise hand each other's environment file the same name.
         if !env.is_empty() {
-            let key = format!("{} · handover", lane_task(label));
-            let source = self.hand_environment(crate::command_step::RUN_DIR, &key, env)?;
+            let handover_key = format!("{} · handover", lane_task(key));
+            let source = self.hand_environment(crate::command_step::RUN_DIR, &handover_key, env)?;
             self.call_ignoring_result(&["pane", "run", &pane, &source])?;
         }
         self.call_ignoring_result(&["pane", "run", &pane, script])?;
@@ -2259,6 +2293,9 @@ impl Mux for Herdr {
 
     fn rename_pane(&self, pane_id: &str, label: &str) -> Result<()> {
         self.call_ignoring_result(&["pane", "rename", pane_id, label])
+    }
+    fn rename_tab(&self, tab_id: &str, label: &str) -> Result<()> {
+        self.call_ignoring_result(&["tab", "rename", tab_id, label])
     }
 }
 

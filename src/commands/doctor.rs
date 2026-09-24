@@ -1229,7 +1229,7 @@ fn live_pane(mux: &dyn Mux) -> Result<Option<String>> {
 
     let started = std::time::Instant::now();
     let outcome = mux
-        .run_in_pane(&tab_id, &dir, "doctor", &script, &env)
+        .run_in_pane(&tab_id, &dir, "doctor", "doctor", &script, &env)
         .and_then(|pane| {
             pane.ok_or_else(|| {
                 anyhow::anyhow!("{} reports panes but ran nothing in one", mux.name())

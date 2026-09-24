@@ -147,10 +147,12 @@ must "a task queues behind the planted workspace" "$SPOOLWAY" queue add --from s
 exit_code "the run settles once its one step passes, with a workspace on the checkout already present" 0 \
   "$SPOOLWAY" dispatch --plain
 
-# The planted rows by name, not the table's line count: the dispatcher's own
-# tab (`spoolway/selfsweep`) lands in the same table once the run starts, so
-# a count alone would still read 2 if the sweep took exactly one of the two
-# planted tabs and left the dispatcher's own behind.
+# The planted rows by name, not the table's line count: the task's own tab —
+# renamed to its bare slug, `selfsweep`, the moment it is cut, rather than
+# left on the `spoolway/selfsweep` its workspace itself is labelled — lands
+# in the same table once the run starts, so a count alone would still read 2
+# if the sweep took exactly one of the two planted tabs and left the task's
+# own behind.
 if [ "$(grep -c '^w-self:' "$HSTATE/tabs")" -eq 2 ]; then
   ok "neither of the project checkout's own tabs was swept along the way"
 else

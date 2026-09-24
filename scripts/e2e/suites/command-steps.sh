@@ -893,31 +893,40 @@ export SPOOLWAY_E2E_PANE_ENV_MARKER="from-the-dispatchers-own-environment"
 # own, and it stands until this suite lets it go.
 #
 # A made window, not a caught one — the same release-file shape the herdr
-# pane case below uses, and for the same reason: this is a one-step pipeline
-# routing straight to `done`, so `queued → visible → archived` is over
-# inside a moment and `teardown.rs` reclaims `commands/` on the archive.
-# Everything read below — the pane file, the log, and the `.kept` copy the
-# env-marker check greps — is written while the step is running, and a
-# `sleep 2` was only ever a guess at how long that would take. It stopped
-# being long enough once a pass got fast: the log was reclaimed out from
-# under `records`, whose `cp` then left no `.kept` at all. `timeout:` is the
-# backstop, so a suite that dies before releasing it does not leave a pane
-# waiting forever.
+# pane case below uses, and for the same reason: `queued → visible → resume →
+# archived` is over inside a moment otherwise, and `teardown.rs` reclaims
+# `commands/` on the archive. Everything read below — the pane file, the log,
+# and the `.kept` copy the env-marker check greps — is written while the step
+# is running, and a `sleep 2` was only ever a guess at how long that would
+# take. It stopped being long enough once a pass got fast: the log was
+# reclaimed out from under `records`, whose `cp` then left no `.kept` at all.
+# `timeout:` is the backstop, so a suite that dies before releasing either
+# step does not leave a pane waiting forever.
 #
-# A one-step pipeline of its own, like `herdrpane.yml` below — not the
-# `default` pipeline's `implement` → this step chain the tmux-backed version
-# of this case used, because that starts on an agent lane, and
+# A second step, `resume`, follows `visible` before either routes to `done` —
+# not the `default` pipeline's `implement` → this step chain the tmux-backed
+# version of this case used, because that starts on an agent lane, and
 # `herdr-stub.sh` answers no `agent start` verb at all: it is here for the
-# handover, not for a full agent lifecycle. See its own header.
+# handover, not for a full agent lifecycle (see its own header), and `resume`
+# is the cheap stand-in for one: a later pass finding this task already
+# sitting on its own tab, the same as a resumed dispatcher would.
 VISIBLE_RELEASE="$LIVE/visible.release"
-rm -f "$VISIBLE_RELEASE"
-sed "s|@RELEASE@|$VISIBLE_RELEASE|" > .spoolway/pipelines/panevisible.yml <<'YML'
-description: One paned command step, for whether it opens a pane at all.
+RESUME_RELEASE="$LIVE/resume.release"
+rm -f "$VISIBLE_RELEASE" "$RESUME_RELEASE"
+sed -e "s|@RELEASE@|$VISIBLE_RELEASE|" -e "s|@RESUME_RELEASE@|$RESUME_RELEASE|" \
+  > .spoolway/pipelines/panevisible.yml <<'YML'
+description: Two paned command steps, for whether a later one on the same task's own tab still gets a pane.
 
 steps:
   - id: visible
     description: Stand in a pane until the suite has read everything it writes.
     run: 'echo visible-pane-marker; echo "env:$SPOOLWAY_E2E_PANE_ENV_MARKER"; while [ ! -e "@RELEASE@" ]; do sleep 0.1; done'
+    timeout: 120s
+    on_pass: resume
+    on_fail: blocked
+  - id: resume
+    description: A second step on the same tab, standing in for a resumed dispatcher meeting it again.
+    run: 'echo resume-pane-marker; while [ ! -e "@RESUME_RELEASE@" ]; do sleep 0.1; done'
     timeout: 120s
     on_pass: done
     on_fail: blocked
@@ -958,6 +967,36 @@ else
   bad "a command step with no headless: key runs in a pane of its own"
 fi
 
+# Under `split` the task's own tab already names it, so the pane inside it
+# carries only the step — not `paned · visible`, the identity `PANE_FILE`
+# above is keyed on. Read from the double's own tables, by the ids `RECORDED`
+# already proved live, rather than from anything spoolway itself reported.
+PANE_LABEL=$(awk -F'\t' -v p="$RECORDED" '$1==p {print $4}' "$HSTATE/panes")
+if [ "$PANE_LABEL" = visible ]; then
+  ok "a split command pane's visible label is just the step"
+else
+  bad "a split command pane's visible label is just the step (was \`$PANE_LABEL\`)"
+fi
+
+# An *agent* lane's pane takes the same label by the same branch in
+# `start_one`, and hands it to the same `rename_pane` this case just proved
+# carries a label through to herdr — but it is never asserted here, and that
+# is deliberate rather than forgotten. `Herdr::start_lane` only reaches
+# `rename_pane` once `agent start` has succeeded, and this double answers no
+# `agent start` at all: hosting one means a believable `pane process-info`,
+# an `agent list` schema and a whole lane lifecycle grafted onto a double
+# every herdr case here shares. See `herdr-stub.sh`'s own header, and
+# `run.sh`'s, which records the same boundary. The agent half of this branch
+# is decided instead where a unit test can reach it, in
+# `src/dispatch.rs::tests::a_split_agent_panes_label_is_only_its_step_not_the_task`.
+PANED_TAB=$(awk -F'\t' -v p="$RECORDED" '$1==p {print $2}' "$HSTATE/panes")
+TAB_LABEL=$(awk -F'\t' -v t="$PANED_TAB" '$1==t {print $3}' "$HSTATE/tabs")
+if [ "$TAB_LABEL" = paned ]; then
+  ok "and the task's own split tab shows its slug"
+else
+  bad "and the task's own split tab shows its slug (was \`$TAB_LABEL\`)"
+fi
+
 # Read while the task is still moving — the archive step reclaims this log.
 # `records` keeps a `.kept` copy so the env-marker check below still has a
 # file to read after `drive paned gone` has deleted the original.
@@ -967,13 +1006,49 @@ has "a variable only the dispatcher's own environment carried reached the herdr 
   "env:from-the-dispatchers-own-environment" \
   "$SPOOLWAY_PROJECT_HOME/commands/paned · visible.log.kept"
 
+# Everything about `visible` has been read, so it may finish and hand the
+# task to `resume` — a second step, on the same tab, standing in for a
+# dispatcher meeting an already-placed task again. Corrupted here, right
+# before release, the same way a restarted Herdr would have forgotten it:
+# a rename that only ever lived in that process's own memory.
+awk -F'\t' -v OFS='\t' -v t="$PANED_TAB" '$1==t {$3="w-corrupted-by-e2e"} {print}' \
+  "$HSTATE/tabs" > "$HSTATE/tabs.tmp"
+mv "$HSTATE/tabs.tmp" "$HSTATE/tabs"
+touch "$VISIBLE_RELEASE"
+
+RESUME_PANE_FILE="$SPOOLWAY_PROJECT_HOME/commands/paned · resume.pane"
+RESUME_RECORDED=""
+for _ in $(seq 1 1200); do
+  RESUME_RECORDED=$(cat "$RESUME_PANE_FILE" 2>/dev/null || true)
+  if [ -n "$RESUME_RECORDED" ] && grep -q "^$RESUME_RECORDED	" "$HSTATE/panes"; then
+    break
+  fi
+  RESUME_RECORDED=""
+  sleep 0.1
+done
+if [ -n "$RESUME_RECORDED" ]; then
+  ok "the task's second step runs in a pane of its own too"
+else
+  bad "the task's second step runs in a pane of its own too"
+fi
+
+# The proof this whole detour exists for: a later pass finding the task
+# already sitting on its tab puts the slug back, exactly as it did the
+# moment the tab was cut — not only once, at creation.
+RESUMED_TAB_LABEL=$(awk -F'\t' -v t="$PANED_TAB" '$1==t {print $3}' "$HSTATE/tabs")
+if [ "$RESUMED_TAB_LABEL" = paned ]; then
+  ok "a later pass puts the task's own tab label back, as a resumed dispatcher must"
+else
+  bad "a later pass puts the task's own tab label back (was \`$RESUMED_TAB_LABEL\`)"
+fi
+
 # Everything above has been read, so the command may finish and the task may
 # go on to be archived — which is the next thing asserted.
-touch "$VISIBLE_RELEASE"
+touch "$RESUME_RELEASE"
 if drive paned gone 180; then ok "the task carries on once the command has passed"
 else bad "the task carries on once the command has passed (at \`$(stage_of paned)\`)"; fi
 unset SPOOLWAY_E2E_PANE_ENV_MARKER
-if [ -n "$RECORDED" ] && grep -q "^$RECORDED	" "$HSTATE/panes"; then
+if [ -n "$RESUME_RECORDED" ] && grep -q "^$RESUME_RECORDED	" "$HSTATE/panes"; then
   bad "a passing command's pane closes behind it"
 else
   ok "a passing command's pane closes behind it"
@@ -1068,12 +1143,70 @@ dispatcher_stop
 must "the failing-pane task is taken back out before its pipeline goes" \
   "$SPOOLWAY" queue unqueue panedfail --force
 
+# ---------------------------------------------------- grouped keeps task and step
+# Under `grouped`, several tasks share one project tab, so a pane still has
+# to say which task it belongs to as well as which step — proven here
+# against the same double as split's own case above, rather than only by
+# `src/dispatch.rs`'s unit tests.
+must "herdr_mode grouped, for the pane label alone" \
+  "$SPOOLWAY" config set dispatch.herdr_mode grouped
+GROUPED_RELEASE="$LIVE/grouped.release"
+rm -f "$GROUPED_RELEASE"
+sed "s|@RELEASE@|$GROUPED_RELEASE|" > .spoolway/pipelines/panegrouped.yml <<'YML'
+description: One paned command step, for the grouped pane label.
+
+steps:
+  - id: visible
+    description: Stand in a pane until the suite has read its own label.
+    run: 'echo grouped-pane-marker; while [ ! -e "@RELEASE@" ]; do sleep 0.1; done'
+    timeout: 120s
+    on_pass: done
+    on_fail: blocked
+YML
+works "a pipeline for the grouped case checks out" "$SPOOLWAY" pipeline check
+
+dispatcher_restart
+task_doc "$LIVE/groupedpane.md" groupedpane "$BODY" "group: live" \
+  "pipeline: panegrouped" "touches: [notes/groupedpane.md]"
+must "a task through a grouped paned command step" \
+  "$SPOOLWAY" queue add --from "$LIVE/groupedpane.md"
+
+GROUPED_PANE_FILE="$SPOOLWAY_PROJECT_HOME/commands/groupedpane · visible.pane"
+GROUPED_RECORDED=""
+for _ in $(seq 1 1200); do
+  GROUPED_RECORDED=$(cat "$GROUPED_PANE_FILE" 2>/dev/null || true)
+  if [ -n "$GROUPED_RECORDED" ] && grep -q "^$GROUPED_RECORDED	" "$HSTATE/panes"; then
+    break
+  fi
+  GROUPED_RECORDED=""
+  sleep 0.1
+done
+if [ -n "$GROUPED_RECORDED" ]; then
+  ok "a grouped command step also runs in a pane"
+else
+  bad "a grouped command step also runs in a pane"
+fi
+GROUPED_LABEL=$(awk -F'\t' -v p="$GROUPED_RECORDED" '$1==p {print $4}' "$HSTATE/panes")
+if [ "$GROUPED_LABEL" = "groupedpane · visible" ]; then
+  ok "and its pane keeps both the task and the step, unlike split's"
+else
+  bad "and its pane keeps both the task and the step (was \`$GROUPED_LABEL\`)"
+fi
+
+touch "$GROUPED_RELEASE"
+if drive groupedpane gone 180; then
+  ok "the grouped task carries on once the command has passed"
+else
+  bad "the grouped task carries on once the command has passed (at \`$(stage_of groupedpane)\`)"
+fi
+must "back to herdr_mode split" "$SPOOLWAY" config set dispatch.herdr_mode split
+
 "$HERDRBIN/herdr" shutdown state >/dev/null 2>&1 || true
 unset HERDR_STUB_STATE
 PATH="$PATH_BEFORE_HERDR_STUB"; export PATH
 must "back to headless" "$SPOOLWAY" config set dispatch.backend headless
 rm -f .spoolway/pipelines/panevisible.yml .spoolway/pipelines/panehidden.yml \
-  .spoolway/pipelines/paneflaky.yml
+  .spoolway/pipelines/paneflaky.yml .spoolway/pipelines/panegrouped.yml
 
 # ---------------------------------------------- a big environment, handed over
 # A pane's shell does not inherit the dispatcher's environment: it belongs to
