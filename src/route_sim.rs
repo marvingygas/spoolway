@@ -74,10 +74,9 @@ mod tests {
     /// * every such edge carries a `loop:` bound keyed on exactly the step it
     ///   targets, so [`Pipeline::check_bounded_loops`] can find the budget
     ///   that breaks that cycle;
-    /// * that budget's exit (`on_loop_max`, or `on_pass` when unset) always
-    ///   lands outside the cycle it bounds — forward in the chain, or
-    ///   `blocked` — so the escalation cannot be read back into the very
-    ///   loop it was meant to leave.
+    ///
+    /// Where a spent budget lands takes no care of its own: it is `blocked`,
+    /// which is outside every cycle a generated shape could close.
     ///
     /// Still handed to [`Pipeline::parse`] rather than trusted outright: a
     /// shape this reasoning got wrong is simply skipped by the caller below,
@@ -102,15 +101,11 @@ mod tests {
             }
 
             // The back edge, before `on_pass`: an earlier step to fail to,
-            // bounded on that exact route, with a exit that lands outside
-            // the cycle it closes — see the doc comment above.
+            // bounded on that exact route — see the doc comment above.
             if i > 0 && rng.chance(60) {
                 let target = rng.below(i);
                 let limit = 1 + rng.below(3); // 1..=3
                 out += &format!("    loop:\n      s{target}: {limit}\n");
-                if rng.chance(50) {
-                    out += "    on_loop_max: blocked\n";
-                }
                 out += &format!("    on_fail: s{target}\n");
             }
 

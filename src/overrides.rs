@@ -145,11 +145,27 @@ pub(crate) fn apply_pipeline_patch(pipeline: &mut Pipeline, overrides: &Path) ->
 /// `pub(crate)` so `commands::pipeline_override` can probe a candidate
 /// `--set` against a cloned step before writing anything: refusing by the
 /// exact rule the merge itself would apply, rather than a second copy of it.
+///
+/// Two keys are refused before the round-trip rather than by it. `id:` would
+/// rename the step, a change to the graph rather than a value on one. And
+/// `on_loop_max:`, retired, which the round-trip would otherwise swallow
+/// without a word: the field is `skip_serializing`, so the step that comes
+/// back out has lost it — a key accepted here, written into
+/// `overrides/pipelines/<name>.yml`, and then silently doing nothing on every
+/// dispatcher pass after. `pipeline::refuse_retired_step_keys` is the
+/// same refusal for a tracked file, where the key survives long enough to be
+/// named; here it has to be caught before serde sees it.
 pub(crate) fn apply_step_patch(step: &mut Step, fields: &serde_norway::Mapping) -> Result<()> {
     if fields.contains_key("id") {
         bail!(
             "sets `id:` — a patch may only set a value on an existing step, never rename or \
              reposition one"
+        );
+    }
+    if fields.contains_key("on_loop_max") {
+        bail!(
+            "sets `on_loop_max:` — a spent loop budget now always parks on `blocked`, so the \
+             key no longer chooses anything; drop it"
         );
     }
     let mut value = serde_norway::to_value(&*step).context("serialising step for override")?;
@@ -873,6 +889,47 @@ mod tests {
             task_template: None,
             steps,
         }
+    }
+
+    /// `on_loop_max:` is retired, and a patch that sets it is refused the same
+    /// way a tracked file naming it is — here rather than by the round-trip,
+    /// which drops the `skip_serializing` field without a word. Left to
+    /// serde, `spoolway pipeline override <name> --set review.on_loop_max=…`
+    /// would be accepted, written into the patch file, and then do nothing on
+    /// every dispatcher pass after, with `override promote` later dead-ending
+    /// on a key the tracked step does not have.
+    ///
+    /// `apply_step_patch` is both halves of that at once: the merge the
+    /// loader runs, and the probe `commands::pipeline_override` runs before
+    /// it writes anything.
+    #[test]
+    fn a_patch_setting_the_retired_on_loop_max_key_is_refused() {
+        let mut fields = serde_norway::Mapping::new();
+        fields.insert(
+            serde_norway::Value::String("on_loop_max".into()),
+            serde_norway::Value::String(crate::pipeline::BLOCKED.into()),
+        );
+        let mut step = Step {
+            id: "review".into(),
+            ..serde_norway::from_str(
+                "id: review
+agent: pi
+",
+            )
+            .unwrap()
+        };
+        let err = apply_step_patch(&mut step, &fields)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("`on_loop_max:`"), "the key by name: {err}");
+        assert!(
+            err.contains("`blocked`"),
+            "where a spent budget goes: {err}"
+        );
+        assert!(
+            step.on_loop_max.is_none(),
+            "the step must not have been touched on the way to the refusal"
+        );
     }
 
     /// The acceptance criterion in full: promoting changes only the values

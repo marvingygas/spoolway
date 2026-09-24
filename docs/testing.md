@@ -198,7 +198,8 @@ SPOOLWAY="$PWD/target/release/spoolway" scripts/e2e/run.sh --tier smoke
 ```
 
 A failure sends the task back to the step before `test` (`e2e` in `impl`, `reproduce-again`
-in `bugfix`), at most twice, then `on_loop_max` parks it. The gate needs `cargo-deny` installed.
+in `bugfix`), at most twice, then the task parks on `blocked`. The gate needs `cargo-deny`
+installed.
 
 `.github/workflows/ci.yml` runs daily on `main` at 03:17 UTC, and on every pull request.
 Pushes do not trigger it. The scheduled run's Linux job runs the same gate plus the

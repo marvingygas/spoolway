@@ -16,7 +16,6 @@ steps:
     session: true
     loop:
       fix: 3
-    on_loop_max: blocked
     on_pass: version
     on_fail: fix
 
@@ -46,7 +45,6 @@ steps:
     gate: true
     loop:
       ready: 1
-    on_loop_max: blocked
     on_pass: preflight
     on_fail: ready
 
@@ -59,7 +57,6 @@ steps:
     session: true
     loop:
       fix: 3
-    on_loop_max: blocked
     on_pass: notes
     on_fail: fix
 
@@ -80,7 +77,6 @@ steps:
     effort: high
     loop:
       version: 1
-    on_loop_max: blocked
     on_pass: merge-release
     on_fail: version
 
@@ -92,7 +88,6 @@ steps:
     effort: high
     loop:
       version: 1
-    on_loop_max: blocked
     on_pass: publish
     on_fail: version
 
@@ -104,7 +99,6 @@ steps:
     effort: high
     loop:
       version: 1
-    on_loop_max: blocked
     on_pass: released
     on_fail: version
 
@@ -116,7 +110,6 @@ steps:
     on_fail: repair-released
     loop:
       repair-released: 2
-    on_loop_max: blocked
 
   - id: repair-released
     description: Repair a failed post-publication verification in one green pull request.
@@ -155,7 +148,6 @@ steps:
     on_fail: repair-fixture
     loop:
       repair-fixture: 2
-    on_loop_max: blocked
 
   - id: repair-fixture
     description: Repair a failed fixture scaffold in one green pull request.

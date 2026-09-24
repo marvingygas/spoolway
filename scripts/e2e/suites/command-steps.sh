@@ -69,10 +69,10 @@ add_command_step() {
       *)            printf '    on_fail: %s\n' "$extra"
                     # A failure routed back to the step ahead of this one is a
                     # cycle of its own — `implement` → this step → `implement`.
-                    # It needs a bound whose exit leaves the cycle, and this
-                    # step`s own `on_pass` is the one that does.
-                    printf '    loop:\n      %s: 1\n' "$extra"
-                    printf '    on_loop_max: %s\n' "$on_pass" ;;
+                    # It needs a bound, wherever along the cycle it sits: a
+                    # spent budget parks the task on `blocked`, which leaves
+                    # the cycle from anywhere in it.
+                    printf '    loop:\n      %s: 1\n' "$extra" ;;
     esac
     printf '    on_pass: %s\n' "$on_pass"
   } >> "$file"
@@ -223,7 +223,21 @@ rm -f "$SPOOLWAY_PROJECT_HOME/queue/routeless.md"
 # polls for is a stage it can miss between two passes. The status log is the
 # record of the route taken, and it cannot be raced.
 cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
-add_command_step default build "echo 'the build is broken' >&2; exit 2" review implement
+# Red on its first run and green on its second, so the detour this case is
+# about is the whole of it: one failure back to `implement`, then a pass on
+# down the pipeline. A command that stayed red would spend the bound above and
+# park the task on `blocked`, which is the case `gated` below is for. The stamp
+# lives outside the worktree so the retry is not itself a change the task
+# carries.
+#
+# The `records` check below reads this log while the task is still moving,
+# and both runs write to the same path — the second, passing run's silence
+# overwrites the first run's line the moment the retry starts. A mock lane's
+# retry is fast enough to win that race outright, so the first run holds a
+# beat after it writes before it exits, giving the poll below room to see it.
+add_command_step default build \
+  "test -f '$LIVE/build.stamp' || { echo 'the build is broken' >&2; touch '$LIVE/build.stamp'; sleep 1; exit 2; }" \
+  review implement
 
 task_doc "$LIVE/broken.md" broken "$BODY" "group: live" "touches: [notes/broken.md]"
 must "a task whose build fails" "$SPOOLWAY" queue add --from "$LIVE/broken.md"
@@ -267,7 +281,7 @@ cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
   printf "    description: A stand-in for a mechanical gate's own agent step.\n"
   printf '    agent: pi\n    prompt: implementer\n    model: fake-local\n'
   printf '    loop:\n      gate: 1\n'
-  printf '    on_loop_max: blocked\n    on_pass: gate\n    on_fail: blocked\n'
+  printf '    on_pass: gate\n    on_fail: blocked\n'
   printf '\n  - id: gate\n'
   printf '    description: Always red, so the loop it bounds is what this case is about.\n'
   printf "    run: echo 'CI would fail here' >&2; exit 1\n"
@@ -305,7 +319,7 @@ cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
   printf "    description: A stand-in for a mechanical gate's own agent step.\n"
   printf '    agent: pi\n    prompt: implementer\n    model: fake-local\n'
   printf '    loop:\n      gate: 2\n'
-  printf '    on_loop_max: blocked\n    on_pass: gate\n    on_fail: blocked\n'
+  printf '    on_pass: gate\n    on_fail: blocked\n'
   printf '\n  - id: gate\n'
   printf '    description: Always red, so the loop it bounds is what this case is about.\n'
   printf "    run: echo 'CI would fail here' >&2; exit 1\n"
@@ -725,10 +739,17 @@ dispatcher_restart
 # as the dispatcher runs — no other clock in a pass has an opinion about a
 # process that is simply still going — so the step's own timeout is the only
 # thing that ends it.
+#
+# Hangs once and returns at once the second time, same as `broken` above and
+# for the same reason: a command that kept hanging would spend the loop bound
+# and park the task on `blocked` rather than let it reach `gone`. The stamp is
+# written before the sleep so the timeout still kills the first run.
 cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
-add_command_step default build "sleep 300" review implement
+add_command_step default build \
+  "test -f '$LIVE/hang.stamp' && exit 0 || { touch '$LIVE/hang.stamp'; sleep 300; }" \
+  review implement
 must "a timeout short enough for a suite to reach" \
-  sed -i 's|^    run: sleep 300$|    run: sleep 300\n    timeout: 3s|' \
+  sed -i "\\|^    run: test -f '$LIVE/hang.stamp'|a\\    timeout: 3s" \
   .spoolway/pipelines/default.yml
 works "a step may name its own timeout" "$SPOOLWAY" pipeline check
 says "and show resolves it" "timeout=3s" "$SPOOLWAY" pipeline show

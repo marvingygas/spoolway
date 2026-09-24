@@ -40,8 +40,6 @@
 #   loop              <n>                Laps allowed, per step sent back to.
 #                     <step>: <n>        The same limit, one destination at a time.
 #                                        Absent: unbounded.
-#   on_loop_max       <step id>          Where a spent loop sends the task.
-#                     on_pass <default>  It carries on, findings and all.
 #   timeout           <duration>         How long a command step may run, e.g. `90s`.
 #                                        Absent: 30m.
 #   background        true               The task moves on; `on_fail` routes it later.

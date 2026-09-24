@@ -321,8 +321,7 @@ separate from this. See [When a task needs a person](tasks.md#when-a-task-needs-
 | Live-child ceiling | How long a lane may hold a child process before it is escalated. | The process exiting. |
 | Issue-tracking hook retry | A failing `[issue_tracking]` hook retries on a doubling delay from ten seconds, capped at an hour. | The hook succeeding. |
 
-When a loop budget runs out, the task goes to the step's `on_loop_max`, or to its `on_pass`
-when there is none.
+When a loop budget runs out, the task parks on `blocked`.
 
 ## Escalation
 
