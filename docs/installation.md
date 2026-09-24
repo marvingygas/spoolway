@@ -254,22 +254,28 @@ What `sync` replaces, file by file:
 | `config.toml` | The comments and the settings reference. Your values stay. |
 | Pipeline file | Only the key reference between `# >>> spoolway >>>` and `# <<< spoolway <<<`. A file without the markers is left alone. |
 | `.gitignore` | Only the old marked block, removed once. |
-| Skills | Every installed provider's skills. |
+| Skills | Every installed provider's skills, except a file changed by hand since it was last written by `install` or `sync`, which is left alone. |
 | Prompts | Nothing. |
 | Document skeletons | Nothing. |
 | Task skeletons | Nothing. |
 | A retired template | Removed, with the reason it is gone. |
 
-`sync` never merges. A marked block you edited by hand stops the sync on that file.
+`sync` never merges. A marked block you edited by hand stops the sync on that file, and so does
+a skill file changed by hand since spoolway last wrote it. Both are reported, not overwritten.
 `spoolway sync --replace <path>` writes the shipped file over yours and saves your version
-beside it as `.bak`. That is also how to take a newer default prompt or skeleton on purpose.
-Replacing a hook script under `.spoolway/hooks/` also leaves it executable on Unix, whether or
-not its text changed. `spoolway doctor` reports files that are behind. `spoolway pipeline check`
-reports a prompt that names a command or flag this binary does not have.
+beside it as `.bak`. That is also how to take a newer default prompt or skeleton on purpose. It
+does not cover skill files: `spoolway install <provider> --force` takes the shipped skills back,
+overwriting that provider's whole set with no `.bak` saved. Replacing a hook script under
+`.spoolway/hooks/` also leaves it executable on Unix, whether or not its text changed.
+`spoolway doctor` reports files that are behind. `spoolway pipeline check` reports a prompt that
+names a command or flag this binary does not have.
 
 On success, `sync` records this binary's version and a fingerprint of the text it would write
-in a stamp under the project's home, one line per checkout. `spoolway init` writes the same
-stamp for a freshly scaffolded project.
+in a stamp under the project's home, one line per checkout. It also records, in a second stamp
+under the project's home, one line per installed skill file, the fingerprint of the copy it just
+wrote there — the record a later sync checks a skill file against to tell a hand edit from a
+stale shipped copy. `spoolway init` and `spoolway install` write the same per-checkout stamp and
+per-skill-file records for a freshly scaffolded or newly installed project.
 
 Every other command that needs a project reads that stamp back first. When it no longer
 matches and a scan finds files to change, the command stops and draws a confirm panel titled
