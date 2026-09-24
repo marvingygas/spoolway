@@ -63,7 +63,7 @@ steps:
     description: Write the code to satisfy the task's acceptance criteria.
     agent: claude
     prompt: implementer
-    model: claude-opus-5
+    model: claude-opus-5-5
     effort: medium
     session: true
     on_pass: review
@@ -72,7 +72,7 @@ steps:
     description: Check the diff against the acceptance criteria and project standards.
     agent: claude
     prompt: reviewer
-    model: claude-opus-5
+    model: claude-opus-5-5
     effort: high
     session: true
     loop:

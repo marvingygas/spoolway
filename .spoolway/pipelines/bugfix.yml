@@ -84,7 +84,7 @@ steps:
       no larger than the bug: flag a rewrite where a repair would do.
     agent: claude
     prompt: reviewer
-    model: claude-opus-5
+    model: claude-opus-5-5
     effort: high
     session: true
     loop:

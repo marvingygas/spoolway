@@ -76,7 +76,7 @@ steps:
       and that every criterion has a test that would fail without it.
     agent: claude
     prompt: reviewer
-    model: claude-opus-5
+    model: claude-opus-5-5
     effort: high
     session: true
     loop:

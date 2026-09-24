@@ -66,7 +66,7 @@ steps:
       leave it review-ready — nothing downstream will look at the diff.
     agent: claude
     prompt: implementer
-    model: claude-opus-5
+    model: claude-opus-5-5
     effort: high
     session: true
     on_pass: test

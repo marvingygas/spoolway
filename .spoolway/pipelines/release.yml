@@ -11,7 +11,7 @@ steps:
     description: Prove clean main passes the complete local and hosted release-readiness suite.
     agent: claude
     prompt: release-readiness
-    model: claude-opus-5
+    model: claude-opus-5-5
     effort: high
     session: true
     loop:
@@ -23,7 +23,7 @@ steps:
     description: Repair every release blocker in one pull request and drive its checks green.
     agent: claude
     prompt: release-fixer
-    model: claude-opus-5
+    model: claude-opus-5-5
     effort: high
     session: true
     on_pass: merge-fix
@@ -32,7 +32,7 @@ steps:
     description: Independently review the repair, correct its existing branch if needed, and merge it.
     agent: claude
     prompt: release-merger
-    model: claude-opus-5
+    model: claude-opus-5-5
     effort: high
     on_pass: ready
 
@@ -40,7 +40,7 @@ steps:
     description: Recommend the next version and pause for a person's approval or override.
     agent: claude
     prompt: release-version
-    model: claude-opus-5
+    model: claude-opus-5-5
     effort: high
     gate: true
     loop:
@@ -52,7 +52,7 @@ steps:
     description: Freeze the chosen release version and assemble its diff, pull requests, contributors and changelog state.
     agent: claude
     prompt: release-preflight
-    model: claude-opus-5
+    model: claude-opus-5-5
     effort: high
     session: true
     loop:
@@ -73,7 +73,7 @@ steps:
     description: Build the exact four-file release commit and open one green pull request for it.
     agent: claude
     prompt: release-candidate
-    model: claude-opus-5
+    model: claude-opus-5-5
     effort: high
     loop:
       version: 1
@@ -84,7 +84,7 @@ steps:
     description: Independently review and merge the exact release commit without changing its candidate.
     agent: claude
     prompt: release-merger
-    model: claude-opus-5
+    model: claude-opus-5-5
     effort: high
     loop:
       version: 1
@@ -95,7 +95,7 @@ steps:
     description: Rehearse the merged release commit, tag it, publish it, and verify every public artifact.
     agent: claude
     prompt: release-publisher
-    model: claude-opus-5
+    model: claude-opus-5-5
     effort: high
     loop:
       version: 1
@@ -115,7 +115,7 @@ steps:
     description: Repair a failed post-publication verification in one green pull request.
     agent: claude
     prompt: release-fixer
-    model: claude-opus-5
+    model: claude-opus-5-5
     effort: high
     session: true
     on_pass: merge-released-repair
@@ -124,7 +124,7 @@ steps:
     description: Review and merge the post-publication verifier repair, then rerun the verifier.
     agent: claude
     prompt: release-merger
-    model: claude-opus-5
+    model: claude-opus-5-5
     effort: high
     on_pass: released
 
@@ -153,7 +153,7 @@ steps:
     description: Repair a failed fixture scaffold in one green pull request.
     agent: claude
     prompt: release-fixer
-    model: claude-opus-5
+    model: claude-opus-5-5
     effort: high
     session: true
     on_pass: merge-fixture-repair
@@ -162,7 +162,7 @@ steps:
     description: Review and merge the fixture machinery repair, then rerun the scaffold.
     agent: claude
     prompt: release-merger
-    model: claude-opus-5
+    model: claude-opus-5-5
     effort: high
     on_pass: fixture
 
@@ -170,6 +170,6 @@ steps:
     description: Review and merge the generated upgrade fixture so the release leaves main complete.
     agent: claude
     prompt: release-merger
-    model: claude-opus-5
+    model: claude-opus-5-5
     effort: high
     on_pass: done
