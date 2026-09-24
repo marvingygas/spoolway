@@ -2,7 +2,7 @@
 name = "spoolway"
 version = "0.5.0"
 edition = "2024"
-description = "Descriptive agent workflow builder run by a minimalistic command line state machine for turning coding agents into a pipeline you can actually reason about"
+description = "spoolway is a descriptive agent workflow builder run by a minimal command line state machine"
 license = "MIT"
 readme = "README.md"
 keywords = ["agent", "pipeline", "dispatcher", "llm", "cli"]

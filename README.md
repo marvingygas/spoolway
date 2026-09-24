@@ -11,8 +11,13 @@
   <a href="https://github.com/marvingygas/spoolway/releases/latest"><img alt="release" src="https://img.shields.io/github/v/release/marvingygas/spoolway?style=flat-square&label=release&labelColor=3f3f46&color=18181b"></a>
 </p>
 
-Descriptive agent workflow builder run by a minimalistic command line state machine for turning coding agents into a pipeline you can actually reason about. Determinism where possible. **Terminal native. Built for herdr**.
-Create yaml pipelines, mixing agents and commands, cloud and local models. Create an implementation plan in any way you want and cut spoolway tasks which get linked to the best matched pipeline. Measurable, comparable, repeatable. 
+spoolway is a descriptive agent workflow builder run by a minimal command line state machine.
+It turns coding agents into pipelines you can reason about. Determinism where possible.
+**Terminal native. Built for herdr.**
+
+Create YAML pipelines that mix agents and commands, cloud and local models. Plan the work
+however you like, then cut spoolway tasks and assign each to a suitable pipeline.
+Measurable, comparable, repeatable.
 
 Supported providers:
 
@@ -25,8 +30,25 @@ Supported providers:
 Running one coding agent is easy. Running five is hard: which one is done, which one is
 stuck, and which one is rewriting a file another one needs. The order lives in your head.
 
-spoolway replaces the orchestrating agent that keeps everything together. It has no model
-inside, so it never surprises you with a bill or an opinion.
+spoolway keeps that order for you. Its dispatcher has no model inside, so scheduling does not
+add model costs or depend on an agent's judgment.
+
+## How does it work?
+
+spoolway gives each agent a system prompt that tells it how to report its outcome with
+`spoolway report`. The task document carries context between steps. Through herdr, agents can
+interact with one another across harnesses.
+
+An agent can report four outcomes:
+
+| Outcome | What happens |
+|---|---|
+| `pass` | Moves to the step's `on_pass` destination. |
+| `fail` | Moves to `on_fail`, often an earlier step, or to `blocked` if none is set. |
+| `block` | Moves to `blocked`. In an unattended run, the configured unblocker agent takes over. |
+| `pause` | Lets an unblocker hand an unresolved issue to a person. |
+
+A gate can pause a task for a person after a step reports.
 
 ## Features
 
@@ -41,9 +63,8 @@ inside, so it never surprises you with a bill or an opinion.
   stack of pull requests. Where or whether you call the command is up to you.
 - **Session reuse.** A step can resume its prompt's earlier conversation. It stops
   reusing when the model's window is too full.
-- **Unattended runs.** Blocked agents won't need you, the unblocker agent takes over
-  resolving the issue, only pausing the pipeline if there is no other way. The unblocker
-  is just a prompt you can customize.
+- **Unattended runs.** When a task blocks, a configurable unblocker agent takes over.
+  It pauses the task for you only when it cannot resolve the issue.
 - **Trials.** Fork a group into one arm per task, each on its own pipeline, and compare
   the arms in eval.
 - **Routines.** Keep the tasks you run more than once in `.spoolway/routines/`.
@@ -86,18 +107,15 @@ spoolway init
 
 `spoolway doctor` checks that everything the configured pipeline needs is present.
 
-### 2. Plan, or create queueable spoolway tasks directly
+### 2. Create queueable tasks
 
-Tell the `/spoolway-plan` skill what you want built. It talks the shape through with you
-and writes one plan page. Approve the page and it cuts the plan into tasks.
+Use `/spoolway-tasks` to cut an agreed plan or any other defined scope into Markdown task
+documents. It assigns each task to a suitable pipeline and writes the documents to
+`~/.spoolway/<project>/pending/`. You can create specialized pipelines for different kinds
+of work. If you want help shaping the work first, use `/spoolway-plan`.
 
-<img src="docs/screenshots/plan.png" alt="a plan page written by /spoolway-plan">
-
-If you already know the shape, `/spoolway-tasks` cuts the task documents straight away.
-
-**Both skills are optional.** A task is a Markdown file in `~/.spoolway/<project>/pending/`.
-An issue exporter, a script, or any model can write one. This command prints the
-frontmatter a task document must carry:
+You can also create tasks with your own skills or scripts. This command prints the frontmatter
+each task document must carry:
 
 ```
 spoolway task contract
@@ -111,24 +129,16 @@ spoolway queue
 
 <img src="docs/screenshots/queue.png" alt="the queue screen">
 
-*The queue screen lists groups on the left and the selected group's tasks on the right.
-Each task names its own pipeline. `enter` queues what is checked and offers to start
-dispatching. `g` gates a task, `t` forks a group into a trial, `s` saves a group as a
-routine, and `r` opens the routines in `.spoolway/routines/`.*
+The queue groups pending tasks. Select a group and press `enter` to queue it.
 
 ### 4. Dispatch
 
 ```
 herdr
-spoolway dispatch      # watch the board, and step in only where you are needed
+spoolway dispatch
 ```
 
 <img src="docs/screenshots/dispatch.png" alt="the dispatcher board">
-
-*One row per task, grouped by `group:`. The board shows what each lane is spending, what
-every queued task waits on, and which tasks are paused for you. NEXT prints the key that acts
-on a row before the command it runs. The bottom line shows the slots in use and every
-scheduled job with its next firing.*
 
 Every task on the board is in one of a few states:
 
@@ -138,7 +148,7 @@ Every task on the board is in one of a few states:
 | `running` | An agent is working the task's current step, or it has just moved there and a lane is starting. |
 | `prompt` | A lane's pane is holding a permission prompt. Press a key in the pane. |
 | `paused` | Waiting for you on purpose: a gated step, or an unresolvable issue. |
-| `blocked` | A step reported a block and for a person. An unattended run hands it to the unblocker prompt instead. |
+| `blocked` | A step reported a block and needs help. An unattended run hands it to the unblocker prompt. |
 | `done` | Finished: the worktree removed, the task archived. |
 
 ### 5. Calibrate
@@ -146,9 +156,6 @@ Every task on the board is in one of a few states:
 The `/spoolway-calibrate` skill reads your archived tasks, their step-level evaluation results
 and the spend ledger. It compares them with the prompts, pipelines and settings that produced
 them. The comparison explains review failures, blocked sessions and wasted loops.
-
-It walks each finding with you, with the numbers behind it. It applies the prompt and pipeline
-changes you pick.
 
 ## A task is what travels the line, and you define it
 
@@ -176,8 +183,7 @@ agent works from it, and you own the skeleton it is written from.
 
 - Mix agents and commands
 - Set model and effort levels per step
-- Create loops and inject skills
-- Re-use previous sessions until the context threshold is met
+- Reuse previous sessions until the context threshold is met
 
 ```yaml
 # .spoolway/pipelines/default.yml
@@ -207,11 +213,15 @@ steps:
     agent: pi
     prompt: archivist
     model: Ornith-1.5-35B-A3B
+    on_pass: handover
+
+  - id: handover
+    description: Create a stacked pull request without an LLM call.
+    run: spoolway stack
     on_pass: done
 ```
 
-**You do not have to write one by hand.** The `/spoolway-config` skill writes and edits
-pipelines for you.
+The `/spoolway-config` skill can write and edit pipelines for you.
 
 ## Jobs
 
@@ -244,15 +254,16 @@ pipeline = "impl_fast"
 routine  = "nightly"       # a folder or a single .md under .spoolway/routines/
 ```
 
-### Routines
+## Routines
 
-A routine is task that can be re-queued anytime. It lives in `.spoolway/routines/`.
+A routine is a saved task or group of tasks that you can queue again. It lives in
+`.spoolway/routines/`.
 Press `s` on a group in the queue screen to save it there, and `r` to browse and queue what is
 saved.
 
-### Trials
+## Trials
 
-A trial answers one question: which pipeline does this task best? Press `t` on a group in the
+A trial answers one question: which pipeline fits this task best? Press `t` on a group in the
 queue screen, pick a pipeline per task, and tick any steps to skip. Every task becomes one arm
 under its chosen pipeline, and all arms share one trial id. Compare them with
 `spoolway eval --runs --trial <id>`. An arm never pushes a branch or opens a pull request. When
@@ -313,6 +324,12 @@ calibrate_window = "14d"     # how far back `/spoolway-calibrate` reads
 retention_days = 30          # how long run records and archived tasks are kept; 0 keeps everything
 price_max_age_days = 30      # how old the price table may be before `spoolway doctor` says so
 
+[issue_tracking]
+hook = ""                    # a script in .spoolway/hooks/, e.g. "github.sh"; blank runs none
+project_key = ""             # handed to the hook verbatim, e.g. owner/repo
+on_fail = "ignore"           # what a failing hook does: ignore it, or pause the task
+key_in_names = false         # prefix branch and worktree names with the tracker's slug
+
 [agents.claude]
 kind = "claude"
 concurrency = 3              # most lanes of this profile at once
@@ -337,12 +354,6 @@ context_window = 100096
 slots = 2                    # parallel lanes the local server can actually hold
 exclusive = true             # never alongside another exclusive model
 local = true                 # runs on hardware you own
-
-[issue_tracking]
-hook = ""                    # a script in .spoolway/hooks/, e.g. "github.sh"; blank runs none
-project_key = ""             # handed to the hook verbatim, e.g. owner/repo
-on_fail = "ignore"           # what a failing hook does: ignore it, or pause the task
-key_in_names = false         # prefix branch and worktree names with the tracker's slug
 ```
 
 See **[Configuration](docs/configuration.md)**.
@@ -365,7 +376,7 @@ pipeline, per step, runs, per watched directory, and per session outside the lan
 
 ## Documentation
 
-See **[Documentation index](DOCS.md)**.
+See **[Documentation](DOCS.md)**.
 
 ## License
 
