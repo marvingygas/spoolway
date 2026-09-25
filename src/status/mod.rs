@@ -108,6 +108,11 @@ pub enum State {
     Prompt,
     /// In the queue, waiting for a slot or a dependency.
     Queued,
+    /// On a `serial: true` command step another task's run still holds, with
+    /// nothing of its own started yet. Apart from `Queued` because what it
+    /// waits on is one named run, not a slot or a dependency — the NEXT
+    /// column names that task.
+    Waiting,
     /// Archived — its pipeline finished and its file moved to the project's
     /// own `archive/`. Kept on the board, dimmed, for as long as its
     /// group still has a task in the queue: see [`rows_for_board`].
@@ -2059,6 +2064,29 @@ fn build_rows(
             .filter(|_| runs.state(&lane) == crate::command_step::RunState::Running)
             .and(Some(&lane));
 
+        // A `serial:` step this task has not started because another task's
+        // run of it is still going — the same question
+        // [`crate::dispatch::Dispatcher::run_command`]'s `Fresh` arm asks
+        // before it will start one, over the same peers: every other task on
+        // this pipeline, since a run's key names no pipeline of its own.
+        let serial_holder = step
+            .filter(|step| step.serial && step.kind() == crate::pipeline::StepKind::Command)
+            .filter(|_| runs.state(&lane) == crate::command_step::RunState::Fresh)
+            .and_then(|step| {
+                runs.serial_holder(
+                    &step.id,
+                    tasks
+                        .iter()
+                        .filter(|peer| peer.id() != task.id())
+                        .filter(|peer| {
+                            pipelines
+                                .for_task(peer)
+                                .is_ok_and(|p| p.name == pipeline.name)
+                        })
+                        .map(|peer| peer.id()),
+                )
+            });
+
         // Parked in front of a person, rather than a lane spoolway is about to
         // start there — the one question that decides whether a task on
         // `blocked` reads as a row like any other running step or as a wait.
@@ -2175,6 +2203,11 @@ fn build_rows(
             Some(_) if live_lane.is_some_and(|l| l.status == crate::mux::LaneStatus::Blocked) => (
                 State::Prompt,
                 format!("press a key in pane `{lane}`"),
+                false,
+            ),
+            Some(_) if serial_holder.is_some() => (
+                State::Waiting,
+                format!("serial: after {}", serial_holder.unwrap_or_default()),
                 false,
             ),
             Some(step) => {
@@ -3566,6 +3599,56 @@ mod tests {
         // Its own clock, off the pid file, and not the last lane's
         // `launched_at` — which this task never set at all.
         assert!(row.lane_time.is_some(), "a run in flight answers with one");
+    }
+
+    /// A task held on a `serial:` step reads `○ waiting` and names the task
+    /// whose run holds it — on the board and in `queue list`'s plain table,
+    /// which both draw these rows — and falls back to an ordinary row the
+    /// moment that run is no longer going.
+    #[test]
+    fn a_task_held_on_a_serial_step_reads_as_waiting_on_the_run_ahead() {
+        let repo = fixture("command-step-serial");
+        let mut pipelines = Pipelines::builtin();
+        // `handover` is the default pipeline's command step.
+        let default = pipelines.pipelines.get_mut("default").unwrap();
+        let step = default
+            .steps
+            .iter_mut()
+            .find(|s| s.id == "handover")
+            .unwrap();
+        step.serial = true;
+        add(&repo, "a-login", &[], Some("handover"));
+        add(&repo, "b-export", &[], Some("handover"));
+
+        let tasks = repo.tasks().unwrap();
+        let graph = Graph::build(&tasks, &repo.archive_dir());
+
+        // `a-login`'s run in flight, as `Runs::start` leaves it: a live pid
+        // — this test's own — and no exit code yet.
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("handover", "a-login");
+        let dir = runs.log_path(&key).parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid = dir.join(format!("{key}.pid"));
+        std::fs::write(&pid, std::process::id().to_string()).unwrap();
+
+        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+        let login = rows.iter().find(|r| r.id == "a-login").unwrap();
+        assert!(matches!(login.state, State::Running));
+        let export = rows.iter().find(|r| r.id == "b-export").unwrap();
+        assert!(matches!(export.state, State::Waiting), "{}", export.next);
+        assert_eq!(export.next, "serial: after a-login");
+        let table = plain_table(&rows);
+        let line = table.lines().find(|l| l.contains("b-export")).unwrap();
+        assert!(line.contains("○ waiting"), "{table}");
+        assert!(line.contains("serial: after a-login"), "{table}");
+
+        // The run ahead exited: nothing holds the step any more, and the
+        // row reads as any other task a pass is about to start.
+        std::fs::write(dir.join(format!("{key}.exit")), "0").unwrap();
+        let rows = build_rows(&repo, &tasks, &pipelines, &graph, &[], &[], None).unwrap();
+        let export = rows.iter().find(|r| r.id == "b-export").unwrap();
+        assert!(matches!(export.state, State::Queued), "{}", export.next);
     }
 
     /// A task fresh off a handoff, with no lane up for it yet, reads

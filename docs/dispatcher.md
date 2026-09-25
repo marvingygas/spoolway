@@ -133,6 +133,10 @@ With `dispatch.priority = "group"`, the default, a task from a group that has no
 ranks behind every task from a group that is already running. It still takes a slot when no
 running group has ready work. With `dispatch.priority = "any"` only the three rules apply.
 
+A task that reaches a `serial: true` command step while another task's run of the same step and
+pipeline is going waits there unstarted, out of the sort above. Its run starts on the first pass
+after that run exits, alongside whichever other ready task the sort picks first.
+
 ## What a lane is sent
 
 A lane starts with a system prompt and one typed message. The system prompt holds the step's

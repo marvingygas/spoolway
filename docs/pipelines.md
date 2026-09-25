@@ -93,6 +93,7 @@ steps:
 | `headless` | `false` | Command steps only. `true` runs the command with no pane. |
 | `last` | `false` | Command steps only. `true` runs it only on the last task of a chain. See [`last:`](#last--a-step-the-chain-runs-once). |
 | `first` | `false` | Command steps only. `true` runs it only on a chain's declared root. See [`first:`](#first--a-step-only-a-chains-root-runs). |
+| `serial` | `false` | Command steps only. `true` runs it for one task at a time. Every other task waits on the step until that run exits. See [`serial:`](#serial--one-run-of-the-step-at-a-time). |
 
 The same table is at the top of every pipeline file, between `# >>> spoolway >>>` and
 `# <<< spoolway <<<`. `spoolway sync` rewrites that block. A file without the markers is
@@ -285,6 +286,26 @@ is read from the task's own file, and archiving what it names does not empty it,
 naming an archived dependency is still not the root. Any other task walks past the step to
 its `on_pass`. In a fan, every independent root runs it. `first:` is allowed on command
 steps only, and is refused together with `last:` on the same step.
+
+### `serial:` — one run of the step at a time
+
+```yaml
+  - id: setup
+    description: Create the task's own database.
+    run: scripts/setup-db.sh
+    serial: true
+    on_pass: implement
+```
+
+Only one task's run of a `serial: true` step goes at a time, counting a `background: true` run
+until it exits. A task that reaches the step while another task's run of it is going waits there
+unstarted: no pane, no run files, no timeout clock. Its own run starts on the first pass after
+the earlier run exits. `spoolway queue list` and the board show it as `○ waiting` with
+`serial: after <task>`.
+
+The hold is per pipeline: two pipelines with a step of the same id do not hold each other, and
+neither does another project's dispatcher. `serial:` is allowed on command steps only.
+`spoolway pipeline check` refuses it on any step with an `agent:`.
 
 ## `spoolway stack`
 

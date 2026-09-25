@@ -93,6 +93,31 @@ impl Runs {
         crate::mux::lane_name(step, task)
     }
 
+    /// Which of `peers` holds a `serial: true` step right now: the first
+    /// whose own run of `step` is still going, or `None` when the step is
+    /// free.
+    ///
+    /// Asked of the run files, never of where a peer's task is: a
+    /// `background: true` run's task has walked on to a later step while its
+    /// run still holds this one. And asked fresh, not off a pass's one
+    /// directory read, so a run started earlier in the same pass —
+    /// [`Runs::start`] and a paned run alike wait for the wrapper's pid
+    /// before answering — already holds the step for the next task the pass
+    /// reaches. An exited or interrupted run holds nothing.
+    ///
+    /// `peers` are the other tasks on this step's own pipeline: a key names
+    /// no pipeline, so a step of the same id elsewhere is left out by the
+    /// caller, not here.
+    pub fn serial_holder<'a>(
+        &self,
+        step: &str,
+        peers: impl IntoIterator<Item = &'a str>,
+    ) -> Option<&'a str> {
+        peers
+            .into_iter()
+            .find(|peer| self.state(&Runs::key(step, peer)) == RunState::Running)
+    }
+
     /// Everything the command wrote, both streams, kept after the run is
     /// forgotten — for a background run with no `on_fail` it is the *only*
     /// account of what happened, since nothing routes on its outcome.
