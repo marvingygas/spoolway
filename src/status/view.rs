@@ -2553,11 +2553,16 @@ mod tests {
     /// way, which is exactly what a mid-turn redraw needs to hold.
     #[test]
     fn a_narrow_pane_moves_the_header_off_the_lockup_instead_of_wrapping_it() {
-        let header = "dispatcher running · pid 587666 · up 16m 18s · next pass in 53s";
+        // The longest header the board draws: the restart hint is only ever
+        // added to an already-full header, so this is the width every case
+        // below has to survive.
+        let header =
+            "dispatcher running · pid 587666 · v0.5.0 (restart to use latest installed version)";
         let lockup_width = LOCKUP[0].iter().map(|l| l.chars().count()).max().unwrap();
 
-        // Columns a line takes, with the escape codes skipped whole — the
-        // header says `16m 18s`, so an `m` is not on its own a code ending.
+        // Columns a line takes, with the escape codes skipped whole. They end
+        // at `m`, and the lockup's own bold carries them, so a bare `m` in the
+        // header text must not be read as one ending.
         let visible = |line: &str| -> usize {
             let mut columns = 0;
             let mut chars = line.chars();
@@ -2590,7 +2595,11 @@ mod tests {
 
             // Too narrow for the pair, wide enough for the art: the lockup
             // keeps its own lines and the header takes one more, whole.
-            let split = masthead(header, lockup_width + 20, frame);
+            // Sized off the header itself — its own columns plus the frame's
+            // one-column left margin — since what counts as "wide enough for
+            // the header whole" moves with how long the header is.
+            let whole = header.chars().count() + 1;
+            let split = masthead(header, whole, frame);
             assert_eq!(split.lines().count(), art + 1, "frame {frame}: {split}");
             assert!(split.lines().last().unwrap().contains(header), "{split}");
             assert!(
@@ -2612,7 +2621,7 @@ mod tests {
             assert!(bare.contains("dispatcher run"), "{bare}");
 
             // At no width does a line reach past the pane it was drawn for.
-            for pane in [24usize, 40, lockup_width + 8, lockup_width + 20, 200] {
+            for pane in [24usize, 40, lockup_width + 8, whole, 200] {
                 for line in masthead(header, pane, frame).lines() {
                     let width = visible(line);
                     assert!(
@@ -2629,7 +2638,7 @@ mod tests {
     /// move when the spool turns.
     #[test]
     fn the_header_lands_in_the_same_column_on_either_frame() {
-        let header = "dispatcher running · pid 587666 · up 16m 18s";
+        let header = "dispatcher running · pid 587666 · v0.5.0";
         let a = masthead(header, 200, 0);
         let b = masthead(header, 200, 1);
 
