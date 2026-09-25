@@ -151,6 +151,10 @@ eventually waits anyway.
 
 <img src="screenshots/dispatch.png" alt="the dispatcher board">
 
+The header above the task rows names the running dispatcher's version, next to its pid. If a
+`spoolway` executable on `PATH` reports a newer version, the header adds `(restart to use latest
+installed version)`.
+
 Rows are grouped by `group:`. A `▌<group>` line opens each block, and a total line closes it.
 The total is the group's banked spend: every step that has settled, across every task in the
 group, added up as soon as each one banks. It does not include a running step's unbanked

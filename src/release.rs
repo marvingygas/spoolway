@@ -36,10 +36,17 @@
 //! npm that was never installed, a registry that answers slowly — none of that
 //! is worth failing a command over, and a version check that can break `queue
 //! add` is a version check nobody should have shipped.
+//!
+//! One question here is not about the registry at all. [`installed_newer`]
+//! asks what the `spoolway` on `PATH` is *now*, because an install swaps that
+//! file under a dispatcher that goes on running the code it started with. It
+//! opens nothing, reaches no network, and answers off a cache a background
+//! thread refills — the board asks it on every redraw.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 
@@ -568,6 +575,142 @@ fn decide_upgrade(
     }
 }
 
+/// How long a reading of the `spoolway` on `PATH` is trusted before another is
+/// taken.
+///
+/// An install is a thing somebody does by hand, so a minute-old answer is
+/// never meaningfully wrong; what it buys is that a board redrawing once a
+/// second spawns one child a minute rather than sixty.
+const PATH_CHECK_INTERVAL: Duration = Duration::from_secs(60);
+
+/// How long the `PATH` executable gets to answer `--version` before its
+/// reading is given up on.
+///
+/// Nothing waits on this — the reading runs on its own thread — so the bound
+/// is not there to keep a caller fast. It is there so an executable that
+/// never answers loses its turn instead of holding the one in-flight slot for
+/// the life of the run, which would freeze the hint at whatever it last said.
+const PATH_CHECK_DEADLINE: Duration = Duration::from_secs(5);
+
+/// The last reading of the `spoolway` on `PATH`, and whether one is in flight.
+#[derive(Debug, Default)]
+struct PathVersion {
+    /// What the executable reported, or `None` where the reading failed —
+    /// no `spoolway` on `PATH`, a non-zero exit, or the deadline passing.
+    version: Option<String>,
+    /// When the last reading finished, either way. `None` until one has.
+    read_at: Option<Instant>,
+    /// A reading is running right now, so a second call does not start a
+    /// second child behind it.
+    reading: bool,
+}
+
+static PATH_VERSION: OnceLock<Mutex<PathVersion>> = OnceLock::new();
+
+fn path_version_cell() -> &'static Mutex<PathVersion> {
+    PATH_VERSION.get_or_init(|| Mutex::new(PathVersion::default()))
+}
+
+/// The version the `spoolway` on `PATH` reports, when it is newer than the one
+/// this process is running.
+///
+/// `None` covers every other case, and deliberately the same way: an equal or
+/// older executable, one that reports something that does not parse, one that
+/// fails or never answers, and no `spoolway` on `PATH` at all. This decides
+/// whether to tell somebody to restart their dispatcher, so the ambiguous
+/// answer is silence — the same rule [`is_newer`] follows.
+///
+/// Never waits for the executable. The board asks this on every redraw, about
+/// once a second, and a process spawn is not a thing to put on that path; the
+/// answer comes off a cache that a background thread refills, so the first
+/// call of a run says `None` and a later one carries the reading.
+pub fn installed_newer() -> Option<String> {
+    cached_path_version(
+        path_version_cell(),
+        path_reported_version,
+        PATH_CHECK_INTERVAL,
+        PATH_CHECK_DEADLINE,
+    )
+    .filter(|version| is_newer(version, current()))
+}
+
+/// The cache behind [`installed_newer`], with its state, its reader and its
+/// two durations passed in.
+///
+/// Split out so a test can drive it with a stub reader and durations short
+/// enough to watch — including a reader that never answers, which proves the
+/// deadline rather than hanging the test. `read` is a plain function pointer
+/// because the reading is handed to a thread that outlives this call.
+fn cached_path_version(
+    cell: &'static Mutex<PathVersion>,
+    read: fn() -> Option<String>,
+    interval: Duration,
+    deadline: Duration,
+) -> Option<String> {
+    // A panic inside the refresh thread would poison this, and a poisoned
+    // lock is not a reason to lose the hint: the state behind it is two
+    // fields that are overwritten wholesale, never half-updated.
+    let mut state = cell.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let stale = state
+        .read_at
+        .is_none_or(|read_at| read_at.elapsed() >= interval);
+    if stale && !state.reading {
+        // Claimed before the thread starts, so two callers racing here cannot
+        // both spawn one.
+        state.reading = true;
+        let spawned = std::thread::Builder::new().spawn(move || {
+            let reading = bounded(read, deadline);
+            let mut state = cell.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.version = reading;
+            // Stamped on a failed reading too, so an executable that is
+            // missing or slow is retried on the next interval rather than on
+            // every redraw in between.
+            state.read_at = Some(Instant::now());
+            state.reading = false;
+        });
+        // The same swallowed failure as everywhere else here: an OS that
+        // cannot start a thread leaves the slot free for the next call rather
+        // than failing the frame.
+        if spawned.is_err() {
+            state.reading = false;
+        }
+    }
+    state.version.clone()
+}
+
+/// Ask the `spoolway` on `PATH` what version it is.
+///
+/// Resolved through `PATH` rather than `current_exe` for the reason
+/// [`hand_over`] gives: after an install the name resolves to a different file
+/// than the inode this process is executing, and that difference is the whole
+/// question.
+fn path_reported_version() -> Option<String> {
+    let program =
+        std::env::var_os("PATH").and_then(|path| crate::platform::which(PACKAGE, &path))?;
+    let out = Command::new(&program)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    match out.status.success() {
+        true => reported_version(&String::from_utf8_lossy(&out.stdout)),
+        false => None,
+    }
+}
+
+/// The version token out of a `spoolway --version` line.
+///
+/// clap prints `spoolway 0.5.0`, so the token is the last word of the first
+/// line that has one. Whatever comes back is handed to [`is_newer`], which
+/// treats anything that does not parse as not newer — so this does not have to
+/// decide what a version looks like, only which word to hand over.
+fn reported_version(output: &str) -> Option<String> {
+    output
+        .lines()
+        .find_map(|line| line.split_whitespace().next_back())
+        .map(str::to_string)
+}
+
 /// Hand over to the binary that was just installed, so what runs from here on
 /// is its own.
 ///
@@ -986,5 +1129,118 @@ mod tests {
             Some(value) => crate::platform::set_test_env("XDG_STATE_HOME", value),
             None => crate::platform::remove_test_env("XDG_STATE_HOME"),
         }
+    }
+
+    /// clap prints `spoolway <version>`, and the token wanted is the last word
+    /// of it. Nothing here decides what a version looks like — [`is_newer`]
+    /// does that — so a line with no words at all is the only `None`.
+    #[test]
+    fn a_reported_version_is_the_last_word_of_the_first_line_that_has_one() {
+        assert_eq!(
+            reported_version("spoolway 0.5.0\n").as_deref(),
+            Some("0.5.0")
+        );
+        // A wrapper that prints a blank line first, and one that prints more
+        // under the version: only the first line with a word on it is read.
+        assert_eq!(
+            reported_version("\n\nspoolway 1.2.3\nbuilt from abc123\n").as_deref(),
+            Some("1.2.3")
+        );
+        // A name with no version is handed on as it stands; `is_newer` is what
+        // decides it is not an upgrade.
+        assert_eq!(reported_version("spoolway\n").as_deref(), Some("spoolway"));
+        assert!(!is_newer("spoolway", current()));
+        assert_eq!(reported_version(""), None);
+        assert_eq!(reported_version("   \n\t\n"), None);
+    }
+
+    /// How many times a stub reader has been called, so a test can prove the
+    /// cache spawned one reading rather than one per call.
+    static STUB_READS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    fn stub_reader() -> Option<String> {
+        STUB_READS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Some("99.0.0".to_string())
+    }
+
+    /// A reader that outlives any deadline a test would wait on. Never joined,
+    /// the same way [`bounded`]'s own thread is not.
+    fn stalled_reader() -> Option<String> {
+        std::thread::sleep(Duration::from_secs(30));
+        Some("99.0.0".to_string())
+    }
+
+    /// Poll `done` for up to two seconds. The reading lands on another thread,
+    /// so there is nothing to join — and a fixed sleep would either be flaky
+    /// or slower than it has to be.
+    fn within_two_seconds(done: impl Fn() -> bool) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if done() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        done()
+    }
+
+    /// The board asks this once a second, so the reading happens behind the
+    /// call and once per interval — never on the caller's thread, and never
+    /// once per redraw.
+    #[test]
+    fn a_path_reading_lands_behind_the_call_and_is_taken_once_per_interval() {
+        static CELL: OnceLock<Mutex<PathVersion>> = OnceLock::new();
+        let cell = CELL.get_or_init(|| Mutex::new(PathVersion::default()));
+        let ask = || {
+            cached_path_version(
+                cell,
+                stub_reader,
+                Duration::from_secs(600),
+                Duration::from_secs(5),
+            )
+        };
+
+        // Nothing has been read yet, so the first call has nothing to say —
+        // the first frame of a run draws no hint, by design.
+        assert_eq!(ask(), None);
+        assert!(within_two_seconds(|| ask().as_deref() == Some("99.0.0")));
+
+        // Every call since the first landed inside the interval, so none of
+        // them started a second reading.
+        for _ in 0..20 {
+            assert_eq!(ask().as_deref(), Some("99.0.0"));
+        }
+        assert_eq!(STUB_READS.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// An executable that never answers costs the hint, not the board: the
+    /// call returns at once, and the deadline hands the in-flight slot back so
+    /// the next interval can try again rather than waiting on it forever.
+    #[test]
+    fn a_stalled_executable_loses_its_turn_rather_than_holding_the_slot() {
+        static CELL: OnceLock<Mutex<PathVersion>> = OnceLock::new();
+        let cell = CELL.get_or_init(|| Mutex::new(PathVersion::default()));
+
+        let started = Instant::now();
+        let answer = cached_path_version(
+            cell,
+            stalled_reader,
+            Duration::from_secs(600),
+            Duration::from_millis(100),
+        );
+        assert_eq!(answer, None);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "the call waited on the reading: {:?}",
+            started.elapsed()
+        );
+
+        // The reader is still sleeping, but its turn is over: the slot is free
+        // and the failure is stamped, which is what makes the next interval a
+        // retry instead of a permanent silence.
+        assert!(within_two_seconds(|| {
+            let state = cell.lock().unwrap_or_else(|p| p.into_inner());
+            !state.reading && state.read_at.is_some() && state.version.is_none()
+        }));
     }
 }

@@ -4,10 +4,15 @@
 # genuinely mid-turn.
 #
 # Everything else about the board is rendering, and `run.sh` says why that is
-# not worth a suite. This is the exception: answering a panel *routes*. A
-# keypress interrupts a live lane, or writes or moves a task file, and the
-# panel standing between the two is the only thing that stops it — none of
-# which a frame comparison can see. `p` and `P` carry most of the suite,
+# not worth a suite. Two things here are the exception. Answering a panel
+# *routes*: a keypress interrupts a live lane, or writes or moves a task
+# file, and the panel standing between the two is the only thing that stops
+# it — none of which a frame comparison can see. And the header's restart
+# hint is not rendering either: it is a real dispatcher resolving `spoolway`
+# off a real `PATH` and running it, which is the one part of the board no
+# unit test can stand up — the last section covers it.
+#
+# `p` and `P` carry most of the suite,
 # since pausing is the one panel that can also abort a live lane; `U` and a
 # `p` of a task that never started each get one pass through the same
 # `enter`/`esc` answers near the bottom, to cover the other panels and the
@@ -188,6 +193,49 @@ never_draws() {
   local what=$1 unwanted=$2 mark=$3
   if tail -n "+$((mark + 1))" "$BOARD_LOG" | grep -qF -- "$unwanted"; then
     bad "$what (a panel opened: \"$unwanted\")"
+    tail -30 "$BOARD_LOG" | sed 's/^/        /'
+  else ok "$what"; fi
+}
+
+# The positive twin of `never_draws`: what the board has drawn *since* a mark
+# says it. The log is one file for the suite's whole life, so a plain `draws`
+# of anything a header has ever said would pass on a frame from ten minutes
+# and three dispatchers ago.
+draws_since() {
+  local what=$1 wanted=$2 mark=$3
+  if tail -n "+$((mark + 1))" "$BOARD_LOG" | grep -qF -- "$wanted"; then ok "$what"
+  else
+    bad "$what (no frame since said \"$wanted\")"
+    tail -30 "$BOARD_LOG" | sed 's/^/        /'
+  fi
+}
+
+# The polling twin of `draws_since`, for a string that has not appeared yet
+# and needs the wait itself, not just the check after it — `draws` cannot be
+# used instead, because that reads the whole log and would pass on a frame
+# from before the mark, drawn by a `PATH` executable this suite never put
+# there.
+_since_says() {
+  local mark=$1 want=$2
+  tail -n "+$((mark + 1))" "$BOARD_LOG" | grep -qF -- "$want"
+}
+draws_since_waited() {
+  local what=$1 want=$2 mark=$3 secs=${4:-20}
+  if poll_until "$secs" _since_says "$mark" "$want"; then ok "$what"
+  else
+    bad "$what (no frame since said \"$want\")"
+    tail -30 "$BOARD_LOG" | sed 's/^/        /'
+  fi
+}
+
+# And its negative. `never_draws` above runs the same test, but reports a
+# failure as a panel having opened, which is the wrong thing to say about a
+# header — so the header's checks carry their own wording rather than making
+# the panel helper's vaguer to fit them both.
+draws_since_not() {
+  local what=$1 unwanted=$2 mark=$3
+  if tail -n "+$((mark + 1))" "$BOARD_LOG" | grep -qF -- "$unwanted"; then
+    bad "$what (the board drew \"$unwanted\")"
     tail -30 "$BOARD_LOG" | sed 's/^/        /'
   else ok "$what"; fi
 }
@@ -650,6 +698,65 @@ stage_reaches "\`P\`, typed the instant six lanes race to start, still parks the
 for n in 1 2 3 4 5; do
   stage_reaches "and every lane racing to start beside it" "pass-race-$n" paused 25
 done
+
+# ------------------------------- the version in the header, and the restart
+# The header names the build the dispatcher is *running*, which after an
+# install is no longer the file on disk — and that gap is the whole reason
+# the hint exists. It cannot be proven anywhere but here: it takes a real
+# dispatcher process, a real `PATH`, and a real executable answering
+# `--version` on it. Two runs, one fake each, because the hint is as much
+# about when it stays off as when it appears.
+#
+# The fake answers `--version` and hands everything else to the build under
+# test, so putting it first on `PATH` changes nothing else in the suite. A
+# lane reaches the real binary through `E2E_SPOOLWAY` regardless.
+VBIN="$LIVE/version-bin"
+install_fake_spoolway() {
+  local version=$1
+  mkdir -p "$VBIN"
+  cat > "$VBIN/spoolway" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = --version ]; then echo "spoolway $version"; exit 0; fi
+exec "$SPOOLWAY" "\$@"
+EOF
+  chmod 755 "$VBIN/spoolway"
+}
+export PATH="$VBIN:$PATH"
+
+# What the build under test calls itself, read from it rather than written
+# down here — a version bump must not need an edit in this suite.
+RUNNING_VERSION=$("$SPOOLWAY" --version | awk '{print $NF}')
+
+# An older executable on `PATH`: the version shows, the hint does not. This
+# is the ordinary case — somebody has spoolway installed and the dispatcher
+# is running the same build or a newer one.
+install_fake_spoolway 0.0.1
+board_stop
+board_start
+# Everything below reads only what this board drew. Four frames rather than
+# one, because the reading of the `PATH` executable lands on a thread behind
+# the first redraw — so a hint that was going to appear has had every chance
+# to by the time the negative assertions run.
+OLD_MARK=$(wc -l < "$BOARD_LOG")
+settle_frames 4
+draws_since "the header names the running build" "· v$RUNNING_VERSION" "$OLD_MARK"
+draws_since_not "and no longer counts the run's own clock" " · up " "$OLD_MARK"
+draws_since_not "an older executable on PATH adds no restart hint" \
+  "restart to use latest installed version" "$OLD_MARK"
+
+# And a newer one: the same header, with the hint after it. Scoped to a mark
+# and polled, rather than a plain `draws` — a machine running this suite with
+# its own newer spoolway already on PATH would have carried the label on
+# frames drawn before this fake ever went up, and a plain `draws` would pass
+# on one of those without this fake having proven anything.
+install_fake_spoolway 99.0.0
+board_stop
+board_start
+NEW_MARK=$(wc -l < "$BOARD_LOG")
+draws_since_waited "a newer executable on PATH asks for a restart" \
+  "restart to use latest installed version" "$NEW_MARK"
+draws_since "with the running build still the version it names" \
+  "· v$RUNNING_VERSION" "$NEW_MARK"
 
 board_stop
 finish

@@ -1661,21 +1661,21 @@ fn render(
 
     // ---- the frame ----
     let mut frame = String::new();
-    // No pass clock: `up` already ticks on every redraw, so a board that has
-    // not changed in a while is visibly alive without a second clock
-    // counting the other way.
-    let mut header = vec![
+    // No pass clock, and no run clock either. Neither is a figure a person
+    // can act on: when the next pass is due changes nothing they would do,
+    // and how long the run has been up only ever said the board was alive —
+    // which is not worth the room the version now takes. The spool beside
+    // the wordmark turns while a lane is running; with nothing running the
+    // board holds still, and a still board over a still queue is the truth
+    // rather than something to animate over.
+    let header = [
         match phase {
             Phase::Stopping => "dispatcher stopped".to_string(),
             _ => "dispatcher running".to_string(),
         },
         format!("pid {}", std::process::id()),
+        version_label(crate::release::installed_newer().as_deref()),
     ];
-    // Absent only if the lock file has gone missing under a live run, which is
-    // a thing to leave out rather than a thing to print an empty figure for.
-    if let Some(up) = run_elapsed(repo).map(human_secs) {
-        header.push(format!("up {up}"));
-    }
     let pane = pane_width();
     // One blank row before the lockup, so its ascenders have a margin to sit
     // in rather than landing flush on the pane's own top row. `masthead`
@@ -2775,6 +2775,27 @@ fn push_recent(recent: &mut VecDeque<RecentEvent>, event: RecentEvent) {
     recent.push_back(event);
 }
 
+/// The header's version cell: what this dispatcher is running, and a nudge to
+/// restart it when a newer `spoolway` has been installed underneath it.
+///
+/// The version is the running process's own, compiled in — not the
+/// executable's on disk. An install swaps that file while a dispatcher goes on
+/// running the code it started with, and naming that gap is the whole point of
+/// the restart label; reading the version off disk would hide it.
+///
+/// `installed` is what the `spoolway` on `PATH` reports, already filtered to a
+/// genuinely newer version by [`crate::release::installed_newer`] — so an
+/// equal, older, unparseable or missing executable arrives here as `None` and
+/// leaves the label off. Taken as an argument rather than read here so the
+/// wording is checked without a test standing up an executable on `PATH`.
+fn version_label(installed: Option<&str>) -> String {
+    let running = format!("v{}", crate::release::current());
+    match installed {
+        Some(_) => format!("{running} (restart to use latest installed version)"),
+        None => running,
+    }
+}
+
 /// When this run began: the moment the dispatcher wrote its lock, as an
 /// RFC 3339 timestamp comparable with the ledger's own.
 ///
@@ -2788,14 +2809,6 @@ pub fn run_start(repo: &Repo) -> Option<String> {
         .and_then(|meta| meta.modified())
         .ok()?;
     Some(chrono::DateTime::<chrono::Utc>::from(modified).to_rfc3339())
-}
-
-/// How long the run has been going, in whole seconds, from the same clock.
-fn run_elapsed(repo: &Repo) -> Option<i64> {
-    let modified = std::fs::metadata(repo.lock_file())
-        .and_then(|meta| meta.modified())
-        .ok()?;
-    modified.elapsed().ok().map(|d| d.as_secs() as i64)
 }
 
 #[cfg(test)]
@@ -3213,21 +3226,27 @@ mod tests {
     }
 
     /// The frame carries the run's own header, because whose process this is
-    /// and how long it has been going are the two things the task files cannot
-    /// say. What it no longer carries is a pass clock: a person watching cannot
-    /// act on when the next pass is due, and `up` already proves the board is
-    /// alive by moving on every redraw.
+    /// and which build it is running are the two things the task files cannot
+    /// say. What it carries is no clock of either kind: when the next pass is
+    /// due is not something a person can act on, and how long the run has been
+    /// up only ever said the board was alive — neither earns the room the
+    /// version now takes.
     #[test]
-    fn a_frame_carries_the_run_but_no_pass_clock() {
+    fn a_frame_carries_the_run_and_its_version_but_no_clock() {
         let repo = fixture("frame-header");
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
 
+        let version = format!("v{}", crate::release::current());
         let mut board = Board::for_test();
         let waiting = board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
         assert!(waiting.contains("dispatcher running · "), "{waiting}");
+        assert!(waiting.contains(&format!("· {version}")), "{waiting}");
         assert!(waiting.contains("→ review"), "{waiting}");
         assert!(!waiting.contains("next pass"), "{waiting}");
+        // The run clock the version replaced. `up ` rather than `up`, which
+        // is a substring of ordinary words elsewhere on the frame.
+        assert!(!waiting.contains("· up "), "{waiting}");
 
         let working = board.frame(&repo, &pipelines, Phase::Passing).unwrap();
         assert!(!working.contains("pass running"), "{working}");
@@ -3236,6 +3255,27 @@ mod tests {
         // The one phase a frame in front of you cannot be read off the frame.
         let over = board.frame(&repo, &pipelines, Phase::Stopping).unwrap();
         assert!(over.contains("dispatcher stopped · "), "{over}");
+        // A stopped board still says which build it was, which is what
+        // somebody reads it for once it has stopped.
+        assert!(over.contains(&format!("· {version}")), "{over}");
+    }
+
+    /// The restart hint is added to the version and nothing else — no second
+    /// version printed, no wording that changes with what was installed. It
+    /// is there exactly when a newer executable was found, and the running
+    /// version stays the one the header names either way.
+    #[test]
+    fn the_version_cell_names_the_running_build_and_hints_only_at_a_newer_one() {
+        let running = format!("v{}", crate::release::current());
+
+        assert_eq!(version_label(None), running);
+        assert_eq!(
+            version_label(Some("99.0.0")),
+            format!("{running} (restart to use latest installed version)")
+        );
+        // What was installed is not printed: the header says what is running,
+        // and a second version beside it would read as the running one.
+        assert!(!version_label(Some("99.0.0")).contains("99.0.0"));
     }
 
     /// An empty queue with a cron job enabled is why a dispatcher is still
