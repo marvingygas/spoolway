@@ -279,11 +279,12 @@ steps only.
 
 ### `first:` — a step only a chain's root runs
 
-The root task of a chain carries no declared dependency, so setup a whole stack needs only
-runs once, there. A task is the root when its own `depends_on` is empty, even when a
-dependency it names has since been archived. Any other task walks past the step to its
-`on_pass`. In a fan, every independent root runs it. `first:` is allowed on command steps
-only, and is refused together with `last:` on the same step.
+The root task of a chain carries no declared dependency, so setup that a whole stack needs
+runs only once, there. A task is the root when its own `depends_on` is empty. `depends_on`
+is read from the task's own file, and archiving what it names does not empty it, so a task
+naming an archived dependency is still not the root. Any other task walks past the step to
+its `on_pass`. In a fan, every independent root runs it. `first:` is allowed on command
+steps only, and is refused together with `last:` on the same step.
 
 ## `spoolway stack`
 

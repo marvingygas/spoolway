@@ -511,6 +511,9 @@ pipeline `impl`  entry: implement
              pass -> document   fail -> e2e
 ```
 
+A command step marked `first: true` prints `first-of-chain` the same way, in place of
+`last-of-chain`. See [`first:`](pipelines.md#first--a-step-only-a-chains-root-runs).
+
 ### `spoolway pipeline check`
 
 Validate every pipeline file, its agent references and its prompts against the config.

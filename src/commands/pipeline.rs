@@ -236,9 +236,13 @@ const FIELD_SENTENCES: &[(&str, &str)] = &[
     ),
     (
         "first",
-        "Command steps only. Only a chain's declared root — a task with no \
-         `depends_on` — runs it; every dependent task walks past to `on_pass`. \
-         Refused together with `last:` on the same step.",
+        "Command steps only, `false` when absent. Only a chain's declared root \
+         — a task whose own `depends_on` is empty — runs it; every task that \
+         names a dependency walks past to `on_pass`. `depends_on` is read \
+         from the task's own file, and archiving what it names does not empty \
+         it, so a task naming an archived dependency is still not the root. \
+         Every root of a fan runs it, since none of them declares a \
+         dependency. Refused together with `last:` on the same step.",
     ),
     (
         "end",
