@@ -139,8 +139,13 @@ pub struct Entry {
     pub session: String,
     #[serde(default)]
     pub round: u32,
-    /// Wall-clock seconds the lane was open. Not model time: a gated lane
-    /// waiting on a person is mostly this.
+    /// Seconds the lane's pane was actually `Working`, not the whole time it
+    /// was open — idle, parked and permission-prompt time bank nothing, so a
+    /// gated lane waiting on a person is exactly what this excludes. A delta
+    /// against what the same lane already banked, the same shape as
+    /// `tokens`: a lane banked twice under the same task, step, round and
+    /// session carries only its own share of the busy time on each line, not
+    /// the whole span since it was banked before.
     #[serde(default)]
     pub wall_s: i64,
     /// Assistant turns in the transcript.

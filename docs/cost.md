@@ -34,10 +34,10 @@ A transcript can grow after the lane is torn down. Every `spoolway eval` and `sp
 reads settled sessions again and appends one line for the turns that arrived later. That
 line carries no `outcome`. Lanes still running are left alone.
 
-A lane banked more than once still counts as one lane. `spoolway spend` groups these lines
-by task, step, round and session: tokens and cost are deltas, so the settled line's zero
-adds nothing, and `WALL` takes the lane's most recently banked age rather than summing every
-line.
+A lane banked more than once still counts as one lane. `spoolway spend` and `spoolway eval`
+group these lines by task, step, round and session. Tokens, cost and time are deltas against
+what a lane already banked, so a settled line's zero adds nothing and `WALL` sums every line
+for that lane.
 
 ### Directory spend
 
@@ -85,7 +85,7 @@ total                    131.1k     399.7k     64.21M     811.5k       43.27
 | `LANES` | Lanes in this row |
 | `IN`, `OUT`, `CACHE R`, `CACHE W` | The four priced token classes |
 | `COST USD` | Priced spend. `—` means no price table knows the model. See [Pricing](#pricing). |
-| `WALL` | How long the lanes were open |
+| `WALL` | How long the lanes were busy |
 
 When only some lanes in a row have a price, the row prints the priced part and a footer names
 the unpriced model.

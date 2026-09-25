@@ -362,6 +362,36 @@ pub(crate) fn fallback_keys(entries: &[Entry]) -> HashMap<(String, String), Stri
     named
 }
 
+/// One ledger line per lane launched is not one lane: a lane held for a
+/// person and later freed banks a second line under the same task, step,
+/// round and session — see gh-378 / issue #380, and [`crate::spend`]'s own
+/// `Totals::add`, which groups the same way. Tokens, cost and `wall_s` are
+/// all banked as deltas, so a plain sum over every line already lands on
+/// each lane's real total whether it wrote one line or two — it is only a
+/// *count* of lanes, and their verdicts, that double-counts a line as a
+/// lane. This answers with one verdict per group instead: `None` until a
+/// line in it actually reports one, and the last such line's outcome from
+/// then on — a lane resumed and reported again is judged by what it said
+/// last, not by every line it ever banked.
+fn lane_verdicts<'a>(
+    entries: impl IntoIterator<Item = &'a Entry>,
+) -> HashMap<(String, String, u32, String), Option<String>> {
+    let mut verdicts: HashMap<(String, String, u32, String), Option<String>> = HashMap::new();
+    for entry in entries {
+        let key = (
+            entry.task.clone(),
+            entry.step.clone(),
+            entry.round,
+            entry.session.clone(),
+        );
+        let slot = verdicts.entry(key).or_insert(None);
+        if entry.outcome.is_some() {
+            *slot = entry.outcome.clone();
+        }
+    }
+    verdicts
+}
+
 /// Every run in `entries`, keyed by `(project, run key)`, in first-seen order.
 fn group_by_run<'a>(
     entries: &'a [Entry],
@@ -427,14 +457,16 @@ pub fn list_runs(
                 .max_by(|a, b| a.ts.cmp(&b.ts))
                 .expect("a run always has at least one lane");
             let task = lanes.first().map(|e| e.task.clone()).unwrap_or_default();
+            // One verdict per lane, not per line — see `lane_verdicts`.
+            let verdicts = lane_verdicts(lanes.iter().copied());
             let mut judged = 0;
             let mut passed = 0;
             let mut blocked = 0;
-            for entry in &lanes {
-                if entry.outcome.as_deref() == Some("block") {
+            for outcome in verdicts.values() {
+                if outcome.as_deref() == Some("block") {
                     blocked += 1;
                 }
-                if let Some(outcome) = entry.outcome.as_deref() {
+                if let Some(outcome) = outcome {
                     judged += 1;
                     if outcome == "pass" {
                         passed += 1;
@@ -448,7 +480,7 @@ pub fn list_runs(
                 ts: latest.ts.clone(),
                 version: version_of(latest).to_string(),
                 pipeline: latest.pipeline.clone(),
-                lanes: lanes.len(),
+                lanes: verdicts.len(),
                 passed,
                 judged,
                 blocked,
@@ -712,7 +744,9 @@ impl Metrics {
         let mut out = Metrics::default();
         let mut runs: HashSet<(String, String)> = HashSet::new();
         for entry in matching {
-            out.lanes += 1;
+            // Tokens, cost and wall time are all banked as deltas, so a
+            // plain sum here already lands on each lane's real total
+            // whether it wrote one ledger line or two.
             out.time_s += entry.wall_s;
             out.out += entry.tokens.output;
             match entry.cost_usd {
@@ -722,16 +756,21 @@ impl Metrics {
                 None if entry.tokens.is_zero() => {}
                 None => out.unpriced += 1,
             }
-            if entry.outcome.as_deref() == Some("block") {
+            runs.insert((entry.project.clone(), run_key(entry, fallback)));
+        }
+        // One verdict per lane, not per line — see `lane_verdicts`.
+        let verdicts = lane_verdicts(matching.iter().copied());
+        out.lanes = verdicts.len();
+        for outcome in verdicts.values() {
+            if outcome.as_deref() == Some("block") {
                 out.blocked += 1;
             }
-            if let Some(outcome) = entry.outcome.as_deref() {
+            if let Some(outcome) = outcome {
                 out.judged += 1;
                 if outcome == "pass" {
                     out.passed += 1;
                 }
             }
-            runs.insert((entry.project.clone(), run_key(entry, fallback)));
         }
         out.tasks = runs.len();
         (out.ctx_peak_tokens, out.ctx_peak_pct) = ctx_peak_of(matching, models);
@@ -3422,6 +3461,28 @@ mod tests {
         );
     }
 
+    /// A lane held for a person and freed later banks two ledger lines under
+    /// the same task, step, round and session — the hold-time line, which
+    /// carries the report that parked it, and the freed-pane line, which
+    /// carries only what happened after (see gh-378 / issue #380). Both
+    /// count as the one lane they are, and the verdict is the block the
+    /// hold-time line actually reported, not doubled by the freed line's own
+    /// blank one.
+    #[test]
+    fn a_lane_banked_twice_counts_once_and_keeps_its_own_verdict() {
+        let held = lane("login", "implement", "v1", 1, Some("block"));
+        let mut freed = lane("login", "implement", "v1", 1, None);
+        freed.wall_s = 15;
+        freed.cost_usd = Some(0.5);
+        let entries = vec![held, freed];
+        let m = Metrics::for_row(&entries, "default", "v1", &no_fallback(), &no_models());
+        assert_eq!(m.lanes, 1, "one lane, whichever of its lines this counts");
+        assert_eq!(m.blocked, 1, "the hold-time line's own verdict survives");
+        assert_eq!(m.judged, 1);
+        assert_eq!(m.time_s, 75, "both lines' own share of the wall time");
+        assert_eq!(m.cost, 1.5, "both lines' own share of the cost");
+    }
+
     #[test]
     fn l_task_and_dollar_task_are_the_row_s_totals_over_its_tasks() {
         // Two runs, four lanes: L/TASK reads 2.0, not the raw lane count.
@@ -3794,6 +3855,27 @@ mod tests {
         let rows = list_runs(&entries, &fallback, &no_models());
         assert_eq!(rows[0].pass_share(), Some(50.0));
         assert_eq!(rows[0].blocked, 0);
+    }
+
+    /// The same double-bank `Metrics::for_matching` guards against
+    /// (`a_lane_banked_twice_counts_once_and_keeps_its_own_verdict`), read
+    /// through `--runs` instead: a held lane's two lines are one lane in a
+    /// run's row too.
+    #[test]
+    fn a_run_row_counts_a_held_lanes_two_lines_as_one() {
+        let mut held = lane("t", "implement", "v1", 1, Some("block"));
+        held.run = Some("r1".into());
+        let mut freed = lane("t", "implement", "v1", 1, None);
+        freed.run = Some("r1".into());
+        freed.wall_s = 15;
+        let entries = vec![held, freed];
+        let fallback = fallback_keys(&entries);
+        let rows = list_runs(&entries, &fallback, &no_models());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].lanes, 1);
+        assert_eq!(rows[0].blocked, 1);
+        assert_eq!(rows[0].judged, 1);
+        assert_eq!(rows[0].time_s, 75);
     }
 
     /// A trial's arms are separate tasks, so what has to correlate them is

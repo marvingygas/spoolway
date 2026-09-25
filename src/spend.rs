@@ -534,14 +534,14 @@ struct Totals {
     /// time it is swept, so its row count says how often somebody ran
     /// `spoolway spend`, not how much work was done.
     sessions: std::collections::BTreeSet<String>,
-    /// `wall_s` last banked for each lane seen so far, keyed on the identity
-    /// a re-bank shares with its earlier line — task, step, round and
-    /// session. A lane still running and its settled twin both carry that
-    /// identity, so the second line must replace the first line's `wall_s`
-    /// in the running total rather than add to it, and must not count a
-    /// second lane. Tokens and cost stay summed per row unconditionally: they
-    /// are banked as deltas, so the settled line's zero already adds nothing.
-    lane_wall_s: std::collections::HashMap<(String, String, u32, String), i64>,
+    /// The identity a re-bank shares with its earlier line — task, step,
+    /// round and session — for every lane already folded into `lanes`. A
+    /// lane held for a person and later freed banks two lines under the same
+    /// identity; the second must not count a second lane, though its
+    /// `wall_s` is a delta against the first exactly as its tokens are (see
+    /// gh-378 / issue #380) and so is summed like every other line's rather
+    /// than replacing it.
+    lane_ids: std::collections::HashSet<(String, String, u32, String)>,
 }
 
 impl Totals {
@@ -567,13 +567,10 @@ impl Totals {
             entry.round,
             entry.session.clone(),
         );
-        match self.lane_wall_s.insert(key, entry.wall_s) {
-            Some(previous) => self.wall_s += entry.wall_s - previous,
-            None => {
-                self.lanes += 1;
-                self.wall_s += entry.wall_s;
-            }
+        if self.lane_ids.insert(key) {
+            self.lanes += 1;
         }
+        self.wall_s += entry.wall_s;
     }
 
     /// This group's cost, plain — the currency is named once in the column's
@@ -756,15 +753,14 @@ mod tests {
         assert_eq!(totals.money(), "17.52");
     }
 
-    /// A lane can bank more than one ledger line — one while it is still
-    /// running, one when it settles — both carrying the same task, step,
-    /// round and session. Tokens and cost are deltas, so the second line adds
-    /// nothing there, but `wall_s` is banked as the lane's age at write time,
-    /// not a delta, and the row itself is not deduped at all. Both must be
-    /// counted once: `lanes` as one lane, `wall_s` as its final age rather
-    /// than the sum of every bank.
+    /// A lane can bank more than one ledger line — one while it is held for
+    /// a person, one when it is freed — both carrying the same task, step,
+    /// round and session. `wall_s` is a delta against what the lane already
+    /// banked, the same shape as tokens and cost, so the second line's is
+    /// added rather than replacing the first's — only `lanes` is deduped,
+    /// to one.
     #[test]
-    fn a_lane_banked_twice_counts_once_and_keeps_its_final_age() {
+    fn a_lane_banked_twice_counts_once_and_sums_its_wall_s() {
         let mut totals = Totals::default();
         let running = lane(Some(2.5));
         let mut settled = lane(None);
@@ -776,8 +772,9 @@ mod tests {
 
         assert_eq!(totals.lanes, 1, "a lane re-banked twice must count once");
         assert_eq!(
-            totals.wall_s, 125,
-            "wall_s must be the lane's final age, not the sum of every bank"
+            totals.wall_s,
+            running.wall_s + settled.wall_s,
+            "wall_s is a delta per line, so both lines' shares are summed"
         );
     }
 
