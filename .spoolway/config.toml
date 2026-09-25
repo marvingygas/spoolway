@@ -12,7 +12,7 @@
 # unattended.max_output_tokens          <tokens>             0                                                       Output tokens one unattended run may spend before the dispatcher stops starting work; 0 is no ceiling.
 # unattended.max_cost_usd               <dollars>            0                                                       Dollars one unattended run may spend before the dispatcher stops starting work, priced from the resolved model table; 0 is no ceiling.
 # unattended.blocked_agent              <profile>            claude                                                  Which `[agents.*]` profile staffs `blocked` in an unattended run, for every pipeline that does not declare its own `blocked` step.
-# unattended.blocked_model              <model>              claude-opus-5-5                                           The model that profile runs, staffing `blocked`. Blank refuses to start an unattended run: nobody would be able to clear a block.
+# unattended.blocked_model              <model>              claude-opus-5                                           The model that profile runs, staffing `blocked`. Blank refuses to start an unattended run: nobody would be able to clear a block.
 # unattended.blocked_effort             <level>              (blank)                                                 How hard that model thinks, staffing `blocked`.
 # unattended.blocked_session            true, false          true                                                    Whether the lane staffing `blocked` carries its own earlier session forward.
 # unattended.blocked_prompt             <name>               unblocker                                               Prompt the lane staffing `blocked` runs.
