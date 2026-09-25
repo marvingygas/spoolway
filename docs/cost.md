@@ -47,9 +47,10 @@ running `claude` or `pi` by hand inside it. See
 Every read of the ledger sweeps those too, and banks one line per session under `dir`. The `dir`
 is the most specific watched root the session ran under.
 
-A directory line carries no `task`, `step`, `pipeline`, `agent`, `outcome`, `run` or `version`,
-because spoolway dispatched no such work. `spoolway spend` skips these lines, so its tables show
-lanes only. The `dirs` and `sessions` views of `spoolway eval` read them, and read nothing else.
+A directory line carries no `task`, `step`, `pipeline`, `agent`, `outcome`, `run` or
+`pipeline_version`, because spoolway dispatched no such work. `spoolway spend` skips these
+lines, so its tables show lanes only. The `dirs` and `sessions` views of `spoolway eval` read
+them, and read nothing else.
 See [The screen](eval.md#the-screen).
 
 A session already banked as a lane is never banked again under `dir`. A transcript that has not
@@ -152,9 +153,8 @@ cost, so the price table answers for it.
 
 ## The version a lane ran under
 
-Each line records a fingerprint of the tracked `.spoolway/` configuration, the commit that last
-touched it, and what the lane reported. That is what `spoolway eval` compares. See
-[Comparing versions](eval.md).
+Each line records the `pipeline_version` its pipeline file carried when the lane started, and
+what the lane reported. See [Comparing pipelines](eval.md).
 
 ## One ledger per project
 

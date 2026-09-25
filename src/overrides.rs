@@ -68,10 +68,14 @@ pub(crate) fn dir_for(root: &Path) -> Result<PathBuf> {
     Ok(crate::mux::project_home(&main)?.join(crate::config::OVERRIDES_DIR))
 }
 
-/// The shape `overrides/pipelines/<name>.yml` is allowed to take: top-level
-/// keys a pipeline itself carries, and `steps:` keyed by id rather than the
-/// tracked file's own ordered list — a patch names a step, never a
-/// position, since position is what decides slot priority.
+/// The shape `overrides/pipelines/<name>.yml` is allowed to take: `steps:`
+/// keyed by id rather than the tracked file's own ordered list — a patch
+/// names a step, never a position, since position is what decides slot
+/// priority — beside `description` and `task_template`, the two other keys
+/// a patch may set. Not every top-level key a pipeline itself carries: the
+/// Mockup raises `version:` by editing the tracked file directly, so this
+/// struct carries no field for it, and `deny_unknown_fields` refuses a patch
+/// that names it.
 ///
 /// `pub(crate)` and round-trippable (not just readable): `pipeline override
 /// --set` reads one of these back, adds one key, and writes it out again,
@@ -286,9 +290,8 @@ pub(crate) fn ack_needed(home: &Path, fingerprint: &str) -> bool {
 }
 
 /// Record that a person has agreed to run under `fingerprint` — the layer's
-/// own, from [`crate::version::layer_fingerprint`], never `stamp`'s combined
-/// one: a tracked-file edit alone must not reopen a gate the layer itself
-/// has not moved.
+/// own, from [`crate::version::layer_fingerprint`]: a tracked-file edit
+/// alone must not reopen a gate the layer itself has not moved.
 pub(crate) fn ack_write(home: &Path, fingerprint: &str) -> Result<()> {
     ack_write_at(home, ACK_FILE, fingerprint)
 }

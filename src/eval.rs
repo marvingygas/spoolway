@@ -1,11 +1,11 @@
-//! Comparing versions of a setup by what they cost to run.
+//! What a pipeline costs to run, by pipeline.
 //!
 //! This is a **view over the ledger**, not a subsystem: every figure here is
 //! grouped out of the same `usage.jsonl` that [`crate::spend`] reads for
 //! `--by`, with nothing kept in a second store.
 //!
 //! The honest limit is worth stating where the code is, not only in the help.
-//! Tasks differ in difficulty, so a version that happens to have drawn easy
+//! Tasks differ in difficulty, so a pipeline that happens to have drawn easy
 //! work looks better than one that drew hard work, and no statistic in here
 //! corrects for that. What the view can do is show the sample size beside
 //! every figure, which is why `RUNS` is a column and not a footnote: a reader
@@ -22,11 +22,6 @@ use crate::pipeline::Pipelines;
 use crate::repo::Repo;
 use crate::screen::{Key, PollableRead, overlay, pad_to, panel, read_key};
 use crate::usage::{Entry, ModelPrice};
-
-/// A version with no fingerprint on its lines — everything written before
-/// versions were recorded. Kept rather than dropped, because a project's
-/// history did not start when this feature landed.
-const UNVERSIONED: &str = "unversioned";
 
 pub fn run(repo: &Repo, args: &EvalArgs, json: bool) -> Result<()> {
     if json && args.csv {
@@ -98,7 +93,7 @@ pub fn run(repo: &Repo, args: &EvalArgs, json: bool) -> Result<()> {
     if entries.is_empty() {
         println!("Nothing to compare in {} yet.", scope.what);
         println!(
-            "A version is recorded when a step finishes, so this fills up as `spoolway \
+            "A lane is recorded when a step finishes, so this fills up as `spoolway \
              dispatch` runs."
         );
         return Ok(());
@@ -133,7 +128,7 @@ pub fn run(repo: &Repo, args: &EvalArgs, json: bool) -> Result<()> {
         };
     }
 
-    let blocks = pipeline_blocks(&entries, args.limit());
+    let blocks = pipeline_blocks(&entries);
 
     if json {
         return print_json(&entries, &blocks, &fallback, &repo.config.models);
@@ -148,6 +143,7 @@ pub fn run(repo: &Repo, args: &EvalArgs, json: bool) -> Result<()> {
     // pulled in, so `PROJECT` earns its column only when it would otherwise
     // read as two rows nobody could tell apart.
     let show_project = spans_more_than_one_project(&blocks);
+    let pw = project_width(&blocks);
 
     println!("{}", paint("pipelines", "1"));
     for (n, block) in blocks.iter().enumerate() {
@@ -160,50 +156,37 @@ pub fn run(repo: &Repo, args: &EvalArgs, json: bool) -> Result<()> {
             &fallback,
             &repo.config.models,
             show_project,
+            pw,
         );
     }
 
-    footer(&entries, &blocks, &fallback);
+    footer(&entries);
 
     Ok(())
 }
 
-/// One version, in the order it will be printed: newest first.
-struct Version {
-    name: String,
-    /// The project of this version's earliest row in scope. Shown rather than
-    /// used to split rows: two projects producing the same fingerprint by
-    /// coincidence is a fact worth seeing, not a reason to fork the table.
-    project: String,
-    /// Local date of its earliest lane in this window.
-    since: String,
-    /// Whether the lanes banked under this version ran with a patch layer
-    /// active — read off `Entry::commit`'s own `+ovr` suffix (see
-    /// `crate::version::commit_of`) rather than kept as a fact of its own:
-    /// the fingerprint already forces every lane in one version to have run
-    /// under byte-identical files, layer included, so one entry's suffix
-    /// speaks for the whole group. Never changes which versions are cut —
-    /// only how a row already in the table is drawn.
-    ovr: bool,
-}
-
-/// One pipeline's block: its name, and its versions newest first.
+/// One pipeline's row: its name, and the project of its earliest lane in
+/// scope. The project is shown rather than used to split rows — two
+/// projects sharing a pipeline name is a fact worth seeing, not a reason to
+/// fork the table.
 struct PipelineBlock {
     name: String,
-    versions: Vec<Version>,
+    project: String,
 }
 
-/// Every pipeline with a lane in `entries`, ordered so the one whose newest
-/// version is newest leads — this morning's work heads the stack, whatever
-/// pipeline it ran on. `entries` must already be sorted oldest first, which
-/// `run` guarantees before calling this.
-fn pipeline_blocks(entries: &[Entry], limit: usize) -> Vec<PipelineBlock> {
+/// Every pipeline with a lane in `entries`, one row apiece, ordered so the
+/// one whose newest lane is newest leads — this morning's work heads the
+/// stack, whatever pipeline it ran on. `entries` must already be sorted
+/// oldest first, which `run` guarantees before calling this.
+fn pipeline_blocks(entries: &[Entry]) -> Vec<PipelineBlock> {
     let mut order: Vec<&str> = Vec::new();
     let mut latest_ts: HashMap<&str, &str> = HashMap::new();
+    let mut first_project: HashMap<&str, &str> = HashMap::new();
     for entry in entries {
         let name = entry.pipeline.as_str();
         if !latest_ts.contains_key(name) {
             order.push(name);
+            first_project.insert(name, entry.project.as_str());
         }
         // Overwritten by every later entry — entries arrive oldest first, so
         // what survives is each pipeline's latest timestamp.
@@ -215,7 +198,11 @@ fn pipeline_blocks(entries: &[Entry], limit: usize) -> Vec<PipelineBlock> {
         .into_iter()
         .map(|name| PipelineBlock {
             name: name.to_string(),
-            versions: versions_of(entries, name, limit),
+            project: first_project
+                .get(name)
+                .copied()
+                .unwrap_or_default()
+                .to_string(),
         })
         .collect()
 }
@@ -227,60 +214,10 @@ fn pipeline_blocks(entries: &[Entry], limit: usize) -> Vec<PipelineBlock> {
 fn spans_more_than_one_project(blocks: &[PipelineBlock]) -> bool {
     blocks
         .iter()
-        .flat_map(|b| b.versions.iter())
-        .map(|v| v.project.as_str())
+        .map(|b| b.project.as_str())
         .collect::<HashSet<_>>()
         .len()
         > 1
-}
-
-fn versions_of(entries: &[Entry], pipeline: &str, limit: usize) -> Vec<Version> {
-    let mut order: Vec<String> = Vec::new();
-    let mut first: HashMap<String, String> = HashMap::new();
-    let mut projects: HashMap<String, String> = HashMap::new();
-    let mut overridden: HashSet<String> = HashSet::new();
-
-    for entry in entries.iter().filter(|e| e.pipeline == pipeline) {
-        let name = version_of(entry).to_string();
-        if !first.contains_key(&name) {
-            order.push(name.clone());
-            first.insert(name.clone(), entry.ts.clone());
-            projects.insert(name.clone(), entry.project.clone());
-        }
-        if commit_has_ovr(entry) {
-            overridden.insert(name);
-        }
-    }
-
-    // Entries arrive oldest first, so `order` is oldest first: reverse for a
-    // newest-first table, then keep the newest `limit`.
-    order.reverse();
-    order.truncate(limit.max(1));
-    order
-        .into_iter()
-        .map(|name| Version {
-            since: first
-                .get(&name)
-                .map(|ts| local_date(ts))
-                .unwrap_or_default(),
-            project: projects.get(&name).cloned().unwrap_or_default(),
-            ovr: overridden.contains(&name),
-            name,
-        })
-        .collect()
-}
-
-fn version_of(entry: &Entry) -> &str {
-    entry.version.as_deref().unwrap_or(UNVERSIONED)
-}
-
-/// Whether `entry` banked under a patch layer — `Entry::commit`'s own `+ovr`
-/// suffix, the same one `version::commit_of` writes. A version's own
-/// fingerprint already forces every lane sharing it to have run under
-/// byte-identical files, layer included, so this is a fact of the version as
-/// a whole read off any one of its lines, not a per-lane distinction.
-fn commit_has_ovr(entry: &Entry) -> bool {
-    entry.commit.as_deref().is_some_and(|c| c.contains("+ovr"))
 }
 
 pub(crate) fn local_date(ts: &str) -> String {
@@ -421,7 +358,6 @@ pub struct RunRow {
     pub task: String,
     /// The latest lane's timestamp, for sorting and display.
     pub ts: String,
-    pub version: String,
     pub pipeline: String,
     pub lanes: usize,
     pub passed: usize,
@@ -478,7 +414,6 @@ pub fn list_runs(
                 id,
                 task,
                 ts: latest.ts.clone(),
-                version: version_of(latest).to_string(),
                 pipeline: latest.pipeline.clone(),
                 lanes: verdicts.len(),
                 passed,
@@ -525,12 +460,6 @@ pub fn print_run_table(rows: &[RunRow], entries: &[Entry]) -> Result<()> {
         return Ok(());
     }
     let tw = rows.iter().map(|r| r.task.len()).max().unwrap_or(4).max(4);
-    let vw = rows
-        .iter()
-        .map(|r| r.version.len())
-        .max()
-        .unwrap_or(7)
-        .max(7);
     let pw = rows
         .iter()
         .map(|r| r.pipeline.len())
@@ -539,10 +468,9 @@ pub fn print_run_table(rows: &[RunRow], entries: &[Entry]) -> Result<()> {
         .max(8);
 
     println!(
-        "{:<tw$}  {:<10}  {:<vw$}  {:<pw$}  {:>5}  {:>4}  {:>6}  {:>8}  {:>7}  {:>8}  {:>8}",
+        "{:<tw$}  {:<10}  {:<pw$}  {:>5}  {:>4}  {:>6}  {:>8}  {:>7}  {:>8}  {:>8}",
         "TASK",
         "WHEN",
-        "VERSION",
         "PIPELINE",
         "LANES",
         "PASS",
@@ -554,10 +482,9 @@ pub fn print_run_table(rows: &[RunRow], entries: &[Entry]) -> Result<()> {
     );
     for row in rows {
         println!(
-            "{:<tw$}  {:<10}  {:<vw$}  {:<pw$}  {:>5}  {:>4}  {:>6}  {:>8}  {:>7}  {:>8}  {:>8}",
+            "{:<tw$}  {:<10}  {:<pw$}  {:>5}  {:>4}  {:>6}  {:>8}  {:>7}  {:>8}  {:>8}",
             row.task,
             local_date(&row.ts),
-            row.version,
             row.pipeline,
             row.lanes,
             percent(row.pass_share()),
@@ -620,16 +547,13 @@ fn trial_delta_line(baseline: &RunRow, row: &RunRow) -> String {
 }
 
 fn print_run_csv(rows: &[RunRow]) -> Result<()> {
-    println!(
-        "run,task,when,version,pipeline,lanes,pass,blocks,out_tokens,cost_usd,unpriced,time_s"
-    );
+    println!("run,task,when,pipeline,lanes,pass,blocks,out_tokens,cost_usd,unpriced,time_s");
     for row in rows {
         println!(
-            "{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{}",
             csv_field(&row.id),
             csv_field(&row.task),
             csv_field(&local_date(&row.ts)),
-            csv_field(&row.version),
             csv_field(&row.pipeline),
             row.lanes,
             csv_fraction(row.pass_share()),
@@ -665,15 +589,14 @@ fn csv_cost(cost: f64, total: usize, unpriced: usize) -> String {
     }
 }
 
-// -------------------------------------------------------------- versioned metrics
+// ------------------------------------------------------------------ metrics
 
-/// What one row of the table came to: every lane whose pipeline and version
-/// match this row.
+/// What one row of the table came to: every lane whose pipeline matches this
+/// row.
 #[derive(Default, Clone)]
 pub(crate) struct Metrics {
     /// Distinct runs that touched this row — any lane of theirs matched, not
-    /// necessarily every one. A run whose lanes straddled a version edit
-    /// counts on both rows it touched; see [`footer`].
+    /// necessarily every one.
     pub(crate) tasks: usize,
     /// One ledger line per lane launched, matching this row.
     pub(crate) lanes: usize,
@@ -705,21 +628,17 @@ impl Metrics {
     fn for_row(
         entries: &[Entry],
         pipeline: &str,
-        version: &str,
         fallback: &HashMap<(String, String), String>,
         models: &BTreeMap<String, ModelPrice>,
     ) -> Self {
-        let matching: Vec<&Entry> = entries
-            .iter()
-            .filter(|e| e.pipeline == pipeline && version_of(e) == version)
-            .collect();
+        let matching: Vec<&Entry> = entries.iter().filter(|e| e.pipeline == pipeline).collect();
         Metrics::for_matching(&matching, fallback, models)
     }
 
-    /// The same row, narrowed to one step of it, over every version in
-    /// scope — what the steps view's own rows are built from. Not a filter
-    /// the printing path needs: `--step` already narrows `entries` itself
-    /// before a block is ever built, so nothing there calls this.
+    /// The same row, narrowed to one step of it — what the steps view's own
+    /// rows are built from. Not a filter the printing path needs: `--step`
+    /// already narrows `entries` itself before a block is ever built, so
+    /// nothing there calls this.
     fn for_step(
         entries: &[Entry],
         pipeline: &str,
@@ -900,23 +819,10 @@ fn percent(value: Option<f64>) -> String {
 
 const HEAD: &str = "\x1b[2m";
 
-/// How wide the version column has to be.
-///
-/// `unversioned` is longer than a fingerprint, so a fixed width would push
-/// every column on that row out of line with the rest of the table.
-fn name_width(versions: &[Version]) -> usize {
-    versions
+fn project_width(blocks: &[PipelineBlock]) -> usize {
+    blocks
         .iter()
-        .map(|v| v.name.len())
-        .max()
-        .unwrap_or(8)
-        .max("VERSION".len())
-}
-
-fn project_width(versions: &[Version]) -> usize {
-    versions
-        .iter()
-        .map(|v| v.project.len())
+        .map(|b| b.project.len())
         .max()
         .unwrap_or(7)
         .max("PROJECT".len())
@@ -929,20 +835,20 @@ fn project_width(versions: &[Version]) -> usize {
 /// header row over exactly these columns without also measuring an ANSI
 /// escape as a visible character, which would throw its frame's column
 /// count off. See the screen's own module comment.
-fn header_plain(show_project: bool, pw: usize, vw: usize) -> String {
+fn header_plain(show_project: bool, pw: usize) -> String {
     let mut line = String::new();
     if show_project {
         line.push_str(&format!("{:<pw$}  ", "PROJECT"));
     }
     line.push_str(&format!(
-        "{:<vw$}   {:<10}  {:>5}  {:>6}  {:>4}  {:>6}  {:>8}  {:>7}  {:>9}",
-        "VERSION", "SINCE", "RUNS", "L/RUN", "PASS", "BLOCKS", "CTX PEAK", "USD/RUN", "TIME/RUN",
+        "{:>5}  {:>6}  {:>4}  {:>6}  {:>8}  {:>7}  {:>9}",
+        "RUNS", "L/RUN", "PASS", "BLOCKS", "CTX PEAK", "USD/RUN", "TIME/RUN",
     ));
     line.trim_end().to_string()
 }
 
-fn header(show_project: bool, pw: usize, vw: usize) -> String {
-    let line = header_plain(show_project, pw, vw);
+fn header(show_project: bool, pw: usize) -> String {
+    let line = header_plain(show_project, pw);
     use std::io::IsTerminal;
     match std::io::stdout().is_terminal() {
         true => format!("{HEAD}{line}\x1b[0m"),
@@ -950,15 +856,13 @@ fn header(show_project: bool, pw: usize, vw: usize) -> String {
     }
 }
 
-fn full_row(show_project: bool, version: &Version, m: &Metrics, pw: usize, vw: usize) -> String {
+fn full_row(show_project: bool, project: &str, m: &Metrics, pw: usize) -> String {
     let mut line = String::new();
     if show_project {
-        line.push_str(&format!("{:<pw$}  ", version.project));
+        line.push_str(&format!("{:<pw$}  ", project));
     }
     line.push_str(&format!(
-        "{:<vw$}   {:<10}  {:>5}  {:>6}  {:>4}  {:>6}  {:>8}  {:>7}  {:>9}",
-        version.name,
-        version.since,
+        "{:>5}  {:>6}  {:>4}  {:>6}  {:>8}  {:>7}  {:>9}",
         m.tasks,
         m.lanes_per_task_str(),
         percent(m.pass_share()),
@@ -967,12 +871,6 @@ fn full_row(show_project: bool, version: &Version, m: &Metrics, pw: usize, vw: u
         m.cost_per_task_str(),
         m.time_per_task_str(),
     ));
-    // The one flag this table draws: a version banked under a patch layer,
-    // trailing the row exactly as the mockup draws it, rather than a column
-    // of its own — every other version's row has nothing to say here at all.
-    if version.ovr {
-        line.push_str(" ovr");
-    }
     line
 }
 
@@ -982,23 +880,11 @@ fn print_block(
     fallback: &HashMap<(String, String), String>,
     models: &BTreeMap<String, ModelPrice>,
     show_project: bool,
+    pw: usize,
 ) {
-    let metrics: Vec<Metrics> = block
-        .versions
-        .iter()
-        .map(|v| Metrics::for_row(entries, &block.name, &v.name, fallback, models))
-        .collect();
-
-    let pw = project_width(&block.versions);
-    let vw = name_width(&block.versions);
-    println!(
-        "{}\n{}",
-        paint(&block.name, "1"),
-        header(show_project, pw, vw)
-    );
-    for (i, version) in block.versions.iter().enumerate() {
-        println!("{}", full_row(show_project, version, &metrics[i], pw, vw));
-    }
+    let m = Metrics::for_row(entries, &block.name, fallback, models);
+    println!("{}\n{}", paint(&block.name, "1"), header(show_project, pw));
+    println!("{}", full_row(show_project, &block.project, &m, pw));
 }
 
 /// "Cost is a floor" note, naming every model with no configured price among
@@ -1030,22 +916,18 @@ fn print_json(
 ) -> Result<()> {
     let mut rows: Vec<serde_json::Value> = Vec::new();
     for block in blocks {
-        for version in &block.versions {
-            let m = Metrics::for_row(entries, &block.name, &version.name, fallback, models);
-            rows.push(json_row(&block.name, version, &m));
-        }
+        let m = Metrics::for_row(entries, &block.name, fallback, models);
+        rows.push(json_row(block, &m));
     }
 
     println!("{}", serde_json::to_string_pretty(&rows)?);
     Ok(())
 }
 
-fn json_row(pipeline: &str, v: &Version, m: &Metrics) -> serde_json::Value {
+fn json_row(block: &PipelineBlock, m: &Metrics) -> serde_json::Value {
     serde_json::json!({
-        "project": v.project,
-        "pipeline": pipeline,
-        "version": v.name,
-        "since": v.since,
+        "project": block.project,
+        "pipeline": block.name,
         "tasks": m.tasks,
         "lanes": m.lanes,
         "lanes_per_task": m.lanes_per_task(),
@@ -1080,86 +962,45 @@ fn print_csv(
     // seconds and raw tokens, and every total the table itself stopped
     // printing once it started dividing by `RUNS`.
     println!(
-        "project,pipeline,version,since,tasks,lanes,lanes_per_task,pass,blocks,ctx_peak_tokens,\
+        "project,pipeline,tasks,lanes,lanes_per_task,pass,blocks,ctx_peak_tokens,\
          ctx_peak_pct,out_tokens,out_per_task,cost_usd,cost_per_task,unpriced,time_s,\
          time_per_task_s"
     );
     for block in blocks {
-        for version in &block.versions {
-            let m = Metrics::for_row(entries, &block.name, &version.name, fallback, models);
-            let ctx_tokens = m.ctx_peak_tokens.map_or(String::new(), |t| t.to_string());
-            let ctx_pct = m.ctx_peak_pct.map_or(String::new(), |p| format!("{p:.2}"));
-            // `out_per_task` and `time_per_task_s` are counts — tokens and
-            // seconds — so they round to whole numbers, the same as the
-            // `out_tokens` and `time_s` totals beside them; only the ratios
-            // (`lanes_per_task`) and the dollar figures carry decimal places.
-            println!(
-                "{},{},{},{},{},{},{:.2},{},{},{},{},{},{},{},{},{},{},{}",
-                csv_field(&version.project),
-                csv_field(&block.name),
-                csv_field(&version.name),
-                csv_field(&version.since),
-                m.tasks,
-                m.lanes,
-                m.lanes_per_task(),
-                csv_fraction(m.pass_share()),
-                m.blocked,
-                ctx_tokens,
-                ctx_pct,
-                m.out,
-                m.out_per_task().round() as u64,
-                csv_cost(m.cost, m.lanes, m.unpriced),
-                csv_cost(m.cost_per_task(), m.lanes, m.unpriced),
-                m.unpriced,
-                m.time_s.max(0),
-                m.time_per_task_s().round() as i64,
-            );
-        }
+        let m = Metrics::for_row(entries, &block.name, fallback, models);
+        let ctx_tokens = m.ctx_peak_tokens.map_or(String::new(), |t| t.to_string());
+        let ctx_pct = m.ctx_peak_pct.map_or(String::new(), |p| format!("{p:.2}"));
+        // `out_per_task` and `time_per_task_s` are counts — tokens and
+        // seconds — so they round to whole numbers, the same as the
+        // `out_tokens` and `time_s` totals beside them; only the ratios
+        // (`lanes_per_task`) and the dollar figures carry decimal places.
+        println!(
+            "{},{},{},{},{:.2},{},{},{},{},{},{},{},{},{},{},{}",
+            csv_field(&block.project),
+            csv_field(&block.name),
+            m.tasks,
+            m.lanes,
+            m.lanes_per_task(),
+            csv_fraction(m.pass_share()),
+            m.blocked,
+            ctx_tokens,
+            ctx_pct,
+            m.out,
+            m.out_per_task().round() as u64,
+            csv_cost(m.cost, m.lanes, m.unpriced),
+            csv_cost(m.cost_per_task(), m.lanes, m.unpriced),
+            m.unpriced,
+            m.time_s.max(0),
+            m.time_per_task_s().round() as i64,
+        );
     }
     Ok(())
 }
 
-/// What the table could not say inside a row: a run counted on more than one
-/// row, a model nothing could price, or a version that predates the ledger
-/// recording one at all.
-fn footer(
-    entries: &[Entry],
-    blocks: &[PipelineBlock],
-    fallback: &HashMap<(String, String), String>,
-) {
-    let shown: HashSet<(String, String)> = blocks
-        .iter()
-        .flat_map(|b| b.versions.iter().map(|v| (b.name.clone(), v.name.clone())))
-        .collect();
-
-    let straddled = group_by_run(entries, fallback)
-        .iter()
-        .filter(|(_, lanes)| {
-            let touched: HashSet<(String, String)> = lanes
-                .iter()
-                .map(|e| (e.pipeline.clone(), version_of(e).to_string()))
-                .filter(|key| shown.contains(key))
-                .collect();
-            touched.len() > 1
-        })
-        .count();
-    if straddled > 0 {
-        println!("\n{straddled} run(s) spanned a version change and are counted in both rows.");
-    }
-
-    if let Some(note) = unpriced_note(
-        entries
-            .iter()
-            .filter(|e| shown.contains(&(e.pipeline.clone(), version_of(e).to_string()))),
-    ) {
+/// What the table could not say inside a row: a model nothing could price.
+fn footer(entries: &[Entry]) {
+    if let Some(note) = unpriced_note(entries.iter()) {
         println!("\n{note}");
-    }
-
-    if shown.iter().any(|(_, version)| version == UNVERSIONED) {
-        println!(
-            "\n`{UNVERSIONED}` is lanes recorded before versions were, which cannot be compared \
-             to anything."
-        );
     }
 }
 
@@ -1278,7 +1119,6 @@ struct Filters {
     since: String,
     until: String,
     scope: Scope,
-    limit: usize,
 }
 
 impl Filters {
@@ -1296,7 +1136,6 @@ impl Filters {
             since: args.since.clone().unwrap_or_default(),
             until: args.until.clone().unwrap_or_default(),
             scope,
-            limit: args.limit(),
         }
     }
 }
@@ -1593,13 +1432,14 @@ fn row_numbers(lines: &[Line]) -> Vec<Option<usize>> {
 
 // ---------------------------------------------------------------- pipelines
 
-fn pipelines_lines(entries: &[&Entry], loaded: &Loaded, filters: &Filters) -> Vec<Line> {
+fn pipelines_lines(entries: &[&Entry], loaded: &Loaded) -> Vec<Line> {
     if entries.is_empty() {
         return vec![Line::Text("Nothing to compare in this window.".to_string())];
     }
     let owned: Vec<Entry> = entries.iter().map(|e| (*e).clone()).collect();
-    let blocks = pipeline_blocks(&owned, filters.limit);
+    let blocks = pipeline_blocks(&owned);
     let show_project = spans_more_than_one_project(&blocks);
+    let pw = project_width(&blocks);
 
     // No `pipelines` heading here: the frame's own top border already reads
     // `─ eval · pipelines ─`, and a block key that reads `Pipeline: <name>`
@@ -1611,27 +1451,11 @@ fn pipelines_lines(entries: &[&Entry], loaded: &Loaded, filters: &Filters) -> Ve
         }
         out.push(Line::Text(format!("Pipeline: {}", block.name)));
 
-        let metrics: Vec<Metrics> = block
-            .versions
-            .iter()
-            .map(|v| {
-                Metrics::for_row(
-                    &owned,
-                    &block.name,
-                    &v.name,
-                    &loaded.fallback,
-                    &loaded.models,
-                )
-            })
-            .collect();
-        let pw = project_width(&block.versions);
-        let vw = name_width(&block.versions);
-        out.push(Line::Text(header_plain(show_project, pw, vw)));
-
-        for (i, version) in block.versions.iter().enumerate() {
-            let text = full_row(show_project, version, &metrics[i], pw, vw);
-            out.push(Line::Row(Row { text }));
-        }
+        let m = Metrics::for_row(&owned, &block.name, &loaded.fallback, &loaded.models);
+        out.push(Line::Text(header_plain(show_project, pw)));
+        out.push(Line::Row(Row {
+            text: full_row(show_project, &block.project, &m, pw),
+        }));
     }
     out
 }
@@ -1645,8 +1469,7 @@ struct StepRow {
 }
 
 /// One pipeline's block in the steps view: one row per step it ran anywhere
-/// in the window, aggregated over every version — not one version compared
-/// against another.
+/// in the window, aggregated over every lane of that step.
 struct StepBlock {
     pipeline: String,
     rows: Vec<StepRow>,
@@ -1685,10 +1508,10 @@ fn step_blocks(
     models: &BTreeMap<String, ModelPrice>,
     pipelines: &Pipelines,
 ) -> Vec<StepBlock> {
-    // One version is enough to read off the pipeline names and their
-    // newest-first order; the steps view no longer reads a block's own
-    // versions, so there is nothing to widen the limit for.
-    pipeline_blocks(entries, 1)
+    // Read off just for the pipeline names and their newest-first order —
+    // the steps view aggregates every lane of a pipeline into one row per
+    // step, so nothing here reads a block's own metrics or project.
+    pipeline_blocks(entries)
         .into_iter()
         .map(|block| {
             let steps = ordered_steps(entries, &block.name, pipelines);
@@ -1765,12 +1588,11 @@ fn steps_lines(entries: &[&Entry], loaded: &Loaded, pipelines: &Pipelines) -> Ve
 
 // --------------------------------------------------------------------- runs
 
-fn runs_header_plain(tw: usize, vw: usize, pw: usize) -> String {
+fn runs_header_plain(tw: usize, pw: usize) -> String {
     format!(
-        "{:<tw$}  {:<10}  {:<vw$}  {:<pw$}  {:>5}  {:>4}  {:>6}  {:>8}  {:>7}  {:>8}  {:>8}",
+        "{:<tw$}  {:<10}  {:<pw$}  {:>5}  {:>4}  {:>6}  {:>8}  {:>7}  {:>8}  {:>8}",
         "TASK",
         "WHEN",
-        "VERSION",
         "PIPELINE",
         "LANES",
         "PASS",
@@ -1782,12 +1604,11 @@ fn runs_header_plain(tw: usize, vw: usize, pw: usize) -> String {
     )
 }
 
-fn runs_row_line(row: &RunRow, tw: usize, vw: usize, pw: usize) -> String {
+fn runs_row_line(row: &RunRow, tw: usize, pw: usize) -> String {
     format!(
-        "{:<tw$}  {:<10}  {:<vw$}  {:<pw$}  {:>5}  {:>4}  {:>6}  {:>8}  {:>7}  {:>8}  {:>8}",
+        "{:<tw$}  {:<10}  {:<pw$}  {:>5}  {:>4}  {:>6}  {:>8}  {:>7}  {:>8}  {:>8}",
         row.task,
         local_date(&row.ts),
-        row.version,
         row.pipeline,
         row.lanes,
         percent(row.pass_share()),
@@ -1811,12 +1632,6 @@ fn runs_lines(entries: &[&Entry], loaded: &Loaded) -> Vec<Line> {
     rows.reverse();
 
     let tw = rows.iter().map(|r| r.task.len()).max().unwrap_or(4).max(4);
-    let vw = rows
-        .iter()
-        .map(|r| r.version.len())
-        .max()
-        .unwrap_or(7)
-        .max(7);
     let pw = rows
         .iter()
         .map(|r| r.pipeline.len())
@@ -1824,10 +1639,10 @@ fn runs_lines(entries: &[&Entry], loaded: &Loaded) -> Vec<Line> {
         .unwrap_or(8)
         .max(8);
 
-    let mut out = vec![Line::Text(runs_header_plain(tw, vw, pw))];
+    let mut out = vec![Line::Text(runs_header_plain(tw, pw))];
     for row in &rows {
         out.push(Line::Row(Row {
-            text: runs_row_line(row, tw, vw, pw),
+            text: runs_row_line(row, tw, pw),
         }));
     }
     out
@@ -2155,7 +1970,7 @@ fn sessions_lines(entries: &[&Entry], loaded: &Loaded) -> Vec<Line> {
 
 fn view_lines(loaded: &Loaded, filters: &Filters, pipelines: &Pipelines, view: View) -> Vec<Line> {
     match view {
-        View::Pipelines => pipelines_lines(&scoped_entries(loaded, filters), loaded, filters),
+        View::Pipelines => pipelines_lines(&scoped_entries(loaded, filters), loaded),
         View::Steps => steps_lines(&scoped_entries(loaded, filters), loaded, pipelines),
         View::Runs => runs_lines(&scoped_entries(loaded, filters), loaded),
         View::Dirs => dirs_lines(&scoped_dirs(loaded, filters), loaded),
@@ -2177,23 +1992,15 @@ fn export_rows(
         View::Pipelines => {
             let entries = scoped_entries(loaded, filters);
             let owned: Vec<Entry> = entries.iter().map(|e| (*e).clone()).collect();
-            let blocks = pipeline_blocks(&owned, filters.limit);
-            let header = "project,pipeline,version,since,tasks,lanes,lanes_per_task,pass,blocks,\
+            let blocks = pipeline_blocks(&owned);
+            let header = "project,pipeline,tasks,lanes,lanes_per_task,pass,blocks,\
                            ctx_peak_tokens,ctx_peak_pct,out_tokens,out_per_task,cost_usd,\
                            cost_per_task,unpriced,time_s,time_per_task_s"
                 .to_string();
             let mut rows = Vec::new();
             for block in &blocks {
-                for version in &block.versions {
-                    let m = Metrics::for_row(
-                        &owned,
-                        &block.name,
-                        &version.name,
-                        &loaded.fallback,
-                        &loaded.models,
-                    );
-                    rows.push(csv_pipeline_row(&version.project, &block.name, version, &m));
-                }
+                let m = Metrics::for_row(&owned, &block.name, &loaded.fallback, &loaded.models);
+                rows.push(csv_pipeline_row(block, &m));
             }
             (header, rows)
         }
@@ -2201,9 +2008,6 @@ fn export_rows(
             let entries = scoped_entries(loaded, filters);
             let owned: Vec<Entry> = entries.iter().map(|e| (*e).clone()).collect();
             let blocks = step_blocks(&owned, &loaded.fallback, &loaded.models, pipelines);
-            // No `version`/`since`: a row now mixes every version in the
-            // window rather than reading one, so there is no single version
-            // left to name.
             let header = "pipeline,step,tasks,lanes,lanes_per_task,pass,blocks,\
                            ctx_peak_tokens,ctx_peak_pct,out_tokens,out_per_task,cost_usd,\
                            cost_per_task,unpriced,time_s,time_per_task_s"
@@ -2228,7 +2032,7 @@ fn export_rows(
             // `ctx_peak_tokens`/`ctx_peak_pct` — the same reading the runs
             // view's own `CTX PEAK` column shows on screen, and `docs/eval.md`
             // promises every export here matches its view's own columns.
-            let header = "run,task,when,version,pipeline,lanes,pass,blocks,ctx_peak_tokens,\
+            let header = "run,task,when,pipeline,lanes,pass,blocks,ctx_peak_tokens,\
                            ctx_peak_pct,out_tokens,cost_usd,unpriced,time_s"
                 .to_string();
             let lines = rows.iter().map(csv_run_row).collect();
@@ -2294,15 +2098,13 @@ fn csv_session_row(row: &SessionRow) -> String {
     )
 }
 
-fn csv_pipeline_row(project: &str, pipeline: &str, version: &Version, m: &Metrics) -> String {
+fn csv_pipeline_row(block: &PipelineBlock, m: &Metrics) -> String {
     let ctx_tokens = m.ctx_peak_tokens.map_or(String::new(), |t| t.to_string());
     let ctx_pct = m.ctx_peak_pct.map_or(String::new(), |p| format!("{p:.2}"));
-    let project = csv_field(project);
-    let pipeline = csv_field(pipeline);
+    let project = csv_field(&block.project);
+    let pipeline = csv_field(&block.name);
     format!(
-        "{project},{pipeline},{},{},{},{},{:.2},{},{},{ctx_tokens},{ctx_pct},{},{},{},{},{},{},{}",
-        csv_field(&version.name),
-        csv_field(&version.since),
+        "{project},{pipeline},{},{},{:.2},{},{},{ctx_tokens},{ctx_pct},{},{},{},{},{},{},{}",
         m.tasks,
         m.lanes,
         m.lanes_per_task(),
@@ -2347,11 +2149,10 @@ fn csv_run_row(row: &RunRow) -> String {
         .ctx_peak_pct
         .map_or(String::new(), |p| format!("{p:.2}"));
     format!(
-        "{},{},{},{},{},{},{},{},{ctx_tokens},{ctx_pct},{},{},{},{}",
+        "{},{},{},{},{},{},{},{ctx_tokens},{ctx_pct},{},{},{},{}",
         csv_field(&row.id),
         csv_field(&row.task),
         csv_field(&local_date(&row.ts)),
-        csv_field(&row.version),
         csv_field(&row.pipeline),
         row.lanes,
         csv_fraction(row.pass_share()),
@@ -2576,9 +2377,7 @@ fn cursor_line_index(lines: &[Line], cursor: usize) -> usize {
 /// The right side of the top border: the scope, any pipeline/step filter,
 /// and the window — every filter a person can actually move from the panel,
 /// in one place, the same job the queue screen's own frame gives no line to
-/// because it has no filters at all. `limit` names no row of its own any
-/// more either, for the same reason: nothing on the screen can move it, so
-/// naming it on every frame would say nothing a reader could act on.
+/// because it has no filters at all.
 /// The scope and window only — see [`view_title`] for `dir`/`skill`, which
 /// the mockup draws in the top border's *left* segment beside the view name
 /// rather than here, on the right beside the scope. `pipeline`/`step` stay
@@ -2647,8 +2446,8 @@ fn draw(
     // terminal down to size, but a body shorter than whatever panel is
     // about to be drawn on it needs padding the other way, or `overlay`
     // writes past the frame's own last row and the panel loses its bottom
-    // border. Reproduced on a one-version ledger, where the table itself is
-    // only a few lines tall and the filter panel is twelve.
+    // border. Reproduced on a small ledger, where the table itself is only a
+    // few lines tall and the filter panel is twelve.
     let overlay_panel: Option<Vec<String>> = match &state.mode {
         // Wrapped to the frame's own width, not just split on the newlines
         // `body` already carries: an error message from `load` — a bad
@@ -2716,33 +2515,13 @@ fn draw(
 /// a model nowhere in view.
 fn screen_unpriced_note(loaded: &Loaded, filters: &Filters, view: View) -> Option<String> {
     match view {
-        // Steps and runs show every step or run their own filters admit —
-        // neither view truncates by `filters.limit` — so the plain scoped
-        // entries are exactly what is on screen.
-        View::Steps | View::Runs => unpriced_note(scoped_entries(loaded, filters).into_iter()),
-        // Neither `dirs` nor `sessions` truncates — every row its own
-        // filters admit is on screen.
-        View::Dirs | View::Sessions => unpriced_note(scoped_dirs(loaded, filters).into_iter()),
-        // Pipelines narrows to `filters.limit` versions per block, the same
-        // truncation `footer` accounts for in the printed table — without
-        // it, a model priced fine on every version still on screen could be
-        // blamed for an older one `limit` has already dropped.
-        View::Pipelines => {
-            let owned: Vec<Entry> = scoped_entries(loaded, filters)
-                .into_iter()
-                .cloned()
-                .collect();
-            let blocks = pipeline_blocks(&owned, filters.limit);
-            let shown: HashSet<(String, String)> = blocks
-                .iter()
-                .flat_map(|b| b.versions.iter().map(|v| (b.name.clone(), v.name.clone())))
-                .collect();
-            unpriced_note(
-                owned
-                    .iter()
-                    .filter(|e| shown.contains(&(e.pipeline.clone(), version_of(e).to_string()))),
-            )
+        // No view truncates any more — every row its own filters admit is on
+        // screen — so the plain scoped entries are exactly what a note about
+        // "on screen" should read.
+        View::Pipelines | View::Steps | View::Runs => {
+            unpriced_note(scoped_entries(loaded, filters).into_iter())
         }
+        View::Dirs | View::Sessions => unpriced_note(scoped_dirs(loaded, filters).into_iter()),
     }
 }
 
@@ -2750,10 +2529,10 @@ fn screen_unpriced_note(loaded: &Loaded, filters: &Filters, view: View) -> Optio
 
 /// One row of the filter panel — `↑`/`↓` moves between these, `←`/`→`
 /// changes the value on the first two, and `enter` on the last two opens a
-/// calendar rather than applying. `scope` and `limit` are not rows here at
-/// all: the screen only ever opens bare, so both can only ever hold the
-/// default they opened with, and a row with a single possible answer is not
-/// a question — see the task's own context for why they left the panel.
+/// calendar rather than applying. `scope` is not a row here at all: the
+/// screen only ever opens bare, so it can only ever hold the default it
+/// opened with, and a row with a single possible answer is not a
+/// question — see the task's own context for why it left the panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FilterField {
     Pipeline,
@@ -2878,7 +2657,6 @@ pub fn screen(repo: &Repo, pipelines: &Pipelines) -> Result<()> {
         since: None,
         until: None,
         month: None,
-        limit: None,
         all: false,
         project: None,
         runs: false,
@@ -3350,7 +3128,7 @@ mod tests {
         );
     }
 
-    fn lane(task: &str, step: &str, version: &str, round: u32, outcome: Option<&str>) -> Entry {
+    fn lane(task: &str, step: &str, round: u32, outcome: Option<&str>) -> Entry {
         Entry {
             ts: "2026-08-04T07:00:00+00:00".into(),
             task: task.into(),
@@ -3367,8 +3145,7 @@ mod tests {
             tokens: crate::usage::Tokens::default(),
             cost_usd: Some(1.0),
             ctx_peak: None,
-            version: Some(version.into()),
-            commit: Some("a91c33e".into()),
+            pipeline_version: "1.0".into(),
             outcome: outcome.map(str::to_string),
             run: None,
             trial: None,
@@ -3400,21 +3177,16 @@ mod tests {
     }
 
     #[test]
-    fn a_task_that_straddles_a_version_counts_on_both_rows() {
+    fn a_row_counts_every_task_that_touched_it() {
         let entries = vec![
-            lane("login", "implement", "aaaa1111", 1, Some("pass")),
-            lane("login", "review", "bbbb2222", 1, Some("pass")),
-            lane("logout", "implement", "bbbb2222", 1, Some("pass")),
+            lane("login", "implement", 1, Some("pass")),
+            lane("login", "review", 1, Some("pass")),
+            lane("logout", "implement", 1, Some("pass")),
         ];
         let fallback = fallback_keys(&entries);
         let models = no_models();
         assert_eq!(
-            Metrics::for_row(&entries, "default", "aaaa1111", &fallback, &models).tasks,
-            1,
-            "login touched this row too, even though it also ran under bbbb2222"
-        );
-        assert_eq!(
-            Metrics::for_row(&entries, "default", "bbbb2222", &fallback, &models).tasks,
+            Metrics::for_row(&entries, "default", &fallback, &models).tasks,
             2,
             "login and logout both touched this row"
         );
@@ -3423,12 +3195,12 @@ mod tests {
     #[test]
     fn pass_is_the_share_of_lanes_not_of_tasks() {
         let entries = vec![
-            lane("login", "implement", "v1", 1, Some("pass")),
-            lane("login", "review", "v1", 1, Some("fail")),
-            lane("login", "implement", "v1", 2, Some("pass")),
-            lane("login", "review", "v1", 2, Some("pass")),
+            lane("login", "implement", 1, Some("pass")),
+            lane("login", "review", 1, Some("fail")),
+            lane("login", "implement", 2, Some("pass")),
+            lane("login", "review", 2, Some("pass")),
         ];
-        let m = Metrics::for_row(&entries, "default", "v1", &no_fallback(), &no_models());
+        let m = Metrics::for_row(&entries, "default", &no_fallback(), &no_models());
         assert_eq!(m.tasks, 1);
         assert_eq!(m.lanes, 4);
         assert_eq!(m.pass_share(), Some(75.0), "one of the four lanes failed");
@@ -3437,10 +3209,10 @@ mod tests {
     #[test]
     fn a_block_is_what_a_lane_reports_not_a_run_grain_judgement() {
         let entries = vec![
-            lane("login", "implement", "v1", 1, Some("block")),
-            lane("logout", "implement", "v1", 1, Some("pass")),
+            lane("login", "implement", 1, Some("block")),
+            lane("logout", "implement", 1, Some("pass")),
         ];
-        let m = Metrics::for_row(&entries, "default", "v1", &no_fallback(), &no_models());
+        let m = Metrics::for_row(&entries, "default", &no_fallback(), &no_models());
         assert_eq!(m.tasks, 2);
         assert_eq!(m.blocked, 1);
         assert_eq!(m.pass_share(), Some(50.0));
@@ -3449,10 +3221,10 @@ mod tests {
     #[test]
     fn a_lane_that_never_reported_is_left_out_of_the_pass_share() {
         let entries = vec![
-            lane("login", "implement", "v1", 1, Some("pass")),
-            lane("logout", "implement", "v1", 1, None),
+            lane("login", "implement", 1, Some("pass")),
+            lane("logout", "implement", 1, None),
         ];
-        let m = Metrics::for_row(&entries, "default", "v1", &no_fallback(), &no_models());
+        let m = Metrics::for_row(&entries, "default", &no_fallback(), &no_models());
         assert_eq!(m.lanes, 2, "it still ran, and it still cost something");
         assert_eq!(
             m.pass_share(),
@@ -3470,12 +3242,12 @@ mod tests {
     /// blank one.
     #[test]
     fn a_lane_banked_twice_counts_once_and_keeps_its_own_verdict() {
-        let held = lane("login", "implement", "v1", 1, Some("block"));
-        let mut freed = lane("login", "implement", "v1", 1, None);
+        let held = lane("login", "implement", 1, Some("block"));
+        let mut freed = lane("login", "implement", 1, None);
         freed.wall_s = 15;
         freed.cost_usd = Some(0.5);
         let entries = vec![held, freed];
-        let m = Metrics::for_row(&entries, "default", "v1", &no_fallback(), &no_models());
+        let m = Metrics::for_row(&entries, "default", &no_fallback(), &no_models());
         assert_eq!(m.lanes, 1, "one lane, whichever of its lines this counts");
         assert_eq!(m.blocked, 1, "the hold-time line's own verdict survives");
         assert_eq!(m.judged, 1);
@@ -3486,19 +3258,19 @@ mod tests {
     #[test]
     fn l_task_and_dollar_task_are_the_row_s_totals_over_its_tasks() {
         // Two runs, four lanes: L/TASK reads 2.0, not the raw lane count.
-        let mut a1 = lane("login", "implement", "v1", 1, Some("pass"));
+        let mut a1 = lane("login", "implement", 1, Some("pass"));
         a1.run = Some("ra".into());
-        let mut a2 = lane("login", "review", "v1", 1, Some("pass"));
+        let mut a2 = lane("login", "review", 1, Some("pass"));
         a2.run = Some("ra".into());
         a2.cost_usd = Some(3.0);
-        let mut b1 = lane("logout", "implement", "v1", 1, Some("pass"));
+        let mut b1 = lane("logout", "implement", 1, Some("pass"));
         b1.run = Some("rb".into());
-        let mut b2 = lane("logout", "review", "v1", 1, Some("pass"));
+        let mut b2 = lane("logout", "review", 1, Some("pass"));
         b2.run = Some("rb".into());
         b2.cost_usd = Some(3.0);
         let entries = vec![a1, a2, b1, b2];
         let fallback = fallback_keys(&entries);
-        let m = Metrics::for_row(&entries, "default", "v1", &fallback, &no_models());
+        let m = Metrics::for_row(&entries, "default", &fallback, &no_models());
         assert_eq!(m.tasks, 2);
         assert_eq!(m.lanes, 4);
         assert_eq!(m.lanes_per_task(), 2.0);
@@ -3508,10 +3280,10 @@ mod tests {
 
     #[test]
     fn ctx_is_the_largest_peak_on_the_row_as_a_percentage_of_its_own_model_s_window() {
-        let mut small = lane("login", "implement", "v1", 1, Some("pass"));
+        let mut small = lane("login", "implement", 1, Some("pass"));
         small.model = "sized".into();
         small.ctx_peak = Some(50_000);
-        let mut big = lane("logout", "implement", "v1", 1, Some("pass"));
+        let mut big = lane("logout", "implement", 1, Some("pass"));
         big.model = "sized".into();
         big.ctx_peak = Some(91_000);
         let entries = vec![small, big];
@@ -3525,25 +3297,25 @@ mod tests {
             },
         );
 
-        let m = Metrics::for_row(&entries, "default", "v1", &no_fallback(), &models);
+        let m = Metrics::for_row(&entries, "default", &no_fallback(), &models);
         assert_eq!(m.ctx_peak_tokens, Some(91_000), "the larger of the two");
         assert_eq!(m.ctx_str(), "91%");
     }
 
     #[test]
     fn ctx_falls_back_to_raw_tokens_when_the_model_s_window_is_unconfigured() {
-        let mut with_peak = lane("login", "implement", "v1", 1, Some("pass"));
+        let mut with_peak = lane("login", "implement", 1, Some("pass"));
         with_peak.model = "unsized".into();
         with_peak.ctx_peak = Some(142_000);
         let entries = vec![with_peak];
-        let m = Metrics::for_row(&entries, "default", "v1", &no_fallback(), &no_models());
+        let m = Metrics::for_row(&entries, "default", &no_fallback(), &no_models());
         assert_eq!(m.ctx_str(), "142k");
     }
 
     #[test]
     fn ctx_is_a_dash_when_no_lane_on_the_row_banked_one() {
-        let entries = vec![lane("login", "implement", "v1", 1, Some("pass"))];
-        let m = Metrics::for_row(&entries, "default", "v1", &no_fallback(), &no_models());
+        let entries = vec![lane("login", "implement", 1, Some("pass"))];
+        let m = Metrics::for_row(&entries, "default", &no_fallback(), &no_models());
         assert_eq!(m.ctx_peak_tokens, None);
         assert_eq!(m.ctx_str(), "—");
     }
@@ -3555,14 +3327,14 @@ mod tests {
     /// every lane that actually spent something was priced.
     #[test]
     fn a_zero_token_unpriced_lane_is_not_counted_as_unpriced() {
-        let mut priced = lane("login", "implement", "v1", 1, Some("pass"));
+        let mut priced = lane("login", "implement", 1, Some("pass"));
         priced.cost_usd = Some(5.0);
-        let mut zero_token = lane("login", "implement", "v1", 2, Some("pass"));
+        let mut zero_token = lane("login", "implement", 2, Some("pass"));
         zero_token.cost_usd = None;
         zero_token.tokens = crate::usage::Tokens::default();
 
         let entries = vec![priced, zero_token];
-        let m = Metrics::for_row(&entries, "default", "v1", &no_fallback(), &no_models());
+        let m = Metrics::for_row(&entries, "default", &no_fallback(), &no_models());
         assert_eq!(m.unpriced, 0);
         assert_eq!(m.lanes, 2);
     }
@@ -3573,9 +3345,9 @@ mod tests {
     /// the same plain number a full total would.
     #[test]
     fn a_real_unpriced_lane_still_counts() {
-        let mut priced = lane("login", "implement", "v1", 1, Some("pass"));
+        let mut priced = lane("login", "implement", 1, Some("pass"));
         priced.cost_usd = Some(5.0);
-        let mut unpriced = lane("login", "implement", "v1", 2, Some("pass"));
+        let mut unpriced = lane("login", "implement", 2, Some("pass"));
         unpriced.cost_usd = None;
         unpriced.tokens = crate::usage::Tokens {
             input: 10,
@@ -3583,7 +3355,7 @@ mod tests {
         };
 
         let entries = vec![priced, unpriced];
-        let m = Metrics::for_row(&entries, "default", "v1", &no_fallback(), &no_models());
+        let m = Metrics::for_row(&entries, "default", &no_fallback(), &no_models());
         assert_eq!(m.unpriced, 1);
         assert_eq!(m.cost_per_task_str(), "5.00");
     }
@@ -3594,9 +3366,9 @@ mod tests {
     /// print as the same shape of number.
     #[test]
     fn json_row_carries_the_unpriced_count() {
-        let mut priced = lane("login", "implement", "v1", 1, Some("pass"));
+        let mut priced = lane("login", "implement", 1, Some("pass"));
         priced.cost_usd = Some(5.0);
-        let mut unpriced = lane("login", "implement", "v1", 2, Some("pass"));
+        let mut unpriced = lane("login", "implement", 2, Some("pass"));
         unpriced.cost_usd = None;
         unpriced.tokens = crate::usage::Tokens {
             input: 10,
@@ -3604,14 +3376,12 @@ mod tests {
         };
 
         let entries = vec![priced, unpriced];
-        let m = Metrics::for_row(&entries, "default", "v1", &no_fallback(), &no_models());
-        let version = Version {
+        let m = Metrics::for_row(&entries, "default", &no_fallback(), &no_models());
+        let block = PipelineBlock {
+            name: "default".into(),
             project: "demo".into(),
-            name: "v1".into(),
-            since: "2026-08-04".into(),
-            ovr: false,
         };
-        let row = json_row("default", &version, &m);
+        let row = json_row(&block, &m);
         assert_eq!(row["unpriced"], 1);
         // A plain number here, not `null` — only a *wholly* unpriced row nulls
         // `cost_usd`, and this row has one priced lane.
@@ -3624,7 +3394,7 @@ mod tests {
     /// needs `cost_usd`'s presence to answer.
     #[test]
     fn json_row_nulls_cost_when_every_lane_is_unpriced() {
-        let mut unpriced = lane("login", "implement", "v1", 1, Some("pass"));
+        let mut unpriced = lane("login", "implement", 1, Some("pass"));
         unpriced.cost_usd = None;
         unpriced.tokens = crate::usage::Tokens {
             input: 10,
@@ -3632,14 +3402,12 @@ mod tests {
         };
 
         let entries = vec![unpriced];
-        let m = Metrics::for_row(&entries, "default", "v1", &no_fallback(), &no_models());
-        let version = Version {
+        let m = Metrics::for_row(&entries, "default", &no_fallback(), &no_models());
+        let block = PipelineBlock {
+            name: "default".into(),
             project: "demo".into(),
-            name: "v1".into(),
-            since: "2026-08-04".into(),
-            ovr: false,
         };
-        let row = json_row("default", &version, &m);
+        let row = json_row(&block, &m);
         assert_eq!(row["unpriced"], 1);
         assert!(row["cost_usd"].is_null());
     }
@@ -3664,125 +3432,63 @@ mod tests {
     }
 
     #[test]
-    fn versions_come_out_newest_first_and_capped() {
-        let mut entries = Vec::new();
-        for (n, v) in ["v1", "v2", "v3"].iter().enumerate() {
-            let mut lane = lane("t", "implement", v, 1, Some("pass"));
-            lane.ts = format!("2026-08-0{}T07:00:00+00:00", n + 1);
-            entries.push(lane);
-        }
-        let versions = versions_of(&entries, "default", 2);
-        assert_eq!(versions.len(), 2);
-        assert_eq!(versions[0].name, "v3");
-        assert_eq!(versions[1].name, "v2");
-    }
-
-    /// A version whose lines carry `Entry::commit`'s `+ovr` suffix is marked
-    /// `ovr`, a version whose lines are plain (or merely `+dirty`) is not —
-    /// and the flag reaches the printed row exactly as the mockup draws it,
-    /// trailing the line rather than living in a column of its own.
-    #[test]
-    fn a_version_banked_under_a_layer_is_marked_ovr() {
-        let mut layered = lane("t", "implement", "a91c4f02", 1, Some("pass"));
-        layered.commit = Some("abc1234+ovr".into());
-        let mut dirty_only = lane("t", "implement", "72614d06", 1, Some("pass"));
-        dirty_only.commit = Some("def5678+dirty".into());
-        dirty_only.ts = "2026-08-02T07:00:00+00:00".into();
-
-        let versions = versions_of(&[dirty_only, layered], "default", 10);
-        let by_name = |name: &str| versions.iter().find(|v| v.name == name).unwrap();
-        assert!(by_name("a91c4f02").ovr);
-        assert!(!by_name("72614d06").ovr);
-
-        let m = Metrics::default();
-        let vw = name_width(&versions);
-        assert!(
-            full_row(false, by_name("a91c4f02"), &m, 0, vw).ends_with(" ovr"),
-            "the layered row's own line must end with the flag"
-        );
-        assert!(
-            !full_row(false, by_name("72614d06"), &m, 0, vw).ends_with(" ovr"),
-            "a merely dirty row carries no flag at all"
-        );
-    }
-
-    #[test]
-    fn pipelines_are_ordered_by_their_newest_version() {
-        let mut default_old = lane("a", "implement", "v1", 1, Some("pass"));
+    fn pipelines_are_ordered_by_their_newest_lane() {
+        let mut default_old = lane("a", "implement", 1, Some("pass"));
         default_old.ts = "2026-08-01T07:00:00+00:00".into();
-        let mut local_new = lane("b", "implement", "v2", 1, Some("pass"));
+        let mut local_new = lane("b", "implement", 1, Some("pass"));
         local_new.pipeline = "local".into();
         local_new.ts = "2026-08-10T07:00:00+00:00".into();
 
         let entries = vec![default_old, local_new];
-        let blocks = pipeline_blocks(&entries, 10);
-        assert_eq!(blocks[0].name, "local", "its version is the newer one");
+        let blocks = pipeline_blocks(&entries);
+        assert_eq!(blocks[0].name, "local", "its lane is the newer one");
         assert_eq!(blocks[1].name, "default");
     }
 
     #[test]
     fn project_stays_off_screen_when_every_row_is_the_same_project() {
         let entries = vec![
-            lane("login", "implement", "v1", 1, Some("pass")),
-            lane("logout", "implement", "v2", 1, Some("pass")),
+            lane("login", "implement", 1, Some("pass")),
+            lane("logout", "implement", 1, Some("pass")),
         ];
-        let blocks = pipeline_blocks(&entries, 10);
+        let blocks = pipeline_blocks(&entries);
         assert!(
             !spans_more_than_one_project(&blocks),
             "both lanes are `demo`, lane()'s own project"
         );
         assert!(
-            !header(false, 7, 8).contains("PROJECT"),
+            !header(false, 7).contains("PROJECT"),
             "the header omits the column entirely, not just its value"
         );
     }
 
     #[test]
     fn project_prints_once_two_of_them_are_on_screen_together() {
-        // Different versions, so alpha and beta each get their own row —
-        // sharing one version would merge them into a single row whose
-        // `Version.project` names only the first-seen project, hiding the
-        // second one from this very check.
+        // Different pipelines, so alpha and beta each get their own row —
+        // sharing one pipeline would merge them into a single row whose
+        // `PipelineBlock::project` names only the first-seen project, hiding
+        // the second one from this very check.
         let alpha = Entry {
             project: "alpha".into(),
-            ..lane("login", "implement", "v1", 1, Some("pass"))
+            ..lane("login", "implement", 1, Some("pass"))
         };
         let beta = Entry {
             project: "beta".into(),
-            ..lane("logout", "implement", "v2", 1, Some("pass"))
+            pipeline: "local".into(),
+            ..lane("logout", "implement", 1, Some("pass"))
         };
         let entries = vec![alpha, beta];
-        let blocks = pipeline_blocks(&entries, 10);
+        let blocks = pipeline_blocks(&entries);
         assert!(
             spans_more_than_one_project(&blocks),
             "alpha and beta are both on screen, on their own rows"
         );
-        assert!(header(true, 7, 8).contains("PROJECT"));
-    }
-
-    #[test]
-    fn the_version_column_widens_for_the_unversioned_row() {
-        // `unversioned` is longer than a fingerprint, and a fixed-width column
-        // would push every figure on that row out of line with the table.
-        let old = Entry {
-            version: None,
-            ..lane("login", "implement", "v1", 1, Some("pass"))
-        };
-        let versions = versions_of(&[old], "default", 10);
-        assert_eq!(versions[0].name, UNVERSIONED);
-        assert_eq!(name_width(&versions), UNVERSIONED.len());
-
-        let normal = versions_of(
-            &[lane("login", "implement", "3f9a1c04", 1, None)],
-            "default",
-            10,
-        );
-        assert_eq!(name_width(&normal), 8);
+        assert!(header(true, 7).contains("PROJECT"));
     }
 
     #[test]
     fn a_line_with_no_run_falls_back_to_a_key_derived_from_its_task() {
-        let entries = vec![lane("session-resume", "land", "v1", 1, Some("pass"))];
+        let entries = vec![lane("session-resume", "land", 1, Some("pass"))];
         let fallback = fallback_keys(&entries);
         let key = run_key(&entries[0], &fallback);
         assert_eq!(key, "session-resume@0804");
@@ -3792,11 +3498,11 @@ mod tests {
     fn two_projects_whose_same_named_task_first_ran_the_same_day_get_distinct_fallback_ids() {
         let alpha = Entry {
             project: "alpha".into(),
-            ..lane("login", "implement", "v1", 1, Some("pass"))
+            ..lane("login", "implement", 1, Some("pass"))
         };
         let beta = Entry {
             project: "beta".into(),
-            ..lane("login", "implement", "v1", 1, Some("pass"))
+            ..lane("login", "implement", 1, Some("pass"))
         };
         let entries = vec![alpha, beta];
         let fallback = fallback_keys(&entries);
@@ -3823,9 +3529,9 @@ mod tests {
 
     #[test]
     fn a_run_id_groups_its_lanes_even_across_different_tasks_named_the_same() {
-        let mut a = lane("t", "implement", "v1", 1, Some("pass"));
+        let mut a = lane("t", "implement", 1, Some("pass"));
         a.run = Some("r00001".into());
-        let mut b = lane("t", "review", "v1", 1, Some("pass"));
+        let mut b = lane("t", "review", 1, Some("pass"));
         b.run = Some("r00001".into());
         let entries = vec![a, b];
         let fallback = fallback_keys(&entries);
@@ -3836,7 +3542,7 @@ mod tests {
 
     #[test]
     fn a_historical_run_is_listed_and_named_by_its_fallback_key() {
-        let entries = vec![lane("session-resume", "land", "v1", 1, Some("pass"))];
+        let entries = vec![lane("session-resume", "land", 1, Some("pass"))];
         let fallback = fallback_keys(&entries);
         let rows = list_runs(&entries, &fallback, &no_models());
         assert_eq!(rows.len(), 1);
@@ -3846,9 +3552,9 @@ mod tests {
 
     #[test]
     fn run_pass_share_is_over_its_own_lanes() {
-        let mut a = lane("t", "implement", "v1", 1, Some("pass"));
+        let mut a = lane("t", "implement", 1, Some("pass"));
         a.run = Some("r1".into());
-        let mut b = lane("t", "review", "v1", 1, Some("fail"));
+        let mut b = lane("t", "review", 1, Some("fail"));
         b.run = Some("r1".into());
         let entries = vec![a, b];
         let fallback = fallback_keys(&entries);
@@ -3863,9 +3569,9 @@ mod tests {
     /// run's row too.
     #[test]
     fn a_run_row_counts_a_held_lanes_two_lines_as_one() {
-        let mut held = lane("t", "implement", "v1", 1, Some("block"));
+        let mut held = lane("t", "implement", 1, Some("block"));
         held.run = Some("r1".into());
-        let mut freed = lane("t", "implement", "v1", 1, None);
+        let mut freed = lane("t", "implement", 1, None);
         freed.run = Some("r1".into());
         freed.wall_s = 15;
         let entries = vec![held, freed];
@@ -3884,11 +3590,11 @@ mod tests {
     /// `Vec::retain` inlined there rather than a function of its own.
     #[test]
     fn filtering_entries_by_trial_id_keeps_only_that_trial_s_arms() {
-        let mut a = lane("solo-1", "implement", "v1", 1, Some("pass"));
+        let mut a = lane("solo-1", "implement", 1, Some("pass"));
         a.trial = Some("solo".into());
-        let mut b = lane("solo-2", "implement", "v1", 1, Some("fail"));
+        let mut b = lane("solo-2", "implement", 1, Some("fail"));
         b.trial = Some("solo".into());
-        let unrelated = lane("other-task", "implement", "v1", 1, Some("pass"));
+        let unrelated = lane("other-task", "implement", 1, Some("pass"));
 
         let entries = vec![a, b, unrelated];
         let trial: Vec<Entry> = entries
@@ -3901,9 +3607,9 @@ mod tests {
 
     #[test]
     fn a_trial_delta_line_names_both_arms_and_the_direction_each_figure_moved() {
-        let mut baseline = lane("solo-1", "implement", "v1", 1, Some("pass"));
+        let mut baseline = lane("solo-1", "implement", 1, Some("pass"));
         baseline.run = Some("r1".into());
-        let mut challenger = lane("solo-2", "implement", "v1", 1, Some("fail"));
+        let mut challenger = lane("solo-2", "implement", 1, Some("fail"));
         challenger.run = Some("r2".into());
         challenger.cost_usd = Some(3.0);
         challenger.wall_s = 120;
@@ -3921,8 +3627,8 @@ mod tests {
     // -------------------------------------------------- dirs and sessions
 
     /// A directory line, the way `usage::sweep`'s directory walk banks one:
-    /// no `task`, `step`, `pipeline`, `agent`, `outcome`, `run` or `version` —
-    /// see `Entry::dir`.
+    /// no `task`, `step`, `pipeline`, `agent`, `outcome`, `run` or
+    /// `pipeline_version` — see `Entry::dir`.
     fn dir_line(dir: &str, session: &str, ts: &str, cost: f64) -> Entry {
         Entry {
             ts: ts.into(),
@@ -3943,8 +3649,7 @@ mod tests {
             },
             cost_usd: Some(cost),
             ctx_peak: None,
-            version: None,
-            commit: None,
+            pipeline_version: String::new(),
             outcome: None,
             run: None,
             trial: None,
@@ -4050,7 +3755,7 @@ mod screen_tests {
     /// A minimal in-memory `Entry` on the `default` pipeline — what the pure
     /// functions below (`ordered_steps`, `step_blocks`, ...) that never touch
     /// disk are exercised against.
-    fn entry(step: &str, version: &str) -> Entry {
+    fn entry(step: &str) -> Entry {
         Entry {
             ts: "2026-08-04T07:00:00+00:00".into(),
             task: "t".into(),
@@ -4067,8 +3772,7 @@ mod screen_tests {
             tokens: crate::usage::Tokens::default(),
             cost_usd: Some(1.0),
             ctx_peak: None,
-            version: Some(version.into()),
-            commit: None,
+            pipeline_version: "1.0".into(),
             outcome: Some("pass".into()),
             run: None,
             trial: None,
@@ -4088,7 +3792,6 @@ mod screen_tests {
         step: &str,
         pipeline: &str,
         model: &str,
-        version: &str,
         cost: f64,
         outcome: Option<&str>,
     ) {
@@ -4103,15 +3806,14 @@ mod screen_tests {
                 agent: "pi".to_string(),
                 kind: "pi".to_string(),
                 model: model.to_string(),
-                session: format!("{task}-{step}-{version}"),
+                session: format!("{task}-{step}"),
                 round: 1,
                 wall_s: 60,
                 turns: 1,
                 tokens: crate::usage::Tokens::default(),
                 cost_usd: Some(cost),
                 ctx_peak: None,
-                version: Some(version.to_string()),
-                commit: Some(format!("commit-{version}")),
+                pipeline_version: "1.0".into(),
                 outcome: outcome.map(str::to_string),
                 run: Some(format!("r-{task}")),
                 trial: None,
@@ -4131,7 +3833,6 @@ mod screen_tests {
             since: None,
             until: None,
             month: None,
-            limit: None,
             all: false,
             project: None,
             runs: false,
@@ -4155,7 +3856,6 @@ mod screen_tests {
             since: String::new(),
             until: String::new(),
             scope: Scope::Mine,
-            limit: 10,
         }
     }
 
@@ -4184,7 +3884,6 @@ mod screen_tests {
             "implement",
             "default",
             "qwen",
-            "v1",
             1.0,
             Some("pass"),
         );
@@ -4217,8 +3916,7 @@ mod screen_tests {
                 tokens: crate::usage::Tokens::default(),
                 cost_usd: Some(2.0),
                 ctx_peak: None,
-                version: None,
-                commit: None,
+                pipeline_version: String::new(),
                 outcome: None,
                 run: None,
                 trial: None,
@@ -4288,10 +3986,9 @@ mod screen_tests {
     }
 
     /// The top border's right side names the project and, once one is set,
-    /// the window — never the limit, which no row of the panel can move any
-    /// more.
+    /// the window — nothing else.
     #[test]
-    fn filters_label_names_the_window_but_never_the_limit() {
+    fn filters_label_names_only_the_project_and_the_window() {
         let loaded = loaded(Vec::new());
         let filters = Filters {
             since: "2026-08-01".to_string(),
@@ -4299,7 +3996,6 @@ mod screen_tests {
         };
         let label = filters_label(&loaded, &filters, View::Pipelines);
         assert_eq!(label, "demo · 2026-08-01 → now");
-        assert!(!label.contains("limit"), "{label}");
     }
 
     // ---------------------------------------------------------- pipelines
@@ -4309,10 +4005,10 @@ mod screen_tests {
     /// frame's own top border already names the view.
     #[test]
     fn pipelines_lines_opens_on_the_first_block_key() {
-        let entries = vec![entry("implement", "v1")];
+        let entries = vec![entry("implement")];
         let refs: Vec<&Entry> = entries.iter().collect();
         let loaded = loaded(entries.clone());
-        let lines = pipelines_lines(&refs, &loaded, &no_filters());
+        let lines = pipelines_lines(&refs, &loaded);
         match &lines[0] {
             Line::Text(text) => assert_eq!(text, "Pipeline: default"),
             Line::Row(_) => panic!("the first line should be the `Pipeline: default` block key"),
@@ -4323,7 +4019,7 @@ mod screen_tests {
 
     #[test]
     fn ordered_steps_follows_the_pipeline_s_own_declared_order() {
-        let entries = vec![entry("review", "v1"), entry("implement", "v1")];
+        let entries = vec![entry("review"), entry("implement")];
         let pipelines = Pipelines::builtin();
         let order = ordered_steps(&entries, "default", &pipelines);
         // `default`'s own pipeline runs `implement` before `review`, even
@@ -4333,18 +4029,17 @@ mod screen_tests {
 
     #[test]
     fn ordered_steps_appends_a_step_the_pipeline_no_longer_names() {
-        let entries = vec![entry("retired-step", "v1")];
+        let entries = vec![entry("retired-step")];
         let pipelines = Pipelines::builtin();
         let order = ordered_steps(&entries, "default", &pipelines);
         assert_eq!(order, vec!["retired-step".to_string()]);
     }
 
-    /// A step's row mixes every version in the window rather than reading
-    /// the newest against the one before it: `implement` ran once under
-    /// `v1` (`pass`) and once under `v2` (`fail`), and its row here is both
-    /// lanes together, not `v2`'s lane alone.
+    /// A step's row mixes every lane in the window: `implement` ran once for
+    /// task `a` (`pass`) and once for task `b` (`fail`), and its row here is
+    /// both lanes together, not just the more recent one.
     #[test]
-    fn step_blocks_aggregates_every_version_in_the_window() {
+    fn step_blocks_aggregates_every_lane_in_the_window() {
         let repo = fixture("step-blocks");
         bank(
             &repo,
@@ -4353,7 +4048,6 @@ mod screen_tests {
             "implement",
             "default",
             "qwen",
-            "v1",
             1.0,
             Some("pass"),
         );
@@ -4364,7 +4058,6 @@ mod screen_tests {
             "implement",
             "default",
             "qwen",
-            "v2",
             2.0,
             Some("fail"),
         );
@@ -4386,7 +4079,7 @@ mod screen_tests {
     /// pipeline name or a fingerprint.
     #[test]
     fn steps_lines_opens_on_the_pipeline_block_key() {
-        let entries = vec![entry("implement", "v1")];
+        let entries = vec![entry("implement")];
         let refs: Vec<&Entry> = entries.iter().collect();
         let loaded = loaded(entries.clone());
         let pipelines = Pipelines::builtin();
@@ -4403,9 +4096,9 @@ mod screen_tests {
     /// same width in both, not each block measuring its own.
     #[test]
     fn steps_lines_measures_step_width_from_the_longest_name_on_screen() {
-        let mut long_step = entry("reproduce-again", "v1");
+        let mut long_step = entry("reproduce-again");
         long_step.pipeline = "bugfix".to_string();
-        let entries = vec![entry("implement", "v1"), long_step];
+        let entries = vec![entry("implement"), long_step];
         let refs: Vec<&Entry> = entries.iter().collect();
         let loaded = loaded(entries.clone());
         let pipelines = Pipelines::builtin();
@@ -4470,7 +4163,6 @@ mod screen_tests {
             "implement",
             "default",
             "qwen",
-            "v1",
             1.5,
             Some("pass"),
         );
@@ -4482,8 +4174,8 @@ mod screen_tests {
         assert_eq!(rows, 1);
         assert!(path.starts_with(repo.root.join(".spoolway").join("evals")));
         let body = std::fs::read_to_string(&path).unwrap();
-        assert!(body.starts_with("project,pipeline,version,since,tasks,lanes,"));
-        assert!(body.contains(",default,v1,2026-08-01,1,1,"));
+        assert!(body.starts_with("project,pipeline,tasks,lanes,"));
+        assert!(body.contains(",default,1,1,"));
     }
 
     /// `e` on `dirs` and on `sessions` writes their own header, built from
@@ -4565,8 +4257,7 @@ mod screen_tests {
                 },
                 cost_usd: None,
                 ctx_peak: None,
-                version: Some("v1".into()),
-                commit: Some("commit-v1".into()),
+                pipeline_version: "1.0".into(),
                 outcome: Some("pass".into()),
                 run: Some("r-a".into()),
                 trial: None,
@@ -4627,7 +4318,7 @@ mod screen_tests {
         screen(&repo, "f\x7fq");
     }
 
-    /// A one-version ledger draws a table only a few lines tall — shorter
+    /// A small ledger draws a table only a few lines tall — shorter
     /// than either overlay panel. `draw` has to pad the frame's own body out
     /// to fit whichever panel is on top of it, or `overlay` writes past the
     /// frame's last row and the panel loses its own bottom border along
@@ -4790,7 +4481,6 @@ mod screen_tests {
             "implement",
             "other",
             "qwen",
-            "v1",
             1.0,
             Some("pass"),
         );
@@ -4841,8 +4531,7 @@ mod screen_tests {
                 },
                 cost_usd: Some(cost),
                 ctx_peak: None,
-                version: None,
-                commit: None,
+                pipeline_version: String::new(),
                 outcome: None,
                 run: None,
                 trial: None,

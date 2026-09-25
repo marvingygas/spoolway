@@ -327,6 +327,17 @@ pub(crate) struct LaneRecord {
     agent: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     model: String,
+    /// The pipeline's own `version:` this lane started under — see
+    /// [`crate::pipeline::Pipeline::version`]. Set once, at launch, and never
+    /// re-read: raising the pipeline's version while a lane is running does
+    /// not relabel it. Copied onto the lane's own ledger line by
+    /// `record_usage`, the same way `kind`, `agent` and `model` are.
+    ///
+    /// Empty for a lane this dispatcher never watched launch, the same as
+    /// those three — [`LaneRecord::readopted`] recovers it from the ledger's
+    /// own last line for this name where one exists.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pipeline_version: String,
     /// Where the lane's branch stood at launch. Read only when the lane is torn
     /// down without having reported, which is the one path where nothing else
     /// knows whether the work in the worktree is the lane's whole turn or the
@@ -435,6 +446,7 @@ impl LaneRecord {
             kind: String::new(),
             agent: String::new(),
             model: String::new(),
+            pipeline_version: String::new(),
             head: String::new(),
             held_for_block: false,
             person_turn_busy: false,
@@ -476,6 +488,7 @@ impl LaneRecord {
             record.kind = entry.kind.clone();
             record.agent = entry.agent.clone();
             record.model = entry.model.clone();
+            record.pipeline_version = entry.pipeline_version.clone();
         }
         record
     }
@@ -2461,8 +2474,6 @@ impl<'a> Dispatcher<'a> {
             .filter(|report| report.step == step_id)
             .map(|report| report.outcome.clone());
 
-        let stamp = crate::version::stamp(self.repo);
-
         let entry = crate::usage::Entry {
             ts: banked_at.to_rfc3339(),
             task: task_id.to_string(),
@@ -2490,8 +2501,7 @@ impl<'a> Dispatcher<'a> {
             // would need every past line re-read for one that is already the
             // largest reading in the transcript spoolway just harvested.
             ctx_peak: Some(harvest.ctx_peak),
-            version: Some(stamp.version),
-            commit: stamp.commit,
+            pipeline_version: record.pipeline_version.clone(),
             outcome,
             run: task.and_then(|t| t.front.run.clone()),
             trial: task.and_then(|t| t.front.trial.clone()),
@@ -3669,6 +3679,7 @@ impl<'a> Dispatcher<'a> {
                             kind: profile.kind.clone(),
                             agent: agent_name.clone(),
                             model: started.model,
+                            pipeline_version: pipeline.version.clone(),
                             head: started.head,
                             held_for_block: false,
                             person_turn_busy: false,
@@ -10935,8 +10946,7 @@ mod tests {
                 },
                 cost_usd: None,
                 ctx_peak: None,
-                version: None,
-                commit: None,
+                pipeline_version: "1.0".into(),
                 outcome: None,
                 run: None,
                 trial: None,
@@ -11649,8 +11659,7 @@ mod tests {
                 tokens: crate::usage::Tokens::default(),
                 cost_usd: None,
                 ctx_peak: None,
-                version: None,
-                commit: None,
+                pipeline_version: "1.0".into(),
                 outcome: None,
                 run: None,
                 trial: None,
@@ -11685,8 +11694,7 @@ mod tests {
                 },
                 cost_usd: None,
                 ctx_peak: None,
-                version: None,
-                commit: None,
+                pipeline_version: "1.0".into(),
                 outcome: None,
                 run: None,
                 trial: None,
@@ -11758,8 +11766,7 @@ mod tests {
                 tokens: crate::usage::Tokens::default(),
                 cost_usd: Some(7.50),
                 ctx_peak: None,
-                version: None,
-                commit: None,
+                pipeline_version: "1.0".into(),
                 outcome: None,
                 run: None,
                 trial: None,

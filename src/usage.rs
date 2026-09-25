@@ -164,16 +164,18 @@ pub struct Entry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ctx_peak: Option<u64>,
 
-    /// Fingerprint of the tracked configuration this lane ran under — see
-    /// [`crate::version`]. Absent on lines written before versions were
-    /// recorded, which read as `unversioned` rather than being dropped.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub version: Option<String>,
-    /// Short commit that last touched that configuration, `+dirty` where the
-    /// working tree had edits git never saw. The half of a version that can be
-    /// turned back into a diff.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub commit: Option<String>,
+    /// The pipeline's own `version:` this lane ran under — see
+    /// [`crate::pipeline::Pipeline::version`]. Set once, when the lane
+    /// starts, and never re-read: raising the pipeline's version while a
+    /// lane is running does not relabel it.
+    ///
+    /// A line written before this field existed, or one still carrying the
+    /// retired `version`/`commit` fingerprint, has no key of this name at
+    /// all — the default reads it as `1.0`, the same as a pipeline file that
+    /// never set one, rather than as some other version the fingerprint
+    /// never meant.
+    #[serde(default = "default_pipeline_version")]
+    pub pipeline_version: String,
     /// What this lane reported: `pass`, `fail` or `block`.
     ///
     /// Absent means the lane never reported one — it was killed, or it ended
@@ -203,8 +205,8 @@ pub struct Entry {
     /// [`sweep`]'s directory walk rather than dispatched as a lane. `None` on
     /// every lane line, historical or fresh: this is what [`Entry::is_lane`]
     /// tests, and a line carrying it also carries no `task`, `step`,
-    /// `pipeline`, `agent`, `outcome`, `run` or `version`, since none of
-    /// those describe a session spoolway never dispatched.
+    /// `pipeline`, `agent`, `outcome`, `run` or `pipeline_version`, since none
+    /// of those describe a session spoolway never dispatched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dir: Option<String>,
 
@@ -214,6 +216,15 @@ pub struct Entry {
     /// interesting once more than one ledger is being read at once.
     #[serde(skip)]
     pub project: String,
+}
+
+/// What a ledger line with no `pipeline_version` key at all reads as. Kept
+/// deliberately equal to [`crate::pipeline`]'s own `default_pipeline_version`
+/// — a private copy of the same literal, not a shared function — so a line
+/// banked before this field existed and a pipeline that has never raised its
+/// own version read the same way, `1.0`.
+fn default_pipeline_version() -> String {
+    "1.0".to_string()
 }
 
 /// The agent name historical interactive lines carry — nothing writes one any
@@ -2197,12 +2208,14 @@ fn banked_delta(repo: &Repo, session: &str, ledger: &[Entry], harvest: &Harvest)
 /// enough for that record to be swept next time.
 ///
 /// `carry` is the session's most recent lane line. Its `pipeline`, `agent`,
-/// `plan`, `run`, `trial` and `round` are copied onto the new line, so spend
-/// recovered by a sweep lands in the same `spoolway eval` row the lane's own
-/// turns did rather than in a pipeline-less one no group owns. `None` for
-/// [`bank_lane`]'s caller — the headless interrupt has a lane name and a
-/// transcript, not a loaded pipeline — where those fields stay blank the way a
-/// line written before they existed carries them.
+/// `plan`, `run`, `trial`, `round` and `pipeline_version` are copied onto the
+/// new line, so spend recovered by a sweep lands in the same `spoolway eval`
+/// row the lane's own turns did rather than in a pipeline-less one no group
+/// owns — and under the version the lane actually ran, not whatever a
+/// pipeline file says by the time the sweep runs. `None` for [`bank_lane`]'s
+/// caller — the headless interrupt has a lane name and a transcript, not a
+/// loaded pipeline — where those fields stay blank the way a line written
+/// before they existed carries them.
 #[allow(clippy::too_many_arguments)]
 fn bank_lane_at(
     repo: &Repo,
@@ -2216,7 +2229,6 @@ fn bank_lane_at(
     harvest: &Harvest,
 ) -> Option<Entry> {
     let delta = banked_delta(repo, session, ledger, harvest)?;
-    let stamp = crate::version::stamp(repo);
     let entry = Entry {
         ts: banked_at.to_rfc3339(),
         task: task.to_string(),
@@ -2233,8 +2245,12 @@ fn bank_lane_at(
         tokens: delta.tokens,
         cost_usd: delta.cost_usd,
         ctx_peak: Some(harvest.ctx_peak),
-        version: Some(stamp.version),
-        commit: stamp.commit,
+        // Carried from the line this sweep continues rather than read fresh
+        // — the pipeline that ran this lane, not whatever a pipeline file
+        // says right now.
+        pipeline_version: carry
+            .map(|c| c.pipeline_version.clone())
+            .unwrap_or_else(default_pipeline_version),
         // The turns swept up here arrived after the lane reported — or after it
         // was killed without reporting — so nothing judged them. A guessed
         // `pass` would put unjudged work in the pass rate.
@@ -2589,8 +2605,8 @@ fn matching_root(cwd: &Path, roots: &[PathBuf]) -> Option<PathBuf> {
 /// The same arithmetic [`bank_lane_at`] does for a settled lane, repeated for
 /// a population that never dispatched at all — which is exactly why the line
 /// this appends carries no `task`, `step`, `pipeline`, `agent`, `outcome`,
-/// `run` or `version`: none of those describe a session spoolway did not
-/// start.
+/// `run` or `pipeline_version`: none of those describe a session spoolway did
+/// not start.
 fn bank_dir_session(
     repo: &Repo,
     kind: &str,
@@ -2617,8 +2633,7 @@ fn bank_dir_session(
         tokens: delta.tokens,
         cost_usd: delta.cost_usd,
         ctx_peak: Some(harvest.ctx_peak),
-        version: None,
-        commit: None,
+        pipeline_version: String::new(),
         outcome: None,
         run: None,
         trial: None,
@@ -3698,8 +3713,7 @@ mod tests {
             },
             cost_usd: Some(0.41),
             ctx_peak: None,
-            version: Some("3f9a1c04".into()),
-            commit: Some("a91c33e".into()),
+            pipeline_version: "1.1".into(),
             outcome: Some("pass".into()),
             run: Some("r00001".into()),
             trial: None,
@@ -3714,7 +3728,7 @@ mod tests {
         assert_eq!(back[0].task, "login");
         assert_eq!(back[0].tokens.cache_read, 42609);
         assert_eq!(back[0].cost_usd, Some(0.41));
-        assert_eq!(back[0].version.as_deref(), Some("3f9a1c04"));
+        assert_eq!(back[0].pipeline_version, "1.1");
         assert_eq!(back[0].outcome.as_deref(), Some("pass"));
         assert_eq!(back[0].run.as_deref(), Some("r00001"));
 
@@ -3738,14 +3752,29 @@ mod tests {
             tokens: Tokens::default(),
             cost_usd: None,
             ctx_peak: None,
-            version: None,
-            commit: None,
+            pipeline_version: "1.0".into(),
             outcome: None,
             run: None,
             trial: None,
             dir: None,
             project: String::new(),
         }
+    }
+
+    /// A line written before `pipeline_version` existed, or one still
+    /// carrying the retired `version`/`commit` fingerprint, still parses —
+    /// the fingerprint is never read back as a pipeline version, and the
+    /// missing key reads as `1.0`, the same as a pipeline file that never
+    /// raised its own.
+    #[test]
+    fn a_line_with_no_pipeline_version_reads_as_1_0_and_a_fingerprint_line_still_parses() {
+        let old = r#"{"ts":"2026-08-04T06:14:15+00:00","task":"login","step":"review","pipeline":"default","agent":"claude","kind":"claude","model":"claude-opus-5","session":"s","tokens":{"input":1,"output":1,"cache_read":0,"cache_write_5m":0,"cache_write_1h":0,"reasoning":0},"version":"3f9a1c04","commit":"a91c33e"}"#;
+        let entry: Entry = serde_json::from_str(old).unwrap();
+        assert_eq!(entry.pipeline_version, "1.0");
+
+        let newer = r#"{"ts":"2026-08-04T06:14:15+00:00","task":"login","step":"review","pipeline":"default","agent":"claude","kind":"claude","model":"claude-opus-5","session":"s","tokens":{"input":1,"output":1,"cache_read":0,"cache_write_5m":0,"cache_write_1h":0,"reasoning":0}}"#;
+        let entry: Entry = serde_json::from_str(newer).unwrap();
+        assert_eq!(entry.pipeline_version, "1.0");
     }
 
     /// `read_cached` reads the ledger once and again only past what it has
@@ -4380,8 +4409,7 @@ mod tests {
             tokens: Tokens::default(),
             cost_usd: None,
             ctx_peak: None,
-            version: None,
-            commit: None,
+            pipeline_version: "1.0".into(),
             outcome: None,
             run: None,
             trial: None,
@@ -4912,7 +4940,7 @@ mod tests {
         assert_eq!(appended[0].pipeline, "");
         assert_eq!(appended[0].outcome, None);
         assert_eq!(appended[0].run, None);
-        assert_eq!(appended[0].version, None);
+        assert_eq!(appended[0].pipeline_version, "");
 
         std::fs::remove_dir_all(&home).ok();
     }

@@ -454,28 +454,22 @@ pub enum SpendBy {
 
 #[derive(Debug, Args)]
 #[command(
-    long_about = "Compare versions of your pipeline and prompts by what they cost to run.\n\n\
-        A version is a fingerprint of the tracked `.spoolway/` configuration — the config, \
-        the pipelines and the prompts. Every edit to any of them mints a new one, and every \
-        lane is banked under the version it ran under, so the ledger already holds the \
-        comparison.\n\n\
-        One block per pipeline, its versions inside it newest first. Read RUNS before \
-        believing a delta: a version that ran four runs can swing a long way on luck alone, \
-        and the column is there to say so.\n\n\
+    long_about = "What each pipeline costs to run, by pipeline.\n\n\
+        One row per pipeline, from the same ledger `spoolway spend` reads. Read RUNS before \
+        believing a figure: a pipeline that has only run a couple of times can swing a long \
+        way on luck alone, and the column is there to say so.\n\n\
         `spoolway spend` is a different read of the same ledger: a table grouped by task, \
         group, step, model, project or month, or one row per lane. `eval --by` still \
         works as a deprecated alias for it.",
     after_long_help = "\x1b[1mExamples:\x1b[0m\n  \
-        spoolway eval                       every pipeline, the last ten versions\n  \
-        spoolway eval --pipeline default    one pipeline's block\n  \
+        spoolway eval                       every pipeline\n  \
+        spoolway eval --pipeline default    one pipeline's row\n  \
         spoolway eval --step review         one step, across every pipeline\n\n  \
-        spoolway eval --since 30d           a window\n  \
-        spoolway eval --limit 3             fewer versions per block\n\n  \
+        spoolway eval --since 30d           a window\n\n  \
         spoolway eval --runs                one row per run, newest last\n  \
         spoolway eval --csv > report.csv    the same rows, flat\n\n\
         \x1b[1mReading a row:\x1b[0m\n  \
-        RUNS counts every run that touched the row, so a run straddling a version edit \n  \
-        counts in both; a footer line says how many. PASS is the share of lanes that \n  \
+        RUNS counts every run that touched the pipeline. PASS is the share of lanes that \n  \
         reported pass. L/RUN, USD/RUN and TIME/RUN are each figure's total over RUNS, \n  \
         and BLOCKS is how many lanes ended blocked. CTX PEAK is the largest context reading \n  \
         any lane on the row banked, as a share of that model's window.\n\n\
@@ -505,14 +499,6 @@ pub struct EvalArgs {
     #[arg(long, value_name = "YYYY-MM", conflicts_with_all = ["since", "until"], requires = "by")]
     pub month: Option<String>,
 
-    /// How many versions to show per pipeline block. Ten by default.
-    ///
-    /// `Option` rather than a `default_value_t`: `EvalArgs::limit()` is
-    /// where the default of 10 actually applies, so this field itself stays
-    /// `None` until a person types the flag.
-    #[arg(long, value_name = "N")]
-    pub limit: Option<usize>,
-
     /// Every project spoolway knows about, not just this one.
     #[arg(long, conflicts_with = "project")]
     pub all: bool,
@@ -521,8 +507,8 @@ pub struct EvalArgs {
     #[arg(long, value_name = "NAME")]
     pub project: Option<String>,
 
-    /// One row per run instead of a grouped summary — task, when, version,
-    /// pipeline, lanes, pass, blocks, ctx peak, out, cost, time.
+    /// One row per run instead of a grouped summary — task, when, pipeline,
+    /// lanes, pass, blocks, ctx peak, out, cost, time.
     #[arg(long)]
     pub runs: bool,
 
@@ -577,15 +563,6 @@ pub struct EvalArgs {
     /// `eval::run`.
     #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "CUT", hide = true)]
     pub by: Option<String>,
-}
-
-impl EvalArgs {
-    /// How many versions a pipeline block shows — `--limit`, or ten when it
-    /// was not given. The one place the default actually applies, now that
-    /// `limit` itself is `None` until a person types the flag.
-    pub fn limit(&self) -> usize {
-        self.limit.unwrap_or(10)
-    }
 }
 
 #[derive(Debug, Args)]
@@ -1712,20 +1689,6 @@ mod tests {
         assert!(eval_bare_from(&[]));
     }
 
-    /// Clap's `args_present` sees a flag whether or not its value happens to
-    /// equal what `EvalArgs::limit()` would have supplied anyway — which is
-    /// the whole point: a person who typed `--limit 10` asked for the
-    /// printing path, not the screen, even though the number changes nothing.
-    #[test]
-    fn limit_spelled_out_to_its_own_default_is_not_bare() {
-        let args = eval_args(&["--limit", "10"]);
-        assert_eq!(args.limit, Some(10));
-        assert!(
-            !eval_bare_from(&["--limit", "10"]),
-            "a person who typed --limit 10 asked for the printing path, not the screen"
-        );
-    }
-
     #[test]
     fn any_other_flag_is_not_bare_either() {
         assert!(!eval_bare_from(&["--pipeline", "default"]));
@@ -1765,12 +1728,6 @@ mod tests {
         assert!(!eval_bare_from_full(&[
             "spoolway", "-C", "/tmp", "eval", "--csv"
         ]));
-    }
-
-    #[test]
-    fn limit_defaults_to_ten_when_unset() {
-        assert_eq!(eval_args(&[]).limit(), 10);
-        assert_eq!(eval_args(&["--limit", "3"]).limit(), 3);
     }
 
     /// `--by` with no cut named still has to be told from "not typed at

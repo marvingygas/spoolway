@@ -1,20 +1,12 @@
 ---
 domain: eval
-covers: ["src/eval.rs", "src/version.rs", "src/screen.rs"]
+covers: ["src/eval.rs", "src/screen.rs"]
 ---
 
-# Comparing versions
+# Comparing pipelines
 
-`spoolway eval` shows what a change to a prompt, a pipeline or the config did to pass rate,
-cost and time. It reads the ledger described in [Cost accounting](cost.md). There is no second
-store.
-
-```mermaid
-flowchart LR
-  A[edit a prompt, pipeline or config.toml] --> B[new version fingerprint]
-  B --> C[lanes bank under it]
-  C --> D[spoolway eval: one row per version]
-```
+`spoolway eval` shows what each pipeline costs to run, by pass rate, cost and time. It reads
+the ledger described in [Cost accounting](cost.md). There is no second store.
 
 ```
 spoolway eval
@@ -22,9 +14,8 @@ spoolway eval
 ```
 pipelines
 default
-VERSION    SINCE        RUNS   L/RUN  PASS  BLOCKS  CTX PEAK  USD/RUN   TIME/RUN
-c310d7e2   2026-08-16      1     2.0   50%       0       68%     4.42    12m 40s
-b210d1a8   2026-08-15      4     4.8   74%       5       91%    70.26     1h 04m
+RUNS   L/RUN  PASS  BLOCKS  CTX PEAK  USD/RUN   TIME/RUN
+    5    3.8   68%       5       91%    52.30     54m 12s
 ```
 
 ## The screen
@@ -36,7 +27,7 @@ prints the table instead.
 
 | View | What it shows |
 |---|---|
-| `pipelines` | One block per pipeline, one row per version |
+| `pipelines` | One row per pipeline |
 | `steps` | Per pipeline, one row per step |
 | `runs` | One row per run, newest first |
 | `dirs` | One row per watched directory, over its own sessions |
@@ -62,32 +53,17 @@ day, `x` clears the bound, `esc` goes back.
 A line under the table names any model on screen that has no price. Its cost figures are then
 a floor.
 
-## What a version is
-
-A version is a fingerprint over the parts of `.spoolway/` that decide how work is done:
-`config.toml`, every pipeline and every prompt. An active
-[overrides layer](configuration.md#the-overrides-layer) is part of the fingerprint. `queue/`
-and `archive/` are not.
-
-spoolway stores no change history. Git holds every version of `.spoolway/`.
-
-## A block per pipeline
-
-One version covers every pipeline, so the same version can appear in several blocks. Blocks
-are ordered by their newest version. Every block repeats the header, one row per version,
-newest first. With `--all`, a `PROJECT` column appears when the rows span more than one
-project.
-
 ## Reading a row
 
 ```
-spoolway eval                          every pipeline, the last ten versions
-spoolway eval --pipeline default       one pipeline's block
+spoolway eval                          every pipeline
+spoolway eval --pipeline default       one pipeline's row
 spoolway eval --step review            one step, across every pipeline
 spoolway eval --pipeline default --step review
-spoolway eval --limit 3                fewer versions per block
 spoolway eval --since 30d              a window
 ```
+
+With `--all`, a `PROJECT` column appears when the rows span more than one project.
 
 `--since` and `--until` take a duration back from now (`30d`, `4h`), a local date
 (`2026-08-21`), or a whole month (`2026-08`). `--until` includes the whole day or month.
@@ -102,14 +78,6 @@ spoolway eval --since 30d              a window
 | `USD/RUN` | Cost per run |
 | `TIME/RUN` | Wall time per run |
 
-A row ends in ` ovr` when its lanes ran under an overrides layer.
-
-A run whose lanes span two versions counts on both rows. A footer says how many:
-
-```
-2 run(s) spanned a version change and are counted in both rows.
-```
-
 ## Runs
 
 Every task gets a `run` id when its worktree is cut. Every ledger line for that task carries
@@ -120,9 +88,9 @@ spoolway eval --runs
 ```
 
 ```
-TASK    WHEN        VERSION   PIPELINE  LANES  PASS  BLOCKS  CTX PEAK      OUT  COST USD      TIME
-login   2026-08-04  8b21ee90  default      4  100%       0       73%    12.1k      0.41    9m 20s
-signup  2026-08-09  3f9a1c04  default      6   67%       1         —    24.0k      1.02   14m 02s
+TASK    WHEN        PIPELINE  LANES  PASS  BLOCKS  CTX PEAK      OUT  COST USD      TIME
+login   2026-08-04  default      4  100%       0       73%    12.1k      0.41    9m 20s
+signup  2026-08-09  default      6   67%       1         —    24.0k      1.02   14m 02s
 ```
 
 One row per run. The columns are totals for that run.
@@ -145,8 +113,8 @@ spoolway eval --runs --csv
 ```
 
 ```
-project,pipeline,version,since,tasks,lanes,lanes_per_task,pass,blocks,ctx_peak_tokens,ctx_peak_pct,out_tokens,out_per_task,cost_usd,cost_per_task,unpriced,time_s,time_per_task_s
-spoolway,default,c310d7e2,2026-08-16,1,2,2.00,0.50,0,68000,0.68,40300,40300,4.42,4.42,0,760,760
+project,pipeline,tasks,lanes,lanes_per_task,pass,blocks,ctx_peak_tokens,ctx_peak_pct,out_tokens,out_per_task,cost_usd,cost_per_task,unpriced,time_s,time_per_task_s
+spoolway,default,1,2,2.00,0.50,0,68000,0.68,40300,40300,4.42,4.42,0,760,760
 ```
 
 Same rows and order as the table. Raw seconds, raw tokens, no `$`, no `k`. Header names match
@@ -160,7 +128,7 @@ project, month or lane. See [Cost accounting](cost.md).
 
 ## The honest limit
 
-Every task is different work. A version that drew easy tasks looks better than one that drew
+Every task is different work. A pipeline that drew easy tasks looks better than one that drew
 hard ones. Read every figure against `RUNS`, the sample size. `spoolway eval` catches drift,
 such as a review step that got a third pricier after a prompt edit.
 
@@ -168,5 +136,3 @@ such as a review step that got a third pricier after a prompt edit.
 
 `spoolway report` writes a lane's verdict to the task's `last_report:`. The dispatcher reads it
 back when it banks the lane. A lane that never reported counts as neither pass nor failure.
-
-Ledger lines written before versions existed group under `unversioned`.

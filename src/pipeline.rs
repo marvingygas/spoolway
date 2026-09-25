@@ -811,6 +811,15 @@ fn default_true() -> bool {
     true
 }
 
+/// What an absent `version:` reads as.
+fn default_pipeline_version() -> String {
+    "1.0".to_string()
+}
+
+fn is_default_pipeline_version(value: &str) -> bool {
+    value == "1.0"
+}
+
 impl Step {
     /// What this step is, read off the keys it carries.
     ///
@@ -892,6 +901,21 @@ pub struct Pipeline {
     /// second spelling of it is one that can disagree.
     #[serde(skip)]
     pub name: String,
+
+    /// Yours to raise when this pipeline changed enough to compare, in `x.y`
+    /// form. Absent reads `1.0`.
+    ///
+    /// A plain `String`, read as written — `1.10` stays `1.10` rather than
+    /// folding to the `1.1` an `f64` would read it as. spoolway never checks
+    /// its format, never compares it against a previous run, and never bumps
+    /// or warns about it: it is a person's own note to themselves, recorded
+    /// onto every lane's ledger line so a later `spoolway eval` can group by
+    /// it, and nothing more.
+    #[serde(
+        default = "default_pipeline_version",
+        skip_serializing_if = "is_default_pipeline_version"
+    )]
+    pub version: String,
 
     /// What this pipeline is for, in a few sentences of free prose — read by
     /// a person choosing between pipelines, and by `spoolway-tasks`' own
@@ -2146,6 +2170,32 @@ mod tests {
         }
     }
 
+    /// An absent `version:` reads as `1.0` — the built-in `default` pipeline
+    /// never sets one, per the task's own non-goal against touching this
+    /// project's shipped pipelines.
+    #[test]
+    fn an_absent_version_reads_as_1_0() {
+        let pipeline = Pipelines::builtin().get("default").unwrap().clone();
+        assert_eq!(pipeline.version, "1.0");
+    }
+
+    /// `version:` is read into a plain `String`, as written — `1.10` stays
+    /// `1.10` rather than folding to the `1.1` an `f64` would read it as,
+    /// and spoolway never checks, compares or bumps it.
+    #[test]
+    fn version_is_read_as_written_not_folded_as_a_number() {
+        let pipeline = Pipeline::parse(
+            "solo",
+            "version: 1.10\n\
+             steps:\n  \
+             - id: a\n    agent: pi\n    prompt: implementer\n    model: m\n    \
+               on_pass: z\n  \
+             - id: z\n    end: true\n",
+        )
+        .unwrap();
+        assert_eq!(pipeline.version, "1.10");
+    }
+
     /// `on_fail: blocked` is exactly what an absent `on_fail` already
     /// resolves to, so it warns — and a step with no `on_fail` at all draws
     /// nothing, since there is no redundant key there to name.
@@ -2441,6 +2491,7 @@ mod tests {
     fn the_key_reference_names_every_key_a_step_can_carry() {
         let block = key_block();
         for key in [
+            "version",
             "task_template",
             "steps",
             "id",

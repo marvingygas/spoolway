@@ -1088,7 +1088,7 @@ pub fn read_stamp(home: &Path, checkout: &Path) -> Option<(String, String)> {
 /// exactly once, at the moment they were last brought current.
 fn text_fingerprint(checkout: &Path) -> String {
     let mut material = String::new();
-    // Best-effort, like `version::stamp`'s own read of the tracked files: a
+    // Best-effort, like `version::layer_fingerprint`'s own read of a layer: a
     // config that will not load or render at all is a fact `sync`'s own
     // `config()` reports as `Outcome::Blocked` and leaves untouched, not a
     // reason to fail the whole stamp — the fingerprint it produces here is

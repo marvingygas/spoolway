@@ -370,8 +370,8 @@ Fire one job now. Its schedule is unchanged.
 
 ### `spoolway eval`
 
-Compare versions of the pipeline and prompts by what they cost. Bare, in a terminal, it opens
-the eval screen. With any flag, or when stdout is not a terminal, it prints a table.
+What each pipeline costs to run, by pipeline. Bare, in a terminal, it opens the eval screen.
+With any flag, or when stdout is not a terminal, it prints a table.
 
 ```
 spoolway eval
@@ -394,7 +394,6 @@ spoolway eval
 | `--step <STEP>` | | One step only |
 | `--since <WHEN>` | | Start of the window: a duration ago (`24h`, `7d`), a date (`2026-08-01`) or a month (`2026-08`) |
 | `--until <WHEN>` | | End of the window, same forms |
-| `--limit <N>` | `10` | Versions per pipeline |
 | `--all` | | Every project |
 | `--project <NAME>` | | One named project |
 | `--runs` | | One row per run |
@@ -406,7 +405,7 @@ spoolway eval
 | `--csv` | | Print the rows as CSV |
 | `--by`, `--month` | | Deprecated. Use `spoolway spend` |
 
-See [Comparing versions](eval.md).
+See [Comparing pipelines](eval.md).
 
 ### `spoolway spend [<task|group|step|model|project|month|lane>]`
 

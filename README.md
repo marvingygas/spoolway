@@ -361,8 +361,8 @@ See **[Configuration](docs/configuration.md)**.
 ## Eval every run
 
 When a lane finishes, its transcript is read and written to a ledger: tokens, cost, wall
-time, and what the lane reported. Every edit to your pipelines, prompts or config creates a
-new version, so you can see what your last change did to pass rate and price.
+time, and what the lane reported. `spoolway eval` shows what each pipeline costs to run, by
+pass rate and price.
 
 ```
 spoolway eval

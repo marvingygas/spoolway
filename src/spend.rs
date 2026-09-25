@@ -1,9 +1,9 @@
 //! `spoolway spend`: the lane ledger read back out, grouped and totalled.
 //!
-//! This is a separate read of the same `usage.jsonl` [`crate::eval`]'s
-//! version screen is, through the same [`collect_scoped`] and [`window_of`]
-//! that screen uses — one ledger, two different questions asked of it.
-//! `eval --by` is a deprecated alias for [`run`], kept so a script or skill
+//! This is a separate read of the same `usage.jsonl` [`crate::eval`]'s own
+//! screen is, through the same [`collect_scoped`] and [`window_of`] that
+//! screen uses — one ledger, two different questions asked of it. `eval
+//! --by` is a deprecated alias for [`run`], kept so a script or skill
 //! written before the split keeps working.
 
 use anyhow::{Context, Result, bail};
@@ -260,9 +260,9 @@ fn collect(repo: &Repo, filters: &Filters) -> Result<(Vec<crate::usage::Entry>, 
 
 /// The window a `--month`, `--since` and `--until` triple describes.
 ///
-/// Shared with `spoolway eval`'s own version screen, which takes the same
-/// three forms for the same reason: a person asking what August cost and a
-/// person asking what August's pipeline versions cost mean the same August.
+/// Shared with `spoolway eval`'s own screen, which takes the same three
+/// forms for the same reason: a person asking what August cost and a
+/// person asking what August's pipelines cost mean the same August.
 pub fn window_of(
     month: Option<&str>,
     since: Option<&str>,

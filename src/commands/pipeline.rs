@@ -72,7 +72,7 @@ fn build_list(pipelines: &Pipelines) -> PipelineListJson {
 }
 
 /// Keys a pipeline file may carry at the top level, above `steps:`.
-const PIPELINE_KEYS: &[&str] = &["description", "task_template", "steps"];
+const PIPELINE_KEYS: &[&str] = &["version", "description", "task_template", "steps"];
 
 /// Keys a step may carry — every one `Step` actually reads a value from.
 /// `loop` stands for the struct's own `r#loop`, a raw identifier only
@@ -122,6 +122,11 @@ const REFUSED_KEYS: &[&str] = &[
 /// and [`STEP_KEYS`] together — written from the doc comment already on the
 /// field in `pipeline.rs`.
 const FIELD_SENTENCES: &[(&str, &str)] = &[
+    (
+        "version",
+        "Yours to raise when this pipeline changed enough to compare, in `x.y` \
+         form. spoolway only records it — absent takes `1.0`.",
+    ),
     (
         "task_template",
         "Which task skeleton a task queued on this pipeline is written from, by \
