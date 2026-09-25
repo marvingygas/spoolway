@@ -370,6 +370,10 @@ tab. Each split halves the smallest pane in the tab along its longer side, so a 
 spiral. A tab left holding nothing is closed on the next pass, unless it is its workspace's only
 tab.
 
+Under `split`, a task's tab is renamed to the task's slug, and stays that way across a
+dispatcher restart. Its panes then show only the step. Under `grouped`, several tasks share one
+tab, so its panes show `<task> · <step>`, the same as the lane's own name.
+
 ### Vacating a pane
 
 When a step finishes, the dispatcher asks its session to leave the pane, so the next step can

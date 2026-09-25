@@ -3841,7 +3841,7 @@ impl<'a> Dispatcher<'a> {
                 let started = if step.headless {
                     runs.start(&key, &run, &worktree, &env)
                 } else {
-                    self.start_command_in_pane(task, &key, &run, &worktree, &env, &runs)
+                    self.start_command_in_pane(task, step, &run, &worktree, &env, &runs)
                 };
                 match started {
                     Ok(_) => {
@@ -3946,19 +3946,33 @@ impl<'a> Dispatcher<'a> {
     fn start_command_in_pane(
         &self,
         task: &Task,
-        key: &str,
+        step: &Step,
         run: &str,
         worktree: &Path,
         env: &BTreeMap<String, String>,
         runs: &crate::command_step::Runs,
     ) -> Result<u32> {
+        // The run's own identity — never touched by the visible-label split
+        // below, so a command step's log file and pane lookup stay keyed on
+        // task-and-step whether or not the pane says both.
+        let key = crate::command_step::Runs::key(&step.id, task.id());
         let tab = task
             .front
             .tab_id
             .clone()
             .or_else(|| task.front.pane_id.clone())
             .context("task has a workspace but no recorded tab or pane")?;
-        let script = runs.script_for_pane(key, run, env)?;
+        // Same split as an agent lane's own pane label — see `start_one` —
+        // for the same reason: under `split` the task's tab already says
+        // which task this is, so the pane says only the step. No need for
+        // `start_one`'s extra `task.front.tab_id.is_some()` gate against
+        // headless: headless's own `run_in_pane` is the trait default, which
+        // answers `None` and never looks at `label` at all.
+        let label = match self.mux.task_owns_workspace() {
+            true => step.id.clone(),
+            false => key.clone(),
+        };
+        let script = runs.script_for_pane(&key, run, env)?;
         // This process's own environment, because a pane belongs to the
         // multiplexer's server rather than to the dispatcher: without this the
         // command would run with whatever environment that server was started
@@ -3992,13 +4006,13 @@ impl<'a> Dispatcher<'a> {
         pane_env.extend(env.iter().map(|(k, v)| (k.clone(), v.clone())));
         match self
             .mux
-            .run_in_pane(&tab, worktree, key, &script, &pane_env)?
+            .run_in_pane(&tab, worktree, &key, &label, &script, &pane_env)?
         {
             Some(pane) => {
-                runs.record_pane(key, &pane)?;
-                runs.await_started(key)
+                runs.record_pane(&key, &pane)?;
+                runs.await_started(&key)
             }
-            None => runs.start(key, run, worktree, env),
+            None => runs.start(&key, run, worktree, env),
         }
     }
 
@@ -4642,6 +4656,22 @@ fn ensure_workspace(
         }
     }
 
+    // Herdr labels a freshly opened tab numerically, and forgets any rename
+    // once its own process restarts — so this runs every pass a split task
+    // still owns its tab, fresh open and every resume alike, rather than
+    // once at creation. Every caller of this function reaches a task's tab
+    // this way — an agent lane's own `start_one` and a command step's
+    // `run_command` alike — so a task whose steps are all commands gets its
+    // tab named too, not only one that happens to run an agent first.
+    // `task.front.tab_id` specifically, never the pane fallback `start_one`
+    // and `start_command_in_pane` split from: a backend with no tab, like
+    // headless, has nothing here to rename.
+    if mux.task_owns_workspace()
+        && let Some(tab_id) = task.front.tab_id.as_deref()
+    {
+        mux.rename_tab(tab_id, task.id())?;
+    }
+
     Ok((
         task.front
             .worktree_path
@@ -5001,7 +5031,18 @@ fn start_one(
     // here, so it was kept, but the ids beside it are somebody else's. Let go of
     // the placement rather than failing forever — the next pass cuts a workspace
     // of its own and the task carries on.
-    let label = tab_label(task.id(), &step.id);
+    // Under `split` the task's own tab already carries the task — see the
+    // `rename_tab` call above — so the pane inside it carries only the step;
+    // under `grouped` several tasks share one tab and the pane has to say
+    // which is which, same as it always did. Gated on a real tab, not just
+    // `task_owns_workspace()` alone: headless answers that the same way split
+    // does, but records no tab at all — see `Mux::create_workspace`'s doc on
+    // `Headless` — and has no visible row to lean on for the task half of
+    // this label, which its own turn header still needs.
+    let label = match mux.task_owns_workspace() && task.front.tab_id.is_some() {
+        true => step.id.clone(),
+        false => tab_label(task.id(), &step.id),
+    };
     let pane_id = match inherited {
         Some(pane_id) => pane_id,
         None => match mux.split_pane(&tab, &worktree) {
@@ -5983,6 +6024,7 @@ mod tests {
             &self,
             tab_id: &str,
             cwd: &Path,
+            key: &str,
             label: &str,
             script: &str,
             env: &BTreeMap<String, String>,
@@ -5993,7 +6035,7 @@ mod tests {
             let mut splits = self.splits.borrow_mut();
             *splits += 1;
             let pane = format!("{tab_id}.s{splits}");
-            self.log(format!("run_in_pane {tab_id} -> {pane} ({label})"));
+            self.log(format!("run_in_pane {tab_id} -> {pane} ({key}) ({label})"));
             // The names in its environment, the same way `start_lane` logs a
             // lane's own — so a test can assert this backend was handed one at
             // all, without depending on the script text `script_for_pane` also
@@ -6098,6 +6140,10 @@ mod tests {
         }
         fn rename_pane(&self, _pane: &str, label: &str) -> Result<()> {
             self.log(format!("pane {label}"));
+            Ok(())
+        }
+        fn rename_tab(&self, tab_id: &str, label: &str) -> Result<()> {
+            self.log(format!("rename_tab {tab_id} {label}"));
             Ok(())
         }
     }
@@ -7776,19 +7822,107 @@ mod tests {
         );
     }
 
-    /// A grid of panes is only readable if each says what it is: the pane is
-    /// labelled with the lane's own name, the same string every later call
-    /// addresses it by — one name, not a display name over a hidden key.
+    /// Under `grouped`, several tasks share one project tab, so a pane still
+    /// has to say which task it belongs to as well as which step — the same
+    /// string [`LaneSpec::name`] addresses it by, unlike under `split` where
+    /// the task's own tab already says so (see the next test).
     #[test]
-    fn a_pane_is_labelled_with_the_lanes_own_name() {
+    fn a_grouped_pane_is_labelled_with_the_lanes_own_name() {
         let repo = fixture("pane-label");
         add_task(&repo, "demo", "queued");
-        let mux = FakeMux::new(vec![]);
+        let mux = FakeMux::new(vec![]).tabs_in_one_workspace();
 
         run_pass(&repo, &mux);
 
         assert_eq!(mux.did("pane"), ["pane demo · implement"]);
         assert_eq!(mux.did("start"), ["start demo · implement"]);
+        assert!(
+            mux.did("rename_tab").is_empty(),
+            "a shared tab is never a single task's to rename: {:?}",
+            mux.calls()
+        );
+    }
+
+    /// Under `split`, every task already has its own tab naming it, so its
+    /// pane only needs to say which step is running there — not repeat the
+    /// task name the tab beside it already shows. The lane's own name (what
+    /// `start_lane` addresses it by) stays `task · step` regardless; only
+    /// the visible pane label drops the task.
+    #[test]
+    fn a_split_agent_panes_label_is_only_its_step_not_the_task() {
+        let repo = fixture("split-pane-label");
+        add_task(&repo, "demo", "queued");
+        let mux = FakeMux::new(vec![]); // default: task_owns_workspace() == true, i.e. split
+
+        run_pass(&repo, &mux);
+
+        assert_eq!(
+            mux.did("pane"),
+            ["pane implement"],
+            "a split task's own tab already names the task; its pane label \
+             should be just the step: {:?}",
+            mux.calls()
+        );
+        assert_eq!(
+            mux.did("start"),
+            ["start demo · implement"],
+            "the lane's own name stays task-and-step regardless of its \
+             visible pane label: {:?}",
+            mux.calls()
+        );
+    }
+
+    /// A split task's tab is renamed to the task's own slug the moment it is
+    /// cut, on the same pass that opens it — Herdr's own default label for a
+    /// freshly opened tab is a bare number, and this is what replaces it.
+    #[test]
+    fn a_freshly_cut_split_tasks_tab_is_renamed_to_its_slug() {
+        let repo = fixture("split-tab-fresh");
+        add_task(&repo, "demo", "queued");
+        let mux = FakeMux::new(vec![]); // default: task_owns_workspace() == true, i.e. split
+
+        run_pass(&repo, &mux);
+
+        assert_eq!(
+            mux.did("rename_tab"),
+            ["rename_tab w9:t1 demo"],
+            "a task's own tab should be renamed to its slug as soon as it is \
+             cut: {:?}",
+            mux.calls()
+        );
+    }
+
+    /// A split task's tab is renamed again on a later pass that finds the
+    /// task already sitting on it — not just the one that first cut it.
+    /// Herdr forgets a rename once its own process restarts, and spoolway
+    /// only ever rediscovers the tab id from the task file, never from a
+    /// rename that outlived the herdr it was sent to; re-asserting the label
+    /// every pass is the only way a resumed dispatcher's tab reliably shows
+    /// the slug too, per the task's own "resumed split task" mockup.
+    #[test]
+    fn a_resumed_split_tasks_tab_is_renamed_to_its_slug_too() {
+        let repo = fixture("split-tab-resumed");
+        // Already placed — `workspace_id`/`tab_id`/`pane_id` set as though an
+        // earlier dispatcher had cut this task's workspace on a run that has
+        // since restarted, rather than freshly cut by this pass.
+        add_task_with_worktree(&repo, "demo", "queued");
+        let mux = FakeMux::new(vec![]);
+
+        run_pass(&repo, &mux);
+
+        assert!(
+            mux.did("create_workspace").is_empty(),
+            "this task's workspace was already placed; a resumed pass must \
+             not cut it a second one: {:?}",
+            mux.calls()
+        );
+        assert_eq!(
+            mux.did("rename_tab"),
+            ["rename_tab w1:t1 demo"],
+            "a resumed task's already-existing tab should be renamed to its \
+             slug too: {:?}",
+            mux.calls()
+        );
     }
 
     /// `headless` records a pane for a task and never a tab — its
@@ -9521,7 +9655,9 @@ mod tests {
 
         assert!(mux.did("tab").is_empty(), "{:?}", mux.calls());
         assert!(mux.did("workspace").is_empty(), "{:?}", mux.calls());
-        assert_eq!(mux.did("pane"), ["pane demo · review"]);
+        // Split's own pane label carries the step alone — the task's row is
+        // what this test is about, and stays untouched either way.
+        assert_eq!(mux.did("pane"), ["pane review"]);
     }
 
     #[test]
@@ -14170,6 +14306,71 @@ mod tests {
                 .iter()
                 .any(|call| call.contains("w1:t1.s1")),
             "a passing command's pane closes behind it: {:?}",
+            mux.calls()
+        );
+    }
+
+    /// Same as the test above, but for the visible label: under `split` — the
+    /// default `FakeMux::new` — a command pane drops the task the same way an
+    /// agent lane's own pane does, since the step's own tab already names it.
+    /// The run's own identity (what the log file and pane lookup are keyed
+    /// on) still carries `demo · implement`, logged here as `run_in_pane`'s
+    /// own `key`.
+    #[test]
+    fn a_split_command_panes_label_is_only_its_step_not_the_task() {
+        let repo = fixture("command-pane-split-label");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]).offering_panes();
+        let pipelines = pipelines_running("echo paned", false);
+
+        drive(&repo, &pipelines, &mux, &path, "review");
+
+        assert!(
+            mux.did("run_in_pane")
+                .iter()
+                .any(|call| call.contains("(demo · implement) (implement)")),
+            "a split command pane's own identity stays task-and-step, but its \
+             visible label should be just the step: {:?}",
+            mux.calls()
+        );
+        // A task whose steps are all commands still gets its own tab named —
+        // `ensure_workspace` renames it, not `start_one`, so a task that
+        // never runs an agent step is not left with a numbered tab. `drive`
+        // runs more than one pass here, each re-asserting the label, so this
+        // checks every call it logged rather than an exact count.
+        assert!(
+            mux.did("rename_tab")
+                .iter()
+                .all(|call| call == "rename_tab w1:t1 demo"),
+            "a command-only task's tab should be renamed to its slug too: {:?}",
+            mux.calls()
+        );
+        assert!(
+            !mux.did("rename_tab").is_empty(),
+            "the tab should have been renamed at least once: {:?}",
+            mux.calls()
+        );
+    }
+
+    /// Under `grouped`, the shared tab names no single task, so a command
+    /// pane keeps both — same as the identity it is already keyed on.
+    #[test]
+    fn a_grouped_command_panes_label_keeps_task_and_step() {
+        let repo = fixture("command-pane-grouped-label");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![])
+            .offering_panes()
+            .tabs_in_one_workspace();
+        let pipelines = pipelines_running("echo paned", false);
+
+        drive(&repo, &pipelines, &mux, &path, "review");
+
+        assert!(
+            mux.did("run_in_pane")
+                .iter()
+                .any(|call| call.contains("(demo · implement) (demo · implement)")),
+            "a grouped command pane's visible label should still be \
+             task-and-step: {:?}",
             mux.calls()
         );
     }

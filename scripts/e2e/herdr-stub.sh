@@ -282,6 +282,19 @@ case "$DOMAIN $VERB" in
       "$(jstr "$tab")" "$(jstr "$pane")" "$(jstr "$tab")"
     ;;
 
+  "tab rename")
+    tab=${POS[0]:?}
+    label=${POS[1]:-}
+    # Rewrite this tab's own line in place — the third field, its label —
+    # leaving every other tab's line untouched. Real herdr answers the same
+    # `{}` either way; this double has no notion of a tab id it does not
+    # recognise to refuse against.
+    awk -F'\t' -v OFS='\t' -v t="$tab" -v l="$label" \
+      '$1==t {$3=l} {print}' "$STATE/tabs" >"$STATE/tabs.tmp"
+    mv "$STATE/tabs.tmp" "$STATE/tabs"
+    echo '{"result":{}}'
+    ;;
+
   "tab close")
     tab=${POS[0]:-}
     cp "$STATE/panes" "$STATE/panes.snap"
@@ -332,6 +345,15 @@ case "$DOMAIN $VERB" in
     ;;
 
   "pane rename")
+    pane=${POS[0]:?}
+    label=${POS[1]:-}
+    # Rewrite this pane's own line in place — the fourth field, its label —
+    # the same way `tab rename` above rewrites a tab's third. Without this a
+    # pane's label column keeps whatever `make_pane` wrote at creation, which
+    # for a split pane is the empty string it was cut with.
+    awk -F'\t' -v OFS='\t' -v p="$pane" -v l="$label" \
+      '$1==p {$4=l} {print}' "$STATE/panes" >"$STATE/panes.tmp"
+    mv "$STATE/panes.tmp" "$STATE/panes"
     echo '{"result":{}}'
     ;;
 
