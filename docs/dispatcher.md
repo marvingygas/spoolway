@@ -315,7 +315,7 @@ separate from this. See [When a task needs a person](tasks.md#when-a-task-needs-
 | Launch guard | A lane that dies at launch and leaves no session blocks the task. In an unattended run it is retried on a doubling delay, capped at one hour. | A pass that sees the lane; every stage transition; a dispatcher stop. |
 | Launch-failure ceiling | A launch that cannot start at all, such as a refused tab or an unconfigured model, is retried twice. The third failure in a row routes the task to the step's `on_fail`, or `blocked`. | A launch that starts; arriving at the step again; re-queueing the document. |
 | Pane-busy wait | A pane that has not reached its shell prompt refuses `agent start`. The task waits. After ten minutes it routes the way the launch-failure ceiling does. | A launch that starts; arriving at the step again; re-queueing the document. |
-| A step's `loop:` | How many times a task may arrive at the step from a given step. | `spoolway resume`, for the loops out of the step it resumes at. |
+| A step's `loop:` | How many times a task may arrive at the step, by any route. | Never. A person's resume counts too, and refunds nothing. |
 | Reminder loop | Three reminders to a silent lane. | Anything the lane writes to its transcript. |
 | Live-child ceiling | How long a lane may hold a child process before it is escalated. | The process exiting. |
 | Issue-tracking hook retry | A failing `[issue_tracking]` hook retries on a doubling delay from ten seconds, capped at an hour. | The hook succeeding. |

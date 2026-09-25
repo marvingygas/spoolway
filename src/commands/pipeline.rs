@@ -201,11 +201,10 @@ const FIELD_SENTENCES: &[(&str, &str)] = &[
     ),
     (
         "loop",
-        "Laps allowed per route out — backward moves this step makes, not \
-         arrivals at it. A bare number bounds every route; the map form bounds \
-         one at a time, keyed by where the task is sent. A spent budget parks \
-         the task on `blocked` for a person. Three is the ceiling worth \
-         reaching for; a flow that needs more is welcome to say so, and \
+        "Most arrivals this step may take, by any route in — the same number \
+         the board draws as `↻`. The next arrival past it parks the task on \
+         `blocked` for a person. Absent means unbounded. Three is the ceiling \
+         worth reaching for; a flow that needs more is welcome to say so, and \
          nothing refuses it.",
     ),
     (
@@ -432,8 +431,6 @@ fn template() -> String {
          \x20\x20\x20\x20prompt: reviewer\n\
          \x20\x20\x20\x20model: {hosted_model}\n\
          \x20\x20\x20\x20effort: high\n\
-         \x20\x20\x20\x20loop:\n\
-         \x20\x20\x20\x20\x20\x20fix: 3\n\
          \x20\x20\x20\x20on_pass: handover\n\
          \x20\x20\x20\x20on_fail: fix\n\
          \n\
@@ -443,6 +440,7 @@ fn template() -> String {
          \x20\x20\x20\x20prompt: implementer\n\
          \x20\x20\x20\x20model: {local_model}\n\
          \x20\x20\x20\x20session: true\n\
+         \x20\x20\x20\x20loop: 3\n\
          \x20\x20\x20\x20on_pass: review\n\
          \x20\x20\x20\x20# on_fail:                a fail with none of its own goes to `blocked`\n\
          \n\

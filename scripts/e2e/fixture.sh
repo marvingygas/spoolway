@@ -329,10 +329,9 @@ set_step() {
 # shipped default and pass for the wrong reason.
 #
 # A key whose old value was a nested block loses that block too, not just its
-# own line. `loop:` is the one that matters: a suite pinning it writes the
-# flow form, `set_step_of default review loop "{fix: 3}"`, and the routes the
-# step listed underneath before must go with the line that headed them or the
-# file is left with orphaned keys the loader refuses.
+# own line, so a file whose step still carries some nested value is not left
+# with orphaned keys the loader refuses. `loop:` is a bare number now —
+# `set_step_of default implement loop 3` — with nothing nested under it.
 set_step_of() {
   local pipeline=$1 step=$2 key=$3 value=$4
   local file=".spoolway/pipelines/$pipeline.yml"
@@ -372,52 +371,6 @@ set_step_of() {
     END { if (!found) exit 3 }
   ' "$file" > "$file.new" || {
     echo "no step \`$step\` in $file" >&2; rm -f "$file.new"; return 1
-  }
-  mv "$file.new" "$file"
-}
-
-# set_loop_of <pipeline> <step-id> <arriving-step> <n>
-#
-# The round budget one step allows arrivals from another, which `set_step_of`
-# cannot reach: `loop:` is a nested map, and setting it to a scalar would leave
-# the `<arriving>: <n>` line under it orphaned at its own indent.
-#
-# A suite that wants several rounds says so here rather than inheriting
-# whatever the shipped pipeline happens to carry. Budgets are tuning — this
-# project dropped every one of its own to a single lap once — and a suite about
-# the loop mechanism must not go red because somebody turned a number down.
-#
-# The step must already carry a `loop:` block naming that arriving step; a
-# suite that silently edited nothing would assert against the shipped default
-# and pass for the wrong reason.
-set_loop_of() {
-  local pipeline=$1 step=$2 from=$3 n=$4
-  local file=".spoolway/pipelines/$pipeline.yml"
-  [ -f "$file" ] || { echo "no pipeline file: $file" >&2; return 1; }
-  awk -v step="$step" -v from="$from" -v n="$n" '
-    /^[[:space:]]*-[[:space:]]*id:/ {
-      id = $0
-      sub(/^[[:space:]]*-[[:space:]]*id:[[:space:]]*/, "", id)
-      sub(/[[:space:]]*$/, "", id)
-      here = (id == step)
-      inloop = 0
-      print
-      next
-    }
-    here && $0 ~ /^[[:space:]]+loop:[[:space:]]*$/ { inloop = 1; print; next }
-    # Any other key at the step level closes the nested block.
-    here && inloop && $0 ~ /^[[:space:]]+[a-z_]+:/ && $0 !~ "^[[:space:]]+" from ":" { inloop = 0 }
-    here && inloop && $0 ~ "^[[:space:]]+" from ":" {
-      match($0, /^[[:space:]]*/)
-      print substr($0, 1, RLENGTH) from ": " n
-      found = 1
-      next
-    }
-    { print }
-    END { if (!found) exit 3 }
-  ' "$file" > "$file.new" || {
-    echo "no \`loop: {$from: ...}\` on step \`$step\` in $file" >&2
-    rm -f "$file.new"; return 1
   }
   mv "$file.new" "$file"
 }

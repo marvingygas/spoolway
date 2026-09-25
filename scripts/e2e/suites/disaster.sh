@@ -507,10 +507,13 @@ else
   tail -n +"$((BEFORE + 1))" "$E2E_DISPATCH_LOG" | sed 's/^/        /'
 fi
 tail -n +"$((BEFORE + 1))" "$E2E_DISPATCH_LOG" > "$LIVE/local-pool.out"
-# The live count in `pi`'s own line is not asserted — `localnote`'s hung
-# `implement` lane may or may not have been dispatched yet by this point, and
-# either way is beside what this case is about: the `/3` cap is there at all,
-# off the queued pipeline's own step, whether or not a lane is live.
+# `pi`'s line carries two figures: the profile's own (`slots n/∞`, since
+# `pi` has no `concurrency` of its own) and, after it, the pool's model and
+# its figure against the model's own cap (`fake-local   n/3`). Neither live
+# count is asserted — `localnote`'s hung `implement` lane may or may not have
+# been dispatched yet by this point, and either way is beside what this case
+# is about: the `/3` cap is there at all, beside the model it belongs to, off
+# the queued pipeline's own step, whether or not a lane is live.
 if python3 - "$LIVE/local-pool.out" "$LOCAL_MODEL" <<'PY'
 import re
 import sys
@@ -518,7 +521,9 @@ import sys
 data = open(sys.argv[1], "rb").read()
 model = sys.argv[2].encode()
 pool_line = re.compile(
-    rb"\x1b\[1mpi\s*\x1b\[0m {3}\x1b\[2mslots\x1b\[0m \d+/3 {3}" + re.escape(model)
+    rb"\x1b\[1mpi\s*\x1b\[0m {3}\x1b\[2mslots\x1b\[0m \d+/(?:\d+|\xe2\x88\x9e) {3}"
+    + re.escape(model)
+    + rb" {3}\d+/3\b"
 )
 sys.exit(0 if pool_line.search(data) else 1)
 PY

@@ -712,15 +712,18 @@ pub struct UnattendedConfig {
     /// Off, a task that cannot go on parks on `blocked`, its pane is kept, you
     /// are told, and `spoolway resume` resumes it. On, there is nobody to park
     /// in front of: every road to `blocked` instead resumes the lane that hit
-    /// it — the same session, its round budgets handed back, the blocker in its
-    /// prompt — which is exactly what `spoolway resume` does by hand. Nothing
-    /// waits, and no task ever sits on `blocked`.
+    /// it — the same session, the blocker in its prompt, continued rather than
+    /// replaced — which is exactly what `spoolway resume` does by hand, minus
+    /// the person: nothing this resumes hands any budget back, on this road or
+    /// that one. Nothing waits, and no task ever sits on `blocked`.
     ///
     /// Two things stop meaning anything with it on, because both exist only to
     /// hand a decision to somebody who is not there: a `loop` whose exit
-    /// resolves to `blocked` — a later resume would hand the budget straight
-    /// back — and the launch ceiling that parks a task whose lane keeps dying
-    /// (that one backs off instead — see
+    /// resolves to `blocked` — the run answers its own exit by resuming itself
+    /// straight back onto the spent step, so `apply_loop_budget` skips the
+    /// bound outright rather than spending it against a wall this resume could
+    /// only walk back into — and the launch ceiling that parks a task whose
+    /// lane keeps dying (that one backs off instead — see
     /// [`crate::dispatch::relaunch_backoff`]). What still holds is every check
     /// that catches a lane going wrong rather than a person being needed: the
     /// reminder loop, and a command step's own `timeout:`.

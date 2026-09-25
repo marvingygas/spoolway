@@ -18,7 +18,7 @@ use crate::graph::{DepState, Graph};
 use crate::mux::Mux;
 use crate::pipeline::{Outcome, Pipeline, Pipelines, Step, StepKind};
 use crate::repo::Repo;
-use crate::task::{Task, route_key, write_atomic};
+use crate::task::{Task, write_atomic};
 
 /// Environment variable every lane gets, so a prompt can call `spoolway report`
 /// with no arguments and still hit the right task.

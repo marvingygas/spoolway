@@ -306,6 +306,22 @@ lacks "the retired [pipeline_gen] table and its header rows are both gone" \
 byte_for_byte_outside_block "the prose around the already-current block is untouched" \
   "$WORK/0.2.0/before-default.yml" "$PIPELINE"
 
+# Every release up to 0.5.0 wrote `loop:` as a map on the step that sends
+# work back — `bugfix`'s `review` carries `loop: {fix: 2}` here — and that
+# per-route shape is refused by name now that a limit counts arrivals at the
+# step carrying it. Refused with no migration, like the self-route further
+# down, so `sync` must leave it exactly where it was and the refusal must then
+# say which step takes the limit instead. This fixture carries no self-route,
+# so nothing else is refused ahead of it.
+has "sync leaves the 0.2.0 fixture's map-form loop where it found it" \
+  "      fix: 2" .spoolway/pipelines/bugfix.yml
+refuses "a 0.2.0 project's map-form loop is then refused at load" \
+  "step .review. declares .loop:. as a map" \
+  "$SPOOLWAY" pipeline check
+refuses "and the refusal names the step the limit belongs on now" \
+  "give .fix. a .loop: <n>. of its own" \
+  "$SPOOLWAY" pipeline check
+
 works "the 0.2.0 fixture's dead task-log template is swept" \
   test ! -e .spoolway/templates/task-log.md
 works "the 0.2.0 fixture's dead pull request template is swept" \
@@ -389,21 +405,42 @@ refuses "and the refusal names the step whose file the owner has to edit" \
 
 # The edit the message asks for, made to the staged copy — never to the
 # fixture, which is a record of what 0.5.0 really wrote. Deleting the
-# `on_fail` alone is not the whole fix: the `loop:` map that bounded the
-# self-route then names a route the step no longer has, and is refused in
-# its turn. Worth having on the record, because the refusal names only the
-# first of the two edits.
+# `on_fail` alone is not the whole fix: every release up to 0.5.0 wrote
+# `loop:` as a map keyed by the step a failure is sent back to, and that
+# per-route shape is refused by name now — a limit counts arrivals at the
+# step that carries it. It too lands with no migration, so a project written
+# by any of those releases has this second edit to make. Worth having on the
+# record, because the self-route refusal names only the first of the two.
 sed -i '/^    on_fail: checks$/d' "$PIPELINE" .spoolway/pipelines/bugfix.yml
-refuses "deleting the self-route alone leaves the loop that bounded it behind" \
-  "sets .loop. for moves to .checks., but it never routes to .checks." \
+refuses "deleting the self-route alone leaves the retired loop map behind" \
+  "declares .loop:. as a map" \
+  "$SPOOLWAY" pipeline check
+refuses "and that refusal says where the limit belongs now" \
+  "Delete it here and give .[a-z-]*. a .loop: <n>. of its own" \
   "$SPOOLWAY" pipeline check
 
-sed -i '/^    loop:$/{N;/\n      checks: 3$/d}' "$PIPELINE" .spoolway/pipelines/bugfix.yml
-silent_about "deleting that loop as well is the whole of the fix" \
+# What that message asks for, done the way an owner would: every map comes
+# off the step that sent work back, and the step it named takes a bare
+# `loop:` of its own. `checks`'s map named only its own id, the self-route
+# already deleted, so nothing takes its place. `check_bounded_loops` then
+# still has to accept every cycle left — `review` → `implement` in the one,
+# `review`/`reproduce-again` → `fix` in the other — on the strength of the
+# new limits alone.
+for f in "$PIPELINE" .spoolway/pipelines/bugfix.yml; do
+  awk '/^    loop:$/ { inmap = 1; next }
+       inmap && /^      / { next }
+       { inmap = 0; print }' "$f" > "$f.new" && mv "$f.new" "$f"
+done
+sed -i 's/^  - id: implement$/&\n    loop: 2/' "$PIPELINE"
+sed -i 's/^  - id: fix$/&\n    loop: 2/' .spoolway/pipelines/bugfix.yml
+silent_about "moving each limit onto the step it named is the whole of the fix" \
   "may not route back to its own id" \
   "$SPOOLWAY" pipeline check
-silent_about "and the loop it bounded is settled with it" \
-  "but it never routes to" \
+silent_about "and no map is left for the loader to refuse" \
+  "declares \`loop:\` as a map" \
+  "$SPOOLWAY" pipeline check
+silent_about "and every cycle left is bounded by a limit in the new form" \
+  "nothing bounds" \
   "$SPOOLWAY" pipeline check
 
 # The positive half of the two above, which on their own only prove an
