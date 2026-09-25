@@ -152,12 +152,12 @@ pub struct Row {
     /// thing `queue conflicts` reasons from.
     pub parallel: bool,
     pub stage: String,
-    /// How many times this task has arrived at the step it is on now — the
-    /// sum of every [`crate::task::Frontmatter::rounds`] entry whose key
-    /// ends `->{stage}`, [`crate::task::Task::rounds_at`]'s own answer.
-    /// Whichever route carried it there each time, and with no budget behind
-    /// it: a step reached once is a bare id, since one visit is not yet worth
-    /// a reader's notice, and every visit after that draws `↻ <n>` beside it.
+    /// How many times this task has arrived at the step it is on now —
+    /// [`crate::task::Frontmatter::arrivals`]'s own entry for it,
+    /// [`crate::task::Task::rounds_at`]'s own answer. Whichever route
+    /// carried it there each time, and with no budget behind it: a step
+    /// reached once is a bare id, since one visit is not yet worth a
+    /// reader's notice, and every visit after that draws `↻ <n>` beside it.
     pub arrivals: u32,
     /// The pipeline this task resolves to, by name — what the `PIPELINE`
     /// column draws. A task with no `pipeline:` of its own names its
@@ -1790,9 +1790,9 @@ fn render(
 
 /// How many live lanes each agent profile is paying for, keyed by profile name.
 ///
-/// A lane maps to a profile through the step that started it. Three things have
+/// A lane maps to a profile through the step that started it. Four things have
 /// to hold before a session in the multiplexer is one of those lanes, and all
-/// three are the pass's own tests — [`crate::dispatch::Dispatcher::pass`] counts
+/// four are the pass's own tests — [`crate::dispatch::Dispatcher::pass`] counts
 /// exactly this set against the cap, and a board that counted a different one
 /// was describing a run that wasn't happening:
 ///
@@ -1810,6 +1810,13 @@ fn render(
 ///   saying no work can start while the dispatcher starts some. A staffed
 ///   `blocked` lane is not parked at all — see
 ///   [`crate::pipeline::Pipeline::blocked_is_staffed`] — and does count.
+/// - It is still the task's own step, or mid-turn. A lane whose task has
+///   already moved on and that is not currently `Working` or `Blocked` is a
+///   finished pane the multiplexer has not yet reported closed —
+///   `Dispatcher::free_finished_lanes`'s own `still_current` check, mirrored
+///   here read-only. Counted here it would read as an occupied slot for a
+///   pass after the one where `start_lanes`' own `in_flight` already
+///   started another lane in its place.
 ///
 /// `agent_model`, on its own, is wider than the other two: after the live
 /// walk above it is widened again over every task's whole pipeline, so a
@@ -1850,6 +1857,23 @@ fn slots_used<'a>(
             || (task.stage() == crate::pipeline::BLOCKED
                 && !pipeline.blocked_is_staffed(repo.unattended()));
         if parked {
+            continue;
+        }
+        // A lane whose task has already moved off the step this lane's own
+        // name carries, and is not mid-turn, is a finished pane the
+        // dispatcher's own `free_finished_lanes` would close and stop
+        // counting on this very pass — `still_current` there, mirrored here
+        // without touching a pane or a task file: reading the board must
+        // never do either. Left out, a lane that finished a while ago but
+        // whose pane the multiplexer has not yet reported closed reads as an
+        // occupied slot here while `start_lanes`' own `in_flight` has
+        // already stopped counting it and starts another lane in its place.
+        let live = task.stage() == step_id
+            || matches!(
+                lane.status,
+                crate::mux::LaneStatus::Working | crate::mux::LaneStatus::Blocked
+            );
+        if !live {
             continue;
         }
         let Some(step) = pipeline.step(step_id) else {
@@ -2983,6 +3007,51 @@ mod tests {
         assert_eq!(used.agents.get("claude").copied(), Some(1), "{used:#?}");
     }
 
+    /// A lane whose pane the multiplexer has not yet reported closed, but
+    /// whose task has already moved off the step that lane belongs to and is
+    /// not mid-turn, is exactly the pane `Dispatcher::free_finished_lanes`
+    /// closes on this very pass — `start_lanes`' own `in_flight` has already
+    /// stopped counting it before the footer is ever drawn. Counting it here
+    /// too would read as a full profile for a pass where the dispatcher
+    /// starts another lane in its place.
+    #[test]
+    fn a_finished_lane_not_yet_closed_gives_its_slot_back() {
+        let repo = fixture("slots-finished-not-closed");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "moved-on", &[], Some("review"));
+
+        let tasks = repo.tasks().unwrap();
+        let mut stale = lane("moved-on · implement", &repo.root);
+        stale.status = crate::mux::LaneStatus::Idle;
+        let used = slots_used(&repo, &tasks, &pipelines, &[stale]);
+
+        assert!(used.agents.is_empty(), "{used:#?}");
+    }
+
+    /// The other half of the same check: a lane still `Working` or
+    /// `Blocked` counts even once its task has moved off the step that lane
+    /// belongs to — a lane runs `spoolway report` mid-turn, so the stage
+    /// moves on the spot while the lane keeps talking, and
+    /// `free_finished_lanes` leaves a busy lane alone whatever step its task
+    /// now reads. Dropping this half and keeping only the idle one would
+    /// still pass `a_finished_lane_not_yet_closed_gives_its_slot_back`
+    /// above, so it needs its own case.
+    #[test]
+    fn a_lane_still_mid_turn_counts_even_once_its_task_has_moved_on() {
+        let repo = fixture("slots-busy-not-current");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "moved-on", &[], Some("review"));
+
+        let tasks = repo.tasks().unwrap();
+        let mut busy = lane("moved-on · implement", &repo.root);
+        busy.status = crate::mux::LaneStatus::Working;
+        let used = slots_used(&repo, &tasks, &pipelines, &[busy]);
+
+        // `Pipelines::builtin`'s own test hydration gives every agent step
+        // but `review` the `pi` profile — see its own doc comment.
+        assert_eq!(used.agents.get("pi").copied(), Some(1), "{used:#?}");
+    }
+
     /// The whole point of the column: a task that is moving is described by
     /// where it goes, and a task that is stuck by what is holding it. Also
     /// where a blocked row, a paused row and a row with arrivals on file are
@@ -3015,17 +3084,11 @@ mod tests {
         ship.set_stage(crate::pipeline::PAUSED, None);
         ship.save().unwrap();
 
-        // A second arrival at `review`, both times off `implement`. `rounds`
-        // is cleared first: `add`'s own `set_stage` already banked one
-        // arrival off `queued`, which this test is not about.
+        // A second arrival at `review`. `add`'s own `set_stage` already
+        // banked one; this stands in for a hand-edited second visit.
         add(&repo, "spinner", &[], Some("review"));
         let mut spinner = repo.task("spinner").unwrap();
-        spinner.front.arrived_from = Some("implement".into());
-        spinner.front.rounds.clear();
-        spinner
-            .front
-            .rounds
-            .insert(crate::task::route_key("implement", "review"), 2);
+        spinner.front.arrivals.insert("review".into(), 2);
         spinner.save().unwrap();
 
         let rows = rows(&repo, &pipelines).unwrap();
@@ -3166,43 +3229,27 @@ mod tests {
         );
     }
 
-    /// `Row::arrivals` is a plain count of every `rounds` entry ending
-    /// `->{stage}` — no `loop:` bound involved at all, unlike the pair this
-    /// replaced. A step reached once still banks the arrival even though the
-    /// STEP column draws no suffix for it below two — see `step_text`.
+    /// `Row::arrivals` reads [`crate::task::Frontmatter::arrivals`]'s own
+    /// entry for the step directly — no `loop:` bound involved at all, and,
+    /// since this is its own map rather than a sum over `rounds`, no route
+    /// behind it either: a task that reached a step several times over
+    /// several different routes still banks one arrival count, not one per
+    /// route.
     #[test]
-    fn arrivals_sum_every_route_into_the_step_regardless_of_any_loop_bound() {
+    fn arrivals_read_the_step_s_own_entry_regardless_of_any_loop_bound() {
         let repo = fixture("arrival-counter");
         let pipelines = Pipelines::builtin();
 
-        // One arrival at `review`, off a route the shipped pipeline does
-        // bound: the count is banked all the same. `rounds` is cleared
-        // first: `add`'s own `set_stage` already banked one arrival off
-        // `queued`, which this test is not about.
+        // A route the shipped pipeline does bound: the arrival count is
+        // banked all the same, since it carries no budget of its own.
         add(&repo, "once", &[], Some("review"));
-        let mut once = repo.task("once").unwrap();
-        once.front.arrived_from = Some("implement".into());
-        once.front.rounds.clear();
-        once.front
-            .rounds
-            .insert(crate::task::route_key("implement", "review"), 1);
-        once.save().unwrap();
 
-        // Two arrivals at `implement`, off two different routes — the
-        // shipped pipeline gives `implement` no `loop:` of its own, so there
-        // is no budget behind this count either.
+        // Several arrivals at `implement`, however many different routes
+        // carried them — the shipped pipeline gives `implement` no `loop:`
+        // of its own, so there is no budget behind this count either.
         add(&repo, "twice", &[], Some("implement"));
         let mut twice = repo.task("twice").unwrap();
-        twice.front.arrived_from = Some("review".into());
-        twice.front.rounds.clear();
-        twice
-            .front
-            .rounds
-            .insert(crate::task::route_key("review", "implement"), 3);
-        twice
-            .front
-            .rounds
-            .insert(crate::task::route_key("queued", "implement"), 2);
+        twice.front.arrivals.insert("implement".into(), 5);
         twice.save().unwrap();
 
         let rows = rows(&repo, &pipelines).unwrap();
@@ -4977,8 +5024,8 @@ mod tests {
     }
 
     /// `p` then `R` parks a task and puts it straight back — the round trip
-    /// the board leaves nothing behind for: `steps`, `rounds` and
-    /// `arrived_from` come back byte-for-byte, `rounds_via("implement",
+    /// the board leaves nothing behind for: `steps`, `rounds`, `arrivals`
+    /// and `arrived_from` come back byte-for-byte, `rounds_via("implement",
     /// "paused")` stays zero, and the row's own NEXT column carries no loop
     /// counter across it.
     #[test]
@@ -4990,6 +5037,7 @@ mod tests {
 
         let before = repo.task("login").unwrap();
         let rounds_before = before.front.rounds.clone();
+        let arrivals_before = before.front.arrivals.clone();
         let prompts_before = before.front.steps.clone();
         let arrived_from_before = before.front.arrived_from.clone();
 
@@ -5018,6 +5066,7 @@ mod tests {
         let after = repo.task("login").unwrap();
         assert_eq!(after.stage(), "implement");
         assert_eq!(after.front.rounds, rounds_before);
+        assert_eq!(after.front.arrivals, arrivals_before);
         assert_eq!(after.front.steps, prompts_before);
         assert_eq!(after.front.arrived_from, arrived_from_before);
         assert_eq!(after.rounds_via("implement", crate::pipeline::PAUSED), 0);

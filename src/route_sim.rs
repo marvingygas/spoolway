@@ -223,13 +223,15 @@ mod tests {
             .is_some_and(|step| step.kind() == StepKind::Terminal)
     }
 
-    /// Property 2 and 3 together: a `rounds` map that only ever grows. Route
-    /// never removes an entry on its own — only a person's own
-    /// `spoolway resume` does that, through `resume_at`'s `by_hand: true`
-    /// arm, which nothing on this walk's road ever passes — so the one
-    /// shape a bug could produce here is a route that failed to bank a lap
-    /// it should have, or banked the wrong one. Either reads as a count that
-    /// should have risen and did not, exactly what this compares for.
+    /// Property 2 and 3 together: a keyed count map that only ever grows —
+    /// `rounds` and `arrivals` both, this walk's one check for each. Route
+    /// never removes an entry of either on its own — only a person's own
+    /// `spoolway resume` does, and only from `rounds`, through `resume_at`'s
+    /// `by_hand: true` arm, which nothing on this walk's road ever passes —
+    /// so the one shape a bug could produce here is a route that failed to
+    /// bank a lap or an arrival it should have, or banked the wrong one.
+    /// Either reads as a count that should have risen and did not, exactly
+    /// what this compares for.
     fn rounds_only_rise(before: &BTreeMap<String, u32>, after: &BTreeMap<String, u32>) -> bool {
         before
             .iter()
@@ -442,6 +444,7 @@ mod tests {
             branch.front.gate_at
         );
         let before = branch.front.rounds.clone();
+        let arrivals_before = branch.front.arrivals.clone();
         let routed = route(
             &mut branch,
             ctx.pipeline,
@@ -459,6 +462,19 @@ mod tests {
                 "`rounds` lost a lap on the last hop of {}: {before:?} -> {:?}",
                 path.join(" | "),
                 branch.front.rounds
+            ));
+        }
+        // `arrivals` has no exception at all — unlike `rounds`, nothing on
+        // any road, by-hand `resume` included, ever removes or lowers an
+        // entry in it (see `Frontmatter::arrivals`'s own doc). Checked the
+        // same way as `rounds` above, so a change that gave `arrivals` an
+        // exception of its own would fail this walk exactly as one would
+        // for `rounds`.
+        if !rounds_only_rise(&arrivals_before, &branch.front.arrivals) {
+            return Err(format!(
+                "`arrivals` lost a count on the last hop of {}: {arrivals_before:?} -> {:?}",
+                path.join(" | "),
+                branch.front.arrivals
             ));
         }
 

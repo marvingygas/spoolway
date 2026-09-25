@@ -231,7 +231,9 @@ pause to clear it.
 ### Footer
 
 One line per agent profile: `<profile>   slots <live>/<cap>`. A model with its own `slots` gets
-its own line. A line `issue_tracking: N hook failures — see tracking/` appears while any hook
+its own figure appended after the profile's, model name then `<live>/<cap>`, so a profile
+running a pooled model reads `pi   slots 2/3   Ornith-1.5-35B-A3B   1/2`. A line
+`issue_tracking: N hook failures — see tracking/` appears while any hook
 has failed. Then the job ledger lists every enabled job with its next firing:
 
 ```

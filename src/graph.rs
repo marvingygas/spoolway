@@ -526,6 +526,7 @@ mod tests {
                 launched_at: None,
                 steps: Default::default(),
                 rounds: Default::default(),
+                arrivals: Default::default(),
                 launch_failures: Default::default(),
                 launch_busy_since: Default::default(),
                 arrived_from: None,
