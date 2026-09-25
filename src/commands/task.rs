@@ -3,8 +3,8 @@
 //!
 //! `spoolway task contract` is the whole interface a producer needs. Printed
 //! bare, it is every key a document may set, every key it may not, a
-//! sentence on how to size a breakdown, and — per pipeline — its id budget,
-//! the steps `gate_at` accepts, its own `description:`, which step is
+//! sentence on how to size a breakdown, and — per pipeline — its longest
+//! agent step, the steps `gate_at` accepts, its own `description:`, which step is
 //! `last-of-chain`, and the
 //! body skeleton itself; under `output` it is the directory a finished
 //! document is written to, what to name it there, and the two commands that
@@ -93,8 +93,8 @@ const FIELD_SENTENCES: &[(&str, &str)] = &[
     (
         "id",
         "A short, unique name for this task — becomes the filename, the branch \
-         suffix and half a lane name, so it must fit the id budget of the pipeline \
-         this task runs on.",
+         suffix and half a lane name, so it holds only lowercase letters, digits \
+         and hyphens.",
     ),
     (
         "title",

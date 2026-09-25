@@ -1165,9 +1165,9 @@ pub enum TaskCommand {
     ///
     /// Bare, prints the whole contract as JSON — this project's default
     /// pipeline, every key a document may set, every key it may not, one
-    /// sentence per settable key on how to fill it, each pipeline's id
-    /// budget, the step ids `gate_at` accepts and the body skeleton a task
-    /// on it is written from, and the rules that only hold across a set —
+    /// sentence per settable key on how to fill it, each pipeline's longest
+    /// agent step, the step ids `gate_at` accepts and the body skeleton a
+    /// task on it is written from, and the rules that only hold across a set —
     /// so a producer that has never seen the planning skills can write
     /// queueable tasks from it alone. `--from` checks a document against
     /// that same contract and writes nothing, whichever way it comes out:
