@@ -96,6 +96,7 @@ const STEP_KEYS: &[&str] = &[
     "background",
     "headless",
     "last",
+    "first",
     "end",
 ];
 
@@ -232,6 +233,16 @@ const FIELD_SENTENCES: &[(&str, &str)] = &[
         "last",
         "Command steps only. Only the task at the top of a chain runs it; every \
          task below walks past to `on_pass`.",
+    ),
+    (
+        "first",
+        "Command steps only, `false` when absent. Only a chain's declared root \
+         — a task whose own `depends_on` is empty — runs it; every task that \
+         names a dependency walks past to `on_pass`. `depends_on` is read \
+         from the task's own file, and archiving what it names does not empty \
+         it, so a task naming an archived dependency is still not the root. \
+         Every root of a fan runs it, since none of them declares a \
+         dependency. Refused together with `last:` on the same step.",
     ),
     (
         "end",
@@ -455,6 +466,7 @@ fn template() -> String {
          \x20\x20\x20\x20# background: true         let the task move on; `on_fail` still routes it later\n\
          \x20\x20\x20\x20# headless: true            run detached, with no pane, the way every command did before\n\
          \x20\x20\x20\x20# last: true                only the top task of a chain runs it\n\
+         \x20\x20\x20\x20# first: true               only a chain's declared root runs it\n\
          \x20\x20\x20\x20on_pass: done\n\
          \x20\x20\x20\x20# on_fail:                a fail with none of its own goes to `blocked`\n\
          \n\
@@ -475,6 +487,20 @@ pub fn pipeline_contract(repo: &Repo, pipelines: &Pipelines) -> Result<()> {
         serde_json::to_string_pretty(&build_contract(repo, pipelines))?
     );
     Ok(())
+}
+
+/// `pipeline show`'s marker for a command step carrying `last:` or `first:`
+/// — refused together at load, so at most one ever applies. Pulled out of
+/// [`show_one`] so the text is a fact `cargo test` can check without
+/// capturing stdout.
+fn chain_marker(step: &crate::pipeline::Step) -> &'static str {
+    if step.last {
+        " last-of-chain"
+    } else if step.first {
+        " first-of-chain"
+    } else {
+        ""
+    }
 }
 
 fn show_one(pipeline: &Pipeline) -> Result<()> {
@@ -541,13 +567,11 @@ fn show_one(pipeline: &Pipeline) -> Result<()> {
                 " timeout={}",
                 crate::config::human_duration::format(step.command_timeout())
             );
-            // The one key that makes a flow read differently for two tasks on
-            // the same pipeline, so a reader who does not see it here would
-            // have no way to know a step they are looking at is one most tasks
+            // The keys that make a flow read differently for two tasks on the
+            // same pipeline, so a reader who does not see one here would have
+            // no way to know a step they are looking at is one most tasks
             // walk straight past.
-            if step.last {
-                print!(" last-of-chain");
-            }
+            print!("{}", chain_marker(step));
             if !step.r#loop.is_unbounded() {
                 print!(" loop={}", step.r#loop.describe());
                 print!(" exit={}", step.loop_exit());
@@ -1051,6 +1075,35 @@ mod tests {
                 "missing `description`: {entry}"
             );
         }
+    }
+
+    /// `pipeline show`'s marker for a command step that reads differently for
+    /// two tasks on the same pipeline — `last:` and `first:` are refused
+    /// together at load, so a step is marked for at most one of them.
+    #[test]
+    fn chain_marker_names_first_or_last_or_neither() {
+        let neither = Pipeline::parse(
+            "p",
+            "steps:\n  - id: a\n    run: make\n    on_pass: z\n  - id: z\n    end: true\n",
+        )
+        .unwrap();
+        assert_eq!(chain_marker(neither.step("a").unwrap()), "");
+
+        let last = Pipeline::parse(
+            "p",
+            "steps:\n  - id: a\n    run: make\n    last: true\n    on_pass: z\n  \
+             - id: z\n    end: true\n",
+        )
+        .unwrap();
+        assert_eq!(chain_marker(last.step("a").unwrap()), " last-of-chain");
+
+        let first = Pipeline::parse(
+            "p",
+            "steps:\n  - id: a\n    run: make\n    first: true\n    on_pass: z\n  \
+             - id: z\n    end: true\n",
+        )
+        .unwrap();
+        assert_eq!(chain_marker(first.step("a").unwrap()), " first-of-chain");
     }
 
     /// A `session:` step whose agent profile runs a kind spoolway cannot

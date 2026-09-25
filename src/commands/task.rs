@@ -219,8 +219,9 @@ struct ContractOutput {
 }
 
 /// One pipeline's own slice of the contract: its longest agent step, the
-/// steps a `gate_at` may name, which of them is `last-of-chain`, this
-/// pipeline's own `description:`, and the body a task on it is written from.
+/// steps a `gate_at` may name, which of them are `last-of-chain` and
+/// `first-of-chain`, this pipeline's own `description:`, and the body a task
+/// on it is written from.
 ///
 /// `longest_agent_step` no longer bounds a task id's length — see gh-359 and
 /// [`crate::mux::check_task_id`] — but is kept here as information: a lane
@@ -235,6 +236,11 @@ struct PipelineContract {
     /// this pipeline marks no step `last: true`, the same case `pipeline
     /// show` renders by saying nothing rather than printing a placeholder.
     last_of_chain: Option<String>,
+    /// The step only a chain's declared root runs — `None` when this pipeline
+    /// marks no step `first: true`. Separate from `last_of_chain` because a
+    /// pipeline may mark both, on different steps, and a producer sizing a
+    /// chain needs to know which end each one lands on.
+    first_of_chain: Option<String>,
     description: Option<String>,
     body: String,
 }
@@ -280,12 +286,18 @@ fn build_contract(repo: &Repo, pipelines: &Pipelines) -> Contract {
                 .iter()
                 .find(|step| step.last)
                 .map(|step| step.id.clone());
+            let first_of_chain = pipeline
+                .steps
+                .iter()
+                .find(|step| step.first)
+                .map(|step| step.id.clone());
             (
                 name.clone(),
                 PipelineContract {
                     longest_agent_step: longest.to_string(),
                     gate_at: pipeline.steps.iter().map(|s| s.id.clone()).collect(),
                     last_of_chain,
+                    first_of_chain,
                     description: pipeline.description.clone(),
                     body,
                 },
@@ -710,6 +722,38 @@ mod tests {
         // rather than a made-up placeholder.
         let bugfix_out = &contract.pipelines["bugfix"];
         assert_eq!(bugfix_out.last_of_chain, None);
+    }
+
+    /// `first_of_chain` names the step only a chain's declared root runs, the
+    /// same way `last_of_chain` names the one only its top runs. A pipeline
+    /// may mark both, on different steps, so the two fields are read
+    /// independently and neither shadows the other.
+    #[test]
+    fn pipeline_contract_carries_first_of_chain_beside_last_of_chain() {
+        let mut pipelines = Pipelines::builtin();
+        let with_both = pipelines.pipelines.get_mut("default").unwrap();
+        let first_step_id = with_both.steps.first().unwrap().id.clone();
+        let last_step_id = with_both.steps.last().unwrap().id.clone();
+        with_both.steps.first_mut().unwrap().first = true;
+        with_both.steps.last_mut().unwrap().last = true;
+
+        let repo = fixture("contract-first-of-chain");
+        let contract = build_contract(&repo, &pipelines);
+
+        let default_out = &contract.pipelines["default"];
+        assert_eq!(
+            default_out.first_of_chain.as_deref(),
+            Some(first_step_id.as_str())
+        );
+        assert_eq!(
+            default_out.last_of_chain.as_deref(),
+            Some(last_step_id.as_str())
+        );
+
+        // `bugfix` marks no step `first: true` in this fixture — `None`
+        // rather than a made-up placeholder, the same as `last_of_chain`.
+        let bugfix_out = &contract.pipelines["bugfix"];
+        assert_eq!(bugfix_out.first_of_chain, None);
     }
 
     /// The contract names the directory a document is written to, and names

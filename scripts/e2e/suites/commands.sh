@@ -434,6 +434,40 @@ else
   echo "$CHECK_JSON" | sed 's/^/        /'
 fi
 
+# A producer sizing a chain has to know which end of it each marked command
+# step lands on, so both ends are advertised per pipeline. Neither is ever
+# absent from the object: a pipeline that marks no such step carries `null`,
+# not a missing key, so a caller reading the field never has to tell "this
+# pipeline has no root step" apart from "this version does not report one".
+if jq -e '
+    [.pipelines[] | has("first_of_chain") and has("last_of_chain")] | all
+  ' <<<"$CHECK_JSON" >/dev/null 2>&1; then
+  ok "every pipeline reports both first_of_chain and last_of_chain"
+else
+  bad "every pipeline reports both first_of_chain and last_of_chain"
+  echo "$CHECK_JSON" | sed 's/^/        /'
+fi
+
+# Whatever a pipeline reports as its root step has to be one of that
+# pipeline's own steps — the same list `gate_at` may name — rather than a
+# label from somewhere else.
+# `. as $p` before the index: jq evaluates `index`'s argument against the
+# array on its left, so the shorter `(.gate_at | index(.first_of_chain))`
+# looks `first_of_chain` up on the step list and errors out instead of
+# answering. Binding the pipeline first keeps both halves reading off it.
+if jq -e '
+    [ .pipelines[]
+      | select(.first_of_chain != null)
+      | . as $p
+      | ($p.gate_at | index($p.first_of_chain)) != null
+    ] | all
+  ' <<<"$CHECK_JSON" >/dev/null 2>&1; then
+  ok "a reported first_of_chain names one of that pipeline's own steps"
+else
+  bad "a reported first_of_chain names one of that pipeline's own steps"
+  echo "$CHECK_JSON" | sed 's/^/        /'
+fi
+
 RESERVED="$LIVE/reserved.md"
 {
   echo "---"
@@ -649,6 +683,20 @@ if jq -e '
   ok "every pipeline or step key has a fields entry"
 else
   bad "every pipeline or step key has a fields entry"
+  echo "$PIPELINE_JSON" | sed 's/^/        /'
+fi
+
+# `first:` is a step key a pipeline author can only learn about from here or
+# from the annotated starter, so both have to carry it: the key list names
+# it, and the starter shows the line to uncomment.
+if jq -e '
+    (.keys.step | index("first")) != null
+    and (.fields.first | test("Command steps only"))
+    and (.template | test("# first: true"))
+  ' <<<"$PIPELINE_JSON" >/dev/null 2>&1; then
+  ok "the step keys carry first, with its effect and a starter line"
+else
+  bad "the step keys carry first, with its effect and a starter line"
   echo "$PIPELINE_JSON" | sed 's/^/        /'
 fi
 

@@ -92,6 +92,7 @@ steps:
 | `background` | `false` | Command steps only. `true` lets the task move on while the command runs. |
 | `headless` | `false` | Command steps only. `true` runs the command with no pane. |
 | `last` | `false` | Command steps only. `true` runs it only on the last task of a chain. See [`last:`](#last--a-step-the-chain-runs-once). |
+| `first` | `false` | Command steps only. `true` runs it only on a chain's declared root. See [`first:`](#first--a-step-only-a-chains-root-runs). |
 
 The same table is at the top of every pipeline file, between `# >>> spoolway >>>` and
 `# <<< spoolway <<<`. `spoolway sync` rewrites that block. A file without the markers is
@@ -275,6 +276,15 @@ The top task of a chain carries every change beneath it, so a suite the whole st
 runs once, there. A task is last when no unfinished task depends on it. Any other task walks
 past the step to its `on_pass`. In a fan, every task is last. `last:` is allowed on command
 steps only.
+
+### `first:` — a step only a chain's root runs
+
+The root task of a chain carries no declared dependency, so setup that a whole stack needs
+runs only once, there. A task is the root when its own `depends_on` is empty. `depends_on`
+is read from the task's own file, and archiving what it names does not empty it, so a task
+naming an archived dependency is still not the root. Any other task walks past the step to
+its `on_pass`. In a fan, every independent root runs it. `first:` is allowed on command
+steps only, and is refused together with `last:` on the same step.
 
 ## `spoolway stack`
 
