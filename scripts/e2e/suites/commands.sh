@@ -382,12 +382,22 @@ command -v jq >/dev/null || { echo "commands.sh needs jq" >&2; exit 2; }
 # two would hand `jq` that line as its first byte and fail every parse on a
 # behind checkout, which is not what either check below is about.
 CHECK_JSON=$("$SPOOLWAY" task contract 2>"$LIVE/task-contract.err")
-if jq -e '.pipelines.default.id_budget' <<<"$CHECK_JSON" >/dev/null 2>&1; then
+if jq -e '.pipelines.default.longest_agent_step' <<<"$CHECK_JSON" >/dev/null 2>&1; then
   ok "bare task contract prints the contract as parseable JSON"
 else
   bad "bare task contract prints the contract as parseable JSON"
   echo "$CHECK_JSON" | sed 's/^/        /'
   sed 's/^/        /' "$LIVE/task-contract.err"
+fi
+
+# gh-359: a lane too long for the multiplexer's own name limit gets a short
+# internal alias instead of a refusal, so the contract advertises no
+# pipeline-dependent task-id budget any more.
+if jq -e '.pipelines.default | has("id_budget") | not' <<<"$CHECK_JSON" >/dev/null 2>&1; then
+  ok "the contract advertises no pipeline-dependent task-id budget"
+else
+  bad "the contract advertises no pipeline-dependent task-id budget"
+  echo "$CHECK_JSON" | sed 's/^/        /'
 fi
 
 # There is no project default any more — `dispatch.default_pipeline` is
@@ -451,6 +461,38 @@ else
   bad "and leaves the queue directory exactly as it was"
   diff <(echo "$BEFORE_CHECK") <(echo "$AFTER_CHECK") | sed 's/^/        /'
 fi
+
+# ------------------------------------------------------------- gh-359: long ids
+# `release-spoolway-2` on the release pipeline's `merge-released-repair` step
+# used to be refused before it ever queued: the lane it would build there ran
+# past the multiplexer's own 32-character name limit, and the queue measured
+# a task id against that full, unaliased lane name. A lane too long for the
+# wire now gets a short internal alias instead, so nothing about a task id's
+# length is the queue's business any more — checked here against an id well
+# past what the old 34-byte lane budget ever allowed.
+LONG_ID="a-task-id-much-longer-than-herdrs-own-agent-name-limit-of-32-characters"
+LONG_ID_DOC="$LIVE/long-id.md"
+{
+  echo "---"
+  echo "id: $LONG_ID"
+  echo "title: a very long task id must still queue"
+  echo "group: live"
+  echo "base: main"
+  echo "pipeline: default"
+  echo "---"
+  cat "$BODY"
+} > "$LONG_ID_DOC"
+
+works "gh-359: task contract --from checks out a task id longer than any lane budget" \
+  "$SPOOLWAY" task contract --from "$LONG_ID_DOC"
+silent_about "gh-359: the check report no longer measures an id against a lane name" \
+  "fits a lane name" "$SPOOLWAY" task contract --from "$LONG_ID_DOC"
+
+works "gh-359: queue add --from actually queues the long task id" \
+  "$SPOOLWAY" queue add --from "$LONG_ID_DOC"
+says "and the long id landed in the queue rather than being refused" "base: main" \
+  "$SPOOLWAY" queue show "$LONG_ID"
+rm -f "$SPOOLWAY_PROJECT_HOME/queue/$LONG_ID.md"
 
 # ------------------------------------------------------ no pipelines/ at all
 # A missing `.spoolway/pipelines/` used to be answered from the pipelines

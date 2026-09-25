@@ -95,7 +95,8 @@ pub fn check_id(kind: &str, id: &str) -> Result<()> {
         None => bail!("a {kind} cannot be empty"),
         Some(first) if !first.is_ascii_lowercase() => bail!(
             "{kind} `{id}` must start with a lowercase letter — it names files under the \
-             project's home directory, and a task id also names a multiplexer session"
+             project's home directory, and a task id also crosses the wire as a multiplexer \
+             session name or the alias recorded for one"
         ),
         Some(_) => {}
     }

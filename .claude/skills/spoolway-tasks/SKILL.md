@@ -36,7 +36,7 @@ reading the file whole.
 
 1. **Gather, before anything is sized.** One command, and nothing is opened past it:
    `spoolway task contract` — every pipeline this project defines, its own `sizing` guidance, and
-   per pipeline its `description:`, `id_budget`, `gate_at` steps, `last_of_chain`, and
+   per pipeline its `description:`, `longest_agent_step`, `gate_at` steps, `last_of_chain`, and
    skeleton `body`.
 
    **A project with no pipelines is not a dead end.** Where this reports `no pipelines
@@ -122,10 +122,10 @@ reading the file whole.
    own answer or dropped with the rest of an unused heading — never left standing as if the
    task itself said it:
 
-   - `id` — the task id, and the file's own stem. **Keep it short enough to become a lane
-     name:** a lane is called `<id> · <step>` and stops at 34 bytes. Measure against the
-     `id_budget` step 1's contract already printed for this task's own pipeline — `bugfix`'s
-     is 15 — rather than working the arithmetic again.
+   - `id` — the task id, and the file's own stem. Lowercase letters, digits and hyphens only,
+     starting with a letter — the same path-safe rule every id on this project follows. No
+     length budget: a lane too long for the multiplexer's own name limit gets a short internal
+     alias instead, so an id is sized for readability, not for fitting a lane name.
    - `title` — a Conventional Commits line: a type, the area of code in parentheses, a colon,
      and one short present-tense sentence. `feat(queue): add a --dry-run flag`. The type is
      `feat`, `fix`, `docs`, `refactor`, `perf`, `test`, `build`, `ci` or `chore`; the
