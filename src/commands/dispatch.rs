@@ -303,7 +303,7 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     let pane_id = mux.own_pane_id();
     let _lock = crate::lock::Lock::acquire(&repo.lock_file(), unattended, pane_id.as_deref())?;
 
-    // Note this project once per run, so `spoolway eval --by --all` can find
+    // Note this project once per run, so `spoolway eval --all` can find
     // its ledger later. A project that is dispatched in is a project that spends.
     crate::usage::registry::register(&repo.root);
 
@@ -1227,9 +1227,9 @@ pub(crate) fn overrides_gate_with(
         return Ok(true);
     }
 
-    // The layer's own fingerprint, never `version::stamp`'s combined one — a
-    // tracked-file edit alone must not reopen a gate the layer itself has
-    // not moved. `unwrap_or_default` only stands in for the moment between
+    // The layer's own fingerprint — a tracked-file edit alone must not
+    // reopen a gate the layer itself has not moved. `unwrap_or_default`
+    // only stands in for the moment between
     // `rows` being non-empty and the same directory being read a second
     // time; an empty string never equals a real fingerprint, so this still
     // asks rather than silently trusting a layer it could not re-read.

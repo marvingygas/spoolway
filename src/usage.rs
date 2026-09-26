@@ -119,7 +119,7 @@ pub struct Entry {
     pub step: String,
     // No `skip_serializing_if` here: `bank_lane`'s headless-interrupt path
     // already writes this blank on a real lane line — see its own doc — and
-    // `spoolway spend --json` dumps that key as `""` today. Omitting it would
+    // `spoolway eval --json` dumps that key as `""` today. Omitting it would
     // turn `jq '.pipeline'` into `null` on lines this task never touched,
     // which the Goal's "nothing on screen changes" rules out. A directory
     // line satisfies the "no pipeline" criterion by carrying it blank, the
@@ -139,8 +139,13 @@ pub struct Entry {
     pub session: String,
     #[serde(default)]
     pub round: u32,
-    /// Wall-clock seconds the lane was open. Not model time: a gated lane
-    /// waiting on a person is mostly this.
+    /// Seconds the lane's pane was actually `Working`, not the whole time it
+    /// was open — idle, parked and permission-prompt time bank nothing, so a
+    /// gated lane waiting on a person is exactly what this excludes. A delta
+    /// against what the same lane already banked, the same shape as
+    /// `tokens`: a lane banked twice under the same task, step, round and
+    /// session carries only its own share of the busy time on each line, not
+    /// the whole span since it was banked before.
     #[serde(default)]
     pub wall_s: i64,
     /// Assistant turns in the transcript.
@@ -159,16 +164,18 @@ pub struct Entry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ctx_peak: Option<u64>,
 
-    /// Fingerprint of the tracked configuration this lane ran under — see
-    /// [`crate::version`]. Absent on lines written before versions were
-    /// recorded, which read as `unversioned` rather than being dropped.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub version: Option<String>,
-    /// Short commit that last touched that configuration, `+dirty` where the
-    /// working tree had edits git never saw. The half of a version that can be
-    /// turned back into a diff.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub commit: Option<String>,
+    /// The pipeline's own `version:` this lane ran under — see
+    /// [`crate::pipeline::Pipeline::version`]. Set once, when the lane
+    /// starts, and never re-read: raising the pipeline's version while a
+    /// lane is running does not relabel it.
+    ///
+    /// A line written before this field existed, or one still carrying the
+    /// retired `version`/`commit` fingerprint, has no key of this name at
+    /// all — the default reads it as `1.0`, the same as a pipeline file that
+    /// never set one, rather than as some other version the fingerprint
+    /// never meant.
+    #[serde(default = "default_pipeline_version")]
+    pub pipeline_version: String,
     /// What this lane reported: `pass`, `fail` or `block`.
     ///
     /// Absent means the lane never reported one — it was killed, or it ended
@@ -188,7 +195,7 @@ pub struct Entry {
 
     /// The trial this task is one arm of, banked verbatim from
     /// `task.front.trial` — see [`crate::task::Frontmatter::trial`]. Absent on
-    /// every ordinary task, which is what lets `spoolway eval --runs --trial
+    /// every ordinary task, which is what lets `spoolway eval --by task --trial
     /// <id>` find only the arms and nothing else.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trial: Option<String>,
@@ -198,8 +205,8 @@ pub struct Entry {
     /// [`sweep`]'s directory walk rather than dispatched as a lane. `None` on
     /// every lane line, historical or fresh: this is what [`Entry::is_lane`]
     /// tests, and a line carrying it also carries no `task`, `step`,
-    /// `pipeline`, `agent`, `outcome`, `run` or `version`, since none of
-    /// those describe a session spoolway never dispatched.
+    /// `pipeline`, `agent`, `outcome`, `run` or `pipeline_version`, since none
+    /// of those describe a session spoolway never dispatched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dir: Option<String>,
 
@@ -209,6 +216,15 @@ pub struct Entry {
     /// interesting once more than one ledger is being read at once.
     #[serde(skip)]
     pub project: String,
+}
+
+/// What a ledger line with no `pipeline_version` key at all reads as. Kept
+/// deliberately equal to [`crate::pipeline`]'s own `default_pipeline_version`
+/// — a private copy of the same literal, not a shared function — so a line
+/// banked before this field existed and a pipeline that has never raised its
+/// own version read the same way, `1.0`.
+fn default_pipeline_version() -> String {
+    "1.0".to_string()
 }
 
 /// The agent name historical interactive lines carry — nothing writes one any
@@ -227,8 +243,8 @@ const SYNTHETIC_MODEL: &str = "<synthetic>";
 
 impl Entry {
     /// Whether this line belongs to a lane, and so is worth a row in
-    /// `spoolway eval` or `spoolway spend`: every reader over those two asks
-    /// this. Two populations are excluded: historical interactive lines —
+    /// `spoolway eval`, the one reader of the ledger that asks this. Two
+    /// populations are excluded: historical interactive lines —
     /// nothing writes one any more, but the ledger is append-only, so old
     /// ones stay on disk — and a directory line [`sweep`]'s watched-root walk
     /// banked, told apart by [`Entry::dir`] rather than by a fixed agent name
@@ -425,7 +441,7 @@ impl ModelPrice {
 /// back to `crate::models`' refreshed and vendored tables by exact name — see
 /// [`crate::models::resolve`], which this defers to. Returning `None` rather
 /// than zero is deliberate: a model in none has an unknown cost, not a free
-/// one, and `spoolway eval --by` says which models those are instead of quietly
+/// one, and `spoolway eval` says which models those are instead of quietly
 /// under-reporting a total.
 pub fn price(prices: &BTreeMap<String, ModelPrice>, model: &str, tokens: &Tokens) -> Option<f64> {
     crate::models::resolve(prices, model)
@@ -1460,7 +1476,7 @@ fn transcripts_matching(
 /// `$XDG_STATE_HOME` the way [`registry::path`] reads it. The two are not the
 /// same kind of path: the registry is written and read by the same command in
 /// the same shell, while this one is written by a dispatcher and read back
-/// later by whoever runs `spoolway eval --by` — possibly a different shell, a cron
+/// later by whoever runs `spoolway eval` — possibly a different shell, a cron
 /// entry, or a lane. An environment variable set for one and not the other
 /// would send the reader looking in a directory the writer never used, and the
 /// only symptom would be a lane that silently never appears in the ledger.
@@ -1565,7 +1581,7 @@ pub fn new_session_id() -> String {
 /// frontmatter and copied onto ledger lines, not folded into `<task> · <step>`
 /// — so there is no width budget to leave room in, and nothing gained by
 /// keeping it short. 64 bits of entropy instead of 20 pushes a collision
-/// (`group_by_run` would silently fold two unrelated runs into one row) from
+/// (`eval --by task` would silently fold two unrelated runs into one row) from
 /// something that starts showing up within a project's lifetime to something
 /// that will not happen. From the same [`os_random`] [`new_session_id`] reads,
 /// so it costs nothing to distinguish a run from another minted the same
@@ -1581,8 +1597,8 @@ pub fn new_run_id() -> String {
 /// A fresh trial id: `t` plus sixteen hex digits, minted once per trial
 /// launch so every arm the batch mints shares one and two trials of the same
 /// group are never indistinguishable in the ledger. Same shape and the same
-/// reason as [`new_run_id`]: `spoolway eval --runs --trial <id>` groups by
-/// this value exactly the way `group_by_run` groups a run, so a collision
+/// reason as [`new_run_id`]: `spoolway eval --by task --trial <id>` narrows
+/// to the arms carrying this value, one row per run, so a collision
 /// would silently fold two unrelated trials into one comparison table — the
 /// one question a trial exists to let a person answer.
 pub fn new_trial_id() -> String {
@@ -1915,14 +1931,6 @@ pub fn parse_month(raw: &str) -> Result<Window> {
     })
 }
 
-/// The calendar month an entry falls in, locally, as `YYYY-MM`.
-pub fn month_of(ts: &str) -> String {
-    match chrono::DateTime::parse_from_rfc3339(ts) {
-        Ok(at) => at.with_timezone(&chrono::Local).format("%Y-%m").to_string(),
-        Err(_) => "?".to_string(),
-    }
-}
-
 /// Every project this machine has run spoolway in.
 ///
 /// A ledger lives inside its project, which is right — it is that project's
@@ -2192,12 +2200,14 @@ fn banked_delta(repo: &Repo, session: &str, ledger: &[Entry], harvest: &Harvest)
 /// enough for that record to be swept next time.
 ///
 /// `carry` is the session's most recent lane line. Its `pipeline`, `agent`,
-/// `plan`, `run`, `trial` and `round` are copied onto the new line, so spend
-/// recovered by a sweep lands in the same `spoolway eval` row the lane's own
-/// turns did rather than in a pipeline-less one no group owns. `None` for
-/// [`bank_lane`]'s caller — the headless interrupt has a lane name and a
-/// transcript, not a loaded pipeline — where those fields stay blank the way a
-/// line written before they existed carries them.
+/// `plan`, `run`, `trial`, `round` and `pipeline_version` are copied onto the
+/// new line, so spend recovered by a sweep lands in the same `spoolway eval`
+/// row the lane's own turns did rather than in a pipeline-less one no group
+/// owns — and under the version the lane actually ran, not whatever a
+/// pipeline file says by the time the sweep runs. `None` for [`bank_lane`]'s
+/// caller — the headless interrupt has a lane name and a transcript, not a
+/// loaded pipeline — where those fields stay blank the way a line written
+/// before they existed carries them.
 #[allow(clippy::too_many_arguments)]
 fn bank_lane_at(
     repo: &Repo,
@@ -2211,7 +2221,6 @@ fn bank_lane_at(
     harvest: &Harvest,
 ) -> Option<Entry> {
     let delta = banked_delta(repo, session, ledger, harvest)?;
-    let stamp = crate::version::stamp(repo);
     let entry = Entry {
         ts: banked_at.to_rfc3339(),
         task: task.to_string(),
@@ -2228,8 +2237,12 @@ fn bank_lane_at(
         tokens: delta.tokens,
         cost_usd: delta.cost_usd,
         ctx_peak: Some(harvest.ctx_peak),
-        version: Some(stamp.version),
-        commit: stamp.commit,
+        // Carried from the line this sweep continues rather than read fresh
+        // — the pipeline that ran this lane, not whatever a pipeline file
+        // says right now.
+        pipeline_version: carry
+            .map(|c| c.pipeline_version.clone())
+            .unwrap_or_else(default_pipeline_version),
         // The turns swept up here arrived after the lane reported — or after it
         // was killed without reporting — so nothing judged them. A guessed
         // `pass` would put unjudged work in the pass rate.
@@ -2269,8 +2282,8 @@ fn catch_up_settled_lane_at(
     ledger: &[Entry],
 ) -> Option<Entry> {
     // The gate: read the transcript only if it has moved since this session's
-    // most recent banked line. `spoolway eval` and `spoolway spend` sweep on
-    // every invocation, and a lane the dispatcher banked at teardown and never
+    // most recent banked line. `spoolway eval` sweeps on every invocation,
+    // and a lane the dispatcher banked at teardown and never
     // touched again has a transcript no newer than that line — re-parsing the
     // largest file in every finished run each time buys nothing. A tie reads:
     // a line banked in the same second the last turn landed is no proof
@@ -2340,7 +2353,7 @@ pub fn sweep(repo: &Repo) -> Vec<Entry> {
     // without having stalled, so this defers on a lock it cannot take rather
     // than sweeping unlocked and risking the double-bank the lock exists to
     // prevent: the holder is running this exact catch-up, and the next
-    // `spend`/`eval` re-runs it.
+    // `eval` re-runs it.
     let Ok(_lock) = crate::lock::LedgerLock::acquire(&repo.ledger_lock_file()) else {
         return Vec::new();
     };
@@ -2584,8 +2597,8 @@ fn matching_root(cwd: &Path, roots: &[PathBuf]) -> Option<PathBuf> {
 /// The same arithmetic [`bank_lane_at`] does for a settled lane, repeated for
 /// a population that never dispatched at all — which is exactly why the line
 /// this appends carries no `task`, `step`, `pipeline`, `agent`, `outcome`,
-/// `run` or `version`: none of those describe a session spoolway did not
-/// start.
+/// `run` or `pipeline_version`: none of those describe a session spoolway did
+/// not start.
 fn bank_dir_session(
     repo: &Repo,
     kind: &str,
@@ -2612,8 +2625,7 @@ fn bank_dir_session(
         tokens: delta.tokens,
         cost_usd: delta.cost_usd,
         ctx_peak: Some(harvest.ctx_peak),
-        version: None,
-        commit: None,
+        pipeline_version: String::new(),
         outcome: None,
         run: None,
         trial: None,
@@ -2706,9 +2718,9 @@ pub fn skill_markers(kind: &str, session: &str) -> BTreeSet<String> {
 /// Read one project's ledger, tagging every entry with the project's name.
 ///
 /// A project whose home cannot be resolved reads as no entries rather than
-/// an error: this is `spend`'s own read of *other* registered projects, used
-/// to report spend across a machine, so one unreadable project must not stop
-/// a report on every other one. Nothing is written here, so the risk a
+/// an error: this is `spoolway eval --all`'s own read of *other* registered
+/// projects, used to report across a machine, so one unreadable project must
+/// not stop a report on every other one. Nothing is written here, so the risk a
 /// writer runs on a resolution failure — landing in the wrong directory —
 /// does not apply.
 pub fn read_project(root: &Path) -> Vec<Entry> {
@@ -2722,23 +2734,6 @@ pub fn read_project(root: &Path) -> Vec<Entry> {
         entry.project = name.clone();
     }
     entries
-}
-
-/// Whether a project's ledger holds anything at all, from a `stat` rather than
-/// a parse.
-///
-/// `spoolway spend`'s "not shown: …" hint used to answer this by fully parsing
-/// every other registered project's ledger on every interactive run — five
-/// multi-megabyte files could make an empty local report take seconds (review
-/// finding 45). A non-empty file is the same yes this needs, at the cost of
-/// one `stat`.
-pub fn project_has_ledger(root: &Path) -> bool {
-    let Ok(home) = crate::mux::project_home(root) else {
-        return false;
-    };
-    std::fs::metadata(home.join(LEDGER_FILE))
-        .map(|m| m.len() > 0)
-        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -3693,8 +3688,7 @@ mod tests {
             },
             cost_usd: Some(0.41),
             ctx_peak: None,
-            version: Some("3f9a1c04".into()),
-            commit: Some("a91c33e".into()),
+            pipeline_version: "1.1".into(),
             outcome: Some("pass".into()),
             run: Some("r00001".into()),
             trial: None,
@@ -3709,7 +3703,7 @@ mod tests {
         assert_eq!(back[0].task, "login");
         assert_eq!(back[0].tokens.cache_read, 42609);
         assert_eq!(back[0].cost_usd, Some(0.41));
-        assert_eq!(back[0].version.as_deref(), Some("3f9a1c04"));
+        assert_eq!(back[0].pipeline_version, "1.1");
         assert_eq!(back[0].outcome.as_deref(), Some("pass"));
         assert_eq!(back[0].run.as_deref(), Some("r00001"));
 
@@ -3733,14 +3727,29 @@ mod tests {
             tokens: Tokens::default(),
             cost_usd: None,
             ctx_peak: None,
-            version: None,
-            commit: None,
+            pipeline_version: "1.0".into(),
             outcome: None,
             run: None,
             trial: None,
             dir: None,
             project: String::new(),
         }
+    }
+
+    /// A line written before `pipeline_version` existed, or one still
+    /// carrying the retired `version`/`commit` fingerprint, still parses —
+    /// the fingerprint is never read back as a pipeline version, and the
+    /// missing key reads as `1.0`, the same as a pipeline file that never
+    /// raised its own.
+    #[test]
+    fn a_line_with_no_pipeline_version_reads_as_1_0_and_a_fingerprint_line_still_parses() {
+        let old = r#"{"ts":"2026-08-04T06:14:15+00:00","task":"login","step":"review","pipeline":"default","agent":"claude","kind":"claude","model":"claude-opus-5","session":"s","tokens":{"input":1,"output":1,"cache_read":0,"cache_write_5m":0,"cache_write_1h":0,"reasoning":0},"version":"3f9a1c04","commit":"a91c33e"}"#;
+        let entry: Entry = serde_json::from_str(old).unwrap();
+        assert_eq!(entry.pipeline_version, "1.0");
+
+        let newer = r#"{"ts":"2026-08-04T06:14:15+00:00","task":"login","step":"review","pipeline":"default","agent":"claude","kind":"claude","model":"claude-opus-5","session":"s","tokens":{"input":1,"output":1,"cache_read":0,"cache_write_5m":0,"cache_write_1h":0,"reasoning":0}}"#;
+        let entry: Entry = serde_json::from_str(newer).unwrap();
+        assert_eq!(entry.pipeline_version, "1.0");
     }
 
     /// `read_cached` reads the ledger once and again only past what it has
@@ -3994,33 +4003,6 @@ mod tests {
         assert!(!window.contains("whenever"));
     }
 
-    #[test]
-    fn a_month_label_follows_local_time() {
-        use chrono::{Offset, TimeZone};
-
-        // 00:30 on the 1st, here. Written down two hours west the same instant
-        // reads as the 31st of July — and the person who ran the lane would
-        // still call it August, because that is the month they were in.
-        let just_after_midnight = chrono::Local
-            .with_ymd_and_hms(2026, 8, 1, 0, 30, 0)
-            .single()
-            .expect("00:30 on the 1st of August is a real local time");
-        let two_hours_west = chrono::FixedOffset::east_opt(
-            just_after_midnight.offset().fix().local_minus_utc() - 2 * 3600,
-        )
-        .expect("two hours west of here is still a real offset");
-        let written_west = just_after_midnight
-            .with_timezone(&two_hours_west)
-            .to_rfc3339();
-        assert!(
-            written_west.starts_with("2026-07-31"),
-            "the point of this test is a line whose own date disagrees: {written_west}"
-        );
-
-        assert_eq!(month_of(&written_west), "2026-08");
-        assert_eq!(month_of("nonsense"), "?");
-    }
-
     /// `XDG_STATE_HOME` is process-global, and every test below that points
     /// the registry at a scratch directory has to set it — so two of them
     /// running at once (the ordinary case; `cargo test` is parallel by
@@ -4082,7 +4064,7 @@ mod tests {
 
     /// A `projects.json` written by every version before `binding-record`
     /// — a bare array of checkout paths — still reads back, rather than
-    /// every existing registry looking corrupt and empty (and `spend
+    /// every existing registry looking corrupt and empty (and `eval
     /// --all` forgetting every project until each re-registers) the
     /// moment the schema changed underneath it.
     #[test]
@@ -4199,7 +4181,7 @@ mod tests {
 
     /// The shipped agent profiles name kinds the ledger can actually read.
     /// Without this, a profile could be added whose lanes silently never
-    /// appear in `spoolway eval --by`.
+    /// appear in `spoolway eval`.
     ///
     /// Note what this does *not* say: that every launchable kind is metered.
     /// An unmetered kind is a legal state a project may adopt on purpose — see
@@ -4375,8 +4357,7 @@ mod tests {
             tokens: Tokens::default(),
             cost_usd: None,
             ctx_peak: None,
-            version: None,
-            commit: None,
+            pipeline_version: "1.0".into(),
             outcome: None,
             run: None,
             trial: None,
@@ -4471,7 +4452,7 @@ mod tests {
 
     /// `bank_lane`'s headless-interrupt path writes a real lane line with
     /// `pipeline` and `agent` both blank — see its own doc comment — and
-    /// `spoolway spend --json` has always dumped that as `"pipeline":""` and
+    /// `spoolway eval --json` has always dumped that as `"pipeline":""` and
     /// `"agent":""`. Neither key may start disappearing because of a change
     /// this task makes for an unrelated population: `jq '.pipeline'` reading
     /// `null` instead of `""` on a line nobody touched is exactly the
@@ -4506,9 +4487,9 @@ mod tests {
         assert!(!entry.is_lane(), "an interactive line, not a lane's");
     }
 
-    /// `is_lane` is what `spoolway eval` and `spoolway spend` filter the
-    /// ledger through — pinned against both an interactive line and a lane
-    /// line so the two never trade places.
+    /// `is_lane` is what `spoolway eval` filters the ledger through —
+    /// pinned against both an interactive line and a lane line so the two
+    /// never trade places.
     #[test]
     fn is_lane_tells_a_lane_from_an_interactive_session() {
         let lane = Entry {
@@ -4708,9 +4689,9 @@ mod tests {
     }
 
     /// A settled lane whose transcript has not moved since its last banked line
-    /// is not read at all — `spoolway eval` and `spoolway spend` run on every
-    /// invocation, and re-parsing the largest file in every finished run each
-    /// time is the cost this gate removes.
+    /// is not read at all — `spoolway eval` runs on every invocation, and
+    /// re-parsing the largest file in every finished run each time is the
+    /// cost this gate removes.
     #[test]
     fn a_settled_lane_whose_transcript_has_not_moved_is_not_read() {
         let (repo, path) = fixture("settled-lane-still");
@@ -4901,13 +4882,13 @@ mod tests {
             Some(root.to_string_lossy().as_ref())
         );
         assert_eq!(appended[0].tokens.output, 42);
-        assert!(!appended[0].is_lane(), "invisible to eval and spend");
+        assert!(!appended[0].is_lane(), "invisible to eval");
         assert_eq!(appended[0].task, "");
         assert_eq!(appended[0].step, "");
         assert_eq!(appended[0].pipeline, "");
         assert_eq!(appended[0].outcome, None);
         assert_eq!(appended[0].run, None);
-        assert_eq!(appended[0].version, None);
+        assert_eq!(appended[0].pipeline_version, "");
 
         std::fs::remove_dir_all(&home).ok();
     }
@@ -5339,7 +5320,7 @@ mod tests {
 
     /// A session's own span is its transcript's first and last `timestamp` —
     /// not the machine's clock, and not `wall_s`, which a directory session
-    /// never banks. What `spoolway eval`'s `sessions` view reads its `WHEN`
+    /// never banks. What `spoolway eval`'s `by session` table reads its `WHEN`
     /// and `TIME` columns from.
     #[test]
     fn session_span_reads_the_first_and_last_timestamp() {

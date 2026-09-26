@@ -253,10 +253,51 @@ stage_reaches() {
   else bad "$what ($task is at $(stage_of "$task"), wanted $want)"; fi
 }
 
+# The board's own log holds every frame it ever drew, back to back, each one
+# opening with the same clear-and-home escape `_frame_count` already counts
+# by. The last one — this suite's whole log, minus every frame before it —
+# is the only one a "TIME held still" comparison should ever read from: an
+# earlier frame is a stale answer, not proof of anything happening now.
+# `python3`, not `awk`: the marker's own `[` and `]` read as an unescaped
+# bracket expression the moment they reach a regex engine, which is exactly
+# what a multi-byte `RS` is to (g)awk — a plain byte split sidesteps that
+# rather than fighting it.
+_last_frame() {
+  python3 - "$BOARD_LOG" <<'PY'
+import sys
+data = open(sys.argv[1], "rb").read()
+sys.stdout.buffer.write(data.split(b"\x1b[2J\x1b[H")[-1])
+PY
+}
+
+# `dim_nothing` (src/status/view.rs) colours only the dash a figure has
+# none — a real TIME, OUT or COST reads as plain text — but the state dot
+# and the row's own colour still wrap the rest of the line in SGR escapes,
+# which this strips so a plain grep can read what is left.
+_strip_ansi() { sed -E $'s/\x1b\\[[0-9;]*[a-zA-Z]//g'; }
+
+# `task`'s own TIME column, off the board's last frame: the one
+# duration-shaped token — `12s`, `1m 02s`, `1h 05m`, `human_secs`'s three
+# shapes — on the row naming it. Empty when the row shows a dash instead of
+# a figure (nothing banked yet), which a caller comparing two reads of this
+# treats as "still nothing" rather than a match worth trusting.
+_row_time() {
+  local task=$1
+  _last_frame | _strip_ansi | grep -F "$task" | head -1 |
+    grep -Eo '[0-9]+h [0-9]{2}m|[0-9]+m [0-9]{2}s|[0-9]+s' | tail -1
+}
+
 # ------------------------------------------- `p` over a live agent lane
 # The cursor's own panel: it names the step, calls it an agent turn, and says
 # the turn is interrupted rather than killed — the one thing a person
 # answering `enter` needs to know before they do.
+#
+# Turned on here, for the rest of the suite: a stand-in writes no transcript
+# by default (agents/transcript.sh), so with nothing else `record_usage`
+# would have nothing to harvest and every lane from here on would bank
+# nothing at all — exactly what the TIME-unchanged check below needs a real,
+# non-dash figure to hold still. Same incantation disaster.sh uses.
+echo 4000 > "$CTL/transcript"
 queue_hang mid-turn
 board_start
 LANE_PID=$(lane_pid "mid-turn · implement" 30)
@@ -317,6 +358,35 @@ press $'\r'
 stage_reaches "enter parks the task" mid-turn paused 25
 if poll_while 15 kill -0 "$LANE_PID"; then ok "and the turn it named is over"
 else bad "and the turn it named is over"; fi
+
+# A paused row's TIME is the busy time it already banked, not the wait for
+# a person to come back, and it must hold still while the task stays paused
+# (acceptance criterion 5, gh-378 / issue #380).
+#
+# This suite runs the headless backend (`configure_project`), which does not
+# keep a lane resident while it waits, so `hold_for_block` never runs here.
+# The line the row reads is banked by the headless `interrupt_lane` through
+# `usage::bank_lane`, whose `wall_s` is always 0 — so the figure held still
+# is `0s`, not the seconds `mid-turn` actually ran. That bank lands whenever
+# the interrupt does rather than on a dispatcher pass, so this polls for a
+# figure rather than reading one `next_frame` after the pause and mistaking
+# a bank that has not landed yet for a dash that never will.
+_row_time_is_set() { [ -n "$(_row_time "$1")" ]; }
+if poll_until 30 _row_time_is_set mid-turn; then
+  PAUSED_TIME=$(_row_time mid-turn)
+  ok "the paused row shows a real TIME ($PAUSED_TIME)"
+else
+  PAUSED_TIME=""
+  bad "the paused row never shows a TIME at all"
+  tail -30 "$BOARD_LOG" | sed 's/^/        /'
+fi
+settle_frames 15
+STILL_TIME=$(_row_time mid-turn)
+if [ "$STILL_TIME" = "$PAUSED_TIME" ]; then ok "and TIME is still $PAUSED_TIME after a wait, unchanged"
+else
+  bad "TIME moved while paused: was $PAUSED_TIME, now $STILL_TIME"
+  tail -30 "$BOARD_LOG" | sed 's/^/        /'
+fi
 
 # ---------------------------------- `P` with one lane live and one task idle
 # The run-wide panel lists every abort and counts what pauses behind it, so

@@ -4064,6 +4064,66 @@ mod tests {
         );
     }
 
+    /// The board's STEP column reads `Task::rounds_at`, which now answers
+    /// off `Frontmatter::arrivals` — a map of its own, banked beside `rounds`
+    /// in `Task::set_stage` but never touched by `resume_at`'s by-hand
+    /// refund, which only ever removes a `rounds` entry. A task that has
+    /// genuinely stood at `implement` twice — once from `queued`, once sent
+    /// back by `review` — keeps showing `↻2` after a person resumes it past
+    /// a blocked `review`, even though the refund removes the
+    /// `review->implement` entry out of `rounds`: that entry was never what
+    /// `arrivals["implement"]` was counting.
+    #[test]
+    fn a_hand_resume_does_not_erase_a_steps_arrival_count() {
+        let repo = fixture("unblock-keeps-arrivals");
+        let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+        add(&repo, "stuck", &[]);
+
+        let mut task = queued(&repo, "stuck");
+        task.set_stage("implement", None); // queued->implement: 1
+        task.set_stage("review", None); // implement->review: 1
+        task.set_stage("implement", None); // review->implement: 1
+        task.set_stage("review", None); // implement->review: 2
+        task.save().unwrap();
+
+        let before = queued(&repo, "stuck");
+        assert_eq!(
+            before.rounds_at("implement"),
+            2,
+            "two genuine arrivals at `implement` before anything is resumed"
+        );
+
+        let mut task = before;
+        task.front.blocked_from = Some("review".into());
+        task.set_stage("blocked", None);
+        task.save().unwrap();
+
+        resume(
+            &repo,
+            &Pipelines::builtin(),
+            &crate::cli::ResumeArgs {
+                task: "stuck".into(),
+                stage: None,
+                message: None,
+            },
+            None,
+        )
+        .unwrap();
+
+        let task = queued(&repo, "stuck");
+        assert_eq!(task.stage(), "review");
+        assert_eq!(
+            task.rounds_at("implement"),
+            2,
+            "the refund that hands back `review->implement`'s budget must not \
+             also erase the arrival it counted — `implement` was still \
+             visited twice"
+        );
+    }
+
     /// The lane that blocked did the reading, the exploring and usually the
     /// work; a fresh session on the same step pays for all of it again to get
     /// back where that one already was. Resuming marks the step to be
@@ -4152,6 +4212,7 @@ mod tests {
         let mut task = queued(&repo, "stuck");
         task.set_stage("implement", None);
         let rounds_before = task.front.rounds.clone();
+        let arrivals_before = task.front.arrivals.clone();
         let prompts_before = task.front.steps.clone();
         let arrived_from_before = task.front.arrived_from.clone();
         task.front.parked_from = Some("implement".into());
@@ -4173,6 +4234,7 @@ mod tests {
         let task = queued(&repo, "stuck");
         assert_eq!(task.stage(), "implement");
         assert_eq!(task.front.rounds, rounds_before);
+        assert_eq!(task.front.arrivals, arrivals_before);
         assert_eq!(task.front.steps, prompts_before);
         assert_eq!(task.front.arrived_from, arrived_from_before);
         assert_eq!(task.front.blocked_from, None);

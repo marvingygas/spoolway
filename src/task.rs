@@ -366,7 +366,7 @@ pub struct Frontmatter {
     /// The trial this task is one arm of, minted once per trial and stamped
     /// on every arm the queue screen's `t` picker forks — see
     /// `commands::queue::begin_trial`. Absent on a task queued the ordinary
-    /// way. What lets `spoolway eval --runs --trial <id>` find a trial's arms
+    /// way. What lets `spoolway eval --by task --trial <id>` find a trial's arms
     /// together in the ledger: a trial forks a whole group, one arm per
     /// source task (`alpha-1`, `beta-1`, …), so those arms come from
     /// different source documents and share nothing else — not even an id
@@ -525,6 +525,27 @@ pub struct Frontmatter {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub rounds: BTreeMap<String, u32>,
 
+    /// How many times this task has arrived at each step, keyed by the step
+    /// itself rather than by route — what the board's STEP column draws as
+    /// `↻<n>` once it reaches [`crate::status::view::ARRIVAL_FLOOR`].
+    ///
+    /// Its own map rather than a sum over [`Self::rounds`], which
+    /// [`Task::rounds_at`] used to compute: `rounds` also holds the loop
+    /// budget, and `resume_at`'s by-hand refund in `src/commands/report.rs`
+    /// deletes a route's entry there on purpose, to hand the budget back.
+    /// Reading the arrival count off the same map meant that refund also
+    /// erased however many genuine arrivals it had counted. This map is
+    /// banked separately, in [`Task::set_stage`], and nothing ever removes
+    /// or lowers an entry in it — a fact a step actually visited never
+    /// becomes false again, however many budgets are later handed back.
+    ///
+    /// Empty on a task file written before this field existed, which
+    /// [`Task::parse`] backfills from `rounds` the moment such a file is
+    /// read — see its own doc for why an empty map here is safe to treat as
+    /// "not yet backfilled" rather than "genuinely never arrived".
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub arrivals: BTreeMap<String, u32>,
+
     /// How many consecutive launches at each step could not even start —
     /// never a lane or a command process that ran and failed, only one that
     /// [`crate::mux::Mux::start_lane`], [`crate::command_step::Runs::start`]
@@ -643,19 +664,13 @@ impl Task {
     }
 
     /// How many times this task has arrived at `step`, whichever route
-    /// carried it there each time — every `rounds` entry keyed `*->{step}`,
-    /// summed. Unlike [`Self::rounds_via`], which asks about one route's own
+    /// carried it there each time — [`Frontmatter::arrivals`]'s own entry for
+    /// it. Unlike [`Self::rounds_via`], which asks about one route's own
     /// budget, this is a fact about the step itself: the board's STEP column
     /// reads it to say how many times a task has stood there, with no route
     /// or budget behind the number at all.
     pub fn rounds_at(&self, step: &str) -> u32 {
-        let suffix = format!("->{step}");
-        self.front
-            .rounds
-            .iter()
-            .filter(|(key, _)| key.ends_with(&suffix))
-            .map(|(_, n)| *n)
-            .sum()
+        self.front.arrivals.get(step).copied().unwrap_or(0)
     }
 
     /// Bank one launch at `to`, arriving from `from` — an agent lane's own
@@ -742,6 +757,28 @@ impl Task {
             front.extra.remove(*key);
         }
 
+        // A task file from before `arrivals:` existed carries `rounds:` but
+        // no `arrivals:` of its own — every route this task ever took is
+        // still there, only not yet re-keyed by destination. Backfilled by
+        // the sum [`Task::rounds_at`] itself used to compute, the one time
+        // this can still be told apart from a task that has genuinely never
+        // arrived anywhere: after this shipped, [`Task::set_stage`] banks
+        // both maps on every arrival, so a task with laps on file but no
+        // `arrivals:` can only be one still carrying the old shape. Without
+        // this, every task already in a queue would read as never having
+        // arrived anywhere the moment this shipped — exactly the count this
+        // field exists to keep from dropping. Same precedent as
+        // `an_old_prompts_key_is_read_unchanged_and_saved_as_steps`, for the
+        // shape that field's own alias could not cover: an old file's laps
+        // are keyed by route already, this only sums them per destination.
+        if front.arrivals.is_empty() {
+            for (route, n) in &front.rounds {
+                if let Some((_, to)) = route.split_once("->") {
+                    *front.arrivals.entry(to.to_string()).or_insert(0) += n;
+                }
+            }
+        }
+
         // `queue add` checks this too, and is not the only way a file gets here:
         // a person edits one, a plan writes several. The id names this task's
         // worktree and every file a lane of it writes under the project's
@@ -801,6 +838,7 @@ impl Task {
             .rounds
             .entry(route_key(&from, stage))
             .or_insert(0) += 1;
+        *self.front.arrivals.entry(stage.to_string()).or_insert(0) += 1;
         self.front.arrived_from = Some(from);
         self.front.attempts = 0;
         self.front.launched_at = None;
@@ -1265,6 +1303,38 @@ mod tests {
         assert!(!rendered.contains("prompts:"), "{rendered}");
     }
 
+    /// A task file already on disk carrying `rounds:` but no `arrivals:` of
+    /// its own — written before this field existed — reads its arrival
+    /// count backfilled from the same sum [`Task::rounds_at`] used to
+    /// compute before `arrivals:` had a map of its own: every task already
+    /// in a queue the moment this ships keeps its counter rather than
+    /// reading as never having arrived anywhere.
+    #[test]
+    fn a_task_with_rounds_but_no_arrivals_key_backfills_its_count() {
+        let raw = "---\nid: demo\nstage: implement\nrounds:\n  \
+                   queued->implement: 1\n  review->implement: 1\n  implement->review: 2\n\
+                   ---\n## Goal\nDo a thing.\n";
+        let task = Task::parse(PathBuf::from("demo.md"), raw).unwrap();
+        assert_eq!(task.rounds_at("implement"), 2);
+        assert_eq!(task.rounds_at("review"), 2);
+
+        // The backfill writes `arrivals:` back out, so a re-save never
+        // repeats it.
+        let rendered = task.render().unwrap();
+        assert!(rendered.contains("arrivals:"), "{rendered}");
+    }
+
+    /// A task that already carries `arrivals:` of its own is read exactly as
+    /// written — the backfill above only ever fills a genuinely empty map,
+    /// never adds to one a real `set_stage` already banked.
+    #[test]
+    fn a_task_with_its_own_arrivals_key_is_never_backfilled_over() {
+        let raw = "---\nid: demo\nstage: implement\nrounds:\n  queued->implement: 5\n\
+                   arrivals:\n  implement: 1\n---\n## Goal\nDo a thing.\n";
+        let task = Task::parse(PathBuf::from("demo.md"), raw).unwrap();
+        assert_eq!(task.rounds_at("implement"), 1);
+    }
+
     #[test]
     fn set_stage_appends_to_existing_status_log() {
         let mut task = Task::parse(PathBuf::from("demo.md"), SAMPLE).unwrap();
@@ -1321,15 +1391,17 @@ mod tests {
     }
 
     /// A park-and-resume round trip through `set_stage_unbanked` banks
-    /// nothing: `steps`, `rounds` and `arrived_from` come out byte-for-byte
-    /// as they went in, which is exactly what a person interrupting a turn
-    /// and putting it back must look like — the task never left the step.
+    /// nothing: `steps`, `rounds`, `arrivals` and `arrived_from` come out
+    /// byte-for-byte as they went in, which is exactly what a person
+    /// interrupting a turn and putting it back must look like — the task
+    /// never left the step.
     #[test]
     fn set_stage_unbanked_round_trip_banks_nothing() {
         let mut task = Task::parse(PathBuf::from("demo.md"), SAMPLE).unwrap();
         task.set_stage("implement", Some("moved on"));
         let prompts_before = task.front.steps.clone();
         let rounds_before = task.front.rounds.clone();
+        let arrivals_before = task.front.arrivals.clone();
         let arrived_from_before = task.front.arrived_from.clone();
 
         task.set_stage_unbanked("paused", "paused from the board");
@@ -1338,6 +1410,7 @@ mod tests {
         assert_eq!(task.stage(), "implement");
         assert_eq!(task.front.steps, prompts_before);
         assert_eq!(task.front.rounds, rounds_before);
+        assert_eq!(task.front.arrivals, arrivals_before);
         assert_eq!(task.front.arrived_from, arrived_from_before);
         let log = task.section("## Status Log").unwrap();
         assert!(log.contains("→ `paused`: paused from the board"));

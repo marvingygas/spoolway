@@ -33,7 +33,7 @@ live in [`docs/`](docs/README.md).
 | Page | What it covers |
 |---|---|
 | [Cost accounting](docs/cost.md) | The usage ledger and model prices |
-| [Comparing versions](docs/eval.md) | What a prompt or pipeline edit did to cost and pass rate |
+| [Comparing pipelines](docs/eval.md) | What each pipeline costs to run, by pass rate and price |
 
 ## Reference
 

@@ -372,7 +372,7 @@ fn price_table_age_at(today: NaiveDate) -> PriceTableAge {
 }
 
 /// Where a resolved answer came from — what `spoolway models` prints in its
-/// `SOURCE` column, and what `spoolway eval --by` and `spoolway doctor` tell apart
+/// `SOURCE` column, and what `spoolway eval` and `spoolway doctor` tell apart
 /// a project's own word on a model from litellm's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]

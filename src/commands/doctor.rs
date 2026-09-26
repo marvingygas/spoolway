@@ -1358,7 +1358,7 @@ fn model_health_checks(pipelines: &Pipelines, config: &Config) -> Vec<Finding> {
     // A step naming a model is not the same as that name meaning anything.
     // This is a note rather than a failure — an unpriced, unsized model is a
     // lane that still runs, just unaccounted, exactly like a dropped
-    // `{session_id}` — but it is worth a person seeing before `spoolway spend`
+    // `{session_id}` — but it is worth a person seeing before `spoolway eval`
     // shows them a bill with a hole in it. The placeholder is left out: it was
     // a problem a moment ago, and saying it twice in two weights reads as two
     // findings.

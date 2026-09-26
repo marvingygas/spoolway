@@ -122,7 +122,7 @@ pub struct Adapter {
 /// **What `None` costs.** Nothing breaks; three things degrade, and one
 /// consumer does not care:
 ///
-/// - `spoolway eval --by` gets no ledger lines at all for lanes of this kind. This
+/// - `spoolway eval` gets no ledger lines at all for lanes of this kind. This
 ///   is the one with no fallback — the spend is simply absent.
 /// - Session reuse always misses: `dispatch::carried_session` returns
 ///   `SessionMiss::NotFound` and every step opens a fresh session.
@@ -482,7 +482,7 @@ pub const ADAPTERS: &[Adapter] = &[
             "{model}",
             "--append-system-prompt",
             "{prompt_file}",
-            // Pin the session so `spoolway eval --by` can find this lane's
+            // Pin the session so `spoolway eval` can find this lane's
             // transcript by a name spoolway chose rather than by guessing.
             "--session-id",
             "{session_id}",

@@ -65,6 +65,7 @@ steps:
 
 | Key | Default | What it does |
 |---|---|---|
+| `version` | `1.0` | The pipeline's own version, in `x.y` form. Yours to raise when the pipeline changed enough to compare. spoolway only records it. |
 | `description` | none | One sentence on what this pipeline is for. Shown when choosing between pipelines. |
 | `task_template` | the pipeline's name, then `default` | Which task skeleton a task queued here is written from. |
 | `steps` | required | The steps, in order. The first one is where a task starts. |

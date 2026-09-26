@@ -296,9 +296,9 @@ impl<'a> Dispatcher<'a> {
         report.actions.push(format!(
             "  removed   {removed} panes, scratch dirs, sessions and run-file sets"
         ));
-        report
-            .actions
-            .push(format!("  read      spoolway eval --runs --trial {trial}"));
+        report.actions.push(format!(
+            "  read      spoolway eval --by task --trial {trial}"
+        ));
     }
 
     /// Close this project's shared tab, once the project has nothing left in
@@ -697,7 +697,18 @@ impl<'a> Dispatcher<'a> {
                 .for_task(task)
                 .map(|p| p.name.clone())
                 .unwrap_or_default();
-            self.record_usage(&record, task.id(), &step_id, Some(task), &pipeline);
+            let banked = self.record_usage(&record, task.id(), &step_id, Some(task), &pipeline);
+            // The record above is a clone; the one still in `self.lanes`
+            // under `name` is what `save_lane_records` below actually
+            // writes out, and its `busy_s` has to be zeroed the same way
+            // `Dispatcher::hold_for_block` zeroes its own kept record — or
+            // this stop persists the busy time just banked straight back to
+            // disk, and the next dispatcher banks it a second time once this
+            // lane, left running, finally settles. Only on `true`: a call
+            // that banked nothing must leave the accrued time standing.
+            if banked && let Some(record) = self.lanes.get_mut(&name) {
+                record.clear_busy_s();
+            }
 
             // Under the task's own lock, and against a fresh read rather
             // than the copy taken at the top: the lane this forgives is
@@ -777,7 +788,16 @@ impl<'a> Dispatcher<'a> {
                 .get(&name)
                 .cloned()
                 .unwrap_or_else(|| LaneRecord::readopted(&name, now_secs(), &ledger));
-            self.record_usage(&record, task.id(), &step_id, Some(task), &pipeline);
+            let banked = self.record_usage(&record, task.id(), &step_id, Some(task), &pipeline);
+            // Same reset `sweep_on_stop` makes on its own kept record — the
+            // stale-record sweep below removes this one before the function
+            // returns, so nothing persists it either way today, but the
+            // contract `busy_s`'s own doc states is "the caller that keeps
+            // its record zeroes this on `true`", not "unless something else
+            // happens to clean it up two calls later".
+            if banked && let Some(record) = self.lanes.get_mut(&name) {
+                record.clear_busy_s();
+            }
             let _ = self.mux.stop_lane(&lane.name, &lane.pane_id);
         }
 
@@ -994,7 +1014,7 @@ pub fn discard_trial(
     println!("  kept      usage rows for {usage_tasks} trial tasks");
     println!("  removed   {removed} task documents, worktrees and local branches");
     println!("  removed   {removed} panes, scratch dirs, sessions and run-file sets");
-    println!("  read      spoolway eval --runs --trial {trial}");
+    println!("  read      spoolway eval --by task --trial {trial}");
     for problem in &report.problems {
         eprintln!("  {problem}");
     }

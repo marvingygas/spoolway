@@ -764,6 +764,7 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Res
     front.launched_at = None;
     front.steps = Default::default();
     front.rounds = Default::default();
+    front.arrivals = Default::default();
     front.launch_failures = Default::default();
     front.launch_busy_since = Default::default();
     front.arrived_from = None;
@@ -5444,8 +5445,8 @@ fn begin_trial(
 
     // Minted fresh, not the group's own name or any one task's — two
     // trials of the same group must read apart in the ledger, since
-    // `spoolway eval --runs --trial <id>` groups arms by this value the same
-    // way `group_by_run` groups a run, and a reused value would silently
+    // `spoolway eval --by task --trial <id>` finds a trial's arms by this
+    // value, one row per run, and a reused value would silently
     // fold two unrelated batches into one comparison table.
     let trial_id = crate::usage::new_trial_id();
 

@@ -36,7 +36,7 @@ Each page covers one part of the system. The order below is the order most peopl
 | Page | What it covers |
 |---|---|
 | [Cost accounting](cost.md) | The usage ledger and model prices |
-| [Comparing versions](eval.md) | What a prompt or pipeline edit did to cost and pass rate |
+| [Comparing pipelines](eval.md) | What each pipeline costs to run, by pass rate and price |
 
 ## Reference
 

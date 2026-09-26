@@ -46,6 +46,17 @@ pub(crate) const LANES_FILE: &str = "lanes.json";
 /// makes it.
 pub const PROBE_INTERVAL: Duration = Duration::from_secs(10);
 
+/// The most one [`Dispatcher::accrue_busy_time`] interval may add to a
+/// lane's `busy_s` in a single pass — a small multiple of `PROBE_INTERVAL`,
+/// the fixed rate passes actually run at. `busy_polled_at` survives a
+/// restart in `lanes.json`, so without this the gap across a dispatcher
+/// down for maintenance, or a machine suspended and resumed, would be
+/// banked in full as busy time for every lane the multiplexer still
+/// reports `Working` on the first pass back — the same shape as the bug
+/// this constant exists beside: a wait banked as work. See gh-378 / issue
+/// #380.
+const BUSY_POLL_CEILING: Duration = Duration::from_secs(PROBE_INTERVAL.as_secs() * 6);
+
 /// How many times a task's lane may be *launched* at the step it is on
 /// before a person is asked instead.
 ///
@@ -250,13 +261,39 @@ pub struct Report {
 }
 
 /// Per-lane bookkeeping the multiplexer does not keep for us: when a lane
-/// started, and when its output last changed. `last_progress` is what the
-/// reminder loop reads; `started_at` is the usage ledger's alone now.
+/// started, when its output last changed, and how much of its time was
+/// actually spent working. `last_progress` is what the reminder loop reads;
+/// `started_at` answers `reported_since`; `busy_s` is what `record_usage`
+/// banks as wall time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct LaneRecord {
     started_at: i64,
     last_progress: i64,
     output_hash: u64,
+    /// Seconds this lane has been `LaneStatus::Working` since the last time
+    /// it was actually banked — a running total this pass's own
+    /// [`Dispatcher::accrue_busy_time`] adds to, and [`Dispatcher::record_usage`]
+    /// reads as the line's `wall_s`. Unlike tokens, whose delta is re-read
+    /// from `usage_banked` on every call, this is not zeroed by
+    /// `record_usage` itself — it only reads `record: &LaneRecord` — so a
+    /// caller that keeps its record in `self.lanes` afterwards zeroes this
+    /// itself, and only once `record_usage` answers `true`: a call that
+    /// banked nothing must leave the accrued time standing for the next one
+    /// to bank instead. `hold_for_block`, the held branch of
+    /// `tear_down_and_escalate`, and `teardown::sweep_on_stop` and
+    /// `teardown::discard_arm` (both of which read `self.lanes` rather than
+    /// remove from it, since the lane they bank is left running) all do
+    /// this. Idle, parked and permission-prompt passes
+    /// (`Blocked`) never touch it, which is the whole fix: a lane held for a
+    /// person and freed hours later has spent none of that wait, so this
+    /// stays exactly 0 across it — see gh-378 / issue #380.
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    busy_s: i64,
+    /// The pass `busy_s` was last measured up to. `None` until
+    /// `accrue_busy_time` first sees this lane, so the interval before a
+    /// dispatcher noticed it existed is never guessed at and never counted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    busy_polled_at: Option<i64>,
     /// When this lane was last sent the report contract again, in
     /// `last_progress`'s own clock. `None` until the first reminder.
     ///
@@ -290,6 +327,17 @@ pub(crate) struct LaneRecord {
     agent: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     model: String,
+    /// The pipeline's own `version:` this lane started under — see
+    /// [`crate::pipeline::Pipeline::version`]. Set once, at launch, and never
+    /// re-read: raising the pipeline's version while a lane is running does
+    /// not relabel it. Copied onto the lane's own ledger line by
+    /// `record_usage`, the same way `kind`, `agent` and `model` are.
+    ///
+    /// Empty for a lane this dispatcher never watched launch, the same as
+    /// those three — [`LaneRecord::readopted`] recovers it from the ledger's
+    /// own last line for this name where one exists.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pipeline_version: String,
     /// Where the lane's branch stood at launch. Read only when the lane is torn
     /// down without having reported, which is the one path where nothing else
     /// knows whether the work in the worktree is the lane's whole turn or the
@@ -371,6 +419,16 @@ struct RetiredPane {
 }
 
 impl LaneRecord {
+    /// What every caller that keeps its record in `self.lanes` after a
+    /// `true` from `record_usage` owes `busy_s` — see that field's own doc
+    /// for the full contract and the list of callers this way. A plain
+    /// field write would do the same thing from inside `dispatch.rs`
+    /// itself, but `teardown.rs` is a sibling module and `busy_s` is
+    /// private, so this is the one door in from outside it.
+    pub(crate) fn clear_busy_s(&mut self) {
+        self.busy_s = 0;
+    }
+
     /// A record for a lane this dispatcher did not start — an interrupted pass
     /// picking up where it left off. There is nothing to attribute its usage to,
     /// so the ledger fields stay blank and only `started_at` and
@@ -380,12 +438,15 @@ impl LaneRecord {
             started_at: now,
             last_progress: now,
             output_hash: 0,
+            busy_s: 0,
+            busy_polled_at: None,
             reminded_at: None,
             reminders: 0,
             session: String::new(),
             kind: String::new(),
             agent: String::new(),
             model: String::new(),
+            pipeline_version: String::new(),
             head: String::new(),
             held_for_block: false,
             person_turn_busy: false,
@@ -427,6 +488,7 @@ impl LaneRecord {
             record.kind = entry.kind.clone();
             record.agent = entry.agent.clone();
             record.model = entry.model.clone();
+            record.pipeline_version = entry.pipeline_version.clone();
         }
         record
     }
@@ -888,6 +950,10 @@ impl<'a> Dispatcher<'a> {
                     .map(|(step, task)| (step.to_string(), task.to_string(), lane))
             })
             .collect();
+
+        // Every owned lane's own busy clock, ticked once before anything
+        // this pass might bank reads it — see `accrue_busy_time`.
+        self.accrue_busy_time(&owned);
 
         // The dependency graph, resolved once for the whole pass. It owns its
         // data, so the rest of the pass is free to keep writing task files.
@@ -1875,6 +1941,60 @@ impl<'a> Dispatcher<'a> {
         parked_for_a_person(self.pipelines, self.unattended, task)
     }
 
+    /// Add this pass's own interval to every owned lane's `busy_s`, for
+    /// whichever of them the multiplexer just reported `Working` — the one
+    /// status that means mid-turn and spending, as opposed to idle, settled,
+    /// or parked on a permission prompt. Read once per pass, ahead of
+    /// anything this pass might bank, so a lane freed or first held this
+    /// same pass carries this interval into that bank rather than losing it.
+    ///
+    /// Deliberately not `is_busy()`, which also answers `Blocked`: a
+    /// permission prompt is a lane waiting on a person, not one running —
+    /// see gh-378 / issue #380, where a held lane's whole parked wait used
+    /// to be banked as if it had run the entire time.
+    ///
+    /// Quantised to a poll, not a stopwatch: the interval a lane turns
+    /// `Working` between this pass and the next is credited to it only once
+    /// this or a later pass actually looks, so the true first fraction of a
+    /// turn — before the first pass that finds it `Working` — and the true
+    /// last fraction — after the last pass that still does — are never
+    /// banked. At `PROBE_INTERVAL`'s rate that is on the order of ten
+    /// seconds under-counted at each end of a turn, which is the honest
+    /// price of measuring "was it working" pass by pass rather than timing
+    /// the turn itself.
+    fn accrue_busy_time(&mut self, owned: &[(String, String, &Lane)]) {
+        // The ledger is read lazily, one lane at a time, and only for a name
+        // this dispatcher has no record of yet — the ordinary case is every
+        // owned lane already has one, and an empty pass must not read the
+        // ledger at all (see `a_pass_that_banks_nothing_never_reads_the_ledger`).
+        let now = now_secs();
+        for (_, _, lane) in owned {
+            if !self.lanes.contains_key(&lane.name) {
+                let ledger = self.ledger();
+                self.lanes.insert(
+                    lane.name.clone(),
+                    LaneRecord::readopted(&lane.name, now, &ledger),
+                );
+            }
+            let record = self.lanes.get_mut(&lane.name).expect("just inserted above");
+            let since = record.busy_polled_at.unwrap_or(now);
+            if lane.status == LaneStatus::Working {
+                // Clamped: `busy_polled_at` is written to `lanes.json` and so
+                // survives a restart, and an ordinary pass is at most
+                // `PROBE_INTERVAL` apart (sooner, on a wake). A gap wider
+                // than `BUSY_POLL_CEILING` is not a pass running late, it is
+                // the dispatcher having been down — a maintenance window, a
+                // suspended machine — and banking that whole gap as busy
+                // time for every lane still `Working` on the first pass back
+                // is the same shape as the bug this fixes: a wait banked as
+                // work. See gh-378 / issue #380.
+                let elapsed = (now - since).max(0).min(BUSY_POLL_CEILING.as_secs() as i64);
+                record.busy_s += elapsed;
+            }
+            record.busy_polled_at = Some(now);
+        }
+    }
+
     /// End any lane whose work is done, and take its pane back for the task.
     ///
     /// Taking it back rather than closing it is what gives a task one pane for
@@ -2172,7 +2292,19 @@ impl<'a> Dispatcher<'a> {
             .and_then(|t| self.pipelines.for_task(t).ok())
             .map(|p| p.name.clone())
             .unwrap_or_default();
-        self.record_usage(&record, task_id, step_id, task, &pipeline);
+        let banked = self.record_usage(&record, task_id, step_id, task, &pipeline);
+        // Banked, not removed — this record stays in `self.lanes` under
+        // `held_for_block` for `settle_person_turn` to keep finding it every
+        // later pass. Its `busy_s` has to go back to 0 the same way tokens
+        // already do via `usage_banked`, or the next bank of this same lane
+        // (`free_finished_lanes`, once the block clears) would carry this
+        // interval a second time — but only once a line was actually
+        // appended; a call that banked nothing (no session, no readable
+        // transcript) must leave the accrued time for that next bank to
+        // find, or it is simply lost.
+        if banked && let Some(record) = self.lanes.get_mut(&lane.name) {
+            record.busy_s = 0;
+        }
 
         // Failing to focus is a pane somebody has to find themselves, not a
         // reason to spoil the pass — the notification named it either way.
@@ -2278,6 +2410,14 @@ impl<'a> Dispatcher<'a> {
     /// case, so its own appends are serial. The one gap is a `bank_lane`
     /// racing this call for the *same carried session* — a narrow window
     /// accepted in favour of not re-reading the ledger per lane.
+    ///
+    /// Answers whether a line was actually appended — `false` on either
+    /// early return below. A caller that keeps `record` in `self.lanes`
+    /// afterwards (`hold_for_block`, and the held branch of
+    /// `tear_down_and_escalate`) reads this before it zeroes `busy_s`: a
+    /// call that banked nothing still owes that busy time to the next bank,
+    /// the same way an empty session or an unreadable transcript never
+    /// touches `usage_banked` and so never loses a token either.
     pub(crate) fn record_usage(
         &mut self,
         record: &LaneRecord,
@@ -2285,9 +2425,9 @@ impl<'a> Dispatcher<'a> {
         step_id: &str,
         task: Option<&Task>,
         pipeline: &str,
-    ) {
+    ) -> bool {
         if record.session.is_empty() {
-            return;
+            return false;
         }
         // Read before the harvest, and used verbatim as the line's `ts` below.
         // A record appended to the transcript between the harvest reaching EOF
@@ -2297,7 +2437,7 @@ impl<'a> Dispatcher<'a> {
         // chosen after the read would strand the unread tail forever.
         let banked_at = chrono::Utc::now();
         let Some(harvest) = crate::usage::harvest(&record.kind, &record.session) else {
-            return;
+            return false;
         };
 
         // The transcript is the authority on which model actually answered; the
@@ -2345,8 +2485,6 @@ impl<'a> Dispatcher<'a> {
             .filter(|report| report.step == step_id)
             .map(|report| report.outcome.clone());
 
-        let stamp = crate::version::stamp(self.repo);
-
         let entry = crate::usage::Entry {
             ts: banked_at.to_rfc3339(),
             task: task_id.to_string(),
@@ -2358,7 +2496,13 @@ impl<'a> Dispatcher<'a> {
             model,
             session: record.session.clone(),
             round: task.map(|t| t.steps_at(step_id)).unwrap_or(0),
-            wall_s: (now_secs() - record.started_at).max(0),
+            // The delta since this lane was last banked, the same shape as
+            // `tokens` above — `accrue_busy_time` is what fills `busy_s`,
+            // pass by pass, and only while the multiplexer reports the lane
+            // `Working`. A lane held for a person and freed hours later
+            // spent none of that wait, so this reads 0 across it rather
+            // than the whole elapsed span — see gh-378 / issue #380.
+            wall_s: record.busy_s,
             turns: harvest.turns.saturating_sub(banked_turns),
             tokens,
             cost_usd,
@@ -2368,8 +2512,7 @@ impl<'a> Dispatcher<'a> {
             // would need every past line re-read for one that is already the
             // largest reading in the transcript spoolway just harvested.
             ctx_peak: Some(harvest.ctx_peak),
-            version: Some(stamp.version),
-            commit: stamp.commit,
+            pipeline_version: record.pipeline_version.clone(),
             outcome,
             run: task.and_then(|t| t.front.run.clone()),
             trial: task.and_then(|t| t.front.trial.clone()),
@@ -2378,7 +2521,14 @@ impl<'a> Dispatcher<'a> {
             // is, and only a reader spanning several needs the answer.
             project: String::new(),
         };
-        let _ = crate::usage::append(self.repo, &entry);
+        // Whether the line actually landed on disk — what this function
+        // answers to its caller. A failed write (a full disk, a permission
+        // error) folds no differently into `usage_banked` below than a
+        // successful one always did, which is unchanged from before this
+        // return value existed; what is new is that a caller keeping its
+        // record for `busy_s`'s sake (see that field's own doc) reads this
+        // and does not zero accrued time a write never actually banked.
+        let appended = crate::usage::append(self.repo, &entry).is_ok();
         // Folded into the running total immediately, so a second lane banked
         // against this same carried session later in the same pass sees this
         // entry without a fresh read of the file. Already populated by the
@@ -2390,6 +2540,7 @@ impl<'a> Dispatcher<'a> {
         banked.tokens.add(&entry.tokens);
         banked.turns += entry.turns;
         banked.cost_usd += entry.cost_usd.unwrap_or(0.0);
+        appended
     }
 
     /// Fold what a lane has said into its record, and answer with how long it
@@ -2898,7 +3049,7 @@ impl<'a> Dispatcher<'a> {
             self.mux.stop_lane(&lane.name, &lane.pane_id)?;
         }
         // A lane that went wrong spent exactly as much as one that went right,
-        // and is the one you most want to find in `spoolway eval --by` afterwards.
+        // and is the one you most want to find in `spoolway eval` afterwards.
         // Booked here rather than in `free_finished_lanes`, which never sees a
         // lane this path has already torn down — or, for a held one, sees it
         // every pass and would book it on each.
@@ -2918,8 +3069,22 @@ impl<'a> Dispatcher<'a> {
                     .unwrap_or_else(|| LaneRecord::readopted(&lane.name, now_secs(), &ledger)),
             ),
         };
-        if let Some(record) = &record {
-            self.record_usage(record, task.id(), &step.id, Some(task), &pipeline.name);
+        let banked = match &record {
+            Some(record) => {
+                self.record_usage(record, task.id(), &step.id, Some(task), &pipeline.name)
+            }
+            None => false,
+        };
+        // Same reset `hold_for_block` does, on the same condition: a held
+        // record stays in `self.lanes` after this bank, and its `busy_s`
+        // must not carry the interval just banked into whatever this lane
+        // is held for next — but only once a line was actually appended, or
+        // the accrued time this call left unbanked is simply lost.
+        if hold
+            && banked
+            && let Some(record) = self.lanes.get_mut(&lane.name)
+        {
+            record.busy_s = 0;
         }
         if hold {
             let _ = self.mux.focus_lane(&lane.name);
@@ -3517,12 +3682,15 @@ impl<'a> Dispatcher<'a> {
                             started_at: now_secs(),
                             last_progress: now_secs(),
                             output_hash: 0,
+                            busy_s: 0,
+                            busy_polled_at: None,
                             reminded_at: None,
                             reminders: 0,
                             session: started.session,
                             kind: profile.kind.clone(),
                             agent: agent_name.clone(),
                             model: started.model,
+                            pipeline_version: pipeline.version.clone(),
                             head: started.head,
                             held_for_block: false,
                             person_turn_busy: false,
@@ -5663,6 +5831,10 @@ fn is_zero_u32(n: &u32) -> bool {
     *n == 0
 }
 
+fn is_zero_i64(n: &i64) -> bool {
+    *n == 0
+}
+
 fn hash_of(text: &str) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     text.hash(&mut hasher);
@@ -6582,6 +6754,7 @@ mod tests {
             launched_at: None,
             steps: Default::default(),
             rounds: Default::default(),
+            arrivals: Default::default(),
             launch_failures: Default::default(),
             launch_busy_since: Default::default(),
             arrived_from: None,
@@ -7045,7 +7218,7 @@ mod tests {
             "both arms' documents are named as removed: {report}"
         );
         assert!(
-            report.contains("read      spoolway eval --runs --trial t1"),
+            report.contains("read      spoolway eval --by task --trial t1"),
             "the report points back at the evidence a settled trial keeps, in the same \
              column its kept/removed lines use: {report}"
         );
@@ -11025,6 +11198,328 @@ mod tests {
         );
     }
 
+    /// A held lane's `wall_s` is a delta against what the hold-time line
+    /// already banked, the same way its tokens are (see the test above) —
+    /// not the whole time since the lane was launched. A pause with no new
+    /// work in the transcript should therefore bank `wall_s: 0` on the
+    /// freed-pane line, whatever the person left the pane sitting for
+    /// between the hold and the free (see gh-378 / issue #380: the ledger
+    /// today holds a second line carrying the wait itself, because
+    /// `record_usage` always writes `now_secs() - record.started_at`).
+    #[test]
+    fn a_held_lanes_second_bank_carries_only_its_own_wall_time() {
+        let mut repo = fixture("held-lane-wall-delta");
+        priced(&mut repo, "priced-model");
+        let _task = reload(&add_task_with(&repo, "demo", "implement", |f| {
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+        }));
+
+        let session = "held-wall-378";
+        let kind = local_kind(&repo);
+        // The line banked when the lane was first held: 100s of real work,
+        // 500 input tokens.
+        crate::usage::append(
+            &repo,
+            &crate::usage::Entry {
+                ts: chrono::Utc::now().to_rfc3339(),
+                task: "demo".to_string(),
+                plan: None,
+                step: "implement".to_string(),
+                pipeline: "default".to_string(),
+                agent: "pi".to_string(),
+                kind: kind.clone(),
+                model: "priced-model".to_string(),
+                session: session.to_string(),
+                round: 0,
+                wall_s: 100,
+                turns: 1,
+                tokens: crate::usage::Tokens {
+                    input: 500,
+                    ..Default::default()
+                },
+                cost_usd: None,
+                ctx_peak: None,
+                pipeline_version: "1.0".into(),
+                outcome: None,
+                run: None,
+                trial: None,
+                dir: None,
+                project: String::new(),
+            },
+        )
+        .unwrap();
+        {
+            let mut lanes = load_lane_records(&repo);
+            lanes.insert(
+                "demo · implement".into(),
+                LaneRecord {
+                    session: session.into(),
+                    kind: kind.clone(),
+                    agent: "pi".into(),
+                    model: "priced-model".into(),
+                    held_for_block: true,
+                    // The lane was launched long before it was even held —
+                    // a stand-in for the 100s of work above, plus a long
+                    // parked wait since. `record_usage` reads this straight
+                    // off `started_at`, which never moves once the lane is
+                    // running, so a bug here banks the whole elapsed span a
+                    // second time rather than nothing.
+                    ..LaneRecord::adopted(now_secs() - 4_000)
+                },
+            );
+            save_lane_records(&repo, &lanes).unwrap();
+        }
+
+        // The block clears and the pane is freed. Nothing ran in it while
+        // it was parked, so the transcript is unchanged from what the
+        // hold-time line already banked.
+        let home = pi_home_with(session, 500);
+        let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]);
+        with_home(&home, || {
+            Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
+                .pass(&mut || {})
+                .unwrap();
+        });
+
+        let banked = crate::usage::read(&repo).unwrap();
+        let lines: Vec<_> = banked.iter().filter(|e| e.session == session).collect();
+        assert_eq!(
+            lines.len(),
+            2,
+            "the hold-time line and the freed lane's own bank: {banked:?}"
+        );
+        assert_eq!(
+            lines[1].tokens.input, 0,
+            "no new tokens arrived while the lane sat parked"
+        );
+        assert_eq!(
+            lines[1].wall_s, 0,
+            "nothing ran while the lane was parked, so the freed-pane line \
+             should carry none of that wait — got the whole elapsed span \
+             instead: {banked:?}"
+        );
+    }
+
+    /// `accrue_busy_time` is the mechanism the two tests above only exercise
+    /// indirectly, through a lane that never moves off `Done`. Pinned
+    /// directly: a pass that finds the lane `Working` adds the interval
+    /// since it was last polled, and a pass that finds it on a permission
+    /// prompt (`Blocked`) — a person's own turn, not the lane's — adds
+    /// nothing, which is acceptance criterion 2's "idle, parked and
+    /// permission-prompt time add nothing" (see gh-378 / issue #380).
+    #[test]
+    fn a_working_pass_adds_its_interval_and_a_permission_prompt_adds_none() {
+        let repo = fixture("accrue-busy-time");
+        add_task_with(&repo, "demo", "implement", |f| {
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+        });
+
+        let mut records = HashMap::new();
+        records.insert(
+            lane_name("implement", "demo"),
+            LaneRecord {
+                session: "s1".into(),
+                kind: "pi".into(),
+                agent: "pi".into(),
+                model: "priced-model".into(),
+                // Last polled 40s ago — a stand-in for the previous pass,
+                // since `accrue_busy_time` measures the interval between
+                // polls, not since launch.
+                busy_polled_at: Some(now_secs() - 40),
+                ..LaneRecord::adopted(now_secs())
+            },
+        );
+        save_lane_records(&repo, &records).unwrap();
+
+        let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Working)]);
+        run_pass(&repo, &mux);
+
+        let after = load_lane_records(&repo);
+        let record = after.get("demo · implement").unwrap();
+        assert!(
+            (35..=45).contains(&record.busy_s),
+            "a Working pass should add roughly the 40s since the last poll: {}",
+            record.busy_s
+        );
+        let busy_after_working = record.busy_s;
+
+        // The same lane, now sitting on a permission prompt — alive, but not
+        // running anything of its own. Whatever interval has passed since
+        // the pass above, none of it is busy time.
+        let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Blocked)]);
+        run_pass(&repo, &mux);
+
+        let after = load_lane_records(&repo);
+        let record = after.get("demo · implement").unwrap();
+        assert_eq!(
+            record.busy_s, busy_after_working,
+            "a permission prompt is a person's turn, not the lane's — it must add nothing"
+        );
+    }
+
+    /// A stop banks a running lane and then writes its record straight back
+    /// to lanes.json, because the lane is left running for the next
+    /// dispatcher to pick up. The busy time that bank just carried must not
+    /// go back to disk with it, or the next dispatcher banks the same
+    /// seconds again once the lane settles — the double-bank gh-378 removes,
+    /// back on the stop-and-restart path. `sweep_on_stop` zeroes its kept
+    /// record through `LaneRecord::clear_busy_s` for exactly this.
+    #[test]
+    fn a_stop_banks_a_running_lanes_busy_time_once_and_saves_none_of_it() {
+        let mut repo = fixture("stop-banks-busy-time-once");
+        priced(&mut repo, "priced-model");
+        add_task_with(&repo, "demo", "implement", |f| {
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+        });
+
+        let session = "stop-busy-378";
+        let kind = local_kind(&repo);
+        {
+            let mut lanes = load_lane_records(&repo);
+            lanes.insert(
+                "demo · implement".into(),
+                LaneRecord {
+                    session: session.into(),
+                    kind: kind.clone(),
+                    agent: "pi".into(),
+                    model: "priced-model".into(),
+                    busy_s: 90,
+                    ..LaneRecord::adopted(now_secs() - 4_000)
+                },
+            );
+            save_lane_records(&repo, &lanes).unwrap();
+        }
+
+        let home = pi_home_with(session, 500);
+        let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Working)]);
+        let mut report = Report::default();
+        with_home(&home, || {
+            Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
+                .sweep_on_stop(&mut report)
+                .unwrap();
+        });
+
+        let banked = crate::usage::read(&repo).unwrap();
+        let lines: Vec<_> = banked.iter().filter(|e| e.session == session).collect();
+        assert_eq!(lines.len(), 1, "the stop banks the lane once: {banked:?}");
+        assert_eq!(
+            lines[0].wall_s, 90,
+            "the line carries the busy time the lane accrued: {banked:?}"
+        );
+        let saved = load_lane_records(&repo);
+        let record = saved
+            .get("demo · implement")
+            .expect("a lane left running keeps its record");
+        assert_eq!(
+            record.busy_s, 0,
+            "the busy time just banked must not be saved for the next dispatcher to bank again"
+        );
+    }
+
+    /// A gap since the last poll wider than [`BUSY_POLL_CEILING`] is not a
+    /// pass running late — it is the dispatcher having been down, the same
+    /// shape as the bug this whole change fixes: a wait banked as if it
+    /// were work. `accrue_busy_time` clamps a single interval to the
+    /// ceiling rather than crediting the lane with the dispatcher's own
+    /// downtime.
+    #[test]
+    fn a_gap_since_the_last_poll_wider_than_the_ceiling_is_clamped() {
+        let repo = fixture("accrue-busy-time-ceiling");
+        add_task_with(&repo, "demo", "implement", |f| {
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+        });
+
+        let mut records = HashMap::new();
+        records.insert(
+            lane_name("implement", "demo"),
+            LaneRecord {
+                session: "s1".into(),
+                kind: "pi".into(),
+                agent: "pi".into(),
+                model: "priced-model".into(),
+                // A stand-in for the dispatcher having been down for an
+                // hour — far past any ordinary gap between passes.
+                busy_polled_at: Some(now_secs() - 3_600),
+                ..LaneRecord::adopted(now_secs())
+            },
+        );
+        save_lane_records(&repo, &records).unwrap();
+
+        let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Working)]);
+        run_pass(&repo, &mux);
+
+        let after = load_lane_records(&repo);
+        let record = after.get("demo · implement").unwrap();
+        assert!(
+            record.busy_s <= BUSY_POLL_CEILING.as_secs() as i64,
+            "an hour of downtime must not be banked as an hour of work: {}",
+            record.busy_s
+        );
+    }
+
+    /// `record_usage` answers `false` when it banks nothing — an empty
+    /// session, or (this test's case) a transcript it cannot read at all —
+    /// and `hold_for_block` must leave `busy_s` standing rather than zero it
+    /// on that answer: unlike tokens, which are re-diffed against
+    /// `usage_banked` on every call and so never lose anything to a call
+    /// that appended no line, `busy_s` is only ever incremented by
+    /// `accrue_busy_time` — zeroing it here with nothing banked would
+    /// discard the interval outright, with no later call to recover it from.
+    #[test]
+    fn a_hold_that_banks_nothing_leaves_its_busy_time_for_the_next_bank_to_find() {
+        let repo = fixture("hold-banks-nothing-keeps-busy-time");
+        let path = add_task_with(&repo, "demo", "implement", |f| {
+            f.workspace_id = Some("w1".into());
+            f.pane_id = Some("w1:p1".into());
+        });
+        let mut task = reload(&path);
+        task.front.parked_from = Some("implement".into());
+        task.set_stage(crate::pipeline::PAUSED, None);
+        task.save().unwrap();
+
+        let session = "hold-no-transcript";
+        let mut records = HashMap::new();
+        records.insert(
+            lane_name("implement", "demo"),
+            LaneRecord {
+                session: session.into(),
+                kind: local_kind(&repo),
+                agent: "pi".into(),
+                model: "priced-model".into(),
+                busy_s: 55,
+                ..LaneRecord::adopted(now_secs())
+            },
+        );
+        save_lane_records(&repo, &records).unwrap();
+
+        // No transcript exists anywhere for this session, in an empty home
+        // of its own — `usage::harvest` fails to read one, so
+        // `record_usage` appends no line this pass.
+        let empty_home = crate::scratch::root("hold-banks-nothing-empty-home");
+        std::fs::create_dir_all(&empty_home).unwrap();
+        let mux = FakeMux::new(vec![lane(&repo, "demo · implement", LaneStatus::Done)]);
+        with_home(&empty_home, || {
+            run_pass(&repo, &mux);
+        });
+
+        let banked = crate::usage::read(&repo).unwrap();
+        assert!(
+            banked.iter().all(|e| e.session != session),
+            "nothing should have been banked: there was no transcript to read"
+        );
+
+        let after = load_lane_records(&repo);
+        let record = after.get("demo · implement").unwrap();
+        assert_eq!(
+            record.busy_s, 55,
+            "the accrued busy time must survive a bank that appended nothing"
+        );
+    }
+
     /// Backdate a lane's record so the clocks read as `how_long` having passed.
     /// The record is the dispatcher's own bookkeeping, so a test that wants a
     /// timeout to fire moves that rather than the wall clock.
@@ -11458,8 +11953,7 @@ mod tests {
                 tokens: crate::usage::Tokens::default(),
                 cost_usd: None,
                 ctx_peak: None,
-                version: None,
-                commit: None,
+                pipeline_version: "1.0".into(),
                 outcome: None,
                 run: None,
                 trial: None,
@@ -11494,8 +11988,7 @@ mod tests {
                 },
                 cost_usd: None,
                 ctx_peak: None,
-                version: None,
-                commit: None,
+                pipeline_version: "1.0".into(),
                 outcome: None,
                 run: None,
                 trial: None,
@@ -11567,8 +12060,7 @@ mod tests {
                 tokens: crate::usage::Tokens::default(),
                 cost_usd: Some(7.50),
                 ctx_peak: None,
-                version: None,
-                commit: None,
+                pipeline_version: "1.0".into(),
                 outcome: None,
                 run: None,
                 trial: None,

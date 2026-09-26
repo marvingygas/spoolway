@@ -22,7 +22,7 @@
 //! ## What carries a conversation across turns
 //!
 //! The session id the profile already pins with `{session_id}`. Every profile
-//! is validated to pass it (see [`crate::config`]) so that `spoolway eval --by` can
+//! is validated to pass it (see [`crate::config`]) so that `spoolway eval` can
 //! find a transcript afterwards; the same id is what lets a *second* turn
 //! reopen the first one's conversation. How a kind spells that is one row of
 //! [`crate::agent::ADAPTERS`] — this module knows that lanes resume, and

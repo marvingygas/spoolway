@@ -441,13 +441,17 @@ fn shorten_home(path: &std::path::Path) -> String {
 /// total line closing each group.
 struct Spend {
     name: String,
-    /// One line per pooled model this profile's steps name — a figure and the
-    /// model it counts against — or, when it names none, the single line the
-    /// profile drew before pooling existed: a figure with no model beside it,
-    /// counted against the profile's own `concurrency` instead. Always at
-    /// least one entry, since a `Spend` with none earns no line at all and is
-    /// filtered out before this is built.
-    lines: Vec<(String, Option<String>)>,
+    /// The profile's own figure — counted against the profile's own
+    /// `concurrency` — drawn whether or not any of its steps also name a
+    /// pooled model: a pool has its own cap, rationing the weights behind
+    /// it, but the profile is still the thing `concurrency` rations, and a
+    /// lane on a step naming no model counts against nothing else.
+    own: String,
+    /// One `(model, figure)` pair per pooled model this profile's steps
+    /// name, each counted against that model's own `slots` — drawn on the
+    /// same line as `own`, after it, in the order first seen. Empty for a
+    /// profile whose steps name no pooled model.
+    pools: Vec<(String, String)>,
 }
 
 /// One line per agent profile, its worker slots and nothing else — then, when
@@ -537,27 +541,30 @@ pub(super) fn footer(
             if live == 0 && !runnable.contains_key(name.as_str()) {
                 return None;
             }
-            let lines = if pools.is_empty() {
-                // `∞` rather than the profile's `0`: unlimited is what zero
-                // means here, and printing `1/0` reads as a cap already
-                // breached.
-                let slots = match profile.concurrency {
-                    0 => format!("{live}/∞"),
-                    cap => format!("{live}/{cap}"),
-                };
-                vec![(slots, None)]
-            } else {
-                pools
-                    .into_iter()
-                    .map(|(model, slots)| {
-                        let live = model_used.get(model).copied().unwrap_or(0);
-                        (format!("{live}/{slots}"), Some(model.to_string()))
-                    })
-                    .collect()
+            // `∞` rather than the profile's `0`: unlimited is what zero
+            // means here, and printing `1/0` reads as a cap already
+            // breached.
+            let own = match profile.concurrency {
+                0 => format!("{live}/∞"),
+                cap => format!("{live}/{cap}"),
             };
+            // One line per profile, not one per pool: the un-pooled case
+            // the mockup in `gh-378` draws (`pi` running one pooled lane and
+            // one un-pooled one) needs both figures on the same row, or the
+            // profile's own count reads as belonging to nothing. This used
+            // to draw a separate line per pool instead, with the profile's
+            // own figure dropped outright once any pool existed.
+            let pools = pools
+                .into_iter()
+                .map(|(model, slots)| {
+                    let live = model_used.get(model).copied().unwrap_or(0);
+                    (model.to_string(), format!("{live}/{slots}"))
+                })
+                .collect();
             Some(Spend {
                 name: name.clone(),
-                lines,
+                own,
+                pools,
             })
         })
         .collect();
@@ -577,25 +584,21 @@ pub(super) fn footer(
         }
     };
 
-    // One rendered line per `(figure, model)` pair a profile carries — the
-    // profile's own name prints once, on the first, and every line after it
-    // leaves that column blank, exactly as a group's own rows leave a
-    // repeated value off every line but their first.
+    // One rendered line per profile — its own figure, then every pool it
+    // carries, model and figure, appended after it in the order first seen.
     let mut lines: Vec<String> = spends
         .iter()
-        .flat_map(|spend| {
-            spend
-                .lines
+        .map(|spend| {
+            let pools: String = spend
+                .pools
                 .iter()
-                .enumerate()
-                .map(move |(i, (slots, model))| {
-                    let name = if i == 0 { spend.name.as_str() } else { "" };
-                    let pool = match model {
-                        Some(model) => format!("{GUTTER}{model}"),
-                        None => String::new(),
-                    };
-                    format!("{BOLD}{name:<name_w$}{RESET}{GUTTER}{DIM}slots{RESET} {slots}{pool}")
-                })
+                .map(|(model, slots)| format!("{GUTTER}{model}{GUTTER}{slots}"))
+                .collect();
+            format!(
+                "{BOLD}{name:<name_w$}{RESET}{GUTTER}{DIM}slots{RESET} {own}{pools}",
+                name = spend.name,
+                own = spend.own,
+            )
         })
         .collect();
 
@@ -1357,7 +1360,7 @@ pub fn plain_table(rows: &[Row]) -> String {
 
 /// A token count at a glance: `840`, `140k`, `1.2M`.
 ///
-/// Coarser than `spoolway eval --by`'s columns, which keep a decimal on the
+/// Coarser than `spoolway eval`'s columns, which keep a decimal on the
 /// thousands. A footer figure that ticks over while you watch it wants the
 /// magnitude and nothing more — `139.7k` reads as precision that the next
 /// finished lane immediately spends.
@@ -1668,7 +1671,7 @@ pub(super) fn strip_ansi(text: &str) -> String {
 
 /// Seconds as the shortest honest clock reading: `47s`, `12m 03s`, `1h 04m`.
 ///
-/// Crate-visible so [`crate::eval`] spells a version's summed lane time the
+/// Crate-visible so [`crate::eval`] spells a row's lane time the
 /// same way the board does — one clock reading, not two competing ones.
 pub(crate) fn human_secs(total: i64) -> String {
     let (h, m, s) = (total / 3600, (total % 3600) / 60, total % 60);
@@ -2839,9 +2842,10 @@ mod tests {
         );
     }
 
-    /// A model's own `slots` replaces its profile's `concurrency` in the
-    /// footer's figure, named beside it, and is counted against the model's
-    /// own cap rather than the profile's.
+    /// A model's own `slots` draws its own line beside the profile's own —
+    /// the profile's own figure still counts every live lane against its own
+    /// `concurrency`, and the pool's line counts only the lanes on a step
+    /// naming that model, against the model's own cap.
     #[test]
     fn a_models_own_slots_are_counted_in_the_footer() {
         let mut repo = fixture("footer-model-slots");
@@ -2873,20 +2877,68 @@ mod tests {
             .collect();
 
         let line = |name: &str| lines.iter().find(|l| l.starts_with(name)).unwrap().clone();
-        // The model's own slots answer, 1/1 — and it is also what earns `pi`
-        // its line at all, since a local profile carries no `concurrency` to
-        // fall back to.
-        assert!(line("pi").contains("slots 1/1"), "{lines:#?}");
+        // `pi` draws one line: its own figure (1 live lane against no cap of
+        // its own) and the pool's (the same lane, against the model's own
+        // 1/1) beside it.
+        let pi_lines: Vec<&String> = lines.iter().filter(|l| l.starts_with("pi")).collect();
+        assert_eq!(pi_lines.len(), 1, "{lines:#?}");
+        assert!(pi_lines[0].contains("slots 1/\u{221e}"), "{lines:#?}");
+        assert!(
+            pi_lines[0].contains("small-local") && pi_lines[0].contains("1/1"),
+            "{lines:#?}"
+        );
         // A profile whose live lanes name no model with its own `slots` is
         // unaffected: its usual `used`/`concurrency` reading stands.
         assert!(line("claude").contains("slots 0/1"), "{lines:#?}");
     }
 
-    /// A profile whose steps name two different pooled models draws two
-    /// lines, each with its own live count and cap — the profile's own name
-    /// on the first, and the second left blank under it.
+    /// A profile running one lane on a step naming a pooled model and one on
+    /// a step naming none — the `gh-378` mockup's own scenario — prints its
+    /// own figure over both lanes beside the pool's figure over the one.
     #[test]
-    fn a_profile_naming_two_pooled_models_draws_two_pool_lines() {
+    fn a_profile_with_one_pooled_lane_and_one_unpooled_prints_both_figures() {
+        let mut repo = fixture("footer-mixed-pooled-and-unpooled");
+        repo.config.agents.get_mut("pi").unwrap().concurrency = 3;
+        repo.config.models.insert(
+            "Ornith-1.5-35B-A3B".to_string(),
+            crate::usage::ModelPrice {
+                slots: 2,
+                ..Default::default()
+            },
+        );
+
+        // Two live `pi` lanes: one on the pooled step, one on a step naming
+        // no model at all.
+        let mut used: BTreeMap<&str, usize> = BTreeMap::new();
+        used.insert("pi", 2);
+        let mut model_used: BTreeMap<&str, usize> = BTreeMap::new();
+        model_used.insert("Ornith-1.5-35B-A3B", 1);
+        let mut agent_model: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        agent_model.insert("pi", vec!["Ornith-1.5-35B-A3B"]);
+
+        let pipelines = Pipelines::builtin();
+        let lines: Vec<String> = footer(&repo, &pipelines, &used, &model_used, &agent_model, &[])
+            .iter()
+            .map(|l| strip(l))
+            .collect();
+
+        let pi_lines: Vec<&String> = lines.iter().filter(|l| l.starts_with("pi")).collect();
+        assert_eq!(pi_lines.len(), 1, "{lines:#?}");
+        // The profile's own figure counts both lanes against its own cap,
+        // and the pool's figure — on the same line — counts only the one
+        // against its own.
+        assert!(pi_lines[0].contains("slots 2/3"), "{lines:#?}");
+        assert!(
+            pi_lines[0].contains("Ornith-1.5-35B-A3B") && pi_lines[0].contains("1/2"),
+            "{lines:#?}"
+        );
+    }
+
+    /// A profile whose steps name two different pooled models draws one
+    /// line still — its own figure, then each pool's own model and figure
+    /// appended after it, in the order first seen.
+    #[test]
+    fn a_profile_naming_two_pooled_models_appends_both_to_its_one_line() {
         let mut repo = fixture("footer-two-pools");
         repo.config.models.insert(
             "ornith/Ornith-1.5-35B-A3B".to_string(),
@@ -2925,31 +2977,33 @@ mod tests {
         .collect();
 
         // `claude` also draws a line here — its own `concurrency` is nonzero
-        // — so `pi`'s lines are everything from its own name onward.
-        let pi_lines: Vec<&String> = lines.iter().skip_while(|l| !l.starts_with("pi")).collect();
-        assert_eq!(pi_lines.len(), 2, "{lines:#?}");
+        // — so `pi`'s own line is the one that starts with its name.
+        let pi_lines: Vec<&String> = lines.iter().filter(|l| l.starts_with("pi")).collect();
+        assert_eq!(pi_lines.len(), 1, "{lines:#?}");
+        assert!(pi_lines[0].contains("slots 0/\u{221e}"), "{lines:#?}");
         assert!(
-            pi_lines[0].starts_with("pi") && pi_lines[0].contains("slots 0/3"),
+            pi_lines[0].contains("ornith/Ornith-1.5-35B-A3B") && pi_lines[0].contains("0/3"),
             "{lines:#?}"
         );
         assert!(
-            pi_lines[0].contains("ornith/Ornith-1.5-35B-A3B"),
+            pi_lines[0].contains("qwen/Qwen3.6-35B-A3B") && pi_lines[0].contains("1/3"),
             "{lines:#?}"
         );
-        // The second line leaves the name column blank rather than repeating
-        // `pi`.
-        assert!(!pi_lines[1].trim_start().starts_with("pi"), "{lines:#?}");
-        assert!(
-            pi_lines[1].contains("slots 1/3") && pi_lines[1].contains("qwen/Qwen3.6-35B-A3B"),
-            "{lines:#?}"
-        );
+        // The first pool's model comes before the second's, the order their
+        // steps were first seen in.
+        let ornith_at = pi_lines[0].find("ornith/Ornith-1.5-35B-A3B").unwrap();
+        let qwen_at = pi_lines[0].find("qwen/Qwen3.6-35B-A3B").unwrap();
+        assert!(ornith_at < qwen_at, "{lines:#?}");
     }
 
     /// Two model names matching the same `[models."<glob>"]` entry draw one
-    /// line, not two — the pool is the config entry, not the literal name a
-    /// step happens to spell.
+    /// pool figure, not two — the pool is the config entry, not the literal
+    /// name a step happens to spell. Every profile draws exactly one line
+    /// now whatever it carries (see the single-line footer shape above), so
+    /// the property worth pinning is that the *alias* never earns a pool
+    /// entry of its own, not the line count.
     #[test]
-    fn two_names_resolving_to_the_same_pool_draw_one_line() {
+    fn two_names_resolving_to_the_same_pool_draw_one_pool_figure() {
         let mut repo = fixture("footer-shared-glob");
         repo.config.models.insert(
             "ornith/*".to_string(),
@@ -2984,17 +3038,25 @@ mod tests {
         .map(|l| strip(l))
         .collect();
 
-        let pi_lines: Vec<&String> = lines.iter().skip_while(|l| !l.starts_with("pi")).collect();
+        let pi_lines: Vec<&String> = lines.iter().filter(|l| l.starts_with("pi")).collect();
         assert_eq!(pi_lines.len(), 1, "{lines:#?}");
-        assert!(pi_lines[0].contains("slots 2/3"), "{lines:#?}");
+        // The alias never earns a pool entry of its own — if the dedupe on
+        // `resolved_row` broke, this line would carry a second, undeduped
+        // `0/3` figure for it.
+        assert!(
+            !pi_lines[0].contains("ornith/Ornith-1.5-35B-A3B-alias"),
+            "{lines:#?}"
+        );
+        assert_eq!(pi_lines[0].matches("2/3").count(), 1, "{lines:#?}");
     }
 
     /// Two spellings of one model reached only through the suffix fallback —
-    /// a step's own `vendor/Name` and pi's bare `Name` — draw one line too:
-    /// the dedupe has to key on the row `models::resolved_row` answers, not
-    /// on a `best_match` pointer that never takes that second pass.
+    /// a step's own `vendor/Name` and pi's bare `Name` — draw one pool
+    /// figure too: the dedupe has to key on the row `models::resolved_row`
+    /// answers, not on a `best_match` pointer that never takes that second
+    /// pass.
     #[test]
-    fn a_qualified_and_a_bare_name_sharing_a_plain_row_draw_one_line() {
+    fn a_qualified_and_a_bare_name_sharing_a_plain_row_draw_one_pool_figure() {
         let mut repo = fixture("footer-shared-suffix-row");
         repo.config.models.insert(
             "Ornith-1.5-35B-A3B".to_string(),
@@ -3027,9 +3089,18 @@ mod tests {
         .map(|l| strip(l))
         .collect();
 
-        let pi_lines: Vec<&String> = lines.iter().skip_while(|l| !l.starts_with("pi")).collect();
+        let pi_lines: Vec<&String> = lines.iter().filter(|l| l.starts_with("pi")).collect();
         assert_eq!(pi_lines.len(), 1, "{lines:#?}");
-        assert!(pi_lines[0].contains("slots 2/3"), "{lines:#?}");
+        // "Ornith-1.5-35B-A3B" is a substring of the qualified
+        // "ornith/Ornith-1.5-35B-A3B" the pool figure prints, so a broken
+        // dedupe that also printed the bare name's own undeduped entry
+        // would push this count to 2, not 1.
+        assert_eq!(
+            pi_lines[0].matches("Ornith-1.5-35B-A3B").count(),
+            1,
+            "{lines:#?}"
+        );
+        assert_eq!(pi_lines[0].matches("2/3").count(), 1, "{lines:#?}");
     }
 
     /// Every enabled job draws one row on the job ledger, below the whole

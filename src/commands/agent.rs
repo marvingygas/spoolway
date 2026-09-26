@@ -267,7 +267,7 @@ pub fn agent_verify(
     // Nothing below can fail the command. Every one of these is a reading a
     // lane already degrades gracefully without — see `agent::Accounting`.
     let unmetered = vec![
-        "no ledger lines, so `spoolway spend` will not see its lanes".to_string(),
+        "no ledger lines, so `spoolway eval` will not see its lanes".to_string(),
         "no session reuse — every step starts a fresh session".into(),
         "silence is detected from the pane, not the transcript, which is weak on the \
          headless backend"

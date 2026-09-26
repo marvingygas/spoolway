@@ -174,10 +174,10 @@ task id marks `parallel: true`.
 | CTX | How full the lane's context window is, as a percentage of the model's `context_window`. |
 | OUT | Output tokens this step has produced. |
 | COST | What this step has cost. |
-| TIME | How long the lane has been on this step. |
+| TIME | How long the lane's pane has been busy on this step. A paused or blocked row's TIME does not grow. |
 | NEXT | For a running task, the step it goes to on pass. For one with a scheduled pause, `→ paused after <step>`. For a queued task, what it waits on. For a paused task, the outcome the pause caught and where a resume sends it, key first: `[r] review failed → e2e — \`spoolway resume <task>\``; a caught pass reads `[r] → e2e — \`spoolway resume <task>\``. A task parked before it ever started reads `→ queued — [r] resumes it`. For a lane holding a permission prompt, `press a key in pane \`<task> · <step>\``. |
 
-`spoolway spend task` gives the task's whole bill.
+`spoolway eval --by task` gives the task's whole bill.
 
 ### States
 
@@ -235,7 +235,9 @@ pause to clear it.
 ### Footer
 
 One line per agent profile: `<profile>   slots <live>/<cap>`. A model with its own `slots` gets
-its own line. A line `issue_tracking: N hook failures — see tracking/` appears while any hook
+its own figure appended after the profile's, model name then `<live>/<cap>`, so a profile
+running a pooled model reads `pi   slots 2/3   Ornith-1.5-35B-A3B   1/2`. A line
+`issue_tracking: N hook failures — see tracking/` appears while any hook
 has failed. Then the job ledger lists every enabled job with its next firing:
 
 ```
@@ -439,7 +441,7 @@ trial t9f3a settled
   removed   3 task documents, worktrees and local branches
   removed   3 panes, scratch dirs, sessions and run-file sets
 
-  read      spoolway eval --runs --trial t9f3a
+  read      spoolway eval --by task --trial t9f3a
 ```
 
 `spoolway eval --discard <id>` removes a trial before it settles. It refuses while an arm is
