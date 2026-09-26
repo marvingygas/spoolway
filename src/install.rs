@@ -138,17 +138,6 @@ const SKILLS: &[Skill] = &[
         pi_skill_md: include_str!("../assets/skills/pi/spoolway-config/SKILL.md"),
         assets: &[],
     },
-    // Reading a pipeline's health is CLI calls too, and the same shape as the
-    // others: what is wrong comes out of the binary, and what to do about
-    // it is a person's decision. Shipped so that the answer to "is this thing
-    // set up right" is not a session re-deriving `doctor`'s output every time.
-    Skill {
-        name: "spoolway-doctor",
-        skill_md: include_str!("../assets/skills/claude/spoolway-doctor/SKILL.md"),
-        codex_skill_md: include_str!("../assets/skills/codex/spoolway-doctor/SKILL.md"),
-        pi_skill_md: include_str!("../assets/skills/pi/spoolway-doctor/SKILL.md"),
-        assets: &[],
-    },
     // Reads lane-written task records and step-level evaluation and spend data
     // back into the control plane that produced them. It uses both the agents'
     // own reports and the numbers, then applies the changes the person chooses.
@@ -162,13 +151,22 @@ const SKILLS: &[Skill] = &[
 ];
 
 /// Skill directories this project once shipped under a name it no longer
-/// uses — a short, hand-written literal, and never derived from [`SKILLS`]:
-/// a skill this binary actively ships must never appear here by
-/// construction, or `spoolway sync` would delete what `install` is about
-/// to rewrite in the very same pass. `spoolway-pipeline` is the one entry
-/// today, renamed and widened into `spoolway-config` — see [`SKILLS`]'s own
-/// comment above.
-pub const RETIRED_SKILLS: &[&str] = &["spoolway-pipeline"];
+/// uses, each with the reason `spoolway sync` reports beside it — a short,
+/// hand-written literal, and never derived from [`SKILLS`]: a skill this
+/// binary actively ships must never appear here by construction, or
+/// `spoolway sync` would delete what `install` is about to rewrite in the
+/// very same pass. `spoolway-pipeline` was renamed and widened into
+/// `spoolway-config` — see [`SKILLS`]'s own comment above. `spoolway-doctor`
+/// is retired outright: repair moved into `spoolway-config`, which reads
+/// `spoolway doctor --json` itself rather than the read-only skill that used
+/// to wrap it.
+pub const RETIRED_SKILLS: &[(&str, &str)] = &[
+    ("spoolway-pipeline", "renamed to spoolway-config"),
+    (
+        "spoolway-doctor",
+        "retired: /spoolway-config repairs a project now",
+    ),
+];
 
 /// Templates under `.spoolway/templates/` this project once shipped and no
 /// longer does, each with the reason `spoolway sync` reports beside it — a
@@ -303,28 +301,11 @@ pub struct Outcome {
 /// `force`. Rendering is left to [`report`], so a caller embedding the install
 /// does not inherit a nested file-by-file transcript.
 ///
-/// `home` records, for every file actually written, the fingerprint
-/// `sync::skills` will later look for to tell a shipped copy this project
-/// has not been brought current from a file a person changed by hand — see
-/// `sync::read_skill_fingerprint`. Without it, a file this call writes today
-/// would read as hand-edited the moment a future release changes it, since
-/// nothing would say spoolway itself put today's text there. `None` only
-/// when a caller could not resolve a project home at all, the same
-/// best-effort a stamp write already tolerates elsewhere.
-///
-/// The record itself is best-effort, the same way: the skill files are
-/// already down and this call has already committed to succeeding by the
-/// time it tries to write one, so a failure recording it must not read back
-/// as the install having failed. The safe direction is already covered —
-/// a file with no record reads as blocked later, with a message saying what
-/// to do — so losing this write costs a `--force` down the line, never a
-/// silent overwrite.
-pub fn install(
-    root: &Path,
-    home: Option<&Path>,
-    provider: Provider,
-    force: bool,
-) -> Result<Outcome> {
+/// Skill files belong to spoolway outright: `spoolway sync` rewrites every
+/// installed one that differs from the shipped copy on every run (see
+/// [`crate::sync::skills`]), so there is nothing here for a per-file record
+/// to protect any more.
+pub fn install(root: &Path, provider: Provider, force: bool) -> Result<Outcome> {
     let planned = provider.plan(root);
 
     for file in &planned {
@@ -332,13 +313,6 @@ pub fn install(
             continue;
         }
         write_atomic(&file.path, file.contents)?;
-        if let Some(home) = home {
-            let _ = crate::sync::record_skill_fingerprint(
-                home,
-                &file.path,
-                &crate::skeleton::fingerprint(file.contents),
-            );
-        }
     }
 
     Ok(Outcome {
@@ -398,7 +372,6 @@ mod tests {
                 skills.join("spoolway-plan").join("assets").join("page.md"),
                 skills.join("spoolway-tasks").join("SKILL.md"),
                 skills.join("spoolway-config").join("SKILL.md"),
-                skills.join("spoolway-doctor").join("SKILL.md"),
                 skills.join("spoolway-calibrate").join("SKILL.md"),
             ];
 
@@ -649,22 +622,18 @@ mod tests {
         }
     }
 
-    /// `install` has to leave behind the same fact `sync::skills` will later
-    /// look for: without it, a project that only ever ran `install` — never
-    /// `sync` — would have every one of its untouched skill files read as
-    /// hand-edited the moment a release changes one, since nothing would
-    /// say spoolway itself wrote today's text there (finding from review).
+    /// A fresh install leaves nothing for a sync right afterwards to do: every
+    /// skill file it just wrote already matches the shipped copy, so a
+    /// dry-run scan reads every one of them as kept, not as a rewrite.
     #[test]
-    fn install_records_a_skill_fingerprint_sync_recognises_as_its_own() {
-        let root = crate::scratch::root("install-records-fingerprint");
+    fn install_leaves_a_project_a_sync_finds_nothing_to_change() {
+        let root = crate::scratch::root("install-then-sync-is-a-noop");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let home = root.join(".home");
 
-        install(&root, Some(&home), Provider::Claude, false).unwrap();
+        install(&root, Provider::Claude, false).unwrap();
 
-        // A dry-run scan right after a fresh install must find every file
-        // exactly ours, not blocked for having no recorded fingerprint —
         // `scan` also covers `.gitignore`, `config.toml` and the task
         // templates dir, none of which this fixture set up, so only the
         // skill files' own outcomes are asserted on.
@@ -687,14 +656,14 @@ mod tests {
         assert!(
             outcomes.iter().all(|o| !matches!(
                 o,
-                crate::sync::Outcome::Blocked { path, .. }
+                crate::sync::Outcome::Wrote { path, .. }
                     if root.join(path).starts_with(&claude_dir)
             )),
-            "a file `install` just wrote must not read as blocked: {:?}",
+            "a file `install` just wrote must not read as needing a rewrite: {:?}",
             outcomes
                 .iter()
                 .filter_map(|o| match o {
-                    crate::sync::Outcome::Blocked { path, why } => Some((path, why)),
+                    crate::sync::Outcome::Wrote { path, detail } => Some((path, detail)),
                     _ => None,
                 })
                 .collect::<Vec<_>>()

@@ -157,8 +157,7 @@ spoolway install codex
 |---|---|
 | `spoolway-plan` | Turns one goal into a plan page. After you approve it, it cuts the tasks into the pending directory. |
 | `spoolway-tasks` | Cuts an agreed shape into task documents: pipeline, size, ids, globs, dependency order. |
-| `spoolway-config` | Changes pipelines, prompts, `config.toml`, templates and hooks, as an override or as an edit. |
-| `spoolway-doctor` | Runs every read-only check and reports the findings. |
+| `spoolway-config` | Changes pipelines, prompts, `config.toml`, templates and hooks, as an override or as an edit. Also repairs a project that is broken, refused or behind. |
 | `spoolway-calibrate` | Compares archived tasks, step-level evaluation results and spend data against the prompts and pipelines that produced them, then applies the changes you pick. |
 
 Each skill is one directory holding a `SKILL.md`. All three providers read that layout.
@@ -186,7 +185,8 @@ spoolway doctor
 - each agent binary is on `PATH`, has a model set, and accepts the configured permission mode
 - every prompt a step names exists and passes its checks
 
-Problems set a non-zero exit code. Notes do not. The `spoolway-doctor` skill reads both.
+Problems set a non-zero exit code. Notes do not. The `spoolway-config` skill's repair section
+reads both.
 
 `doctor` still runs when the config or a pipeline file does not parse. It reports the parse
 error with its line and runs every check that does not need that file. It does the same when the
@@ -252,30 +252,30 @@ What `sync` replaces, file by file:
 | File | What is replaced |
 |---|---|
 | `config.toml` | The comments and the settings reference. Your values stay. |
-| Pipeline file | Only the key reference between `# >>> spoolway >>>` and `# <<< spoolway <<<`. A file without the markers is left alone. |
+| Pipeline file | The key reference between `# >>> spoolway >>>` and `# <<< spoolway <<<`, plus three retired step shapes: a self-routing `on_fail:`, `loop:` written as a map, and `on_loop_max:`. A file without the markers is left alone. |
 | `.gitignore` | Only the old marked block, removed once. |
-| Skills | Every installed provider's skills, except a file changed by hand since it was last written by `install` or `sync`, which is left alone. |
+| Skills | Every installed provider's skill file that differs from the shipped copy. |
 | Prompts | Nothing. |
 | Document skeletons | Nothing. |
 | Task skeletons | Nothing. |
 | A retired template | Removed, with the reason it is gone. |
 
-`sync` never merges. A marked block you edited by hand stops the sync on that file, and so does
-a skill file changed by hand since spoolway last wrote it. Both are reported, not overwritten.
+`sync` never merges. A marked block you edited by hand stops the sync on that file, and it is
+reported, not overwritten. A skill file has no such block: sync always rewrites it to match the
+shipped copy.
+
 `spoolway sync --replace <path>` writes the shipped file over yours and saves your version
 beside it as `.bak`. That is also how to take a newer default prompt or skeleton on purpose. It
-does not cover skill files: `spoolway install <provider> --force` takes the shipped skills back,
-overwriting that provider's whole set with no `.bak` saved. Replacing a hook script under
+does not cover skill files: `spoolway install <provider> --force` also takes the shipped skills
+back, overwriting that provider's whole set with no `.bak` saved. Replacing a hook script under
 `.spoolway/hooks/` also leaves it executable on Unix, whether or not its text changed.
 `spoolway doctor` reports files that are behind. `spoolway pipeline check` reports a prompt that
 names a command or flag this binary does not have.
 
 On success, `sync` records this binary's version and a fingerprint of the text it would write
-in a stamp under the project's home, one line per checkout. It also records, in a second stamp
-under the project's home, one line per installed skill file, the fingerprint of the copy it just
-wrote there — the record a later sync checks a skill file against to tell a hand edit from a
-stale shipped copy. `spoolway init` and `spoolway install` write the same per-checkout stamp and
-per-skill-file records for a freshly scaffolded or newly installed project.
+in a stamp under the project's home, one line per checkout. It deletes a leftover per-skill-file
+stamp an older release left there, if it finds one. `spoolway init` and `spoolway install` write
+the same per-checkout stamp for a freshly scaffolded or newly installed project.
 
 Every other command that needs a project reads that stamp back first. When it no longer
 matches and a scan finds files to change, the command stops and draws a confirm panel titled
@@ -301,10 +301,10 @@ Where stdin or stdout is not a terminal, under `--json`, or inside a lane, the p
 drawn. Instead one line goes to stderr and the command runs anyway:
 
 ```
-spoolway wants to update: 1 file(s) in this checkout. Run `spoolway sync`.
+spoolway wants to update: 1 file(s) in this checkout. Open spoolway to apply them.
 ```
 
-Inside a lane the line omits the trailing "Run `spoolway sync`." sentence. `init`, `doctor`,
+Inside a lane the line omits the trailing "Open spoolway to apply them." sentence. `init`, `doctor`,
 `whats-new`, `update`, `config edit`, `config override` and `sync` itself never draw the panel
 or print the line.
 

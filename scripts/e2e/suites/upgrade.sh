@@ -171,6 +171,58 @@ byte_for_byte_outside_block() {
     cmp <(tail_from_marker "$before" "$END_MARKER") <(tail_from_marker "$after" "$END_MARKER")
 }
 
+# byte_for_byte_outside_block_expecting <what> <before> <after> <expected-after>
+#
+# [`byte_for_byte_outside_block`]'s own shape, for a file whose steps section
+# is expected to differ from `before`: the prose above the key block is
+# still compared against `before`, since `spoolway sync`'s retired-shape
+# migration never reaches it (only a step's own lines are ever edited), but
+# the prose below is compared against `expected_after` — a caller's own,
+# already-computed answer for what the migration should have produced —
+# rather than asserting nothing changed where something now legitimately
+# does.
+byte_for_byte_outside_block_expecting() {
+  local what=$1 before=$2 after=$3 expected=$4
+  local before_head after_head
+  before_head=$(offset_of "$before" "$BEGIN_MARKER")
+  after_head=$(offset_of "$after" "$BEGIN_MARKER")
+  works "$what — the prose above the key block" \
+    cmp <(byte_range "$before" "$before_head") <(byte_range "$after" "$after_head")
+  works "$what — the steps section matches the expected migration" \
+    cmp <(tail_from_marker "$expected" "$END_MARKER") <(tail_from_marker "$after" "$END_MARKER")
+}
+
+# migrated_default_tail <before-file>
+#
+# What `spoolway sync` now does to `default.yml`'s own steps, up to 0.3.0:
+# `review`'s retired `loop: {implement: 2}` map is gone, and `implement` —
+# the one step it named — carries a bare `loop: 3` of its own, one plus the
+# sum of every entry naming it (there is only the one). Applied here by
+# hand, on a fixture's own `before` copy, so the real output from a real
+# `spoolway sync` can be checked against exactly this, not merely asserted
+# to still equal what a past release wrote.
+migrated_default_tail() {
+  awk '/^    loop:$/ { inmap = 1; next }
+       inmap && /^      / { next }
+       { inmap = 0 }
+       { print }' "$1" \
+    | sed 's/^    on_pass: review$/    loop: 3\n    on_pass: review/'
+}
+
+# migrated_bugfix_tail <before-file>
+#
+# The same migration on `bugfix.yml`, up to 0.3.0: `review`'s map names
+# `fix`, and `reproduce-again`'s names `review` — two steps, each taking a
+# bare `loop: 3` of its own, and each map gone from the step that carried it.
+migrated_bugfix_tail() {
+  awk '/^    loop:$/ { inmap = 1; next }
+       inmap && /^      / { next }
+       { inmap = 0 }
+       { print }' "$1" \
+    | sed 's/^    on_pass: review$/    loop: 3\n    on_pass: review/' \
+    | sed 's/^    on_pass: reproduce-again$/    loop: 3\n    on_pass: reproduce-again/'
+}
+
 # stage <version>
 #
 # A fresh repo with that version's own fixture laid over it, registered
@@ -272,8 +324,14 @@ lacks "the stale key block's retired \`cleanup\` line is gone, not left alone" \
   "cleanup           true" "$PIPELINE"
 has "the key block now reads the way this binary ships it" \
   "on_fail\` routes it later" "$PIPELINE"
-byte_for_byte_outside_block "the prose around the refreshed block came back byte for byte" \
-  "$WORK/0.1.0/before-default.yml" "$PIPELINE"
+
+# `review`'s own `loop: {implement: 2}` is the retired per-route shape too —
+# present since 0.1.0, migrated the same way at every version that still
+# carries it, not only 0.5.0's own self-routing `checks`.
+migrated_default_tail "$WORK/0.1.0/before-default.yml" >"$WORK/0.1.0/expected-default.yml"
+byte_for_byte_outside_block_expecting \
+  "the prose around the refreshed block came back byte for byte, and the retired loop map migrated" \
+  "$WORK/0.1.0/before-default.yml" "$PIPELINE" "$WORK/0.1.0/expected-default.yml"
 
 works "the 0.1.0 fixture's dead task-log template is swept" \
   test ! -e .spoolway/templates/task-log.md
@@ -295,7 +353,11 @@ works "the 0.1.0 fixture's dead lane-prompts template is swept" \
 stage 0.2.0
 assert_init_reused_everything 0.2.0
 PIPELINE=".spoolway/pipelines/default.yml"
+BUGFIX=".spoolway/pipelines/bugfix.yml"
 cp "$PIPELINE" "$WORK/0.2.0/before-default.yml"
+cp "$BUGFIX" "$WORK/0.2.0/before-bugfix.yml"
+has "the 0.2.0 fixture really does carry the retired per-route loop map" \
+  "      fix: 2" "$WORK/0.2.0/before-bugfix.yml"
 
 must "spoolway sync runs against the 0.2.0 project" "$SPOOLWAY" sync
 
@@ -303,23 +365,34 @@ has "the housekeeping value already in place survives the sync" \
   "retention_days = 45" .spoolway/config.toml
 lacks "the retired [pipeline_gen] table and its header rows are both gone" \
   "pipeline_gen" .spoolway/config.toml
-byte_for_byte_outside_block "the prose around the already-current block is untouched" \
-  "$WORK/0.2.0/before-default.yml" "$PIPELINE"
+migrated_default_tail "$WORK/0.2.0/before-default.yml" >"$WORK/0.2.0/expected-default.yml"
+byte_for_byte_outside_block_expecting \
+  "the prose around the already-current block is untouched outside its retired loop map" \
+  "$WORK/0.2.0/before-default.yml" "$PIPELINE" "$WORK/0.2.0/expected-default.yml"
 
 # Every release up to 0.5.0 wrote `loop:` as a map on the step that sends
-# work back — `bugfix`'s `review` carries `loop: {fix: 2}` here — and that
-# per-route shape is refused by name now that a limit counts arrivals at the
-# step carrying it. Refused with no migration, like the self-route further
-# down, so `sync` must leave it exactly where it was and the refusal must then
-# say which step takes the limit instead. This fixture carries no self-route,
-# so nothing else is refused ahead of it.
-has "sync leaves the 0.2.0 fixture's map-form loop where it found it" \
-  "      fix: 2" .spoolway/pipelines/bugfix.yml
-refuses "a 0.2.0 project's map-form loop is then refused at load" \
-  "step .review. declares .loop:. as a map" \
+# work back — `bugfix`'s `review` carries `loop: {fix: 2}` here, and
+# `reproduce-again` carries `loop: {review: 2}` — and that per-route shape is
+# refused by name now that a limit counts arrivals at the step carrying it.
+# `spoolway sync` migrates it away: each map is gone from the step that
+# carried it, and the step it named takes a bare `loop: 3` of its own, one
+# plus the sum of every entry naming it (there is only the one, in each
+# case). This fixture carries no self-route, so there is nothing else here
+# for `pipeline check` to say.
+migrated_bugfix_tail "$WORK/0.2.0/before-bugfix.yml" >"$WORK/0.2.0/expected-bugfix.yml"
+byte_for_byte_outside_block_expecting \
+  "sync migrates the 0.2.0 fixture's map-form loop rather than leaving it" \
+  "$WORK/0.2.0/before-bugfix.yml" "$BUGFIX" "$WORK/0.2.0/expected-bugfix.yml"
+lacks "the retired map is gone from the step that carried it" \
+  "      fix: 2" "$BUGFIX"
+has "and the step it named took a bare loop of its own" \
+  "    loop: 3" "$BUGFIX"
+
+silent_about "a fully upgraded 0.2.0 project is no longer refused over a map-form loop" \
+  "declares \`loop:\` as a map" \
   "$SPOOLWAY" pipeline check
-refuses "and the refusal names the step the limit belongs on now" \
-  "give .fix. a .loop: <n>. of its own" \
+says "and the pipelines load far enough for the per-step checks to run at all" \
+  "names no model" \
   "$SPOOLWAY" pipeline check
 
 works "the 0.2.0 fixture's dead task-log template is swept" \
@@ -352,98 +425,122 @@ works "the 0.3.0 fixture's dead pull request template is swept" \
 works "the 0.3.0 fixture's dead lane-prompts template is swept" \
   test ! -e .spoolway/templates/lane-prompts.md
 
-# --------------------------------------- 0.5.0: a self-route it can no longer load
+# ------------------------------------------------ 0.4.0: loop maps, no self-route
+#
+# The last release before the self-routing `checks` step: both pipelines
+# still carry the retired per-route `loop:` map, and nothing else is refused.
+# Staged here because its fixture was on disk with no section reading it, and
+# because it is the release a project most often upgrades from straight into
+# this migration. What is asserted is the report as well as the file: each
+# rewrite is named under the file it changed, in `--dry-run` and in the real
+# pass alike, and the project loads afterwards.
+stage 0.4.0
+assert_init_reused_everything 0.4.0
+PIPELINE=".spoolway/pipelines/default.yml"
+BUGFIX=".spoolway/pipelines/bugfix.yml"
+has "the 0.4.0 fixture really does carry the retired per-route loop map" \
+  "      implement: 2" "$PIPELINE"
+
+says "a dry run names the migration it would make under the file" \
+  "(migrated: the \`loop:\` map on \`review\` became \`loop: 3\` on \`implement\`)" \
+  "$SPOOLWAY" sync --dry-run
+has "and a dry run writes nothing" "      implement: 2" "$PIPELINE"
+
+says "the real sync names each migration under the file it changed" \
+  "(migrated: the \`loop:\` map on \`reproduce-again\` became \`loop: 3\` on \`review\`)" \
+  "$SPOOLWAY" sync
+lacks "the retired map is gone from default.yml" "      implement: 2" "$PIPELINE"
+lacks "and from bugfix.yml" "      fix: 2" "$BUGFIX"
+silent_about "a fully upgraded 0.4.0 project is no longer refused over a map-form loop" \
+  "declares \`loop:\` as a map" \
+  "$SPOOLWAY" pipeline check
+says "and its pipelines load far enough for the per-step checks to run at all" \
+  "names no model" \
+  "$SPOOLWAY" pipeline check
+
+# ------------------------------------------ 0.5.0: a self-route it now migrates
 #
 # 0.5.0 is the first release whose own `spoolway init` scaffolded a step that
-# routes back to its own id: `checks`, whose `on_fail` names `checks`. Both
-# shipped pipelines carry it. A step may not do that any more — `Pipeline::
-# validate` refuses it at load, naming the step and the key — and that
-# refusal was landed with no migration on purpose: a project carrying a
-# self-route is refused, and its owner edits the file.
+# routes back to its own id: `checks`, whose `on_fail` names `checks`, paired
+# with a `loop:` map naming `checks` too — the same per-route shape every
+# fixture back to 0.1.0 carries elsewhere, just aimed at its own id here.
+# Both shipped pipelines carry it. A step may not do either any more —
+# `Pipeline::validate` refuses each at load, naming the step and the key —
+# and `spoolway sync` now migrates both away in the same pass it migrates
+# every other fixture's own loop maps: `checks`'s `on_fail:` and its
+# self-targeting map entry are dropped together, and every other map in
+# these two files becomes a bare `loop:` on the step it named, same as at
+# every earlier version.
 #
-# That decision is exactly the kind this suite exists to price before a tag,
-# because it is invisible everywhere else. `init` and `sync` both run to
-# completion against such a project and report nothing wrong: `sync` swaps
-# the generated key block and copies every byte around it through unread, so
-# the self-routing step comes back untouched. The project is only refused the
-# next time something loads a pipeline. No unit test reaches this — it needs
-# a whole `.spoolway/` tree a past release really wrote, upgraded in place.
-#
-# So what is asserted here is the break itself, deliberately: that the
-# upgrade succeeds, that the refusal then names the step the owner has to
-# edit, and that editing it is enough. If a migration is ever written, this
-# section is what should go red.
+# This is exactly the kind of change this suite exists to price before a
+# tag, because it is invisible everywhere else: `init` and `sync` both run
+# to completion against such a project, and only a whole `.spoolway/` tree a
+# past release really wrote, upgraded in place, proves the rewrite reaches a
+# step this deep in a real file rather than only the fixtures a unit test
+# builds by hand.
 stage 0.5.0
 assert_init_reused_everything 0.5.0
 PIPELINE=".spoolway/pipelines/default.yml"
+BUGFIX=".spoolway/pipelines/bugfix.yml"
 cp "$PIPELINE" "$WORK/0.5.0/before-default.yml"
+cp "$BUGFIX" "$WORK/0.5.0/before-bugfix.yml"
 has "the 0.5.0 fixture really does carry that release's own self-routing checks step" \
   "    on_fail: checks" "$WORK/0.5.0/before-default.yml"
+
+says "a dry run over the 0.5.0 project names the self-route migration" \
+  "(migrated: step \`checks\` no longer routes a failure back to itself" \
+  "$SPOOLWAY" sync --dry-run
+says "and names bugfix's two maps folding into one limit on fix" \
+  "became \`loop: 5\` on \`fix\`" \
+  "$SPOOLWAY" sync --dry-run
 
 must "spoolway sync runs against the 0.5.0 project" "$SPOOLWAY" sync
 
 has "the housekeeping value already in place survives the sync" \
   "retention_days = 45" .spoolway/config.toml
-byte_for_byte_outside_block "the prose around the refreshed block came back byte for byte" \
-  "$WORK/0.5.0/before-default.yml" "$PIPELINE"
 
-# The upgrade reports nothing wrong, and leaves the step it can no longer
-# load exactly where it found it. Asserted rather than assumed: if `sync`
-# ever does start rewriting steps, the two assertions below are the ones
-# that should say so first.
-has "sync leaves the self-routing step exactly where it found it" \
-  "    on_fail: checks" "$PIPELINE"
-has "and leaves the second pipeline's copy of it alone too" \
-  "    on_fail: checks" .spoolway/pipelines/bugfix.yml
+# `default.yml`: `checks`'s self-route and its self-targeting map both go,
+# and `review`'s map on `implement` becomes `loop: 3` — one plus the sum of
+# the one entry naming it, same as at every earlier version.
+migrated_default_tail "$WORK/0.5.0/before-default.yml" \
+  | sed '/^    on_fail: checks$/d' >"$WORK/0.5.0/expected-default.yml"
+byte_for_byte_outside_block_expecting \
+  "the prose around the refreshed block came back byte for byte, self-route and map both migrated" \
+  "$WORK/0.5.0/before-default.yml" "$PIPELINE" "$WORK/0.5.0/expected-default.yml"
+lacks "the self-routing checks step no longer routes to itself" \
+  "on_fail: checks" "$PIPELINE"
+has "implement took the bare loop the map named it for" \
+  "    loop: 3" "$PIPELINE"
 
-refuses "a fully upgraded 0.5.0 project is then refused at load" \
+# `bugfix.yml`: the same self-route, plus two maps — `review` and
+# `reproduce-again` both name `fix` — that fold into one bare `loop: 5` on
+# `fix`, one plus their sum of `2 + 2`.
+awk '/^    loop:$/ { inmap = 1; next }
+     inmap && /^      / { next }
+     { inmap = 0 }
+     { print }' "$WORK/0.5.0/before-bugfix.yml" \
+  | sed 's/^    on_pass: review$/    loop: 5\n    on_pass: review/' \
+  | sed '/^    on_fail: checks$/d' >"$WORK/0.5.0/expected-bugfix.yml"
+byte_for_byte_outside_block_expecting \
+  "and the second pipeline's copy of the self-route and its two-source map both migrated" \
+  "$WORK/0.5.0/before-bugfix.yml" "$BUGFIX" "$WORK/0.5.0/expected-bugfix.yml"
+lacks "the second pipeline's self-route is gone too" "on_fail: checks" "$BUGFIX"
+has "fix took the bare loop the sum of both maps named it for" \
+  "    loop: 5" "$BUGFIX"
+
+# A fully upgraded 0.5.0 project loads clean: neither the self-route nor the
+# retired loop-map shape is left for `Pipeline::validate` to refuse.
+silent_about "a fully upgraded 0.5.0 project is no longer refused over its self-route" \
   "may not route back to its own id" \
   "$SPOOLWAY" pipeline check
-refuses "and the refusal names the step whose file the owner has to edit" \
-  "step .checks." \
-  "$SPOOLWAY" pipeline check
-
-# The edit the message asks for, made to the staged copy — never to the
-# fixture, which is a record of what 0.5.0 really wrote. Deleting the
-# `on_fail` alone is not the whole fix: every release up to 0.5.0 wrote
-# `loop:` as a map keyed by the step a failure is sent back to, and that
-# per-route shape is refused by name now — a limit counts arrivals at the
-# step that carries it. It too lands with no migration, so a project written
-# by any of those releases has this second edit to make. Worth having on the
-# record, because the self-route refusal names only the first of the two.
-sed -i '/^    on_fail: checks$/d' "$PIPELINE" .spoolway/pipelines/bugfix.yml
-refuses "deleting the self-route alone leaves the retired loop map behind" \
-  "declares .loop:. as a map" \
-  "$SPOOLWAY" pipeline check
-refuses "and that refusal says where the limit belongs now" \
-  "Delete it here and give .[a-z-]*. a .loop: <n>. of its own" \
-  "$SPOOLWAY" pipeline check
-
-# What that message asks for, done the way an owner would: every map comes
-# off the step that sent work back, and the step it named takes a bare
-# `loop:` of its own. `checks`'s map named only its own id, the self-route
-# already deleted, so nothing takes its place. `check_bounded_loops` then
-# still has to accept every cycle left — `review` → `implement` in the one,
-# `review`/`reproduce-again` → `fix` in the other — on the strength of the
-# new limits alone.
-for f in "$PIPELINE" .spoolway/pipelines/bugfix.yml; do
-  awk '/^    loop:$/ { inmap = 1; next }
-       inmap && /^      / { next }
-       { inmap = 0; print }' "$f" > "$f.new" && mv "$f.new" "$f"
-done
-sed -i 's/^  - id: implement$/&\n    loop: 2/' "$PIPELINE"
-sed -i 's/^  - id: fix$/&\n    loop: 2/' .spoolway/pipelines/bugfix.yml
-silent_about "moving each limit onto the step it named is the whole of the fix" \
-  "may not route back to its own id" \
-  "$SPOOLWAY" pipeline check
-silent_about "and no map is left for the loader to refuse" \
+silent_about "and no map is left for the loader to refuse either" \
   "declares \`loop:\` as a map" \
   "$SPOOLWAY" pipeline check
 silent_about "and every cycle left is bounded by a limit in the new form" \
   "nothing bounds" \
   "$SPOOLWAY" pipeline check
 
-# The positive half of the two above, which on their own only prove an
+# The positive half of the three above, which on their own only prove an
 # absence. `pipeline check` reaches its per-step model checks only once every
 # pipeline in the directory has loaded, so being told about a missing `model:`
 # is proof the routing was accepted. The fixture configures no agents, so that

@@ -42,11 +42,11 @@ reading the file whole.
    **A project with no pipelines is not a dead end.** Where this reports `no pipelines
    defined`, install the shipped ones yourself: a bare `spoolway init --yes` — `--provider`
    takes only `claude` or `codex`, not `pi`, so this is the same mechanical fix
-   **spoolway-doctor**'s own pi copy reaches for. Re-runnable, and it writes only what is
-   absent, so it restores just the missing pipelines and prompts and leaves everything else
-   in the project untouched. Then re-run `spoolway task contract` and carry on with what it
-   now reports, without asking the person first — say one line about it, `Installed the two
-   shipped pipelines; routing against them.`, ahead of the ballot in step 2.
+   **spoolway-config**'s own pi copy reaches for when it repairs a project. Re-runnable, and it
+   writes only what is absent, so it restores just the missing pipelines and prompts and leaves
+   everything else in the project untouched. Then re-run `spoolway task contract` and carry on
+   with what it now reports, without asking the person first — say one line about it, `Installed
+   the two shipped pipelines; routing against them.`, ahead of the ballot in step 2.
 
 2. **Route each subject to a pipeline, then decompose against that pipeline's own shape.**
    Read the pipelines before choosing task boundaries. Let their purpose and steps shape the
@@ -184,7 +184,7 @@ reading the file whole.
    reports, re-run until it passes, never mention the loop to the human.
 
 6. **Say one line**, once: `<n> tasks written to ~/.spoolway/<project>/pending. Open the
-   queue screen (\`spoolway queue\`) to send them.` Never summarise the tasks themselves.
+   board to send them.` Never summarise the tasks themselves.
 
 ## Guardrails
 

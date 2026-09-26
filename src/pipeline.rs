@@ -1042,6 +1042,43 @@ impl Pipeline {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The three retired shapes' own messages, each written once: `validate` and
+// `refuse_retired_step_keys` bail on the first with these, and
+// `Pipeline::retired_shape_problems` collects every one — the same wording
+// either way, since `scripts/e2e/suites/upgrade.sh` greps these exact
+// strings and a copy that drifted from its original would break silently.
+// ---------------------------------------------------------------------------
+
+/// A step's `on_pass:` or `on_fail:` naming its own id.
+fn self_route_message(step_id: &str, key: &str) -> String {
+    format!(
+        "step `{step_id}`: `{key}` names `{step_id}` itself — a step may not route back to \
+         its own id. Send the failure to a step that leaves, or delete the step."
+    )
+}
+
+/// A step's `loop:` still written as the retired per-route map.
+fn loop_map_message(step_id: &str, by_route: &BTreeMap<String, u32>) -> String {
+    let give = by_route
+        .keys()
+        .map(|to| format!("give `{to}` a `loop: <n>` of its own"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!(
+        "step `{step_id}` declares `loop:` as a map — a limit now counts arrivals at the step \
+         that carries it. Delete it here and {give}."
+    )
+}
+
+/// A step still declaring the retired `on_loop_max:`.
+fn on_loop_max_message(step_id: &str) -> String {
+    format!(
+        "step `{step_id}` declares `on_loop_max:` — a spent loop budget now always parks on \
+         `blocked`, so the key no longer chooses anything; delete it."
+    )
+}
+
 impl Pipeline {
     /// The step a task starts on once its dependencies are in.
     ///
@@ -1441,12 +1478,7 @@ impl Pipeline {
                 ("on_fail", step.on_fail.as_deref()),
             ] {
                 if target == Some(step.id.as_str()) {
-                    bail!(
-                        "step `{}`: `{key}` names `{}` itself — a step may not route back to \
-                         its own id. Send the failure to a step that leaves, or delete the step.",
-                        step.id,
-                        step.id
-                    );
+                    bail!(self_route_message(&step.id, key));
                 }
             }
         }
@@ -1507,22 +1539,49 @@ impl Pipeline {
         // belongs now instead of just that the old key is gone.
         for step in &self.steps {
             if let Loop::Map(by_route) = &step.r#loop {
-                let give = by_route
-                    .keys()
-                    .map(|to| format!("give `{to}` a `loop: <n>` of its own"))
-                    .collect::<Vec<_>>()
-                    .join("; ");
-                bail!(
-                    "step `{}` declares `loop:` as a map — a limit now counts arrivals at \
-                     the step that carries it. Delete it here and {give}.",
-                    step.id
-                );
+                bail!(loop_map_message(&step.id, by_route));
             }
         }
 
         self.check_bounded_loops()?;
 
         Ok(())
+    }
+
+    /// Every occurrence of the three retired step shapes this pipeline's own
+    /// steps carry — `on_loop_max:`, an `on_fail:` naming its own step, and
+    /// `loop:` written as the old per-route map — each named by its step,
+    /// collected without stopping at the first the way [`Self::validate`]
+    /// must.
+    ///
+    /// `spoolway sync` migrates all three away (see
+    /// [`migrate_retired_shapes`]), so a pipeline that has been through it
+    /// never has anything to say here; this is for `pipeline check` and
+    /// `doctor`'s `pipelines load` row, reading a project that has not
+    /// synced yet and wants the whole list in one pass rather than one
+    /// refusal per run. Scoped to exactly these three shapes rather than
+    /// every way `validate` can refuse a pipeline: the rest of `validate`'s
+    /// checks stay bail-at-the-first, which is what every other caller
+    /// wants from a pipeline that genuinely cannot run.
+    pub fn retired_shape_problems(&self) -> Vec<String> {
+        let mut problems = Vec::new();
+        for step in &self.steps {
+            if step.on_loop_max.is_some() {
+                problems.push(on_loop_max_message(&step.id));
+            }
+            for (key, target) in [
+                ("on_pass", step.on_pass.as_deref()),
+                ("on_fail", step.on_fail.as_deref()),
+            ] {
+                if target == Some(step.id.as_str()) {
+                    problems.push(self_route_message(&step.id, key));
+                }
+            }
+            if let Loop::Map(by_route) = &step.r#loop {
+                problems.push(loop_map_message(&step.id, by_route));
+            }
+        }
+        problems
     }
 
     /// Steps that gate but declare no `on_fail`, so a `spoolway report
@@ -1821,12 +1880,7 @@ fn parse_unchecked(name: &str, raw: &str) -> Result<Pipeline> {
 fn refuse_retired_step_keys(pipeline: &Pipeline) -> Result<()> {
     for step in &pipeline.steps {
         if step.on_loop_max.is_some() {
-            bail!(
-                "{}: step `{}` declares `on_loop_max:` — a spent loop budget now always parks \
-                 on `blocked`, so the key no longer chooses anything; delete it.",
-                pipeline.name,
-                step.id
-            );
+            bail!("{}: {}", pipeline.name, on_loop_max_message(&step.id));
         }
     }
     Ok(())
@@ -1924,6 +1978,335 @@ fn opt(value: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
+// ---------------------------------------------------------------------------
+// Retired shapes: the three step keys 0.5.0 and earlier could still write —
+// `on_fail:` naming its own step, `loop:` as the old per-route map, and
+// `on_loop_max:` — that this binary now refuses to load. `spoolway sync`
+// rewrites all three away by hand, without ever reading a project's own
+// prose; `Pipelines::refusals` lists every one still standing, for a project
+// that has not synced yet.
+// ---------------------------------------------------------------------------
+
+/// One change [`migrate_retired_shapes`] made, named twice: `report` is the
+/// full sentence `spoolway sync`'s own report and `--dry-run` print, and
+/// `panel` is the shorter one that still fits inside `crate::gate`'s bounded
+/// confirm line. Both describe the same change; a caller never has to pick
+/// one over the other; it decides which surface it is printing to.
+pub struct RetiredShapeChange {
+    pub report: String,
+    pub panel: String,
+}
+
+/// Migrate a pipeline file's text away from the three retired step shapes —
+/// see this section's own header — and name every change made.
+///
+/// `None` three ways, only the first of which is the ordinary case this must
+/// cost nothing more than the one parse below for: the file carries none of
+/// the three shapes; it has no steps at all; or it fails to deserialise as a
+/// [`Pipeline`] in the first place — `deny_unknown_fields` on both
+/// [`Pipeline`] and [`Step`], or a still-parsing retired key this function
+/// does not migrate (`max_rounds:`, `max_new_sessions:`), all fail the parse
+/// outright rather than leaving an `Option` field empty. A file in either of
+/// the last two states is left untouched here, exactly as it was found —
+/// `sync::pipelines` still refreshes the key reference below it on its own —
+/// and it is not silently dropped elsewhere either: [`Pipelines::refusals`]
+/// reads the same file the same way, and names its own parse error when this
+/// does.
+///
+/// Reads `raw` through [`Pipeline`]'s own parser to know which steps carry
+/// which shape — the exact knowledge [`Pipeline::validate`] refuses to load
+/// over — but never re-serialises it: every edit below splices the original
+/// text, line by line, so a project's own prose around a step comes back
+/// exactly as it was. See `sync::pipelines`, the one caller.
+pub fn migrate_retired_shapes(raw: &str) -> Option<(String, Vec<RetiredShapeChange>)> {
+    let pipeline: Pipeline = serde_norway::from_str(raw).ok()?;
+    if pipeline.steps.is_empty() {
+        return None;
+    }
+
+    // An `on_fail:` naming its own step — refused outright at
+    // `Pipeline::validate`'s self-route check. Only `on_fail` is migrated:
+    // an `on_pass:` doing the same thing is the same refusal, but no shipped
+    // pipeline has ever written one, and this task's own mockup names only
+    // `on_fail`.
+    let self_route: Vec<&str> = pipeline
+        .steps
+        .iter()
+        .filter(|step| step.on_fail.as_deref() == Some(step.id.as_str()))
+        .map(|step| step.id.as_str())
+        .collect();
+
+    // Every step whose `loop:` is still the retired per-route map. Its whole
+    // block is retired wherever it is found — a self-targeting entry (the
+    // step naming its own id, exactly the shape a self-route pairs with) is
+    // dropped rather than contributed anywhere, since nothing may arrive at
+    // a step by routing back to itself any more; every other entry becomes a
+    // contribution toward the bare `loop:` its target ends up with.
+    let mut sources_with_map: Vec<&str> = Vec::new();
+    let mut contributions: Vec<(&str, &str, u32)> = Vec::new();
+    for step in &pipeline.steps {
+        if let Loop::Map(by_route) = &step.r#loop {
+            sources_with_map.push(step.id.as_str());
+            for (target, n) in by_route {
+                if target != &step.id {
+                    contributions.push((step.id.as_str(), target.as_str(), *n));
+                }
+            }
+        }
+    }
+
+    let on_loop_max: Vec<&str> = pipeline
+        .steps
+        .iter()
+        .filter(|step| step.on_loop_max.is_some())
+        .map(|step| step.id.as_str())
+        .collect();
+
+    if self_route.is_empty() && sources_with_map.is_empty() && on_loop_max.is_empty() {
+        return None;
+    }
+
+    // Aggregated per target, in the order their sources appear in the
+    // pipeline's own step list — the order the note below names them in.
+    let mut targets_order: Vec<&str> = Vec::new();
+    let mut seen_targets: HashSet<&str> = HashSet::new();
+    for &(_, target, _) in &contributions {
+        if seen_targets.insert(target) {
+            targets_order.push(target);
+        }
+    }
+    let mut by_target: BTreeMap<&str, (u32, Vec<&str>)> = BTreeMap::new();
+    for &(source, target, n) in &contributions {
+        let entry = by_target.entry(target).or_default();
+        entry.0 += n;
+        entry.1.push(source);
+    }
+
+    // One plus the sum of every entry naming a target, unless the target
+    // already carries a bare `loop:` larger than that — the one case a
+    // shipped pipeline never wrote, but the acceptance criterion states by
+    // name, so it is honoured here rather than left to whichever number
+    // happened to be computed last.
+    let mut new_bare: BTreeMap<&str, u32> = BTreeMap::new();
+    for &target in &targets_order {
+        let sum = by_target[target].0;
+        let existing = match pipeline.step(target).map(|s| &s.r#loop) {
+            Some(Loop::Bare(n)) => *n,
+            _ => 0,
+        };
+        new_bare.insert(target, existing.max(1 + sum));
+    }
+
+    let text = splice_retired_shapes(raw, &self_route, &sources_with_map, &new_bare, &on_loop_max);
+
+    let mut changes = Vec::new();
+    for &id in &self_route {
+        changes.push(RetiredShapeChange {
+            // "a red check" rather than a generic "a failure": the task's own
+            // mockup fixes this exact wording, and every shipped pipeline's
+            // one self-routing step is `checks` — a red `gh pr checks`. A
+            // project that gave some other step this shape reads a sentence
+            // written for the case that actually occurs, not a blander one
+            // hedged against a case nothing has ever produced.
+            report: format!(
+                "step `{id}` no longer routes a failure back to itself — a red check now waits \
+                 on `blocked`"
+            ),
+            panel: format!("`{id}` no longer retries itself"),
+        });
+    }
+    for &target in &targets_order {
+        let (_, sources) = &by_target[target];
+        let n = new_bare[target];
+        let plural = if sources.len() > 1 { "s" } else { "" };
+        let sources_list = join_and(sources);
+        changes.push(RetiredShapeChange {
+            report: format!(
+                "the `loop:` map{plural} on {sources_list} became `loop: {n}` on `{target}`"
+            ),
+            panel: format!("`loop:` map{plural} into `{target}` became `loop: {n}`"),
+        });
+    }
+    for &id in &on_loop_max {
+        changes.push(RetiredShapeChange {
+            report: format!(
+                "`on_loop_max:` removed from step `{id}` — a spent loop budget now always \
+                 parks on `blocked`"
+            ),
+            panel: format!("`on_loop_max:` removed from `{id}`"),
+        });
+    }
+
+    Some((text, changes))
+}
+
+/// Join a list of step ids as a sentence names them: `` `a` ``, `` `a` and
+/// `b` ``, or `` `a`, `b` and `c` ``.
+fn join_and(items: &[&str]) -> String {
+    let quoted: Vec<String> = items.iter().map(|id| format!("`{id}`")).collect();
+    match quoted.split_last() {
+        None => String::new(),
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// Every `- id: <name>` step's own line range in `lines` — from that line up
+/// to (not including) the next step's own `- id:` line, or the end of the
+/// file for the last one. What [`splice_retired_shapes`] edits one step at a
+/// time, rather than re-serialising the document.
+fn step_line_ranges(lines: &[&str]) -> Vec<(String, usize, usize)> {
+    let starts: Vec<(usize, String)> = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(i, line)| {
+            line.trim_start()
+                .strip_prefix("- id:")
+                .map(|id| (i, id.trim().to_string()))
+        })
+        .collect();
+    starts
+        .iter()
+        .enumerate()
+        .map(|(k, (start, id))| {
+            let end = starts.get(k + 1).map(|(s, _)| *s).unwrap_or(lines.len());
+            (id.clone(), *start, end)
+        })
+        .collect()
+}
+
+/// The indentation of `body`'s own keys — read off the first line after its
+/// `- id:` line, so an inserted `loop:` line matches whatever this project's
+/// own generator indented every other key with, rather than a width spoolway
+/// assumes.
+fn step_key_indent(body: &[String]) -> String {
+    body.get(1)
+        .map(|line| line.chars().take_while(|c| c.is_whitespace()).collect())
+        .unwrap_or_else(|| "    ".to_string())
+}
+
+/// One step's own lines, rewritten: its self-routing `on_fail:` dropped, its
+/// retired `loop:` map dropped whole, a fresh bare `loop:` inserted or an
+/// existing one's number replaced if this step is a migration target, and
+/// its `on_loop_max:` dropped.
+fn splice_step(
+    body: &[String],
+    self_route: bool,
+    has_map: bool,
+    new_bare: Option<u32>,
+    has_on_loop_max: bool,
+) -> Vec<String> {
+    let mut out = Vec::with_capacity(body.len());
+    let mut i = 0;
+    while i < body.len() {
+        let line = &body[i];
+        let trimmed = line.trim_start();
+
+        if self_route && trimmed.starts_with("on_fail:") {
+            i += 1;
+            continue;
+        }
+        if has_on_loop_max && trimmed.starts_with("on_loop_max:") {
+            i += 1;
+            continue;
+        }
+        if has_map && trimmed == "loop:" {
+            let indent = line.len() - trimmed.len();
+            i += 1;
+            while i < body.len() {
+                let next = &body[i];
+                let next_trimmed = next.trim_start();
+                let next_indent = next.len() - next_trimmed.len();
+                if next_trimmed.is_empty() || next_indent <= indent {
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        // An existing bare `loop: <n>` on a migration target: the number is
+        // replaced in place rather than adding a second `loop:` key.
+        if let Some(n) = new_bare
+            && trimmed.starts_with("loop:")
+            && !trimmed["loop:".len()..].trim().is_empty()
+        {
+            let indent = &line[..line.len() - trimmed.len()];
+            out.push(format!("{indent}loop: {n}"));
+            i += 1;
+            continue;
+        }
+        out.push(line.clone());
+        i += 1;
+    }
+
+    // A target with no `loop:` of its own yet gets one, right before its own
+    // `on_pass:` — matching where this task's own mockup draws it — or its
+    // `on_fail:` if it has no `on_pass:`, or at the end of the step as a
+    // last resort.
+    if let Some(n) = new_bare
+        && !out
+            .iter()
+            .any(|line| line.trim_start().starts_with("loop:"))
+    {
+        let indent = step_key_indent(&out);
+        let insert_at = out
+            .iter()
+            .position(|line| line.trim_start().starts_with("on_pass:"))
+            .or_else(|| {
+                out.iter()
+                    .position(|line| line.trim_start().starts_with("on_fail:"))
+            })
+            .unwrap_or(out.len());
+        out.insert(insert_at, format!("{indent}loop: {n}"));
+    }
+
+    out
+}
+
+/// Apply every retired-shape edit to `raw`'s own text, one step block at a
+/// time, and nothing else: everything between step blocks — the header, the
+/// key reference fence, the pipeline's own `description:` — is copied
+/// through unread.
+fn splice_retired_shapes(
+    raw: &str,
+    self_route: &[&str],
+    sources_with_map: &[&str],
+    new_bare: &BTreeMap<&str, u32>,
+    on_loop_max: &[&str],
+) -> String {
+    let had_trailing_newline = raw.ends_with('\n');
+    let lines: Vec<&str> = raw.lines().collect();
+    let blocks = step_line_ranges(&lines);
+
+    let mut out: Vec<String> = Vec::with_capacity(lines.len());
+    let mut idx = 0;
+    for (id, start, end) in &blocks {
+        while idx < *start {
+            out.push(lines[idx].to_string());
+            idx += 1;
+        }
+        let body: Vec<String> = lines[*start..*end].iter().map(|l| l.to_string()).collect();
+        out.extend(splice_step(
+            &body,
+            self_route.contains(&id.as_str()),
+            sources_with_map.contains(&id.as_str()),
+            new_bare.get(id.as_str()).copied(),
+            on_loop_max.contains(&id.as_str()),
+        ));
+        idx = *end;
+    }
+    while idx < lines.len() {
+        out.push(lines[idx].to_string());
+        idx += 1;
+    }
+
+    let mut text = out.join("\n");
+    if had_trailing_newline {
+        text.push('\n');
+    }
+    text
+}
+
 /// Every pipeline defined for a project.
 ///
 /// Assembled rather than parsed: each pipeline is its own file under
@@ -1944,6 +2327,80 @@ impl Pipelines {
     /// Where a named pipeline's file lives.
     pub fn file_in(root: &Path, name: &str) -> PathBuf {
         Pipelines::dir_in(root).join(format!("{name}.yml"))
+    }
+
+    /// Every retired-shape refusal this project's pipeline files carry right
+    /// now — see [`Pipeline::retired_shape_problems`] — one line per
+    /// occurrence, named by its file and step, collected across every file
+    /// rather than stopping at the first the way [`Pipelines::load`]'s `?`
+    /// chain must (right for the dispatcher, which can only ever act on one
+    /// problem at a time). `pipeline check` and `doctor`'s `pipelines load`
+    /// row call this once loading has already failed, so a project meets
+    /// every retired shape at once instead of one refusal per run.
+    ///
+    /// A file that will not deserialise at all — a genuine syntax error, or a
+    /// key `deny_unknown_fields` or one of the still-parsing retired keys
+    /// (`max_rounds:`, `max_new_sessions:`) refuses outright — is named here
+    /// too, by its own parse error, rather than skipped: a project with one
+    /// broken file and one carrying a retired shape hears about both, not
+    /// only the shape.
+    ///
+    /// Empty only when nothing here found anything to say at all — no
+    /// pipeline directory, or every file both parsed and carried none of the
+    /// three shapes — which means the original load failed for a reason
+    /// outside this function's own scope (a `validate` refusal none of the
+    /// three shapes explains), and a caller falls back to that error, the
+    /// same one it always printed.
+    pub fn refusals(root: &Path) -> Vec<String> {
+        let dir = Pipelines::dir_in(root);
+        let files = match read_pipeline_dir(&dir) {
+            Ok(Some(files)) => files,
+            Ok(None) | Err(_) => return Vec::new(),
+        };
+        let mut problems = Vec::new();
+        for (name, raw) in &files {
+            match serde_norway::from_str::<Pipeline>(raw) {
+                Ok(mut pipeline) => {
+                    pipeline.name = name.clone();
+                    for problem in pipeline.retired_shape_problems() {
+                        problems.push(format!("{name}.yml: {problem}"));
+                    }
+                }
+                Err(err) => problems.push(format!("{name}.yml: {err:#}")),
+            }
+        }
+        problems
+    }
+
+    /// How many pipeline files carry a retired shape and nothing worse — for
+    /// `doctor`'s own `pipelines load` row on the upgrade path, which wants a
+    /// count and not [`Pipelines::refusals`]'s own per-step prose: those
+    /// refusals are all things `sync` migrates, so naming the file count and
+    /// pointing at the update says what actually helps a person, rather than
+    /// reading as an instruction to hand-edit the file.
+    ///
+    /// `None` the moment any file in the directory refuses to deserialise at
+    /// all — a genuine syntax error, or one of the two keys that still parse
+    /// only to be refused (`deny_unknown_fields`, a still-parsing retired key
+    /// such as `max_rounds:`) — since the update cannot migrate that file,
+    /// and a caller falls back to [`Pipelines::refusals`]'s own detail rather
+    /// than call an unrelated parse failure "migrated" too. `None` as well
+    /// when nothing here found a retired shape at all.
+    pub fn retired_shape_file_count(root: &Path) -> Option<usize> {
+        let dir = Pipelines::dir_in(root);
+        let files = match read_pipeline_dir(&dir) {
+            Ok(Some(files)) => files,
+            Ok(None) | Err(_) => return None,
+        };
+        let mut count = 0;
+        for (_, raw) in &files {
+            match serde_norway::from_str::<Pipeline>(raw) {
+                Ok(pipeline) if !pipeline.retired_shape_problems().is_empty() => count += 1,
+                Ok(_) => {}
+                Err(_) => return None,
+            }
+        }
+        (count > 0).then_some(count)
     }
 
     /// Load and validate from a repo root, with any patch under
@@ -3482,10 +3939,12 @@ mod tests {
     /// `on_loop_max:` chose where a spent loop budget went, and across seven
     /// pipelines and twenty-eight bounded steps nobody ever chose anything but
     /// `blocked`. The key is retired, and a file still carrying it is refused
-    /// by name — `spoolway sync` rewrites a pipeline file's key reference and
-    /// never a step, so this message is the whole of the migration for a
-    /// project that has one, and it has to name the file to open and the step
-    /// to find in it without a reader going to the release notes.
+    /// by name. `spoolway sync` now removes it outright (see
+    /// [`migrate_retired_shapes`]); this message is what a project meets
+    /// before its first sync, or a hand-written file that still names the
+    /// key some other way sync will not reach, and it has to name the file
+    /// to open and the step to find in it without a reader going to the
+    /// release notes.
     // covers: step.on_loop_max — retired, and refused by name rather than by `deny_unknown_fields`
     #[test]
     fn the_retired_on_loop_max_key_is_refused_by_name() {
@@ -3505,6 +3964,338 @@ mod tests {
         // Not serde's own list of every other key a step may carry, which is
         // what `deny_unknown_fields` would have answered with.
         assert!(!err.contains("unknown field"), "{err}");
+    }
+
+    /// `migrate_retired_shapes` against the real 0.5.0 `bugfix.yml` fixture:
+    /// `checks`'s self-route and its self-targeting loop entry both vanish,
+    /// `review` and `reproduce-again` lose their maps, and `fix` — named by
+    /// both — gets `loop: 5`, one plus their sum.
+    #[test]
+    fn migrates_the_0_5_0_bugfix_fixture_to_loop_5_on_fix() {
+        let raw =
+            std::fs::read_to_string("scripts/e2e/fixtures/0.5.0/.spoolway/pipelines/bugfix.yml")
+                .unwrap();
+        let (text, changes) = migrate_retired_shapes(&raw).expect("this fixture has all three");
+
+        // Loads clean afterward — the point of the whole exercise.
+        Pipeline::parse("bugfix", &text).expect("migrated text must validate");
+
+        assert!(text.contains("    loop: 5\n    on_pass: review"), "{text}");
+        assert!(!text.contains("on_fail: checks"), "{text}");
+        assert!(!text.contains("      fix: 2"), "{text}");
+        assert!(!text.contains("      checks: 3"), "{text}");
+
+        let reports: Vec<&str> = changes.iter().map(|c| c.report.as_str()).collect();
+        assert!(
+            reports
+                .iter()
+                .any(|r| r.contains("step `checks` no longer routes a failure back to itself")),
+            "{reports:?}"
+        );
+        assert!(
+            reports.iter().any(|r| {
+                r.contains(
+                    "the `loop:` maps on `review` and `reproduce-again` became `loop: 5` \
+                            on `fix`",
+                )
+            }),
+            "{reports:?}"
+        );
+    }
+
+    /// Acceptance criterion 1, proven rather than sampled: every line of the
+    /// real 0.5.0 `bugfix.yml` fixture that is not one of the three retired
+    /// shapes survives untouched, in the same order, and the only lines that
+    /// differ are exactly the ones the task names.
+    #[test]
+    fn migrating_bugfix_touches_only_the_three_retired_shapes() {
+        let raw =
+            std::fs::read_to_string("scripts/e2e/fixtures/0.5.0/.spoolway/pipelines/bugfix.yml")
+                .unwrap();
+        let (text, _) = migrate_retired_shapes(&raw).unwrap();
+
+        let before: Vec<&str> = raw.lines().collect();
+        let after: Vec<&str> = text.lines().collect();
+
+        // Every line dropped from `before` is one of the retired shapes —
+        // the two self-referencing map entries, the map keys that carried
+        // them, and the self-routing `on_fail:`.
+        let expected_removed: HashSet<&str> = [
+            "    loop:",
+            "      fix: 2",
+            "      checks: 3",
+            "    on_fail: checks",
+        ]
+        .into_iter()
+        .collect();
+        for line in &before {
+            if !after.contains(line) {
+                assert!(
+                    expected_removed.contains(line),
+                    "an untouched line was dropped: {line:?}"
+                );
+            }
+        }
+
+        // The only line gained is the bare `loop:` the merged maps produced.
+        for line in &after {
+            if !before.contains(line) {
+                assert_eq!(
+                    *line, "    loop: 5",
+                    "an unexpected line was added: {line:?}"
+                );
+            }
+        }
+    }
+
+    /// `on_loop_max:` is removed outright, wherever it is found — not left
+    /// for a project to keep hitting the same refusal at every load.
+    #[test]
+    fn migrate_removes_on_loop_max_from_the_text() {
+        let raw = "steps:\n  \
+                    - id: a\n    agent: pi\n    loop: 2\n    on_pass: b\n  \
+                    - id: b\n    agent: pi\n    on_loop_max: blocked\n    on_pass: z\n    \
+                    on_fail: a\n  \
+                    - id: z\n    end: true\n";
+        let (text, changes) = migrate_retired_shapes(raw).expect("carries on_loop_max");
+        assert!(!text.contains("on_loop_max"), "{text}");
+        Pipeline::parse("solo", &text).expect("migrated text must validate");
+        assert!(
+            changes
+                .iter()
+                .any(|c| c.report.contains("`on_loop_max:` removed from step `b`")),
+            "{:?}",
+            changes.iter().map(|c| &c.report).collect::<Vec<_>>()
+        );
+    }
+
+    /// The `default.yml` half of the same fixture: one map, on `review`,
+    /// becomes `loop: 3` on `implement`.
+    #[test]
+    fn migrates_the_0_5_0_default_fixture_to_loop_3_on_implement() {
+        let raw =
+            std::fs::read_to_string("scripts/e2e/fixtures/0.5.0/.spoolway/pipelines/default.yml")
+                .unwrap();
+        let (text, changes) = migrate_retired_shapes(&raw).expect("this fixture has all three");
+        Pipeline::parse("default", &text).expect("migrated text must validate");
+
+        assert!(text.contains("    loop: 3\n    on_pass: review"), "{text}");
+        assert!(!text.contains("on_fail: checks"), "{text}");
+        assert!(!text.contains("      implement: 2"), "{text}");
+
+        let reports: Vec<&str> = changes.iter().map(|c| c.report.as_str()).collect();
+        assert!(
+            reports
+                .iter()
+                .any(|r| r.contains("the `loop:` map on `review` became `loop: 3` on `implement`")),
+            "{reports:?}"
+        );
+
+        // The prose above and below the steps section is untouched — only
+        // step lines are ever edited.
+        assert!(
+            text.contains("One unit of work, start to finish: implement against the acceptance"),
+            "{text}"
+        );
+    }
+
+    /// A pipeline with none of the three retired shapes costs nothing more
+    /// than the parse: `None`, not a rewrite that happens to be a no-op.
+    #[test]
+    fn migrate_retired_shapes_is_none_when_there_is_nothing_to_migrate() {
+        let raw = "steps:\n  - id: a\n    agent: pi\n    on_pass: z\n  \
+                    - id: z\n    end: true\n";
+        assert!(migrate_retired_shapes(raw).is_none());
+    }
+
+    /// A target that already carries a bare `loop:` larger than what the
+    /// retired maps would sum to keeps its own, larger number.
+    #[test]
+    fn migrate_keeps_a_targets_existing_bare_loop_if_it_is_larger() {
+        let raw = "steps:\n  \
+                    - id: a\n    agent: pi\n    loop: 9\n    on_pass: b\n  \
+                    - id: b\n    agent: pi\n    loop:\n      a: 1\n    on_pass: a\n    on_fail: a\n  \
+                    - id: z\n    end: true\n";
+        // `b` routes back to `a`, not to itself, so this parses today —
+        // `a`'s own `on_fail: a`-style self-route is not being exercised
+        // here, only the map-vs-bare precedence.
+        let (text, _) = migrate_retired_shapes(raw).expect("carries a loop map");
+        assert!(text.contains("loop: 9"), "{text}");
+        assert!(!text.contains("loop: 2"), "{text}");
+    }
+
+    /// Every retired shape this pipeline's steps carry, listed rather than
+    /// stopping at the first — the collecting form `Pipelines::refusals`
+    /// uses so `pipeline check` and `doctor` can say all of it in one pass.
+    #[test]
+    fn retired_shape_problems_lists_every_occurrence_not_just_the_first() {
+        let raw = "steps:\n  \
+                    - id: a\n    agent: pi\n    on_pass: b\n    on_fail: a\n  \
+                    - id: b\n    agent: pi\n    loop:\n      a: 1\n    on_pass: z\n    on_fail: a\n  \
+                    - id: z\n    end: true\n    on_loop_max: blocked\n";
+        let pipeline: Pipeline = serde_norway::from_str(raw).unwrap();
+        let problems = pipeline.retired_shape_problems();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("step `a`") && p.contains("may not route back")),
+            "{problems:?}"
+        );
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("step `b`") && p.contains("declares `loop:` as a map")),
+            "{problems:?}"
+        );
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("step `z`") && p.contains("on_loop_max:")),
+            "{problems:?}"
+        );
+        assert_eq!(problems.len(), 3, "{problems:?}");
+    }
+
+    /// `Pipelines::refusals` across a whole directory, not one pipeline: two
+    /// files, each carrying a retired shape, both named — acceptance
+    /// criterion 4's "across every pipeline file", proven directly rather
+    /// than only through `pipeline_check`'s own count.
+    #[test]
+    fn refusals_names_every_file_and_step_across_the_whole_directory() {
+        let root = crate::scratch::root("pipeline-refusals-across-files");
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = Pipelines::dir_in(&root);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("default.yml"),
+            "steps:\n  \
+             - id: implement\n    agent: pi\n    on_pass: checks\n  \
+             - id: checks\n    run: gh pr checks\n    loop:\n      checks: 3\n    \
+             on_pass: done\n    on_fail: checks\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("bugfix.yml"),
+            "steps:\n  \
+             - id: fix\n    agent: pi\n    on_pass: review\n  \
+             - id: review\n    agent: pi\n    loop:\n      fix: 2\n    on_pass: done\n    \
+             on_fail: fix\n",
+        )
+        .unwrap();
+
+        let problems = Pipelines::refusals(&root);
+        // default.yml: `checks` self-routes and its own `loop:` is a map —
+        // two. bugfix.yml: `review`'s `loop:` is a map, naming `fix` — one.
+        assert_eq!(problems.len(), 3, "{problems:?}");
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.starts_with("default.yml:") && p.contains("may not route back")),
+            "{problems:?}"
+        );
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.starts_with("default.yml:") && p.contains("declares `loop:` as a map")),
+            "{problems:?}"
+        );
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.starts_with("bugfix.yml:") && p.contains("step `review`")),
+            "{problems:?}"
+        );
+    }
+
+    /// A file that will not deserialise at all is named by its own parse
+    /// error rather than skipped — otherwise a project with one broken file
+    /// and one carrying a retired shape would hear about only the shape.
+    #[test]
+    fn refusals_names_a_file_that_will_not_parse_instead_of_skipping_it() {
+        let root = crate::scratch::root("pipeline-refusals-unparseable");
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = Pipelines::dir_in(&root);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("broken.yml"),
+            "steps:\n  - id: a\n    unknown_key: yes\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("default.yml"),
+            "steps:\n  \
+             - id: implement\n    agent: pi\n    on_pass: implement\n  \
+             - id: z\n    end: true\n",
+        )
+        .unwrap();
+
+        let problems = Pipelines::refusals(&root);
+        assert!(
+            problems.iter().any(|p| p.starts_with("broken.yml:")),
+            "{problems:?}"
+        );
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.starts_with("default.yml:") && p.contains("may not route back")),
+            "{problems:?}"
+        );
+    }
+
+    /// Every file behind carries only a retired shape — nothing an update
+    /// cannot fix — so the count is the number of files, not the number of
+    /// occurrences: `default.yml` above carries two retired shapes but is
+    /// one file.
+    #[test]
+    fn retired_shape_file_count_counts_files_not_occurrences() {
+        let root = crate::scratch::root("pipeline-retired-shape-file-count");
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = Pipelines::dir_in(&root);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("default.yml"),
+            "steps:\n  \
+             - id: implement\n    agent: pi\n    on_pass: checks\n  \
+             - id: checks\n    run: gh pr checks\n    loop:\n      checks: 3\n    \
+             on_pass: done\n    on_fail: checks\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("bugfix.yml"),
+            "steps:\n  \
+             - id: fix\n    agent: pi\n    on_pass: review\n  \
+             - id: review\n    agent: pi\n    loop:\n      fix: 2\n    on_pass: done\n    \
+             on_fail: fix\n",
+        )
+        .unwrap();
+
+        assert_eq!(Pipelines::retired_shape_file_count(&root), Some(2));
+    }
+
+    /// A genuine parse failure alongside a retired shape is not something an
+    /// update can migrate, so the count backs off to `None` rather than call
+    /// the broken file "migrated" too — the caller falls back to
+    /// `Pipelines::refusals`'s own per-file detail instead.
+    #[test]
+    fn retired_shape_file_count_is_none_beside_a_genuine_parse_failure() {
+        let root = crate::scratch::root("pipeline-retired-shape-file-count-mixed");
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = Pipelines::dir_in(&root);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("broken.yml"),
+            "steps:\n  - id: a\n    unknown_key: yes\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("default.yml"),
+            "steps:\n  \
+             - id: implement\n    agent: pi\n    on_pass: implement\n  \
+             - id: z\n    end: true\n",
+        )
+        .unwrap();
+
+        assert_eq!(Pipelines::retired_shape_file_count(&root), None);
     }
 
     /// And refused on a step an installation's own override also patches.

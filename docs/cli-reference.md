@@ -34,8 +34,8 @@ object:
 ```
 
 The commands that print it: `pipeline show`, `pipeline check`, `pipeline list`, `pipeline
-override`, `prompt list`, `prompt override`, `config show`, `config list`, `config get`,
-`config path`, `config override`, `doctor` and `sync`.
+override`, `prompt contract`, `prompt list`, `prompt override`, `config show`, `config list`,
+`config get`, `config path`, `config override`, `doctor` and `sync`.
 
 ## Your work
 
@@ -294,7 +294,7 @@ settings
     unattended.max_cost_usd
 
 files
-  .spoolway/config.toml is behind this spoolway
+  1 file(s) are behind this spoolway — open spoolway to apply them
 
 problems
   prompt `archivist`: missing
@@ -560,7 +560,7 @@ cannot be set. See [`spoolway override`](#spoolway-override-list--promote--drop)
 
 ### `spoolway prompt contract`
 
-Print the contract a prompt is written against, rendered from this project's pipeline.
+Print the contract a prompt is written against, rendered from the checkout's own pipeline.
 
 ```
 spoolway prompt contract [--step <STEP>] [--pipeline <PIPELINE>] [--task <TASK>]
@@ -840,7 +840,7 @@ runs the command. Ctrl-c writes nothing, runs nothing, and restores the terminal
 
 Where stdin or stdout is not a terminal, under `--json`, or inside a lane, no panel is drawn.
 One line goes to stderr instead and the command runs anyway; inside a lane the line omits the
-trailing "Run `spoolway sync`." sentence. `init`, `doctor`, `whats-new`, `update`,
+trailing "Open spoolway to apply them." sentence. `init`, `doctor`, `whats-new`, `update`,
 `config edit`, `config override` and `sync` itself never draw the panel or print the line.
 
 ### `spoolway whats-new`

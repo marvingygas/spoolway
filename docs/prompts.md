@@ -66,7 +66,7 @@ sits on. `WHAT YOU WRITE DOWN` lists the task-file headings spoolway appends to:
 
 ## What every lane is told about spoolway
 
-The system prompt opens with the step and the task, then six rules:
+The system prompt opens with the step and the task, then seven rules:
 
 - One step's worth of the job, and nothing enforces it. The role below is the whole of what is
   the lane's.
@@ -78,6 +78,7 @@ The system prompt opens with the step and the task, then six rules:
 - If the task is ever held on `paused` or `blocked` and a person carries on talking in the
   lane's pane, it does what they ask, including work its own step would otherwise leave to
   another. Resuming it stays theirs alone.
+- What a person has to do, name on the board, never as a `spoolway` command.
 
 A `blocked` step gets a different first rule — its remit is the run, not one task's step — and a
 `READING THE RUN` block naming `spoolway queue list`, `spoolway queue show`, `spoolway lane` and

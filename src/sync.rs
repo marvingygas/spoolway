@@ -11,7 +11,9 @@
 //! the freshly rendered version — every byte around it is copied through without
 //! being read. Anything a person has changed is reported and left exactly as it
 //! is: this command's failure mode has to be "did nothing and said so", never
-//! "helped".
+//! "helped". [`skills`] does not keep this promise either, for the same reason
+//! [`config`] and [`pipelines`] do not — see the `config.toml` paragraph
+//! below.
 //!
 //! Prompts, their assets, and task skeletons are not here at all, and that is
 //! the design. All are prose a project owns outright, with nothing generated
@@ -40,7 +42,9 @@
 //! rewritten outright. A pipeline file's key reference is the same bargain in
 //! one fenced block of an otherwise untouched file; [`pipelines`] says why it
 //! is documentation of the binary's contract rather than anything a project
-//! meant.
+//! meant. A skill file is the whole-file version of the same bargain: nothing
+//! in one is a project's to have meant, so [`skills`] rewrites it outright
+//! wherever it differs from the shipped copy, hand edit or not.
 //!
 //! This used to be `spoolway update`'s job, along with installing the binary
 //! itself. The two were split apart so `update` can run from any directory,
@@ -48,6 +52,7 @@
 //! this machine's `PATH`, and file work is a fact about a checkout that has
 //! to exist first. See [`crate::update`] for the half that stayed there.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -67,6 +72,20 @@ pub enum Outcome {
     Wrote {
         path: String,
         detail: String,
+    },
+    /// A pipeline file rewritten to migrate a retired step shape — see
+    /// `crate::pipeline::migrate_retired_shapes`. Its own variant rather than
+    /// another [`Outcome::Wrote`], because its detail is one of the few this
+    /// report actually prints under the file's own `wrote` line, in both the
+    /// long form (`report`) `run`'s own report and `--dry-run` use and the
+    /// short one (`panel`) that fits `crate::gate`'s bounded confirm line —
+    /// an ordinary `Wrote`'s `detail` is never shown this way, and giving it
+    /// two forms besides would only invite it to grow long enough to need
+    /// them.
+    Migrated {
+        path: String,
+        report: String,
+        panel: String,
     },
     /// Already ours, or already current. Carries no path because nothing needs
     /// one: a file nothing was done to is a file nothing has to say about it,
@@ -104,6 +123,17 @@ impl Outcome {
         Outcome::Removed {
             path: path.into(),
             why: why.into(),
+        }
+    }
+    fn migrated(
+        path: impl Into<String>,
+        report: impl Into<String>,
+        panel: impl Into<String>,
+    ) -> Outcome {
+        Outcome::Migrated {
+            path: path.into(),
+            report: report.into(),
+            panel: panel.into(),
         }
     }
 }
@@ -146,6 +176,7 @@ pub fn run(repo: &Repo, args: &SyncArgs, json: bool) -> Result<()> {
     // wrote, or the person reading it would think a deletion was a rewrite.
     let outcomes = scan(repo, args)?;
     let (wrote, removed) = dedup_paths(&outcomes);
+    let notes = migration_notes(&outcomes);
     // A dry run reports the same paths in the conditional: "wrote" over a
     // tree nothing touched reads as a lie the moment `git status` is run.
     let (wrote_word, removed_word) = match args.dry_run {
@@ -154,6 +185,9 @@ pub fn run(repo: &Repo, args: &SyncArgs, json: bool) -> Result<()> {
     };
     for path in &wrote {
         println!("  {wrote_word} {path}");
+        for (report, _) in notes.get(path).into_iter().flatten() {
+            println!("               ({report})");
+        }
     }
     for (path, why) in &removed {
         println!("  {removed_word} {path}");
@@ -171,6 +205,7 @@ pub fn run(repo: &Repo, args: &SyncArgs, json: bool) -> Result<()> {
     // checkout was last brought to, and a dry run brings it to nothing.
     if !args.dry_run {
         write_stamp(&repo.home, &repo.checkout)?;
+        remove_skill_stamp(&repo.home);
     }
     Ok(())
 }
@@ -185,17 +220,45 @@ pub(crate) fn dedup_paths(outcomes: &[Outcome]) -> (Vec<&str>, Vec<(&str, &str)>
     let mut removed: Vec<(&str, &str)> = Vec::new();
     for outcome in outcomes {
         match outcome {
-            Outcome::Wrote { path, .. } if !wrote.contains(&path.as_str()) => wrote.push(path),
+            Outcome::Wrote { path, .. } | Outcome::Migrated { path, .. }
+                if !wrote.contains(&path.as_str()) =>
+            {
+                wrote.push(path)
+            }
             Outcome::Removed { path, why } if !removed.iter().any(|(p, _)| *p == path) => {
                 removed.push((path, why))
             }
             Outcome::Wrote { .. }
+            | Outcome::Migrated { .. }
             | Outcome::Removed { .. }
             | Outcome::Kept
             | Outcome::Blocked { .. } => {}
         }
     }
     (wrote, removed)
+}
+
+/// The `(migrated: …)` lines a scan's own [`Outcome::Migrated`] entries
+/// carry, keyed by path and kept in the order they were recorded — the
+/// extra explanation [`run`]'s own report and `crate::gate`'s confirm panel
+/// each draw under a pipeline file's `wrote` line, one tuple of `(report,
+/// panel)` per change so each surface reads the length it can afford.
+pub(crate) fn migration_notes(outcomes: &[Outcome]) -> BTreeMap<&str, Vec<(&str, &str)>> {
+    let mut notes: BTreeMap<&str, Vec<(&str, &str)>> = BTreeMap::new();
+    for outcome in outcomes {
+        if let Outcome::Migrated {
+            path,
+            report,
+            panel,
+        } = outcome
+        {
+            notes
+                .entry(path.as_str())
+                .or_default()
+                .push((report.as_str(), panel.as_str()));
+        }
+    }
+    notes
 }
 
 /// Every file spoolway owns here, and what would happen to it.
@@ -713,14 +776,16 @@ fn provider_installed(
         || planned.iter().any(|file| file.path.exists())
         || crate::install::RETIRED_SKILLS
             .iter()
-            .any(|name| provider.skills_dir(checkout).join(name).is_dir())
+            .any(|(name, _)| provider.skills_dir(checkout).join(name).is_dir())
 }
 
-/// Skills are rewritten to the shipped copy where a project installed them —
-/// unless the skill stamp says a person changed one by hand, which is
-/// reported and left alone the same way a hand-edited skeleton block is; see
-/// [`read_skill_fingerprint`]. Writing them into a project that never ran
-/// `install` would be this command choosing an agent on someone's behalf.
+/// Skills are rewritten to the shipped copy wherever a project installed
+/// them: a skill file belongs to spoolway outright, the same bargain
+/// `config.toml` keeps for everything around a project's own values, so
+/// there is no hand edit to protect here — nothing but the shipped copy was
+/// ever meant to be there. Writing them into a project that never ran
+/// `install` would still be this command choosing an agent on someone's
+/// behalf, so that guard stays.
 ///
 /// Every provider, not just `claude`: `init` and `install` write the same
 /// skills under `.agents/skills/` and `.pi/skills/` too, and a codex or pi
@@ -754,56 +819,17 @@ fn skills(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<(
             match std::fs::read_to_string(&planned.path) {
                 Ok(on_disk) if on_disk == planned.contents => {
                     outcomes.push(Outcome::Kept);
-                    if !args.dry_run {
-                        record_skill_fingerprint(
-                            &repo.home,
-                            &planned.path,
-                            &crate::skeleton::fingerprint(planned.contents),
-                        )?;
-                    }
                     continue;
                 }
-                Ok(on_disk) => {
-                    // Ours only if the fingerprint spoolway itself last
-                    // recorded here still matches what is on disk now — the
-                    // same distinction `BlockState` draws for a skeleton's
-                    // block, kept the other way round because a skill file
-                    // has no hand-curated `history` of every shape it has
-                    // ever shipped. No record at all is not proof either
-                    // way, so it reads as a hand edit too — see
-                    // [`read_skill_fingerprint`].
-                    let last_shipped = read_skill_fingerprint(&repo.home, &planned.path);
-                    if last_shipped.as_deref()
-                        != Some(crate::skeleton::fingerprint(&on_disk).as_str())
-                    {
-                        outcomes.push(Outcome::blocked(
-                            &shown,
-                            format!(
-                                "was changed by hand, so it was left alone — `spoolway install \
-                                 {} --force` takes the shipped skills back",
-                                provider.name()
-                            ),
-                        ));
-                        continue;
-                    }
+                Ok(_) => {
                     if !args.dry_run {
                         write_atomic(&planned.path, planned.contents)?;
-                        record_skill_fingerprint(
-                            &repo.home,
-                            &planned.path,
-                            &crate::skeleton::fingerprint(planned.contents),
-                        )?;
                     }
                     outcomes.push(Outcome::wrote(&shown, "rewritten"));
                 }
                 Err(_) => {
                     if !args.dry_run {
                         write_atomic(&planned.path, planned.contents)?;
-                        record_skill_fingerprint(
-                            &repo.home,
-                            &planned.path,
-                            &crate::skeleton::fingerprint(planned.contents),
-                        )?;
                     }
                     outcomes.push(Outcome::wrote(&shown, "added"));
                 }
@@ -823,7 +849,11 @@ fn skills(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<(
                         .map(|c| c.as_os_str().to_string_lossy().into_owned())
                 })
                 .collect();
-            names.extend(crate::install::RETIRED_SKILLS.iter().map(|s| s.to_string()));
+            names.extend(
+                crate::install::RETIRED_SKILLS
+                    .iter()
+                    .map(|(name, _)| name.to_string()),
+            );
             names.sort();
             names.dedup();
             for name in names {
@@ -870,7 +900,7 @@ fn skills(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<(
 fn retired_skills(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<()> {
     for provider in <crate::cli::Provider as clap::ValueEnum>::value_variants() {
         let dir = provider.skills_dir(&repo.checkout);
-        for name in crate::install::RETIRED_SKILLS {
+        for (name, why) in crate::install::RETIRED_SKILLS {
             let stale = dir.join(name);
             if !stale.is_dir() {
                 continue;
@@ -880,7 +910,7 @@ fn retired_skills(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> 
                 std::fs::remove_dir_all(&stale)
                     .with_context(|| format!("removing {}", stale.display()))?;
             }
-            outcomes.push(Outcome::removed(&shown, "renamed to spoolway-config"));
+            outcomes.push(Outcome::removed(&shown, *why));
         }
     }
     Ok(())
@@ -916,7 +946,9 @@ fn retired_templates(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) 
 /// wherever it is found and every line around it — the title, the steps, the
 /// notes between them — is copied through unread.
 ///
-/// Two departures from the rule the module doc states, both deliberate:
+/// Three departures from the module doc's promise, specific to a pipeline
+/// file — [`skills`] departs from the same promise too, in its own way; see
+/// the module doc's own paragraph on it. All three below are deliberate:
 ///
 /// - An edit inside the markers is discarded, not refused. This is
 ///   `config.toml`'s bargain, not a skeleton's: there is nothing in here for a
@@ -926,6 +958,13 @@ fn retired_templates(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) 
 ///   a block into a pipeline somebody wrote themselves would be this command
 ///   helping, which is the one thing it must never do. Pasting the two markers
 ///   in is how a pipeline opts in.
+/// - The three retired step shapes — an `on_fail:` naming its own step,
+///   `loop:` as the old per-route map, and `on_loop_max:` — are migrated
+///   ahead of the fence, on any file that has opted in. Unlike the key
+///   reference this does read into a step, but it still never re-serialises
+///   one: [`crate::pipeline::migrate_retired_shapes`] edits the file's own
+///   text, so everything else about a step — its prose, its key order, the
+///   blank lines around it — is copied through unread the same as ever.
 fn pipelines(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<()> {
     // `checkout`, not `root`: the pipelines are as tracked as the prompts
     // and the task skeletons `shipped_for` above already reads from there,
@@ -985,10 +1024,14 @@ fn pipelines(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Resul
         };
 
         let region = crate::pipeline::KEY_BLOCK;
-        let Some(found) = region.read(&on_disk) else {
+        if region.read(&on_disk).is_none() {
             // Half a fence is the one shape worth saying something about: the
             // lines under a start marker with no end could be anyone's, so
-            // nothing is written and the missing marker is named.
+            // nothing is written and the missing marker is named. No markers
+            // at all means the file never opted in, and the retired shapes
+            // below are left alone right along with the key reference — see
+            // this function's own doc on why an unfenced file is never ours
+            // to touch.
             let opened = on_disk
                 .lines()
                 .any(|line| line.trim() == crate::assets::PIPELINE_KEYS_BEGIN);
@@ -1005,21 +1048,48 @@ fn pipelines(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Resul
                 false => Outcome::Kept,
             });
             continue;
-        };
+        }
 
+        // The three retired step shapes migrated ahead of the key
+        // reference: each rewrites this file's own text, never re-parsing
+        // it back out to serde, so re-reading the fence just below still
+        // finds it exactly where it was — see
+        // `crate::pipeline::migrate_retired_shapes`.
+        let mut on_disk = on_disk;
+        let mut changed = false;
+        if let Some((migrated_text, changes)) = crate::pipeline::migrate_retired_shapes(&on_disk) {
+            on_disk = migrated_text;
+            changed = true;
+            for change in changes {
+                outcomes.push(Outcome::migrated(
+                    &shown,
+                    format!("migrated: {}", change.report),
+                    format!("migrated: {}", change.panel),
+                ));
+            }
+        }
+
+        let found = region
+            .read(&on_disk)
+            .expect("migrate_retired_shapes never touches the fenced key reference");
         if crate::skeleton::same(found, crate::pipeline::key_block()) {
             outcomes.push(Outcome::Kept);
-            continue;
+        } else {
+            match region.replace(&on_disk, crate::pipeline::key_block()) {
+                Some(next) => {
+                    on_disk = next;
+                    changed = true;
+                    outcomes.push(Outcome::wrote(&shown, "key reference refreshed"));
+                }
+                None => {
+                    outcomes.push(Outcome::blocked(&shown, "its block moved while we read it"));
+                }
+            }
         }
 
-        let Some(next) = region.replace(&on_disk, crate::pipeline::key_block()) else {
-            outcomes.push(Outcome::blocked(&shown, "its block moved while we read it"));
-            continue;
-        };
-        if !args.dry_run {
-            write_atomic(&path, &next)?;
+        if changed && !args.dry_run {
+            write_atomic(&path, &on_disk)?;
         }
-        outcomes.push(Outcome::wrote(&shown, "key reference refreshed"));
     }
     Ok(())
 }
@@ -1139,68 +1209,23 @@ pub fn stamp_behind(home: &Path, checkout: &Path) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// The skill stamp: what spoolway itself last wrote at each installed skill
-// file. [`skeleton::BlockState`] tells a block an earlier release shipped
-// from one a person edited by keeping a hand-curated `history` of every
-// fingerprint that block has ever had. A skill file has no such curated list
-// — nobody appends to one every time a `SKILL.md` changes — so this keeps the
-// same fact the other way round: not every fingerprint a file has ever had,
-// but the one fingerprint spoolway itself put there last. A mismatch against
-// that recorded value, not against today's shipped copy, is what a hand edit
-// looks like; a mismatch that agrees with it is exactly a shipped copy this
-// project has not been brought current yet.
+// The skill stamp is gone: a skill file belongs to spoolway outright now, so
+// there is no hand edit left to tell from a stale shipped copy, and nothing
+// here reads or writes one any more. [`remove_skill_stamp`] is the one thing
+// left to do with the name — clear out the file an upgraded project may
+// still be carrying from before this change.
 // ---------------------------------------------------------------------------
 
-/// The skill stamp's file name, under [`Repo::home`] — beside [`STAMP_FILE`]
-/// for the same reason: a home is shared by every worktree cut from it, and
-/// each keeps its own lines rather than fighting over shared ones.
-pub const SKILL_STAMP_FILE: &str = "skill-stamp";
+/// The skill stamp's old file name, under [`Repo::home`] — kept only so a
+/// leftover one can be found and removed.
+const SKILL_STAMP_FILE: &str = "skill-stamp";
 
-/// Where the skill stamp lives, given a project's home directory.
-pub fn skill_stamp_path(home: &Path) -> PathBuf {
-    home.join(SKILL_STAMP_FILE)
-}
-
-/// Record that spoolway itself last wrote `fingerprint` at `path` — one line,
-/// `<fingerprint> <path>`, replacing any earlier line for the same path.
-/// `path` is the absolute path a [`crate::install::Planned`] entry carries,
-/// which already encodes the checkout: no separate key is needed the way
-/// [`write_stamp_line`] needs one for a checkout with several tracked files.
-pub(crate) fn record_skill_fingerprint(home: &Path, path: &Path, fingerprint: &str) -> Result<()> {
-    let stamp = skill_stamp_path(home);
-    let existing = std::fs::read_to_string(&stamp).unwrap_or_default();
-    let shown = path.display().to_string();
-    let mut lines: Vec<String> = existing
-        .lines()
-        .filter(|line| line.split_once(' ').map(|(_, path)| path) != Some(shown.as_str()))
-        .map(str::to_string)
-        .collect();
-    lines.push(format!("{fingerprint} {shown}"));
-    lines.sort();
-    let mut body = lines.join("\n");
-    body.push('\n');
-    write_atomic(&stamp, body)
-}
-
-/// What the skill stamp says spoolway last wrote at `path`, if anything.
-/// [`crate::install::install`] records one here for every file it actually
-/// writes, and so does [`skills`] itself, so an ordinary install followed by
-/// an ordinary sync always has one. No record at all — a project installed
-/// by a spoolway old enough not to keep this stamp — is not proof the file
-/// on disk is ours, so [`skills`] treats it the same as a fingerprint that
-/// disagrees: blocked, not silently rewritten. The one place this bites is
-/// the first sync after upgrading such a project to a spoolway that keeps
-/// this stamp: every one of its skill files reads as blocked once,
-/// `spoolway install <provider> --force` takes them back, and every sync
-/// after that — like every sync on a project that installed fresh — tells a
-/// real hand edit apart from a stale shipped copy correctly.
-fn read_skill_fingerprint(home: &Path, path: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(skill_stamp_path(home)).ok()?;
-    let shown = path.display().to_string();
-    text.lines().find_map(|line| {
-        let (fingerprint, recorded_path) = line.split_once(' ')?;
-        (recorded_path == shown).then(|| fingerprint.to_string())
-    })
+/// Delete a project's leftover skill stamp, if one is still there from
+/// before skill files became spoolway's outright. Best-effort, the same way
+/// [`write_stamp`] tolerates a home it cannot resolve: a stamp nobody reads
+/// any more is clutter, not a fact worth failing a sync over.
+fn remove_skill_stamp(home: &Path) {
+    let _ = std::fs::remove_file(home.join(SKILL_STAMP_FILE));
 }
 
 #[cfg(test)]
@@ -1235,6 +1260,7 @@ mod tests {
             .iter()
             .map(|outcome| match outcome {
                 Outcome::Wrote { path, detail } => format!("wrote {path} ({detail})"),
+                Outcome::Migrated { path, report, .. } => format!("migrated {path} ({report})"),
                 Outcome::Kept => "kept".to_string(),
                 Outcome::Blocked { path, why } => format!("blocked {path}: {why}"),
                 Outcome::Removed { path, why } => format!("removed {path}: {why}"),
@@ -1485,18 +1511,9 @@ mod tests {
             .unwrap();
         std::fs::create_dir_all(first.path.parent().unwrap()).unwrap();
         std::fs::write(&first.path, "stale, from an older release\n").unwrap();
-        // The skill stamp is what tells this apart from a hand edit: record
-        // it as spoolway's own last write, the way an earlier sync actually
-        // would have.
-        record_skill_fingerprint(
-            &repo.home,
-            &first.path,
-            &crate::skeleton::fingerprint("stale, from an older release\n"),
-        )
-        .unwrap();
 
         // `retired_skills`: a directory this binary no longer ships.
-        let retired = claude_dir.join(crate::install::RETIRED_SKILLS[0]);
+        let retired = claude_dir.join(crate::install::RETIRED_SKILLS[0].0);
         std::fs::create_dir_all(&retired).unwrap();
 
         // `replace`: a task template this project no longer keeps, named
@@ -1805,6 +1822,72 @@ mod tests {
         );
     }
 
+    /// `spoolway sync` migrates a pipeline file's three retired step shapes
+    /// in the same pass it refreshes the key reference: the result loads,
+    /// the migration is named as an `Outcome::Migrated` under the file's own
+    /// path, and the key reference is current too.
+    #[test]
+    fn sync_migrates_a_pipelines_retired_shapes_and_refreshes_its_key_reference() {
+        let repo = fixture("pipeline-retired-shapes");
+        let dir = crate::pipeline::Pipelines::dir_in(&repo.root);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bugfix.yml");
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n# a stale key reference this sync also brings forward\n{}\n\nsteps:\n  \
+                 - id: fix\n    agent: pi\n    on_pass: review\n  \
+                 - id: review\n    agent: pi\n    loop:\n      fix: 2\n    on_pass: checks\n    \
+                 on_fail: fix\n  \
+                 - id: checks\n    run: gh pr checks\n    loop:\n      checks: 3\n    \
+                 on_pass: done\n    on_fail: checks\n",
+                crate::assets::PIPELINE_KEYS_BEGIN,
+                crate::assets::PIPELINE_KEYS_END
+            ),
+        )
+        .unwrap();
+
+        let mut outcomes = Vec::new();
+        pipelines(&repo, &args(), &mut outcomes).unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+
+        assert!(after.contains(crate::pipeline::key_block()), "{after}");
+        assert!(
+            after.contains("    loop: 3\n    on_pass: review"),
+            "{after}"
+        );
+        assert!(!after.contains("on_fail: checks"), "{after}");
+        assert!(!after.contains("checks: 3"), "{after}");
+        crate::pipeline::Pipeline::parse("bugfix", &after).expect("migrated file must load");
+
+        let migrated: Vec<(&str, &str)> = outcomes
+            .iter()
+            .filter_map(|o| match o {
+                Outcome::Migrated { path, report, .. } => Some((path.as_str(), report.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            migrated
+                .iter()
+                .any(|(p, r)| p.contains("bugfix.yml") && r.contains("no longer routes a failure")),
+            "{migrated:?}"
+        );
+        assert!(
+            migrated
+                .iter()
+                .any(|(p, r)| p.contains("bugfix.yml") && r.contains("became `loop: 3` on `fix`")),
+            "{migrated:?}"
+        );
+        assert!(
+            outcome_lines(&outcomes)
+                .iter()
+                .any(|line| line.starts_with("wrote") && line.contains("key reference refreshed")),
+            "{:?}",
+            outcome_lines(&outcomes)
+        );
+    }
+
     /// Half a fence is the one shape worth a refusal: the lines under a start
     /// marker with no end could be anyone's.
     #[test]
@@ -1937,15 +2020,6 @@ mod tests {
             let first = provider.plan(&repo.root).into_iter().next().unwrap();
             std::fs::create_dir_all(first.path.parent().unwrap()).unwrap();
             std::fs::write(&first.path, "stale, from an older release\n").unwrap();
-            // Recorded as spoolway's own last write, standing in for the
-            // earlier sync that would really have put it there — without
-            // this, an unrecognised fingerprint reads as a hand edit.
-            record_skill_fingerprint(
-                &repo.home,
-                &first.path,
-                &crate::skeleton::fingerprint("stale, from an older release\n"),
-            )
-            .unwrap();
         }
 
         let mut outcomes = Vec::new();
@@ -1975,14 +2049,6 @@ mod tests {
         let plan = claude_dir.join("spoolway-plan").join("SKILL.md");
         std::fs::create_dir_all(plan.parent().unwrap()).unwrap();
         std::fs::write(&plan, "stale, from an older release\n").unwrap();
-        // Recorded as spoolway's own last write, standing in for the earlier
-        // sync that would really have put it there.
-        record_skill_fingerprint(
-            &repo.home,
-            &plan,
-            &crate::skeleton::fingerprint("stale, from an older release\n"),
-        )
-        .unwrap();
 
         let mut outcomes = Vec::new();
         skills(&repo, &args(), &mut outcomes).unwrap();
@@ -2008,19 +2074,13 @@ mod tests {
         );
     }
 
-    /// The module doc promises "Anything a person has changed is reported
-    /// and left exactly as it is" — `templates()` keeps that promise via
-    /// `BlockState::HandEdited`; `skills()` now does too, via the skill
-    /// stamp. This fixture stands for the legacy case: a project whose
-    /// skills predate the stamp, so nothing was ever recorded for this
-    /// path — `install` now records one for every file it writes, so an
-    /// ordinary install-then-sync never lands here. No fingerprint recorded
-    /// is not proof the file on disk is ours, so it is reported as blocked
-    /// and left alone rather than rewritten like a stale one. See the next
-    /// test for the sharper case, where a recorded fingerprint disagrees
-    /// with what is on disk.
+    /// A skill file belongs to spoolway outright now, unlike a config value
+    /// or a skeleton's own styling — so a hand edit to one is not protected
+    /// the way [`BlockState::HandEdited`] protects a project's own prose.
+    /// Sync writes the shipped copy over it and says so, the same as any
+    /// other stale file.
     #[test]
-    fn a_hand_edited_skill_file_is_reported_as_blocked_and_left_alone() {
+    fn a_hand_edited_skill_file_is_overwritten_and_named() {
         let repo = fixture("skills-hand-edited");
         let planned = crate::cli::Provider::Claude.plan(&repo.root);
         let first = planned.into_iter().next().unwrap();
@@ -2034,69 +2094,45 @@ mod tests {
 
         assert_eq!(
             std::fs::read_to_string(&first.path).unwrap(),
-            edited,
-            "a hand-edited skill file must be left exactly as it is: {lines:?}"
+            first.contents,
+            "a skill file is spoolway's outright, so a hand edit does not survive a sync: {lines:?}"
         );
         assert!(
-            lines.iter().any(|l| l.starts_with("blocked")
-                && l.contains("spoolway install")
-                && l.contains("--force")),
+            lines
+                .iter()
+                .any(|l| l.starts_with("wrote") && l.contains("rewritten")),
             "{lines:?}"
         );
     }
 
-    /// The discrimination the fix is actually built on: a file whose
-    /// recorded fingerprint agrees with what is on disk, exactly as
-    /// `install` or an earlier `sync` would have left it, is stale and
-    /// gets rewritten — the same file, edited by hand afterwards, is
-    /// blocked instead, even though both start from a real recorded
-    /// fingerprint rather than no record at all.
+    /// The 0.5.0 case the whole change is for: a project with no fingerprint
+    /// of any kind for its skill files — this binary never wrote one for
+    /// them — still gets every stale file rewritten on the first sync, and
+    /// the second sync then finds nothing left to do.
     #[test]
-    fn a_recorded_fingerprint_tells_a_stale_copy_from_a_later_hand_edit() {
-        let repo = fixture("skills-recorded-then-edited");
+    fn a_project_with_no_fingerprint_at_all_is_brought_current_in_one_sync() {
+        let repo = fixture("skills-0-5-0-project");
         let planned = crate::cli::Provider::Claude.plan(&repo.root);
         let first = planned.into_iter().next().unwrap();
         std::fs::create_dir_all(first.path.parent().unwrap()).unwrap();
-
-        // An older release's text, recorded as spoolway's own — the shape
-        // `install` leaves a file in when it writes it.
-        let old_release = "an older release's text\n";
-        std::fs::write(&first.path, old_release).unwrap();
-        record_skill_fingerprint(
-            &repo.home,
-            &first.path,
-            &crate::skeleton::fingerprint(old_release),
-        )
-        .unwrap();
+        std::fs::write(&first.path, "0.5.0's text, no fingerprint ever recorded\n").unwrap();
 
         let mut outcomes = Vec::new();
         skills(&repo, &args(), &mut outcomes).unwrap();
         assert_eq!(
             std::fs::read_to_string(&first.path).unwrap(),
             first.contents,
-            "a recorded fingerprint that matches what is on disk is a stale copy, not a hand edit: {:?}",
+            "{:?}",
             outcome_lines(&outcomes)
         );
 
-        // Now a person edits the file this sync just brought current.
-        // Its fingerprint still matches, but the text it matches is no
-        // longer what is on disk.
-        let edited = format!("{}\na line a person added by hand\n", first.contents);
-        std::fs::write(&first.path, &edited).unwrap();
-
+        // Nothing left to do the second time around.
         let mut outcomes = Vec::new();
         skills(&repo, &args(), &mut outcomes).unwrap();
-        let lines = outcome_lines(&outcomes);
-        assert_eq!(
-            std::fs::read_to_string(&first.path).unwrap(),
-            edited,
-            "a recorded fingerprint that no longer matches what is on disk is a hand edit: {lines:?}"
-        );
         assert!(
-            lines
-                .iter()
-                .any(|l| l.starts_with("blocked") && l.contains("--force")),
-            "{lines:?}"
+            outcomes.iter().all(|o| matches!(o, Outcome::Kept)),
+            "{:?}",
+            outcome_lines(&outcomes)
         );
     }
 
@@ -2286,6 +2322,31 @@ mod tests {
         );
     }
 
+    /// `spoolway-doctor` is retired outright, not renamed, so its own entry
+    /// on [`crate::install::RETIRED_SKILLS`] carries a different reason than
+    /// `spoolway-pipeline`'s — repair moved into `spoolway-config` rather
+    /// than a file simply changing name.
+    #[test]
+    fn sync_removes_an_installed_doctor_skill_with_its_own_reason() {
+        let repo = fixture("retired-doctor-skill");
+        let claude_dir = crate::cli::Provider::Claude.skills_dir(&repo.root);
+        let stale = claude_dir.join("spoolway-doctor");
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::write(stale.join("SKILL.md"), "the old skill\n").unwrap();
+
+        let mut outcomes = Vec::new();
+        retired_skills(&repo, &args(), &mut outcomes).unwrap();
+
+        assert!(!stale.exists(), "the retired directory must be removed");
+        let lines = outcome_lines(&outcomes);
+        assert!(
+            lines.iter().any(|l| l.starts_with("removed")
+                && l.contains("spoolway-doctor")
+                && l.contains("retired: /spoolway-config repairs a project now")),
+            "{lines:?}"
+        );
+    }
+
     /// A dry run reports the removal without actually deleting anything —
     /// the same promise every other `sync` scan already keeps.
     #[test]
@@ -2411,53 +2472,41 @@ mod tests {
         assert!(read_stamp(&repo.home, &other).is_some());
     }
 
-    /// The skill stamp's own version of the same guarantee: written for one
-    /// path, re-readable straight back, a later write for that same path
-    /// replacing rather than duplicating its line, and a sibling path's own
-    /// line kept untouched.
+    /// A project brought forward from before this change may still carry the
+    /// old per-skill stamp — a real sync clears it out, since nothing reads
+    /// it any more.
     #[test]
-    fn a_skill_fingerprint_reads_back_and_keeps_a_siblings_line() {
-        let repo = fixture("skill-stamp-roundtrip");
-        let path = repo.checkout.join(".claude/skills/spoolway-plan/SKILL.md");
-        let sibling = repo.checkout.join(".claude/skills/spoolway-tasks/SKILL.md");
+    fn sync_removes_a_leftover_skill_stamp() {
+        let repo = fixture("skill-stamp-leftover");
+        let stamp = repo.home.join(SKILL_STAMP_FILE);
+        std::fs::create_dir_all(&repo.home).unwrap();
+        std::fs::write(&stamp, "some-fingerprint /a/skill/SKILL.md\n").unwrap();
 
-        record_skill_fingerprint(&repo.home, &sibling, "sibling-fingerprint").unwrap();
-        record_skill_fingerprint(&repo.home, &path, "first-fingerprint").unwrap();
-        assert_eq!(
-            read_skill_fingerprint(&repo.home, &path).as_deref(),
-            Some("first-fingerprint")
-        );
+        run(&repo, &args(), false).unwrap();
 
-        // A later write for the same path replaces its line rather than
-        // adding a second one — a stamp with two lines for one path would
-        // leave `find_map` picking whichever happened to come first.
-        record_skill_fingerprint(&repo.home, &path, "second-fingerprint").unwrap();
-        assert_eq!(
-            read_skill_fingerprint(&repo.home, &path).as_deref(),
-            Some("second-fingerprint")
-        );
-        let stamp = std::fs::read_to_string(skill_stamp_path(&repo.home)).unwrap();
-        assert_eq!(
-            stamp
-                .lines()
-                .filter(|l| l.ends_with(&path.display().to_string()))
-                .count(),
-            1,
-            "{stamp}"
-        );
+        assert!(!stamp.exists(), "a real sync must remove the old stamp");
+    }
 
-        // The sibling's own line is still there, untouched.
-        assert_eq!(
-            read_skill_fingerprint(&repo.home, &sibling).as_deref(),
-            Some("sibling-fingerprint")
-        );
+    /// A dry run reads and says, never writes — clearing the old stamp is no
+    /// exception.
+    #[test]
+    fn a_dry_run_leaves_a_leftover_skill_stamp_alone() {
+        let repo = fixture("skill-stamp-leftover-dry-run");
+        let stamp = repo.home.join(SKILL_STAMP_FILE);
+        std::fs::create_dir_all(&repo.home).unwrap();
+        std::fs::write(&stamp, "some-fingerprint /a/skill/SKILL.md\n").unwrap();
 
-        // A path with nothing ever recorded for it reads as no evidence
-        // either way, not as an empty string.
-        let never_written = repo
-            .checkout
-            .join(".claude/skills/spoolway-doctor/SKILL.md");
-        assert_eq!(read_skill_fingerprint(&repo.home, &never_written), None);
+        run(
+            &repo,
+            &SyncArgs {
+                dry_run: true,
+                ..args()
+            },
+            false,
+        )
+        .unwrap();
+
+        assert!(stamp.exists(), "a dry run must not remove the old stamp");
     }
 
     /// `text_fingerprint` has to agree with `skills()` about which providers

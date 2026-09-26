@@ -120,6 +120,13 @@ impl Finding {
 
 /// `spoolway prompt contract` — the whole of what a prompt is written against.
 pub fn contract(repo: &Repo, pipelines: &Pipelines, args: &PromptContractArgs) -> Result<()> {
+    // First, like `pipeline show`: `pipelines` is read out of this checkout,
+    // not the project root, so a linked worktree previewing its own pipeline
+    // edit needs to see which copy answered before anything else prints.
+    if let Some(note) = repo.checkout_note()? {
+        note.print(false)?;
+    }
+
     let (pipeline, step, task, sampled) = subject(repo, pipelines, args)?;
 
     let profile = step

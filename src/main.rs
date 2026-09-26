@@ -479,8 +479,14 @@ fn run() -> Result<()> {
                     commands::pipeline_override(&repo, &args.name, &args.set)
                 }
 
+                // Read out of the checkout, like `pipeline show` and the
+                // other file readers below — not `routing(&graph)`. A pipeline
+                // edit made in a worktree has not landed on the project root
+                // yet, and `prompt contract` exists to preview exactly that
+                // edit before it does.
                 Command::Prompt(PromptCommand::Contract(args)) => {
-                    prompt::contract(&repo, routing(&graph)?, args)
+                    let read = Pipelines::load(&repo.checkout, &repo.config)?;
+                    prompt::contract(&repo, &read, args)
                 }
                 Command::Prompt(PromptCommand::List) => {
                     let read = Pipelines::load(&repo.checkout, &repo.config)?;
@@ -527,12 +533,7 @@ fn run() -> Result<()> {
                     exit_dispatch(commands::dispatch(&repo, routing(&graph)?, args))
                 }
                 Command::Install(args) => {
-                    let installed = crate::install::install(
-                        &repo.root,
-                        Some(&repo.home),
-                        args.provider,
-                        args.force,
-                    )?;
+                    let installed = crate::install::install(&repo.root, args.provider, args.force)?;
                     crate::install::report(installed);
                     Ok(())
                 }
