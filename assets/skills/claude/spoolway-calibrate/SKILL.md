@@ -20,9 +20,8 @@ or both.
   back, why a session blocked, what an agent misunderstood, and what later cleared it.
 - Read `spoolway eval --by step --since <window>`. Check pass rates, block counts, context
   pressure, tokens per run, cost and time. Use `--step` to inspect a troubled step and
-  `spoolway eval --by task --since <window>` to connect its figures to task records.
-- Read `spoolway spend step --since <window>` for total step costs. Use figures where they
-  help; do not make them a gate for findings.
+  `spoolway eval --by task --since <window>` to connect its figures to task records. Use
+  figures where they help; do not make them a gate for findings.
 - Read the pipelines, prompts, templates and settings involved in those runs. Compare what the
   agents did with what the control plane asked them to do.
 

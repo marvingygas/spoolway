@@ -19,7 +19,7 @@ flowchart LR
   A[lane starts] -->|session id| B[agent writes transcript]
   B --> C[lane settles]
   C -->|read transcript| D[one line in usage.jsonl]
-  D --> E[spoolway spend / eval]
+  D --> E[spoolway eval]
 ```
 
 `pi` and `claude` accept a session id from spoolway. `codex` gets its own `$CODEX_HOME`
@@ -30,12 +30,12 @@ read back.
 
 ### Settled lanes
 
-A transcript can grow after the lane is torn down. Every `spoolway eval` and `spoolway spend`
-reads settled sessions again and appends one line for the turns that arrived later. That
-line carries no `outcome`. Lanes still running are left alone.
+A transcript can grow after the lane is torn down. Every `spoolway eval` reads settled sessions
+again and appends one line for the turns that arrived later. That line carries no `outcome`.
+Lanes still running are left alone.
 
-A lane banked more than once still counts as one lane. `spoolway spend` and `spoolway eval`
-group these lines by task, step, round and session. Tokens, cost and time are deltas against
+A lane banked more than once still counts as one lane. `spoolway eval`
+groups these lines by task, step, round and session. Tokens, cost and time are deltas against
 what a lane already banked, so a settled line's zero adds nothing and `WALL` sums every line
 for that lane.
 
@@ -48,9 +48,9 @@ Every read of the ledger sweeps those too, and banks one line per session under 
 is the most specific watched root the session ran under.
 
 A directory line carries no `task`, `step`, `pipeline`, `agent`, `outcome`, `run` or
-`pipeline_version`, because spoolway dispatched no such work. `spoolway spend` skips these
-lines, so its tables show lanes only. The directory table of `spoolway eval` reads them, and
-reads nothing else. See [The directory table](eval.md#the-directory-table).
+`pipeline_version`, because spoolway dispatched no such work. The lanes table of
+`spoolway eval` skips these lines. Its directory table reads them, and reads nothing else. See
+[The directory table](eval.md#the-directory-table).
 
 A session already banked as a lane is never banked again under `dir`. A transcript that has not
 changed since its last banked line is not read again.
@@ -61,45 +61,28 @@ nothing to match against a watched root.
 ## Reading it
 
 ```
-spoolway spend                                  # this project, by step
-spoolway spend task                             # what each task came to
-spoolway spend lane                             # one row per lane, newest last
-spoolway spend project --all                    # every project
-spoolway spend group --project webshop          # one named project
-spoolway spend --month 2026-08                  # one calendar month, local time
-spoolway spend --since 2026-06-01 --until 7d    # a window
-spoolway spend month --all                      # what each month came to
+spoolway eval --by pipeline                    # this project, by pipeline
+spoolway eval --by task                        # what each task came to
+spoolway eval --by group --all                 # every project
+spoolway eval --by group --project webshop     # one named project
+spoolway eval --since 2026-06-01 --until 7d    # a window
 ```
 
 ```
-STEP          LANES         IN        OUT    CACHE R    CACHE W    COST USD      WALL
-implement         4      52.2k      15.4k     794.4k          0           0       49m
-review            4        536     222.1k     27.22M     568.3k       24.85       53m
-pipeline         17     118.4k     339.9k     36.57M     683.2k       31.12     3h29m
-
-total                    131.1k     399.7k     64.21M     811.5k       43.27
+PIPELINE    RUNS  PASS  BLOCKS  CTX PEAK AVG  CTX PEAK  IN/RUN  OUT/RUN  CACHE R/RUN  CACHE W/RUN       USD  USD/RUN  TIME/RUN
+impl          41   82%       3           32%       52%     642   155.8k       41.91M       799.4k    692.90    16.90    1h 12m
+impl_ui       15   79%       2           31%       50%     810   196.7k       52.90M        1.01M    319.95    21.33    2h 04m
+Total         56             5                                                              1012.85
 ```
 
 | Column | What it is |
 |---|---|
-| `LANES` | Lanes in this row |
-| `IN`, `OUT`, `CACHE R`, `CACHE W` | The four priced token classes |
-| `COST USD` | Priced spend. `—` means no price table knows the model. See [Pricing](#pricing). |
-| `WALL` | How long the lanes were busy |
+| `RUNS` | Runs that touched this row |
+| `IN/RUN`, `OUT/RUN`, `CACHE R/RUN`, `CACHE W/RUN` | Each priced token class, divided by `RUNS` |
+| `USD` | Priced spend. Blank when no lane on the row has a price. See [Pricing](#pricing). |
+| `TIME/RUN` | Wall time per run |
 
-When only some lanes in a row have a price, the row prints the priced part and a footer names
-the unpriced model.
-
-| Option | What it does |
-|---|---|
-| `task`, `group`, `step`, `model`, `project`, `month`, `lane` | What to group by. Default `step`, or `project` with more than one project in scope. `lane` prints one row per lane. |
-| `--since`, `--until` | A duration back from now (`4h`, `2d6h`), a local date (`2026-08-01`), or a month (`2026-08`). `--until` includes the whole day or month. |
-| `--month <YYYY-MM>` | One calendar month |
-| `--all`, `--project <name>` | Every project, or one named project |
-| `--csv` | The same rows as CSV |
-| `--json` | The matching ledger lines, ungrouped. Not allowed with `--csv`. |
-
-`eval --month` is a deprecated alias for `spoolway spend --month`.
+See [Comparing pipelines](eval.md) for the full column set, `--by` and the rest of the flags.
 
 ## Pricing
 

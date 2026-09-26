@@ -2,8 +2,9 @@
 //! watched directories cost outside them.
 //!
 //! This is a **view over the ledger**, not a subsystem: every figure here is
-//! grouped out of the same `usage.jsonl` that [`crate::spend`] reads, with
-//! nothing kept in a second store.
+//! grouped out of the same `usage.jsonl`, with nothing kept in a second
+//! store. `crate::spend` holds only the scope and window helpers this module
+//! calls to find and bound that ledger — it groups nothing itself.
 //!
 //! There are two tables, because the ledger holds two populations that never
 //! share a row — see [`Entry::is_lane`] and [`Entry::dir`]. The lanes table
@@ -44,27 +45,7 @@ pub fn run(repo: &Repo, args: &EvalArgs, json: bool, pipelines: Option<&Pipeline
         bail!("`--csv` and `--json` are two different exports of the same rows — pick one");
     }
 
-    // `--month` is a deprecated alias: the calendar-month spend table moved
-    // to `spoolway spend`, and this still routes there so a script or skill
-    // written before the split keeps working. `--by` used to be the other
-    // half of that alias; it is the lanes table's own grouping now.
-    if let Some(month) = &args.month {
-        eprintln!(
-            "`eval --month` has moved to `spoolway spend --month` — this still works, but switch \
-             when you can."
-        );
-        let filters = crate::spend::Filters {
-            since: None,
-            until: None,
-            month: Some(month.as_str()),
-            all: args.all,
-            project: args.project.as_deref(),
-        };
-        return crate::spend::print(repo, None, &filters, json, args.csv);
-    }
-
-    // Reading is also what catches the ledger up — see `usage::sweep`, and
-    // `spend::print`, which sweeps for the same reason.
+    // Reading is also what catches the ledger up — see `usage::sweep`.
     crate::usage::sweep(repo);
 
     let (mut entries, scope) =
@@ -82,7 +63,7 @@ pub fn run(repo: &Repo, args: &EvalArgs, json: bool, pipelines: Option<&Pipeline
     // under every filter over this project.
     let fallback = fallback_keys(&entries);
 
-    let window = crate::spend::window_of(None, args.since.as_deref(), args.until.as_deref())?;
+    let window = crate::spend::window_of(args.since.as_deref(), args.until.as_deref())?;
     entries.retain(|entry| window.contains(&entry.ts));
 
     if let Some(step) = &args.step {
@@ -264,8 +245,7 @@ fn lane_key(entry: &Entry) -> LaneKey {
 
 /// One ledger line per lane launched is not one lane: a lane held for a
 /// person and later freed banks a second line under the same task, step,
-/// round and session — see gh-378 / issue #380, and [`crate::spend`]'s own
-/// `Totals::add`, which groups the same way. Tokens, cost and `wall_s` are
+/// round and session — see gh-378 / issue #380. Tokens, cost and `wall_s` are
 /// all banked as deltas, so a plain sum over every line already lands on
 /// each lane's real total whether it wrote one line or two — it is only a
 /// *count* of lanes, and their verdicts, that double-counts a line as a
@@ -1991,8 +1971,7 @@ fn load(repo: &Repo, filters: &Filters) -> Result<Loaded> {
 
     let fallback = fallback_keys(&entries);
 
-    let window =
-        crate::spend::window_of(None, non_empty(&filters.since), non_empty(&filters.until))?;
+    let window = crate::spend::window_of(non_empty(&filters.since), non_empty(&filters.until))?;
     entries.retain(|entry| window.contains(&entry.ts));
     entries.sort_by(|a, b| a.ts.cmp(&b.ts));
     dirs.retain(|entry| window.contains(&entry.ts));
@@ -2938,7 +2917,6 @@ pub fn screen(repo: &Repo, pipelines: &Pipelines) -> Result<()> {
         pipeline_version: None,
         since: None,
         until: None,
-        month: None,
         all: false,
         project: None,
         trial: None,
@@ -4376,7 +4354,6 @@ mod screen_tests {
             pipeline_version: None,
             since: None,
             until: None,
-            month: None,
             all: false,
             project: None,
             trial: None,
@@ -5024,7 +5001,7 @@ mod screen_tests {
     /// and at two real widths.
     #[test]
     fn a_long_notice_wraps_to_fit_the_frame_at_any_width() {
-        let err = crate::spend::window_of(None, Some("2026-08-0"), None).unwrap_err();
+        let err = crate::spend::window_of(Some("2026-08-0"), None).unwrap_err();
         let message = format!("{err:#}");
         assert!(message.chars().count() > MIN_WIDTH, "{message:?}");
 

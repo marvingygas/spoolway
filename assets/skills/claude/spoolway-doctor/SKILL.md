@@ -30,7 +30,7 @@ turning each into a fix concrete enough to approve.
    spoolway pipeline check          # the graphs and the agents they name, and every prompt against its step
    spoolway queue list --json       # the dispatcher, and where every task is sitting
    spoolway queue conflicts         # overlapping `touches` with no `depends_on` between them
-   spoolway spend                   # what has been spent, and which models are unpriced
+   spoolway eval                    # every table's own footer names any model on screen with no price
    ```
 
    Only `doctor` exits non-zero, and only for its own `fail` rows (`FAIL` in the plain-text
@@ -116,7 +116,7 @@ turning each into a fix concrete enough to approve.
 | `queue list --json`: `"state": "paused"` with `"next"` naming a pane | a lane asked a question and is holding its pane | look at the pane | theirs |
 | `queue list --json`: `"laps"` non-null | a task looping between two steps | say how many rounds and on which step; the cause is in the lane's log | decision |
 | `queue conflicts` | two lanes would edit the same files | add `depends_on` to the later task's frontmatter | decision |
-| `spend`: unpriced models | spend that cannot be seen | price the model in config, or accept it knowingly | decision |
+| `eval`: unpriced models | spend that cannot be seen | price the model in config, or accept it knowingly | decision |
 
 ## Never
 

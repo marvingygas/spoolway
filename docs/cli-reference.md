@@ -404,32 +404,10 @@ spoolway eval
 | `--discard <ID>` | | Delete a whole trial: every arm's document, worktree, branch, pane and run files. The ledger rows and the source group stay |
 | `--force` | | `--discard` only: stop live lanes and discard anyway |
 | `--csv` | | Print the lanes table's rows as CSV |
-| `--month <YYYY-MM>` | | Deprecated. Routes to `spoolway spend --month` |
 
 `--json` prints `{"by", "rows", "total"}` rather than a bare array.
 
 See [Comparing pipelines](eval.md).
-
-### `spoolway spend [<task|group|step|model|project|month|lane>]`
-
-Print what the pipeline has spent, grouped by the named cut. Bare, it groups by `step`, or by
-`project` when more than one project is in scope.
-
-```
-spoolway spend
-spoolway spend task --since 7d
-```
-
-| Flag | Default | What it does |
-|---|---|---|
-| `--since <WHEN>` | | Start of the window, same forms as `eval` |
-| `--until <WHEN>` | | End of the window |
-| `--month <YYYY-MM>` | | One calendar month |
-| `--all` | | Every project |
-| `--project <NAME>` | | One named project |
-| `--csv` | | Print the rows as CSV |
-
-`--json` prints the raw ledger entries. See [Cost accounting](cost.md).
 
 ## When something needs you
 

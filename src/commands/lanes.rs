@@ -31,9 +31,9 @@ pub struct AttachArgs {
 
 /// `spoolway lane`: which of the three questions the flags ask.
 ///
-/// Not named `lane`: `commands::testutil::lane` already is, building a test
-/// fixture rather than running a command, and a module that globs both in
-/// (as `cost`'s tests do) cannot tell them apart.
+/// Not named `lane`: several modules already have their own test-only `lane`
+/// helper building a fixture `Entry` or `Lane`, and a name shared with a
+/// command is easy to reach for by mistake in a `use super::*` test module.
 ///
 /// At most one of `message` and `attach` can be set — clap already refused
 /// the combination, and refused `--lines` alongside either, at parse time —

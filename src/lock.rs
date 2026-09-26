@@ -283,7 +283,7 @@ impl Drop for TaskLock {
 /// difference. With nothing between them, two `spoolway` commands run at once
 /// in the same session both read the same banked total and both append the
 /// same delta, so that session's cost is counted twice in every later
-/// `spend`/`eval` — review finding 15. The banker holds this across the whole
+/// `eval` — review finding 15. The banker holds this across the whole
 /// read-diff-append, so the second one reads a ledger the first has already
 /// written to and finds nothing new to add.
 ///
@@ -299,7 +299,7 @@ impl Drop for TaskLock {
 /// - A batch — [`crate::usage::sweep`] — defers instead: it holds the lock
 ///   across every session's transcript read and append, so it can legitimately
 ///   outlast the bound, and whoever holds the lock is running the same
-///   catch-up. A later `spend`/`eval` re-runs it.
+///   catch-up. A later `eval` re-runs it.
 pub struct LedgerLock {
     path: PathBuf,
 }

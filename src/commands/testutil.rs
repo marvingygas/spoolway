@@ -53,37 +53,3 @@ pub fn add(repo: &Repo, id: &str, depends_on: &[&str]) {
 pub fn queued(repo: &Repo, id: &str) -> Task {
     repo.task(id).unwrap()
 }
-
-pub fn lane(cost: Option<f64>) -> crate::usage::Entry {
-    crate::usage::Entry {
-        ts: "2026-08-04T07:00:00+00:00".into(),
-        task: "login".into(),
-        plan: None,
-        step: "review".into(),
-        pipeline: "default".into(),
-        agent: "claude".into(),
-        kind: "claude".into(),
-        model: "claude-opus-5".into(),
-        session: "s".into(),
-        round: 1,
-        wall_s: 60,
-        turns: 1,
-        // A lane that really ran, not a zero-token enrolment line — a caller
-        // testing `cost_usd: None` almost always wants "an unpriced model",
-        // which a zero-token line is not. See `Totals::add`'s own comment on
-        // why the two must never be conflated.
-        tokens: crate::usage::Tokens {
-            input: 100,
-            output: 200,
-            ..Default::default()
-        },
-        cost_usd: cost,
-        ctx_peak: None,
-        pipeline_version: "1.0".into(),
-        outcome: Some("pass".into()),
-        run: None,
-        trial: None,
-        dir: None,
-        project: "demo".into(),
-    }
-}

@@ -173,7 +173,7 @@ task id marks `parallel: true`.
 | TIME | How long the lane's pane has been busy on this step. A paused or blocked row's TIME does not grow. |
 | NEXT | For a running task, the step it goes to on pass. For one with a scheduled pause, `→ paused after <step>`. For a queued task, what it waits on. For a paused task, the outcome the pause caught and where a resume sends it, key first: `[r] review failed → e2e — \`spoolway resume <task>\``; a caught pass reads `[r] → e2e — \`spoolway resume <task>\``. A task parked before it ever started reads `→ queued — [r] resumes it`. For a lane holding a permission prompt, `press a key in pane \`<task> · <step>\``. |
 
-`spoolway spend task` gives the task's whole bill.
+`spoolway eval --by task` gives the task's whole bill.
 
 ### States
 

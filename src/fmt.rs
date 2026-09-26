@@ -28,9 +28,9 @@ pub(crate) fn money(cost: Option<f64>) -> String {
     }
 }
 
-/// The same rounding rule as [`money`], with no `$` — for `spoolway eval` and
-/// `spoolway spend`, which name the currency once in a `USD`/`COST USD`
-/// column header rather than repeating it in every cell.
+/// The same rounding rule as [`money`], with no `$` — for `spoolway eval`,
+/// which names the currency once in a `USD`/`COST USD` column header rather
+/// than repeating it in every cell.
 pub(crate) fn money_plain(cost: Option<f64>) -> String {
     match cost {
         None => "—".to_string(),
@@ -43,7 +43,7 @@ pub(crate) fn money_plain(cost: Option<f64>) -> String {
 /// One CSV field, RFC 4180 quoted when it holds a comma, a double quote or a
 /// newline, and passed through untouched otherwise.
 ///
-/// `spoolway spend --csv` and `spoolway eval --csv` join project basenames,
+/// `spoolway eval --csv` joins project basenames,
 /// pipeline names, version strings and skill names straight into a
 /// comma-separated line. A project directory named `foo, bar` then shifted
 /// every column after it (review finding 43). Numbers spoolway formats itself

@@ -184,12 +184,6 @@ The CSV and `--json` rows carry the per-run token figures beside the raw totals,
 `unpriced` counts how many lanes have no price. `cost_usd` is blank in CSV, and `null` in
 `--json`, when every lane on the row is unpriced.
 
-## Spend, by `spoolway spend`
-
-`spoolway spend` reads the same ledger as a spend table, grouped by task, group, step, model,
-project, month or lane. See [Cost accounting](cost.md). `spoolway eval --month` still works as
-a deprecated alias for `spoolway spend --month`; it takes no `--by` and conflicts with it.
-
 ## The honest limit
 
 Every task is different work. A pipeline that drew easy tasks looks better than one that drew
