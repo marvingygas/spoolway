@@ -18,9 +18,9 @@ use serde::Serialize;
 /// the checks can be rendered as the full listing or as only its exceptions.
 ///
 /// `Serialize` is what `--json` reads back out: a `kind` tag plus each
-/// variant's own fields, so a consumer like the `spoolway-doctor` skill can
-/// match on `kind` instead of pattern-matching the plain-text prefixes
-/// [`Report::render`] prints.
+/// variant's own fields, so a consumer like the `spoolway-config` skill's own
+/// repair procedure can match on `kind` instead of pattern-matching the
+/// plain-text prefixes [`Report::render`] prints.
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum Row {

@@ -1,6 +1,6 @@
 ---
 name: spoolway-config
-description: Write or change anything spoolway runs on — a pipeline, a step, the PROMPT.md a step's lane is briefed with, `config.toml`, the task and lane templates, or an issue hook. Use it whenever somebody wants a new pipeline, a new or rewritten prompt, or a different model, effort, timeout or concurrency anywhere in spoolway — said as override, try, tweak, change or set. Fetches every format from the binary itself and checks what it wrote.
+description: Write, change or repair anything spoolway runs on — a pipeline, a step, the PROMPT.md a step's lane is briefed with, `config.toml`, the task and lane templates, or an issue hook. Use it whenever somebody wants a new pipeline, a new or rewritten prompt, or a different model, effort, timeout or concurrency anywhere in spoolway — said as override, try, tweak, change or set. Use it too when a project is broken, refused or behind. Fetches every format from the binary itself and checks what it wrote.
 ---
 
 # spoolway-config
@@ -78,12 +78,18 @@ whole prompt, or any key `spoolway config contract` lists:
   permanent, or when a layered patch is already right and ready to keep —
   then `spoolway override promote <target>` writes it in and clears the
   layer, an ordinary diff ready to review and commit.
-- Say which of the two you did, every time, and how to undo it: `spoolway
-  override drop <target>` clears a layered change; a tracked-file edit is
-  undone the way any tracked change is, by hand or with git.
+- Say which of the two you did, every time, and offer to undo it:
+  `spoolway override drop <target>` for a layer, git for a tracked file.
 
 - Say what changed: the paths touched, and `spoolway pipeline show` where a
   step moved.
+
+**Repairing a project** — something is broken, refused or behind:
+
+- Read `spoolway doctor --json` and `spoolway pipeline check`.
+- Propose every fix in one list, each marked as keeping behaviour or
+  changing it. Apply only what the person confirms.
+- Run both again and show what cleared.
 
 ## Never
 
@@ -106,3 +112,4 @@ whole prompt, or any key `spoolway config contract` lists:
   spoolway entirely, appear in no ledger, and are not this skill's to
   configure. `agent:`/`model:`/`effort:` on a *step* are the whole of what
   spoolway sets.
+- Never hand the person a spoolway command. Run it yourself once they say yes.
