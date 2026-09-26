@@ -1360,7 +1360,7 @@ pub fn plain_table(rows: &[Row]) -> String {
 
 /// A token count at a glance: `840`, `140k`, `1.2M`.
 ///
-/// Coarser than `spoolway eval --by`'s columns, which keep a decimal on the
+/// Coarser than `spoolway eval`'s columns, which keep a decimal on the
 /// thousands. A footer figure that ticks over while you watch it wants the
 /// magnitude and nothing more — `139.7k` reads as precision that the next
 /// finished lane immediately spends.
@@ -1671,7 +1671,7 @@ pub(super) fn strip_ansi(text: &str) -> String {
 
 /// Seconds as the shortest honest clock reading: `47s`, `12m 03s`, `1h 04m`.
 ///
-/// Crate-visible so [`crate::eval`] spells a version's summed lane time the
+/// Crate-visible so [`crate::eval`] spells a row's lane time the
 /// same way the board does — one clock reading, not two competing ones.
 pub(crate) fn human_secs(total: i64) -> String {
     let (h, m, s) = (total / 3600, (total % 3600) / 60, total % 60);

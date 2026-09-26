@@ -199,7 +199,7 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub criteria: LegacyCriteria,
     /// What a model costs, and how big its context window is, keyed by a glob
-    /// over the model name. Consulted by `spoolway eval --by`.
+    /// over the model name. Consulted by `spoolway eval` and `spoolway spend`.
     ///
     /// Aliased to `pricing`, its name before the window joined the rates: an
     /// old `[pricing]` table is read into this field and written back as

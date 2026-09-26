@@ -49,9 +49,8 @@ is the most specific watched root the session ran under.
 
 A directory line carries no `task`, `step`, `pipeline`, `agent`, `outcome`, `run` or
 `pipeline_version`, because spoolway dispatched no such work. `spoolway spend` skips these
-lines, so its tables show lanes only. The `dirs` and `sessions` views of `spoolway eval` read
-them, and read nothing else.
-See [The screen](eval.md#the-screen).
+lines, so its tables show lanes only. The directory table of `spoolway eval` reads them, and
+reads nothing else. See [The directory table](eval.md#the-directory-table).
 
 A session already banked as a lane is never banked again under `dir`. A transcript that has not
 changed since its last banked line is not read again.
@@ -100,7 +99,7 @@ the unpriced model.
 | `--csv` | The same rows as CSV |
 | `--json` | The matching ledger lines, ungrouped. Not allowed with `--csv`. |
 
-`eval --by` is a deprecated alias for `spoolway spend`.
+`eval --month` is a deprecated alias for `spoolway spend --month`.
 
 ## Pricing
 

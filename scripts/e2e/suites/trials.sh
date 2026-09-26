@@ -267,10 +267,25 @@ done
 
 # Acceptance criterion: usage rows remain correlated by trial id — the one
 # thing a settled trial leaves standing, which is what makes `spoolway eval
-# --runs --trial <id>` still answerable after every disposable copy is gone.
+# --by task --trial <id>` still answerable after every disposable copy is gone.
 TRIAL_ROWS=$(grep -c "\"trial\":\"$TRIAL_ID\"" "$SPOOLWAY_PROJECT_HOME/usage.jsonl" 2>/dev/null || true)
 works "both arms' usage rows are still in the ledger, correlated by trial id" \
   bash -c '[ "$1" -ge 2 ]' _ "${TRIAL_ROWS:-0}"
+
+# And that question, asked: `--by task` is one row per arm, closed by the
+# table's `Total` line, and `--trial` adds one delta line per arm against
+# the first. Which arm started first is the mock's scheduling to decide, so
+# the delta line is accepted either way round.
+COMPARE_OUT=$("$SPOOLWAY" eval --by task --trial "$TRIAL_ID" 2>&1)
+for arm in alpha-1 beta-1; do
+  says "eval --by task --trial has a row for $arm" "$arm" \
+    bash -c 'printf "%s" "$1"' _ "$COMPARE_OUT"
+done
+works "the arms' table closes on its Total line" \
+  bash -c 'grep -Eq "^Total +2 " <<<"$1"' _ "$COMPARE_OUT"
+works "and compares the second arm against the first on one delta line" \
+  bash -c 'grep -Eq "^(beta-1 vs alpha-1|alpha-1 vs beta-1): pass .*, cost .*, time " <<<"$1"' \
+  _ "$COMPARE_OUT"
 
 # ------------------------------------------------------------ explicit discard
 # A trial has two cleanup triggers, and everything above only proves the first
@@ -337,7 +352,7 @@ else bad "the discard exits clean (exit $DISCARD_STATUS)"; echo "$DISCARD_OUT" |
 says "the discard names the trial it threw away" "discarded" \
   bash -c 'printf "%s" "$1"' _ "$DISCARD_OUT"
 says "and points back at the same ledger the settlement path reads" \
-  "eval --runs --trial $SOLO_TRIAL" \
+  "eval --by task --trial $SOLO_TRIAL" \
   bash -c 'printf "%s" "$1"' _ "$DISCARD_OUT"
 works "the discarded arm's task document is gone" \
   bash -c '[ ! -e "$1" ]' _ "$SPOOLWAY_PROJECT_HOME/queue/oneoff-1.md"

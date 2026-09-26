@@ -266,7 +266,7 @@ saved.
 A trial answers one question: which pipeline fits this task best? Press `t` on a group in the
 queue screen, pick a pipeline per task, and tick any steps to skip. Every task becomes one arm
 under its chosen pipeline, and all arms share one trial id. Compare them with
-`spoolway eval --runs --trial <id>`. An arm never pushes a branch or opens a pull request. When
+`spoolway eval --by task --trial <id>`. An arm never pushes a branch or opens a pull request. When
 the last arm finishes, every arm's copy is removed. The source group and the ledger rows stay.
 
 ## Issue tracker
@@ -370,9 +370,8 @@ spoolway eval
 
 <img src="docs/screenshots/eval.png" alt="the eval screen">
 
-*The eval screen on its runs view, one row per attempt at a task. `tab` cycles the views: per
-pipeline, per step, runs, per watched directory, and per session outside the lanes. `f` filters,
-`e` exports CSV.*
+*The eval screen's lanes table, grouped by pipeline. `tab` switches to the directory table. `f`
+filters, `e` exports CSV.*
 
 ## Documentation
 

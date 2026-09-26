@@ -433,7 +433,7 @@ trial t9f3a settled
   removed   3 task documents, worktrees and local branches
   removed   3 panes, scratch dirs, sessions and run-file sets
 
-  read      spoolway eval --runs --trial t9f3a
+  read      spoolway eval --by task --trial t9f3a
 ```
 
 `spoolway eval --discard <id>` removes a trial before it settles. It refuses while an arm is

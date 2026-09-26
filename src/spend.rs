@@ -3,8 +3,8 @@
 //! This is a separate read of the same `usage.jsonl` [`crate::eval`]'s own
 //! screen is, through the same [`collect_scoped`] and [`window_of`] that
 //! screen uses — one ledger, two different questions asked of it. `eval
-//! --by` is a deprecated alias for [`run`], kept so a script or skill
-//! written before the split keeps working.
+//! --month` is a deprecated alias for `spend --month`, kept so a script or
+//! skill written before the split keeps working.
 
 use anyhow::{Context, Result, bail};
 
@@ -22,7 +22,7 @@ pub struct Filters<'a> {
 }
 
 /// `spoolway spend`'s entry point: build the filters `SpendArgs` carries and
-/// hand off to [`print`], the same way `eval --by`'s deprecated alias does.
+/// hand off to [`print`], the same way `eval --month`'s deprecated alias does.
 pub fn run(repo: &Repo, args: &SpendArgs, json: bool) -> Result<()> {
     if json && args.csv {
         bail!("`--csv` and `--json` are two different exports of the same rows — pick one");

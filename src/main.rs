@@ -383,7 +383,7 @@ fn run() -> Result<()> {
                         args.force,
                     )
                 }
-                Command::Eval(args) => eval::run(&repo, args, cli.json),
+                Command::Eval(args) => eval::run(&repo, args, cli.json, graph.as_ref().ok()),
                 Command::Spend(args) => spend::run(&repo, args, cli.json),
                 Command::Report(args) => {
                     // The one place the lane's own step is read. Everything

@@ -296,9 +296,9 @@ impl<'a> Dispatcher<'a> {
         report.actions.push(format!(
             "  removed   {removed} panes, scratch dirs, sessions and run-file sets"
         ));
-        report
-            .actions
-            .push(format!("  read      spoolway eval --runs --trial {trial}"));
+        report.actions.push(format!(
+            "  read      spoolway eval --by task --trial {trial}"
+        ));
     }
 
     /// Close this project's shared tab, once the project has nothing left in
@@ -1014,7 +1014,7 @@ pub fn discard_trial(
     println!("  kept      usage rows for {usage_tasks} trial tasks");
     println!("  removed   {removed} task documents, worktrees and local branches");
     println!("  removed   {removed} panes, scratch dirs, sessions and run-file sets");
-    println!("  read      spoolway eval --runs --trial {trial}");
+    println!("  read      spoolway eval --by task --trial {trial}");
     for problem in &report.problems {
         eprintln!("  {problem}");
     }

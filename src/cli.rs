@@ -452,37 +452,99 @@ pub enum SpendBy {
     Lane,
 }
 
+/// What one row of `spoolway eval`'s lanes table stands for. Only the
+/// columns naming a row change with it — the figure columns are the same
+/// under every one, which is what lets two `by`s be read side by side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum EvalBy {
+    /// A task's `group:` — every run its tasks made.
+    Group,
+    /// One row per run of a task, with its pipeline, version and date.
+    Task,
+    /// One row per pipeline. What the screen opens on.
+    Pipeline,
+    /// One row per step, in its pipeline's own walk order.
+    Step,
+    /// One row per pipeline and `version:`, newest version first.
+    Version,
+}
+
+impl EvalBy {
+    /// Every `by`, in the order the screen's filter panel cycles them.
+    pub const ALL: [EvalBy; 5] = [
+        EvalBy::Group,
+        EvalBy::Task,
+        EvalBy::Pipeline,
+        EvalBy::Step,
+        EvalBy::Version,
+    ];
+
+    /// The name a person types after `--by`, and the one the screen's
+    /// title, its filter row and an export's file name all spell it with.
+    pub fn label(self) -> &'static str {
+        match self {
+            EvalBy::Group => "group",
+            EvalBy::Task => "task",
+            EvalBy::Pipeline => "pipeline",
+            EvalBy::Step => "step",
+            EvalBy::Version => "version",
+        }
+    }
+}
+
 #[derive(Debug, Args)]
 #[command(
-    long_about = "What each pipeline costs to run, by pipeline.\n\n\
-        One row per pipeline, from the same ledger `spoolway spend` reads. Read RUNS before \
-        believing a figure: a pipeline that has only run a couple of times can swing a long \
-        way on luck alone, and the column is there to say so.\n\n\
-        `spoolway spend` is a different read of the same ledger: a table grouped by task, \
-        group, step, model, project or month, or one row per lane. `eval --by` still \
-        works as a deprecated alias for it.",
+    long_about = "What each pipeline costs to run, grouped one way at a time.\n\n\
+        One row per pipeline by default, from the same ledger `spoolway spend` reads. `--by` \
+        groups the same lanes by group, task, pipeline, step or version instead; only the \
+        columns naming a row change with it, and a Total line closes the table with only \
+        what adds up: distinct RUNS, BLOCKS and USD. Read RUNS before believing a figure: a \
+        row that has only run a couple of times can swing a long way on luck alone, and the \
+        column is there to say so.\n\n\
+        `spoolway spend` is a different read of the same ledger. `eval --month` still works \
+        as a deprecated alias for `spoolway spend --month`.",
     after_long_help = "\x1b[1mExamples:\x1b[0m\n  \
-        spoolway eval                       every pipeline\n  \
-        spoolway eval --pipeline default    one pipeline's row\n  \
-        spoolway eval --step review         one step, across every pipeline\n\n  \
-        spoolway eval --since 30d           a window\n\n  \
-        spoolway eval --runs                one row per run, newest last\n  \
-        spoolway eval --csv > report.csv    the same rows, flat\n\n\
+        spoolway eval --by pipeline               every pipeline\n  \
+        spoolway eval --by step --pipeline impl   one pipeline's steps, in walk order\n  \
+        spoolway eval --by version                every pipeline version, newest first\n  \
+        spoolway eval --by task --since 30d       one row per run of a task\n  \
+        spoolway eval --by task --trial <id>      a trial's arms, compared\n\n  \
+        spoolway eval --csv > report.csv          the same rows, flat\n\n\
         \x1b[1mReading a row:\x1b[0m\n  \
-        RUNS counts every run that touched the pipeline. PASS is the share of lanes that \n  \
-        reported pass. L/RUN, USD/RUN and TIME/RUN are each figure's total over RUNS, \n  \
-        and BLOCKS is how many lanes ended blocked. CTX PEAK is the largest context reading \n  \
-        any lane on the row banked, as a share of that model's window.\n\n\
+        RUNS counts every run that touched the row. PASS is the share of lanes that \n  \
+        reported pass, and BLOCKS is how many lanes ended blocked. CTX PEAK is the largest \n  \
+        context reading any lane on the row banked, and CTX PEAK AVG the mean of every \n  \
+        lane's own peak, each as a share of its model's window. IN, OUT, CACHE R and \n  \
+        CACHE W per run, USD/RUN and TIME/RUN are each figure's total over RUNS.\n\n\
         The spend table moved to its own command: see `spoolway spend --help`."
 )]
 pub struct EvalArgs {
-    /// One pipeline's block only.
+    /// What one row stands for. The figure columns are the same under
+    /// every one.
+    #[arg(long, value_enum, value_name = "BY", default_value_t = EvalBy::Pipeline)]
+    pub by: EvalBy,
+
+    /// One group's runs only — the tasks carrying this `group:`.
+    #[arg(long = "group", value_name = "GROUP")]
+    pub group: Option<String>,
+
+    /// One task's runs only. A trial forks a whole group, one arm per source
+    /// task (`alpha-1`, `beta-1`, …), so this is not how to see a trial side
+    /// by side — that is `--by task --trial <id>`.
+    #[arg(long, value_name = "ID")]
+    pub task: Option<String>,
+
+    /// One pipeline's lanes only.
     #[arg(long, value_name = "NAME")]
     pub pipeline: Option<String>,
 
-    /// One step's rows only.
+    /// One step's lanes only.
     #[arg(long, value_name = "STEP")]
     pub step: Option<String>,
+
+    /// Lanes that ran under this pipeline `version:` only, in `x.y` form.
+    #[arg(long = "pipeline-version", value_name = "X.Y")]
+    pub pipeline_version: Option<String>,
 
     /// Start of the window: a duration ago (`24h`, `7d`), a local date, or a
     /// whole month (`2026-08`).
@@ -494,9 +556,10 @@ pub struct EvalArgs {
     #[arg(long, value_name = "WHEN")]
     pub until: Option<String>,
 
-    /// Deprecated, and only meaningful alongside `--by`: `spoolway spend
-    /// --month` is where this lives now.
-    #[arg(long, value_name = "YYYY-MM", conflicts_with_all = ["since", "until"], requires = "by")]
+    /// Deprecated: `spoolway spend --month` is where this lives now, and
+    /// this routes there with a note to stderr so a script still calling it
+    /// keeps working.
+    #[arg(long, value_name = "YYYY-MM", conflicts_with_all = ["since", "until", "by"])]
     pub month: Option<String>,
 
     /// Every project spoolway knows about, not just this one.
@@ -507,26 +570,12 @@ pub struct EvalArgs {
     #[arg(long, value_name = "NAME")]
     pub project: Option<String>,
 
-    /// One row per run instead of a grouped summary — task, when, pipeline,
-    /// lanes, pass, blocks, ctx peak, out, cost, time.
-    #[arg(long)]
-    pub runs: bool,
-
-    /// `--runs` only: one task's runs. A trial forks a whole group, one arm
-    /// per source task (`alpha-1`, `beta-1`, …), so this is not how to see a
-    /// trial side by side — that is `--runs --trial <id>`.
-    #[arg(long, value_name = "ID", requires = "runs")]
-    pub task: Option<String>,
-
-    /// `--runs` only: only runs whose task carries this `group:`.
-    #[arg(long = "group", value_name = "GROUP", requires = "runs")]
-    pub run_group: Option<String>,
-
-    /// `--runs` only: one trial's arms, side by side on pass rate, cost and
-    /// time — the comparison a trial exists to answer. Named by the trial id
-    /// every arm banks, minted once when the queue screen's `t` picker forks
-    /// the arms; see `commands::queue::begin_trial`.
-    #[arg(long, value_name = "ID", requires = "runs")]
+    /// One trial's arms only. With `--by task`, one row per arm and a delta
+    /// line per arm against the first, on pass rate, cost and time — the
+    /// comparison a trial exists to answer. Named by the trial id every arm
+    /// banks, minted once when the queue screen's `t` picker forks the arms;
+    /// see `commands::queue::begin_trial`.
+    #[arg(long, value_name = "ID")]
     pub trial: Option<String>,
 
     /// Throw a whole trial away now: every arm's task document, worktree,
@@ -539,7 +588,7 @@ pub struct EvalArgs {
     /// Uncommitted work in an arm's worktree goes with it. An arm is a
     /// throwaway copy of a task that still exists, so there is nothing here
     /// a discard could be preserving.
-    #[arg(long, value_name = "ID", conflicts_with_all = ["runs", "csv", "by"])]
+    #[arg(long, value_name = "ID", conflicts_with_all = ["csv", "by", "month"])]
     pub discard: Option<String>,
 
     /// `--discard` only: stop a live agent lane or a running command step
@@ -553,16 +602,6 @@ pub struct EvalArgs {
     /// The same rows this would print, as CSV.
     #[arg(long)]
     pub csv: bool,
-
-    /// Deprecated: the spend table moved to `spoolway spend`. Kept, with a
-    /// note to stderr pointing there, so a script or skill still calling
-    /// `eval --by` keeps working. A plain string rather than `SpendBy`,
-    /// because there is no longer a sentinel variant to fill a bare `--by`
-    /// with — `""` (what `default_missing_value` fills a valueless `--by`
-    /// with) means "auto" and everything else is parsed as a cut by
-    /// `eval::run`.
-    #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "CUT", hide = true)]
-    pub by: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -1584,15 +1623,45 @@ mod tests {
         );
     }
 
-    /// `eval --by` takes a plain string and resolves it through the same
-    /// `SpendBy` value list, so the deprecated alias refuses `skill` too.
+    /// `eval --by` is the lanes table's own grouping now, not an alias for
+    /// `spoolway spend`: it takes the five lane keys and nothing else, and
+    /// clap is what refuses a spend cut such as `model`, listing the keys it
+    /// does take.
     #[test]
-    fn eval_by_skill_is_refused() {
-        assert_eq!(eval_args(&["--by", "skill"]).by.as_deref(), Some("skill"));
+    fn eval_by_takes_the_five_lane_keys_and_refuses_a_spend_cut() {
+        assert_eq!(eval_args(&[]).by, EvalBy::Pipeline, "opens by pipeline");
+        assert_eq!(eval_args(&["--by", "group"]).by, EvalBy::Group);
+        assert_eq!(eval_args(&["--by", "task"]).by, EvalBy::Task);
+        assert_eq!(eval_args(&["--by", "step"]).by, EvalBy::Step);
+        assert_eq!(eval_args(&["--by", "version"]).by, EvalBy::Version);
+        let err = Cli::try_parse_from(["spoolway", "eval", "--by", "model"])
+            .expect_err("`eval --by model` is a spend cut, not a lane key");
+        let rendered = err.to_string();
         assert!(
-            <SpendBy as clap::ValueEnum>::from_str("skill", true).is_err(),
-            "`eval --by skill` should not resolve to a cut"
+            rendered.contains("[possible values: group, task, pipeline, step, version]"),
+            "{rendered}"
         );
+    }
+
+    /// `--runs` is gone: `--by task` is the one-row-per-run table now, and
+    /// `--group`, `--task` and `--trial` narrow any `by` without it.
+    #[test]
+    fn runs_is_gone_and_its_narrowing_flags_stand_alone() {
+        assert!(Cli::try_parse_from(["spoolway", "eval", "--runs"]).is_err());
+        let args = eval_args(&[
+            "--group",
+            "audits",
+            "--task",
+            "solo-1",
+            "--trial",
+            "t1",
+            "--pipeline-version",
+            "1.1",
+        ]);
+        assert_eq!(args.group.as_deref(), Some("audits"));
+        assert_eq!(args.task.as_deref(), Some("solo-1"));
+        assert_eq!(args.trial.as_deref(), Some("t1"));
+        assert_eq!(args.pipeline_version.as_deref(), Some("1.1"));
     }
 
     #[test]
@@ -1693,9 +1762,12 @@ mod tests {
     fn any_other_flag_is_not_bare_either() {
         assert!(!eval_bare_from(&["--pipeline", "default"]));
         assert!(!eval_bare_from(&["--csv"]));
-        assert!(!eval_bare_from(&["--runs"]));
-        assert!(!eval_bare_from(&["--by", "--month", "2026-08"]));
-        assert!(!eval_bare_from(&["--by"]));
+        assert!(!eval_bare_from(&["--month", "2026-08"]));
+        assert!(!eval_bare_from(&["--by", "step"]));
+        assert!(
+            !eval_bare_from(&["--by", "pipeline"]),
+            "spelled out to its own default, it still prints"
+        );
     }
 
     /// The mechanism this replaced — `EvalArgs::is_bare()` enumerating every
@@ -1705,13 +1777,10 @@ mod tests {
     /// touching `cli.rs`'s bareness logic still gets caught by it.
     #[test]
     fn a_flag_never_mentioned_by_name_still_defeats_bareness() {
-        // `--task`, `--group` and `--trial` all `requires = "runs"`, so each
-        // needs `--runs` alongside it to parse at all — already covered on
-        // its own by `any_other_flag_is_not_bare_either` above, which is
-        // exactly why these three are worth pinning separately.
-        assert!(!eval_bare_from(&["--runs", "--trial", "solo"]));
-        assert!(!eval_bare_from(&["--runs", "--task", "solo-1"]));
-        assert!(!eval_bare_from(&["--runs", "--group", "audits"]));
+        assert!(!eval_bare_from(&["--trial", "solo"]));
+        assert!(!eval_bare_from(&["--task", "solo-1"]));
+        assert!(!eval_bare_from(&["--group", "audits"]));
+        assert!(!eval_bare_from(&["--pipeline-version", "1.0"]));
     }
 
     /// `--repo`/`-C` and `--json` are `global = true` on [`Cli`], so clap
@@ -1730,49 +1799,26 @@ mod tests {
         ]));
     }
 
-    /// `--by` with no cut named still has to be told from "not typed at
-    /// all" apart — an empty string is what `default_missing_value` fills a
-    /// bare `--by` with, since `by` is a plain string on the deprecated
-    /// alias now rather than a `SpendBy` with a sentinel variant of its own.
-    #[test]
-    fn by_with_no_value_is_the_empty_string() {
-        assert_eq!(eval_args(&["--by"]).by.as_deref(), Some(""));
-    }
-
-    #[test]
-    fn by_with_a_cut_is_that_cut() {
-        assert_eq!(eval_args(&["--by", "task"]).by.as_deref(), Some("task"));
-        assert_eq!(eval_args(&["--by", "lane"]).by.as_deref(), Some("lane"));
-    }
-
     #[test]
     fn month_conflicts_with_since_and_until() {
         assert!(
-            Cli::try_parse_from([
-                "spoolway", "eval", "--by", "--month", "2026-08", "--since", "7d"
-            ])
-            .is_err()
+            Cli::try_parse_from(["spoolway", "eval", "--month", "2026-08", "--since", "7d"])
+                .is_err()
         );
     }
 
-    /// The version screen has no notion of a calendar month, so `--month`
-    /// meant nothing there — accepting it anyway would have parsed fine and
-    /// silently changed nothing, which is worse than refusing it outright.
+    /// `--month` no longer needs `--by` beside it: `--by` is the lanes
+    /// table's grouping now, so `--month` on its own is what still routes to
+    /// `spoolway spend --month`, the deprecated alias kept until it is
+    /// removed.
     #[test]
-    fn month_with_no_by_is_refused() {
-        assert!(
-            Cli::try_parse_from(["spoolway", "eval", "--month", "2026-08"]).is_err(),
-            "--month with no --by should be refused, not silently ignored"
-        );
-    }
-
-    #[test]
-    fn month_with_by_is_accepted() {
+    fn month_alone_is_accepted() {
         assert_eq!(
-            eval_args(&["--by", "--month", "2026-08"]).month.as_deref(),
+            eval_args(&["--month", "2026-08"]).month.as_deref(),
             Some("2026-08")
         );
     }
+
     #[test]
     fn every_visible_command_has_a_help_heading() {
         use clap::CommandFactory;

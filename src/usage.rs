@@ -195,7 +195,7 @@ pub struct Entry {
 
     /// The trial this task is one arm of, banked verbatim from
     /// `task.front.trial` — see [`crate::task::Frontmatter::trial`]. Absent on
-    /// every ordinary task, which is what lets `spoolway eval --runs --trial
+    /// every ordinary task, which is what lets `spoolway eval --by task --trial
     /// <id>` find only the arms and nothing else.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trial: Option<String>,
@@ -441,7 +441,7 @@ impl ModelPrice {
 /// back to `crate::models`' refreshed and vendored tables by exact name — see
 /// [`crate::models::resolve`], which this defers to. Returning `None` rather
 /// than zero is deliberate: a model in none has an unknown cost, not a free
-/// one, and `spoolway eval --by` says which models those are instead of quietly
+/// one, and `spoolway eval` says which models those are instead of quietly
 /// under-reporting a total.
 pub fn price(prices: &BTreeMap<String, ModelPrice>, model: &str, tokens: &Tokens) -> Option<f64> {
     crate::models::resolve(prices, model)
@@ -1476,7 +1476,7 @@ fn transcripts_matching(
 /// `$XDG_STATE_HOME` the way [`registry::path`] reads it. The two are not the
 /// same kind of path: the registry is written and read by the same command in
 /// the same shell, while this one is written by a dispatcher and read back
-/// later by whoever runs `spoolway eval --by` — possibly a different shell, a cron
+/// later by whoever runs `spoolway eval` — possibly a different shell, a cron
 /// entry, or a lane. An environment variable set for one and not the other
 /// would send the reader looking in a directory the writer never used, and the
 /// only symptom would be a lane that silently never appears in the ledger.
@@ -1581,7 +1581,7 @@ pub fn new_session_id() -> String {
 /// frontmatter and copied onto ledger lines, not folded into `<task> · <step>`
 /// — so there is no width budget to leave room in, and nothing gained by
 /// keeping it short. 64 bits of entropy instead of 20 pushes a collision
-/// (`group_by_run` would silently fold two unrelated runs into one row) from
+/// (`eval --by task` would silently fold two unrelated runs into one row) from
 /// something that starts showing up within a project's lifetime to something
 /// that will not happen. From the same [`os_random`] [`new_session_id`] reads,
 /// so it costs nothing to distinguish a run from another minted the same
@@ -1597,8 +1597,8 @@ pub fn new_run_id() -> String {
 /// A fresh trial id: `t` plus sixteen hex digits, minted once per trial
 /// launch so every arm the batch mints shares one and two trials of the same
 /// group are never indistinguishable in the ledger. Same shape and the same
-/// reason as [`new_run_id`]: `spoolway eval --runs --trial <id>` groups by
-/// this value exactly the way `group_by_run` groups a run, so a collision
+/// reason as [`new_run_id`]: `spoolway eval --by task --trial <id>` narrows
+/// to the arms carrying this value, one row per run, so a collision
 /// would silently fold two unrelated trials into one comparison table — the
 /// one question a trial exists to let a person answer.
 pub fn new_trial_id() -> String {
@@ -4233,7 +4233,7 @@ mod tests {
 
     /// The shipped agent profiles name kinds the ledger can actually read.
     /// Without this, a profile could be added whose lanes silently never
-    /// appear in `spoolway eval --by`.
+    /// appear in `spoolway eval`.
     ///
     /// Note what this does *not* say: that every launchable kind is metered.
     /// An unmetered kind is a legal state a project may adopt on purpose — see
@@ -5372,7 +5372,7 @@ mod tests {
 
     /// A session's own span is its transcript's first and last `timestamp` —
     /// not the machine's clock, and not `wall_s`, which a directory session
-    /// never banks. What `spoolway eval`'s `sessions` view reads its `WHEN`
+    /// never banks. What `spoolway eval`'s `by session` table reads its `WHEN`
     /// and `TIME` columns from.
     #[test]
     fn session_span_reads_the_first_and_last_timestamp() {

@@ -303,7 +303,7 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     let pane_id = mux.own_pane_id();
     let _lock = crate::lock::Lock::acquire(&repo.lock_file(), unattended, pane_id.as_deref())?;
 
-    // Note this project once per run, so `spoolway eval --by --all` can find
+    // Note this project once per run, so `spoolway eval --all` can find
     // its ledger later. A project that is dispatched in is a project that spends.
     crate::usage::registry::register(&repo.root);
 

@@ -366,7 +366,7 @@ pub struct Frontmatter {
     /// The trial this task is one arm of, minted once per trial and stamped
     /// on every arm the queue screen's `t` picker forks — see
     /// `commands::queue::begin_trial`. Absent on a task queued the ordinary
-    /// way. What lets `spoolway eval --runs --trial <id>` find a trial's arms
+    /// way. What lets `spoolway eval --by task --trial <id>` find a trial's arms
     /// together in the ledger: a trial forks a whole group, one arm per
     /// source task (`alpha-1`, `beta-1`, …), so those arms come from
     /// different source documents and share nothing else — not even an id

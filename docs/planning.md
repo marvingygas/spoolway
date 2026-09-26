@@ -121,7 +121,7 @@ Each task becomes one arm, queued under its assigned pipeline, with a minted id 
 `<id>-1`. All arms share one trial id. The source documents stay in the pending directory.
 
 An arm never pushes a branch or opens a pull request. Compare the arms with
-`spoolway eval --runs --trial <id>`. When the last arm finishes, every arm's copy is removed.
+`spoolway eval --by task --trial <id>`. When the last arm finishes, every arm's copy is removed.
 Only the source group and the ledger rows remain. `spoolway eval --discard <id>` removes a
 trial early. See [Trial arms](dispatcher.md#trial-arms).
 

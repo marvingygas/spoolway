@@ -370,8 +370,8 @@ Fire one job now. Its schedule is unchanged.
 
 ### `spoolway eval`
 
-What each pipeline costs to run, by pipeline. Bare, in a terminal, it opens the eval screen.
-With any flag, or when stdout is not a terminal, it prints a table.
+What each pipeline costs to run, grouped one way at a time. Bare, in a terminal, it opens the
+eval screen. With any flag, or when stdout is not a terminal, it prints the lanes table.
 
 ```
 spoolway eval
@@ -381,29 +381,32 @@ spoolway eval
 
 | Key | What it does |
 |---|---|
-| `tab` | Cycle the views: `pipelines`, `steps`, `runs` |
-| `↑` `↓` | Move the cursor |
-| `f` | Open the filter panel |
-| `e` | Export the rows on screen to `.spoolway/evals/eval-<view>-<timestamp>.csv` |
-| `r` | Refresh |
-| `q` | Quit |
+| `[tab]` | Switch between the lanes table and the directory table |
+| `[↑↓]` | Move the cursor |
+| `[f]` | Open the filter panel |
+| `[e]` | Export the rows on screen to `.spoolway/evals/eval-by-<by>-<date>-<time>.csv` |
+| `[r]` | Refresh |
+| `[q]` | Quit |
 
 | Flag | Default | What it does |
 |---|---|---|
+| `--by <group\|task\|pipeline\|step\|version>` | `pipeline` | What one lanes-table row stands for |
 | `--pipeline <NAME>` | | One pipeline only |
 | `--step <STEP>` | | One step only |
+| `--pipeline-version <X.Y>` | | One pipeline version only |
+| `--group <NAME>` | | One group's runs |
+| `--task <ID>` | | One task's runs |
 | `--since <WHEN>` | | Start of the window: a duration ago (`24h`, `7d`), a date (`2026-08-01`) or a month (`2026-08`) |
 | `--until <WHEN>` | | End of the window, same forms |
 | `--all` | | Every project |
 | `--project <NAME>` | | One named project |
-| `--runs` | | One row per run |
-| `--task <ID>` | | `--runs` only: one task's runs |
-| `--group <GROUP>` | | `--runs` only: one group's runs |
-| `--trial <ID>` | | `--runs` only: one trial's arms side by side |
+| `--trial <ID>` | | One trial's arms. With `--by task`, one row per arm and a delta line per arm against the first |
 | `--discard <ID>` | | Delete a whole trial: every arm's document, worktree, branch, pane and run files. The ledger rows and the source group stay |
 | `--force` | | `--discard` only: stop live lanes and discard anyway |
-| `--csv` | | Print the rows as CSV |
-| `--by`, `--month` | | Deprecated. Use `spoolway spend` |
+| `--csv` | | Print the lanes table's rows as CSV |
+| `--month <YYYY-MM>` | | Deprecated. Routes to `spoolway spend --month` |
+
+`--json` prints `{"by", "rows", "total"}` rather than a bare array.
 
 See [Comparing pipelines](eval.md).
 

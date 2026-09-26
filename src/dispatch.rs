@@ -3038,7 +3038,7 @@ impl<'a> Dispatcher<'a> {
             self.mux.stop_lane(&lane.name, &lane.pane_id)?;
         }
         // A lane that went wrong spent exactly as much as one that went right,
-        // and is the one you most want to find in `spoolway eval --by` afterwards.
+        // and is the one you most want to find in `spoolway eval` afterwards.
         // Booked here rather than in `free_finished_lanes`, which never sees a
         // lane this path has already torn down — or, for a held one, sees it
         // every pass and would book it on each.
@@ -7161,7 +7161,7 @@ mod tests {
             "both arms' documents are named as removed: {report}"
         );
         assert!(
-            report.contains("read      spoolway eval --runs --trial t1"),
+            report.contains("read      spoolway eval --by task --trial t1"),
             "the report points back at the evidence a settled trial keeps, in the same \
              column its kept/removed lines use: {report}"
         );
