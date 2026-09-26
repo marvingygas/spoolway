@@ -117,7 +117,7 @@ flowchart LR
 | `.spoolway/hooks/` | `github.sh` and `jira.sh`. See [`[issue_tracking]`](configuration.md#issue_tracking--a-hook-fired-on-four-task-events). |
 | `.github/workflows/spoolway-issues.yml` | Closes an issue once its pull request merges. Written only when the tracker is github. |
 | `~/.spoolway/<label>-<id>/project.toml` | Records the id and the checkout this home belongs to. |
-| The provider's skills directory | The five pipeline skills. See [The pipeline skills](#the-pipeline-skills). |
+| The provider's skills directory | The four pipeline skills. See [The pipeline skills](#the-pipeline-skills). |
 
 Existing files are kept. `--force` overwrites them.
 
@@ -320,5 +320,5 @@ The same as Linux.
 
 ### Windows
 
-Not supported. The last release carrying a Windows binary is 0.3.x. Under WSL you get the
+Not supported. The last release carrying a Windows binary is 0.4.x. Under WSL you get the
 Linux build.

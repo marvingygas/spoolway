@@ -12,7 +12,7 @@ install the current release and run `spoolway init`; none of the earlier-version
 
 | Upgrade | What changes | What you need to do |
 |---|---|---|
-| 0.5.x to 0.6.x | Retired pipeline shapes are migrated on update; `loop:` counts arrivals; installed skills are always rewritten; `/spoolway-doctor` is gone. | Open spoolway, apply the update, and read what it migrated. |
+| 0.5.x to 0.6.x | Retired pipeline shapes are migrated on update; `loop:` counts arrivals; installed skills are always rewritten; `/spoolway-doctor` and `spoolway spend` are gone; `spoolway eval` flags change. | Open spoolway, apply the update, read what it migrated, and update scripts that call `spend` or the removed `eval` flags. |
 | 0.4.x to 0.5.x | `sync` takes over from `update`; `dispatch.interval`, `dispatch.default_pipeline` and the tmux backend are gone; tasks name their own `pipeline:` and `base:`. | Delete the retired keys, set `pipeline:` and `base:` on every task, and apply the update. |
 | 0.3.x to 0.4.x | Retired config, template and pipeline-generation features are removed. | Remove the retired entries described below. |
 | 0.2.x to 0.3.x | Project state moves from a checkout-name directory to an id-keyed home. | Stop live work, then run any spoolway command and let the automatic move finish. |
@@ -52,6 +52,17 @@ retired, and names each change:
 - Installed skills are rewritten whenever they differ from the shipped copy. Keep a changed skill
   under a name of your own.
 - `/spoolway-doctor` is removed. `/spoolway-config` diagnoses and repairs a project.
+
+Two commands changed shape. The update does not rewrite scripts that call them:
+
+- `spoolway spend` is removed. `spoolway eval` is the one command that reads the ledger. It
+  shows tokens and cost by group, task, pipeline, step or version. The `spend` cuts by model,
+  project, month and lane have no direct replacement.
+- `spoolway eval` no longer takes `--runs`, `--limit` or `--month`. `--by` picks what one row
+  stands for: `group`, `task`, `pipeline` (the default), `step` or `version`. Use `--by task`
+  where you used `--runs`. Use `--since 2026-08 --until 2026-08` where you used
+  `--month 2026-08`. The new `--pipeline-version <x.y>` keeps only lanes that ran under one
+  pipeline `version:`.
 
 ## 0.4.x to 0.5.x
 
