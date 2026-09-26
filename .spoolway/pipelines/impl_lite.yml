@@ -2,6 +2,8 @@
 
 # >>> spoolway >>>
 # Top level
+#   version           <x.y>              Yours to raise when this pipeline changed enough
+#                                        to compare. spoolway only records it. Absent: 1.0.
 #   description       <prose>            What this pipeline is for, in a few sentences.
 #                                        Read to choose between pipelines.
 #   task_template     <name>             Task skeleton tasks queued here are written from.
