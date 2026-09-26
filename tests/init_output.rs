@@ -24,10 +24,18 @@ impl Project {
     }
 
     fn run(&self, args: &[&str]) -> Output {
+        self.run_in(&self.0, args)
+    }
+
+    /// [`Project::run`], but from `cwd` rather than the project root — for a
+    /// linked worktree, which still answers through this same project's
+    /// `HOME` (it was bound to it by the `init` that created the worktree's
+    /// commit in the first place).
+    fn run_in(&self, cwd: &Path, args: &[&str]) -> Output {
         let home = self.0.join("home");
         let output = Command::new(env!("CARGO_BIN_EXE_spoolway"))
             .args(args)
-            .current_dir(&self.0)
+            .current_dir(cwd)
             .env("HOME", home)
             .output()
             .expect("run spoolway");
@@ -630,4 +638,98 @@ fn a_re_stamped_checkout_prints_exactly_one_line_when_the_old_one_moved_on() {
     assert_eq!(moves.len(), 1, "expected exactly one move notice: {out:?}");
 
     std::fs::remove_dir_all(&copy).ok();
+}
+
+/// A pipeline edit made only in a linked worktree — never committed, never
+/// synced to the project root — is one `prompt contract` can preview from
+/// inside that worktree, printing the `checkout:` line first the same way
+/// `pipeline show` does.
+///
+/// Runs the real binary rather than calling `prompt::contract` directly: a
+/// unit test handed a `Pipelines` already loaded from the checkout would
+/// pass whether or not `main.rs` actually chose that source, since
+/// `contract` has always just taken whatever `Pipelines` it is given. This
+/// is the one place `main.rs`'s own wiring — which copy it loads for this
+/// command — is on the hook.
+#[test]
+fn prompt_contract_in_a_linked_worktree_reads_the_worktrees_own_pipeline() {
+    let project = Project::new("prompt-contract-worktree");
+    project.init("claude");
+
+    let root = project.as_ref().to_path_buf();
+    let status = Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(&root)
+        .status()
+        .expect("git add");
+    assert!(status.success());
+    let status = Command::new("git")
+        .args([
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ])
+        .current_dir(&root)
+        .status()
+        .expect("git commit");
+    assert!(status.success());
+
+    let wt = root.parent().unwrap().join(format!(
+        "{}-wt",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    let status = Command::new("git")
+        .args([
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "task/upgrade-step",
+            wt.to_str().unwrap(),
+        ])
+        .current_dir(&root)
+        .status()
+        .expect("git worktree add");
+    assert!(status.success());
+
+    // The worktree's own copy gains a step the project root never
+    // committed — the edit `prompt contract` exists to preview before it
+    // lands.
+    let pipeline_path = wt.join(".spoolway/pipelines/default.yml");
+    let mut pipeline = std::fs::read_to_string(&pipeline_path).expect("read worktree pipeline");
+    pipeline.push_str(
+        "\n  - id: upgrade\n    description: Added only in this worktree.\n    agent: claude\n    \
+         prompt: implementer\n    model: \"\"\n    effort: \"\"\n    on_pass: done\n",
+    );
+    std::fs::write(&pipeline_path, pipeline).expect("write worktree pipeline");
+
+    let out = stdout(&project.run_in(
+        &wt,
+        &[
+            "prompt",
+            "contract",
+            "--pipeline",
+            "default",
+            "--step",
+            "upgrade",
+        ],
+    ));
+
+    assert!(out.starts_with("checkout: "), "{out}");
+    assert!(
+        out.contains(&wt.file_name().unwrap().to_string_lossy().to_string()),
+        "{out}"
+    );
+    assert!(out.contains("task/upgrade-step"), "{out}");
+    assert!(out.contains("For `default`/`upgrade`"), "{out}");
+
+    let _ = Command::new("git")
+        .args(["worktree", "remove", "--force", wt.to_str().unwrap()])
+        .current_dir(&root)
+        .status();
 }
