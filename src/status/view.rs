@@ -143,6 +143,7 @@ impl State {
             State::Blocked => "● blocked",
             State::Prompt => "● prompt",
             State::Queued => "○ queued",
+            State::Waiting => "○ waiting",
             State::Done => "● done",
         }
     }
@@ -160,6 +161,7 @@ impl State {
             // the task has not left its step, only paused for a keystroke.
             State::Prompt => format!("{GREEN}{word}{RESET}"),
             State::Queued => format!("{DIM}{word}{RESET}"),
+            State::Waiting => format!("{DIM}{word}{RESET}"),
             State::Done => format!("{DIM}{word}{RESET}"),
         }
     }
@@ -1704,6 +1706,7 @@ mod tests {
             State::Blocked,
             State::Prompt,
             State::Queued,
+            State::Waiting,
             State::Done,
         ] {
             assert!(!state.dot().contains(RED), "{}", state.word());

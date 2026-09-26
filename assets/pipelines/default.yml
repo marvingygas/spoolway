@@ -55,6 +55,9 @@
 #                                        `depends_on`) runs this command; the
 #                                        rest walk past to `on_pass`.
 #                     false <default>    Every task runs it.
+#   serial            true               One task runs this command at a time; the
+#                                        rest wait on the step. Command steps only.
+#                     false <default>    Every task runs it on arrival.
 # <<< spoolway <<<
 
 description: >-

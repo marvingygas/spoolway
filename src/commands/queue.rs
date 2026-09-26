@@ -112,6 +112,7 @@ fn state_label(state: crate::status::State) -> &'static str {
         Blocked => "blocked",
         Prompt => "prompt",
         Queued => "queued",
+        Waiting => "waiting",
         Done => "done",
     }
 }

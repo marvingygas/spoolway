@@ -1294,7 +1294,26 @@ impl<'a> Dispatcher<'a> {
 
                 StepKind::Command => {
                     let id = tasks[index].id().to_string();
-                    let Some(destination) = self.run_command(&mut tasks[index], &step, report)?
+                    // Every other task on this same pipeline, for a `serial:`
+                    // step to ask whether one of them holds it — see
+                    // [`crate::command_step::Runs::serial_holder`]. Filtered
+                    // by pipeline here because a run's key carries none, and
+                    // the same step id in another pipeline holds nothing.
+                    let serial_peers: Vec<String> = match step.serial {
+                        true => tasks
+                            .iter()
+                            .filter(|peer| peer.id() != id)
+                            .filter(|peer| {
+                                self.pipelines
+                                    .for_task(peer)
+                                    .is_ok_and(|p| p.name == pipeline.name)
+                            })
+                            .map(|peer| peer.id().to_string())
+                            .collect(),
+                        false => Vec::new(),
+                    };
+                    let Some(destination) =
+                        self.run_command(&mut tasks[index], &step, &serial_peers, report)?
                     else {
                         continue;
                     };
@@ -3829,10 +3848,13 @@ impl<'a> Dispatcher<'a> {
         pipeline.step(destination).map(|s| s.kind()) == Some(StepKind::Agent)
     }
 
+    /// `serial_peers` are the other tasks on this step's pipeline, and empty
+    /// unless the step is `serial: true` — see the `Fresh` arm.
     fn run_command(
         &mut self,
         task: &mut Task,
         step: &Step,
+        serial_peers: &[String],
         report: &mut Report,
     ) -> Result<Option<String>> {
         // Only the `Exited` arm below ever sets this — see the field's own
@@ -3988,6 +4010,21 @@ impl<'a> Dispatcher<'a> {
             }
 
             crate::command_step::RunState::Fresh => {
+                // A `serial:` step another task's run still holds. Checked
+                // before anything is opened or written, so a waiting task
+                // has no pane, no run files and no timeout clock of its own
+                // yet — it stays `Fresh`, and the first pass after the run
+                // ahead exits starts it. The same refusal the `exclusive`
+                // model check makes in `start_lanes`, and worded like it.
+                if let Some(holder) =
+                    runs.serial_holder(&step.id, serial_peers.iter().map(String::as_str))
+                {
+                    report.actions.push(format!(
+                        "{id}: waiting for `{holder}` to finish — `{}` is serial",
+                        step.id
+                    ));
+                    return Ok(None);
+                }
                 let (worktree, _) =
                     ensure_workspace(self.repo, self.mux, task, &mut self.file_seen)?;
                 let env = BTreeMap::from([
@@ -15915,6 +15952,224 @@ mod tests {
             report.actions
         );
         assert!(!crate::headless::alive(pid), "the background run survived");
+    }
+
+    // ------------------------------------------------------- serial command steps
+
+    /// [`pipelines_running`], with the command step marked `serial: true`.
+    fn pipelines_running_serial(run: &str, background: bool) -> Pipelines {
+        let mut pipelines = pipelines_running(run, background);
+        let pipeline = pipelines.pipelines.get_mut("default").unwrap();
+        pipeline
+            .steps
+            .iter_mut()
+            .find(|s| s.id == "implement")
+            .unwrap()
+            .serial = true;
+        pipelines
+    }
+
+    /// A command line that runs until `release` exists, so a test decides
+    /// when the run ahead exits rather than racing a `sleep`.
+    fn run_until(release: &Path) -> String {
+        format!(
+            "while [ ! -e '{}' ]; do sleep 0.05; done",
+            release.display()
+        )
+    }
+
+    /// Whether `task`'s run of `implement` has left anything on disk at all.
+    /// A waiting task must not have: `Runs::prepare` writes the log before a
+    /// wrapper is spawned, and the wrapper the pid.
+    fn has_run_files(repo: &Repo, task: &str) -> bool {
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("implement", task);
+        runs.log_path(&key).exists() || runs.read_pid(&key).is_some()
+    }
+
+    /// Which of `a` and `b` holds the step — whichever the pass reached
+    /// first — and which waits. Panics unless exactly one run is going.
+    fn holder_and_waiter<'a>(repo: &Repo, a: &'a str, b: &'a str) -> (&'a str, &'a str) {
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let running = |task: &str| {
+            runs.state(&crate::command_step::Runs::key("implement", task))
+                == crate::command_step::RunState::Running
+        };
+        match (running(a), running(b)) {
+            (true, false) => (a, b),
+            (false, true) => (b, a),
+            both => panic!("exactly one serial run should be going, found {both:?}"),
+        }
+    }
+
+    /// The whole feature, end to end: two tasks reach one serial command
+    /// step in the same pass, one run starts, and the other task leaves no
+    /// run files at all — pass after pass — until the first run has exited.
+    /// Its own run then starts on a later pass.
+    #[test]
+    fn a_serial_command_step_runs_for_one_task_at_a_time() {
+        let repo = fixture("command-serial");
+        let login = add_task_with_worktree(&repo, "a-login", "implement");
+        let export = add_task_with_worktree(&repo, "b-export", "implement");
+        let release = repo.root.join("release");
+        let pipelines = pipelines_running_serial(&run_until(&release), false);
+        let mux = FakeMux::new(vec![]);
+
+        let report = Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
+        let (first, second) = holder_and_waiter(&repo, "a-login", "b-export");
+        assert!(
+            !has_run_files(&repo, second),
+            "`{second}` started while `{first}` held the step"
+        );
+        assert!(
+            report
+                .actions
+                .iter()
+                .any(|a| a.starts_with(second) && a.contains(&format!("waiting for `{first}`"))),
+            "{:?}",
+            report.actions
+        );
+
+        // Still held on a pass that finds the run ahead still going.
+        Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
+        assert!(!has_run_files(&repo, second));
+        assert_eq!(reload(&login).stage(), "implement");
+        assert_eq!(reload(&export).stage(), "implement");
+
+        std::fs::write(&release, "").unwrap();
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let first_key = crate::command_step::Runs::key("implement", first);
+        let started = std::time::Instant::now();
+        while !has_run_files(&repo, second) {
+            // Checked before every pass, not only after the last: the first
+            // run's exit is what may start the second one, never anything
+            // earlier.
+            assert!(
+                started.elapsed() < Duration::from_secs(20),
+                "`{second}`'s run never started"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+            Dispatcher::new(&repo, &pipelines, &mux)
+                .pass(&mut || {})
+                .unwrap();
+        }
+        assert_ne!(
+            runs.state(&first_key),
+            crate::command_step::RunState::Running,
+            "`{second}` started while `{first}`'s run was still going"
+        );
+        let second_path = if second == "a-login" { &login } else { &export };
+        drive(&repo, &pipelines, &mux, second_path, "review");
+    }
+
+    /// A background run holds its serial step after its task has walked on:
+    /// what is waited on is the run, not where the task that started it is.
+    #[test]
+    fn a_serial_background_run_holds_the_step_after_its_task_moves_on() {
+        let repo = fixture("command-serial-background");
+        let login = add_task_with_worktree(&repo, "a-login", "implement");
+        let export = add_task_with_worktree(&repo, "b-export", "implement");
+        let release = repo.root.join("release");
+        let pipelines = pipelines_running_serial(&run_until(&release), true);
+        let mux = FakeMux::new(vec![]);
+
+        Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
+        let (first, second) = holder_and_waiter(&repo, "a-login", "b-export");
+        let (first_path, second_path) = match first {
+            "a-login" => (&login, &export),
+            _ => (&export, &login),
+        };
+        assert_ne!(
+            reload(first_path).stage(),
+            "implement",
+            "a background step does not hold its own task"
+        );
+        assert_eq!(reload(second_path).stage(), "implement");
+        assert!(!has_run_files(&repo, second));
+
+        Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
+        assert_eq!(reload(second_path).stage(), "implement");
+        assert!(
+            !has_run_files(&repo, second),
+            "the step was free once `{first}` moved on, though its run was going"
+        );
+
+        std::fs::write(&release, "").unwrap();
+        drive(&repo, &pipelines, &mux, second_path, "review");
+        assert!(has_run_files(&repo, second));
+    }
+
+    /// `serial:` holds one step id in one pipeline. The same id in another
+    /// pipeline is a different step, and a run of it holds nothing here.
+    #[test]
+    fn a_serial_step_is_not_held_by_the_same_step_in_another_pipeline() {
+        let repo = fixture("command-serial-other-pipeline");
+        let release = repo.root.join("release");
+        let mut pipelines = pipelines_running_serial(&run_until(&release), false);
+        let mut other = pipelines.get("default").unwrap().clone();
+        other.name = "other".to_string();
+        pipelines.pipelines.insert("other".to_string(), other);
+        add_task_with_worktree(&repo, "a-login", "implement");
+        let worktree = repo.root.join("wt-b-export");
+        std::fs::create_dir_all(&worktree).unwrap();
+        add_task_with(&repo, "b-export", "implement", |front| {
+            front.pipeline = Some("other".into());
+            front.branch = Some("task/b-export".into());
+            front.base = Some("work".into());
+            front.workspace_id = Some("w1".into());
+            front.tab_id = Some("w1:t1".into());
+            front.pane_id = Some("w1:p1".into());
+            front.worktree_path = Some(worktree);
+        });
+        let mux = FakeMux::new(vec![]);
+
+        Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
+
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        for task in ["a-login", "b-export"] {
+            assert_eq!(
+                runs.state(&crate::command_step::Runs::key("implement", task)),
+                crate::command_step::RunState::Running,
+                "`{task}` waited on a step of another pipeline"
+            );
+        }
+        std::fs::write(&release, "").unwrap();
+    }
+
+    /// Without `serial:` a command step starts for every task that reaches
+    /// it, exactly as it always has.
+    #[test]
+    fn a_command_step_without_serial_starts_for_every_task() {
+        let repo = fixture("command-not-serial");
+        add_task_with_worktree(&repo, "a-login", "implement");
+        add_task_with_worktree(&repo, "b-export", "implement");
+        let release = repo.root.join("release");
+        let pipelines = pipelines_running(&run_until(&release), false);
+        let mux = FakeMux::new(vec![]);
+
+        Dispatcher::new(&repo, &pipelines, &mux)
+            .pass(&mut || {})
+            .unwrap();
+
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        for task in ["a-login", "b-export"] {
+            assert_eq!(
+                runs.state(&crate::command_step::Runs::key("implement", task)),
+                crate::command_step::RunState::Running,
+                "`{task}` waited on a step nothing marked serial"
+            );
+        }
+        std::fs::write(&release, "").unwrap();
     }
 
     /// The step that hands the change over, and what the pipeline says about it.

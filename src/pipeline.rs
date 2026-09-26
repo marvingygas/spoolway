@@ -623,6 +623,30 @@ pub struct Step {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub first: bool,
 
+    /// Let only one task at a time run this step's command. Every other task
+    /// that reaches it waits on the step, unstarted — no pane, no run files,
+    /// no timeout clock — until the run ahead of it has exited, and its own
+    /// run starts on the first pass after that.
+    ///
+    /// For a command that shares something outside the worktree: a setup
+    /// script creating a database, a suite binding one port. Two groups
+    /// dispatched together used to run it at once, because a task's `Fresh`
+    /// run never looked at any other task's. The dispatcher holds the run
+    /// back rather than the script taking a lock of its own, since `flock`
+    /// is not on macOS.
+    ///
+    /// "One at a time" is one step id, in one pipeline, in one project: a
+    /// step of the same name in another pipeline does not hold this one. A
+    /// run ahead that is still going holds the step even once its task has
+    /// moved on, which is what a `background: true` run's task does — see
+    /// [`crate::command_step::Runs::serial_holder`].
+    ///
+    /// A command step's key, like `last:` — [`Pipeline::validate`] refuses
+    /// it on an agent step, whose lane is not a run the dispatcher can hold
+    /// back for its turn.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub serial: bool,
+
     /// Retired: used to tear the task's worktree and branch down, and archive
     /// its file, on arrival at a declared terminal step — reaching the
     /// reserved `done` stage does this unconditionally now, at
@@ -1381,6 +1405,17 @@ impl Pipeline {
                     );
                 }
             }
+            // Only a command step's run is something a pass starts and can
+            // therefore hold back; an agent step's lane has no such turn to
+            // wait for. Named apart from the `kind != Command` refusals
+            // above, whose wording is for an ending as much as a lane.
+            if step.serial && kind == StepKind::Agent {
+                bail!(
+                    "step `{}` declares `serial:` but is an agent step — only a command step's \
+                     run can be held for its turn",
+                    step.id
+                );
+            }
             // `first:` and `last:` ask opposite questions about a chain, so a
             // command step naming both has no single command left to be, root
             // or not.
@@ -1828,6 +1863,7 @@ fn blocked_step_from_config(unattended: &crate::config::UnattendedConfig) -> Ste
         headless: false,
         last: false,
         first: false,
+        serial: false,
         cleanup: None,
         blocked_on_write: Vec::new(),
     }
@@ -2548,6 +2584,7 @@ mod tests {
             "headless",
             "last",
             "first",
+            "serial",
         ] {
             assert!(
                 block.contains(&format!("#   {key} ")),
@@ -3078,6 +3115,42 @@ mod tests {
 
         let rendered = serde_norway::to_string(&pipeline).unwrap();
         assert!(rendered.contains("first: true"), "{rendered}");
+    }
+
+    /// `serial` parses and round-trips as a boolean, defaulting to false the
+    /// same way `first` does.
+    #[test]
+    fn serial_parses_and_defaults_to_false() {
+        let pipeline = parse(
+            "steps:\n  - id: a\n    run: make\n    serial: true\n    on_pass: z\n  \
+             - id: z\n    end: true\n",
+        )
+        .unwrap();
+        assert!(pipeline.step("a").unwrap().serial);
+        assert!(
+            !pipeline.step("z").unwrap().serial,
+            "absent defaults to false"
+        );
+
+        let rendered = serde_norway::to_string(&pipeline).unwrap();
+        assert!(rendered.contains("serial: true"), "{rendered}");
+    }
+
+    /// A lane is not a run the dispatcher starts and can hold back, so
+    /// `serial:` on an agent step is refused — worded as the task's mockup
+    /// draws it, under the `pipeline `<name>`:` prefix loading adds.
+    #[test]
+    fn rejects_serial_on_an_agent_step() {
+        let err = parse(
+            "steps:\n  - id: review\n    agent: pi\n    model: m\n    serial: true\n    \
+             on_pass: z\n  - id: z\n    end: true\n",
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "step `review` declares `serial:` but is an agent step — only a command \
+             step's run can be held for its turn"
+        );
     }
 
     /// `handover:` marked which step opened the pull request and `credentials:`

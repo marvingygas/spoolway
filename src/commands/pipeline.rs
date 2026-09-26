@@ -97,6 +97,7 @@ const STEP_KEYS: &[&str] = &[
     "headless",
     "last",
     "first",
+    "serial",
     "end",
 ];
 
@@ -247,6 +248,15 @@ const FIELD_SENTENCES: &[(&str, &str)] = &[
          it, so a task naming an archived dependency is still not the root. \
          Every root of a fan runs it, since none of them declares a \
          dependency. Refused together with `last:` on the same step.",
+    ),
+    (
+        "serial",
+        "Command steps only, `false` when absent. One task at a time runs this \
+         step's command: while another task's run of it is still going, a task \
+         reaching the step waits there unstarted, and its run starts on the \
+         first pass after that one exits. A background run holds the step until \
+         it exits, wherever its task has moved on to. The same step id in \
+         another pipeline does not hold it.",
     ),
     (
         "end",
@@ -470,6 +480,7 @@ fn template() -> String {
          \x20\x20\x20\x20# headless: true            run detached, with no pane, the way every command did before\n\
          \x20\x20\x20\x20# last: true                only the top task of a chain runs it\n\
          \x20\x20\x20\x20# first: true               only a chain's declared root runs it\n\
+         \x20\x20\x20\x20# serial: true              one task runs it at a time; the rest wait on the step\n\
          \x20\x20\x20\x20on_pass: done\n\
          \x20\x20\x20\x20# on_fail:                a fail with none of its own goes to `blocked`\n\
          \n\
