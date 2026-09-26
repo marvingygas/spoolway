@@ -30,7 +30,8 @@ on the board.
    commit has a fixed parent, and only `scripts/release-publish.sh` can rehearse and tag, which runs
    again only after a fresh `candidate`. Diagnose the cause as far as you can. Then remove the release
    commit exactly as rule 4 does: one revert pull request, a person's merge, the version files and
-   `CHANGELOG.md` confirmed back at the previous release, scratch `release-notes.md` deleted. Then fail
+   `CHANGELOG.md` and `docs/migrations.md` confirmed back at the previous release, scratch
+   `release-notes.md` and `migrations.md` deleted. Then fail
    to `version` with the full diagnosis. Say plainly whether the cause is a defect on `main`: the next
    cycle goes `version` → `preflight`, not through readiness, so a real defect has to be named for
    `preflight` to fail it to `fix`.
@@ -50,15 +51,15 @@ on the board.
    `released` to have it re-read and confirm the public state.
 4. **Main moved before the tag.** `scripts/release-publish.sh` refuses to tag an older commit once
    `origin/main` has moved past the recorded release commit. Do not fold the new commits into it,
-   force-push, or rewrite `main`. Open one revert pull request that removes only the four-file release
+   force-push, or rewrite `main`. Open one revert pull request that removes only the release
    commit, require its protected checks, review its final diff, push it, and wait for a person to merge
    it yourself with `scripts/release-await-merge.sh <branch>` — never merge it. That wait can last hours
    and a foreground command is capped at 10 minutes, so run it in the background and poll it. Once
-   merged, verify both version files and `CHANGELOG.md` are back at the previous release, delete scratch
-   `release-notes.md`, and fail this step so the task returns to `version` with a fresh candidate to
-   choose, naming both the abandoned release SHA and the new main SHA. If the revert conflicts, its
-   checks cannot go green, or a person closes it unmerged, that exact unreconciled state is a genuine
-   block.
+   merged, verify both version files, `CHANGELOG.md` and `docs/migrations.md` are back at the previous
+   release, delete scratch `release-notes.md` and `migrations.md`, and fail this step so the task
+   returns to `version` with a fresh candidate to choose, naming both the abandoned release SHA and
+   the new main SHA. If the revert conflicts, its checks cannot go green, or a person closes it
+   unmerged, that exact unreconciled state is a genuine block.
 5. **The post-publication verifier failed on an otherwise complete publish.** A missing asset, a stale
    published body, or a registry read that is merely flaky is not the same as a partial publish; retry
    the bounded transient failure once, and if the gap is real, treat it as a partial publish under rule 3.

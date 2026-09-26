@@ -209,7 +209,9 @@ jobs:
 
       # Nothing outside the four files a release commit is allowed to touch may
       # have moved. If this trips, the bump above is wrong, not the repo.
-      # The list is the one docs/releasing.md gives for the release commit.
+      # The list is the one docs/releasing.md gives for the release commit, less
+      # docs/migrations.md: prose only a release with migration work adds, and
+      # nothing version-coupled reads it.
       - name: only a release commit's own files changed
         run: |
           changed="$(git diff --name-only | sort | tr '\n' ' ')"

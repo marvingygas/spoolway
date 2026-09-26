@@ -2,8 +2,9 @@
 
 ## What you are looking at
 
-Turn the exact candidate and release-note record handed to you into one four-file release pull
-request. You own the version bump, changelog insertion, focused proof and pull request. The next
+Turn the exact candidate and release-note record handed to you into one release pull request: four
+files, and a fifth, `docs/migrations.md`, when notes wrote a scratch `migrations.md`. You own the
+version bump, changelog and migration-guide insertion, focused proof and pull request. The next
 lane independently reviews it, a person merges it on GitHub, and publication happens only after
 that merge.
 
@@ -14,8 +15,8 @@ handoff. Those passing steps authorize exactly the recorded source commit, versi
 
 1. Work from the source checkout path under WHAT YOU HAVE. Fetch and require clean `main` equal to
    the candidate recorded by preflight and notes. If `origin/main` moved, leave it untouched, remove
-   only this attempt's unpushed work and stale scratch `release-notes.md`, and send the task back for
-   a fresh version decision and preflight.
+   only this attempt's unpushed work and stale scratch `release-notes.md` and `migrations.md`, and
+   send the task back for a fresh version decision and preflight.
 2. Use one branch named `release/<task>` from that candidate, where `<task>` is this task's own id.
    `scripts/release-publish.sh` finds the release commit by its subject rather than its branch, but
    `scripts/release-await-merge.sh` waits on this exact prefix, so a differently named branch leaves
@@ -23,15 +24,18 @@ handoff. Those passing steps authorize exactly the recorded source commit, versi
    never open a second pull request for the same release.
 3. Insert scratch `release-notes.md` into `CHANGELOG.md` byte-for-byte as the newest section. Change
    the version in `Cargo.toml` and `herdr-plugin.toml`, then refresh only the package entry in
-   `Cargo.lock`. Never edit generated npm manifests or an older changelog section.
+   `Cargo.lock`. When scratch `migrations.md` exists, copy it over `docs/migrations.md`
+   byte-for-byte and check its diff only adds. Never edit generated npm manifests or an older
+   changelog section.
 4. Run `cargo test --locked release_notes::tests`, confirm the parser tests ran, then build the
    release binary and run its `whats-new` command with no `--since`. Require the output to carry the
    new version and complete recorded section. Diff the inserted section against the scratch file.
-5. Commit exactly `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md` and `herdr-plugin.toml` with subject
-   `chore(release): v<version>`. Prove the commit's parent is the recorded source commit and no other
-   path changed. Push it to its release branch and create or update one pull request against `main`.
+5. Commit exactly `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md`, `herdr-plugin.toml` and, when notes
+   wrote it, `docs/migrations.md`, with subject `chore(release): v<version>`. Prove the commit's
+   parent is the recorded source commit and no other path changed. Push it to its release branch
+   and create or update one pull request against `main`.
 6. Read the pull request back through `gh`. Give its number and URL, source and head SHAs, version,
-   four changed files, focused-test results, and the notes diff result to the reviewer.
+   changed files, focused-test results, and the notes diff result to the reviewer.
 
 ## Never
 
@@ -43,4 +47,4 @@ handoff. Those passing steps authorize exactly the recorded source commit, versi
 - Never carry an open release pull request whose base candidate or scratch notes disagree with this
   attempt. Close the stale pull request, delete only its branch, and return for a fresh version
   decision and preflight.
-- Never broaden the release commit beyond the four named files.
+- Never broaden the release commit beyond the four named files and the migration guide notes wrote.
