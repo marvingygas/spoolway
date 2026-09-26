@@ -194,6 +194,7 @@ steps:
     prompt: implementer
     model: Ornith-1.5-35B-A3B
     session: true
+    loop: 2
     on_pass: review
 
   - id: review
@@ -203,8 +204,6 @@ steps:
     model: claude-opus-5
     effort: high
     session: true
-    loop:
-      implement: 2
     on_pass: document
     on_fail: implement
 

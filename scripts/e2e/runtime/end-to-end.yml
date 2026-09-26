@@ -69,32 +69,28 @@ steps:
   # headless can show is whether a *real* conversation crosses
   # `agents.pi.session_reuse_ctx` percent of the window a real model was
   # given — and what the lane does on the visit after it does.
-  # A map rather than a bare number, so a plan can watch one route run out of
-  # rounds while the others stay open — which is what `step.loop` means and
-  # what a bare number cannot show.
   #
-  # `fix` always exits back through `review`, so this is where the lap is
-  # counted rather than on `fix` itself. Two whole laps — arrivals from
-  # `fix`, whether or not the lane that arrives resumes `session:` above's
-  # conversation. The two settings do not interact any more: what ends a
-  # review loop here is the second arrival, and what
-  # `agents.pi.session_reuse_ctx` decides along the way is a separate thing
-  # for a plan to watch, not a second way this budget gets spent.
+  # The bound is on `fix`, not here: a `loop:` counts arrivals at the step that
+  # carries it, by any route, the first included. `fix` is reached from this
+  # step's failure (and from `implement`'s), so `loop: 2` there allows two
+  # whole laps back through it — whether or not the lane that arrives resumes
+  # `session:` above's conversation. The two settings do not interact: what
+  # ends a review loop here is the third attempt to send the task to `fix`,
+  # and what `agents.pi.session_reuse_ctx` decides along the way is a separate
+  # thing for a plan to watch, not a second way this limit gets spent.
   #
-  # A spent budget parks the task on `blocked`, which is what the `escalation`
+  # A spent limit parks the task on `blocked`, which is what the `escalation`
   # plan watches happen in a pane — no key says so any more, since `blocked` is
-  # now the only place a spent budget goes. The `fix` step below is this
+  # now the only place a spent limit goes. The `fix` step below is this
   # fixture's own shape too: the shipped `default` retired its `fix` step and
   # loops `review` straight back through `implement`, but `escalation.html` is
-  # written against `loop: {fix: 2}` and rewriting that plan is not a drift fix.
+  # written against a `fix` step and rewriting that plan is not a drift fix.
   - id: review
     description: Check the diff against the acceptance criteria and project standards.
     agent: pi
     prompt: reviewer
     model: your-local-model
     session: true
-    loop:
-      fix: 2
     on_pass: verify
     on_fail: fix
 
@@ -104,6 +100,7 @@ steps:
     prompt: implementer
     model: your-local-model
     session: true
+    loop: 2
     on_pass: review
 
   # The gate. `gate: true` parks the task on `paused` after this step passes,

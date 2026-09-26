@@ -39,8 +39,8 @@
 #                                        Absent: the task stays put.
 #   on_fail           <step id>          Where a failure goes.
 #                     blocked <default>  The task parks for a person.
-#   loop              <n>                Laps allowed, per step sent back to.
-#                     <step>: <n>        The same limit, one destination at a time.
+#   loop              <n>                Most arrivals at this step, by any
+#                                        route. The next goes to `blocked`.
 #                                        Absent: unbounded.
 #   timeout           <duration>         How long a command step may run, e.g. `90s`.
 #                                        Absent: 30m.
@@ -83,6 +83,7 @@ steps:
     model: ""
     effort: ""
     session: true
+    loop: 2
     on_pass: review
 
   - id: review
@@ -94,8 +95,6 @@ steps:
     model: ""
     effort: ""
     session: true
-    loop:
-      fix: 2
     on_pass: reproduce-again
     on_fail: fix
 
@@ -108,8 +107,6 @@ steps:
     model: ""
     effort: ""
     session: true
-    loop:
-      fix: 2
     on_pass: document
     on_fail: fix
 

@@ -14,8 +14,7 @@ steps:
     model: claude-opus-5-5
     effort: high
     session: true
-    loop:
-      fix: 3
+    loop: 2
     on_pass: version
     on_fail: fix
 
@@ -26,6 +25,7 @@ steps:
     model: claude-opus-5-5
     effort: high
     session: true
+    loop: 2
     on_pass: merge-fix
 
   - id: merge-fix
@@ -43,8 +43,7 @@ steps:
     model: claude-opus-5-5
     effort: high
     gate: true
-    loop:
-      ready: 1
+    loop: 2
     on_pass: preflight
     on_fail: ready
 
@@ -55,8 +54,6 @@ steps:
     model: claude-opus-5-5
     effort: high
     session: true
-    loop:
-      fix: 3
     on_pass: notes
     on_fail: fix
 
@@ -75,8 +72,6 @@ steps:
     prompt: release-candidate
     model: claude-opus-5-5
     effort: high
-    loop:
-      version: 1
     on_pass: merge-release
     on_fail: version
 
@@ -86,8 +81,6 @@ steps:
     prompt: release-merger
     model: claude-opus-5-5
     effort: high
-    loop:
-      version: 1
     on_pass: publish
     on_fail: version
 
@@ -97,8 +90,6 @@ steps:
     prompt: release-publisher
     model: claude-opus-5-5
     effort: high
-    loop:
-      version: 1
     on_pass: released
     on_fail: version
 
@@ -108,8 +99,6 @@ steps:
     timeout: 15m
     on_pass: fixture
     on_fail: repair-released
-    loop:
-      repair-released: 2
 
   - id: repair-released
     description: Repair a failed post-publication verification in one green pull request.
@@ -118,6 +107,7 @@ steps:
     model: claude-opus-5-5
     effort: high
     session: true
+    loop: 2
     on_pass: merge-released-repair
 
   - id: merge-released-repair
@@ -146,8 +136,6 @@ steps:
     timeout: 30m
     on_pass: merge-fixture
     on_fail: repair-fixture
-    loop:
-      repair-fixture: 2
 
   - id: repair-fixture
     description: Repair a failed fixture scaffold in one green pull request.
@@ -156,6 +144,7 @@ steps:
     model: claude-opus-5-5
     effort: high
     session: true
+    loop: 2
     on_pass: merge-fixture-repair
 
   - id: merge-fixture-repair

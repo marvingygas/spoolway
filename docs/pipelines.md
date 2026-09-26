@@ -31,6 +31,7 @@ steps:
     prompt: implementer
     model: claude-opus-5
     session: true
+    loop: 2               # two arrivals at most, then blocked
     on_pass: review
 
   - id: review
@@ -39,8 +40,6 @@ steps:
     model: claude-opus-5
     effort: high
     session: true
-    loop:
-      implement: 2         # two laps back to implement, then blocked
     on_pass: document
     on_fail: implement
 
@@ -88,7 +87,7 @@ steps:
 | `gate` | `false` | `true` holds the step's pass on `paused` until `spoolway resume`. See [Gates](#gates). |
 | `on_pass` | none | Where a pass goes. `done` finishes the task. Absent means the task stays put. |
 | `on_fail` | `blocked` | Where a failure goes. Writing `blocked` outright is redundant; `spoolway pipeline check` warns and leaving the key absent does the same thing. |
-| `loop` | unbounded | How many times a task may arrive here from a given step. A number, or a map keyed by step. |
+| `loop` | unbounded | The most times a task may arrive at this step, by any route. The next arrival parks on `blocked`. |
 | `timeout` | `30m` | Command steps only. How long the command may run before it is killed. |
 | `background` | `false` | Command steps only. `true` lets the task move on while the command runs. |
 | `headless` | `false` | Command steps only. `true` runs the command with no pane. |
@@ -134,23 +133,22 @@ key.
 
 ### Loops
 
-`loop` counts arrivals at this step from a given step. Put it on the step that sends work
-back. In the shipped pipeline `review` fails back to `implement`, so `review` carries it.
+`loop` counts arrivals at this step, by any route, the first included. Put it on the step
+that is sent back to. In the shipped pipeline `review` fails back to `implement`, so
+`implement` carries it.
 
 ```yaml
-  - id: review
+  - id: implement
     session: true
-    loop:
-      fix: 3          # three arrivals from fix
-      verify: 5       # five arrivals from verify
+    loop: 3          # at most three arrivals here, then blocked
 ```
 
-- A bare number bounds every route into the step. A route left out of a map is unbounded.
-- A step named in the map that never routes here is refused.
-- A spent loop parks the task on `blocked`. The round count is written to `## Status Log`.
+- A spent loop parks the task on `blocked`. The arrival count is written to `## Status Log`.
+- The map form, keyed by the step a failure is sent back from, is refused at parse. The
+  refusal names the step that should carry the limit instead.
 - A file still declaring `on_loop_max:` is refused, naming the pipeline, the step and the key.
-- Every cycle needs a `loop` whose exit leaves the cycle. `spoolway pipeline check` refuses the
-  file otherwise.
+- Every cycle needs some step along it carrying a `loop:`. `spoolway pipeline check` refuses
+  the file otherwise.
 
 ### Proving the loops
 
@@ -158,8 +156,8 @@ back. In the shipped pipeline `review` fails back to `implement`, so `review` ca
 `src/route_sim.rs` proves the counters that walk that graph agree with it. It routes every
 outcome at every step, to a bounded depth, over the shipped pipelines, the tracked
 `.spoolway/pipelines` files, and pipelines it generates that pass `spoolway pipeline check`.
-Each path it walks must reach a terminal step, keep every `loop` count rising except where a
-person resumes a blocked task, and start no more lanes than a stated bound.
+Each path it walks must reach a terminal step, keep every `loop` count rising, and start no
+more lanes than a stated bound.
 
 ## Unattended runs
 
@@ -357,14 +355,14 @@ flowchart LR
   Q([queued]) --> I[implement]
   I -->|pass| R[review]
   R -->|pass| D[document]
-  R -->|fail, 2 laps| I
+  R -->|fail| I
   I & D -->|fail| B([blocked])
 ```
 
 | Step | Runs |
 |---|---|
-| `implement` | the `implementer` prompt, session kept |
-| `review` | the `reviewer` prompt, session kept. A fail goes back to `implement`, twice at most. |
+| `implement` | the `implementer` prompt, session kept. Arrivals here are bounded at two, from any route. |
+| `review` | the `reviewer` prompt, session kept. A fail goes back to `implement`. |
 | `document` | the `archivist` prompt, on this task's diff |
 | `blocked` | the unblocker, in an unattended run |
 
@@ -388,7 +386,7 @@ flowchart LR
   P -->|pass: the repro fails| F[fix]
   F -->|pass| R[review]
   R -->|pass| A[reproduce-again]
-  R -->|fail, 2 laps| F
+  R -->|fail| F
   A -->|pass: the repro passes| D[document]
   A -->|fail| F
   P -->|fail| B([blocked])
@@ -400,9 +398,9 @@ pass. After the fix, a passing repro is the pass. Its agent path joins `default`
 | Step | Runs |
 |---|---|
 | `reproduce` | the `reproducer`: write the repro and see it fail |
-| `fix` | the `implementer`, session kept |
-| `review` | the `reviewer`. A fail goes back to `fix`, twice at most. |
-| `reproduce-again` | the `reproducer`. A fail goes back to `fix`. Arrivals from `review` are bounded at two. |
+| `fix` | the `implementer`, session kept. Arrivals here are bounded at two, from any route. |
+| `review` | the `reviewer`. A fail goes back to `fix`. |
+| `reproduce-again` | the `reproducer`. A fail goes back to `fix`. |
 
 ## Whose worktree
 

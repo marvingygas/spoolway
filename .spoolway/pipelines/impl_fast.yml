@@ -37,8 +37,8 @@
 #                                        Absent: the task stays put.
 #   on_fail           <step id>          Where a failure goes.
 #                     blocked <default>  The task parks for a person.
-#   loop              <n>                Laps allowed, per step sent back to.
-#                     <step>: <n>        The same limit, one destination at a time.
+#   loop              <n>                Most arrivals at this step, by any
+#                                        route. The next goes to `blocked`.
 #                                        Absent: unbounded.
 #   timeout           <duration>         How long a command step may run, e.g. `90s`.
 #                                        Absent: 30m.
@@ -73,14 +73,13 @@ steps:
     model: claude-opus-5-5
     effort: high
     session: true
+    loop: 2
     on_pass: test
 
   - id: test
     description: The mechanical verdict on this change, as an exit code.
     run: scripts/gate.sh
     timeout: 45m
-    loop:
-      implement: 2
     on_pass: handover
     on_fail: implement
 

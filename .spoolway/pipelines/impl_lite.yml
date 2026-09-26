@@ -37,8 +37,8 @@
 #                                        Absent: the task stays put.
 #   on_fail           <step id>          Where a failure goes.
 #                     blocked <default>  The task parks for a person.
-#   loop              <n>                Laps allowed, per step sent back to.
-#                     <step>: <n>        The same limit, one destination at a time.
+#   loop              <n>                Most arrivals at this step, by any
+#                                        route. The next goes to `blocked`.
 #                                        Absent: unbounded.
 #   timeout           <duration>         How long a command step may run, e.g. `90s`.
 #                                        Absent: 30m.
@@ -72,6 +72,7 @@ steps:
     model: claude-sonnet-5
     effort: medium
     session: true
+    loop: 2
     on_pass: review
 
   - id: review
@@ -81,8 +82,6 @@ steps:
     model: claude-opus-5-5
     effort: high
     session: true
-    loop:
-      implement: 2
     on_pass: test
     on_fail: implement
 
@@ -90,10 +89,6 @@ steps:
     description: The mechanical verdict on this change, as an exit code, without the advisory check.
     run: scripts/gate-quick.sh
     timeout: 45m
-    # See `suite`'s own comment: `spoolway pipeline check` refuses this fail
-    # edge back into `implement` unbounded too, for the same reason.
-    loop:
-      implement: 1
     on_pass: suite
     on_fail: implement
 
@@ -102,13 +97,6 @@ steps:
     last: true
     run: scripts/e2e-smoke.sh
     timeout: 45m
-    # `review`'s own loop bounds how many times *it* sends a task back to
-    # `implement`, but `test` and `suite` also fail straight back there —
-    # `spoolway pipeline check` refuses the cycle that makes unbounded, and
-    # names this the edge to bound, the same way `impl.yml`'s `test` and
-    # `suite` bound their own fail edge back into `e2e`.
-    loop:
-      implement: 1
     on_pass: document
     on_fail: implement
 

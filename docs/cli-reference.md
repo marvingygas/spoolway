@@ -477,11 +477,11 @@ $ spoolway pipeline show
 pipeline `impl`  entry: implement
     One unit of feature work, start to finish: implement against the acceptance criteria, review the diff, carry the change into the end-to-end suites, then document and hand over.
 
-  implement  agent     agent=claude prompt=implementer model=claude-sonnet-5 session
+  implement  agent     agent=claude prompt=implementer model=claude-sonnet-5 session loop=2 exit=blocked
              Write the code to satisfy the task's acceptance criteria.
              pass -> review   fail -> blocked
 
-  review     agent     agent=codex prompt=reviewer model=gpt-5.6-sol session loop=implement:2 exit=blocked
+  review     agent     agent=codex prompt=reviewer model=gpt-5.6-sol session
              Check the diff against the acceptance criteria and project standards.
              pass -> e2e   fail -> implement
 

@@ -4312,13 +4312,13 @@ impl<'a> Dispatcher<'a> {
     /// `blocked` exactly as an attended run's would, and the scheduler starts
     /// an ordinary lane there on the next pass — see
     /// [`Pipeline::blocked_is_staffed`]. The old resume is what a pipeline with
-    /// no such step still gets, unchanged: the same one `spoolway resume`
-    /// performs by hand, through the same code — the lane that stopped is
-    /// continued rather than replaced, and the loop budgets out of the step it
-    /// is going back to are handed back. What it does *not* do is announce
-    /// anything. A notification is a request for attention, and an unattended
-    /// run has already been told there is none to ask for; a night of them is
-    /// a night of noise nobody read.
+    /// no such step still gets, unchanged: through the same `commands::
+    /// resume_at` a hand `spoolway resume` calls, which refunds nothing on any
+    /// road now — the lane that stopped is continued rather than replaced, but
+    /// the step it is going back to keeps whatever it had already spent. What
+    /// this does *not* do is announce anything. A notification is a request
+    /// for attention, and an unattended run has already been told there is
+    /// none to ask for; a night of them is a night of noise nobody read.
     fn escalate(
         &mut self,
         task: &mut Task,
@@ -4357,9 +4357,10 @@ impl<'a> Dispatcher<'a> {
 
         if self.unattended && !pipeline.blocked_is_staffed(self.unattended) {
             let target = crate::commands::resume_target(task, pipeline);
-            // The run resuming itself, not a person: the loop budgets out of
-            // the step it stopped on stay spent — see `commands::resume_at`.
-            crate::commands::resume_at(task, pipeline, &target, false);
+            // The run resuming itself, not a person: `commands::resume_at`
+            // refunds nothing on any road now, so the budgets out of the step
+            // it stopped on stay spent here too.
+            crate::commands::resume_at(task, &target);
             task.set_stage(&target, Some(reason));
             self.persist(task)?;
             return Ok(());
@@ -15445,14 +15446,18 @@ mod tests {
             .find(|s| s.id == "implement")
             .unwrap();
         implement.on_fail = Some("review".to_string());
-        implement.r#loop = crate::pipeline::Loop::PerRoute(std::collections::BTreeMap::from([(
-            "review".to_string(),
-            1,
-        )]));
+        let review = pipeline
+            .steps
+            .iter_mut()
+            .find(|s| s.id == "review")
+            .unwrap();
+        review.r#loop = crate::pipeline::Loop::Bare(1);
 
-        // That one lap already taken, so the failure below is the one over.
+        // That one arrival already banked, so the failure below is the one
+        // over — the budget now lives on `review`, the step arrived at, not
+        // on `implement`, the one sending it there.
         let mut task = reload(&path);
-        task.front.rounds.insert("implement->review".into(), 1);
+        task.front.arrivals.insert("review".into(), 1);
         task.save().unwrap();
 
         drive(&repo, &pipelines, &mux, &path, crate::pipeline::BLOCKED);

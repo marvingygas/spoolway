@@ -513,9 +513,13 @@ pub struct Frontmatter {
 
     /// How many times a task has taken each route, keyed the same way — one
     /// lap of the loop per move, whatever a lane at either end went on to do.
-    /// This is what a step's `loop:` bounds, read off the step the move
-    /// *leaves*: `loop: { implement: 2 }` on `review` is a budget for the
-    /// `review->implement` entry here.
+    /// Kept as history now that a step's `loop:` reads [`Frontmatter::
+    /// arrivals`] instead: nothing routes on a single route's own count any
+    /// more. Not dead weight, though — [`Task::parse`]'s own backfill still
+    /// sums this map, in production, to give a task file written before
+    /// `arrivals:` existed its own arrival count the first time it is read
+    /// under this shipped version; [`Task::rounds_via`] is the one *test*
+    /// reader left.
     ///
     /// Banked by [`Task::set_stage`], not [`Task::bank_launch`]: a lap is a
     /// transition, and a retried launch at a step the task never left is a
@@ -530,14 +534,14 @@ pub struct Frontmatter {
     /// `↻<n>` once it reaches [`crate::status::view::ARRIVAL_FLOOR`].
     ///
     /// Its own map rather than a sum over [`Self::rounds`], which
-    /// [`Task::rounds_at`] used to compute: `rounds` also holds the loop
-    /// budget, and `resume_at`'s by-hand refund in `src/commands/report.rs`
-    /// deletes a route's entry there on purpose, to hand the budget back.
-    /// Reading the arrival count off the same map meant that refund also
-    /// erased however many genuine arrivals it had counted. This map is
-    /// banked separately, in [`Task::set_stage`], and nothing ever removes
-    /// or lowers an entry in it — a fact a step actually visited never
-    /// becomes false again, however many budgets are later handed back.
+    /// [`Task::rounds_at`] used to compute: a step's `loop:` now reads this
+    /// map directly, as the whole of its own budget, and `rounds` is kept
+    /// only as per-route history — see its own doc. Keeping the two apart
+    /// survives a change to either: `resume_at` refunds nothing at all now,
+    /// but even if some later road ever removed a `rounds` entry again, this
+    /// map would still answer for a step actually visited, never becoming
+    /// false again. Banked separately, in [`Task::set_stage`], and nothing
+    /// ever removes or lowers an entry in it.
     ///
     /// Empty on a task file written before this field existed, which
     /// [`Task::parse`] backfills from `rounds` the moment such a file is
@@ -640,8 +644,8 @@ impl Task {
     /// whichever this step is.
     ///
     /// What a person reads and what the ledger records — "3 launches of
-    /// review" is about the step, however it got there. The limit is a
-    /// route's business; see [`Task::rounds_via`].
+    /// review" is about the step, however it got there. The limit a `loop:`
+    /// sets is the step's own business now; see [`Task::rounds_at`].
     pub fn steps_at(&self, step: &str) -> u32 {
         let suffix = format!("->{step}");
         self.front
@@ -653,8 +657,10 @@ impl Task {
     }
 
     /// How many times this task has moved from `from` to `to` — laps of that
-    /// route through the loop. This is what `from`'s own `loop:` bounds, the
-    /// budget being spent by whichever step makes the move.
+    /// one route through the loop, kept as history now that a `loop:` limit
+    /// reads [`Task::rounds_at`] instead. Test-only: nothing routes on a
+    /// single route's own count any more, so no production caller is left.
+    #[cfg(test)]
     pub fn rounds_via(&self, from: &str, to: &str) -> u32 {
         self.front
             .rounds
@@ -665,10 +671,11 @@ impl Task {
 
     /// How many times this task has arrived at `step`, whichever route
     /// carried it there each time — [`Frontmatter::arrivals`]'s own entry for
-    /// it. Unlike [`Self::rounds_via`], which asks about one route's own
-    /// budget, this is a fact about the step itself: the board's STEP column
-    /// reads it to say how many times a task has stood there, with no route
-    /// or budget behind the number at all.
+    /// it. Read by two very different callers for the same number: the
+    /// board's STEP column, to say how many times a task has stood there, and
+    /// `apply_loop_budget` in `src/commands/report.rs`, as the step's own
+    /// `loop:` budget — a fact about the step itself, unlike [`Self::
+    /// rounds_via`]'s test-only answer about one route into it.
     pub fn rounds_at(&self, step: &str) -> u32 {
         self.front.arrivals.get(step).copied().unwrap_or(0)
     }

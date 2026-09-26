@@ -30,7 +30,7 @@
 # covers: step.run — a command step runs in the task`s worktree and routes on its exit code
 # covers: step.background — the task moves on the same pass, and cleanup stops the command
 # covers: step.timeout — a hung command is stopped at the step`s own bound, not the dispatcher`s
-# covers: step.loop — a command step's own failure feeds the loop bound on the agent step behind it, the shape a mechanical CI gate is built on
+# covers: step.loop — a command step's own `loop:` bounds how many times the agent step behind it may send a task back in, the shape a mechanical CI gate is built on
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=../lib.sh
@@ -66,25 +66,19 @@ add_command_step() {
     case "$extra" in
       --background) printf '    background: true\n' ;;
       "")           ;;
-      *)            printf '    on_fail: %s\n' "$extra"
-                    # A failure routed back to the step ahead of this one is a
-                    # cycle of its own — `implement` → this step → `implement`.
-                    # It needs a bound, wherever along the cycle it sits: a
-                    # spent budget parks the task on `blocked`, which leaves
-                    # the cycle from anywhere in it.
-                    printf '    loop:\n      %s: 1\n' "$extra" ;;
+      *)            printf '    on_fail: %s\n' "$extra" ;;
+      # A failure routed back to the step ahead of this one is a cycle of
+      # its own — `implement` → this step → `implement` — but it needs no
+      # `loop:` of this step's own: a limit now counts arrivals at the step
+      # it names, and `implement` already carries one, unconditionally, in
+      # the shipped file this fixture starts from. Inserting a step ahead
+      # of it changes nothing about that count.
     esac
     printf '    on_pass: %s\n' "$on_pass"
   } >> "$file"
 
   # `implement` goes through the new step now, so its `on_pass` names the new
   # step rather than `review`.
-  #
-  # `review`'s own budget is left alone. A `loop:` map names the steps a step
-  # *sends a task to*, so `review`'s entry is `implement` — the step its
-  # `on_fail` routes back to — and inserting a step ahead of `review` does not
-  # change that. Rewriting it to name the new step would name a route `review`
-  # does not have, and is refused at load.
   sed -i "0,/^    on_pass: review$/s//    on_pass: $id/" "$file"
 }
 
@@ -270,21 +264,21 @@ fi
 
 # ------------------------------------------------------------- a gate that never turns green
 # The shape a mechanical CI gate is built on: a command step whose failure
-# returns to the agent step behind it, that step bounded so a change which
-# cannot be made green stops rather than circling forever. Nothing here is
-# specific to `cargo` or to end-to-end suites — the graph is the whole of what
-# is under test, so a stand-in agent and a command that is always red are
-# enough to exercise it.
+# returns to the agent step behind it, and which carries its own `loop:` so a
+# change that cannot be made green stops rather than circling forever. Nothing
+# here is specific to `cargo` or to end-to-end suites — the graph is the whole
+# of what is under test, so a stand-in agent and a command that is always red
+# are enough to exercise it.
 cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
 {
   printf '\n  - id: e2e\n'
   printf "    description: A stand-in for a mechanical gate's own agent step.\n"
   printf '    agent: pi\n    prompt: implementer\n    model: fake-local\n'
-  printf '    loop:\n      gate: 1\n'
   printf '    on_pass: gate\n    on_fail: blocked\n'
   printf '\n  - id: gate\n'
   printf '    description: Always red, so the loop it bounds is what this case is about.\n'
   printf "    run: echo 'CI would fail here' >&2; exit 1\n"
+  printf '    loop: 1\n'
   printf '    on_pass: document\n    on_fail: e2e\n'
 } >> .spoolway/pipelines/default.yml
 # `review` fell through to `document` directly; put `e2e` and its gate between
@@ -307,10 +301,16 @@ lacks "and never reached the step the gate guards" "→ \`document\`" \
   $SPOOLWAY_PROJECT_HOME/queue/gated.md
 counter "the round the loop bounds is what actually stopped it, not a guess" \
   rounds "gate->e2e" 1 $SPOOLWAY_PROJECT_HOME/queue/gated.md
+# And the refusal is `gate`'s own limit, read off its arrivals: `e2e`'s pass is
+# what would have carried the task there a second time, and a pass into a
+# spent step is refused the same as a fail.
+has "and it was gate's own loop: 1 that refused the second arrival" \
+  "\`e2e\` may not send this to \`gate\` a 2nd time — \`gate\` has \`loop: 1\`" \
+  $SPOOLWAY_PROJECT_HOME/queue/gated.md
 
-# The same shape with `loop: gate: 2` rather than `1` — every shipped pipeline
-# now carries 2, not 1, so a route bounded at 2 is what a reviewer's fix
-# actually gets: seen once before the budget is spent, not zero times. The
+# The same shape with `gate`'s own `loop: 2` rather than `1` — every shipped
+# pipeline now carries 2, not 1, so a route bounded at 2 is what a reviewer's
+# fix actually gets: seen once before the budget is spent, not zero times. The
 # exit is taken on the third arrival rather than the second — two allowed
 # laps banked, and only the third attempt diverted.
 cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
@@ -318,11 +318,11 @@ cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
   printf '\n  - id: e2e\n'
   printf "    description: A stand-in for a mechanical gate's own agent step.\n"
   printf '    agent: pi\n    prompt: implementer\n    model: fake-local\n'
-  printf '    loop:\n      gate: 2\n'
   printf '    on_pass: gate\n    on_fail: blocked\n'
   printf '\n  - id: gate\n'
   printf '    description: Always red, so the loop it bounds is what this case is about.\n'
   printf "    run: echo 'CI would fail here' >&2; exit 1\n"
+  printf '    loop: 2\n'
   printf '    on_pass: document\n    on_fail: e2e\n'
 } >> .spoolway/pipelines/default.yml
 sed -i "0,/^    on_pass: document\$/s//    on_pass: e2e/" .spoolway/pipelines/default.yml
@@ -341,10 +341,10 @@ fi
 # `arrivals` counts every line naming `→ \`e2e\``, and this log carries three
 # of them: the entry from `review`, and the two laps `gate` sent back. The
 # note `apply_loop_budget` writes on the third attempt is *not* among them —
-# it reads "`gate` may not send this back to `e2e` a 3rd time", naming the
-# move it is refusing rather than one it made, so it no longer answers a grep
-# for arrivals. The two real laps are what the `rounds` counter below proves;
-# this only checks that the third attempt left no further arrival behind it.
+# it reads "`e2e` may not send this to `gate` a 3rd time", naming the move it
+# is refusing rather than one it made, so it no longer answers a grep for
+# arrivals. The two real laps are what the `rounds` counter below proves; this
+# only checks that the third attempt left no further arrival behind it.
 if [ "$(arrivals $SPOOLWAY_PROJECT_HOME/queue/gated-twice.md e2e)" -eq 3 ]; then
   ok "the third attempt spent the budget rather than arriving at e2e again"
 else
@@ -354,6 +354,9 @@ time(s), wanted 3)"
 fi
 counter "and the counter agrees: two laps banked, not one" \
   rounds "gate->e2e" 2 $SPOOLWAY_PROJECT_HOME/queue/gated-twice.md
+has "and it was gate's own loop: 2 that refused the third arrival" \
+  "\`e2e\` may not send this to \`gate\` a 3rd time — \`gate\` has \`loop: 2\`" \
+  $SPOOLWAY_PROJECT_HOME/queue/gated-twice.md
 
 # --------------------------------------------------------- a launch that never succeeds
 # The other half of a command step's own trouble: not one that ran and
@@ -591,8 +594,9 @@ rm -f "$SCRATCH_FAIL" "$SCRATCH_HOLD"
 } >> .spoolway/pipelines/default.yml
 # The same rewrite `add_command_step` makes, done by hand for this splice:
 # `implement`'s own `on_pass: review` becomes the entry into `scratch`.
-# `review`'s `loop: implement: 2` is left alone — a budget names the step its
-# owner sends a task *to*, and `review` still sends back to `implement`.
+# `implement`'s own `loop: 2` is left alone — a limit now counts arrivals at
+# the step that carries it, and `review` still sends its failure to
+# `implement`.
 sed -i "0,/^    on_pass: review\$/s//    on_pass: scratch/" .spoolway/pipelines/default.yml
 works "a background step that also declares on_fail checks out" "$SPOOLWAY" pipeline check
 

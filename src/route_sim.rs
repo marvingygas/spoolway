@@ -71,8 +71,8 @@ mod tests {
     /// * every `on_fail` back edge names a *strictly earlier* step, so the
     ///   cycle it can only ever close runs through the forward chain in
     ///   front of it;
-    /// * every such edge carries a `loop:` bound keyed on exactly the step it
-    ///   targets, so [`Pipeline::check_bounded_loops`] can find the budget
+    /// * every step named as a back edge's target carries a `loop:` bound of
+    ///   its own, so [`Pipeline::check_bounded_loops`] can find the budget
     ///   that breaks that cycle;
     ///
     /// Where a spent budget lands takes no care of its own: it is `blocked`,
@@ -85,6 +85,27 @@ mod tests {
     fn generate(seed: u64) -> String {
         let mut rng = Rng::new(seed);
         let steps = 2 + rng.below(4); // 2..=5
+
+        // The back edges first: an earlier step to fail to, and the number
+        // due on it — a limit now lives on the step arrived at, not the one
+        // sending the task there, so it has to be known before that step's
+        // own block is written, and more than one later step can name the
+        // same target; the strictest number asked of it wins, arbitrarily,
+        // since any of them clears `check_bounded_loops`'s rule for the
+        // cycle it closes.
+        let mut on_fail: HashMap<u32, u32> = HashMap::new();
+        let mut loop_limit: HashMap<u32, u32> = HashMap::new();
+        for i in 0..steps {
+            if i > 0 && rng.chance(60) {
+                let target = rng.below(i);
+                let limit = 1 + rng.below(3); // 1..=3
+                on_fail.insert(i, target);
+                loop_limit
+                    .entry(target)
+                    .and_modify(|n| *n = (*n).max(limit))
+                    .or_insert(limit);
+            }
+        }
 
         let mut out = String::from("steps:\n");
         for i in 0..steps {
@@ -100,12 +121,10 @@ mod tests {
                 }
             }
 
-            // The back edge, before `on_pass`: an earlier step to fail to,
-            // bounded on that exact route — see the doc comment above.
-            if i > 0 && rng.chance(60) {
-                let target = rng.below(i);
-                let limit = 1 + rng.below(3); // 1..=3
-                out += &format!("    loop:\n      s{target}: {limit}\n");
+            if let Some(limit) = loop_limit.get(&i) {
+                out += &format!("    loop: {limit}\n");
+            }
+            if let Some(target) = on_fail.get(&i) {
                 out += &format!("    on_fail: s{target}\n");
             }
 
@@ -224,14 +243,13 @@ mod tests {
     }
 
     /// Property 2 and 3 together: a keyed count map that only ever grows —
-    /// `rounds` and `arrivals` both, this walk's one check for each. Route
-    /// never removes an entry of either on its own — only a person's own
-    /// `spoolway resume` does, and only from `rounds`, through `resume_at`'s
-    /// `by_hand: true` arm, which nothing on this walk's road ever passes —
-    /// so the one shape a bug could produce here is a route that failed to
-    /// bank a lap or an arrival it should have, or banked the wrong one.
-    /// Either reads as a count that should have risen and did not, exactly
-    /// what this compares for.
+    /// `rounds` and `arrivals` both, this walk's one check for each. `route`
+    /// never removes an entry of either, on any road — `resume_at` refunds
+    /// nothing now, on the hand resume or either self-resume — so the one
+    /// shape a bug could produce here is a route that failed to bank a lap or
+    /// an arrival it should have, or banked the wrong one. Either reads as a
+    /// count that should have risen and did not, exactly what this compares
+    /// for.
     fn rounds_only_rise(before: &BTreeMap<String, u32>, after: &BTreeMap<String, u32>) -> bool {
         before
             .iter()
@@ -263,8 +281,10 @@ mod tests {
     /// adding a field to a fixture is whichever of the two shapes above the
     /// field answers to: a field `route` reads must either be in the key or
     /// be held constant across the whole walk, and held by an assertion, not
-    /// by prose. The step a task sits on plus its `rounds` is the whole of
-    /// what a repeat visit needs to be recognised by.
+    /// by prose. The step a task sits on plus its `arrivals` at every step a
+    /// `loop:` could still bind is the whole of what a repeat visit needs to
+    /// be recognised by — a limit now reads `Task::rounds_at`, not a
+    /// per-route entry in `rounds`.
     type State = (String, BTreeMap<String, u32>);
 
     /// The three facts that never change over one walk — bundled so `walk`
@@ -275,17 +295,19 @@ mod tests {
         unattended: bool,
         /// Lane bound — property 4's own "stated bound". See [`lane_bound`].
         cap: usize,
-        /// The bounded route counters that can still affect routing from each
-        /// step. Historical counters behind a one-way phase boundary cannot
-        /// change a later decision, so keeping them in [`State`] would split
-        /// one routing state into many identical copies.
-        relevant_rounds: HashMap<String, Vec<String>>,
+        /// The bounded steps whose own `arrivals` count can still affect
+        /// routing from each step. Historical counters behind a one-way phase
+        /// boundary cannot change a later decision, so keeping them in
+        /// [`State`] would split one routing state into many identical
+        /// copies.
+        relevant_arrivals: HashMap<String, Vec<String>>,
     }
 
-    /// Build the part of `rounds` that can still affect a future routing
-    /// decision from each step. `route` reads only counters for bounded moves,
-    /// and only sources reachable before a resting state can run again.
-    fn relevant_rounds(pipeline: &Pipeline) -> HashMap<String, Vec<String>> {
+    /// Build the part of `arrivals` that can still affect a future routing
+    /// decision from each step. `route` reads a bounded step's own count
+    /// through `apply_loop_budget`, and only steps reachable before a resting
+    /// state can run again.
+    fn relevant_arrivals(pipeline: &Pipeline) -> HashMap<String, Vec<String>> {
         let mut by_step = HashMap::new();
 
         for origin in pipeline.step_ids() {
@@ -302,8 +324,11 @@ mod tests {
                 };
 
                 for destination in pipeline.destinations(step) {
-                    if step.round_limit(destination).is_some() {
-                        keys.insert(crate::task::route_key(current, destination));
+                    if pipeline
+                        .step(destination)
+                        .is_some_and(|s| s.arrival_limit().is_some())
+                    {
+                        keys.insert(destination.to_string());
                     }
                     if !is_resting(pipeline, destination) {
                         pending.push(destination);
@@ -318,20 +343,20 @@ mod tests {
     }
 
     fn state_key(ctx: &Walk<'_>, task: &Task, current: &str) -> State {
-        let rounds = ctx
-            .relevant_rounds
+        let arrivals = ctx
+            .relevant_arrivals
             .get(current)
             .into_iter()
             .flatten()
             .filter_map(|key| {
                 task.front
-                    .rounds
+                    .arrivals
                     .get(key)
                     .copied()
                     .map(|count| (key.clone(), count))
             })
             .collect();
-        (current.to_string(), rounds)
+        (current.to_string(), arrivals)
     }
 
     /// Walk every outcome at every step reachable from `current`. `Err`
@@ -553,25 +578,22 @@ mod tests {
     /// The lane-count bound one pipeline's walked paths are held to —
     /// property 4's own "stated bound", and [`walk`]'s own `cap`.
     ///
-    /// Computed per pipeline rather than one constant for every shape: two
-    /// or more of this project's own loops can compound (`bugfix.yml`'s
-    /// `review → fix`, `reproduce-again → fix`, `test → reproduce-again` and
-    /// `suite → reproduce-again` all bound different routes, so an
-    /// adversarial walk can spend every one of them along a single path
-    /// before any of them forces an exit), and a single small constant
-    /// picked against a two-step fixture undercounted a real shipped
-    /// pipeline the first time this ran. Summing every bounded route's own
-    /// limit and tripling it, plus three lanes a step for the unbounded
-    /// forward chain between them, is generous enough that a path reaching
-    /// it is a real bug rather than a bound too tight for its own pipeline.
+    /// Computed per pipeline rather than one constant for every shape: two or
+    /// more of this project's own loops can compound (`bugfix.yml`'s `fix`
+    /// and `reproduce-again` both carry their own `loop:`, reached by more
+    /// than one failing step, so an adversarial walk can spend every bounded
+    /// step's own budget along a single path before any of them forces an
+    /// exit), and a single small constant picked against a two-step fixture
+    /// undercounted a real shipped pipeline the first time this ran. Summing
+    /// every bounded step's own limit and tripling it, plus three lanes a
+    /// step for the unbounded forward chain between them, is generous enough
+    /// that a path reaching it is a real bug rather than a bound too tight
+    /// for its own pipeline.
     fn lane_bound(pipeline: &Pipeline) -> usize {
         let bounded: u32 = pipeline
             .steps
             .iter()
-            .map(|step| match &step.r#loop {
-                crate::pipeline::Loop::Every(n) => *n,
-                crate::pipeline::Loop::PerRoute(by_route) => by_route.values().sum(),
-            })
+            .filter_map(|step| step.arrival_limit())
             .sum();
         (bounded as usize) * 3 + pipeline.steps.len() * 3 + 12
     }
@@ -640,7 +662,7 @@ mod tests {
                     pipeline,
                     unattended,
                     cap,
-                    relevant_rounds: relevant_rounds(pipeline),
+                    relevant_arrivals: relevant_arrivals(pipeline),
                 };
                 // Shared across every starting step: a state this walk has
                 // already proven safe from one start is exactly as safe
