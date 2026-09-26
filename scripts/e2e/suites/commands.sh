@@ -1132,8 +1132,8 @@ says "and prints the one-line notice" \
 says "naming a file count, whatever configure_project's own fixture leaves behind" \
   "file(s) in this checkout." \
   "$SPOOLWAY" override list
-says "naming the command that clears it" \
-  'Run `spoolway sync`.' \
+says "pointing at spoolway itself, never a command" \
+  'Open spoolway to apply them.' \
   "$SPOOLWAY" override list
 says "the command itself still ran, piped or not" \
   "no overrides" \

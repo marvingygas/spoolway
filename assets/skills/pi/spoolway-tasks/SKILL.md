@@ -184,7 +184,7 @@ reading the file whole.
    reports, re-run until it passes, never mention the loop to the human.
 
 6. **Say one line**, once: `<n> tasks written to ~/.spoolway/<project>/pending. Open the
-   queue screen (\`spoolway queue\`) to send them.` Never summarise the tasks themselves.
+   board to send them.` Never summarise the tasks themselves.
 
 ## Guardrails
 

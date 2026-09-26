@@ -198,7 +198,7 @@ fn confirm_sync_gate_with(
     if !interactive || json || in_lane {
         let mut line = format!("spoolway wants to update: {count} file(s) in this checkout.");
         if !in_lane {
-            line.push_str(" Run `spoolway sync`.");
+            line.push_str(" Open spoolway to apply them.");
         }
         writeln!(err, "{line}")?;
         return Ok(true);
@@ -411,7 +411,10 @@ mod tests {
         assert!(out.is_empty(), "no cursor drawing on this path: {out:?}");
         let printed = String::from_utf8(err).unwrap();
         assert!(printed.contains("spoolway wants to update:"), "{printed}");
-        assert!(printed.contains("Run `spoolway sync`."), "{printed}");
+        assert!(
+            printed.contains("Open spoolway to apply them."),
+            "{printed}"
+        );
     }
 
     /// `--json` takes the same stderr path even with both ends a terminal —
@@ -466,7 +469,10 @@ mod tests {
         .unwrap();
         let printed = String::from_utf8(err).unwrap();
         assert!(printed.contains("spoolway wants to update:"), "{printed}");
-        assert!(!printed.contains("Run `spoolway sync`."), "{printed}");
+        assert!(
+            !printed.contains("Open spoolway to apply them."),
+            "{printed}"
+        );
     }
 
     /// A command step runs in a real pane, which can carry a real

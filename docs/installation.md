@@ -301,10 +301,10 @@ Where stdin or stdout is not a terminal, under `--json`, or inside a lane, the p
 drawn. Instead one line goes to stderr and the command runs anyway:
 
 ```
-spoolway wants to update: 1 file(s) in this checkout. Run `spoolway sync`.
+spoolway wants to update: 1 file(s) in this checkout. Open spoolway to apply them.
 ```
 
-Inside a lane the line omits the trailing "Run `spoolway sync`." sentence. `init`, `doctor`,
+Inside a lane the line omits the trailing "Open spoolway to apply them." sentence. `init`, `doctor`,
 `whats-new`, `update`, `config edit`, `config override` and `sync` itself never draw the panel
 or print the line.
 

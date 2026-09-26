@@ -138,15 +138,20 @@ pub(crate) fn system_prompt(
 /// this pane belongs to [`report_contract`], the form it qualifies, not
 /// here.
 ///
-/// The last bullet is fixed for every lane, gated or not, because composing
-/// happens once at launch and this file is all a pane has once the person in
-/// it starts talking: a `p` park from the board, a gate, or a step landing
-/// on `blocked` with nobody staffed to clear it all leave the same lane
-/// sitting in the same pane, and none of the three is knowable ahead of the
-/// turn that might cause it. A stopped task belongs to whoever is looking at
-/// its pane — see `commands::task_edit` — so the one thing worth fixing in
-/// place, for every step, is that the lane's own remit stops being the
-/// ceiling on what it will do there.
+/// The `paused`/`blocked` bullet is fixed for every lane, gated or not,
+/// because composing happens once at launch and this file is all a pane has
+/// once the person in it starts talking: a `p` park from the board, a gate,
+/// or a step landing on `blocked` with nobody staffed to clear it all leave
+/// the same lane sitting in the same pane, and none of the three is knowable
+/// ahead of the turn that might cause it. A stopped task belongs to whoever
+/// is looking at its pane — see `commands::task_edit` — so the one thing
+/// worth fixing in place, for every step, is that the lane's own remit stops
+/// being the ceiling on what it will do there.
+///
+/// The bullet after it, closing `YOUR LANE`, is fixed the same way and for
+/// the same reason: what a person does about anything a lane leaves for
+/// them belongs on the board, never quoted here as a `spoolway` command a
+/// prompt could as easily just run and skip the person entirely.
 pub(crate) fn situating(
     pipeline: &Pipeline,
     step: &Step,
@@ -177,7 +182,8 @@ pub(crate) fn situating(
          - Commit as you go. Anything uncommitted is committed for you when you report.\n\
          - If this task is ever held on `paused` or `blocked` and a person carries on \
          talking in this pane, do what they ask — including work your step would \
-         otherwise leave to another. Resuming it stays theirs alone.\
+         otherwise leave to another. Resuming it stays theirs alone.\n\
+         - What a person has to do, name on the board, never as a `spoolway` command.\
          {what_you_have}\
          {what_you_write_down}",
         step = step.id,

@@ -2372,6 +2372,37 @@ impl Pipelines {
         problems
     }
 
+    /// How many pipeline files carry a retired shape and nothing worse — for
+    /// `doctor`'s own `pipelines load` row on the upgrade path, which wants a
+    /// count and not [`Pipelines::refusals`]'s own per-step prose: those
+    /// refusals are all things `sync` migrates, so naming the file count and
+    /// pointing at the update says what actually helps a person, rather than
+    /// reading as an instruction to hand-edit the file.
+    ///
+    /// `None` the moment any file in the directory refuses to deserialise at
+    /// all — a genuine syntax error, or one of the two keys that still parse
+    /// only to be refused (`deny_unknown_fields`, a still-parsing retired key
+    /// such as `max_rounds:`) — since the update cannot migrate that file,
+    /// and a caller falls back to [`Pipelines::refusals`]'s own detail rather
+    /// than call an unrelated parse failure "migrated" too. `None` as well
+    /// when nothing here found a retired shape at all.
+    pub fn retired_shape_file_count(root: &Path) -> Option<usize> {
+        let dir = Pipelines::dir_in(root);
+        let files = match read_pipeline_dir(&dir) {
+            Ok(Some(files)) => files,
+            Ok(None) | Err(_) => return None,
+        };
+        let mut count = 0;
+        for (_, raw) in &files {
+            match serde_norway::from_str::<Pipeline>(raw) {
+                Ok(pipeline) if !pipeline.retired_shape_problems().is_empty() => count += 1,
+                Ok(_) => {}
+                Err(_) => return None,
+            }
+        }
+        (count > 0).then_some(count)
+    }
+
     /// Load and validate from a repo root, with any patch under
     /// `~/.spoolway/<project>/overrides/pipelines/` merged onto each
     /// pipeline first — see [`crate::overrides`]. This is what every
@@ -4209,6 +4240,62 @@ mod tests {
                 .any(|p| p.starts_with("default.yml:") && p.contains("may not route back")),
             "{problems:?}"
         );
+    }
+
+    /// Every file behind carries only a retired shape — nothing an update
+    /// cannot fix — so the count is the number of files, not the number of
+    /// occurrences: `default.yml` above carries two retired shapes but is
+    /// one file.
+    #[test]
+    fn retired_shape_file_count_counts_files_not_occurrences() {
+        let root = crate::scratch::root("pipeline-retired-shape-file-count");
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = Pipelines::dir_in(&root);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("default.yml"),
+            "steps:\n  \
+             - id: implement\n    agent: pi\n    on_pass: checks\n  \
+             - id: checks\n    run: gh pr checks\n    loop:\n      checks: 3\n    \
+             on_pass: done\n    on_fail: checks\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("bugfix.yml"),
+            "steps:\n  \
+             - id: fix\n    agent: pi\n    on_pass: review\n  \
+             - id: review\n    agent: pi\n    loop:\n      fix: 2\n    on_pass: done\n    \
+             on_fail: fix\n",
+        )
+        .unwrap();
+
+        assert_eq!(Pipelines::retired_shape_file_count(&root), Some(2));
+    }
+
+    /// A genuine parse failure alongside a retired shape is not something an
+    /// update can migrate, so the count backs off to `None` rather than call
+    /// the broken file "migrated" too — the caller falls back to
+    /// `Pipelines::refusals`'s own per-file detail instead.
+    #[test]
+    fn retired_shape_file_count_is_none_beside_a_genuine_parse_failure() {
+        let root = crate::scratch::root("pipeline-retired-shape-file-count-mixed");
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = Pipelines::dir_in(&root);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("broken.yml"),
+            "steps:\n  - id: a\n    unknown_key: yes\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("default.yml"),
+            "steps:\n  \
+             - id: implement\n    agent: pi\n    on_pass: implement\n  \
+             - id: z\n    end: true\n",
+        )
+        .unwrap();
+
+        assert_eq!(Pipelines::retired_shape_file_count(&root), None);
     }
 
     /// And refused on a step an installation's own override also patches.

@@ -16619,7 +16619,9 @@ mod tests {
     /// can land in: no dependency, no gate, no arrived-by-fail paragraph, no
     /// failed command. Raised from 275 when `WHAT YOU WRITE DOWN` joined
     /// `WHAT YOU HAVE` in `YOUR LANE` — the three headings' built-in wording
-    /// costs around 60 words on its own.
+    /// costs around 60 words on its own. Raised again from 345 for `YOUR
+    /// LANE`'s own closing bullet naming the board, never a `spoolway`
+    /// command.
     #[test]
     fn the_composed_prompt_is_under_the_word_budget_for_the_plain_case() {
         let repo = fixture("prompt-word-budget");
@@ -16631,7 +16633,7 @@ mod tests {
 
         let prompt = crate::compose::system_prompt(&repo, &task, pipeline, step, role).unwrap();
         let words = prompt.replace(role, "").split_whitespace().count();
-        assert!(words < 345, "got {words} words:\n{prompt}");
+        assert!(words < 360, "got {words} words:\n{prompt}");
     }
 
     /// Every heading gap in the Mockup is exactly one blank line — never
