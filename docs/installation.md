@@ -252,7 +252,7 @@ What `sync` replaces, file by file:
 | File | What is replaced |
 |---|---|
 | `config.toml` | The comments and the settings reference. Your values stay. |
-| Pipeline file | Only the key reference between `# >>> spoolway >>>` and `# <<< spoolway <<<`. A file without the markers is left alone. |
+| Pipeline file | The key reference between `# >>> spoolway >>>` and `# <<< spoolway <<<`, plus three retired step shapes: a self-routing `on_fail:`, `loop:` written as a map, and `on_loop_max:`. A file without the markers is left alone. |
 | `.gitignore` | Only the old marked block, removed once. |
 | Skills | Every installed provider's skills, except a file changed by hand since it was last written by `install` or `sync`, which is left alone. |
 | Prompts | Nothing. |

@@ -48,6 +48,7 @@
 //! this machine's `PATH`, and file work is a fact about a checkout that has
 //! to exist first. See [`crate::update`] for the half that stayed there.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -67,6 +68,20 @@ pub enum Outcome {
     Wrote {
         path: String,
         detail: String,
+    },
+    /// A pipeline file rewritten to migrate a retired step shape — see
+    /// `crate::pipeline::migrate_retired_shapes`. Its own variant rather than
+    /// another [`Outcome::Wrote`], because its detail is one of the few this
+    /// report actually prints under the file's own `wrote` line, in both the
+    /// long form (`report`) `run`'s own report and `--dry-run` use and the
+    /// short one (`panel`) that fits `crate::gate`'s bounded confirm line —
+    /// an ordinary `Wrote`'s `detail` is never shown this way, and giving it
+    /// two forms besides would only invite it to grow long enough to need
+    /// them.
+    Migrated {
+        path: String,
+        report: String,
+        panel: String,
     },
     /// Already ours, or already current. Carries no path because nothing needs
     /// one: a file nothing was done to is a file nothing has to say about it,
@@ -104,6 +119,17 @@ impl Outcome {
         Outcome::Removed {
             path: path.into(),
             why: why.into(),
+        }
+    }
+    fn migrated(
+        path: impl Into<String>,
+        report: impl Into<String>,
+        panel: impl Into<String>,
+    ) -> Outcome {
+        Outcome::Migrated {
+            path: path.into(),
+            report: report.into(),
+            panel: panel.into(),
         }
     }
 }
@@ -146,6 +172,7 @@ pub fn run(repo: &Repo, args: &SyncArgs, json: bool) -> Result<()> {
     // wrote, or the person reading it would think a deletion was a rewrite.
     let outcomes = scan(repo, args)?;
     let (wrote, removed) = dedup_paths(&outcomes);
+    let notes = migration_notes(&outcomes);
     // A dry run reports the same paths in the conditional: "wrote" over a
     // tree nothing touched reads as a lie the moment `git status` is run.
     let (wrote_word, removed_word) = match args.dry_run {
@@ -154,6 +181,9 @@ pub fn run(repo: &Repo, args: &SyncArgs, json: bool) -> Result<()> {
     };
     for path in &wrote {
         println!("  {wrote_word} {path}");
+        for (report, _) in notes.get(path).into_iter().flatten() {
+            println!("               ({report})");
+        }
     }
     for (path, why) in &removed {
         println!("  {removed_word} {path}");
@@ -185,17 +215,45 @@ pub(crate) fn dedup_paths(outcomes: &[Outcome]) -> (Vec<&str>, Vec<(&str, &str)>
     let mut removed: Vec<(&str, &str)> = Vec::new();
     for outcome in outcomes {
         match outcome {
-            Outcome::Wrote { path, .. } if !wrote.contains(&path.as_str()) => wrote.push(path),
+            Outcome::Wrote { path, .. } | Outcome::Migrated { path, .. }
+                if !wrote.contains(&path.as_str()) =>
+            {
+                wrote.push(path)
+            }
             Outcome::Removed { path, why } if !removed.iter().any(|(p, _)| *p == path) => {
                 removed.push((path, why))
             }
             Outcome::Wrote { .. }
+            | Outcome::Migrated { .. }
             | Outcome::Removed { .. }
             | Outcome::Kept
             | Outcome::Blocked { .. } => {}
         }
     }
     (wrote, removed)
+}
+
+/// The `(migrated: …)` lines a scan's own [`Outcome::Migrated`] entries
+/// carry, keyed by path and kept in the order they were recorded — the
+/// extra explanation [`run`]'s own report and `crate::gate`'s confirm panel
+/// each draw under a pipeline file's `wrote` line, one tuple of `(report,
+/// panel)` per change so each surface reads the length it can afford.
+pub(crate) fn migration_notes(outcomes: &[Outcome]) -> BTreeMap<&str, Vec<(&str, &str)>> {
+    let mut notes: BTreeMap<&str, Vec<(&str, &str)>> = BTreeMap::new();
+    for outcome in outcomes {
+        if let Outcome::Migrated {
+            path,
+            report,
+            panel,
+        } = outcome
+        {
+            notes
+                .entry(path.as_str())
+                .or_default()
+                .push((report.as_str(), panel.as_str()));
+        }
+    }
+    notes
 }
 
 /// Every file spoolway owns here, and what would happen to it.
@@ -916,7 +974,7 @@ fn retired_templates(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) 
 /// wherever it is found and every line around it — the title, the steps, the
 /// notes between them — is copied through unread.
 ///
-/// Two departures from the rule the module doc states, both deliberate:
+/// Three departures from the rule the module doc states, all deliberate:
 ///
 /// - An edit inside the markers is discarded, not refused. This is
 ///   `config.toml`'s bargain, not a skeleton's: there is nothing in here for a
@@ -926,6 +984,13 @@ fn retired_templates(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) 
 ///   a block into a pipeline somebody wrote themselves would be this command
 ///   helping, which is the one thing it must never do. Pasting the two markers
 ///   in is how a pipeline opts in.
+/// - The three retired step shapes — an `on_fail:` naming its own step,
+///   `loop:` as the old per-route map, and `on_loop_max:` — are migrated
+///   ahead of the fence, on any file that has opted in. Unlike the key
+///   reference this does read into a step, but it still never re-serialises
+///   one: [`crate::pipeline::migrate_retired_shapes`] edits the file's own
+///   text, so everything else about a step — its prose, its key order, the
+///   blank lines around it — is copied through unread the same as ever.
 fn pipelines(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Result<()> {
     // `checkout`, not `root`: the pipelines are as tracked as the prompts
     // and the task skeletons `shipped_for` above already reads from there,
@@ -985,10 +1050,14 @@ fn pipelines(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Resul
         };
 
         let region = crate::pipeline::KEY_BLOCK;
-        let Some(found) = region.read(&on_disk) else {
+        if region.read(&on_disk).is_none() {
             // Half a fence is the one shape worth saying something about: the
             // lines under a start marker with no end could be anyone's, so
-            // nothing is written and the missing marker is named.
+            // nothing is written and the missing marker is named. No markers
+            // at all means the file never opted in, and the retired shapes
+            // below are left alone right along with the key reference — see
+            // this function's own doc on why an unfenced file is never ours
+            // to touch.
             let opened = on_disk
                 .lines()
                 .any(|line| line.trim() == crate::assets::PIPELINE_KEYS_BEGIN);
@@ -1005,21 +1074,48 @@ fn pipelines(repo: &Repo, args: &SyncArgs, outcomes: &mut Vec<Outcome>) -> Resul
                 false => Outcome::Kept,
             });
             continue;
-        };
+        }
 
+        // The three retired step shapes migrated ahead of the key
+        // reference: each rewrites this file's own text, never re-parsing
+        // it back out to serde, so re-reading the fence just below still
+        // finds it exactly where it was — see
+        // `crate::pipeline::migrate_retired_shapes`.
+        let mut on_disk = on_disk;
+        let mut changed = false;
+        if let Some((migrated_text, changes)) = crate::pipeline::migrate_retired_shapes(&on_disk) {
+            on_disk = migrated_text;
+            changed = true;
+            for change in changes {
+                outcomes.push(Outcome::migrated(
+                    &shown,
+                    format!("migrated: {}", change.report),
+                    format!("migrated: {}", change.panel),
+                ));
+            }
+        }
+
+        let found = region
+            .read(&on_disk)
+            .expect("migrate_retired_shapes never touches the fenced key reference");
         if crate::skeleton::same(found, crate::pipeline::key_block()) {
             outcomes.push(Outcome::Kept);
-            continue;
+        } else {
+            match region.replace(&on_disk, crate::pipeline::key_block()) {
+                Some(next) => {
+                    on_disk = next;
+                    changed = true;
+                    outcomes.push(Outcome::wrote(&shown, "key reference refreshed"));
+                }
+                None => {
+                    outcomes.push(Outcome::blocked(&shown, "its block moved while we read it"));
+                }
+            }
         }
 
-        let Some(next) = region.replace(&on_disk, crate::pipeline::key_block()) else {
-            outcomes.push(Outcome::blocked(&shown, "its block moved while we read it"));
-            continue;
-        };
-        if !args.dry_run {
-            write_atomic(&path, &next)?;
+        if changed && !args.dry_run {
+            write_atomic(&path, &on_disk)?;
         }
-        outcomes.push(Outcome::wrote(&shown, "key reference refreshed"));
     }
     Ok(())
 }
@@ -1235,6 +1331,7 @@ mod tests {
             .iter()
             .map(|outcome| match outcome {
                 Outcome::Wrote { path, detail } => format!("wrote {path} ({detail})"),
+                Outcome::Migrated { path, report, .. } => format!("migrated {path} ({report})"),
                 Outcome::Kept => "kept".to_string(),
                 Outcome::Blocked { path, why } => format!("blocked {path}: {why}"),
                 Outcome::Removed { path, why } => format!("removed {path}: {why}"),
@@ -1800,6 +1897,72 @@ mod tests {
             outcome_lines(&outcomes)
                 .iter()
                 .all(|line| !line.contains("mine.yml")),
+            "{:?}",
+            outcome_lines(&outcomes)
+        );
+    }
+
+    /// `spoolway sync` migrates a pipeline file's three retired step shapes
+    /// in the same pass it refreshes the key reference: the result loads,
+    /// the migration is named as an `Outcome::Migrated` under the file's own
+    /// path, and the key reference is current too.
+    #[test]
+    fn sync_migrates_a_pipelines_retired_shapes_and_refreshes_its_key_reference() {
+        let repo = fixture("pipeline-retired-shapes");
+        let dir = crate::pipeline::Pipelines::dir_in(&repo.root);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bugfix.yml");
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n# a stale key reference this sync also brings forward\n{}\n\nsteps:\n  \
+                 - id: fix\n    agent: pi\n    on_pass: review\n  \
+                 - id: review\n    agent: pi\n    loop:\n      fix: 2\n    on_pass: checks\n    \
+                 on_fail: fix\n  \
+                 - id: checks\n    run: gh pr checks\n    loop:\n      checks: 3\n    \
+                 on_pass: done\n    on_fail: checks\n",
+                crate::assets::PIPELINE_KEYS_BEGIN,
+                crate::assets::PIPELINE_KEYS_END
+            ),
+        )
+        .unwrap();
+
+        let mut outcomes = Vec::new();
+        pipelines(&repo, &args(), &mut outcomes).unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+
+        assert!(after.contains(crate::pipeline::key_block()), "{after}");
+        assert!(
+            after.contains("    loop: 3\n    on_pass: review"),
+            "{after}"
+        );
+        assert!(!after.contains("on_fail: checks"), "{after}");
+        assert!(!after.contains("checks: 3"), "{after}");
+        crate::pipeline::Pipeline::parse("bugfix", &after).expect("migrated file must load");
+
+        let migrated: Vec<(&str, &str)> = outcomes
+            .iter()
+            .filter_map(|o| match o {
+                Outcome::Migrated { path, report, .. } => Some((path.as_str(), report.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            migrated
+                .iter()
+                .any(|(p, r)| p.contains("bugfix.yml") && r.contains("no longer routes a failure")),
+            "{migrated:?}"
+        );
+        assert!(
+            migrated
+                .iter()
+                .any(|(p, r)| p.contains("bugfix.yml") && r.contains("became `loop: 3` on `fix`")),
+            "{migrated:?}"
+        );
+        assert!(
+            outcome_lines(&outcomes)
+                .iter()
+                .any(|line| line.starts_with("wrote") && line.contains("key reference refreshed")),
             "{:?}",
             outcome_lines(&outcomes)
         );

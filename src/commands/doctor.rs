@@ -400,7 +400,10 @@ pub fn doctor(
     let pipelines = match pipelines {
         Ok(pipelines) => pipelines,
         Err(err) => {
-            report.check("pipelines load", Err(err));
+            report.check(
+                "pipelines load",
+                pipelines_load_outcome(&repo.checkout, err),
+            );
             report.record_all(config_checks(repo, config_error, &config));
             report.record_all(issue_tracking_checks(repo, &config.issue_tracking));
             report.record_all(retired_key_notes(&repo.checkout));
@@ -1768,6 +1771,22 @@ fn doctor_sync(repo: &Repo, report: &mut Report) {
     }
 }
 
+/// The `pipelines load` row's own outcome, once loading has already failed
+/// with `err`: every retired-shape refusal across every pipeline file, if
+/// there are any — see [`crate::pipeline::Pipelines::refusals`] — so a
+/// project meets all of them at once instead of only the one `err` itself
+/// stopped at; the original `err` otherwise, unchanged, for a load failure
+/// none of the three retired shapes explains. Split out from [`doctor`] so
+/// it can be tested without driving the whole command.
+fn pipelines_load_outcome(root: &Path, err: anyhow::Error) -> Result<Option<String>> {
+    let refusals = crate::pipeline::Pipelines::refusals(root);
+    if refusals.is_empty() {
+        Err(err)
+    } else {
+        Err(anyhow::anyhow!(refusals.join("; ")))
+    }
+}
+
 /// The notes [`doctor_sync`] records for a dry `sync` scan — one line per
 /// file, the mockup's own wording, with the reason `sync` would rewrite it
 /// left out: that reason is often a list of every setting a config has
@@ -1798,6 +1817,7 @@ fn sync_notes(outcomes: &[crate::sync::Outcome], initialised: bool) -> Vec<Strin
             // gains a setting and has a note rewritten in the same pass — and
             // this is one line per file, not per reason.
             crate::sync::Outcome::Wrote { path, .. }
+            | crate::sync::Outcome::Migrated { path, .. }
             | crate::sync::Outcome::Removed { path, .. } => {
                 if !behind.contains(&path.as_str()) {
                     behind.push(path);
@@ -2846,6 +2866,57 @@ mod tests {
                 ".spoolway/prompts/a.md is behind this spoolway".to_string(),
             ]
         );
+    }
+
+    /// The `pipelines load` row lists every retired-shape refusal across
+    /// every pipeline file, not only the one `Pipelines::load` itself
+    /// stopped at — `doctor`'s own half of acceptance criterion 4, tested
+    /// directly rather than through the whole command.
+    #[test]
+    fn pipelines_load_outcome_lists_every_retired_shape_refusal() {
+        let root = crate::scratch::root("doctor-pipelines-load-outcome");
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = crate::pipeline::Pipelines::dir_in(&root);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("default.yml"),
+            "steps:\n  \
+             - id: implement\n    agent: pi\n    on_pass: checks\n  \
+             - id: checks\n    run: gh pr checks\n    loop:\n      checks: 3\n    \
+             on_pass: done\n    on_fail: checks\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("bugfix.yml"),
+            "steps:\n  \
+             - id: fix\n    agent: pi\n    on_pass: review\n  \
+             - id: review\n    agent: pi\n    loop:\n      fix: 2\n    on_pass: done\n    \
+             on_fail: fix\n",
+        )
+        .unwrap();
+
+        let err = pipelines_load_outcome(&root, anyhow::anyhow!("stale error, superseded"))
+            .expect_err("both files still carry a retired shape");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("default.yml:") && message.contains("bugfix.yml:"),
+            "{message}"
+        );
+        assert!(!message.contains("stale error"), "{message}");
+    }
+
+    /// A load failure outside the three retired shapes — nothing for
+    /// `Pipelines::refusals` to say — falls back to the original error
+    /// unchanged, exactly what `doctor` always printed here.
+    #[test]
+    fn pipelines_load_outcome_falls_back_to_the_original_error_otherwise() {
+        let root = crate::scratch::root("doctor-pipelines-load-outcome-fallback");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let err = pipelines_load_outcome(&root, anyhow::anyhow!("no pipelines defined"))
+            .expect_err("nothing here to migrate");
+        assert_eq!(format!("{err:#}"), "no pipelines defined");
     }
 
     /// A file `sync` refused — hand-edited where only a machine reads — is

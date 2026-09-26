@@ -826,14 +826,25 @@ pub fn pipeline_check(repo: &Repo, pipelines: Result<Pipelines>, json: bool) -> 
     }
 
     // A pipeline file that will not load does not stop this check — it is
-    // reported as the one problem, and nothing else is derived: there is no
-    // loaded set left to check a step, a skip, or a prompt against, and the
-    // embedded samples are release-time proof, not this project's own.
+    // reported, and nothing else is derived: there is no loaded set left to
+    // check a step, a skip, or a prompt against, and the embedded samples
+    // are release-time proof, not this project's own. A project carrying
+    // one of the three retired step shapes `spoolway sync` migrates hears
+    // about every occurrence at once, across every pipeline file, rather
+    // than the one `Pipelines::load` itself stopped at — see
+    // `crate::pipeline::Pipelines::refusals`.
     let pipelines = match pipelines {
         Ok(pipelines) => pipelines,
         Err(err) => {
-            println!("  problem: pipelines do not load: {err:#}");
-            bail!("1 problem(s) found");
+            let refusals = crate::pipeline::Pipelines::refusals(&repo.checkout);
+            if refusals.is_empty() {
+                println!("  problem: pipelines do not load: {err:#}");
+                bail!("1 problem(s) found");
+            }
+            for refusal in &refusals {
+                println!("  problem: {refusal}");
+            }
+            bail!("{} problem(s) found", refusals.len());
         }
     };
     let pipelines = &pipelines;
@@ -1218,6 +1229,56 @@ mod tests {
             "the load failure is the only counted problem — nothing from the embedded \
              samples is appended behind it: {err}"
         );
+    }
+
+    /// A project carrying one of the three retired step shapes `spoolway
+    /// sync` migrates hears about every occurrence at once — across every
+    /// pipeline file — rather than only the first one `Pipelines::load`
+    /// itself stopped at.
+    #[test]
+    fn pipeline_check_lists_every_retired_shape_refusal_not_just_the_first() {
+        let root = crate::scratch::root("commands-pipeline-check-retired-shapes");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        crate::scratch::git_init(&root, &["-b", "plan/demo"]);
+        init_at(&root);
+
+        let dir = crate::pipeline::Pipelines::dir_in(&root);
+        std::fs::write(
+            dir.join("default.yml"),
+            "steps:\n  \
+             - id: implement\n    agent: pi\n    on_pass: checks\n  \
+             - id: checks\n    run: gh pr checks\n    loop:\n      checks: 3\n    \
+             on_pass: done\n    on_fail: checks\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("bugfix.yml"),
+            "steps:\n  \
+             - id: fix\n    agent: pi\n    on_pass: review\n  \
+             - id: review\n    agent: pi\n    loop:\n      fix: 2\n    on_pass: done\n    \
+             on_fail: fix\n",
+        )
+        .unwrap();
+
+        let repo = Repo {
+            home: root.join(".home"),
+            checkout: root.clone(),
+            root,
+            config: Config::default(),
+        };
+
+        let err = pipeline_check(
+            &repo,
+            Err(anyhow::anyhow!("stale error, superseded below")),
+            false,
+        )
+        .expect_err("both files still carry a retired shape");
+        let message = err.to_string();
+        let count: usize = message.split_whitespace().next().unwrap().parse().unwrap();
+        // default.yml: `checks` self-routes and its own `loop:` is a map — two.
+        // bugfix.yml: `review`'s `loop:` is a map, naming `fix` — one more.
+        assert_eq!(count, 3, "{message}");
     }
 
     /// The bug this task fixed: a project that owns no `bugfix.yml` of its

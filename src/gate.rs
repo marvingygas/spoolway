@@ -182,6 +182,7 @@ fn confirm_sync_gate_with(
     };
     let outcomes = crate::sync::scan(repo, &dry)?;
     let (wrote, removed) = crate::sync::dedup_paths(&outcomes);
+    let notes = crate::sync::migration_notes(&outcomes);
     let count = wrote.len() + removed.len();
     if count == 0 {
         return Ok(true);
@@ -203,7 +204,7 @@ fn confirm_sync_gate_with(
         return Ok(true);
     }
 
-    print_panel(out, &wrote, &removed)?;
+    print_panel(out, &wrote, &notes, &removed)?;
 
     // Taken only now, right before the first read that can actually block —
     // the same reason `overrides_gate_with` waits this long: every branch
@@ -254,13 +255,22 @@ fn fit(line: String) -> String {
 /// Draw the panel itself: [`TITLE`] reads as a sentence in its own right
 /// now, so a blank row separates it from the list rather than running the
 /// two together — then what `sync` would write, in the order the mockup
-/// draws it: every write, then every removal with its reason on the line
-/// under it, then the one sentence that answers "did it eat my config?"
-/// before anybody has pressed anything.
-fn print_panel(out: &mut impl Write, wrote: &[&str], removed: &[(&str, &str)]) -> Result<()> {
+/// draws it: every write, with a retired-shape migration's own short note
+/// under it where `notes` carries one, then every removal with its reason on
+/// the line under it, then the one sentence that answers "did it eat my
+/// config?" before anybody has pressed anything.
+fn print_panel(
+    out: &mut impl Write,
+    wrote: &[&str],
+    notes: &std::collections::BTreeMap<&str, Vec<(&str, &str)>>,
+    removed: &[(&str, &str)],
+) -> Result<()> {
     let mut body = vec![String::new()];
     for path in wrote {
         body.push(fit(format!("{:<6}  {path}", "write")));
+        for (_, panel) in notes.get(path).into_iter().flatten() {
+            body.push(fit(format!("        ({panel})")));
+        }
     }
     for (path, why) in removed {
         body.push(fit(format!("{:<6}  {path}", "remove")));
@@ -594,7 +604,7 @@ mod tests {
         let long = "a/very/long/path/".repeat(6) + "SKILL.md";
         let wrote = [long.as_str()];
         let mut out = Vec::new();
-        print_panel(&mut out, &wrote, &[]).unwrap();
+        print_panel(&mut out, &wrote, &std::collections::BTreeMap::new(), &[]).unwrap();
         let printed = String::from_utf8(out).unwrap();
         for line in printed.lines() {
             assert!(
