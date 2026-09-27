@@ -114,7 +114,7 @@ pub(crate) fn system_prompt(
         situating = situating(pipeline, step, task, repo)?,
         prompt = prompt.trim(),
         policy = policy(repo, task, pipeline, step),
-        contract = report_contract(task, step),
+        contract = report_contract(task, pipeline, step),
     ))
 }
 
@@ -377,6 +377,7 @@ fn toolbox() -> String {
      `spoolway queue list` — every task, and where each sits\n\
      `spoolway queue show <task>` — one task's file, goal to `## Status Log`\n\
      `spoolway lane` — this run's lanes; name one for its transcript\n\
+     `spoolway prompt show <name>` — the craft a step's lane is briefed with\n\
      `spoolway resume <task>` — put another stopped task back on its step; not\n  \
      one waiting on a gate, and never with `--stage`"
         .to_string()
@@ -394,6 +395,7 @@ fn toolbox() -> String {
 /// form rather than a paragraph.
 pub(crate) fn policy(repo: &Repo, task: &Task, pipeline: &Pipeline, step: &Step) -> String {
     let paragraphs: Vec<String> = [
+        stands_in_for_paragraph(task, pipeline, step),
         arrived_by_fail_paragraph(task, pipeline, step),
         failed_command(repo, task, pipeline, step),
     ]
@@ -404,6 +406,58 @@ pub(crate) fn policy(repo: &Repo, task: &Task, pipeline: &Pipeline, step: &Step)
         true => String::new(),
         false => format!("{}\n\n", paragraphs.join("\n\n")),
     }
+}
+
+/// `blocked` alone: which step this pass stands in for, and where its craft
+/// is written — a prompt never names spoolway's own mechanisms, and the step
+/// changes with every task, so this is the only place a lane on `blocked` can
+/// learn either fact.
+///
+/// Read off `commands::resume_target`, the same lookup a plain `--pass`
+/// itself resolves against — never the pipeline's entry, and never
+/// `blocked` itself. Empty wherever that resolves to a stage this pipeline
+/// does not define as a step (the sample task `spoolway prompt contract`
+/// renders with no real task carries no `blocked_from` and so no origin to
+/// name), rather than guessing one.
+///
+/// The step's own `description:` is data a pipeline already declares, not a
+/// paraphrase of its prompt — the one fact this can state without pasting a
+/// word of that prompt's own prose into `blocked`'s. A command step's
+/// craft is the line it runs, told to run again once this pass carries the
+/// task past it; an agent step's is the prompt it reads, pointed at rather
+/// than quoted, through the one command this file may name.
+fn stands_in_for_paragraph(task: &Task, pipeline: &Pipeline, step: &Step) -> String {
+    if step.id != crate::pipeline::BLOCKED {
+        return String::new();
+    }
+    let origin_id = crate::commands::resume_target(task, pipeline);
+    let Some(origin) = pipeline.step(&origin_id) else {
+        return String::new();
+    };
+
+    let craft = match origin.run.as_deref() {
+        Some(run) => format!(
+            "Its craft is the command `{run}`, which runs again once your pass carries this \
+             task past it."
+        ),
+        None => {
+            let prompt = origin.prompt_name();
+            format!("Its craft is prompt `{prompt}`:\n`spoolway prompt show {prompt}`.")
+        }
+    };
+
+    let description = origin
+        .description
+        .as_deref()
+        .map(|d| format!("{d} "))
+        .unwrap_or_default();
+
+    format!(
+        "`{task}` stopped at `{origin}`: {description}Your pass stands in for that step's \
+         work. {craft}",
+        task = task.id(),
+        origin = origin.id,
+    )
 }
 
 /// The step this task arrived from, when this pass exists because that
@@ -534,8 +588,10 @@ const HANDOFF: Form = (
 );
 
 /// Render a list of [`Form`]s as `report_contract` prints them: the command
-/// line, a blank line, its explanation, a blank line, the next form.
-fn render_forms(forms: &[Form]) -> String {
+/// line, a blank line, its explanation, a blank line, the next form. Takes
+/// any lifetime, not only `'static`: `blocked`'s own `--stage` form has an
+/// explanation built per task, not one of the fixed [`Form`] constants.
+fn render_forms(forms: &[(&str, &str)]) -> String {
     forms
         .iter()
         .map(|(line, explanation)| format!("{line}\n\n{explanation}"))
@@ -591,15 +647,34 @@ fn render_forms(forms: &[Form]) -> String {
 /// and nothing else, so it reads *a pass is held here*; a task's own
 /// `gate_at` catches whatever is reported, so it reads *this report is held
 /// here, whatever it is*.
-pub(crate) fn report_contract(task: &Task, step: &Step) -> String {
+pub(crate) fn report_contract(task: &Task, pipeline: &Pipeline, step: &Step) -> String {
     use crate::pipeline::Outcome;
 
     let blocked = step.id == crate::pipeline::BLOCKED;
     let fail_redundant =
         !blocked && step.destination(Outcome::Fail) == step.destination(Outcome::Block);
 
+    // Where this task actually stopped — `blocked` alone, and only to ask
+    // two questions of it: whether the first gated step at or after there
+    // bounds `--stage`, and whether the origin itself is that step, in which
+    // case a plain `--pass` is held there too. Empty for the sample task
+    // `spoolway prompt contract` renders with no real task, which carries no
+    // `blocked_from` to name.
+    let origin = blocked.then(|| crate::commands::resume_target(task, pipeline));
+    let stage_gate = origin
+        .as_deref()
+        .and_then(|origin| crate::commands::first_gated_from(pipeline, origin));
+
     let forms = if blocked {
-        render_forms(&[BLOCKED_PASS, BLOCKED_PASS_STAGE, BLOCKED_PAUSE, HANDOFF])
+        let stage_explanation = match &stage_gate {
+            Some(gate_step) => format!(
+                "  The same, except you name where the task goes next. Only a step\n  \
+                 this task has already been through, and never one past `{gate_step}`."
+            ),
+            None => BLOCKED_PASS_STAGE.1.to_string(),
+        };
+        let blocked_stage: (&str, &str) = (BLOCKED_PASS_STAGE.0, stage_explanation.as_str());
+        render_forms(&[BLOCKED_PASS, blocked_stage, BLOCKED_PAUSE, HANDOFF])
     } else if fail_redundant {
         render_forms(&[PASS, BLOCK, HANDOFF])
     } else {
@@ -631,13 +706,26 @@ pub(crate) fn report_contract(task: &Task, step: &Step) -> String {
         contract.push_str(lines.trim_end());
     }
 
-    let hypothetical_destination = step
-        .destination(Outcome::Pass)
-        .unwrap_or(crate::pipeline::BLOCKED)
-        .to_string();
-    if let Some(gate) =
-        crate::commands::gate_hold(task, step, Outcome::Pass, &hypothetical_destination)
-    {
+    // `blocked` asks this of the step it stands in for, not of itself: a
+    // plain `--pass` is taken at the unblocker's word for `origin`, so
+    // `origin`'s own `gate: true` is what would hold it — never `blocked`'s,
+    // which no pipeline may even declare. A task's own `gate_at` plays no
+    // part here: it catches this step's outcome before the task ever reaches
+    // `blocked` — see `commands::report::route`'s own doc.
+    let gate = match &origin {
+        Some(origin) => pipeline
+            .step(origin)
+            .filter(|step| step.gate)
+            .map(|_| crate::commands::Gate::Step),
+        None => {
+            let hypothetical_destination = step
+                .destination(Outcome::Pass)
+                .unwrap_or(crate::pipeline::BLOCKED)
+                .to_string();
+            crate::commands::gate_hold(task, step, Outcome::Pass, &hypothetical_destination)
+        }
+    };
+    if let Some(gate) = gate {
         let line = match gate {
             crate::commands::Gate::Step => "A pass is held here for a person, who opens this pane.",
             crate::commands::Gate::Schedule => {
@@ -780,11 +868,11 @@ pub(crate) fn park_prompt(task: &Task, _pipeline: &Pipeline, escalated: bool) ->
 /// repeating the report contract it was launched with. Its own function
 /// rather than inlined at the one call site, so `spoolway prompt contract`
 /// can render it too, against the same wording a real nudge would use.
-pub(crate) fn reminder_prompt(task: &Task, step: &Step) -> String {
+pub(crate) fn reminder_prompt(task: &Task, pipeline: &Pipeline, step: &Step) -> String {
     format!(
         "`{}` ended its turn without reporting.\n\n{}",
         step.id,
-        report_contract(task, step),
+        report_contract(task, pipeline, step),
     )
 }
 
@@ -806,7 +894,7 @@ pub(crate) fn lane_prompt_for_state(
         "carry" => carry_prompt(task, pipeline),
         "park" => park_prompt(task, pipeline, false),
         "park-escalated" => park_prompt(task, pipeline, true),
-        "reminder" => reminder_prompt(task, step),
+        "reminder" => reminder_prompt(task, pipeline, step),
         _ => String::new(),
     }
 }

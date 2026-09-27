@@ -2923,7 +2923,7 @@ impl<'a> Dispatcher<'a> {
                 return Ok(());
             }
 
-            let nudge = crate::compose::reminder_prompt(task, step);
+            let nudge = crate::compose::reminder_prompt(task, pipeline, step);
             self.mux.prompt(&lane.name, &nudge)?;
             // Baselined *after* the nudge lands, not before. A lane with no
             // session to read its transcript by falls back to hashing the
@@ -16258,8 +16258,8 @@ mod tests {
 
         // The report contract is where the two finally differ: the gated
         // step's carries the fact, the plain one's does not.
-        let gated_contract = crate::compose::report_contract(&task, gated_step);
-        let plain_contract = crate::compose::report_contract(&task, plain_step);
+        let gated_contract = crate::compose::report_contract(&task, &pipeline, gated_step);
+        let plain_contract = crate::compose::report_contract(&task, &pipeline, plain_step);
         assert!(
             gated_contract.contains("A pass is held here for a person, who opens this pane."),
             "got: {gated_contract}"
@@ -16318,6 +16318,106 @@ mod tests {
         assert!(
             !implement_prompt.contains("spoolway resume"),
             "{implement_prompt}"
+        );
+    }
+
+    /// The Mockup this task is built from, word for word: a task blocked at
+    /// `look` — a gated agent step — is told, in its own `THIS PASS`, which
+    /// step its pass stands in for, that its craft is prompt `looker`, and
+    /// where to read it; the toolbox gains the `spoolway prompt show <name>`
+    /// line; and the report contract's `--stage` form names `look` as the
+    /// furthest it may go, closing with the same "a pass is held here"
+    /// sentence a gated step's own lane would get.
+    #[test]
+    fn the_unblockers_contract_names_the_gated_step_it_stands_in_for() {
+        let repo = fixture("unblocker-gate-contract");
+        let yaml = "steps:\n  \
+                     - id: implement\n    agent: pi\n    on_pass: review\n  \
+                     - id: review\n    agent: pi\n    on_pass: look\n  \
+                     - id: look\n    \
+                       description: Open the changed screen, drive it, and read back what it actually renders.\n    \
+                       agent: pi\n    prompt: looker\n    gate: true\n    on_pass: e2e\n  \
+                     - id: e2e\n    agent: pi\n    on_pass: done\n  \
+                     - id: blocked\n    agent: pi\n    session: true\n";
+        let pipeline = crate::pipeline::Pipeline::parse("impl_ui", yaml).unwrap();
+        let blocked_step = pipeline.step(crate::pipeline::BLOCKED).unwrap();
+
+        let task = reload(&add_task_with(
+            &repo,
+            "tab-shell",
+            crate::pipeline::BLOCKED,
+            |f| f.blocked_from = Some("look".into()),
+        ));
+
+        let prompt = sent(&repo, &task, &pipeline, blocked_step);
+        assert!(
+            prompt.contains(
+                "`spoolway prompt show <name>` — the craft a step's lane is briefed with"
+            ),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains(
+                "`tab-shell` stopped at `look`: Open the changed screen, drive it, and read \
+                 back what it actually renders. Your pass stands in for that step's work. Its \
+                 craft is prompt `looker`:\n`spoolway prompt show looker`."
+            ),
+            "{prompt}"
+        );
+
+        let contract = crate::compose::report_contract(&task, &pipeline, blocked_step);
+        assert!(
+            contract.contains("and never one past `look`."),
+            "{contract}"
+        );
+        assert!(
+            contract.contains("A pass is held here for a person, who opens this pane."),
+            "{contract}"
+        );
+    }
+
+    /// The command-step half of the same contract: `blocked_from` names a
+    /// step whose craft is a shell command rather than a prompt, and this
+    /// pass is told the command runs again once it carries the task past it
+    /// — never a prompt to read that does not exist. Ungated, so the report
+    /// contract's `--stage` form and trailing sentence both stay unchanged.
+    #[test]
+    fn the_unblockers_contract_names_a_command_steps_own_craft() {
+        let repo = fixture("unblocker-command-contract");
+        let yaml = "steps:\n  \
+                     - id: build\n    run: cargo build --release\n    on_pass: done\n  \
+                     - id: blocked\n    agent: pi\n    session: true\n";
+        let pipeline = crate::pipeline::Pipeline::parse("solo", yaml).unwrap();
+        let blocked_step = pipeline.step(crate::pipeline::BLOCKED).unwrap();
+
+        let task = reload(&add_task_with(
+            &repo,
+            "release-cut",
+            crate::pipeline::BLOCKED,
+            |f| f.blocked_from = Some("build".into()),
+        ));
+
+        let prompt = sent(&repo, &task, &pipeline, blocked_step);
+        assert!(
+            prompt.contains(
+                "`release-cut` stopped at `build`: Your pass stands in for that step's work. \
+                 Its craft is the command `cargo build --release`, which runs again once your \
+                 pass carries this task past it."
+            ),
+            "{prompt}"
+        );
+
+        let contract = crate::compose::report_contract(&task, &pipeline, blocked_step);
+        assert!(
+            !contract.contains("A pass is held here for a person"),
+            "{contract}"
+        );
+        assert!(
+            contract.contains(
+                "The same, except you name where the task goes next. Only a step\n  \
+                 this task has already been through."
+            ),
+            "an ungated origin leaves the stage form's own explanation untouched: {contract}"
         );
     }
 

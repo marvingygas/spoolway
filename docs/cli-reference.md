@@ -967,13 +967,15 @@ spoolway report --fail -m "review found a missing migration" --handoff "add the 
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--pass` | | The step succeeded. Route along `on_pass` |
-| `--stage <STEP>` | | Only with `--pass` on `blocked`: land on `<STEP>` instead of the default. `<STEP>` must be one this task has already run |
+| `--pass` | | The step succeeded. Route along `on_pass`. On `blocked`, when the step this pass stands in for is `gate: true`, it lands on `paused` at that step's own gate instead |
+| `--stage <STEP>` | | Only with `--pass` on `blocked`: land on `<STEP>` instead of the default. `<STEP>` must be one this task has already run, and never one past a gate this pass has not answered for |
 | `--fail` | | The step failed. Route along `on_fail` |
 | `--block` | | Something outside the step is in the way. Escalate |
 | `--pause` | | Only on `blocked`: park the task on `paused` for a person |
 | `-m`, `--message <TEXT>` | | One line for the status log |
 | `--handoff <TEXT>` | | One thing the next step should know. Repeatable. Written into `## Handoff` |
+
+See [Gates](pipelines.md#gates).
 
 ### `spoolway stack [<task>]`
 
