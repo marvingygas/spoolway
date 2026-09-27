@@ -2081,10 +2081,6 @@ fn distinct<'a>(
         .collect()
 }
 
-fn group_candidates(loaded: &Loaded) -> Vec<String> {
-    distinct(loaded.entries.iter(), |e| e.plan.as_deref())
-}
-
 fn pipeline_candidates(loaded: &Loaded) -> Vec<String> {
     distinct(loaded.entries.iter(), |e| Some(e.pipeline.as_str()))
 }
@@ -2111,19 +2107,6 @@ fn version_candidates(loaded: &Loaded, filters: &Filters) -> Vec<String> {
             .filter(|e| pipeline.is_none_or(|p| e.pipeline == p)),
         |e| Some(e.pipeline_version.as_str()),
     )
-}
-
-/// Only the tasks every other lanes row leaves on the table — a project's
-/// whole task list is far too long to cycle through one at a time, and
-/// most of it would narrow the table to nothing.
-fn task_candidates(loaded: &Loaded, filters: &Filters) -> Vec<String> {
-    let others = LaneFilters {
-        task: None,
-        ..filters.lanes()
-    };
-    distinct(loaded.entries.iter().filter(|e| others.admits(e)), |e| {
-        Some(e.task.as_str())
-    })
 }
 
 /// Every directory the table can show — the watched roots and every
@@ -2699,7 +2682,7 @@ fn draw(
     // about to be drawn on it needs padding the other way, or `overlay`
     // writes past the frame's own last row and the panel loses its bottom
     // border. Reproduced on a small ledger, where the table itself is only a
-    // few lines tall and the filter panel is fourteen.
+    // few lines tall and the filter panel is twelve.
     let overlay_panel: Option<Vec<String>> = match &state.mode {
         // Wrapped to the frame's own width, not just split on the newlines
         // `body` already carries: an error message from `load` — a bad
@@ -2716,7 +2699,7 @@ fn draw(
                 None => boxed(title, &lines),
             })
         }
-        Mode::Filter(draft) => Some(filter_panel(draft)),
+        Mode::Filter(draft) => Some(filter_panel(loaded, draft)),
         Mode::Calendar {
             field,
             year,
@@ -2779,12 +2762,12 @@ fn screen_unpriced_note(loaded: &Loaded, filters: &Filters, table: TableKind) ->
 /// two opens a calendar rather than applying. `scope` is not a row here at
 /// all: the screen only ever opens bare, so it can only ever hold the
 /// default it opened with, and a row with a single possible answer is not a
-/// question.
+/// question. Nor are `group` and `task`: a project can hold tens of
+/// thousands of either, far too many to step through one `→` at a time, so
+/// only `--group` and `--task` set them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FilterField {
     By,
-    Group,
-    Task,
     Pipeline,
     Step,
     Version,
@@ -2801,8 +2784,6 @@ fn filter_fields(table: TableKind) -> &'static [FilterField] {
     match table {
         TableKind::Lanes => &[
             FilterField::By,
-            FilterField::Group,
-            FilterField::Task,
             FilterField::Pipeline,
             FilterField::Step,
             FilterField::Version,
@@ -3149,10 +3130,6 @@ fn handle_filter_change(loaded: &Loaded, draft: &mut Draft, forward: bool) {
             TableKind::Lanes => f.by = cycle_by(&EvalBy::ALL, f.by, forward),
             TableKind::Dirs => f.dir_by = cycle_by(&DirBy::ALL, f.dir_by, forward),
         },
-        FilterField::Group => f.group = cycle_option(&group_candidates(loaded), &f.group, forward),
-        FilterField::Task => {
-            f.task = cycle_option(&task_candidates(loaded, f), &f.task, forward);
-        }
         FilterField::Pipeline => {
             f.pipeline = cycle_option(&pipeline_candidates(loaded), &f.pipeline, forward);
         }
@@ -3170,39 +3147,28 @@ fn handle_filter_change(loaded: &Loaded, draft: &mut Draft, forward: bool) {
 }
 
 /// Clear any row a change elsewhere has left naming a value that is no
-/// longer on offer — a step the newly chosen pipeline never ran, a task the
-/// newly chosen group never held. Cleared rather than kept, because `enter`
-/// would apply it as a filter that silently matches nothing. Run to a fixed
-/// point: clearing a step can bring a task back into range, never the other
-/// way round, so two passes always settle it.
+/// longer on offer — a step or a version the newly chosen pipeline never
+/// ran. Cleared rather than kept, because `enter` would apply it as a filter
+/// that silently matches nothing. One pass settles it: both lists narrow on
+/// the pipeline alone, which neither clearing touches.
 fn drop_stranded_values(loaded: &Loaded, f: &mut Filters) {
-    for _ in 0..2 {
-        if f.step
-            .as_ref()
-            .is_some_and(|s| !step_candidates(loaded, f).contains(s))
-        {
-            f.step = None;
-        }
-        if f.version
-            .as_ref()
-            .is_some_and(|v| !version_candidates(loaded, f).contains(v))
-        {
-            f.version = None;
-        }
-        if f.task
-            .as_ref()
-            .is_some_and(|t| !task_candidates(loaded, f).contains(t))
-        {
-            f.task = None;
-        }
+    if f.step
+        .as_ref()
+        .is_some_and(|s| !step_candidates(loaded, f).contains(s))
+    {
+        f.step = None;
+    }
+    if f.version
+        .as_ref()
+        .is_some_and(|v| !version_candidates(loaded, f).contains(v))
+    {
+        f.version = None;
     }
 }
 
 fn filter_field_label(field: FilterField) -> &'static str {
     match field {
         FilterField::By => "by",
-        FilterField::Group => "group",
-        FilterField::Task => "task",
         FilterField::Pipeline => "pipeline",
         FilterField::Step => "step",
         FilterField::Version => "version",
@@ -3216,22 +3182,51 @@ fn filter_field_label(field: FilterField) -> &'static str {
 /// What a row of the filter panel shows for its own value: `‹ value ›` on
 /// every row `←`/`→` cycles, and the plain date — or what a blank one
 /// means — on the two a calendar sets, whose missing chevrons are the
-/// visible sign that `←`/`→` do nothing there.
-fn filter_field_value(draft: &Draft, field: FilterField) -> String {
+/// visible sign that `←`/`→` do nothing there. The same holds within a
+/// cycled row: each chevron is drawn only where its key would still change
+/// the value — asked of the very cycling functions the keys call, so the
+/// two can never disagree — and a space stands in for one that is not, so
+/// the value keeps its column whichever end it sits at.
+fn filter_field_value(loaded: &Loaded, draft: &Draft, field: FilterField) -> String {
     let f = &draft.filters;
-    let cycled = |v: &Option<String>| format!("‹ {} ›", v.as_deref().unwrap_or("all"));
+    let cycled = |candidates: Vec<String>, v: &Option<String>| {
+        chevrons(
+            v.as_deref().unwrap_or("all"),
+            cycle_option(&candidates, v, false) != *v,
+            cycle_option(&candidates, v, true) != *v,
+        )
+    };
     match field {
-        FilterField::By => format!("‹ {} ›", by_label(f, draft.table)),
-        FilterField::Group => cycled(&f.group),
-        FilterField::Task => cycled(&f.task),
-        FilterField::Pipeline => cycled(&f.pipeline),
-        FilterField::Step => cycled(&f.step),
-        FilterField::Version => cycled(&f.version),
-        FilterField::Dir => cycled(&f.dir),
-        FilterField::Skill => cycled(&f.skill),
+        FilterField::By => chevrons(
+            by_label(f, draft.table),
+            by_moves(f, draft.table, false),
+            by_moves(f, draft.table, true),
+        ),
+        FilterField::Pipeline => cycled(pipeline_candidates(loaded), &f.pipeline),
+        FilterField::Step => cycled(step_candidates(loaded, f), &f.step),
+        FilterField::Version => cycled(version_candidates(loaded, f), &f.version),
+        FilterField::Dir => cycled(dir_candidates(loaded), &f.dir),
+        FilterField::Skill => cycled(skill_candidates(loaded), &f.skill),
         FilterField::Since => date_field_value(&f.since, "(blank — the start)"),
         FilterField::Until => date_field_value(&f.until, "(blank — now)"),
     }
+}
+
+/// Whether `←` (`forward` false) or `→` on the `by` row would move it off
+/// the `by` it is on.
+fn by_moves(f: &Filters, table: TableKind, forward: bool) -> bool {
+    match table {
+        TableKind::Lanes => cycle_by(&EvalBy::ALL, f.by, forward) != f.by,
+        TableKind::Dirs => cycle_by(&DirBy::ALL, f.dir_by, forward) != f.dir_by,
+    }
+}
+
+/// `value` between whichever of `‹` and `›` its keys can still act on, a
+/// space in place of each one they cannot.
+fn chevrons(value: &str, back: bool, forward: bool) -> String {
+    let back = if back { '‹' } else { ' ' };
+    let forward = if forward { '›' } else { ' ' };
+    format!("{back} {value} {forward}")
 }
 
 fn date_field_value(text: &str, placeholder: &str) -> String {
@@ -3253,12 +3248,12 @@ const FILTER_HINTS: [&str; 3] = [
 /// then the hints. Built with `boxed` rather than `panel`: the mockup draws
 /// its three hint lines together under one blank row, where `panel` would
 /// set its key line apart by a blank row of its own.
-fn filter_panel(draft: &Draft) -> Vec<String> {
+fn filter_panel(loaded: &Loaded, draft: &Draft) -> Vec<String> {
     let mut body = Vec::with_capacity(draft.fields().len() + 4);
     for (i, field) in draft.fields().iter().enumerate() {
         let marker = if i == draft.field { ">" } else { " " };
         let label = filter_field_label(*field);
-        let value = filter_field_value(draft, *field);
+        let value = filter_field_value(loaded, draft, *field);
         body.push(format!("{marker} {label:<9} {value}"));
     }
     body.push(String::new());
@@ -4598,33 +4593,34 @@ mod screen_tests {
 
     #[test]
     fn the_by_row_cycles_every_key_and_stops_at_either_end() {
-        assert_eq!(cycle_by(&EvalBy::ALL, EvalBy::Pipeline, true), EvalBy::Step);
         assert_eq!(
-            cycle_by(&EvalBy::ALL, EvalBy::Version, true),
-            EvalBy::Version
+            no_filters().by,
+            EvalBy::ALL[0],
+            "the screen opens at the left end"
         );
-        assert_eq!(cycle_by(&EvalBy::ALL, EvalBy::Group, false), EvalBy::Group);
+        assert_eq!(
+            cycle_by(&EvalBy::ALL, EvalBy::Pipeline, false),
+            EvalBy::Pipeline
+        );
+        assert_eq!(cycle_by(&EvalBy::ALL, EvalBy::Pipeline, true), EvalBy::Step);
+        assert_eq!(cycle_by(&EvalBy::ALL, EvalBy::Version, true), EvalBy::Group);
+        assert_eq!(cycle_by(&EvalBy::ALL, EvalBy::Group, true), EvalBy::Task);
+        assert_eq!(cycle_by(&EvalBy::ALL, EvalBy::Task, true), EvalBy::Task);
         assert_eq!(cycle_by(&DirBy::ALL, DirBy::Dir, true), DirBy::Session);
     }
 
-    /// The `task` row cycles only the tasks every other row leaves on the
-    /// table, and a change elsewhere that strands the chosen task clears it.
+    /// A change of pipeline that strands the chosen step clears it.
     #[test]
-    fn the_task_row_cycles_only_the_tasks_the_other_rows_leave() {
-        let mut other = tests_entry("b", "implement");
+    fn a_new_pipeline_clears_a_step_it_never_ran() {
+        let mut other = tests_entry("b", "review");
         other.pipeline = "bugfix".into();
         let loaded = loaded(vec![tests_entry("a", "implement"), other]);
-        let mut filters = no_filters();
-        assert_eq!(task_candidates(&loaded, &filters), ["a", "b"]);
-        filters.pipeline = Some("bugfix".into());
-        assert_eq!(task_candidates(&loaded, &filters), ["b"]);
-
         let mut draft = Draft::new(TableKind::Lanes, no_filters());
-        draft.filters.task = Some("a".into());
-        draft.field = 3; // pipeline
+        draft.filters.step = Some("implement".into());
+        draft.field = 1; // pipeline
         handle_filter_change(&loaded, &mut draft, true);
         assert_eq!(draft.filters.pipeline.as_deref(), Some("bugfix"));
-        assert_eq!(draft.filters.task, None, "`a` never ran on bugfix");
+        assert_eq!(draft.filters.step, None, "bugfix never ran `implement`");
     }
 
     fn tests_entry(task: &str, step: &str) -> Entry {
@@ -4849,40 +4845,64 @@ mod screen_tests {
         assert!(last.contains("└───"), "{last}");
     }
 
-    /// The lanes panel draws its eight rows in order, `by` first, every one
-    /// blank when the screen opens, and the directory panel its five.
+    /// The lanes panel draws its six rows in order, `by` first, every one
+    /// blank when the screen opens, and the directory panel its five. A
+    /// chevron is drawn only where its key still moves the row, a space
+    /// holding its place otherwise.
     #[test]
     fn the_filter_panels_draw_their_rows_by_first_every_one_blank() {
+        let panel_rows = |loaded: &Loaded, draft: &Draft| -> Vec<String> {
+            filter_panel(loaded, draft)[1..=filter_fields(draft.table).len()]
+                .iter()
+                .map(|l| {
+                    let inner = l.trim_matches('│').trim_end();
+                    inner.strip_prefix("  ").unwrap_or(inner).to_string()
+                })
+                .collect()
+        };
+        let lanes = loaded(vec![tests_entry("a", "implement")]);
         let draft = Draft::new(TableKind::Lanes, no_filters());
-        let panel = filter_panel(&draft);
-        let rows: Vec<String> = panel[1..9]
-            .iter()
-            .map(|l| l.trim_matches('│').trim().to_string())
-            .collect();
         assert_eq!(
-            rows,
+            panel_rows(&lanes, &draft),
             [
-                "> by        ‹ pipeline ›",
-                "group     ‹ all ›",
-                "task      ‹ all ›",
-                "pipeline  ‹ all ›",
-                "step      ‹ all ›",
-                "version   ‹ all ›",
-                "since     (blank — the start)",
-                "until     (blank — now)",
+                "> by          pipeline ›",
+                "  pipeline    all ›",
+                "  step        all ›",
+                "  version     all ›",
+                "  since     (blank — the start)",
+                "  until     (blank — now)",
             ]
         );
-        let text = panel.join("\n");
+        let text = filter_panel(&lanes, &draft).join("\n");
         for hint in FILTER_HINTS {
             assert!(text.contains(hint), "{hint}\n{text}");
         }
+        assert!(!text.contains("group"), "{text}");
+        assert!(!text.contains("task"), "{text}");
+
+        // One `→` on `by`, then the last entry; the pipeline row on its only
+        // candidate; and a row with nothing to pick from at all.
+        let mut draft = Draft::new(TableKind::Lanes, no_filters());
+        draft.filters.by = EvalBy::Step;
+        draft.filters.pipeline = Some("default".into());
+        let rows = panel_rows(&lanes, &draft);
+        assert_eq!(rows[0], "> by        ‹ step ›");
+        assert_eq!(rows[1], "  pipeline  ‹ default");
+        assert_eq!(rows[2], "  step        all ›");
+        let rows = panel_rows(
+            &loaded(Vec::new()),
+            &Draft::new(TableKind::Lanes, no_filters()),
+        );
+        assert_eq!(rows[1], "  pipeline    all");
+        draft.filters.by = EvalBy::Task;
+        assert_eq!(panel_rows(&lanes, &draft)[0], "> by        ‹ task");
 
         let draft = Draft::new(TableKind::Dirs, no_filters());
-        let text = filter_panel(&draft).join("\n");
+        let text = filter_panel(&loaded(Vec::new()), &draft).join("\n");
         for row in [
-            "> by        ‹ dir ›",
-            "dir       ‹ all ›",
-            "skill     ‹ all ›",
+            "> by          dir ›",
+            "dir         all  ",
+            "skill       all  ",
         ] {
             assert!(text.contains(row), "{row}\n{text}");
         }
@@ -4894,12 +4914,14 @@ mod screen_tests {
     /// too.
     #[test]
     fn the_filter_panel_and_its_calendar_are_one_width_on_every_row() {
+        let lanes = loaded(vec![tests_entry("a", "implement")]);
         let widths: Vec<usize> = (0..filter_fields(TableKind::Lanes).len())
-            .map(|field| {
+            .flat_map(|field| {
                 let mut draft = Draft::new(TableKind::Lanes, no_filters());
                 draft.field = field;
-                filter_panel(&draft)[0].chars().count()
+                filter_panel(&lanes, &draft)
             })
+            .map(|line| line.chars().count())
             .collect();
         assert!(widths.iter().all(|w| *w == widths[0]), "{widths:?}");
         let calendar = calendar_panel(FilterField::Since, 2026, 9, 25);
@@ -4939,14 +4961,14 @@ mod screen_tests {
             1.0,
             Some("pass"),
         );
-        let text = screen(&repo, &format!("f{DOWN}{DOWN}{DOWN}{RIGHT}\rq"));
+        let text = screen(&repo, &format!("f{DOWN}{RIGHT}\rq"));
         let last = last_frame(&text);
         assert!(last.contains("pipeline default"), "{last}");
         assert!(!last.contains("other"), "{last}");
     }
 
-    /// The calendar still opens from the date rows, now the seventh and
-    /// eighth: `esc` hands the row back untouched, `enter` picks the day it
+    /// The calendar still opens from the date rows, now the fifth and
+    /// sixth: `esc` hands the row back untouched, `enter` picks the day it
     /// opened on, and `x` clears it.
     #[test]
     fn esc_leaves_the_row_untouched_enter_picks_the_day_x_clears_it() {
@@ -4955,7 +4977,7 @@ mod screen_tests {
             .date_naive()
             .format("%Y-%m-%d")
             .to_string();
-        let to_since = format!("f{}", DOWN.repeat(6));
+        let to_since = format!("f{}", DOWN.repeat(4));
 
         // No trailing `q` after a bare `Esc`: its own lookahead read would
         // silently eat it, so the input running out ends the loop here.
@@ -4975,7 +4997,7 @@ mod screen_tests {
     #[test]
     fn a_short_table_still_fits_the_calendars_whole_height_key_line_included() {
         let repo = fixture_with_one_run("screen-short-table-calendar");
-        let text = screen(&repo, &format!("f{}\rq", DOWN.repeat(6)));
+        let text = screen(&repo, &format!("f{}\rq", DOWN.repeat(4)));
         let last = last_frame(&text);
         assert!(last.contains("┌─ since ─"), "{last}");
         assert!(last.contains("[enter] pick   [esc] back"), "{last}");
@@ -4987,7 +5009,7 @@ mod screen_tests {
     #[test]
     fn typing_on_a_date_row_does_nothing_and_enter_still_opens_the_calendar() {
         let repo = fixture("screen-bad-since");
-        let text = screen(&repo, &format!("f{}notadate\rq", DOWN.repeat(6)));
+        let text = screen(&repo, &format!("f{}notadate\rq", DOWN.repeat(4)));
         assert!(last_frame(&text).contains("┌─ since ─"), "{text}");
         assert!(!text.contains("notadate"), "{text}");
     }

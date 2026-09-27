@@ -440,13 +440,15 @@ pub enum EvalBy {
 }
 
 impl EvalBy {
-    /// Every `by`, in the order the screen's filter panel cycles them.
+    /// Every `by`, in the order the screen's filter panel cycles them —
+    /// `pipeline` first, since the screen opens on it: the row then starts
+    /// at its left end, with only `→` left to move it.
     pub const ALL: [EvalBy; 5] = [
-        EvalBy::Group,
-        EvalBy::Task,
         EvalBy::Pipeline,
         EvalBy::Step,
         EvalBy::Version,
+        EvalBy::Group,
+        EvalBy::Task,
     ];
 
     /// The name a person types after `--by`, and the one the screen's
