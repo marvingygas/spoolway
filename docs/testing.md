@@ -98,7 +98,7 @@ with a `// covers:` line.
 | `board-pause` | The board's confirm panels: `p`, `P`, `U` over a live lane |
 | `queue-unqueue` | `spoolway queue unqueue`: its `--help`, the refusal and the two routes out of it, and `--force` over a live lane |
 | `restart` | A second `spoolway dispatch` against a held lock, refused the same way every time, and an empty queue never refused at all |
-| `overrides` | The override commands: fork a setting out of the checkout, list it, promote it back |
+| `overrides` | The override commands: fork a setting out of the checkout, list it, promote it back, and skip a stale one |
 | `upgrade` | Whether this binary still reads what an older release wrote. A `.spoolway/` tree scaffolded by an old tag's own binary, under `scripts/e2e/fixtures/`, goes through a real `spoolway sync`. A value set under a retired table lands at its current home, and hand-written prose comes back byte for byte |
 | `warmth` | `cloud` tier. Real `claude-haiku-4-5` lanes, to check session reuse against a real transcript. |
 | `live` | `live` tier. The real `codex` binary through `agent verify codex --live`. |

@@ -432,10 +432,17 @@ fn prompt_flag(profile: &crate::config::AgentProfile) -> Option<String> {
 /// When neither exists this names the directory shape, so an error points at
 /// where a prompt belongs rather than where it used to.
 pub fn path_for(repo: &Repo, name: &str) -> PathBuf {
+    let tracked = path_for_tracked(repo, name);
     if let Some(overridden) = crate::overrides::prompt_override(&repo.overrides_dir(), name) {
-        return overridden;
+        // A whole-file override for a prompt the checkout no longer has —
+        // renamed or removed — is stale: it replaces nothing, so it is left
+        // out, exactly as if it had never been written.
+        if tracked.is_file() {
+            return overridden;
+        }
+        crate::overrides::print_ignored_notices(&[crate::overrides::Ignored::missing_prompt(name)]);
     }
-    path_for_tracked(repo, name)
+    tracked
 }
 
 /// [`path_for`], with no patch layer applied — for a caller that must see
@@ -1117,6 +1124,7 @@ mod tests {
         .unwrap();
         let pipelines = crate::pipeline::Pipelines {
             pipelines: [("solo".to_string(), pipeline)].into_iter().collect(),
+            ignored_overrides: Vec::new(),
         };
 
         let findings = lint_warnings(&repo, &pipelines).unwrap();
@@ -1209,6 +1217,33 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             "the overriding prompt"
         );
+
+        std::fs::remove_dir_all(&repo.checkout).ok();
+    }
+
+    /// A whole-file override for a prompt the checkout no longer has is
+    /// stale: `path_for` never returns it, answering exactly what it would
+    /// with no override at all — the nested tracked shape's own path, unused
+    /// though that file is, per [`path_for_tracked`]'s own doc.
+    #[test]
+    fn an_override_for_a_prompt_the_checkout_no_longer_has_is_not_used() {
+        let repo = fixture("stale-prompt");
+
+        let overridden = repo
+            .overrides_dir()
+            .join("prompts")
+            .join("retired")
+            .join(crate::assets::PROMPT_FILE);
+        std::fs::create_dir_all(overridden.parent().unwrap()).unwrap();
+        std::fs::write(&overridden, "an override for a prompt nothing tracks").unwrap();
+
+        let path = path_for(&repo, "retired");
+        assert_eq!(
+            path,
+            path_for_tracked(&repo, "retired"),
+            "the stale override must never be returned"
+        );
+        assert_ne!(path, overridden);
 
         std::fs::remove_dir_all(&repo.checkout).ok();
     }

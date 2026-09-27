@@ -218,6 +218,93 @@ must "unattended off again, so nothing later in this file inherits it" \
 must "the dispatched-against task is taken back out" \
   "$SPOOLWAY" queue unqueue gate --force
 
+# ------------------------------------------------------------ a stale override
+# The incident the group's own task describes: a step's own shape changes
+# under an override that still names a key the step no longer takes — here,
+# `review` turning from an agent step into a command step while the layer
+# still sets `review.agent`. Before this task every command refused to load
+# at all; now the stale entry is skipped, one stderr line names it, and
+# every other override in the file still applies.
+must "fork a knob on the step that is about to change shape" \
+  "$SPOOLWAY" pipeline override default --set review.agent=fake-agent
+# A command step may declare none of `prompt`, `model`, `effort` or
+# `session` — those are a lane's — so turning `review` into one has to drop
+# all four, not just swap `agent:` for `run:`, or the tracked file is
+# invalid on its own before the override ever enters the picture.
+must "review turns into a command step, the override none the wiser" \
+  sed -i '/- id: review/,/- id: document/ {
+    s/^    agent: claude/    run: echo hi/
+    /^    prompt:/d
+    /^    model:/d
+    /^    effort:/d
+    /^    session:/d
+  }' "$TRACKED"
+
+LAYER_BYTES_BEFORE=$(cat "$LAYER")
+
+works "a plain command still loads — the stale entry is skipped, not refused" \
+  "$SPOOLWAY" pipeline check
+says "and its stderr names exactly the override left out" \
+  "spoolway: override ignored — pipelines/default.yml step \`review\`: names both \`run:\` and \`agent:\` — a step runs a process or a model, not both" \
+  "$SPOOLWAY" pipeline check
+says "stdout still carries the ordinary report" \
+  "pipeline(s) valid" \
+  "$SPOOLWAY" pipeline check
+
+# `says` reads both streams merged, so the three checks above cannot tell
+# which stream the notice went to, nor how often. One command loads its
+# pipelines several times over (`main.rs` ahead of its dispatch, the command
+# again after), which only a whole process shows — so split the streams of
+# one real invocation and count.
+IGNORED_LINE="spoolway: override ignored — pipelines/default.yml step \`review\`"
+STALE_ERR="$LIVE/stale-check.err"
+STALE_OUT=$("$SPOOLWAY" pipeline check 2>"$STALE_ERR")
+if [ "$(grep -cF -- "$IGNORED_LINE" "$STALE_ERR")" = 1 ]; then
+  ok "the notice is printed exactly once, however many times the command loads"
+else
+  bad "the notice is printed exactly once, however many times the command loads"
+  sed 's/^/        /' "$STALE_ERR"
+fi
+if grep -qF -- "override ignored" <<<"$STALE_OUT"; then
+  bad "and it goes to stderr only — stdout is left as it was"
+  sed 's/^/        /' <<<"$STALE_OUT"
+else
+  ok "and it goes to stderr only — stdout is left as it was"
+fi
+
+# Inside a lane the same load is silent: `SPOOLWAY_TASK` in the environment
+# is how a real process knows it is one.
+silent_about "a command run inside a lane prints nothing about the ignored override" \
+  "override ignored" \
+  env SPOOLWAY_TASK=gate "$SPOOLWAY" pipeline check
+works "and still loads" \
+  env SPOOLWAY_TASK=gate "$SPOOLWAY" pipeline check
+
+works "the override file is never edited or deleted" \
+  test -f "$LAYER"
+if [ "$(cat "$LAYER")" = "$LAYER_BYTES_BEFORE" ]; then
+  ok "and its bytes are exactly what they were before the load that skipped it"
+else
+  bad "and its bytes are exactly what they were before the load that skipped it"
+fi
+
+says "override list moves the stale entry into its own ignored line" \
+  "ignored  review.agent" \
+  "$SPOOLWAY" override list
+says "while the entry beside it in the same file is still listed as applying" \
+  "patch  implement.model" \
+  "$SPOOLWAY" override list
+
+must "clean up: drop the layer entry" \
+  "$SPOOLWAY" override drop pipelines/default.yml
+# `git checkout --`, not a reverse `sed`: the edit above deleted lines
+# rather than only substituting them, so there is no single reverse
+# substitution that puts `review` back — restoring from the commit
+# `configure_project` made is the actual inverse.
+must "and restore the tracked step from the committed copy" \
+  git checkout -- "$TRACKED"
+works "the checkout is clean again" git_clean
+
 # ------------------------------------------------- the four new contracts
 # Each one is a unit-tested render in src/commands/{config,override,template,
 # hook}.rs already; what a unit test cannot see is the command actually

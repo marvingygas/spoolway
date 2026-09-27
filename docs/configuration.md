@@ -1,6 +1,6 @@
 ---
 domain: configuration
-covers: ["src/config.rs", "src/confkv.rs", "src/confdoc.rs", "src/tracking.rs", "src/retain.rs", "assets/tracking/**", "assets/hooks/**"]
+covers: ["src/config.rs", "src/confkv.rs", "src/confdoc.rs", "src/overrides.rs", "src/tracking.rs", "src/retain.rs", "assets/tracking/**", "assets/hooks/**"]
 ---
 
 # Configuration
@@ -90,9 +90,23 @@ steps:
     model: claude-opus-5
 ```
 
-A patch cannot set `id:` or name a step the tracked pipeline lacks. The merged pipeline goes
-through the same validation as the tracked one. A config patch goes through the same checks as
-`spoolway config set`.
+One override is one step's whole entry: every key it sets on that step id. An entry is stale
+when it sets `id:`, names a step the pipeline no longer has, or leaves the step invalid once
+merged, for example a step that already runs a command and gets `agent:` added on top. A
+stale entry is left out of the merge. The step stays exactly as the tracked file wrote it, and
+every other entry, in this file and in every other, still applies. A config patch key the
+tracked config would refuse is left out the same way, with every other key in the patch still
+applied. A prompt override for a prompt the checkout no longer has is left out too. The
+override file itself is never changed.
+
+Outside a lane, each command that loads prints one stderr line per entry it leaves out:
+
+```
+spoolway: override ignored — pipelines/release.yml step `publish`: names both `run:` and `agent:` — a step runs a process or a model, not both
+```
+
+A command running inside a lane prints nothing. `spoolway override list`, its `--json` form
+and `spoolway doctor`'s standing note mark the same entries and reasons.
 
 Write and inspect the layer with `spoolway pipeline override`, `prompt override`,
 `config override` and `spoolway override list | promote | drop`. See

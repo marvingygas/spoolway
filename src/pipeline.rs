@@ -2316,6 +2316,10 @@ fn splice_retired_shapes(
 #[derive(Debug, Clone)]
 pub struct Pipelines {
     pub pipelines: BTreeMap<String, Pipeline>,
+    /// Every override left out of the merge because it no longer fit the
+    /// checkout — empty for [`Pipelines::load_tracked`], which never merges
+    /// anything at all. See [`crate::overrides::Ignored`].
+    pub(crate) ignored_overrides: Vec<crate::overrides::Ignored>,
 }
 
 impl Pipelines {
@@ -2463,6 +2467,7 @@ impl Pipelines {
         };
 
         let mut pipelines = BTreeMap::new();
+        let mut ignored = Vec::new();
         for (name, raw) in files {
             // Unvalidated: a file's own `blocked` step may declare only
             // some of its five keys on purpose, leaning on
@@ -2471,11 +2476,30 @@ impl Pipelines {
             let mut pipeline = parse_unchecked(&name, &raw)
                 .with_context(|| format!("in {}", Pipelines::file_in(root, &name).display()))?;
             if let Some(overrides) = overrides {
-                crate::overrides::apply_pipeline_patch(&mut pipeline, overrides)?;
+                ignored.extend(crate::overrides::apply_pipeline_patch(
+                    &mut pipeline,
+                    overrides,
+                )?);
             }
             pipelines.insert(name, pipeline);
         }
-        Pipelines::assemble(pipelines, config).with_context(|| format!("in {}", dir.display()))
+        // A patch naming a pipeline the checkout no longer has is never
+        // reached by the loop above at all — it iterates the tracked files,
+        // never the layer — so it is caught here instead, once, rather than
+        // silently applying nothing and saying nothing.
+        if let Some(overrides) = overrides {
+            for name in crate::overrides::list_pipeline_patches(overrides)? {
+                if !pipelines.contains_key(&name) {
+                    ignored.push(crate::overrides::Ignored::missing_pipeline(&name));
+                }
+            }
+        }
+        let set = Pipelines::assemble(pipelines, config, ignored)
+            .with_context(|| format!("in {}", dir.display()))?;
+        if overrides.is_some() {
+            crate::overrides::print_ignored_notices(&set.ignored_overrides);
+        }
+        Ok(set)
     }
 
     /// Put a parsed set together with the one setting that is not
@@ -2492,6 +2516,7 @@ impl Pipelines {
     fn assemble(
         mut pipelines: BTreeMap<String, Pipeline>,
         config: &crate::config::Config,
+        ignored_overrides: Vec<crate::overrides::Ignored>,
     ) -> Result<Pipelines> {
         for (name, pipeline) in pipelines.iter_mut() {
             match pipeline.steps.iter_mut().find(|s| s.id == BLOCKED) {
@@ -2513,7 +2538,10 @@ impl Pipelines {
             }
         }
 
-        let mut set = Pipelines { pipelines };
+        let mut set = Pipelines {
+            pipelines,
+            ignored_overrides,
+        };
         set.validate()?;
 
         // Every `blocked` step's description is still `None` here: a
@@ -2540,6 +2568,7 @@ impl Pipelines {
         let mut pipelines = Pipelines::assemble(
             builtin_pipelines().expect("built-in pipelines must parse"),
             &crate::config::Config::default(),
+            Vec::new(),
         )
         .expect("built-in pipelines must be valid");
 
@@ -2574,7 +2603,7 @@ impl Pipelines {
     /// choices.
     #[cfg(test)]
     pub(crate) fn shipped(config: &crate::config::Config) -> Result<Pipelines> {
-        Pipelines::assemble(builtin_pipelines()?, config)
+        Pipelines::assemble(builtin_pipelines()?, config, Vec::new())
     }
 
     /// Look up a pipeline by name, with an error listing the defined ones.
@@ -3249,7 +3278,7 @@ mod tests {
         config.unattended.blocked_prompt = "clearer".into();
         config.unattended.blocked_session = false;
 
-        let set = Pipelines::assemble(one_step_pipeline("solo", ""), &config).unwrap();
+        let set = Pipelines::assemble(one_step_pipeline("solo", ""), &config, Vec::new()).unwrap();
         let pipeline = set.get("solo").unwrap();
 
         assert!(
@@ -3281,6 +3310,7 @@ mod tests {
         let set = Pipelines::assemble(
             one_step_pipeline("ui", "  - id: blocked\n    model: override-model\n"),
             &config,
+            Vec::new(),
         )
         .unwrap();
         let pipeline = set.get("ui").unwrap();
@@ -3310,7 +3340,7 @@ mod tests {
         ];
         for (key, message) in cases {
             let pipelines = one_step_pipeline("p", &format!("  - id: blocked\n    {key}"));
-            let err = Pipelines::assemble(pipelines, &config).unwrap_err();
+            let err = Pipelines::assemble(pipelines, &config, Vec::new()).unwrap_err();
             // The context `assemble` wraps this in (`pipeline \`p\``) only
             // shows up under the alternate `{:#}` format — anyhow's plain
             // `Display` prints just the outermost message.
@@ -3327,7 +3357,7 @@ mod tests {
     #[test]
     fn revalidating_an_assembled_pipeline_does_not_refuse_its_own_blocked_description() {
         let config = crate::config::Config::default();
-        let set = Pipelines::assemble(one_step_pipeline("solo", ""), &config).unwrap();
+        let set = Pipelines::assemble(one_step_pipeline("solo", ""), &config, Vec::new()).unwrap();
         set.validate()
             .expect("an assembled set must validate again cleanly");
     }
@@ -3341,7 +3371,7 @@ mod tests {
         let mut config = crate::config::Config::default();
         config.unattended.blocked_model = String::new();
 
-        let set = Pipelines::assemble(one_step_pipeline("solo", ""), &config).unwrap();
+        let set = Pipelines::assemble(one_step_pipeline("solo", ""), &config, Vec::new()).unwrap();
         assert_eq!(set.get("solo").unwrap().step(BLOCKED).unwrap().model, None);
     }
 
@@ -4337,11 +4367,12 @@ mod tests {
         });
     }
 
-    /// And refused when the key is in the override file itself rather than
-    /// the tracked one — the half `apply_step_patch` owns, since serde would
-    /// drop it on the way through and the layer would sit there doing nothing.
+    /// And skipped, not refused, when the key is in the override file itself
+    /// rather than the tracked one — the half `apply_step_patch` owns, since
+    /// serde would drop it on the way through and the layer would sit there
+    /// doing nothing. The step is left exactly as the tracked file wrote it.
     #[test]
-    fn the_retired_on_loop_max_key_is_refused_in_an_override_file() {
+    fn the_retired_on_loop_max_key_is_skipped_in_an_override_file() {
         with_override_fixture("retired-on-loop-max-patch", |root| {
             let overrides = crate::overrides::dir_for(root).unwrap();
             std::fs::create_dir_all(overrides.join("pipelines")).unwrap();
@@ -4351,12 +4382,16 @@ mod tests {
             )
             .unwrap();
 
-            let err = format!(
-                "{:#}",
-                Pipelines::load(root, &crate::config::Config::default()).unwrap_err()
+            let pipelines = Pipelines::load(root, &crate::config::Config::default()).unwrap();
+            let review = pipelines.get("impl").unwrap().step("review").unwrap();
+            assert!(
+                review.on_loop_max.is_none(),
+                "the retired key must never have been applied"
             );
-            assert!(err.contains("step `review`"), "{err}");
-            assert!(err.contains("`on_loop_max:`"), "{err}");
+            let ignored = &pipelines.ignored_overrides;
+            assert_eq!(ignored.len(), 1, "{ignored:?}");
+            assert!(ignored[0].target.contains("step `review`"), "{ignored:?}");
+            assert!(ignored[0].reason.contains("`on_loop_max:`"), "{ignored:?}");
         });
     }
 
@@ -4469,11 +4504,12 @@ mod tests {
     }
 
     /// An override naming a step id the tracked pipeline does not have is
-    /// refused at load, and the error names both the id and the pipeline —
-    /// list order decides slot priority, so a patch may set a value on a
-    /// step that already exists and nothing more.
+    /// stale: it is left out of the merge, load still succeeds, and the
+    /// reason names both the id and the pipeline — list order decides slot
+    /// priority, so a patch may set a value on a step that already exists
+    /// and nothing more.
     #[test]
-    fn an_override_naming_an_unknown_step_is_refused_by_name() {
+    fn an_override_naming_an_unknown_step_is_skipped_with_a_notice() {
         with_override_fixture("unknown-step", |root| {
             let overrides = crate::overrides::dir_for(root).unwrap();
             std::fs::create_dir_all(overrides.join("pipelines")).unwrap();
@@ -4483,19 +4519,25 @@ mod tests {
             )
             .unwrap();
 
-            let err = Pipelines::load(root, &crate::config::Config::default()).unwrap_err();
-            let message = format!("{err:#}");
-            assert!(message.contains("nonesuch"), "{message}");
-            assert!(message.contains("impl"), "{message}");
+            let pipelines = Pipelines::load(root, &crate::config::Config::default()).unwrap();
+            assert!(
+                pipelines.get("impl").unwrap().step("nonesuch").is_none(),
+                "no such step exists to have received the value"
+            );
+            let ignored = &pipelines.ignored_overrides;
+            assert_eq!(ignored.len(), 1, "{ignored:?}");
+            assert!(ignored[0].target.contains("nonesuch"), "{ignored:?}");
+            assert!(ignored[0].target.contains("impl"), "{ignored:?}");
+            assert!(ignored[0].reason.contains("nonesuch"), "{ignored:?}");
         });
     }
 
-    /// A patch setting `id:` on a step it names is refused, and the error
-    /// says so: renaming a step in place is the one way a patch could
-    /// otherwise add or drop one from the graph, and the guard in
-    /// `crate::overrides::apply_step_patch` is the only thing stopping it.
+    /// A patch setting `id:` on a step it names is stale: renaming a step in
+    /// place is the one way a patch could otherwise add or drop one from the
+    /// graph, so it is skipped rather than applied, and the step is left
+    /// exactly as the tracked file wrote it.
     #[test]
-    fn an_override_setting_a_step_id_is_refused() {
+    fn an_override_setting_a_step_id_is_skipped() {
         with_override_fixture("sets-id", |root| {
             let overrides = crate::overrides::dir_for(root).unwrap();
             std::fs::create_dir_all(overrides.join("pipelines")).unwrap();
@@ -4505,21 +4547,25 @@ mod tests {
             )
             .unwrap();
 
-            let err = Pipelines::load(root, &crate::config::Config::default()).unwrap_err();
-            let message = format!("{err:#}");
-            assert!(message.contains("`id:`"), "{message}");
-            assert!(
-                message.contains("implement"),
-                "the error names the step patched: {message}"
+            let pipelines = Pipelines::load(root, &crate::config::Config::default()).unwrap();
+            assert_eq!(
+                pipelines.get("impl").unwrap().step("implement").unwrap().id,
+                "implement",
+                "the id must never have been renamed"
             );
+            let ignored = &pipelines.ignored_overrides;
+            assert_eq!(ignored.len(), 1, "{ignored:?}");
+            assert!(ignored[0].target.contains("implement"), "{ignored:?}");
+            assert!(ignored[0].reason.contains("`id:`"), "{ignored:?}");
         });
     }
 
-    /// A patch that leaves the graph unreachable is refused exactly as a
-    /// tracked file that shipped the same steps would be — the merged set
-    /// still goes through `Pipelines::validate()`, unchanged.
+    /// A patch that would leave the graph unreachable is stale: applying it
+    /// leaves the pipeline invalid by `Pipelines::validate()`'s own rules, so
+    /// it is skipped rather than applied, and every other pipeline still
+    /// loads.
     #[test]
-    fn a_patch_that_breaks_the_graph_is_refused_at_load() {
+    fn a_patch_that_breaks_the_graph_is_skipped() {
         with_override_fixture("breaks-graph", |root| {
             let overrides = crate::overrides::dir_for(root).unwrap();
             std::fs::create_dir_all(overrides.join("pipelines")).unwrap();
@@ -4529,8 +4575,93 @@ mod tests {
             )
             .unwrap();
 
-            let err = Pipelines::load(root, &crate::config::Config::default()).unwrap_err();
-            assert!(format!("{err:#}").contains("unknown step"), "{err:#}");
+            let pipelines = Pipelines::load(root, &crate::config::Config::default()).unwrap();
+            assert_eq!(
+                pipelines
+                    .get("impl")
+                    .unwrap()
+                    .step("implement")
+                    .unwrap()
+                    .on_pass
+                    .as_deref(),
+                Some("review"),
+                "the tracked transition must still be in place"
+            );
+            let ignored = &pipelines.ignored_overrides;
+            assert_eq!(ignored.len(), 1, "{ignored:?}");
+            assert!(ignored[0].reason.contains("unknown step"), "{ignored:?}");
+        });
+    }
+
+    /// An override for a pipeline the checkout no longer has at all — the
+    /// loop over tracked files never even reaches it — is caught and
+    /// reported the same way a stale step is, and every pipeline that does
+    /// still exist loads normally.
+    #[test]
+    fn an_override_naming_a_pipeline_the_checkout_lacks_is_skipped_with_a_notice() {
+        with_override_fixture("unknown-pipeline", |root| {
+            let overrides = crate::overrides::dir_for(root).unwrap();
+            std::fs::create_dir_all(overrides.join("pipelines")).unwrap();
+            std::fs::write(
+                overrides.join("pipelines").join("nosuchpipeline.yml"),
+                "steps:\n  implement:\n    model: claude-opus-5\n",
+            )
+            .unwrap();
+
+            let pipelines = Pipelines::load(root, &crate::config::Config::default()).unwrap();
+            assert!(
+                pipelines.get("impl").is_ok(),
+                "the real pipeline still loads"
+            );
+            let ignored = &pipelines.ignored_overrides;
+            assert_eq!(ignored.len(), 1, "{ignored:?}");
+            assert!(ignored[0].reason.contains("nosuchpipeline"), "{ignored:?}");
+        });
+    }
+
+    /// A stale override is never edited or deleted — the file's bytes after
+    /// a load that skips it are exactly what they were before.
+    #[test]
+    fn a_stale_override_file_is_untouched_by_the_load_that_skips_it() {
+        with_override_fixture("untouched-file", |root| {
+            let overrides = crate::overrides::dir_for(root).unwrap();
+            std::fs::create_dir_all(overrides.join("pipelines")).unwrap();
+            let patch_path = overrides.join("pipelines").join("impl.yml");
+            let raw = "steps:\n  review:\n    run: echo hi\n";
+            std::fs::write(&patch_path, raw).unwrap();
+
+            Pipelines::load(root, &crate::config::Config::default()).unwrap();
+
+            assert_eq!(std::fs::read_to_string(&patch_path).unwrap(), raw);
+        });
+    }
+
+    /// The Mockup's own scenario: a step patched to add `run:` beside an
+    /// existing `agent:` is stale — a step runs a process or a model, not
+    /// both — and the stderr notice reads exactly as the Mockup shows it.
+    #[test]
+    fn a_step_patch_naming_both_run_and_agent_is_skipped_with_the_mockups_own_notice() {
+        with_override_fixture("run-and-agent", |root| {
+            let overrides = crate::overrides::dir_for(root).unwrap();
+            std::fs::create_dir_all(overrides.join("pipelines")).unwrap();
+            std::fs::write(
+                overrides.join("pipelines").join("impl.yml"),
+                "steps:\n  review:\n    run: echo hi\n",
+            )
+            .unwrap();
+
+            let pipelines = Pipelines::load(root, &crate::config::Config::default()).unwrap();
+            let review = pipelines.get("impl").unwrap().step("review").unwrap();
+            assert!(review.run.is_none(), "the patch must never have applied");
+            assert!(review.agent.is_some(), "the tracked agent is untouched");
+
+            let ignored = &pipelines.ignored_overrides;
+            assert_eq!(ignored.len(), 1, "{ignored:?}");
+            assert_eq!(
+                ignored[0].notice(),
+                "spoolway: override ignored — pipelines/impl.yml step `review`: names both \
+                 `run:` and `agent:` — a step runs a process or a model, not both"
+            );
         });
     }
 

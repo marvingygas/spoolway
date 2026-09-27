@@ -996,7 +996,7 @@ fn required_tool_checks(checkout: &Path, hook_name: &str) -> Vec<Finding> {
 /// only means a person has agreed to run under the layer, not that the
 /// layer stops being worth mentioning to somebody reading `doctor` cold.
 fn override_layer_note(repo: &Repo) -> Vec<Finding> {
-    let rows = match collect_override_rows(&repo.overrides_dir()) {
+    let rows = match collect_override_rows(repo) {
         Ok(rows) => rows,
         Err(err) => {
             return vec![Finding::Note(format!(
@@ -1008,10 +1008,16 @@ fn override_layer_note(repo: &Repo) -> Vec<Finding> {
         return Vec::new();
     }
     let names: Vec<&str> = rows.iter().map(|row| row.target.as_str()).collect();
-    vec![Finding::Note(format!(
+    let mut findings = vec![Finding::Note(format!(
         "overrides are active: {}",
         names.join(", ")
-    ))]
+    ))];
+    for row in &rows {
+        for item in &row.ignored {
+            findings.push(Finding::Note(item.notice()));
+        }
+    }
+    findings
 }
 
 /// Retired: the guard this used to size — how many times a lane may be
@@ -2049,6 +2055,46 @@ mod tests {
         assert!(text.contains("pipelines/default.yml"), "{text}");
     }
 
+    /// A stale step entry earns its own note beside the standing "overrides
+    /// are active" one — the same reason `override list` prints, since both
+    /// read `collect_override_rows`.
+    #[test]
+    fn override_layer_note_names_a_stale_entry_with_its_reason() {
+        let repo = crate::commands::testutil::fixture("doctor-override-note-stale");
+        std::fs::create_dir_all(repo.checkout.join(".spoolway/pipelines")).unwrap();
+        std::fs::write(
+            repo.checkout.join(".spoolway/pipelines/default.yml"),
+            "steps:\n  - id: implement\n    agent: pi\n    on_pass: done\n",
+        )
+        .unwrap();
+        let overrides = repo.overrides_dir();
+        std::fs::create_dir_all(overrides.join("pipelines")).unwrap();
+        std::fs::write(
+            overrides.join("pipelines/default.yml"),
+            "steps:\n  implement:\n    run: echo hi\n",
+        )
+        .unwrap();
+
+        let findings = override_layer_note(&repo);
+        let texts: Vec<String> = findings
+            .iter()
+            .map(|f| match f {
+                Finding::Note(text) => text.clone(),
+                other => panic!("expected a note: {other:?}"),
+            })
+            .collect();
+        assert!(
+            texts.iter().any(|t| t.contains("overrides are active")),
+            "{texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t.contains("override ignored")
+                && t.contains("implement")
+                && t.contains("names both `run:` and `agent:`")),
+            "{texts:?}"
+        );
+    }
+
     /// `doctor`'s model messages name `.spoolway/pipelines/<name>.yml`, where a
     /// step's `model:` actually lives — not the retired single `pipeline.yml`
     /// that `Pipelines::load` now refuses (finding 25).
@@ -2266,7 +2312,10 @@ mod tests {
         pipeline.validate().unwrap();
         let mut pipelines = std::collections::BTreeMap::new();
         pipelines.insert("default".to_string(), pipeline);
-        Pipelines { pipelines }
+        Pipelines {
+            pipelines,
+            ignored_overrides: Vec::new(),
+        }
     }
 
     fn tracking(hook: &str) -> crate::config::IssueTrackingConfig {

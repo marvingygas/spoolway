@@ -497,7 +497,7 @@ fn overrides_gate_with(
     out: &mut impl std::io::Write,
     term: Option<impl FnOnce() -> crate::platform::TermGuard>,
 ) -> Result<bool> {
-    let rows = collect_override_rows(&repo.overrides_dir())?;
+    let rows = collect_override_rows(repo)?;
     if rows.is_empty() {
         return Ok(true);
     }
@@ -734,7 +734,7 @@ impl GatePopup {
 /// The overrides popup, or `None` when [`overrides_gate`] would not ask:
 /// no layer at all, or one already acknowledged and unmoved since.
 pub(crate) fn overrides_popup(repo: &Repo) -> Result<Option<GatePopup>> {
-    let rows = collect_override_rows(&repo.overrides_dir())?;
+    let rows = collect_override_rows(repo)?;
     if rows.is_empty() {
         return Ok(None);
     }
@@ -1461,7 +1461,10 @@ mod tests {
             serde_norway::from_str("steps:\n  - id: a\n    end: true\n").unwrap();
         let mut pipelines = std::collections::BTreeMap::new();
         pipelines.insert("default".to_string(), pipeline);
-        Pipelines { pipelines }
+        Pipelines {
+            pipelines,
+            ignored_overrides: Vec::new(),
+        }
     }
 
     /// Blank both `user.name` and `user.email` locally, overriding whatever
@@ -2147,6 +2150,7 @@ mod tests {
             target: "pipelines/impl.yml".into(),
             kind: "patch",
             overrides: "implement.model, test.timeout".into(),
+            ignored: Vec::new(),
         };
         assert_eq!(overrides_gate_kind(&two_keys), "2 keys");
 
@@ -2154,6 +2158,7 @@ mod tests {
             target: "config.toml".into(),
             kind: "patch",
             overrides: "agents.claude.concurrency".into(),
+            ignored: Vec::new(),
         };
         assert_eq!(overrides_gate_kind(&one_key), "1 key");
 
@@ -2161,6 +2166,7 @@ mod tests {
             target: "prompts/reviewer".into(),
             kind: "whole file",
             overrides: "—".into(),
+            ignored: Vec::new(),
         };
         assert_eq!(overrides_gate_kind(&prompt), "whole file");
     }
