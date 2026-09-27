@@ -4,8 +4,8 @@
 # contracts (`task contract`, `pipeline contract`, `prompt contract`), the
 # queue tab of bare `spoolway` driven over a real pty, the archive's own rows,
 # `config`'s checkout/project asymmetry, the overrides layer resolved through
-# a linked worktree, housekeeping's retention sweep, and the confirm-dialog
-# gate driven over a real pty.
+# a linked worktree, housekeeping's retention sweep, and the notice a behind
+# checkout prints, driven over a real pty.
 #
 # This suite used to also assert the `agent list`/`agent verify` output, the
 # transcript an ambient session is read from, and every refusal `pipeline
@@ -377,10 +377,10 @@ works "and the config is accepted again" \
 # directory gained a file, only this can.
 command -v jq >/dev/null || { echo "commands.sh needs jq" >&2; exit 2; }
 
-# Stdout only, not `2>&1`: the confirm-dialog gate's own notice, when this
-# checkout is behind, is a line on stderr ahead of the JSON — merging the
-# two would hand `jq` that line as its first byte and fail every parse on a
-# behind checkout, which is not what either check below is about.
+# Stdout only, not `2>&1`: stderr is where spoolway's notices go ahead of a
+# command's own output — merging the two would hand `jq` such a line as its
+# first byte and fail every parse, which is not what either check below is
+# about.
 CHECK_JSON=$("$SPOOLWAY" task contract 2>"$LIVE/task-contract.err")
 if jq -e '.pipelines.default.longest_agent_step' <<<"$CHECK_JSON" >/dev/null 2>&1; then
   ok "bare task contract prints the contract as parseable JSON"
@@ -1094,92 +1094,62 @@ works "the aged queue entry did not — queue/ is never swept, whatever its age"
 must "retention restored to its default" "$SPOOLWAY" config set housekeeping.retention_days 30
 rm -f "$OLD_QUEUED"
 
-# ------------------------------------------------------- confirm-dialog's gate
-# `new version installed, apply updates`: the panel `main.rs` draws in front
-# of a project command once this checkout's stamp no longer matches what
-# this binary would write — `spoolway update` already having installed a
-# newer release is the scenario, forced here by hand since only one binary
-# is on `PATH` for a suite to run. Driven both ways, per the task: piped,
-# where the one-line notice on stderr takes over and the command still
-# runs, and keyed, where a real terminal answers Enter and gets the
-# command's own output straight after the report `sync` printed for real.
+# ------------------------------------------------------------- sync notice
+# `Run spoolway sync to apply the last update.`: the line `main.rs` prints in
+# front of a project command once this checkout's stamp no longer matches
+# what this binary would write — `spoolway update` already having installed
+# a newer release is the scenario, forced here by hand since only one binary
+# is on `PATH` for a suite to run. It only informs: the command runs, no key
+# is read and no file is written, at a terminal or not. Only `spoolway sync`
+# writes.
 #
 # `override list` is the command under test: it is routed through the same
 # catch-all in `main.rs` every project command passes through, and its own
 # output ("no overrides") is fixed regardless of anything this suite queued
 # earlier, unlike `queue list` or `group list`.
+SYNC_LINE="Run spoolway sync to apply the last update."
 STALE_SKILL=.claude/skills/spoolway-config/SKILL.md
 PROJECT_STAMP="$SPOOLWAY_PROJECT_HOME/sync-stamp"
 
 # One real file for a scan to find, and a stamp claiming a release that never
 # shipped — `stamp_behind` reads true on the version alone, whatever the
-# fingerprint says. Both conditions the acceptance criteria name, not either
-# alone: `src/gate.rs`'s own unit tests already cover a stale stamp with
-# nothing for a scan to do proceeding silently, so this suite only has to
-# prove the shape where both fire, on the real binary.
+# fingerprint says. Both conditions the notice needs, not either alone:
+# `src/gate.rs`'s own unit tests already cover a stale stamp with nothing for
+# a scan to do saying nothing, so this suite only has to prove the shape
+# where both fire, on the real binary.
 behind_checkout() {
   rm -f "$STALE_SKILL"
   echo "0.0.0-behind-e2e deadbeef $(pwd)" > "$PROJECT_STAMP"
 }
 
+# Piped — every `says` runs under `$(...)`, so stderr is no terminal — the
+# line is for nobody, and is not printed.
 behind_checkout
-silent_about "a piped command with a behind checkout never touches the cursor" \
-  $'\x1b' \
+silent_about "a piped command with a behind checkout prints no sync notice" \
+  "$SYNC_LINE" \
   "$SPOOLWAY" override list
-says "and prints the one-line notice" \
-  "spoolway wants to update:" \
-  "$SPOOLWAY" override list
-says "naming a file count, whatever configure_project's own fixture leaves behind" \
-  "file(s) in this checkout." \
-  "$SPOOLWAY" override list
-says "pointing at spoolway itself, never a command" \
-  'Open spoolway to apply them.' \
-  "$SPOOLWAY" override list
-says "the command itself still ran, piped or not" \
+says "the command itself still ran" \
   "no overrides" \
   "$SPOOLWAY" override list
-works "and the piped path never wrote anything back" \
+works "and nothing was written back" \
   test ! -e "$STALE_SKILL"
 
-# The panel only ever draws with both ends a real terminal, which none of the
-# above ever were — every suite invocation runs under `$(...)`. A plain pipe
-# cannot stand in for one either: `queue`'s own screen reads keys off a pipe
-# fine because it never asks whether anyone is watching, but this dialog
-# does, on purpose (`ask::interactive()`), so stdin has to be a terminal a
-# `read` can block on, not just a descriptor bytes happen to arrive on.
-#
-# `python3`'s `pty` module opens one without needing a real terminal behind
-# this suite's own process — already how `warmth.sh`, `jobs.sh` and
-# `disaster.sh` drive a check no shell built-in reaches, and no new tool this
-# harness does not already depend on. `pty.fork()` specifically, not a plain
-# pty pair handed to `subprocess.Popen`: only `pty.fork()`'s child calls
-# `setsid()` and makes the slave its controlling terminal, which is what a
-# real ctrl-c needs to turn into a real `SIGINT` at all — a slave fd merely
-# `dup2`'d onto a child's stdio carries bytes fine but is nobody's
-# controlling terminal, so the kernel never raises anything on it. Byte
-# `\x03` (ctrl-c) sent down a pty missing that step is silently swallowed as
-# ordinary input instead, which would make the ctrl-c case below pass for
-# the wrong reason — proceeding on EOF, not on the interrupt.
-PTY_DRIVER="$LIVE/confirm-dialog-pty.py"
+# At a terminal, the line prints and the command runs straight after it, with
+# no key sent. `python3`'s `pty` module gives the process a real terminal on
+# stdout and stderr without needing one behind this suite's own process —
+# already how `warmth.sh`, `jobs.sh` and `disaster.sh` drive a check no shell
+# built-in reaches. A process that still waited on a key would hang here
+# until the driver's own deadline and report a timeout.
+PTY_DRIVER="$LIVE/sync-notice-pty.py"
 cat >"$PTY_DRIVER" <<'PY'
 import os, pty, select, sys, time
 
-key = bytes([int(sys.argv[1])])
-argv = sys.argv[2:]
+argv = sys.argv[1:]
 
 pid, master = pty.fork()
 if pid == 0:
     os.execvp(argv[0], argv)
     os._exit(127)
-
-# The panel is drawn before the process ever reads a key, but there is no
-# signal back to this driver that says so — the read it is about to make is
-# exactly what blocks on the answer. A short, fixed wait is what every other
-# scripted-keystroke case in this harness already accepts (`records`' own
-# 0.1s poll), and this dialog's panel is a handful of `write` calls, not a
-# search.
-time.sleep(0.3)
-os.write(master, key)
 
 out = b""
 status = None
@@ -1247,63 +1217,44 @@ if status is None:
 
 sys.stdout.buffer.write(out)
 if status is None:
-    print("confirm-dialog-pty.py: timed out waiting for the process", file=sys.stderr)
+    print("sync-notice-pty.py: timed out waiting for the process", file=sys.stderr)
     os.kill(pid, 9)
     sys.exit(124)
 sys.exit(os.WEXITSTATUS(status) if os.WIFEXITED(status) else 128 + os.WTERMSIG(status))
 PY
 
 behind_checkout
-KEYED_OUT=$(python3 "$PTY_DRIVER" 13 "$SPOOLWAY" override list 2>&1)
-KEYED_STATUS=$?
-if [ "$KEYED_STATUS" -eq 0 ]; then
-  ok "a keyed run confirms and exits zero"
+TTY_OUT=$(python3 "$PTY_DRIVER" "$SPOOLWAY" override list 2>&1)
+TTY_STATUS=$?
+if [ "$TTY_STATUS" -eq 0 ]; then
+  ok "at a terminal the command exits zero without a key pressed"
 else
-  bad "a keyed run confirms and exits zero (exit $KEYED_STATUS)"
-  sed 's/^/        /' <<<"$KEYED_OUT"
+  bad "at a terminal the command exits zero without a key pressed (exit $TTY_STATUS)"
+  sed 's/^/        /' <<<"$TTY_OUT"
 fi
-if grep -qF "new version installed, apply updates" <<<"$KEYED_OUT"; then
-  ok "the panel drew"
+if grep -qF "$SYNC_LINE" <<<"$TTY_OUT"; then
+  ok "the sync notice printed"
 else
-  bad "the panel drew"; sed 's/^/        /' <<<"$KEYED_OUT"
+  bad "the sync notice printed"; sed 's/^/        /' <<<"$TTY_OUT"
 fi
-if grep -qF "no overrides" <<<"$KEYED_OUT"; then
-  ok "and the command's own output followed, after the panel and its report"
+if grep -qF "no overrides" <<<"$TTY_OUT"; then
+  ok "and the command's own output followed"
 else
-  bad "and the command's own output followed, after the panel and its report"
-  sed 's/^/        /' <<<"$KEYED_OUT"
+  bad "and the command's own output followed"
+  sed 's/^/        /' <<<"$TTY_OUT"
 fi
-works "confirming wrote the missing file back for real" \
-  test -f "$STALE_SKILL"
-
-# Ctrl-c, over the same real pty — the acceptance criterion the injectable
-# unit tests cannot reach on their own: those inject "was this interrupted"
-# directly, so nothing in this repository until now has proven that a real
-# ctrl-c over a real terminal actually gets there. Review's own finding: a
-# first attempt at this caught the interrupt with `libc::signal`, which
-# glibc installs with `SA_RESTART`, so the blocked `read` underneath
-# `screen::read_key` silently resumed instead of failing with `EINTR` — the
-# process hung at the panel forever, and only a second ctrl-c (through the
-# kernel's now-restored default disposition) killed it, leaving the
-# terminal in raw mode. `src/gate.rs`'s own `SigintGuard` installs without
-# `SA_RESTART` for exactly this reason; this is what proves it against the
-# real kernel rather than the docs it was fixed against.
-behind_checkout
-CTRLC_OUT=$(python3 "$PTY_DRIVER" 3 "$SPOOLWAY" override list 2>&1)
-CTRLC_STATUS=$?
-if [ "$CTRLC_STATUS" -eq 0 ]; then
-  ok "ctrl-c at the panel exits zero rather than hanging or being killed"
+if grep -qF "new version installed, apply updates" <<<"$TTY_OUT"; then
+  bad "no confirm panel is drawn in front of the command"
+  sed 's/^/        /' <<<"$TTY_OUT"
 else
-  bad "ctrl-c at the panel exits zero rather than hanging or being killed (exit $CTRLC_STATUS)"
-  sed 's/^/        /' <<<"$CTRLC_OUT"
+  ok "no confirm panel is drawn in front of the command"
 fi
-if grep -qF "no overrides" <<<"$CTRLC_OUT"; then
-  bad "ctrl-c must not run the command it interrupted"
-  sed 's/^/        /' <<<"$CTRLC_OUT"
-else
-  ok "and the command it interrupted never ran"
-fi
-works "ctrl-c wrote nothing back" \
+works "and nothing was written back" \
   test ! -e "$STALE_SKILL"
+if grep -q "0.0.0-behind-e2e" "$PROJECT_STAMP"; then
+  ok "the stamp was left alone"
+else
+  bad "the stamp was left alone"; sed 's/^/        /' "$PROJECT_STAMP"
+fi
 
 finish

@@ -306,7 +306,7 @@ settings
     unattended.max_cost_usd
 
 files
-  1 file(s) are behind this spoolway — open spoolway to apply them
+  1 file(s) are behind this spoolway — run spoolway sync to apply them
 
 problems
   prompt `archivist`: missing
@@ -857,21 +857,22 @@ On success, `sync` writes a stamp under the project's home recording this binary
 a fingerprint of the text it would write, one line per checkout. `spoolway init` writes the
 same stamp for a freshly scaffolded project.
 
-Every other command that needs a project reads that stamp back. When it no longer matches and
-a scan finds files to change, the command stops and draws the same panel, titled "new version
-installed, apply updates" — keyed `[enter] confirm` alone, since there is no separate cancel key
-besides ctrl-c — before running. Enter runs `sync` for real, rewrites the stamp, and runs the
-command. Ctrl-c writes nothing, runs nothing, and restores the terminal.
+Every other command that needs a project reads that stamp back. When it no longer matches and a
+scan finds files to change, the command prints one line on stderr and then runs:
 
-Bare `spoolway` asks the same question as a popup over the tab it opens on instead, closed by
-`[enter]` alone, unless the project's pipeline file cannot load, in which case its screen cannot
-open to show the popup and it draws the printed panel like every other command.
+```
+Run spoolway sync to apply the last update.
+```
 
-Where stdin or stdout is not a terminal, under `--json`, or inside a lane, neither this panel nor
-the popup is drawn. One line goes to stderr instead and the command runs anyway; inside a lane
-the line omits the trailing "Open spoolway to apply them." sentence. `init`, `doctor`,
-`whats-new`, `update`, `config edit` and `config override` never draw this panel, the popup, or
-print the line. `sync` never draws this one either: it draws its own panel first, described
+That line prints only to a person at a terminal: never under `--json`, never inside a lane, and
+never when stderr is not a terminal. It never stops the command and never reads a key.
+
+Bare `spoolway` shows the same sentence in a popup over the tab it opens on instead, dismissed
+by `[enter]` alone, unless the project's pipeline file cannot load, in which case its screen
+cannot open to show the popup and it prints the line like every other command.
+
+`init`, `doctor`, `whats-new`, `update`, `config edit` and `config override` never print this
+line or show this popup. `sync` never does either: it draws its own panel first, described
 above.
 
 ### `spoolway whats-new`

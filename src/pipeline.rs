@@ -1989,7 +1989,7 @@ fn opt(value: &str) -> Option<String> {
 
 /// One change [`migrate_retired_shapes`] made, named twice: `report` is the
 /// full sentence `spoolway sync`'s own report and `--dry-run` print, and
-/// `panel` is the shorter one that still fits inside `crate::gate`'s bounded
+/// `panel` is the shorter one that still fits inside `spoolway sync`'s bounded
 /// confirm line. Both describe the same change; a caller never has to pick
 /// one over the other; it decides which surface it is printing to.
 pub struct RetiredShapeChange {

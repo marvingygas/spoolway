@@ -1801,15 +1801,15 @@ fn pipelines_load_outcome(root: &Path, err: anyhow::Error) -> Result<Option<Stri
 }
 
 /// The notes [`doctor_sync`] records for a dry `sync` scan — one note
-/// counting every file that is behind, naming no command, with the reason
-/// `sync` would rewrite each one left out: that reason is often a list of
-/// every setting a config has gained since it was written, which has no room
-/// on a screen naming files to scan before pressing `enter`.
+/// counting every file that is behind and naming `spoolway sync`, with the
+/// reason `sync` would rewrite each one left out: that reason is often a list
+/// of every setting a config has gained since it was written, which has no
+/// room in a one-line count.
 ///
 /// A file that is missing altogether from a project that was never
 /// initialised — no `config.toml` at all — is not *behind*: nothing was ever
 /// written for `sync` to bring forward, and folding it into the "behind"
-/// count there would send a person to open spoolway for the wrong reason.
+/// count there would send a person to run `sync` for the wrong reason.
 /// Those files get a note of their own naming that fact; the "behind" note
 /// keeps only what `sync` is actually for. In an initialised project a
 /// missing file is an ordinary thing for `sync` to restore, and stays where
@@ -1851,7 +1851,7 @@ fn sync_notes(outcomes: &[crate::sync::Outcome], initialised: bool) -> Vec<Strin
     );
     if !behind.is_empty() {
         notes.push(format!(
-            "{} file(s) are behind this spoolway — open spoolway to apply them",
+            "{} file(s) are behind this spoolway — run spoolway sync to apply them",
             behind.len()
         ));
     }
@@ -2867,7 +2867,7 @@ mod tests {
             notes,
             vec![
                 ".spoolway/config.toml has never been written".to_string(),
-                "1 file(s) are behind this spoolway — open spoolway to apply them".to_string(),
+                "1 file(s) are behind this spoolway — run spoolway sync to apply them".to_string(),
             ]
         );
 
@@ -2876,7 +2876,9 @@ mod tests {
         let notes = sync_notes(&outcomes, true);
         assert_eq!(
             notes,
-            vec!["2 file(s) are behind this spoolway — open spoolway to apply them".to_string(),]
+            vec![
+                "2 file(s) are behind this spoolway — run spoolway sync to apply them".to_string(),
+            ]
         );
     }
 

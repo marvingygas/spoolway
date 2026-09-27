@@ -78,7 +78,7 @@ pub enum Outcome {
     /// another [`Outcome::Wrote`], because its detail is one of the few this
     /// report actually prints under the file's own `wrote` line, in both the
     /// long form (`report`) `run`'s own report and `--dry-run` use and the
-    /// short one (`panel`) that fits `crate::gate`'s bounded confirm line —
+    /// short one (`panel`) that fits [`run_asking`]'s bounded confirm line —
     /// an ordinary `Wrote`'s `detail` is never shown this way, and giving it
     /// two forms besides would only invite it to grow long enough to need
     /// them.
@@ -213,21 +213,145 @@ pub fn run(repo: &Repo, args: &SyncArgs, json: bool) -> Result<()> {
 /// What `spoolway sync` says when the panel was answered with esc or ctrl-c.
 const CANCELLED: &str = "Nothing was changed.";
 
+/// Every body line, truncated to this many characters before
+/// [`crate::screen::panel`] sizes the box around it — so the panel's total
+/// width, its two border columns included, never exceeds 80 columns whatever
+/// the paths in it are.
+const MAX_LINE: usize = 74;
+
+/// The confirm panel's title.
+pub(crate) const TITLE: &str = "new version installed, apply updates";
+const KEPT_LINE: &str = "Your config values, prompts and task skeletons are kept.";
+
+/// Truncate `line` to [`MAX_LINE`] characters, with a trailing mark where it
+/// was cut — sized for a whole panel row, borders included.
+fn fit(line: String) -> String {
+    if line.chars().count() <= MAX_LINE {
+        return line;
+    }
+    let head: String = line.chars().take(MAX_LINE - 1).collect();
+    format!("{head}…")
+}
+
+/// The rows inside the confirm panel: a blank row under [`TITLE`], then what
+/// `sync` would write — every write, with a retired-shape migration's own
+/// short note under it where `notes` carries one, then every removal with
+/// its reason on the line under it, then the one sentence that answers "did
+/// it eat my config?" before anybody has pressed anything.
+fn panel_body(
+    wrote: &[&str],
+    notes: &BTreeMap<&str, Vec<(&str, &str)>>,
+    removed: &[(&str, &str)],
+) -> Vec<String> {
+    let mut body = vec![String::new()];
+    for path in wrote {
+        body.push(fit(format!("{:<6}  {path}", "write")));
+        for (_, panel) in notes.get(path).into_iter().flatten() {
+            body.push(fit(format!("        ({panel})")));
+        }
+    }
+    for (path, why) in removed {
+        body.push(fit(format!("{:<6}  {path}", "remove")));
+        body.push(fit(format!("        ({why})")));
+    }
+    body.push(String::new());
+    body.push(fit(KEPT_LINE.to_string()));
+    body
+}
+
+/// The confirm panel's own `SIGINT` handler for the span of its one blocking
+/// read.
+///
+/// Ctrl-c has no [`crate::screen::Key`] variant of its own: under this
+/// project's one raw mode (`crate::platform::TermGuard`, `ISIG` deliberately
+/// kept, see its own doc), a real ctrl-c is intercepted by the terminal
+/// driver and delivered as `SIGINT`, not as a byte a `read` call ever sees.
+/// Left uncaught, the kernel's default disposition would kill this process
+/// before `TermGuard`'s own `Drop` ever ran, leaving the terminal in raw
+/// mode for whatever shell prompt landed next.
+///
+/// It is a `sigaction`, not [`crate::platform::stop::catch_interrupt`]'s
+/// `signal`: glibc's `signal` installs with `SA_RESTART`, which — a real
+/// regression found in review — restarts the blocked `read` underneath
+/// `screen::read_key` instead of failing it with `EINTR`, so the interrupt
+/// is caught, the flag is set, and the read simply keeps blocking as if
+/// nothing happened. `SA_RESTART` off is what actually unblocks it. The
+/// flag itself is [`crate::platform::stop`]'s own shared one. Installed and
+/// restored to whatever was there before around the one blocking read alone,
+/// so ctrl-c means exactly what it always has in whatever this process runs
+/// next.
+pub(crate) struct SigintGuard {
+    previous: libc::sigaction,
+    /// An inert guard installs and restores nothing — test-only, the same
+    /// reason `TermGuard::inert` exists: a test must never touch the real
+    /// process's signal disposition, parallel tests included.
+    inert: bool,
+}
+
+extern "C" fn record_interrupt(_: libc::c_int) {
+    crate::platform::stop::asked_for();
+}
+
+impl SigintGuard {
+    pub(crate) fn new() -> SigintGuard {
+        // SAFETY: `action` and `previous` are plain-old-data structs;
+        // `sigemptyset` and `sigaction` are ordinary syscalls against a
+        // buffer this function owns for the call's duration.
+        unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = record_interrupt as *const () as libc::sighandler_t;
+            libc::sigemptyset(&mut action.sa_mask);
+            // No `SA_RESTART`: this handler exists so the blocking `read`
+            // underneath `screen::read_key` fails with `EINTR` and returns,
+            // not so it silently resumes as if ctrl-c had never happened.
+            action.sa_flags = 0;
+            let mut previous: libc::sigaction = std::mem::zeroed();
+            libc::sigaction(libc::SIGINT, &action, &mut previous);
+            SigintGuard {
+                previous,
+                inert: false,
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inert() -> SigintGuard {
+        SigintGuard {
+            // SAFETY: never installed and never restored — see `inert`.
+            previous: unsafe { std::mem::zeroed() },
+            inert: true,
+        }
+    }
+}
+
+impl Drop for SigintGuard {
+    fn drop(&mut self) {
+        if self.inert {
+            return;
+        }
+        // SAFETY: restoring exactly what `new` read off `sigaction` a
+        // moment ago, on the same signal, unmodified.
+        unsafe {
+            libc::sigaction(libc::SIGINT, &self.previous, std::ptr::null_mut());
+        }
+    }
+}
+
 /// How the confirm panel in front of a real sync ended.
 enum Answer {
     /// Enter: write the files and print [`run`]'s own report.
     Apply,
     /// Esc, ctrl-c, or the terminal going away mid-question: write nothing.
-    /// A read that ran out of input is a cancel rather than a yes, unlike
-    /// the gate's own default — here the only thing enter would do is write,
-    /// and this module's failure mode is "did nothing and said so".
+    /// A read that ran out of input is a cancel rather than a yes: the only
+    /// thing enter would do is write, and this module's failure mode is "did
+    /// nothing and said so".
     Cancel,
 }
 
 /// `spoolway sync` as a person runs it: the files it is about to write or
-/// remove, drawn in the gate's own panel, and [`run`] only once enter says
-/// so. `run` itself never asks, because the gate's enter already calls it
-/// once a person has answered the identical panel.
+/// remove, drawn in a panel, and [`run`] only once enter says so. `run`
+/// itself never asks: this is the one place a person answers, and `--replace`,
+/// a script, `--json` and a lane all reach `run` without a question.
 pub(crate) fn run_asking(repo: &Repo, args: &SyncArgs, json: bool, in_lane: bool) -> Result<()> {
     run_asking_with(
         repo,
@@ -238,13 +362,13 @@ pub(crate) fn run_asking(repo: &Repo, args: &SyncArgs, json: bool, in_lane: bool
         &mut crate::screen::RawStdin,
         &mut std::io::stdout(),
         crate::platform::TermGuard::new,
-        crate::gate::SigintGuard::new,
+        SigintGuard::new,
     )
 }
 
 /// [`run_asking`]'s own logic over injected input, output, terminal and
-/// `SIGINT` handling — the same split, and the same reasons, as
-/// `crate::gate::confirm_sync_gate_with`.
+/// `SIGINT` handling, so a test can drive every branch without a real
+/// terminal and without ever raising a real signal.
 #[allow(clippy::too_many_arguments)]
 fn run_asking_with(
     repo: &Repo,
@@ -255,12 +379,12 @@ fn run_asking_with(
     input: &mut impl crate::screen::PollableRead,
     out: &mut impl std::io::Write,
     term: impl FnOnce() -> crate::platform::TermGuard,
-    interrupt: impl FnOnce() -> crate::gate::SigintGuard,
+    interrupt: impl FnOnce() -> SigintGuard,
 ) -> Result<()> {
     // Nobody to answer, or nothing to ask about: a script (the e2e suites run
     // `sync` with no terminal), `--json`, and a lane — whose pane can carry a
-    // real terminal nobody is watching, the hang `confirm_sync_gate_with`
-    // documents — write straight away. `--dry-run` writes nothing to ask
+    // real terminal nobody is watching, so a panel parked there would hang
+    // the step until its own timeout — write straight away. `--dry-run` writes nothing to ask
     // about, and `--replace` names its files on the command line already.
     if !interactive || json || in_lane || args.dry_run || !args.replace.is_empty() {
         return run(repo, args, json);
@@ -276,8 +400,8 @@ fn run_asking_with(
     }
     let notes = migration_notes(&outcomes);
     let keys = crate::screen::keys(&[("enter", "apply"), ("esc", "cancel")]);
-    let body = crate::gate::panel_body(&wrote, &notes, &removed);
-    for line in crate::screen::panel(crate::gate::TITLE, &body, &keys) {
+    let body = panel_body(&wrote, &notes, &removed);
+    for line in crate::screen::panel(TITLE, &body, &keys) {
         writeln!(out, "{line}")?;
     }
 
@@ -291,9 +415,9 @@ fn run_asking_with(
             match crate::screen::read_key(input) {
                 Some(crate::screen::Key::Enter) => break Answer::Apply,
                 // Ctrl-c arrives as `SIGINT`, never as a byte — see
-                // `crate::gate`'s module doc — so it lands here as the read
-                // failing (`None`), the same as input running out. The gate
-                // has to tell those two apart; here both mean write nothing.
+                // [`SigintGuard`] — so it lands here as the read failing
+                // (`None`), the same as input running out. Both mean write
+                // nothing.
                 Some(crate::screen::Key::Esc) | None => break Answer::Cancel,
                 _ => {}
             }
@@ -311,8 +435,9 @@ fn run_asking_with(
 /// The paths worth naming out of a scan, deduplicated: one file can be
 /// behind for several reasons at once — a config gains a setting and drops a
 /// retired one in the same rewrite — and a path printed twice reads as two
-/// files. Shared by [`run`]'s own report and `confirm-dialog`'s gate, which
-/// draws the same two lists in a panel before either has run for real.
+/// files. Shared by [`run`]'s own report, [`run_asking`]'s panel, which
+/// draws the same two lists before either has run for real, and
+/// `crate::gate`, which only asks whether either list has anything in it.
 pub(crate) fn dedup_paths(outcomes: &[Outcome]) -> (Vec<&str>, Vec<(&str, &str)>) {
     let mut wrote: Vec<&str> = Vec::new();
     let mut removed: Vec<(&str, &str)> = Vec::new();
@@ -338,7 +463,7 @@ pub(crate) fn dedup_paths(outcomes: &[Outcome]) -> (Vec<&str>, Vec<(&str, &str)>
 
 /// The `(migrated: …)` lines a scan's own [`Outcome::Migrated`] entries
 /// carry, keyed by path and kept in the order they were recorded — the
-/// extra explanation [`run`]'s own report and `crate::gate`'s confirm panel
+/// extra explanation [`run`]'s own report and [`run_asking`]'s confirm panel
 /// each draw under a pipeline file's `wrote` line, one tuple of `(report,
 /// panel)` per change so each surface reads the length it can afford.
 pub(crate) fn migration_notes(outcomes: &[Outcome]) -> BTreeMap<&str, Vec<(&str, &str)>> {
@@ -1289,7 +1414,7 @@ pub fn write_stamp(home: &Path, checkout: &Path) -> Result<()> {
 
 /// Whether `checkout`'s stamp — what `sync` or `init` last recorded there —
 /// no longer matches what this binary would write now: a newer release, or
-/// a config whose own values have changed since. `confirm-dialog`'s gate
+/// a config whose own values have changed since. `crate::gate`'s notice
 /// reads this before paying for a full [`scan`], so an up-to-date project
 /// pays nothing beyond one file read and a few hashes per command.
 ///
@@ -1376,10 +1501,26 @@ mod tests {
             &mut input,
             &mut out,
             crate::platform::TermGuard::inert,
-            crate::gate::SigintGuard::inert,
+            SigintGuard::inert,
         )
         .unwrap();
         String::from_utf8(out).unwrap()
+    }
+
+    /// The confirm panel's width is bounded even when a path in it is not:
+    /// every row `screen::boxed` draws — borders included — stays at or
+    /// under 80 columns.
+    #[test]
+    fn the_confirm_panel_is_at_most_eighty_columns_wide() {
+        let long = "a/very/long/path/".repeat(6) + "SKILL.md";
+        let body = panel_body(&[long.as_str()], &BTreeMap::new(), &[]);
+        for line in crate::screen::panel(TITLE, &body, "[enter] apply") {
+            assert!(
+                line.chars().count() <= 80,
+                "{} columns: {line}",
+                line.chars().count()
+            );
+        }
     }
 
     /// Enter at the panel writes the files, records the stamp and draws
@@ -1388,7 +1529,7 @@ mod tests {
     fn asking_sync_writes_only_once_enter_is_pressed() {
         let repo = fixture("ask-enter");
         let drawn = ask(&repo, &args(), false, false, true, "q\r");
-        assert!(drawn.contains(crate::gate::TITLE), "{drawn}");
+        assert!(drawn.contains(TITLE), "{drawn}");
         assert!(drawn.contains("config.toml"), "{drawn}");
         assert!(drawn.contains("[enter] apply"), "{drawn}");
         assert!(drawn.contains("[esc] cancel"), "{drawn}");
@@ -1405,7 +1546,7 @@ mod tests {
         for (name, keys) in [("ask-esc", "\x1b"), ("ask-ctrl-c", "")] {
             let repo = fixture(name);
             let drawn = ask(&repo, &args(), false, false, true, keys);
-            assert!(drawn.contains(crate::gate::TITLE), "{name}: {drawn}");
+            assert!(drawn.contains(TITLE), "{name}: {drawn}");
             assert!(
                 drawn.ends_with(&format!("{CANCELLED}\n")),
                 "{name}: {drawn}"
