@@ -64,11 +64,10 @@ echo $$ > "$SPOOLWAY_PROJECT_HOME/dispatch.pid"
 # generic 1 an error gets, because a script restarting this in a loop needs to
 # tell "deferred" from "the guard has had enough" before the fifth call ever
 # happens.
-# `--plain`, on every call below: without it a start that finds the lock held
-# still returns at once with exit 4, but it also tries to focus a pane —
-# not what this suite is testing, and this hand-written lock file names none
-# to focus anyway. `--plain` keeps every call here to exactly the plain
-# table and the exit code the suite is actually asserting on.
+# `--plain`, on every call below: a start that finds the lock held returns
+# at once with exit 4 and one line either way, and `--plain` keeps every call
+# here to exactly the plain output and the exit code the suite is actually
+# asserting on.
 for n in 1 2 3 4; do
   exit_code "start $n could not run and says so, not an error" 4 "$SPOOLWAY" dispatch --plain
 done

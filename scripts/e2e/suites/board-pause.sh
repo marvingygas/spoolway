@@ -400,7 +400,7 @@ else bad "a second lane is mid-turn"; fi
 press P
 draws "\`P\` opens one panel for the run" "Pausing aborts 1 running step:"
 draws "naming the task and step it aborts" "busy · implement"
-draws "and offers enter on its own line" "[enter] pause the run"
+draws "and offers enter on its own line" "[enter] pause them"
 draws "with schedule and cancel on the line under it" "[s] schedule   [esc] cancel"
 stage_stays "no task file is written while the panel is open" busy implement
 stage_stays "not even the idle one" behind queued

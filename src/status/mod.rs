@@ -1,6 +1,6 @@
 //! The live board `spoolway dispatch` draws in its own terminal, between passes
-//! — and bare `spoolway` draws on its dispatch tab, where no pass runs behind it
-//! at all (see [`Phase::Watching`]).
+//! — and bare `spoolway` draws on its dispatch tab, which runs no pass itself
+//! and draws what the dispatcher it started writes (see [`Phase::Watching`]).
 //!
 //! A renderer, not a participant. Every frame is read from the same two sources
 //! of truth a pass reconciles from — the task files and the live lane list —
@@ -140,11 +140,16 @@ pub enum Phase {
     /// The last frame: the queue is empty and the run is ending.
     Stopping,
     /// A board no dispatcher is drawing: bare `spoolway`'s dispatch tab,
-    /// which runs no pass of its own. Carries the pid holding the dispatch
-    /// lock, if anything does, so the header names the process actually
-    /// dispatching rather than the screen's own — and says `dispatcher
-    /// stopped`, with no pid at all, when nothing is.
-    Watching(Option<u32>),
+    /// which runs no pass of its own. `holder` is the pid holding the
+    /// dispatch lock, if anything does, so the header names the process
+    /// actually dispatching — the child the tab started — rather than the
+    /// screen's own, and says `dispatcher stopped`, with no pid at all, when
+    /// nothing is. `dispatching` is whether the tab has a child up, which is
+    /// what its `enter` would stop rather than start.
+    Watching {
+        holder: Option<u32>,
+        dispatching: bool,
+    },
 }
 
 pub struct Row {
@@ -412,12 +417,26 @@ impl Board {
 
     /// One frame for the dispatch tab: [`Board::frame`] under
     /// [`Phase::Watching`], naming whichever process holds the dispatch lock.
-    /// A lock file that cannot be read reads as nobody holding it — the same
-    /// fallback the queue screen's own `after_write` takes, since this must
-    /// never name a live pid it did not see.
-    pub(crate) fn hosted_frame(&mut self, repo: &Repo, pipelines: &Pipelines) -> Result<String> {
+    /// A lock file that cannot be read reads as nobody holding it, since
+    /// this must never name a live pid it did not see.
+    ///
+    /// `popup` is the tab's own — a start gate, or why its dispatcher ended
+    /// — drawn over the table the same way the board's confirm panels are.
+    /// The board's own panel wins while one is open: the tab opens no popup
+    /// of its own until the board is at rest.
+    pub(crate) fn hosted_frame(
+        &mut self,
+        repo: &Repo,
+        pipelines: &Pipelines,
+        dispatching: bool,
+        popup: Option<&[String]>,
+    ) -> Result<String> {
         let holder = crate::lock::Lock::holder(&repo.lock_file()).unwrap_or(None);
-        self.frame(repo, pipelines, Phase::Watching(holder))
+        let phase = Phase::Watching {
+            holder,
+            dispatching,
+        };
+        self.frame_with(repo, pipelines, phase, popup)
     }
 
     /// Draw one frame over whatever is on the terminal.
@@ -444,6 +463,18 @@ impl Board {
     /// One frame, built whole before anything is written so a slow read never
     /// leaves a half-drawn board on screen.
     fn frame(&mut self, repo: &Repo, pipelines: &Pipelines, phase: Phase) -> Result<String> {
+        self.frame_with(repo, pipelines, phase, None)
+    }
+
+    /// [`Board::frame`], with `popup` drawn over it wherever the board has
+    /// no panel of its own open — see [`Board::hosted_frame`].
+    fn frame_with(
+        &mut self,
+        repo: &Repo,
+        pipelines: &Pipelines,
+        phase: Phase,
+        popup: Option<&[String]>,
+    ) -> Result<String> {
         // `render` seeds `self.cursor` itself, from the very rows it composes
         // to draw the table — see the seeding block inline in its own body
         // for why — rather than this reading the queue a second time first.
@@ -468,45 +499,56 @@ impl Board {
         // because every other reader of `render`'s output — `draw`, the tests
         // below — wants one whole frame too, and a second return shape here
         // would be for this one caller alone.
-        Ok(match self.mode.panel() {
-            Some(panel) => {
-                // `overlay` reads its target width off line zero and writes
-                // each panel row by walking a target row's own characters —
-                // right for `spoolway queue`'s own frame, whose every row is
-                // one fixed-width pane with no colour under where a picker
-                // lands. This board's rows carry colour throughout — the
-                // state dot, the dimmed footer, the key hint — and `overlay`
-                // counts an escape byte as a column exactly like a visible
-                // one, so it writes at the wrong column and can slice a
-                // `DIM`/`RESET` pair in two, printing what is left of the
-                // code as stray text. A panel carries no colour of its own,
-                // so the frame under one loses its for the frame this draws
-                // — [`strip_ansi`] — and gets it back the moment the panel
-                // closes and the next frame is read fresh.
-                //
-                // Also opens on a blank spacer line, and has other blank
-                // rows through the ticker and the rule below it — a row
-                // `overlay` cannot write into at all, since it only ever
-                // replaces characters a row already has. Padding every row
-                // out to the widest one first, never shorter than
-                // `pane_width()`, gives every row the same floor to write
-                // onto and never truncates anything that already reached it.
-                let stripped: Vec<String> = frame.lines().map(strip_ansi).collect();
-                let width = stripped
-                    .iter()
-                    .map(|line| line.chars().count())
-                    .max()
-                    .unwrap_or(0)
-                    .max(pane_width());
-                let mut lines: Vec<String> = stripped
-                    .iter()
-                    .map(|line| crate::screen::pad_to(line, width))
-                    .collect();
-                crate::screen::overlay(&mut lines, &panel);
-                lines.join("\n")
-            }
-            None => frame,
-        })
+        Ok(
+            match self.mode.panel().or_else(|| popup.map(<[String]>::to_vec)) {
+                Some(panel) => {
+                    // `overlay` reads its target width off line zero and writes
+                    // each panel row by walking a target row's own characters —
+                    // right for `spoolway queue`'s own frame, whose every row is
+                    // one fixed-width pane with no colour under where a picker
+                    // lands. This board's rows carry colour throughout — the
+                    // state dot, the dimmed footer, the key hint — and `overlay`
+                    // counts an escape byte as a column exactly like a visible
+                    // one, so it writes at the wrong column and can slice a
+                    // `DIM`/`RESET` pair in two, printing what is left of the
+                    // code as stray text. A panel carries no colour of its own,
+                    // so the frame under one loses its for the frame this draws
+                    // — [`strip_ansi`] — and gets it back the moment the panel
+                    // closes and the next frame is read fresh.
+                    //
+                    // Also opens on a blank spacer line, and has other blank
+                    // rows through the ticker and the rule below it — a row
+                    // `overlay` cannot write into at all, since it only ever
+                    // replaces characters a row already has. Padding every row
+                    // out to the widest one first, never shorter than
+                    // `pane_width()`, gives every row the same floor to write
+                    // onto and never truncates anything that already reached it.
+                    let stripped: Vec<String> = frame.lines().map(strip_ansi).collect();
+                    let width = stripped
+                        .iter()
+                        .map(|line| line.chars().count())
+                        .max()
+                        .unwrap_or(0)
+                        .max(pane_width());
+                    let mut lines: Vec<String> = stripped
+                        .iter()
+                        .map(|line| crate::screen::pad_to(line, width))
+                        .collect();
+                    // `overlay` only writes into rows the frame already has,
+                    // so a panel taller than the frame under it — the
+                    // dispatch tab's warnings over an empty queue — would
+                    // lose its bottom rows, key line and all. Blank rows
+                    // under the frame give it somewhere to land, with one
+                    // row above and below it to spare.
+                    while lines.len() < panel.len() + 2 {
+                        lines.push(" ".repeat(width));
+                    }
+                    crate::screen::overlay(&mut lines, &panel);
+                    lines.join("\n")
+                }
+                None => frame,
+            },
+        )
     }
 
     /// Apply one key read while the board is up.
@@ -1734,7 +1776,9 @@ fn render(
             format!("pid {}", std::process::id()),
             version,
         ],
-        Phase::Watching(Some(pid)) => {
+        Phase::Watching {
+            holder: Some(pid), ..
+        } => {
             vec![
                 "dispatcher running".to_string(),
                 format!("pid {pid}"),
@@ -1743,7 +1787,7 @@ fn render(
         }
         // Nothing is dispatching, so there is no pid to name — this
         // process's own would read as a dispatcher that is not there.
-        Phase::Watching(None) => vec!["dispatcher stopped".to_string(), version],
+        Phase::Watching { holder: None, .. } => vec!["dispatcher stopped".to_string(), version],
     };
     let pane = pane_width();
     // One blank row before the lockup, so its ascenders have a margin to sit
@@ -1839,8 +1883,19 @@ fn render(
     // those the same way everywhere.
     //
     // `q` joins it only inside bare `spoolway`'s dispatch tab, the one place
-    // it quits — see `crate::screen::shell::quit_hint`.
+    // it quits — see `crate::screen::shell::quit_hint` — and so does `enter`,
+    // the one place it starts or stops dispatching.
+    let enter: &[(&str, &str)] = match phase {
+        Phase::Watching {
+            dispatching: false, ..
+        } => &[("enter", "start dispatching")],
+        Phase::Watching {
+            dispatching: true, ..
+        } => &[("enter", "stop dispatching")],
+        _ => &[],
+    };
     let keys = [
+        enter,
         [
             ("o", "open task"),
             ("r/R", "resume / all"),
@@ -4880,6 +4935,24 @@ mod tests {
         assert!(!frame.contains("┌─"), "{frame}");
     }
 
+    /// A popup taller than the frame under it — the dispatch tab's warnings
+    /// over an empty queue — still draws whole, down to its key line: the
+    /// frame grows blank rows for it rather than cutting it off.
+    #[test]
+    fn a_popup_taller_than_the_frame_still_draws_its_key_line() {
+        let repo = fixture("popup-taller-than-frame");
+        let pipelines = Pipelines::builtin();
+        let body: Vec<String> = (0..40).map(|i| format!("finding {i}")).collect();
+        let panel = crate::screen::panel("before dispatching", &body, "[enter] its own key");
+
+        let mut board = Board::for_test();
+        let frame = board
+            .hosted_frame(&repo, &pipelines, false, Some(&panel))
+            .unwrap();
+        assert!(frame.contains("finding 39"), "{frame}");
+        assert!(frame.contains("[enter] its own key"), "{frame}");
+    }
+
     /// A confirm panel is drawn in plain text over a frame the table beneath
     /// it colours throughout — the state dot, the dimmed footer, the key
     /// hint. `overlay` counts an escape byte as a column exactly like a
@@ -5706,7 +5779,7 @@ mod tests {
 
         let frame = strip(&board.frame(&repo, &pipelines, Phase::Waiting).unwrap());
         assert!(frame.contains("unqueue drop-walk"), "{frame}");
-        assert!(frame.contains("2 documents go back to:"), "{frame}");
+        assert!(frame.contains("2 tasks go back to:"), "{frame}");
         assert!(frame.contains("drop-walk"), "{frame}");
         assert!(
             frame.contains("chain-refusals   (depends on drop-walk)"),
@@ -5754,7 +5827,7 @@ mod tests {
 
         let frame = strip(&board.frame(&repo, &pipelines, Phase::Waiting).unwrap());
         assert!(frame.contains("unqueue alpha"), "{frame}");
-        assert!(frame.contains("3 documents go back to:"), "{frame}");
+        assert!(frame.contains("3 tasks go back to:"), "{frame}");
         assert!(frame.contains("beta   (depends on alpha)"), "{frame}");
         assert!(frame.contains("gamma   (depends on beta)"), "{frame}");
 

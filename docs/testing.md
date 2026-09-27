@@ -94,7 +94,7 @@ with a `// covers:` line.
 | `routines` | The routines pane and the `s` save panel on the queue screen |
 | `jobs` | A cron job fired by a real dispatcher pass, and what `spoolway doctor` says about a bad job |
 | `jobs-screen` | The `spoolway jobs` screen writing, pausing and deleting a job |
-| `screen` | Bare `spoolway`: the four-label strip, opening on the queue tab, `←` reaching the dispatch tab, and the grouped help off a terminal |
+| `screen` | Bare `spoolway`: the four-label strip, opening on the queue tab, `←` reaching the dispatch tab, `enter` there starting and stopping a dispatcher, and the grouped help off a terminal |
 | `board-pause` | The board's confirm panels: `p`, `P`, `U` over a live lane |
 | `queue-unqueue` | `spoolway queue unqueue`: its `--help`, the refusal and the two routes out of it, and `--force` over a live lane |
 | `restart` | The dispatcher's restart guard and its exit codes |

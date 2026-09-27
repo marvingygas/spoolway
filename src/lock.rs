@@ -42,10 +42,10 @@ impl Lock {
     /// on the dispatcher alone would give a run whose dispatcher never stopped
     /// and whose lanes parked themselves anyway.
     ///
-    /// `pane_id` is the fourth line: the pane the dispatcher is drawing its
-    /// board in, if it has one, off [`crate::mux::Mux::own_pane_id`] — what a
-    /// second `spoolway dispatch` finding this lock held reads back and asks
-    /// herdr to focus, in place of drawing a second board. `None` for a
+    /// `pane_id` is the fourth line: the pane the dispatcher is running in,
+    /// if it has one, off [`crate::mux::Mux::own_pane_id`] — for a person
+    /// reading the file to find the run by; nothing reads it back since a
+    /// second start stopped focusing the first one's pane. `None` for a
     /// caller with no pane to record — headless, or a test — and left as an
     /// empty line rather than omitted, so the line count a reader splits on
     /// never depends on whether this run had one.
@@ -125,26 +125,6 @@ impl Lock {
             UNATTENDED => Some(true),
             ATTENDED => Some(false),
             _ => None,
-        }
-    }
-
-    /// The pane a live dispatcher's board is drawn in, if it has one — the
-    /// fourth line, off [`Lock::acquire`]'s own `pane_id`.
-    ///
-    /// Through [`Lock::holder`] first, same reasoning as [`Lock::unattended`]:
-    /// a stale lock has nothing left to focus, and a second `spoolway
-    /// dispatch` that raced the first one's exit must not go looking for a
-    /// pane the dead run only used to hold.
-    ///
-    /// `None` from a lock with no fourth line at all — written by a binary
-    /// before this line existed — or an empty one, which [`Lock::acquire`]
-    /// itself writes for a caller with no pane to record.
-    pub fn pane(path: &Path) -> Option<String> {
-        Lock::holder(path).ok().flatten()?;
-        let raw = std::fs::read_to_string(path).ok()?;
-        match raw.lines().nth(3)?.trim() {
-            "" => None,
-            pane => Some(pane.to_string()),
         }
     }
 
@@ -672,19 +652,6 @@ mod tests {
         assert_eq!(Lock::unattended(&path), None);
     }
 
-    /// The pane a run started with survives the trip through the file, and
-    /// stops being an answer the moment the run is over — the same shape as
-    /// the mode, above.
-    #[test]
-    fn the_lock_carries_the_runs_pane_and_only_while_the_run_is_live() {
-        let path = scratch("pane");
-        {
-            let _lock = Lock::acquire(&path, false, Some("w1:p5")).unwrap();
-            assert_eq!(Lock::pane(&path).as_deref(), Some("w1:p5"));
-        }
-        assert_eq!(Lock::pane(&path), None);
-    }
-
     /// Both shapes a fourth line can take are still a live holder, whether
     /// or not there is a pane to go with it: a three-line file written by a
     /// binary before this task, and a four-line one written by this one with
@@ -697,12 +664,10 @@ mod tests {
         let three_lines = scratch("pane-three-lines");
         std::fs::write(&three_lines, format!("{pid}\n{started}\nattended\n")).unwrap();
         assert_eq!(Lock::holder(&three_lines).unwrap(), Some(pid));
-        assert_eq!(Lock::pane(&three_lines), None);
 
         let four_lines_blank = scratch("pane-four-lines-blank");
         std::fs::write(&four_lines_blank, format!("{pid}\n{started}\nattended\n\n")).unwrap();
         assert_eq!(Lock::holder(&four_lines_blank).unwrap(), Some(pid));
-        assert_eq!(Lock::pane(&four_lines_blank), None);
     }
 
     /// The bug this task closes: `holder()` then a plain `write` left a

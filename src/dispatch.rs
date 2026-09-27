@@ -234,6 +234,18 @@ const RELAUNCH_SEED: Duration = Duration::from_secs(10);
 /// on its own so nothing here depends on how often a pass actually runs.
 const LAUNCH_GRACE: Duration = Duration::from_secs(10);
 
+/// A spend ceiling this run has reached, said two ways.
+#[derive(Debug, Clone)]
+pub struct Ceiling {
+    /// The sentence the run logs, and `spoolway dispatch` prints as it ends:
+    /// what was spent against what, and what happens now.
+    pub note: String,
+    /// The same figures as the key that set them — `unattended.max_cost_usd
+    /// reached: $5.02 of $5.00` — for the dispatch tab's popup, where the
+    /// title already says the dispatcher stopped.
+    pub reached: String,
+}
+
 /// What one pass did, for printing and for the loop's own decisions.
 #[derive(Debug, Default)]
 pub struct Report {
@@ -241,9 +253,10 @@ pub struct Report {
     pub problems: Vec<String>,
     /// Nothing is running and nothing is waiting to run.
     pub quiet: bool,
-    /// This run has spent its `max_output_tokens` and started nothing, with the
-    /// figures. The run ends once [`Report::lanes_live`] goes false.
-    pub ceiling: Option<String>,
+    /// This run has spent its `max_output_tokens` or `max_cost_usd` and
+    /// started nothing, with the figures. The run ends once
+    /// [`Report::lanes_live`] goes false.
+    pub ceiling: Option<Ceiling>,
     /// Whether any lane of this run was still open at the end of the pass.
     pub lanes_live: bool,
     /// Whether this pass changed at least one task's own stage, freed a
@@ -996,9 +1009,9 @@ impl<'a> Dispatcher<'a> {
             .over_output_ceiling()
             .or_else(|| self.over_cost_ceiling())
         {
-            Some(note) => {
-                report.actions.push(note.clone());
-                report.ceiling = Some(note);
+            Some(ceiling) => {
+                report.actions.push(ceiling.note.clone());
+                report.ceiling = Some(ceiling);
             }
             None => self.start_lanes(
                 &mut tasks,
@@ -4433,7 +4446,7 @@ impl<'a> Dispatcher<'a> {
     /// an overnight run and your own context reads stop the dispatcher starting
     /// work. The ceiling is documented as the output tokens one unattended run
     /// may spend, and a lane is the only thing that run started.
-    fn over_output_ceiling(&mut self) -> Option<String> {
+    fn over_output_ceiling(&mut self) -> Option<Ceiling> {
         if !self.unattended {
             return None;
         }
@@ -4456,11 +4469,14 @@ impl<'a> Dispatcher<'a> {
         if spent < ceiling {
             return None;
         }
-        Some(format!(
-            "this run has spent {spent} output tokens against a max_output_tokens of {ceiling} — \
-             starting nothing further. Lanes still open will finish, and the queue keeps its \
-             place for the next run"
-        ))
+        Some(Ceiling {
+            note: format!(
+                "this run has spent {spent} output tokens against a max_output_tokens of \
+                 {ceiling} — starting nothing further. Lanes still open will finish, and the \
+                 queue keeps its place for the next run"
+            ),
+            reached: format!("unattended.max_output_tokens reached: {spent} of {ceiling}"),
+        })
     }
 
     /// [`Dispatcher::over_output_ceiling`]'s own counterpart in money rather
@@ -4475,7 +4491,7 @@ impl<'a> Dispatcher<'a> {
     /// heard of, with nothing in `[models]` either — contributes nothing to the
     /// sum rather than being estimated, the same rule `Entry::cost_usd` follows
     /// everywhere else: never invented, only read.
-    fn over_cost_ceiling(&mut self) -> Option<String> {
+    fn over_cost_ceiling(&mut self) -> Option<Ceiling> {
         if !self.unattended {
             return None;
         }
@@ -4498,11 +4514,14 @@ impl<'a> Dispatcher<'a> {
         if spent < ceiling {
             return None;
         }
-        Some(format!(
-            "this run has spent ${spent:.2} against a max_cost_usd of ${ceiling:.2} — starting \
-             nothing further. Lanes still open will finish, and the queue keeps its place for \
-             the next run"
-        ))
+        Some(Ceiling {
+            note: format!(
+                "this run has spent ${spent:.2} against a max_cost_usd of ${ceiling:.2} — \
+                 starting nothing further. Lanes still open will finish, and the queue keeps its \
+                 place for the next run"
+            ),
+            reached: format!("unattended.max_cost_usd reached: ${spent:.2} of ${ceiling:.2}"),
+        })
     }
 }
 
@@ -12065,10 +12084,14 @@ mod tests {
 
         // And one lane, which is what the ceiling is for.
         write_spend(&repo, "demo", 1_500);
-        let note = Dispatcher::new(&repo, &pipelines, &mux)
+        let ceiling = Dispatcher::new(&repo, &pipelines, &mux)
             .over_output_ceiling()
             .expect("the lane's own spend is over the ceiling");
-        assert!(note.contains("1500 output tokens"), "{note}");
+        assert!(ceiling.note.contains("1500 output tokens"), "{ceiling:?}");
+        assert_eq!(
+            ceiling.reached,
+            "unattended.max_output_tokens reached: 1500 of 1000"
+        );
     }
 
     /// `max_cost_usd`'s own counterpart of the test above: off by default, so
@@ -12116,11 +12139,16 @@ mod tests {
         );
 
         repo.config.unattended.max_cost_usd = 5.0;
-        let note = Dispatcher::new(&repo, &pipelines, &mux)
+        let ceiling = Dispatcher::new(&repo, &pipelines, &mux)
             .over_cost_ceiling()
             .expect("$7.50 spent is over a $5.00 ceiling");
-        assert!(note.contains("$7.50"), "{note}");
-        assert!(note.contains("$5.00"), "{note}");
+        assert!(ceiling.note.contains("$7.50"), "{ceiling:?}");
+        assert!(ceiling.note.contains("$5.00"), "{ceiling:?}");
+        // The dispatch tab's popup line, as step 30 of its mockup draws it.
+        assert_eq!(
+            ceiling.reached,
+            "unattended.max_cost_usd reached: $7.50 of $5.00"
+        );
     }
 
     /// Stopping a dispatcher must not block every task that was in flight.

@@ -82,7 +82,7 @@ directory. The right pane lists the highlighted group's tasks and what each wait
 | Key | What it does |
 |---|---|
 | `space` | Select a group. |
-| `enter` | Check the selection and queue it. Then it shows the whole queue; `enter` there starts a dispatcher here. |
+| `enter` | Check the selection and queue it. |
 | `g` | Set or clear a gate on the highlighted task. |
 | `o` | Open the highlighted document in your editor. |
 | `f` | Filter the group list. `enter` keeps the filter, `esc` clears it. |

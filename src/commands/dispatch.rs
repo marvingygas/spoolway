@@ -10,7 +10,9 @@ use crate::screen::PollableRead;
 /// running again once something is queued is exactly what a person or a
 /// script should do next. Only when no job is enabled — an enabled job keeps
 /// the run resident on an empty queue instead, so it is alive when the
-/// job's window comes round.
+/// job's window comes round — and never for a run bare `spoolway` started
+/// (`--from-screen`), which waits on an empty queue until the screen stops
+/// it.
 pub const EXIT_EMPTY_QUEUE: i32 = 3;
 
 /// Another dispatcher already holds the repo lock. Ordinary too — the
@@ -113,7 +115,13 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
             &format!("a dispatcher is already running for this repo (pid {pid})"),
             RESTART_WINDOW,
         )?;
-        already_running(repo, pipelines, pid, args, &mut std::io::stdout())?;
+        // To stderr under the screen, which shows it as the reason this
+        // start did not happen; stdout otherwise, where it always was.
+        let held = format!("a dispatcher is already running for this repo (pid {pid})");
+        match args.screen {
+            true => eprintln!("{held}"),
+            false => println!("  {held}"),
+        }
         return Ok(EXIT_ALREADY_RUNNING);
     }
 
@@ -126,8 +134,9 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // nesting a second one of their own — see `own_term`, below.
     //
     // Not for `--plain`, which keeps its own one-line-per-pass log and gains
-    // none of this: no board, no terminal taken, no checklist printed.
-    let mut board = match args.plain {
+    // none of this: no board, no terminal taken, no checklist printed. Nor
+    // for a run the screen started, whose terminal is the screen's own.
+    let mut board = match args.plain || args.screen {
         true => None,
         false => Some(crate::status::Board::new()),
     };
@@ -164,7 +173,10 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         "queue read",
         &plural(live_tasks.len(), "task"),
     )?;
-    if live_tasks.is_empty() {
+    // A run the screen started is the exception: it waits on an empty queue
+    // for whatever the queue tab sends next, and the board says `nothing
+    // queued` meanwhile — the screen, not the queue, decides when it ends.
+    if live_tasks.is_empty() && !args.screen {
         if crate::jobs::enabled_count(repo) == 0 {
             println!("nothing is queued, so there is nothing to dispatch.");
             println!("  spoolway queue add --from <path>");
@@ -257,18 +269,15 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // carve-out.
     check_dispatcher_visible(mux.as_ref())?;
 
-    // The last three things a person sees before anything is spawned or
-    // written: the overview, naming every task the run is about to touch;
-    // the overrides gate, since a layer changes what runs without `git
-    // status` ever hinting that it is on; and doctor's own cheap findings,
-    // read as a warning rather than discovered mid-run. All three run here,
-    // before the lock is taken and the mode is written into it, so `esc` off
-    // any of them can back out having done nothing at all. `args.confirmed`
-    // skips all three: the queue screen's own `enter` already walked a
-    // person through this same trio, reusing its own `TermGuard` rather than
-    // nesting a second one — see `commands::queue::confirm_start`, which
-    // calls `warnings_gate_with` itself rather than reading this one, since
-    // it never runs this block at all.
+    // The last two things a person sees before anything is spawned or
+    // written: the overrides gate, since a layer changes what runs without
+    // `git status` ever hinting that it is on; and doctor's own cheap
+    // findings, read as a warning rather than discovered mid-run. Both run
+    // here, before the lock is taken and the mode is written into it, so
+    // `esc` off either can back out having done nothing at all.
+    // `args.screen` skips both: bare `spoolway`'s dispatch tab already asked
+    // them as popups of its own, off [`overrides_popup`] and
+    // [`warnings_popup`], before it started this run.
     //
     // `own_term` is false whenever a board is up: its own guard, taken above
     // when the board was built, already has the cursor hidden and the tty
@@ -279,12 +288,9 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // shape for the one blocking read it owns, and drops it deliberately —
     // right there because nothing else is still holding the terminal when it
     // does). `--plain` has no board to reuse, so its own gates still take
-    // their own guard, exactly as before this task.
+    // their own guard.
     let own_term = board.is_none();
-    if !args.confirmed {
-        if !overview_gate(repo, own_term)? {
-            return Ok(0);
-        }
+    if !args.screen {
         if !overrides_gate(repo, own_term)? {
             return Ok(0);
         }
@@ -483,10 +489,10 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
                 // The ceiling drains rather than kills: the run is over, but not
                 // until whatever is mid-turn has had its chance to report. A
                 // lane torn down halfway spent its tokens and produced nothing.
-                if let Some(note) = &report.ceiling
+                if let Some(ceiling) = &report.ceiling
                     && !report.lanes_live
                 {
-                    spent_out = Some(note.clone());
+                    spent_out = Some(ceiling.clone());
                 }
                 // Appended whether or not a board is drawn: the board no
                 // longer carries a pass's trouble at all, so this is the only
@@ -534,9 +540,15 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         // Spent, and nothing left running to spend more. The queue keeps its
         // place: every task is where its last lane left it, and the next run
         // picks them up from exactly there.
-        if let Some(note) = spent_out {
+        if let Some(ceiling) = spent_out {
             stop(repo, pipelines, mux.as_ref(), board.as_mut(), &mut out)?;
-            println!("  {note}");
+            // The screen shows stderr as the reason its dispatcher stopped,
+            // and prints nothing of stdout at all.
+            if args.screen {
+                eprintln!("{}", screen_stop_reason(&ceiling));
+                return Ok(0);
+            }
+            println!("  {}", ceiling.note);
             println!("  spoolway dispatch    # picks the queue back up where it stands");
             return Ok(0);
         }
@@ -556,7 +568,9 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
 
         match repo.tasks() {
             Ok(tasks) if tasks.is_empty() => {
-                if crate::jobs::enabled_count(repo) == 0 {
+                // Not for a run the screen started — see the same carve-out
+                // on the queue read before the loop.
+                if crate::jobs::enabled_count(repo) == 0 && !args.screen {
                     stop(repo, pipelines, mux.as_ref(), board.as_mut(), &mut out)?;
                     println!("  queue is empty — every task is done. Stopping.");
                     return Ok(0);
@@ -706,6 +720,16 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     }
 }
 
+/// Why a dispatcher bare `spoolway` started stopped on a spend ceiling, as
+/// its dispatch tab's popup shows it: the key and its figures, then where
+/// that leaves the queue.
+fn screen_stop_reason(ceiling: &crate::dispatch::Ceiling) -> String {
+    format!(
+        "{}\nEvery task is where its last lane left it.",
+        ceiling.reached
+    )
+}
+
 /// Whether the pass's own callback owes the board a frame: at once wherever a
 /// key has just changed what one would show, and otherwise no faster than
 /// [`crate::status::POLL`], the same cadence the wait draws at.
@@ -793,8 +817,7 @@ fn print_checklist_header(out: &mut impl std::io::Write) -> Result<()> {
 }
 
 /// The "starting" checklist's label column, sized to its own longest label
-/// (`backend available`) rather than borrowed from an unrelated table such
-/// as [`overview_cell`]'s — that one pads a queue row, not a check.
+/// (`backend available`) rather than borrowed from an unrelated table.
 const CHECKLIST_LABEL_W: usize = 22;
 
 fn checklist_label(label: &str) -> String {
@@ -952,207 +975,7 @@ fn commit_reason(pipelines: &Pipelines, config: &Config) -> Option<String> {
         .then(|| "`dispatch.auto_commit` is on".to_string())
 }
 
-/// The queue overview: every task `Repo::tasks()` holds right now, grouped
-/// by `group:` — the mockup on task `overview-and-gates`. `Ok(true)` to go
-/// on to the overrides gate, `Ok(false)` only for `esc`.
-///
-/// A thin wrapper over [`overview_gate_with`] — see [`overrides_gate`]'s own
-/// doc comment for why this split exists at all; the two gates share it for
-/// the same reason.
-///
-/// `own_term` is false whenever `dispatch`'s own board is already holding
-/// the terminal — see its own doc comment on the call site for why a second,
-/// nested `TermGuard` here would be a bug.
-fn overview_gate(repo: &Repo, own_term: bool) -> Result<bool> {
-    overview_gate_with(
-        repo,
-        crate::ask::interactive(),
-        &mut crate::screen::RawStdin,
-        &mut std::io::stdout(),
-        own_term.then_some(crate::platform::TermGuard::new as fn() -> _),
-    )
-}
-
-/// [`overview_gate`]'s own logic. Never printed for a non-interactive run:
-/// unlike the overrides notice, there is no record this needs to leave in a
-/// log nobody is watching — it is a person's own screen, or nothing.
-///
-/// `term: None` for a caller that already holds a [`crate::platform::TermGuard`]
-/// of its own — `commands::queue::confirm_start`, reusing the one
-/// `run_screen` holds for its whole session — and `Some` for one that does
-/// not, taken only just before the first blocking read: see
-/// `commands::queue::tool_requirements_gate_with`'s own doc on why a second,
-/// nested guard is a bug rather than merely redundant.
-pub(crate) fn overview_gate_with(
-    repo: &Repo,
-    interactive: bool,
-    input: &mut impl PollableRead,
-    out: &mut impl std::io::Write,
-    term: Option<impl FnOnce() -> crate::platform::TermGuard>,
-) -> Result<bool> {
-    if !interactive {
-        return Ok(true);
-    }
-
-    let tasks = repo.tasks()?;
-    let _term = term.map(|term| term());
-    let _ = write!(out, "\x1b[2J\x1b[H");
-    for line in overview_lines(&tasks, None) {
-        writeln!(out, "{line}")?;
-    }
-    loop {
-        match crate::screen::read_key(input) {
-            Some(crate::screen::Key::Enter) => return Ok(true),
-            Some(crate::screen::Key::Esc) => return Ok(false),
-            // The tty went away mid-question, or — reached through
-            // `commands::queue::confirm_start` — the script driving the
-            // queue screen simply ran out of keys, exactly the way it ends
-            // every other mode: see `queue_screen`'s own doc comment on why
-            // an exhausted pipe reads as `esc` rather than as a leftover
-            // key nobody typed. `overrides_gate_with`'s own copy of this
-            // match proceeds instead on the same read — this is a new
-            // screen weighing a new decision, so it takes the more
-            // conservative of the two rather than inheriting that one's.
-            None => return Ok(false),
-            _ => {}
-        }
-    }
-}
-
-/// The same overview, drawn for the one thing left to do with it once
-/// `commands::queue::after_write` finds the queue's lock already held: join
-/// the run that is already going rather than start one that cannot. `Ok(true)`
-/// for `enter`, meaning the caller should now focus that dispatcher's
-/// workspace and let this screen end; `Ok(false)` for `esc`, back to
-/// browsing, and for the tty going away mid-question — the same
-/// conservative reading [`overview_gate_with`] gives that case.
-///
-/// Always interactive and always `term: None`: the only caller is
-/// `commands::queue::begin_submission`, reached from `run_screen`, which
-/// already holds its own `TermGuard` — see [`overview_gate_with`]'s own doc
-/// comment on why a second one here would be a bug rather than merely
-/// redundant.
-pub(crate) fn dispatcher_running_gate_with(
-    repo: &Repo,
-    pid: u32,
-    input: &mut impl PollableRead,
-    out: &mut impl std::io::Write,
-) -> Result<bool> {
-    let tasks = repo.tasks()?;
-    let _ = write!(out, "\x1b[2J\x1b[H");
-    for line in overview_lines(&tasks, Some(pid)) {
-        writeln!(out, "{line}")?;
-    }
-    loop {
-        match crate::screen::read_key(input) {
-            Some(crate::screen::Key::Enter) => return Ok(true),
-            Some(crate::screen::Key::Esc) => return Ok(false),
-            None => return Ok(false),
-            _ => {}
-        }
-    }
-}
-
-/// The overview's own column widths, sized to the mockup's own longest
-/// example row: the task id, pipeline and step columns are fixed, and
-/// `OVERVIEW_BASE_W` is whatever is left of 80 columns once the two-space
-/// indent and the other three have taken their share — the one column with
-/// no ceiling of its own otherwise, since a base names a branch and nothing
-/// stops a branch running long.
-const OVERVIEW_NAME_W: usize = 20;
-const OVERVIEW_PIPELINE_W: usize = 12;
-const OVERVIEW_STEP_W: usize = 10;
-const OVERVIEW_BASE_W: usize = 80 - 2 - OVERVIEW_NAME_W - OVERVIEW_PIPELINE_W - OVERVIEW_STEP_W;
-
-/// One cell of the overview's table: `queue::clip`'s own ellipsis-cut, then
-/// padded out to `width` — the same combination the trial picker's own id
-/// column already uses (`assign_pipelines_panel`), so a task id, pipeline
-/// name or step id too long for its column is cut rather than pushing every
-/// column after it out past 80 (review finding 1). Clips to `width - 1`
-/// rather than `width`: `assign_pipelines_panel` clips to a width derived
-/// from the longest id and then writes its own explicit separator after it,
-/// so its cells never touch, but this table has no separate separator —
-/// clipping to the full column width let a cell exactly as long as its
-/// column run straight into the next one with no gap (review finding 1,
-/// still open after the first fix). Reserving one column of the budget for
-/// the gap keeps every row at exactly 80 columns while leaving at least one
-/// space before the next column, matching the mockup's own gapped layout.
-fn overview_cell(text: &str, width: usize) -> String {
-    crate::screen::pad_to(&super::queue::clip(text.to_string(), width - 1), width)
-}
-
-/// The overview's own lines, grouped by `group:` and sorted by group name —
-/// a task naming none is a group of one, keyed by its own id, the same
-/// reading [`crate::status::Row::group`] gives it. Pure, so a caller never
-/// has to reach past `repo.tasks()` to draw the exact screen the mockup
-/// draws — every task the queue directory holds, never the archive, since
-/// `Repo::tasks` never reads that directory at all.
-///
-/// `held_pid` is `None` for the ordinary "about to start one" draw, and the
-/// running dispatcher's own pid once `commands::queue::after_write` finds
-/// the lock already held — see the `focus-live-run` mockup, which draws
-/// both the pid line under the header and the swapped footer this same
-/// table then carries, rather than a screen of its own: nothing about the
-/// board changes, only what a person can do once they are looking at it.
-fn overview_lines(tasks: &[Task], held_pid: Option<u32>) -> Vec<String> {
-    let mut by_group: std::collections::BTreeMap<&str, Vec<&Task>> = Default::default();
-    for task in tasks {
-        let key = task.front.group.as_deref().unwrap_or(task.id());
-        by_group.entry(key).or_default().push(task);
-    }
-
-    let mut lines = vec![format!(
-        "queued  {} · {}",
-        plural(by_group.len(), "group"),
-        plural(tasks.len(), "task")
-    )];
-    if let Some(pid) = held_pid {
-        lines.push(format!(
-            "a dispatcher is already running (pid {pid}) — it takes these on its next pass"
-        ));
-    }
-    lines.push(String::new());
-    lines.push(format!(
-        "  {}{}{}{}",
-        overview_cell("TASK", OVERVIEW_NAME_W),
-        overview_cell("PIPELINE", OVERVIEW_PIPELINE_W),
-        overview_cell("STEP", OVERVIEW_STEP_W),
-        "BASE"
-    ));
-    for group_tasks in by_group.values() {
-        let name = group_tasks[0]
-            .front
-            .group
-            .as_deref()
-            .unwrap_or(group_tasks[0].id());
-        lines.push(String::new());
-        lines.push(super::queue::clip(name.to_string(), 80));
-        for task in group_tasks {
-            lines.push(format!(
-                "  {}{}{}{}",
-                overview_cell(task.id(), OVERVIEW_NAME_W),
-                overview_cell(
-                    task.front.pipeline.as_deref().unwrap_or("—"),
-                    OVERVIEW_PIPELINE_W
-                ),
-                overview_cell(task.stage(), OVERVIEW_STEP_W),
-                super::queue::clip(
-                    task.front.base.as_deref().unwrap_or("—").to_string(),
-                    OVERVIEW_BASE_W
-                ),
-            ));
-        }
-    }
-    lines.push(String::new());
-    lines.push(if held_pid.is_some() {
-        "[enter] go to the dispatcher   [esc] back".to_string()
-    } else {
-        "[enter] start a dispatcher   [esc] back".to_string()
-    });
-    lines
-}
-
-/// `n` with its noun, singular where that is what `n` is — [`overview_lines`]'s
+/// `n` with its noun, singular where that is what `n` is — the checklist's
 /// own copy of the same rule `commands::queue::plural` already applies to the
 /// pending screen, kept local rather than shared across the two: neither
 /// module is the other's to reach into for one line of pluralization.
@@ -1181,7 +1004,8 @@ fn plural(n: usize, noun: &str) -> String {
 /// field) even while driving the branch that would otherwise construct one.
 ///
 /// `own_term` is false whenever `dispatch`'s own board is already holding
-/// the terminal — see [`overview_gate`]'s own doc comment on the pair.
+/// the terminal — see the call site's own comment on why a second, nested
+/// `TermGuard` there would be a bug.
 fn overrides_gate(repo: &Repo, own_term: bool) -> Result<bool> {
     overrides_gate_with(
         repo,
@@ -1207,10 +1031,11 @@ fn overrides_gate(repo: &Repo, own_term: bool) -> Result<bool> {
 /// "don't ask again until this changes" means exactly that.
 ///
 /// `term: None` for a caller that already holds a [`crate::platform::TermGuard`]
-/// of its own — see [`overview_gate_with`]'s own doc comment on the pair, and
+/// of its own — `dispatch`'s board — and `Some` for one that does not, taken
+/// only just before the first blocking read: see
 /// `commands::queue::tool_requirements_gate_with` on why a second, nested
 /// guard is a bug rather than merely redundant.
-pub(crate) fn overrides_gate_with(
+fn overrides_gate_with(
     repo: &Repo,
     interactive: bool,
     input: &mut impl PollableRead,
@@ -1273,22 +1098,29 @@ fn print_overrides_notice(out: &mut impl std::io::Write, rows: &[OverrideRow]) -
     writeln!(out)?;
     writeln!(out, "  overrides are active for this project")?;
     writeln!(out)?;
-    let target_w = rows.iter().map(|r| r.target.len()).max().unwrap_or(0);
-    let labels: Vec<String> = rows.iter().map(overrides_gate_kind).collect();
-    let kind_w = labels.iter().map(String::len).max().unwrap_or(0);
-    for (row, kind) in rows.iter().zip(&labels) {
-        if row.overrides == "—" {
-            writeln!(out, "    {:<target_w$}  {kind}", row.target)?;
-        } else {
-            writeln!(
-                out,
-                "    {:<target_w$}  {kind:<kind_w$}  {}",
-                row.target, row.overrides
-            )?;
-        }
+    for line in overrides_lines(rows) {
+        writeln!(out, "    {line}")?;
     }
     writeln!(out)?;
     Ok(())
+}
+
+/// [`print_overrides_notice`]'s rows on their own, unindented — shared with
+/// the dispatch tab's popup of the same notice, [`overrides_popup`].
+fn overrides_lines(rows: &[OverrideRow]) -> Vec<String> {
+    let target_w = rows.iter().map(|r| r.target.len()).max().unwrap_or(0);
+    let labels: Vec<String> = rows.iter().map(overrides_gate_kind).collect();
+    let kind_w = labels.iter().map(String::len).max().unwrap_or(0);
+    rows.iter()
+        .zip(&labels)
+        .map(|(row, kind)| match row.overrides == "—" {
+            true => format!("{:<target_w$}  {kind}", row.target),
+            false => format!(
+                "{:<target_w$}  {kind:<kind_w$}  {}",
+                row.target, row.overrides
+            ),
+        })
+        .collect()
 }
 
 /// "N keys" for a pipeline or config patch, "whole file" for a prompt.
@@ -1314,16 +1146,16 @@ fn overrides_gate_kind(row: &OverrideRow) -> String {
 /// accepted gap, not one this screen closes.
 ///
 /// `Ok(true)` to go on and start the run, `Ok(false)` only for `esc`.
-/// Alongside [`overview_gate`] and [`overrides_gate`], and — like both —
-/// before `Lock::acquire`: `esc` here must still mean "nothing has happened
-/// yet", which is only true ahead of the lock. The other notice this task
+/// After [`overrides_gate`], and — like it — before `Lock::acquire`: `esc`
+/// here must still mean "nothing has happened yet", which is only true ahead
+/// of the lock. The other notice this task
 /// exists to fix, a failure to open the run's shared workspace, cannot join
 /// this screen for exactly that reason — it is only attempted once the lock
 /// is held — so it gets its own, smaller one instead; see
 /// [`workspace_open_notice`].
 ///
 /// `own_term` is false whenever `dispatch`'s own board is already holding
-/// the terminal — see [`overview_gate`]'s own doc comment on the pair.
+/// the terminal — see [`overrides_gate`]'s own doc comment on the pair.
 fn warnings_gate(repo: &Repo, pipelines: &Pipelines, own_term: bool) -> Result<bool> {
     warnings_gate_with(
         repo,
@@ -1346,7 +1178,7 @@ fn warnings_gate(repo: &Repo, pipelines: &Pipelines, own_term: bool) -> Result<b
 /// run leaves the same record in its log that `overrides_gate_with` leaves
 /// for its own notice; nothing here may then block on a keypress nobody can
 /// answer.
-pub(crate) fn warnings_gate_with(
+fn warnings_gate_with(
     repo: &Repo,
     pipelines: &Pipelines,
     interactive: bool,
@@ -1354,30 +1186,7 @@ pub(crate) fn warnings_gate_with(
     out: &mut impl std::io::Write,
     term: Option<impl FnOnce() -> crate::platform::TermGuard>,
 ) -> Result<bool> {
-    use crate::commands::doctor::Warning;
-
-    let cheap = crate::commands::doctor::cheap_findings(repo, pipelines, &repo.config);
-    let settings: Vec<String> = cheap
-        .iter()
-        .filter_map(|w| match w {
-            Warning::Setting(text) => Some(text.clone()),
-            _ => None,
-        })
-        .collect();
-    let files: Vec<String> = cheap
-        .iter()
-        .filter_map(|w| match w {
-            Warning::File(text) => Some(text.clone()),
-            _ => None,
-        })
-        .collect();
-    let problems: Vec<String> = cheap
-        .iter()
-        .filter_map(|w| match w {
-            Warning::Problem(text) => Some(text.clone()),
-            _ => None,
-        })
-        .collect();
+    let (settings, files, problems) = cheap_sections(repo, pipelines);
 
     if settings.is_empty() && files.is_empty() && problems.is_empty() {
         return Ok(true);
@@ -1388,13 +1197,7 @@ pub(crate) fn warnings_gate_with(
         return Ok(true);
     }
 
-    // Fingerprinted on the body alone — never the header or the footer, both
-    // of which are this screen's own wording rather than a fact about the
-    // project — so a person who has hidden this exact set of lines is not
-    // asked again merely because a later spoolway rewords the prompt beneath
-    // them.
-    let rendered = warnings_lines(&settings, &files, &problems).join("\n");
-    let fingerprint = crate::skeleton::fingerprint(&rendered);
+    let fingerprint = warnings_fingerprint(&settings, &files, &problems);
     if !crate::overrides::warnings_ack_needed(&repo.home, &fingerprint) {
         return Ok(true);
     }
@@ -1427,6 +1230,119 @@ pub(crate) fn warnings_gate_with(
     }
 }
 
+/// Doctor's cheap findings, sorted under the warnings screen's three
+/// headings: settings, files and problems.
+fn cheap_sections(repo: &Repo, pipelines: &Pipelines) -> (Vec<String>, Vec<String>, Vec<String>) {
+    use crate::commands::doctor::Warning;
+
+    let (mut settings, mut files, mut problems) = (Vec::new(), Vec::new(), Vec::new());
+    for warning in crate::commands::doctor::cheap_findings(repo, pipelines, &repo.config) {
+        match warning {
+            Warning::Setting(text) => settings.push(text),
+            Warning::File(text) => files.push(text),
+            Warning::Problem(text) => problems.push(text),
+        }
+    }
+    (settings, files, problems)
+}
+
+/// Fingerprinted on the body alone — never the header or the footer, both
+/// of which are this screen's own wording rather than a fact about the
+/// project — so a person who has hidden this exact set of lines is not
+/// asked again merely because a later spoolway rewords the prompt beneath
+/// them. Always the 80-column body `spoolway dispatch` draws, so hiding it
+/// in the dispatch tab's narrower popup hides it on the CLI too.
+fn warnings_fingerprint(settings: &[String], files: &[String], problems: &[String]) -> String {
+    crate::skeleton::fingerprint(&warnings_lines(settings, files, problems).join("\n"))
+}
+
+/// One of the two gates bare `spoolway`'s dispatch tab asks before it starts
+/// a dispatcher, drawn as a popup over the board — the same notice
+/// [`overrides_gate`] and [`warnings_gate`] draw as a screen of their own
+/// for `spoolway dispatch`, and hidden by the same acknowledgement, so `x`
+/// in either place quiets both.
+pub(crate) struct GatePopup {
+    /// The boxed panel, key line included, for the board to overlay.
+    pub(crate) panel: Vec<String>,
+    fingerprint: String,
+    overrides: bool,
+}
+
+impl GatePopup {
+    /// `x`: don't ask again until what the popup names changes.
+    pub(crate) fn hide(&self, repo: &Repo) -> Result<()> {
+        match self.overrides {
+            true => crate::overrides::ack_write(&repo.home, &self.fingerprint),
+            false => crate::overrides::warnings_ack_write(&repo.home, &self.fingerprint),
+        }
+    }
+}
+
+/// The overrides popup, or `None` when [`overrides_gate`] would not ask:
+/// no layer at all, or one already acknowledged and unmoved since.
+pub(crate) fn overrides_popup(repo: &Repo) -> Result<Option<GatePopup>> {
+    let rows = collect_override_rows(&repo.overrides_dir())?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    // The same stand-in `overrides_gate_with` takes for a layer it could
+    // not re-read: an empty fingerprint never matches, so it still asks.
+    let fingerprint = crate::version::layer_fingerprint(repo).unwrap_or_default();
+    if !crate::overrides::ack_needed(&repo.home, &fingerprint) {
+        return Ok(None);
+    }
+    // One blank row above the rows; `panel` puts the one under them, above
+    // the key line, as step 19 of the dispatch tab's mockup draws it.
+    let mut body = vec![String::new()];
+    body.extend(overrides_lines(&rows));
+    Ok(Some(GatePopup {
+        panel: crate::screen::panel(
+            "overrides are active for this project",
+            &body,
+            "[enter] start dispatching   [esc] back   [x] don't ask again until this changes",
+        ),
+        fingerprint,
+        overrides: true,
+    }))
+}
+
+/// How wide the warnings popup wraps a finding: narrower than the 80
+/// columns [`warnings_gate`]'s own screen takes, so the box and the board's
+/// margins either side of it still fit the 100 columns the dispatch tab is
+/// drawn to.
+const WARNINGS_POPUP_WRAP: usize = 70;
+
+/// The warnings popup, or `None` when [`warnings_gate`] would not ask:
+/// nothing to say, or the same findings already hidden.
+pub(crate) fn warnings_popup(repo: &Repo, pipelines: &Pipelines) -> Option<GatePopup> {
+    let (settings, files, problems) = cheap_sections(repo, pipelines);
+    if settings.is_empty() && files.is_empty() && problems.is_empty() {
+        return None;
+    }
+    let fingerprint = warnings_fingerprint(&settings, &files, &problems);
+    if !crate::overrides::warnings_ack_needed(&repo.home, &fingerprint) {
+        return None;
+    }
+    let mut body = vec![String::new()];
+    body.extend(warnings_lines_at(
+        &settings,
+        &files,
+        &problems,
+        WARNINGS_POPUP_WRAP,
+    ));
+    // One blank row above the findings; `panel` puts the one under them,
+    // above the key line, as step 20 of the dispatch tab's mockup draws it.
+    Some(GatePopup {
+        panel: crate::screen::panel(
+            "before dispatching",
+            &body,
+            "[enter] start dispatching   [esc] back   [x] hide until these change",
+        ),
+        fingerprint,
+        overrides: false,
+    })
+}
+
 /// The one screen [`warnings_gate`] cannot show: a failure to find or open
 /// this run's own shared workspace, only known once `dispatch` has already
 /// taken the lock and attempted it — see that call site's own comment.
@@ -1436,7 +1352,7 @@ pub(crate) fn warnings_gate_with(
 /// this run — there is no standing state worth hiding until it changes.
 ///
 /// `own_term` is false whenever `dispatch`'s own board is already holding
-/// the terminal — see [`overview_gate`]'s own doc comment on the pair. This
+/// the terminal — see [`overrides_gate`]'s own doc comment on the pair. This
 /// is a fourth gate-shaped screen reached the same way the other three are,
 /// so it needs the same guard.
 fn workspace_open_notice(err: &str, own_term: bool) -> Result<()> {
@@ -1508,6 +1424,17 @@ fn print_warnings_notice(
 /// One line per item, with nothing between them: a scan of names before
 /// pressing `enter` has no room for a blank line every notice used to carry.
 fn warnings_lines(settings: &[String], files: &[String], problems: &[String]) -> Vec<String> {
+    warnings_lines_at(settings, files, problems, 80)
+}
+
+/// [`warnings_lines`], wrapped to `width` rather than 80 columns — the
+/// dispatch tab's popup draws the same body inside a box.
+fn warnings_lines_at(
+    settings: &[String],
+    files: &[String],
+    problems: &[String],
+    width: usize,
+) -> Vec<String> {
     let mut lines = Vec::new();
     for (heading, texts) in [
         ("settings", settings),
@@ -1519,7 +1446,7 @@ fn warnings_lines(settings: &[String], files: &[String], problems: &[String]) ->
         }
         lines.push(heading.to_string());
         for text in texts {
-            lines.extend(wrap_indent(text, "  ", 80));
+            lines.extend(wrap_indent(text, "  ", width));
         }
         lines.push(String::new());
     }
@@ -1810,10 +1737,7 @@ fn check_dispatcher_visible(mux: &dyn crate::mux::Mux) -> Result<()> {
         return Ok(());
     }
     if !mux.in_own_pane() {
-        bail!(
-            "a dispatcher has to be visible, and this is not a herdr pane.\n\n  Open one and \
-             run it there:\n\n    herdr\n    spoolway dispatch"
-        );
+        bail!("Open herdr and start spoolway there:\n\n  herdr\n  spoolway");
     }
     Ok(())
 }
@@ -1845,47 +1769,6 @@ fn check_task_routes(pipelines: &Pipelines, tasks: &[Task]) -> Result<()> {
                 task.id()
             ),
             Some(_) => {}
-        }
-    }
-    Ok(())
-}
-
-/// A repo whose lock another process already holds: name it, and, for a
-/// person actually looking at a terminal, bring the pane it is drawing its
-/// board in to the front — there is one board per run now, and it is
-/// already up.
-///
-/// `--plain` keeps its own one-shot table, byte for byte: a script asking
-/// what is running gets an answer meant for parsing, and "focusing its pane"
-/// is a line for a person, not a caller polling this in a loop.
-fn already_running(
-    repo: &Repo,
-    pipelines: &Pipelines,
-    pid: u32,
-    args: &DispatchArgs,
-    out: &mut impl std::io::Write,
-) -> Result<()> {
-    if args.plain {
-        // One read, one print: a script wants the table as it stands, not a
-        // process that sits there polling on its behalf.
-        writeln!(out, "watching dispatcher (pid {pid})\n")?;
-        let rows = crate::status::rows(repo, pipelines)?;
-        write!(out, "{}", crate::status::plain_table(&rows))?;
-        return Ok(());
-    }
-
-    writeln!(
-        out,
-        "  a dispatcher is already running for this repo (pid {pid})"
-    )?;
-    // `None` for an older three-line lock, or a run with no pane recorded —
-    // nothing here to focus, so nothing more is printed. A pane that has
-    // gone away since the lock was written is not fatal either: reported and
-    // stepped over, the same as a failed workspace move is today.
-    if let Some(pane_id) = crate::lock::Lock::pane(&repo.lock_file()) {
-        match crate::mux::backend(repo).and_then(|mux| mux.focus_pane(&pane_id)) {
-            Ok(()) => writeln!(out, "  → focusing its pane {pane_id}")?,
-            Err(err) => writeln!(out, "  → could not focus its pane {pane_id}: {err:#}")?,
         }
     }
     Ok(())
@@ -1959,6 +1842,21 @@ mod tests {
         assert!(
             tick_owes_a_frame(false, crate::status::POLL),
             "a second since the last frame owes the next one"
+        );
+    }
+
+    /// The dispatch tab's step-30 popup body, from the ceiling a pass
+    /// reports: the key's own figures, not the run log's long sentence.
+    #[test]
+    fn a_screen_run_names_the_ceiling_it_reached_as_the_tab_draws_it() {
+        let ceiling = crate::dispatch::Ceiling {
+            note: "this run has spent $5.02 against a max_cost_usd of $5.00 — …".to_string(),
+            reached: "unattended.max_cost_usd reached: $5.02 of $5.00".to_string(),
+        };
+        assert_eq!(
+            screen_stop_reason(&ceiling),
+            "unattended.max_cost_usd reached: $5.02 of $5.00\n\
+             Every task is where its last lane left it."
         );
     }
 
@@ -2141,7 +2039,7 @@ mod tests {
         assert!(!printed.contains("\x1b[2K"), "{printed:?}");
     }
 
-    /// `--plain` (and `args.confirmed`, through the same flag) prints
+    /// `--plain` (and `args.screen`, through the same flag) prints
     /// nothing at all — the checklist is the board's own setup, and
     /// `checklist_row` must be a plain pass-through with `checklist: false`.
     #[test]
@@ -2226,8 +2124,8 @@ mod tests {
     }
 
     /// A dispatcher already running for this repo must send `spoolway
-    /// dispatch` down [`already_running`], never through
-    /// [`crate::lock::Lock::acquire`] — a second start reads the run, it
+    /// dispatch` out with [`EXIT_ALREADY_RUNNING`], never through
+    /// [`crate::lock::Lock::acquire`] — a second start names the run, it
     /// never joins it.
     ///
     /// Proved indirectly rather than by mocking `Lock::acquire`: this process
@@ -2392,48 +2290,6 @@ mod tests {
             dispatch(&repo, &Pipelines::builtin(), &args).unwrap(),
             EXIT_ALREADY_RUNNING
         );
-    }
-
-    /// A repo whose lock is held, found by a non-`--plain` start, prints the
-    /// mockup's own two lines and focuses the pane the lock names — headless
-    /// here so this never shells out to a real herdr, and its `focus_pane`
-    /// never fails, so this is the ordinary case.
-    #[test]
-    fn already_running_names_the_pid_and_focuses_the_recorded_pane() {
-        let mut repo = fixture("already-running-focuses-pane");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
-        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, Some("w1:p5")).unwrap();
-
-        let mut out = Vec::new();
-        let args = DispatchArgs::default();
-        already_running(&repo, &Pipelines::builtin(), 8123, &args, &mut out).unwrap();
-
-        let printed = String::from_utf8(out).unwrap();
-        assert!(
-            printed.contains("a dispatcher is already running for this repo (pid 8123)"),
-            "{printed}"
-        );
-        assert!(printed.contains("→ focusing its pane w1:p5"), "{printed}");
-    }
-
-    /// A lock with no pane recorded — an older three-line file, or a run
-    /// with nothing to name — prints only the pid line: there is nothing to
-    /// focus, so nothing more is said about it.
-    #[test]
-    fn already_running_says_nothing_about_focus_with_no_pane_recorded() {
-        let repo = fixture("already-running-no-pane");
-        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
-
-        let mut out = Vec::new();
-        let args = DispatchArgs::default();
-        already_running(&repo, &Pipelines::builtin(), 8123, &args, &mut out).unwrap();
-
-        let printed = String::from_utf8(out).unwrap();
-        assert!(
-            printed.contains("a dispatcher is already running for this repo (pid 8123)"),
-            "{printed}"
-        );
-        assert!(!printed.contains("focusing"), "{printed}");
     }
 
     /// An empty queue is never counted towards the restart guard: a repo
@@ -2970,7 +2826,9 @@ mod tests {
     }
 
     /// A herdr run with no pane to draw in is refused, naming the way in —
-    /// `herdr` and `spoolway dispatch` — with no exemption.
+    /// `herdr` and then `spoolway` — with no exemption, and no longer saying
+    /// that a dispatcher has to be visible: the dispatch tab shows this
+    /// refusal as its popup, word for word.
     #[test]
     fn dispatcher_visible_refuses_herdr_outside_a_pane() {
         let mux = StubMux {
@@ -2980,9 +2838,10 @@ mod tests {
             in_own_pane: false,
         };
         let err = format!("{:#}", check_dispatcher_visible(&mux).unwrap_err());
-        assert!(err.contains("has to be visible"), "{err}");
-        assert!(err.contains("herdr"), "{err}");
-        assert!(err.contains("spoolway dispatch"), "{err}");
+        assert_eq!(
+            err,
+            "Open herdr and start spoolway there:\n\n  herdr\n  spoolway"
+        );
     }
 
     /// A herdr run that is in a pane passes straight through.
@@ -3206,276 +3065,6 @@ mod tests {
         assert_eq!(overrides_gate_kind(&prompt), "whole file");
     }
 
-    /// A task for [`overview_lines`]'s own tests — `extra` carries whatever
-    /// of `group:`, `pipeline:`, `base:` and `stage:` a case wants; `stage:`
-    /// has no default here the way [`crate::pipeline::QUEUED`] gives a real
-    /// queued task one, since a case testing the STEP column has to be free
-    /// to name something other than `queued`.
-    fn overview_task(id: &str, extra: &str) -> Task {
-        crate::task::Task::parse(
-            std::path::PathBuf::from(format!("{id}.md")),
-            &format!("---\nid: {id}\n{extra}---\nbody\n"),
-        )
-        .unwrap()
-    }
-
-    /// Groups sort by name, alphabetically — `alpha` before `zebra` — and a
-    /// task naming no `group:` is a group of one, keyed by its own id, the
-    /// same reading `crate::status::Row::group` gives it.
-    #[test]
-    fn overview_lines_groups_by_group_sorted_by_name_falling_back_to_the_task_id() {
-        let tasks = [
-            overview_task(
-                "a",
-                "group: zebra\npipeline: default\nstage: queued\nbase: main\n",
-            ),
-            overview_task(
-                "b",
-                "group: alpha\npipeline: default\nstage: queued\nbase: main\n",
-            ),
-            overview_task("c", "pipeline: default\nstage: queued\nbase: main\n"),
-        ];
-        let lines = overview_lines(&tasks, None);
-        assert_eq!(lines[0], "queued  3 groups · 3 tasks", "{lines:?}");
-
-        let alpha = lines.iter().position(|l| l == "alpha").unwrap();
-        let c = lines.iter().position(|l| l == "c").unwrap();
-        let zebra = lines.iter().position(|l| l == "zebra").unwrap();
-        assert!(
-            alpha < c && c < zebra,
-            "groups must sort alphabetically, `c` (task `c`'s own group of one) included: \
-             {lines:?}"
-        );
-    }
-
-    /// A task naming no `pipeline:` or no `base:` — a legacy or hand-edited
-    /// document, since `queue add` always stamps both — draws an em dash in
-    /// that cell rather than an empty one a person could mistake for a
-    /// column that slipped out of alignment.
-    #[test]
-    fn overview_lines_draws_an_em_dash_for_a_missing_pipeline_or_base() {
-        let tasks = [overview_task("solo", "group: solo-group\nstage: queued\n")];
-        let lines = overview_lines(&tasks, None);
-        // Skip the group header line itself ("solo-group") — the row is the
-        // one starting with two spaces, indented under it.
-        let row = lines.iter().find(|l| l.starts_with("  solo")).unwrap();
-        assert_eq!(
-            row,
-            &format!(
-                "  {}{}{}{}",
-                overview_cell("solo", OVERVIEW_NAME_W),
-                overview_cell("—", OVERVIEW_PIPELINE_W),
-                overview_cell("queued", OVERVIEW_STEP_W),
-                "—"
-            )
-        );
-    }
-
-    /// Review finding 1's own repro: a task id, pipeline, step or base too
-    /// long for its column is cut with an ellipsis rather than pushing every
-    /// column after it — and the row overall never runs past 80 columns.
-    #[test]
-    fn overview_lines_cuts_a_long_id_pipeline_step_or_base_rather_than_overflowing() {
-        let tasks = [overview_task(
-            "a-task-id-much-longer-than-the-twenty-column-budget",
-            "group: over\n\
-             pipeline: a-pipeline-name-far-too-long-for-its-own-column\n\
-             stage: an-implausibly-long-step-name-for-its-column\n\
-             base: feature/rework-the-dispatcher-lock-handling-end-to-end\n",
-        )];
-        let lines = overview_lines(&tasks, None);
-        let row = lines
-            .iter()
-            .find(|l| l.trim_start().starts_with("a-task-id"))
-            .unwrap();
-        assert!(
-            row.chars().count() <= 80,
-            "a row must never run past 80 columns: {} ({})",
-            row.chars().count(),
-            row
-        );
-        assert!(row.contains('…'), "{row:?}");
-        // Review finding 1's second half: a cell clipped to its full column
-        // width ran edge to edge into the next column with no separating
-        // space, unlike the mockup's own gapped columns. The last character
-        // of each of the first three (fixed-width) cells must be the space
-        // `overview_cell` now reserves out of its own budget.
-        let chars: Vec<char> = row.chars().collect();
-        for boundary in [
-            2 + OVERVIEW_NAME_W - 1,
-            2 + OVERVIEW_NAME_W + OVERVIEW_PIPELINE_W - 1,
-            2 + OVERVIEW_NAME_W + OVERVIEW_PIPELINE_W + OVERVIEW_STEP_W - 1,
-        ] {
-            assert_eq!(
-                chars[boundary], ' ',
-                "column must end in a gap, not run into the next one: {row:?}"
-            );
-        }
-    }
-
-    /// A project with nothing queued at all still draws — an empty overview
-    /// rather than a screen with nothing between the header and the footer
-    /// line a person could mistake for a stalled draw.
-    #[test]
-    fn overview_lines_with_no_tasks_still_draws_the_header_and_footer() {
-        let lines = overview_lines(&[], None);
-        assert_eq!(lines[0], "queued  0 groups · 0 tasks", "{lines:?}");
-        assert_eq!(
-            lines.last(),
-            Some(&"[enter] start a dispatcher   [esc] back".to_string()),
-            "{lines:?}"
-        );
-    }
-
-    /// `held_pid: Some` — the `focus-live-run` mockup — swaps the footer for
-    /// one describing what `enter` now does and inserts the pid line right
-    /// under the header, ahead of the blank line separating it from the
-    /// table.
-    #[test]
-    fn overview_lines_with_a_held_pid_draws_the_notice_and_swaps_the_footer() {
-        let lines = overview_lines(&[], Some(250));
-        assert_eq!(lines[0], "queued  0 groups · 0 tasks", "{lines:?}");
-        assert_eq!(
-            lines[1], "a dispatcher is already running (pid 250) — it takes these on its next pass",
-            "{lines:?}"
-        );
-        assert_eq!(lines[2], "", "{lines:?}");
-        assert_eq!(
-            lines.last(),
-            Some(&"[enter] go to the dispatcher   [esc] back".to_string()),
-            "{lines:?}"
-        );
-    }
-
-    /// Never drawn with nobody there to answer: unlike the overrides
-    /// notice, this has no record to leave in a log nobody is watching, so
-    /// a non-interactive dispatch prints nothing about it at all and never
-    /// reads a key.
-    #[test]
-    fn overview_gate_with_non_interactive_is_never_drawn() {
-        let repo = fixture("overview-gate-non-interactive");
-        let mut input = keys("");
-        let mut out = Vec::new();
-        let proceed = overview_gate_with(
-            &repo,
-            false,
-            &mut input,
-            &mut out,
-            Some(crate::platform::TermGuard::inert),
-        )
-        .unwrap();
-        assert!(proceed);
-        assert!(out.is_empty(), "{out:?}");
-    }
-
-    /// `enter` proceeds to the overrides gate — the whole of what the
-    /// overview's own `[enter]` promises.
-    #[test]
-    fn overview_gate_with_enter_proceeds() {
-        let repo = fixture("overview-gate-enter");
-        let mut input = keys("\r");
-        let mut out = Vec::new();
-        assert!(
-            overview_gate_with(
-                &repo,
-                true,
-                &mut input,
-                &mut out,
-                Some(crate::platform::TermGuard::inert)
-            )
-            .unwrap()
-        );
-        let drawn = String::from_utf8(out).unwrap();
-        assert!(drawn.contains("queued  0 groups · 0 tasks"), "{drawn}");
-    }
-
-    /// `esc` is the one path that must reach the caller as `false`, the
-    /// same as `overrides_gate_with`'s own.
-    #[test]
-    fn overview_gate_with_esc_declines() {
-        let repo = fixture("overview-gate-esc");
-        let mut input = keys("\x1b");
-        let mut out = Vec::new();
-        assert!(
-            !overview_gate_with(
-                &repo,
-                true,
-                &mut input,
-                &mut out,
-                Some(crate::platform::TermGuard::inert)
-            )
-            .unwrap()
-        );
-    }
-
-    /// The tty going away mid-question declines here, unlike
-    /// `overrides_gate_with`'s own copy of the same read, which proceeds —
-    /// see that function's own doc comment on why the two differ: this
-    /// screen is also reached through `commands::queue::confirm_start`,
-    /// where an exhausted pipe is the ordinary way a script ends the queue
-    /// screen, not a real terminal dying mid-answer.
-    #[test]
-    fn overview_gate_with_none_declines() {
-        let repo = fixture("overview-gate-none");
-        let mut input = keys("");
-        let mut out = Vec::new();
-        assert!(
-            !overview_gate_with(
-                &repo,
-                true,
-                &mut input,
-                &mut out,
-                Some(crate::platform::TermGuard::inert)
-            )
-            .unwrap()
-        );
-    }
-
-    /// `enter` on the held-lock draw — task `focus-live-run`'s own mockup —
-    /// says `true`: there is somewhere to go now, not a run to start, but
-    /// the gate's shape is the same "proceed or not" either way.
-    #[test]
-    fn dispatcher_running_gate_with_enter_proceeds() {
-        let repo = fixture("dispatcher-running-gate-enter");
-        let mut input = keys("\r");
-        let mut out = Vec::new();
-        assert!(dispatcher_running_gate_with(&repo, 250, &mut input, &mut out).unwrap());
-        let drawn = String::from_utf8(out).unwrap();
-        assert!(
-            drawn.contains(
-                "a dispatcher is already running (pid 250) — it takes these on its next pass"
-            ),
-            "{drawn}"
-        );
-        assert!(
-            drawn.contains("[enter] go to the dispatcher   [esc] back"),
-            "{drawn}"
-        );
-    }
-
-    /// `esc` declines, back to browsing — the same reading every other gate
-    /// in this file gives it.
-    #[test]
-    fn dispatcher_running_gate_with_esc_declines() {
-        let repo = fixture("dispatcher-running-gate-esc");
-        let mut input = keys("\x1b");
-        let mut out = Vec::new();
-        assert!(!dispatcher_running_gate_with(&repo, 250, &mut input, &mut out).unwrap());
-    }
-
-    /// The tty going away mid-question declines here too — the same
-    /// conservative reading [`overview_gate_with_none_declines`] gives its
-    /// own copy of this case, since this screen is likewise reached only
-    /// through the queue screen, where an exhausted pipe is the ordinary
-    /// way a script ends it.
-    #[test]
-    fn dispatcher_running_gate_with_none_declines() {
-        let repo = fixture("dispatcher-running-gate-none");
-        let mut input = keys("");
-        let mut out = Vec::new();
-        assert!(!dispatcher_running_gate_with(&repo, 250, &mut input, &mut out).unwrap());
-    }
-
     /// The mockup's own three headings, in order, each skipped when its
     /// section is empty — [`print_warnings_notice`] and
     /// [`warnings_gate_with`]'s own fingerprint both build on this.
@@ -3540,6 +3129,116 @@ mod tests {
             assert!(line.starts_with("    "), "{lines:?}");
             assert!(line.chars().count() <= 80, "{lines:?}");
         }
+    }
+
+    /// The row `boxed` wraps a body line in, trimmed back to that line.
+    fn popup_row(row: &str) -> &str {
+        row.trim_matches(['│', ' '])
+    }
+
+    /// Step 19 of the dispatch tab's mockup: a blank row, the layer's rows,
+    /// one blank row, the key line, and the border straight under it.
+    #[test]
+    fn the_overrides_popup_reads_as_the_dispatch_tab_draws_it() {
+        let repo = fixture_with_layer("overrides-popup-layout");
+        let panel = overrides_popup(&repo)
+            .unwrap()
+            .expect("a layer to name")
+            .panel;
+        let n = panel.len();
+        assert!(
+            panel[0].starts_with("┌─ overrides are active for this project "),
+            "{panel:?}"
+        );
+        assert_eq!(popup_row(&panel[1]), "", "{panel:?}");
+        assert!(
+            popup_row(&panel[2]).starts_with("pipelines/default.yml"),
+            "{panel:?}"
+        );
+        assert_eq!(popup_row(&panel[n - 3]), "", "{panel:?}");
+        assert_eq!(
+            popup_row(&panel[n - 2]),
+            "[enter] start dispatching   [esc] back   [x] don't ask again until this changes"
+        );
+        assert!(
+            !popup_row(&panel[n - 4]).is_empty(),
+            "one blank row above the keys: {panel:?}"
+        );
+    }
+
+    /// Step 20: the same shape, the key line straight on the border.
+    #[test]
+    fn the_warnings_popup_reads_as_the_dispatch_tab_draws_it() {
+        let mut repo = fixture("warnings-popup-layout");
+        repo.config.unattended.enabled = true;
+        let panel = warnings_popup(&repo, &Pipelines::builtin())
+            .expect("unattended with no ceiling is worth a warning")
+            .panel;
+        let n = panel.len();
+        assert!(panel[0].starts_with("┌─ before dispatching "), "{panel:?}");
+        assert_eq!(popup_row(&panel[1]), "", "{panel:?}");
+        assert_eq!(popup_row(&panel[2]), "settings", "{panel:?}");
+        assert_eq!(
+            popup_row(&panel[n - 2]),
+            "[enter] start dispatching   [esc] back   [x] hide until these change"
+        );
+        assert_eq!(popup_row(&panel[n - 3]), "", "{panel:?}");
+        assert!(
+            !popup_row(&panel[n - 4]).is_empty(),
+            "one blank row above the keys: {panel:?}"
+        );
+    }
+
+    /// `x` on the warnings popup quiets both surfaces: the popup is not
+    /// asked again, and neither is `spoolway dispatch`'s own 80-column
+    /// screen, though the popup wraps the same findings narrower.
+    #[test]
+    fn hiding_the_warnings_popup_hides_the_cli_screen_too() {
+        let mut repo = fixture("warnings-popup-hide");
+        repo.config.unattended.enabled = true;
+        let pipelines = Pipelines::builtin();
+        warnings_popup(&repo, &pipelines)
+            .expect("something to warn about")
+            .hide(&repo)
+            .unwrap();
+        assert!(warnings_popup(&repo, &pipelines).is_none());
+
+        let mut out = Vec::new();
+        let proceed = warnings_gate_with(
+            &repo,
+            &pipelines,
+            true,
+            &mut keys(""),
+            &mut out,
+            Some(crate::platform::TermGuard::inert),
+        )
+        .unwrap();
+        assert!(proceed);
+        assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
+    }
+
+    /// `x` on the overrides popup does the same for the overrides gate.
+    #[test]
+    fn hiding_the_overrides_popup_hides_the_cli_gate_too() {
+        let repo = fixture_with_layer("overrides-popup-hide");
+        overrides_popup(&repo)
+            .unwrap()
+            .expect("a layer to name")
+            .hide(&repo)
+            .unwrap();
+        assert!(overrides_popup(&repo).unwrap().is_none());
+
+        let mut out = Vec::new();
+        let proceed = overrides_gate_with(
+            &repo,
+            true,
+            &mut keys(""),
+            &mut out,
+            Some(crate::platform::TermGuard::inert),
+        )
+        .unwrap();
+        assert!(proceed);
+        assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
     }
 
     /// A fresh project has never been initialised, so `doctor_sync`'s own

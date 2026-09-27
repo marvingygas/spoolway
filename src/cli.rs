@@ -887,14 +887,15 @@ pub struct DispatchArgs {
     #[arg(long)]
     pub force: bool,
 
-    /// The overview and the overrides gate were already shown and answered
-    /// — never set from the CLI. `commands::queue::confirm_start` walks a
-    /// person through both from the queue screen's own `enter`, right
-    /// before this runs, so `dispatch` must not ask a second time; a bare
-    /// `spoolway dispatch` leaves this false, being the one caller nobody
-    /// has already asked.
-    #[arg(skip)]
-    pub confirmed: bool,
+    /// Started by bare `spoolway`'s dispatch tab — never typed. The screen
+    /// has already answered the overrides and warnings gates as popups of
+    /// its own, so this run asks neither again. It also owns no terminal:
+    /// it draws no board, prints nothing per pass, and stays up on an empty
+    /// queue until the screen stops it, since the screen, not an empty
+    /// queue, decides when dispatching ends. Why it ends on its own — a
+    /// refusal, a spend ceiling — goes to stderr for the screen to show.
+    #[arg(long = "from-screen", hide = true)]
+    pub screen: bool,
 }
 
 impl DispatchArgs {

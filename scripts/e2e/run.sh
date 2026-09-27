@@ -116,8 +116,8 @@ REPO=$(cd "$E2E_DIR/../.." && pwd)
 #   status      the board's *rendering* — every column, every row state:
 #               unit tests cover it through a real pass, and an e2e version
 #               would re-assert the same branches through a slower path.
-#               There is one board per run now, focused rather than drawn a
-#               second time — see `commands::dispatch::already_running`. The
+#               There is one board per run now: a second dispatcher is
+#               refused on the lock with one line naming the first. The
 #               board's keys are a different question and do have a suite:
 #               `board-pause` drives
 #               `p`, `P` and `U` as real keystrokes into a real dispatcher,

@@ -11,8 +11,10 @@
 //! Each screen still owns its own frame layout, its own modes and its own key
 //! handling — only what is generic across any of them lives here. [`shell`]
 //! is what bare `spoolway` opens: the same screens, one per tab, under one
-//! strip, one terminal guard and one quit.
+//! strip, one terminal guard and one quit — and [`dispatcher`] is the
+//! `spoolway dispatch` child its dispatch tab starts and stops.
 
+pub(crate) mod dispatcher;
 pub(crate) mod shell;
 
 /// One key a screen reads, decoded from however many bytes it took.

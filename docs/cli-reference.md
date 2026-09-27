@@ -60,11 +60,19 @@ Inside the eval tab's filter panel and the queue tab's routines view, `←` and 
 own meaning instead.
 
 Each tab draws exactly what its own command draws, under the strip: `spoolway dispatch`'s
-board, `spoolway queue`, `spoolway jobs` and `spoolway eval`. The dispatch tab shows the board
-with no pass running behind it: its header reads `dispatcher running` and the pid of whichever
-process holds the dispatch lock, or `dispatcher stopped` with no pid when nothing does. The
-queue tab's `enter` still confirms and starts a dispatcher the way `spoolway queue`'s does: the
-screen ends first, and the dispatcher takes the terminal.
+board, `spoolway queue`, `spoolway jobs` and `spoolway eval`.
+
+The dispatch tab runs no pass itself. `enter` starts dispatching the way `unattended.enabled`
+says, asking the overrides and warnings gates as popups first, each only when it has something
+to say, then spawns a `spoolway dispatch` child. `enter` again stops that child straight away,
+with no question: nothing is torn down, and every lane keeps running. The header reads
+`dispatcher running` and the child's pid, or `dispatcher stopped` with no pid once it has
+stopped. `r`/`R`, `p`/`P` and `u`/`U` work whether or not a child is running. `q` or `ctrl-c`
+quits the whole screen and stops dispatching too.
+
+A child the tab started stays up on an empty queue and the board reads `nothing queued`; only
+`spoolway dispatch` run from a terminal exits on an empty queue. A child that exits on its own —
+a refusal, or a spend ceiling — shows the reason in a popup, closed with `enter`.
 
 With stdout not a terminal — `spoolway | cat`, a script — it prints the grouped help instead,
 the same as `spoolway --help`.
@@ -81,7 +89,7 @@ archive directories. The right pane lists the highlighted group's tasks.
 | `↑` `↓` / `j` `k` | Move the cursor |
 | `tab` | Switch focus between the groups and tasks panes |
 | `space` | Select a group. A group is queued whole |
-| `enter` | Check the selection, queue it, and offer to start a dispatcher, or to go to one already running |
+| `enter` | Check the selection and queue it |
 | `g` | Set or clear a `gate_at` on the highlighted task |
 | `o` | Open the highlighted task's document in your editor |
 | `f` | Filter groups by name, task id and title. `enter` keeps the filter, `esc` clears it |
@@ -251,58 +259,21 @@ refusing to start: task `auth-refresh` has no `pipeline:`
 Nothing was dispatched.
 ```
 
-If another dispatcher already holds the lock, it prints that a dispatcher is already running,
-asks herdr to focus that dispatcher's pane, and exits without drawing a board. `--plain` prints
-its one-shot table headed `watching dispatcher (pid N)` instead.
+If another dispatcher already holds the lock, it prints that a dispatcher is already running and
+exits without drawing a board:
+
+```
+  a dispatcher is already running for this repo (pid 250)
+```
+
+Queueing a batch while another dispatcher already holds the lock works the same way: the batch
+is written, and the running dispatcher picks it up on its own next pass.
 
 The restart guard refuses the fifth start in 30 seconds when the four before it could not
 run. See [Restarting into a repo that cannot run](dispatcher.md#restarting-into-a-repo-that-cannot-run).
 
-Before it starts, it shows the whole queue and waits for a key:
-
-```
-  queued  3 groups · 6 tasks
-
-    TASK                PIPELINE    STEP      BASE
-
-  cart
-    cart-empty-state    impl_fast   review    main
-    cart-totals         impl        queued    main
-    cart-discounts      impl        queued    main
-
-  checkout
-    auth-verify         impl        implement main
-    checkout-charge     impl_tdd    queued    main
-
-  search
-    search-facets       impl        queued    release-2
-
-  [enter] start a dispatcher   [esc] back
-```
-
-If another dispatcher already holds the lock, the same overview carries a pid line under the
-header and its own footer instead:
-
-```
-  queued  3 groups · 6 tasks
-  a dispatcher is already running (pid 250) — it takes these on its next pass
-
-    TASK                PIPELINE    STEP      BASE
-
-  cart
-    cart-empty-state    impl_fast   review    main
-    cart-totals         impl        queued    main
-    cart-discounts      impl        queued    main
-
-  [enter] go to the dispatcher   [esc] back
-```
-
-`enter` there brings the running dispatcher's workspace to the front and ends the command. No
-task document is written, moved or re-queued; the batch was already saved, and the running
-dispatcher picks it up on its own next pass.
-
-When an [overrides layer](configuration.md#the-overrides-layer) is active, `enter` there then
-shows what is patched and waits for a key:
+When an [overrides layer](configuration.md#the-overrides-layer) is active, it shows what is
+patched and waits for a key:
 
 ```
   overrides are active for this project
@@ -314,8 +285,8 @@ shows what is patched and waits for a key:
   [enter] start the run   [esc] back   [x] don't ask again until this changes
 ```
 
-`enter` there then shows a warnings screen, built from `spoolway doctor`'s own cheap
-checks, and waits for a key:
+It then shows a warnings screen, built from `spoolway doctor`'s own cheap checks, and waits for
+a key:
 
 ```
 before this run starts
@@ -339,8 +310,9 @@ whole screen is skipped, with nothing drawn, when all three are empty. `x` store
 fingerprint of the rendered lines, separate from the overrides screen's, and the screen returns
 as soon as any line differs from it.
 
-`esc` on any of the three screens ends the command. From the queue screen's own `enter`, `esc`
-on any of the three screens returns to browsing instead.
+`esc` on either screen ends the command. Bare `spoolway`'s dispatch tab asks the same two things
+as popups of its own before it starts a dispatcher — see [`spoolway`](#spoolway) — so `x` there
+quiets this screen too, and the other way round.
 
 Once the lock is taken, a last checklist row, `workspace`, prints once the run's own workspace
 is found or opened. A failure to find or open it is shown instead, on its own notice with only

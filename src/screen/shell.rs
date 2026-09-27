@@ -5,6 +5,9 @@
 //! already draws with — `commands::queue_tab`, `commands::jobs_tab`,
 //! `eval::tab` and the board's own [`crate::status::Board`] — and this module
 //! adds only the strip on the top row and the keys that move between tabs.
+//! The one exception is the dispatch tab's `enter`, which starts and stops a
+//! `spoolway dispatch` child ([`super::dispatcher`]) behind the gates that
+//! command asks, drawn here as popups over the board.
 //!
 //! A tab's screen keeps its own loop. When it reads `←`, `→` or `q` with no
 //! popup or sub-mode of its own open — [`leave_on`] — it hands a [`Leave`]
@@ -222,97 +225,224 @@ fn strip_line(open: Tab, width: usize) -> String {
 /// installs the one `ctrl-c` handler, in the same order `queue_screen` does
 /// for its own — see there for why the order matters. Opens on the queue tab.
 ///
-/// The queue tab's own `enter`, once a person has confirmed the start, still
-/// ends in a dispatcher the way `spoolway queue` does today: the guard is
-/// dropped first and only then does `commands::dispatch` take the terminal.
-/// Starting dispatching from the dispatch tab itself is not this screen's
-/// yet.
+/// A dispatcher the dispatch tab started stops when this returns, however it
+/// returns — see [`super::dispatcher::Dispatcher`]'s own `Drop`.
 pub(crate) fn run(repo: &Repo, pipelines: &Pipelines, cwd: &Path) -> Result<()> {
     crate::platform::stop::catch_interrupt();
-
-    let start_dispatcher = {
-        let _term = crate::platform::TermGuard::new();
-        let mut stdin = RawStdin;
-        let mut stdout = std::io::stdout();
-        host(repo, pipelines, cwd, &mut stdin, &mut stdout)?
-    };
-
-    if start_dispatcher {
-        // `confirmed: true` for the same reason `queue_screen` passes it: the
-        // queue tab's own `enter` already walked the gates.
-        crate::commands::dispatch(
-            repo,
-            pipelines,
-            &crate::cli::DispatchArgs {
-                confirmed: true,
-                ..Default::default()
-            },
-        )?;
-    }
-    Ok(())
+    let _term = crate::platform::TermGuard::new();
+    let mut stdin = RawStdin;
+    let mut stdout = std::io::stdout();
+    host(repo, pipelines, cwd, &mut stdin, &mut stdout)
 }
 
 /// The tab loop, apart from the terminal it runs on so a test can drive it
-/// over a scripted input. `true` when the queue tab asked for a dispatcher.
+/// over a scripted input.
 fn host(
     repo: &Repo,
     pipelines: &Pipelines,
     cwd: &Path,
     input: &mut impl PollableRead,
     out: &mut impl Write,
-) -> Result<bool> {
+) -> Result<()> {
     // Built once and kept across visits, so the board's RECENT ticker and
-    // its cursor survive a trip to another tab and back. An inert guard: the
-    // terminal is already this screen's, taken once above.
+    // its cursor survive a trip to another tab and back — and so does the
+    // dispatcher the tab started, which keeps running while another tab is
+    // open. An inert guard: the terminal is already this screen's, taken
+    // once above.
     let mut board = crate::status::Board::hosted();
+    let mut dispatch = DispatchTab::default();
     let mut tab = Tab::Queue;
 
     loop {
         let leave = {
             let _hosting = Hosting::open(tab);
             match tab {
-                Tab::Dispatch => dispatch_tab(repo, pipelines, &mut board, input, out)?,
-                Tab::Queue => match crate::commands::queue_tab(repo, pipelines, cwd, input, out)? {
-                    Some(leave) => leave,
-                    None => return Ok(true),
-                },
+                Tab::Dispatch => {
+                    dispatch_tab(repo, pipelines, cwd, &mut board, &mut dispatch, input, out)?
+                }
+                Tab::Queue => crate::commands::queue_tab(repo, pipelines, cwd, input, out)?,
                 Tab::Jobs => crate::commands::jobs_tab(repo, pipelines, cwd, input, out)?,
                 Tab::Eval => crate::eval::tab(repo, pipelines, input, out)?,
             }
         };
         // A caught `ctrl-c` ends every tab's own wait with `None` — see
-        // `wait_key` — which each reads as `Quit` already; checked here too so a tab that answered
-        // with a switch in the same instant cannot open another one.
+        // `wait_key` — which each reads as `Quit` already; checked here too
+        // so a tab that answered with a switch in the same instant cannot
+        // open another one.
         if crate::platform::stop::asked() {
-            return Ok(false);
+            return Ok(());
         }
         match leave {
-            Leave::Quit => return Ok(false),
+            Leave::Quit => return Ok(()),
             Leave::Switch(way) => tab = tab.toward(way),
+        }
+    }
+}
+
+/// What the dispatch tab keeps between visits beyond the board itself: the
+/// dispatcher it started, if any, and the popup it has open.
+#[derive(Default)]
+struct DispatchTab {
+    child: Option<super::dispatcher::Dispatcher>,
+    popup: Option<Popup>,
+}
+
+/// A popup the dispatch tab draws over the board. Each one reads every key
+/// until it is answered, the same as the board's own confirm panels.
+enum Popup {
+    /// The overrides gate `enter` asks first, when there is a layer to name.
+    Overrides(crate::commands::GatePopup),
+    /// Doctor's cheap findings, asked after the overrides gate.
+    Warnings(crate::commands::GatePopup),
+    /// Why the dispatcher ended, or never started. `enter` closes it.
+    Ended(Vec<String>),
+}
+
+impl Popup {
+    fn panel(&self) -> &[String] {
+        match self {
+            Popup::Overrides(gate) | Popup::Warnings(gate) => &gate.panel,
+            Popup::Ended(panel) => panel,
+        }
+    }
+}
+
+impl DispatchTab {
+    /// Whether the key line offers to stop rather than start. A child
+    /// already asked to stop still counts until it has exited: offering to
+    /// start one then would be a promise `enter` cannot keep, since the
+    /// lock is still its.
+    fn dispatching(&self) -> bool {
+        self.child.is_some()
+    }
+
+    /// Forget a child that has exited, and open the popup saying why if it
+    /// ended without being asked to.
+    fn reap(&mut self, repo: &Repo) {
+        let Some(child) = self.child.as_mut() else {
+            return;
+        };
+        if let Some(ended) = child.ended(&repo.lock_file()) {
+            self.child = None;
+            if let Some(panel) = ended {
+                self.popup = Some(Popup::Ended(panel));
+            }
+        }
+    }
+
+    /// `enter` with no popup open: stop the child straight away, with no
+    /// question, or — with none running — ask the start gates, each only
+    /// when it has something to say, and start one. A child already asked
+    /// to stop is left to finish going: `stop` asks once.
+    fn enter(&mut self, repo: &Repo, pipelines: &Pipelines, cwd: &Path) {
+        match self.child.as_mut() {
+            Some(child) => child.stop(),
+            None => self.overrides_then_start(repo, pipelines, cwd),
+        }
+    }
+
+    fn overrides_then_start(&mut self, repo: &Repo, pipelines: &Pipelines, cwd: &Path) {
+        match crate::commands::overrides_popup(repo) {
+            Ok(Some(gate)) => self.popup = Some(Popup::Overrides(gate)),
+            Ok(None) => self.warnings_then_start(repo, pipelines, cwd),
+            Err(err) => {
+                self.popup = Some(Popup::Ended(super::dispatcher::popup(
+                    false,
+                    &format!("{err:#}"),
+                )))
+            }
+        }
+    }
+
+    fn warnings_then_start(&mut self, repo: &Repo, pipelines: &Pipelines, cwd: &Path) {
+        match crate::commands::warnings_popup(repo, pipelines) {
+            Some(gate) => self.popup = Some(Popup::Warnings(gate)),
+            None => self.start(cwd),
+        }
+    }
+
+    fn start(&mut self, cwd: &Path) {
+        match super::dispatcher::Dispatcher::start(cwd) {
+            Ok(child) => self.child = Some(child),
+            Err(err) => {
+                self.popup = Some(Popup::Ended(super::dispatcher::popup(
+                    false,
+                    &format!("{err:#}"),
+                )))
+            }
+        }
+    }
+
+    /// A key read while a popup is open. `enter` on a gate goes on to the
+    /// next one, or starts; `x` hides the gate until what it names changes
+    /// and then goes on the same way; `esc` backs out having started
+    /// nothing. Every other key is ignored.
+    fn answer(&mut self, repo: &Repo, pipelines: &Pipelines, cwd: &Path, key: Key) {
+        let Some(popup) = self.popup.take() else {
+            return;
+        };
+        match (popup, key) {
+            (Popup::Overrides(gate), Key::Char('x' | 'X')) => {
+                // Best-effort: an acknowledgement that could not be written
+                // only means the gate asks again next time.
+                let _ = gate.hide(repo);
+                self.warnings_then_start(repo, pipelines, cwd);
+            }
+            (Popup::Overrides(_), Key::Enter) => self.warnings_then_start(repo, pipelines, cwd),
+            (Popup::Warnings(gate), Key::Char('x' | 'X')) => {
+                let _ = gate.hide(repo);
+                self.start(cwd);
+            }
+            (Popup::Warnings(_), Key::Enter) => self.start(cwd),
+            (Popup::Overrides(_) | Popup::Warnings(_), Key::Esc)
+            | (Popup::Ended(_), Key::Enter) => {}
+            (popup, _) => self.popup = Some(popup),
         }
     }
 }
 
 /// The dispatch tab: the board, drawn from the task files, the lane list and
 /// the ledger exactly as `spoolway dispatch` draws it, with the board's own
-/// keys — and no pass run behind it. Redrawn every [`crate::status::POLL`]
-/// while no key is typed, the same wait the board keeps under a dispatcher.
+/// keys. `enter` starts dispatching — a `spoolway dispatch` child, see
+/// [`super::dispatcher`] — and `enter` again stops it. The board is drawn
+/// from what that child writes; this tab runs no pass itself. Redrawn every
+/// [`crate::status::POLL`] while no key is typed, the same wait the board
+/// keeps under a dispatcher, and that redraw is also where a child that has
+/// exited is noticed.
 fn dispatch_tab(
     repo: &Repo,
     pipelines: &Pipelines,
+    cwd: &Path,
     board: &mut crate::status::Board,
+    tab: &mut DispatchTab,
     input: &mut impl PollableRead,
     out: &mut impl Write,
 ) -> Result<Leave> {
     loop {
-        draw_board(repo, pipelines, board, out);
-        let Some(key) = wait_key(input, || draw_board(repo, pipelines, board, out)) else {
+        tab.reap(repo);
+        draw_board(repo, pipelines, board, tab, out);
+        let Some(key) = wait_key(input, || {
+            tab.reap(repo);
+            draw_board(repo, pipelines, board, tab, out)
+        }) else {
             return Ok(Leave::Quit);
         };
-        if board.at_rest()
-            && let Some(leave) = leave_on(key)
-        {
-            return Ok(leave);
+        // The board's own panel is drawn over the tab's popup — see
+        // `Board::hosted_frame` — so it answers first. A child that exits
+        // while a pause panel is open waits its turn rather than taking
+        // keys meant for the panel on screen.
+        if board.at_rest() && tab.popup.is_some() {
+            tab.answer(repo, pipelines, cwd, key);
+            continue;
+        }
+        if board.at_rest() {
+            if let Some(leave) = leave_on(key) {
+                return Ok(leave);
+            }
+            if key == Key::Enter {
+                tab.enter(repo, pipelines, cwd);
+                continue;
+            }
         }
         // Best-effort, the same as the dispatch loop's own `on_key`: a key
         // that failed against a queue being rewritten under it is lost, not a
@@ -351,9 +481,11 @@ fn draw_board(
     repo: &Repo,
     pipelines: &Pipelines,
     board: &mut crate::status::Board,
+    tab: &DispatchTab,
     out: &mut impl Write,
 ) {
-    let Ok(frame) = board.hosted_frame(repo, pipelines) else {
+    let popup = tab.popup.as_ref().map(Popup::panel);
+    let Ok(frame) = board.hosted_frame(repo, pipelines, tab.dispatching(), popup) else {
         return;
     };
     let _ = write!(out, "\x1b[2J\x1b[H");
@@ -458,12 +590,16 @@ mod tests {
         assert_eq!(Tab::Eval.toward(Toward::Right), Tab::Eval);
     }
 
-    /// Drive [`host`] over `input`, handing back whether it asked for a
-    /// dispatcher and every frame it drew, colour codes taken out.
-    fn drive_host(repo: &Repo, input: &str) -> (bool, Vec<String>) {
+    /// Drive [`host`] over `input`, handing back every frame it drew, colour
+    /// codes taken out.
+    ///
+    /// No case here may press `enter` on the dispatch tab with no gate to
+    /// ask: that starts a child from `current_exe`, which under `cargo test`
+    /// is the test binary itself. The e2e suite `screen` covers the start.
+    fn drive_host(repo: &Repo, input: &str) -> Vec<String> {
         let mut input = std::io::Cursor::new(input.as_bytes().to_vec());
         let mut out = Vec::new();
-        let dispatcher = host(
+        host(
             repo,
             &Pipelines::builtin(),
             &repo.root,
@@ -472,18 +608,16 @@ mod tests {
         )
         .unwrap();
         let drawn = String::from_utf8(out).unwrap();
-        let frames = drawn.split("\x1b[2J\x1b[H").skip(1).map(plain).collect();
-        (dispatcher, frames)
+        drawn.split("\x1b[2J\x1b[H").skip(1).map(plain).collect()
     }
 
     // The e2e suite's own gesture, at unit level: the screen opens on the
     // queue tab under the strip, and `←` from there draws the board with no
-    // dispatcher behind it. Running out of keys ends it without one.
+    // dispatcher behind it, offering `enter` to start one.
     #[test]
     fn host_opens_on_the_queue_tab_and_left_reaches_the_board() {
         let repo = crate::status::testutil::fixture("shell-host-left");
-        let (dispatcher, frames) = drive_host(&repo, "\x1b[D");
-        assert!(!dispatcher);
+        let frames = drive_host(&repo, "\x1b[D");
         let first = &frames[0];
         assert!(
             first.contains("dispatch        queue        jobs        eval"),
@@ -493,15 +627,112 @@ mod tests {
         let last = frames.last().unwrap();
         assert!(last.contains("dispatcher stopped"), "{last}");
         assert!(!last.contains("─ groups"), "{last}");
-        assert!(last.contains("[q] quit"), "{last}");
+        assert!(
+            last.contains(
+                "[enter] start dispatching   [o] open task   [r/R] resume / all   \
+                 [p/P] pause / all   [u/U] unqueue / all   [q] quit"
+            ),
+            "{last}"
+        );
     }
 
     #[test]
-    fn q_ends_the_screen_without_a_dispatcher() {
+    fn q_ends_the_screen() {
         let repo = crate::status::testutil::fixture("shell-host-q");
-        let (dispatcher, frames) = drive_host(&repo, "q");
-        assert!(!dispatcher);
+        let frames = drive_host(&repo, "q");
         assert_eq!(frames.len(), 1, "one frame, then q ended it: {frames:?}");
+    }
+
+    /// A project with an override layer nobody has acknowledged.
+    fn fixture_with_layer(name: &str) -> Repo {
+        let repo = crate::status::testutil::fixture(name);
+        std::fs::create_dir_all(repo.overrides_dir().join("pipelines")).unwrap();
+        std::fs::write(
+            repo.overrides_dir().join("pipelines/default.yml"),
+            "steps:\n  implement:\n    model: fake-opus\n",
+        )
+        .unwrap();
+        repo
+    }
+
+    // `enter` asks the overrides gate first, as a popup over the board, and
+    // the popup reads every key: `→` does not leave the tab while it is up.
+    #[test]
+    fn enter_opens_the_overrides_popup_and_it_keeps_the_arrows() {
+        let repo = fixture_with_layer("shell-host-overrides");
+        let frames = drive_host(&repo, "\x1b[D\r\x1b[C");
+        let last = frames.last().unwrap();
+        assert!(
+            last.contains("┌─ overrides are active for this project "),
+            "{last}"
+        );
+        assert!(last.contains("pipelines/default.yml"), "{last}");
+        assert!(
+            last.contains(
+                "[enter] start dispatching   [esc] back   [x] don't ask again until this changes"
+            ),
+            "{last}"
+        );
+        assert!(last.contains("dispatcher stopped"), "{last}");
+        assert!(!last.contains("─ groups"), "{last}");
+    }
+
+    // `esc` backs out of the gate having started nothing: the board is back
+    // at rest, still offering to start dispatching.
+    #[test]
+    fn esc_off_the_overrides_popup_starts_nothing() {
+        let repo = fixture_with_layer("shell-host-overrides-esc");
+        let frames = drive_host(&repo, "\x1b[D\r\x1b");
+        let last = frames.last().unwrap();
+        assert!(!last.contains("overrides are active"), "{last}");
+        assert!(last.contains("[enter] start dispatching"), "{last}");
+        assert!(last.contains("dispatcher stopped"), "{last}");
+        assert_eq!(crate::lock::Lock::holder(&repo.lock_file()).unwrap(), None);
+    }
+
+    // `x` on the overrides popup hides it and goes on to the warnings gate,
+    // just as `enter` would — and the overrides gate does not ask again.
+    // `unattended.enabled` guarantees the warnings gate has something to
+    // say, so nothing here reaches a start.
+    #[test]
+    fn x_on_the_overrides_popup_hides_it_and_asks_the_warnings_next() {
+        let mut repo = fixture_with_layer("shell-host-overrides-x");
+        repo.config.unattended.enabled = true;
+        let pipelines = Pipelines::builtin();
+        let mut tab = DispatchTab::default();
+        tab.enter(&repo, &pipelines, &repo.root);
+        assert!(matches!(tab.popup, Some(Popup::Overrides(_))));
+        tab.answer(&repo, &pipelines, &repo.root, Key::Char('x'));
+        assert!(matches!(tab.popup, Some(Popup::Warnings(_))));
+        assert!(tab.child.is_none());
+        assert!(crate::commands::overrides_popup(&repo).unwrap().is_none());
+
+        // `esc` off the warnings backs out with nothing started, and the
+        // next `enter` skips the hidden overrides gate.
+        tab.answer(&repo, &pipelines, &repo.root, Key::Esc);
+        assert!(tab.popup.is_none());
+        tab.enter(&repo, &pipelines, &repo.root);
+        assert!(matches!(tab.popup, Some(Popup::Warnings(_))));
+    }
+
+    // A dispatcher that ended on its own leaves its reason up until `enter`
+    // closes it, and with no child left `enter` is back to starting one.
+    #[test]
+    fn an_ended_popup_closes_on_enter() {
+        let repo = crate::status::testutil::fixture("shell-host-ended");
+        let mut tab = DispatchTab {
+            child: None,
+            popup: Some(Popup::Ended(super::super::dispatcher::popup(
+                true,
+                "unattended.max_cost_usd reached",
+            ))),
+        };
+        let pipelines = Pipelines::builtin();
+        tab.answer(&repo, &pipelines, &repo.root, Key::Char('x'));
+        assert!(tab.popup.is_some(), "only enter closes it");
+        tab.answer(&repo, &pipelines, &repo.root, Key::Enter);
+        assert!(tab.popup.is_none());
+        assert!(!tab.dispatching());
     }
 
     // While a board confirm panel is open it reads every key: `→` there is
@@ -511,7 +742,7 @@ mod tests {
     fn an_open_board_panel_keeps_the_arrows_from_the_shell() {
         let repo = crate::status::testutil::fixture("shell-host-panel");
         crate::status::testutil::add(&repo, "wire", &[], None);
-        let (_, frames) = drive_host(&repo, "\x1b[DU\x1b[C");
+        let frames = drive_host(&repo, "\x1b[DU\x1b[C");
         let last = frames.last().unwrap();
         assert!(
             last.contains("not started"),
@@ -527,7 +758,7 @@ mod tests {
     fn an_answered_board_panel_gives_the_arrows_back() {
         let repo = crate::status::testutil::fixture("shell-host-panel-answered");
         crate::status::testutil::add(&repo, "wire", &[], None);
-        let (_, frames) = drive_host(&repo, "\x1b[DU\r\x1b[C");
+        let frames = drive_host(&repo, "\x1b[DU\r\x1b[C");
         let last = frames.last().unwrap();
         assert!(last.contains("─ groups"), "{last}");
     }

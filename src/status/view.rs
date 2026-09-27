@@ -326,25 +326,29 @@ fn all_pause_panel(aborts: &[Abort]) -> Vec<String> {
         ));
     }
     body.push(String::new());
-    body.push("[enter] pause the run".to_string());
+    body.push("[enter] pause them".to_string());
     body.push("[s] schedule   [esc] cancel".to_string());
     crate::screen::boxed("pause all", &body)
 }
 
+/// [`BoardMode::ConfirmResume`]'s panel: the gated tasks, named, and nothing
+/// more — the ids are the whole of what a person needs to see before `enter`
+/// carries them past their gates. One blank row above the body and one under
+/// the key line, as the dispatch tab's mockup draws it.
 pub(super) fn resume_confirm_panel(gated: &[String]) -> Vec<String> {
     let mut body = vec![
+        String::new(),
         format!(
             "{} task{} waiting at a gate:",
             gated.len(),
             if gated.len() == 1 { "" } else { "s" }
         ),
-        String::new(),
     ];
-    body.extend(gated.iter().cloned());
+    body.extend(gated.iter().map(|id| format!("  {id}")));
     body.push(String::new());
-    body.push("Resuming sends every one of them past its gate,".to_string());
-    body.push("with nobody having looked at it first.".to_string());
-    crate::screen::panel("resume all", &body, "[enter] resume them   [esc] cancel")
+    body.push("[enter] resume them   [esc] cancel".to_string());
+    body.push(String::new());
+    crate::screen::boxed("resume all", &body)
 }
 
 /// [`BoardMode::ConfirmUnqueue`]'s panel — today's single-line panel
@@ -358,12 +362,13 @@ pub(super) fn unqueue_confirm_panel(chain: &[ChainEntry], dir: &std::path::Path)
     };
     if chain.len() == 1 {
         let body = vec![
+            String::new(),
             "Nothing has run for it yet.".to_string(),
             String::new(),
-            "The document goes back to:".to_string(),
+            "The task goes back to:".to_string(),
             shorten_home(&dir.join(format!("{}.md", head.id))),
             String::new(),
-            "`spoolway queue` is what sends it again.".to_string(),
+            "The queue tab is what sends it again.".to_string(),
         ];
         return crate::screen::panel(
             &format!("unqueue {}", head.id),
@@ -373,9 +378,10 @@ pub(super) fn unqueue_confirm_panel(chain: &[ChainEntry], dir: &std::path::Path)
     }
 
     let mut body = vec![
+        String::new(),
         "Nothing has run for these yet.".to_string(),
         String::new(),
-        format!("{} documents go back to:", chain.len()),
+        format!("{} tasks go back to:", chain.len()),
         format!("{}/", shorten_home(dir)),
         String::new(),
     ];
@@ -391,7 +397,7 @@ pub(super) fn unqueue_confirm_panel(chain: &[ChainEntry], dir: &std::path::Path)
         }
     }
     body.push(String::new());
-    body.push("`spoolway queue` is what sends them again.".to_string());
+    body.push("The queue tab is what sends them again.".to_string());
     crate::screen::panel(
         &format!("unqueue {}", head.id),
         &body,
@@ -406,15 +412,15 @@ pub(super) fn unqueue_confirm_panel(chain: &[ChainEntry], dir: &std::path::Path)
 /// longest id: five or more unstarted tasks pushed it past 80 columns.
 pub(super) fn unqueue_all_confirm_panel(ids: &[String]) -> Vec<String> {
     let mut body = vec![
+        String::new(),
         format!(
             "{} task{} {} not started:",
             ids.len(),
             if ids.len() == 1 { "" } else { "s" },
             if ids.len() == 1 { "has" } else { "have" }
         ),
-        String::new(),
     ];
-    body.extend(ids.iter().cloned());
+    body.extend(ids.iter().map(|id| format!("  {id}")));
     body.push(String::new());
     body.push("Each goes back to pending. Running, paused and".to_string());
     body.push("blocked tasks stay where they are.".to_string());

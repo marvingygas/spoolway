@@ -21,12 +21,10 @@ whatever flags are given:
 
 ```
 $ spoolway dispatch
-spoolway: a dispatcher has to be visible, and this is not a herdr pane.
+spoolway: Open herdr and start spoolway there:
 
-  Open one and run it there:
-
-    herdr
-    spoolway dispatch
+  herdr
+  spoolway
 ```
 
 An internal headless backend exists for automated tests only. It is not a supported runtime
@@ -34,27 +32,22 @@ or an alternative to installing herdr. See [Testing](testing.md).
 
 One dispatcher serves the whole project. Every pass re-reads the queue, so a task queued
 while it runs is picked up on the next pass. A second `spoolway dispatch` on the same project
-prints that a dispatcher is already running, asks herdr to focus its pane, and exits without
-drawing a board:
+prints that a dispatcher is already running and exits without drawing a board:
 
 ```
 $ spoolway dispatch
   a dispatcher is already running for this repo (pid 8123)
-  → focusing its pane w1:p5
 ```
 
-`spoolway dispatch --plain` against the same held lock prints its own one-shot table headed
-`watching dispatcher (pid N)` instead, for scripts.
-
 Queueing a batch from the queue screen while another dispatcher holds the lock works the same
-way: the batch is written, and `enter` on the overview brings that dispatcher's workspace to
-the front instead of starting a second one. See [`spoolway queue`](cli-reference.md#spoolway-queue).
+way: the batch is written, and the running dispatcher picks it up on its next pass. See
+[`spoolway queue`](cli-reference.md#spoolway-queue).
 
-Before the first pass, `enter` on the queue screen and an [overrides
-layer](configuration.md#the-overrides-layer) screen, in turn, a warnings screen holds `spoolway
-doctor`'s cheap findings until a key answers it. See
-[`spoolway dispatch`](cli-reference.md#spoolway-dispatch). Once the run has taken the lock, a
-failure to find or open its own workspace gets a notice of its own.
+Before the first pass, an [overrides layer](configuration.md#the-overrides-layer) screen, then
+a warnings screen holding `spoolway doctor`'s cheap findings, each holds for a key, whenever
+either has something to say. See [`spoolway dispatch`](cli-reference.md#spoolway-dispatch). Once
+the run has taken the lock, a failure to find or open its own workspace gets a notice of its
+own.
 
 | Exit code | Meaning |
 |---|---|
@@ -159,9 +152,9 @@ The header above the task rows names the running dispatcher's version, next to i
 `spoolway` executable on `PATH` reports a newer version, the header adds `(restart to use latest
 installed version)`.
 
-Bare `spoolway`'s dispatch tab draws the same board, under the tab strip, with no pass running
-behind it. Its header names the pid of whichever process holds the dispatch lock, or reads
-`dispatcher stopped` with no pid when nothing does. See
+Bare `spoolway`'s dispatch tab draws the same board, under the tab strip, from a `spoolway
+dispatch` child the tab starts and stops on `enter` — the tab runs no pass itself. Its header
+names the pid of that child, or reads `dispatcher stopped` with no pid once it has stopped. See
 [`spoolway`](cli-reference.md#spoolway).
 
 Rows are grouped by `group:`. A `▌<group>` line opens each block, and a total line closes it.

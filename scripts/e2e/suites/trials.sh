@@ -64,9 +64,8 @@ pending_doc beta "$BODY" "group: audits" "touches: [src/main.rs]" "pipeline:" \
 # loses a step. `alpha` contributes seven checkboxes, not the six steps
 # `bugfix` declares, because every pipeline is loaded with a `blocked` step
 # appended to it; `beta` contributes five the same way. `enter` mints and
-# writes both arms and reaches the overview; the trailing `n` is noise the
-# overview ignores, and the pipe running dry after it declines the same way
-# `esc` would.
+# writes both arms and goes back to browsing; the trailing `n` is noise the
+# screen ignores, and the pipe running dry ends it the same way `esc` would.
 printf '\tt\x1b[Dj\x1b[C\x1b[C\rj jjjjjjjj \rn' | "$SPOOLWAY" queue >/dev/null 2>&1
 
 works "the alpha arm reaches the queue" \
@@ -296,9 +295,9 @@ works "and compares the second arm against the first on one delta line" \
 # A trial of its own group, so the discard below has nothing in common with
 # the two arms already settled. `t`'s minimal form: `f` narrows to the group
 # by name, `enter` leaves the search box keeping the query, `t` opens the
-# picker, two `enter`s take both screens' defaults, reaching the overview;
-# the trailing `n` is noise it ignores, and the pipe running dry after it
-# declines.
+# picker, two `enter`s take both screens' defaults and queue the trial;
+# the trailing `n` is noise it ignores, and the pipe running dry ends the
+# screen.
 #
 # Mid-flight is a state this makes rather than one it catches. A mock lane's
 # step is over in a couple of hundred milliseconds and `drive` looks every two
