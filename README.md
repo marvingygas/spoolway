@@ -89,11 +89,10 @@ From source instead, in a clone of this repository:
 cargo install --path .
 ```
 
-…or, inside herdr:
+As herdr plugin:
 
 ```
 herdr plugin install marvingygas/spoolway
-spoolway herdr bind        # optional: four keys
 ```
 
 Platform notes and requirements in full: **[Installation and setup](docs/installation.md)**.
@@ -106,10 +105,6 @@ Platform notes and requirements in full: **[Installation and setup](docs/install
 spoolway init
 ```
 
-`init` leaves `model: ""` on every agent step. Set a model on each one before you dispatch.
-`spoolway pipeline check` names every step still missing one, and `spoolway doctor` checks
-that everything the configured pipeline needs is present.
-
 ### 2. Create queueable tasks
 
 Use `/spoolway-tasks` to cut an agreed plan or any other defined scope into Markdown task
@@ -117,7 +112,7 @@ documents. It assigns each task to a suitable pipeline and writes the documents 
 `~/.spoolway/<label>-<id>/pending/`. You can create specialized pipelines for different kinds
 of work. If you want help shaping the work first, use `/spoolway-plan`.
 
-You can also create tasks with your own skills or scripts. This command prints the frontmatter
+You can also create tasks with your own skills. This command prints the frontmatter
 each task document must carry:
 
 ```

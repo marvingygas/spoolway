@@ -145,8 +145,10 @@ nightly upgrade suite asks for it from the first bump past $version."
 # against a check suite whose head branch is `main`, and `ci.yml` has no push
 # trigger, so a commit that is not yet on `main` can never have one. The
 # fixture lands the way every other change does, through a pull request. This
-# step opens it and stops; merging is the owner's.
-branch="fixture/v$version"
+# step opens it and stops; a person merges it, and scripts/release-await-merge.sh
+# waits on this exact `fixture/<task>` prefix for that merge.
+[ -n "${SPOOLWAY_TASK:-}" ] || die "SPOOLWAY_TASK is unset — this script only runs as a command step"
+branch="fixture/$SPOOLWAY_TASK"
 git -C "$SCRATCH/main" push --quiet --force-with-lease origin "HEAD:refs/heads/$branch" \
   || die "could not push $dest/ to $branch"
 

@@ -98,7 +98,7 @@ steps:
       while the suites are still cheap to read and fix.
     agent: claude
     prompt: e2e
-    model: claude-sonnet-5
+    model: claude-opus-5-5
     effort: medium
     loop: 2
     on_pass: test
@@ -123,7 +123,7 @@ steps:
     agent: claude
     prompt: archivist
     model: claude-sonnet-5
-    effort: medium
+    effort: high
     on_pass: handover
 
   - id: handover

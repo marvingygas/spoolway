@@ -1,48 +1,58 @@
 # Releasing spoolway
 
-A release is a `v*` tag. The `release` pipeline asks a person to choose the version, then cuts it
-without another planned stop. Queue the routine, approve or override its recommendation, and it does
-the rest: repair `main`, review and merge every pull request it creates, write the release record,
-publish, verify the public artifacts, and land the upgrade fixture.
+A release is a `v*` tag. The `release` pipeline asks a person to choose the version, then does the
+rest by itself except for merging: repair `main`, review every pull request it opens, wait for a
+person to merge each one on GitHub, publish, verify the public artifacts, and land the upgrade
+fixture.
 
 ```mermaid
 flowchart LR
-  R[ready] -->|red| X[fix] --> M[review + merge] --> R
+  R[ready] -->|red| X[fix] --> M[review] --> W1[a person merges] --> R
   R -->|green| S[version suggestion] -->|gate: approve or override| A[preflight] --> B[notes]
-  B --> C[candidate PR] --> N[review + merge] --> P[publish]
-  P --> E[rehearsal run] --> F[tag] --> G[npm + GitHub release] --> V[released] --> Z[fixture PR] --> Q[review + merge]
+  B --> C[candidate PR] --> N[review] --> W2[a person merges] --> P[publish]
+  P --> E[rehearsal + tag] --> V[released] --> Z[fixture PR] --> Q[review] --> W3[a person merges] --> D[done]
+  P -.->|fail| RC[recover]
+  V -.->|fail| RC
+  RC -->|recovered| V
+  RC -->|nothing to finish| S
 ```
 
 | Step | What it does |
 |---|---|
 | `ready` | Runs the whole local gate and a fresh nightly CI run on the candidate. Verifies only — it never edits. |
 | `fix` | Repairs a release blocker in one pull request and drives its checks green. Product code included. |
-| `merge-fix` | Independently reviews the repair, corrects the same branch if needed, and squash-merges it. |
+| `review-fix` | Independently reviews the repair, corrects the same branch if needed, and reports the pull request and its merge method for a person. |
+| `await-fix` | Waits for a person to merge the repair on GitHub, then returns to `ready`. |
 | `version` | Recommends the next version, explains the bump, and waits for a person to approve or override it. |
 | `preflight` | Checks `main` is clean and green, accepts the version gate's choice, and validates that exact version. |
 | `notes` | Writes and validates the one changelog section used by the binary and release page. |
 | `candidate` | Builds the exact four-file release commit and opens its pull request. |
-| `merge-release` | Reviews that exact commit and rebase-merges it without changing the recorded candidate. |
-| `publish` | Rehearses the landed release commit, tags it, and checks what npm and GitHub received. |
+| `review-release` | Independently reviews that exact commit and reports it for a person to merge by rebase. |
+| `await-release` | Waits for a person to merge the release candidate, then runs `publish`. |
+| `publish` | `scripts/release-publish.sh`. Rehearses the merged release commit, tags it, and checks the tag's own workflow run. A command step, so it never asks auto mode to push a tag. |
 | `released` | `scripts/release-verify.sh`. Proves the tag, the six packages, the archives and the published body exist. A command step, so nothing can be credited with it — see below. |
+| `recover` | Recovers a failed `publish` or `released`: reverts an untagged release commit, or fixes and waits for a person to merge a repair. |
 | `fixture` | `scripts/release-fixture.sh`. Scaffolds the released version's upgrade fixture from its own tag and opens its pull request. |
-| `merge-fixture` | Reviews and squash-merges that generated fixture before the task can finish. |
+| `review-fixture` | Independently reviews the generated fixture and reports it for a person to merge by squash. |
+| `await-fixture` | Waits for a person to merge the fixture on GitHub. The task finishes once it does. |
 
 `main` is protected and every pull request is gated on `ci`. Producer lanes never merge their own
-work. A separate landing lane reads the complete diff and required checks, corrects findings on the
-same branch, and merges only the reviewed head. A repair then returns to `ready`, because changing
-`main` invalidates the earlier exact-SHA proof. Failures in the post-publication verifier or fixture
-script use the same repair-review-merge loop and retry the command that found them.
+work, and no lane merges anything either. A `review-*` step reads the complete diff and required
+checks, corrects findings on the same branch, and reports the pull request's number, URL and merge
+method. A person merges it on GitHub, and the `await-*` step right after waits for that merge
+before carrying on. A repair then returns to `ready`, because changing `main` invalidates the
+earlier exact-SHA proof. A failure in `publish` or `released` goes to `recover` instead, which
+either finishes the recovery itself or returns the task to `version`.
 
-The `version` gate is the one planned human stop. Its lane records a recommendation in the task,
-then a resume message either accepts it or names the version to use instead. Preflight and every
-later lane treat that choice as final; they may report a mechanically impossible version, but they
-do not change its semver class or argue for the earlier recommendation.
+The `version` gate is the one planned human stop the pipeline pauses for. Its lane records a
+recommendation in the task, then a resume message either accepts it or names the version to use
+instead. Preflight and every later lane treat that choice as final; they may report a mechanically
+impossible version, but they do not change its semver class or argue for the earlier recommendation.
 
-`released` is not ceremony. `publish` is an agent step, and a `--pass` out of `blocked` carries
-the task one step *past* it — so a release could reach `done` with nothing published if
-`publish` were the last word. A command step is never carried past, so `released` is what makes
-`done` mean released.
+`released` is not ceremony. `publish` pushes the tag and watches its own workflow run, and `recover`
+can report a recovery finished, but neither's own success is the registry's or the release page's
+real state. `released` reads the tag, the packages, the archives and the published body directly,
+so `done` means the release is actually public, not merely that a script or a lane said so.
 
 ## Cutting a release
 
@@ -50,7 +60,10 @@ the task one step *past* it — so a release could reach `done` with nothing pub
 2. When the task pauses after `version`, read its recommendation in the task handoff.
 3. Approve it with `spoolway resume <task> -m "Approve X.Y.Z"`, or override it with
    `spoolway resume <task> -m "Use X.Y.Z"`.
-4. Wait for `done`. The task reports the tag, the workflow runs, the registry versions and the
+4. Merge each pull request the task opens, once its review step reports the pull request's
+   number, URL and merge method. The command step right after it waits for that merge and carries
+   on by itself.
+5. Wait for `done`. The task reports the tag, the workflow runs, the registry versions and the
    result of a real install.
 
 The routine is `.spoolway/routines/release-spoolway/release-spoolway.md`. The prompts are
@@ -103,15 +116,16 @@ branch is `main`, and `ci.yml` has no push trigger, so a commit that is not yet 
 release commit lands the way every other change does, through a pull request:
 
 ```sh
-git push origin HEAD:release/v<version>
-gh pr create --base main --head release/v<version> --fill
+git push origin HEAD:release/<task>
+gh pr create --base main --head release/<task> --fill
 gh pr checks <number> --watch
-gh pr merge <number> --rebase
 ```
 
-The candidate producer stops at the pull request. A separate merge lane performs the final review,
-requires fresh protected checks, and runs the merge. It then **reads the landed SHA off
-`origin/main`** and records that as the release SHA; no pre-merge object is tagged.
+The candidate producer stops at the pull request. `review-release` performs the final review and
+requires fresh protected checks, but never merges. A person merges it on GitHub by rebase, so the
+single release commit lands directly on the recorded source. `scripts/release-publish.sh` then
+**finds that landed commit by its `chore(release): v<version>` subject on `origin/main`**; no
+pre-merge object is tagged.
 
 Rehearsal, on the release commit, with publication off:
 
@@ -150,9 +164,9 @@ exemption into a failing check.
 
 The `fixture` step does this, straight after `released`. It builds the binary at the tag just
 pushed, scaffolds a throwaway project with it, sets `housekeeping.retention_days`, hand-adds the
-one line of prose below the pipeline file's generated key block, and opens a pull request. The
-following merge lane reviews and lands it. The script is idempotent, so a fixture already on `main`
-costs it one lookup.
+one line of prose below the pipeline file's generated key block, and opens a pull request from
+branch `fixture/<task>`. `review-fixture` reviews it, and a person merges it on GitHub. The script
+is idempotent, so a fixture already on `main` costs it one lookup.
 
 It is a pipeline step rather than a line in this runbook because it was a line in this runbook
 and that did not hold: 0.4.0 was tagged and published without one, nothing asked until
@@ -175,9 +189,27 @@ will do.
 
 ## When it fails
 
-- A red rehearsal leaves an untagged candidate. Fix the cause, then rehearse again. A product
-  change needs a fresh readiness, version decision, preflight and notes pass.
-- If `main` moves before the tag, the publisher removes or reverts its release commit and the
-  task goes back to the version gate.
-- A partial publish is retried with `gh run rerun <run-id> --failed`. Published npm versions
-  are never replaced. A successful release tag is never moved.
+`publish` and `released` both fail to `recover`, an agent step with three outcomes: pass back to
+`released` once the public record is complete and correct, fail to `version` once nothing here can
+be finished, or block when only a person can take the next step.
+
+- A red rehearsal, or a failed tag push with nothing yet on `origin`, leaves `main` carrying an
+  untagged `chore(release): v<version>` commit. `recover` opens one pull request that reverts it,
+  waits for a person to merge that revert, confirms the version files and `CHANGELOG.md` are back
+  at the previous release, and fails to `version` with the cause. A product defect needs a fresh
+  readiness, version decision, preflight and notes pass; `version` skips straight to `preflight`,
+  so `recover` says plainly when the cause is a defect on `main`.
+- A partial publish, with `v<version>` already on `origin`, is retried with
+  `gh run rerun <run-id> --failed`. Published npm versions are never replaced. If the workflow
+  itself needs a code fix, `recover` lands it through a reviewed pull request, waits for a person
+  to merge it, and passes back to `released`. If the fix has to move the tag to a different commit,
+  `recover` blocks and names the move for a person:
+
+  ```sh
+  git tag -f v<version> <corrected-sha>
+  git push --force origin refs/tags/v<version>
+  ```
+
+- If `main` moves before the tag, `recover` opens one pull request that reverts only the release
+  commit, waits for a person to merge it, confirms the version files and `CHANGELOG.md` are back
+  at the previous release, and fails to `version` so a fresh candidate is chosen.

@@ -55,12 +55,35 @@ jobs:
     outputs:
       test: ${{ steps.check.outputs.test }}
     steps:
-      - name: check whether this commit already passed a daily run
+      - name: check whether this commit needs the test suite
         id: check
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
         run: |
+          # A pull request that only touches documentation cannot break the
+          # build it documents, so it skips the suite the same way a commit
+          # already covered by the daily run does below. The file list is
+          # fetched into its own variable, outside the `code=` pipeline, so a
+          # failed `gh pr diff` stops the step under `set -e` instead of
+          # feeding grep an empty stream that reads as "no code files
+          # changed" — a lookup failure must run the tests, never skip them,
+          # the same rule the `verify` job below keeps with
+          # `if: !cancelled()` and `run-tests: ... != 'false'`.
+          # `grep -c` still returns 1 (no lines left to count) when every
+          # changed file matched `-v`'s exclusion, which `|| true` turns back
+          # into a legitimate zero.
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            files=$(gh pr diff "$PR" --name-only)
+            code=$(printf '%s\n' "$files" \
+              | grep -vcE '^(docs/|site/|README\.md$|DOCS\.md$|log\.md$)' || true)
+            if [ "$code" -eq 0 ]; then
+              echo "test=false" >> "$GITHUB_OUTPUT"
+              echo "Documentation only; tests skipped." >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+          fi
           if [ "$GITHUB_EVENT_NAME" != schedule ]; then
             echo "test=true" >> "$GITHUB_OUTPUT"
             exit 0

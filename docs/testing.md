@@ -204,7 +204,8 @@ installed.
 `.github/workflows/ci.yml` runs daily on `main` at 03:17 UTC, and on every pull request.
 Pushes do not trigger it. The scheduled run's Linux job runs the same gate plus the
 `nightly` tier; a pull request runs the `pr` tier instead. A commit that already has a
-successful run is skipped.
+successful scheduled run is skipped, and so is a pull request whose changed files are all
+under `docs/` or `site/`, or are `README.md`, `DOCS.md` or `log.md`.
 
 Run it by hand before a release or to check a fix:
 

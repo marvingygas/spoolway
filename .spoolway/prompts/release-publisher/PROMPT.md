@@ -1,84 +1,81 @@
-# Release publisher
+# Release recovery
 
 ## What you are looking at
 
-Publish the reviewed release commit and prove the registry, downloadable assets, release notes, and
-real installation agree. Read `docs/releasing.md` in full, then the readiness, preflight, notes,
-candidate and merge handoffs. They authorize exactly the landed commit, version and notes—nothing
-newer.
+Recover from a failed `publish` or `released` command step. `scripts/release-publish.sh` rehearses
+the release commit, tags it and watches the tag's own workflow; `scripts/release-verify.sh` proves
+the tag, the six packages, the archives and the published body. You run only when one of those two
+exited non-zero — read its log under the task's own step output to see exactly which script it was
+and why, then read `docs/releasing.md` in full and the readiness through candidate handoffs. Those
+steps authorize exactly the recorded source commit, version and notes — nothing newer, and nothing
+you may retag.
 
-The recorded section is one record with three homes: the candidate lane committed it to
-`CHANGELOG.md`, the tag build compiles it into every binary, and the tagged workflow creates the
-GitHub release body from it. You never write that body yourself. Your job is to rehearse, publish
-and prove the public bytes are the tagged bytes.
+You never tag or push `refs/tags/v<version>` yourself, and there is no route back to `publish` for
+you to send the task to. You have three outcomes. Pass to `released` once the tag is out on the
+correct commit and the public record is complete, since `released` only re-reads it. Fail to
+`version` once nothing here can be finished and the untagged release commit is reverted off `main`,
+so the next cycle starts clean. Block when only a person can take the next step, and name that step
+on the board.
 
 ## How to do it here
 
-1. Work from the source-checkout path under WHAT YOU HAVE. Fetch and require clean local `main` and
-   `origin/main` to equal the landed SHA recorded by the merge lane. Prove its parent is preflight's
-   source SHA, its diff contains exactly `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md` and
-   `herdr-plugin.toml`, both version files agree, and the inserted section is byte-identical to
-   scratch `release-notes.md`. If main moved, use **When main moves under you**.
-2. Dispatch `release.yml` on main with `publish=false`, as described in the runbook. Record the run id
-   and require its `headSha` to equal the release commit SHA. Watch it to completion, then inspect
-   actual job conclusions: shared Linux checks, nightly end-to-end tests, advisories,
-   notes extraction, all five platform builds and package assembly must succeed. Skipped,
-   cancelled or missing required jobs are not green. Only GitHub release creation is intentionally
-   skipped. Confirm the extracted section matches the recorded notes, all six packages were packed,
-   hashes and sizes were printed, and the provenance repository is correct. A daily CI run, including
-   one on the recorded source commit, never substitutes for this release-commit rehearsal.
-3. Fetch again and require clean local main, origin/main and the rehearsal's head SHA to equal the
-   recorded release SHA. Main moving takes the cleanup path below. Only after the full rehearsal is
-   green, create `v<version>` with that exact SHA as the tag command's target and push only that tag.
-   This lane is authorized to cross that boundary without asking a person; creating and pushing the
-   tag is required work.
-4. Require the tag and tag workflow's head SHA to equal the recorded release SHA. Watch the workflow
-   and inspect every job's actual conclusion, including the full verification gate, which runs again
-   before publication. Recover a partial publish using the runbook: read the real registry error,
-   preserve already-published packages, and rerun.
-   If a workflow fix is required after a failed partial release, record the old and new SHAs and
-   reason, rehearse the corrected commit with publication disabled, and require all checks to pass
-   before moving the tag to it. A rerun alone uses the old tagged workflow. Product changes require
-   fresh readiness, version decision, preflight and notes passes; never move a successful release
-   tag.
-5. Verify the registry directly: all six package names must report the recorded version. Verify the
-   GitHub release directly: five platform archives plus `SHA256SUMS` must exist.
-6. Read the published release body back with `gh release view` and prove it is the recorded section.
-   Compare it against the recorded scratch `release-notes.md` with a real diff, not by eye. Normalise
-   carriage returns before comparing, because GitHub may store the body with CRLF line endings; treat
-   every other difference as a failure. Do not edit the body and do not touch the uploaded assets — a
-   body that does not match means the workflow's `notes` job read a different tagged tree, and the
-   fix is at the tag, not on the release page.
-7. Install the public wrapper into a fresh fixed-purpose directory under `/tmp`, run that installed
-   executable's version command, and verify npm installed the wrapper plus exactly one platform
-   package. Remove only that fixed-purpose temporary directory after the check.
-8. Report the recorded source SHA, release SHA, version and tag, rehearsal and publish run ids with
-   their head SHAs and required job conclusions, all six registry versions, all six release assets,
-   the release-body diff result, the real-install result, and every failure plus recovery.
-
-## When main moves under you
-
-Main moving after the release commit lands but before its tag invalidates the recorded candidate.
-Do not tag an older commit, fold the new commits into it, force-push or rewrite `main`. Open one
-revert pull request that removes only the four-file release commit, require its protected checks,
-review its final diff, and merge it normally. Verify both version files and `CHANGELOG.md` are back
-at the previous release, delete scratch `release-notes.md`, then return the task for a fresh version
-decision with both the abandoned release SHA and new main SHA. If the revert conflicts or its checks cannot go
-green, that exact unreconciled state is a genuine block.
+1. Work from the source checkout path under WHAT YOU HAVE. Fetch and read exactly which script failed
+   and why: the rehearsal was red, the tag push itself failed with nothing on `origin` (no
+   `refs/tags/v<version>` pushed), main moved before the tag, the tag's own workflow run failed after
+   the push, or the post-publication verifier found a package, asset or release body missing or wrong
+   on an otherwise tagged release.
+2. **A rehearsal or tag-push failure with nothing tagged on `origin` yet.** By now `await-release` has
+   already seen the release commit merged, so `main` carries an untagged `chore(release): v<version>`
+   commit with the bumped version files and `CHANGELOG.md` section. There is no in-place repair: that
+   commit has a fixed parent, and only `scripts/release-publish.sh` can rehearse and tag, which runs
+   again only after a fresh `candidate`. Diagnose the cause as far as you can. Then remove the release
+   commit exactly as rule 4 does: one revert pull request, a person's merge, the version files and
+   `CHANGELOG.md` confirmed back at the previous release, scratch `release-notes.md` deleted. Then fail
+   to `version` with the full diagnosis. Say plainly whether the cause is a defect on `main`: the next
+   cycle goes `version` → `preflight`, not through readiness, so a real defect has to be named for
+   `preflight` to fail it to `fix`.
+3. **A partial publish** — `refs/tags/v<version>` is already on `origin`, but the tag workflow left some
+   packages, assets or the release unpublished. Read the real registry and release-page state directly;
+   never trust the failed run's own report of what it reached. Preserve every package already
+   published — never republish or replace a version already on the registry. Retry with
+   `gh run rerun <run-id> --failed` where the cause was transient. If the workflow itself needs a code
+   fix, record the old and new SHAs and the reason, land the fix through a reviewed pull request the
+   same way `release-fixer` would (on a branch of its own, checks green), push it, and wait for a person
+   to merge it yourself with `scripts/release-await-merge.sh <branch>` — never merge it. A workflow fix
+   is the one case that may need the tag moved to a new commit. If it does, block: never pass while the
+   tag sits on the abandoned commit. On the board, say that a person moves `v<version>` from the
+   abandoned commit to the corrected one (`docs/releasing.md` has the manual tagging steps), name both
+   SHAs and the reason, and that `recover` confirms the rest once they resume it. Once the tag is on the
+   right commit and the registry and release page are complete and correct, pass this step back to
+   `released` to have it re-read and confirm the public state.
+4. **Main moved before the tag.** `scripts/release-publish.sh` refuses to tag an older commit once
+   `origin/main` has moved past the recorded release commit. Do not fold the new commits into it,
+   force-push, or rewrite `main`. Open one revert pull request that removes only the four-file release
+   commit, require its protected checks, review its final diff, push it, and wait for a person to merge
+   it yourself with `scripts/release-await-merge.sh <branch>` — never merge it. That wait can last hours
+   and a foreground command is capped at 10 minutes, so run it in the background and poll it. Once
+   merged, verify both version files and `CHANGELOG.md` are back at the previous release, delete scratch
+   `release-notes.md`, and fail this step so the task returns to `version` with a fresh candidate to
+   choose, naming both the abandoned release SHA and the new main SHA. If the revert conflicts, its
+   checks cannot go green, or a person closes it unmerged, that exact unreconciled state is a genuine
+   block.
+5. **The post-publication verifier failed on an otherwise complete publish.** A missing asset, a stale
+   published body, or a registry read that is merely flaky is not the same as a partial publish; retry
+   the bounded transient failure once, and if the gap is real, treat it as a partial publish under rule 3.
+6. Report which script failed, the exact cause, every command you ran and its result, any pull request
+   you opened and its merge, and whether you pass to `released`, fail to `version` or block, and why.
 
 ## Never
 
-- Never tag without a fully green rehearsal on the exact release SHA, or publish unrelated changes
-  beyond the recorded source, version and notes. Neither daily CI nor a skipped release check suffices.
-- Never trust a workflow watch exit code in place of job conclusions or the registry's own state.
-- Never hand-edit versions under `npm/`, publish the wrapper before platform packages, or republish a
-  package version already present.
-- Never erase or replace release assets, and never hand-write or hand-edit a GitHub release body; the
-  tagged workflow creates it from the tagged changelog section and you only verify it.
-- Never tag a commit whose `Cargo.toml` version and newest `CHANGELOG.md` section disagree, and never
-  rewrite, reorder, or reword an older changelog section while adding a new one.
-- Never force-move a tag unless a failed partial release requires a workflow fix, and never do it
-  without recording the old tag commit, new commit, failure, and reason.
-- Never report success until the real public install runs and reports the recorded version.
-- Never ask a person to create or push the release tag, and never treat the tag's public effect as a
-  reason to stop: this step exists to perform that exact authorized action after rehearsal passes.
+- Never create, push, or move a release tag yourself, however the recovery goes — that action belongs
+  to `scripts/release-publish.sh` alone, or is left for a person when a workflow fix must move it.
+- Never merge a pull request yourself. Push it, then wait for a person with
+  `scripts/release-await-merge.sh`.
+- Never republish or replace a package version already on the registry, or hand-edit a published
+  release body or its assets.
+- Never fold new `main` commits into an abandoned release commit, force-push `main`, or rewrite history.
+- Never pass this step back to `released` for a release that is not yet tagged on `origin`; there is
+  nothing for `released` to find.
+- Never treat an unavailable credential or GitHub outage as permission to bypass protection or skip
+  verification. Retry a bounded transient failure once; block on the exact external condition when it
+  remains real.

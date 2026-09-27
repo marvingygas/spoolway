@@ -182,7 +182,8 @@ pub(crate) fn situating(
          - Commit as you go. Anything uncommitted is committed for you when you report.\n\
          - If this task is ever held on `paused` or `blocked` and a person carries on \
          talking in this pane, do what they ask — including work your step would \
-         otherwise leave to another. Resuming it stays theirs alone.\n\
+         otherwise leave to another. Resuming it stays theirs: once their request is \
+         done, end by telling them to resume it on the board.\n\
          - What a person has to do, name on the board, never as a `spoolway` command.\
          {what_you_have}\
          {what_you_write_down}",
@@ -505,7 +506,8 @@ const BLOCK: Form = (
     "    spoolway report --block -m \"<what is in the way>\"",
     "  You cannot settle this within what this step is allowed to do. It\n  \
      goes up to a person, or to a stronger agent. Say what you tried\n  \
-     and what stopped you.",
+     and what stopped you. When a person has to act, name the\n  \
+     action and end with: then resume it on the board.",
 );
 
 const BLOCKED_PASS: Form = (
@@ -523,7 +525,7 @@ const BLOCKED_PASS_STAGE: Form = (
 const BLOCKED_PAUSE: Form = (
     "    spoolway report --pause -m \"<what needs a person, and why>\"",
     "  You could not clear it, and a person has to. Say plainly what they\n  \
-     need to decide.",
+     need to do, and end with: then resume it on the board.",
 );
 
 const HANDOFF: Form = (

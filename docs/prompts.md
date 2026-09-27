@@ -77,7 +77,8 @@ The system prompt opens with the step and the task, then seven rules:
 - Commit as you go. Uncommitted work is committed for you when the lane reports.
 - If the task is ever held on `paused` or `blocked` and a person carries on talking in the
   lane's pane, it does what they ask, including work its own step would otherwise leave to
-  another. Resuming it stays theirs alone.
+  another. Resuming it stays theirs: once their request is done, it tells them to resume it
+  on the board.
 - What a person has to do, name on the board, never as a `spoolway` command.
 
 A `blocked` step gets a different first rule — its remit is the run, not one task's step — and a
