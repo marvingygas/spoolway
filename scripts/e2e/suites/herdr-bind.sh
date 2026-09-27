@@ -47,8 +47,8 @@ PATH="$HERDRBIN:$PATH"; export PATH
 CONFIG="$HOME/.config/herdr/config.toml"
 
 # Content spoolway never wrote: a person's own comment and theme, a manual
-# binding unrelated to any of spoolway's four, and — on the one key spoolway
-# would otherwise claim for `dispatch` — a binding of the person's own,
+# binding unrelated to any of spoolway's three, and — on the one key spoolway
+# would otherwise claim for the dispatch tab — a binding of the person's own,
 # there before `bind` ever runs. None of it may move, reformat, or lose a
 # byte across the whole round trip below.
 cat > "$CONFIG" <<'SEED'
@@ -87,9 +87,9 @@ has "the person's own theme survives" 'name = "catppuccin"' "$CONFIG"
 has "the person's own lazygit binding survives" 'command = "lazygit"' "$CONFIG"
 has "the person's own conflicting binding survives untouched" 'command = "tmux-status"' "$CONFIG"
 has "init is bound to spoolway on PATH" 'command = "spoolway init"' "$CONFIG"
-has "queue is bound to spoolway on PATH" 'command = "spoolway queue"' "$CONFIG"
 has "doctor is bound to spoolway on PATH" 'command = "spoolway doctor"' "$CONFIG"
-lacks "dispatch is not bound — its key was already taken" 'command = "spoolway dispatch"' "$CONFIG"
+lacks "the dispatch tab's bare spoolway is not bound — its key was already taken" \
+  'command = "spoolway"' "$CONFIG"
 
 UNBIND_OUT="$LIVE/unbind.out"
 if "$SPOOLWAY" herdr unbind --yes >"$UNBIND_OUT" 2>&1; then
@@ -98,14 +98,41 @@ else
   bad "herdr unbind removes once confirmed"
   sed 's/^/        /' "$UNBIND_OUT"
 fi
-has "unbind removes only the three blocks bind actually wrote" \
-  "3 bindings to remove" "$UNBIND_OUT"
+has "unbind removes only the two blocks bind actually wrote" \
+  "2 bindings to remove" "$UNBIND_OUT"
 has "unbind reports the reload separately from the removal" \
   "reloaded the running herdr config" "$UNBIND_OUT"
 works "the round trip leaves the file byte-identical" \
   diff -u "$LIVE/seed.toml" "$CONFIG"
 says "unbinding an already-clean file says so" "no spoolway bindings to remove" \
   "$SPOOLWAY" herdr unbind --yes
+
+# The dispatch tab's own key, free this time: `bind` writes the bare program
+# on it, with no verb after it — the one binding of the three that runs
+# `spoolway` on its own, and so opens the screen.
+printf '# nothing bound yet\n' > "$CONFIG"
+FREE_OUT="$LIVE/bind-free.out"
+if "$SPOOLWAY" herdr bind --yes >"$FREE_OUT" 2>&1; then
+  ok "herdr bind writes on a config with every key free"
+else
+  bad "herdr bind writes on a config with every key free"
+  sed 's/^/        /' "$FREE_OUT"
+fi
+lacks "and skips nothing" "skipped" "$FREE_OUT"
+# The block's own `key` line, then its `type`, then its `command` — read as
+# one block, so a bare `spoolway` bound to some other key cannot pass for it.
+if awk '/^key = "prefix\+alt\+d"$/ { k = NR } k && NR == k + 2 { print; exit }' "$CONFIG" \
+     | grep -qxF 'command = "spoolway"'; then
+  ok "prefix+alt+d runs bare spoolway"
+else
+  bad "prefix+alt+d runs bare spoolway"
+  sed 's/^/        /' "$CONFIG"
+fi
+lacks "and no binding runs spoolway queue any more" 'command = "spoolway queue"' "$CONFIG"
+says "unbind takes all three back" "3 bindings to remove" \
+  "$SPOOLWAY" herdr unbind --yes
+works "leaving the file as it was" \
+  bash -c '[ "$(cat "$1")" = "# nothing bound yet" ]' _ "$CONFIG"
 
 # Regression: a block a person adds *after* `bind` has already run sits
 # right behind the last block `bind` wrote, with only a blank line between

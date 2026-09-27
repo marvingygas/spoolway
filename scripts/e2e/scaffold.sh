@@ -410,7 +410,7 @@ fi
 # --------------------------------------------------------------------- config
 
 say "configuring $MODEL, $WORKERS lanes, ${CTX} tokens"
-# No `dispatch.default_pipeline` to set any more — every task document this
+# No `dispatch.default_pipeline` to set any more — every task this
 # suite queues names `pipeline: end-to-end` itself (see queue-plan.sh), the
 # only pipeline this project has.
 spoolway config set agents.pi.concurrency "$WORKERS"
@@ -482,7 +482,7 @@ Ready: $DIR (on $BRANCH)
   panes:  $([ "$HEADLESS" = 1 ] && echo "none — headless, lanes are processes and logs" || echo "herdr")
 
   1. cd $DIR
-  2. $HERE/queue-plan.sh $PLAN_FILE       (or: spoolway queue, to queue it from the screen)
+  2. $HERE/queue-plan.sh $PLAN_FILE       (or: spoolway, to queue it from the queue tab)
   3. $EXPORTS
   4. spoolway dispatch$([ "$HEADLESS" = 1 ] && echo "" || echo "  (from inside a herdr pane — it refuses anywhere else)")
   5. watch the panes; read observations.md as it fills

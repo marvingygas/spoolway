@@ -20,8 +20,8 @@ Total         56             5                                                  
 
 ## The screen
 
-`spoolway eval` with no flags, in a terminal, opens a screen. Any flag, or a redirected stdout,
-prints the lanes table instead.
+`spoolway eval` always prints the lanes table. Bare `spoolway`'s eval tab draws an interactive
+screen over the same rows.
 
 <img src="screenshots/eval.png" alt="the eval screen">
 
@@ -104,7 +104,7 @@ spoolway eval --by task --trial <id>      a trial's arms, compared
 | `--all` | Every project spoolway knows about |
 | `--project <NAME>` | One named project |
 | `--trial <ID>` | One trial's arms. With `--by task`, one row per arm plus a delta line per arm against the first. |
-| `--discard <ID>` | Throw a whole trial away now: every arm's task document, worktree, branch, pane and run files. The ledger rows and the source group stay. |
+| `--discard <ID>` | Throw a whole trial away now: every arm's task, worktree, branch, pane and run files. The ledger rows and the source group stay. |
 | `--force` | `--discard` only: stop live lanes and discard anyway |
 | `--csv` | Print the rows as CSV |
 | `--json` | Print the rows as JSON |

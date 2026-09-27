@@ -247,7 +247,7 @@ impl Repo {
     }
 
     /// `~/.spoolway/<label>-<id>/` — every runtime file this project's
-    /// spoolway writes: the queue, the archive, pending documents, scratch
+    /// spoolway writes: the queue, the archive, pending tasks, scratch
     /// worktrees, composed prompts, the headless backend's records, command-step logs,
     /// `lanes.json`, `usage.jsonl`, `dispatch.pid`, and the two scratch queue
     /// indexes.
@@ -287,12 +287,12 @@ impl Repo {
         self.home_subdir(crate::config::ARCHIVE_DIR)
     }
 
-    /// Where a producer leaves task documents for the queue screen to list:
+    /// Where a producer leaves tasks for the queue screen to list:
     /// one flat directory of `.md` files, no subdirectories and no index.
     ///
     /// Created silently like every other sibling, so a project that has
     /// planned nothing still has a real, empty directory to read rather than
-    /// a missing-path error on the first draw. Documents live here only until
+    /// a missing-path error on the first draw. Tasks live here only until
     /// they are queued — the screen deletes a group's files by the same act
     /// that writes its task files — so an empty directory is the ordinary
     /// resting state, not a sign anything is wrong.
@@ -373,7 +373,7 @@ impl Repo {
         self.home.join(crate::config::OVERRIDES_DIR)
     }
 
-    /// Where a project keeps task documents it wants to re-run — see
+    /// Where a project keeps tasks it wants to re-run — see
     /// [`crate::config::ROUTINES_DIR`] for why nothing auto-creates this the
     /// way [`Repo::pending_dir`] creates itself: an ordinary project that has
     /// saved no routine has no directory here at all, and the queue screen's
@@ -447,10 +447,12 @@ impl Repo {
         self.home().join("task-locks").join(format!("{id}.lock"))
     }
 
-    /// How many starts in a row could not run at all, and since when — see
-    /// [`crate::lock::Restarts`].
-    pub fn restarts_file(&self) -> PathBuf {
-        self.home().join(crate::lock::RESTART_FILE)
+    /// Bare `spoolway`'s own lock: written when the screen opens, and
+    /// removed when it quits — see [`crate::lock::SCREEN_LOCK_FILE`]. A
+    /// second `spoolway` or `spoolway dispatch` in the same project refuses
+    /// while this, or [`Repo::lock_file`], names a live process.
+    pub fn screen_lock_file(&self) -> PathBuf {
+        self.home().join(crate::lock::SCREEN_LOCK_FILE)
     }
 
     /// Every active task, in id order.

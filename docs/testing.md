@@ -42,7 +42,8 @@ SPOOLWAY="$PWD/target/release/spoolway" scripts/e2e/run.sh --tier nightly
 | `--list` | | Print the suites and the setting-to-case map |
 
 Every lane runs a stand-in agent script from `scripts/e2e/agents/`. The harness needs `git`,
-`bash`, `curl`, `setsid` and `flock`. Only the `cloud` and `live` tiers run a real agent binary.
+`bash`, `curl`, `setsid`, `flock` and `script` (util-linux). Only the `cloud` and `live` tiers
+run a real agent binary.
 
 `spoolway dispatch` refuses `backend = headless` unless `SPOOLWAY_TEST_BACKEND` is set in the
 environment. `fixture.sh` and `scaffold.sh` export it for every suite and scaffolded project
@@ -70,7 +71,7 @@ with a `// covers:` line.
 | Tier | Suites | Used by |
 |---|---|---|
 | `smoke` | flow | A person, by hand |
-| `pr` | flow, commands, command-steps, issue-tracking, stacking, stack, conflicts, forge, disaster, lock, trials, routines, jobs, jobs-screen, board-pause, queue-unqueue, restart, overrides | The `suite` step of the pipelines, on the last task of a chain |
+| `pr` | flow, commands, command-steps, issue-tracking, stacking, stack, conflicts, forge, disaster, lock, trials, routines, jobs, jobs-screen, screen, board-pause, queue-unqueue, restart, overrides | The `suite` step of the pipelines, on the last task of a chain |
 | `nightly` | the `pr` suites plus `upgrade` | Daily CI and the release workflow |
 | `cloud` | warmth | Nothing automatic. Runs only with `SPOOLWAY_E2E_CLOUD=1`. |
 | `live` | live | Nothing automatic. Runs only with `SPOOLWAY_E2E_CODEX_MODEL=<model>`. |
@@ -80,7 +81,7 @@ with a `// covers:` line.
 | Suite | Covers |
 |---|---|
 | `flow` | A task's whole life: queued, agent steps, command steps, archived |
-| `commands` | CLI behaviour that belongs to no domain of its own: `init` and `sync`, the three contracts, the queue screen read off a real pipe, the archive's rows, `config`'s checkout/project asymmetry, the overrides layer through a linked worktree, housekeeping's retention sweep, a confirm dialog over a real pty |
+| `commands` | CLI behaviour that belongs to no domain of its own: `init` and `sync`, the three contracts, the queue tab of bare `spoolway` driven over a real pty, the archive's rows, `config`'s checkout/project asymmetry, the overrides layer through a linked worktree, housekeeping's retention sweep, a confirm dialog over a real pty |
 | `command-steps` | A `run:` step's own mechanics: exit-code routing, `background:`, `timeout:`, `loop:`, headless and paned steps, the environment a step is handed |
 | `issue-tracking` | `[issue_tracking]`'s hook on `queued`, `blocked`, `paused`, `done` and `open`, the shipped `github.sh` against the `gh` double, and `key_in_names` |
 | `stacking` | Three chained tasks, each pull request on the branch it is cut from |
@@ -92,10 +93,11 @@ with a `// covers:` line.
 | `trials` | The `t` picker on the queue screen, the arms it queues, and their cleanup |
 | `routines` | The routines pane and the `s` save panel on the queue screen |
 | `jobs` | A cron job fired by a real dispatcher pass, and what `spoolway doctor` says about a bad job |
-| `jobs-screen` | The `spoolway jobs` screen writing, pausing and deleting a job |
+| `jobs-screen` | Bare `spoolway`'s jobs tab writing, pausing and deleting a job |
+| `screen` | Bare `spoolway`: the four-label strip, opening on the queue tab, `←` reaching the dispatch tab, `enter` there starting and stopping a dispatcher, a second `spoolway` or `spoolway dispatch` refusing while a screen holds `spoolway.pid`, and the grouped help off a terminal |
 | `board-pause` | The board's confirm panels: `p`, `P`, `U` over a live lane |
 | `queue-unqueue` | `spoolway queue unqueue`: its `--help`, the refusal and the two routes out of it, and `--force` over a live lane |
-| `restart` | The dispatcher's restart guard and its exit codes |
+| `restart` | A second `spoolway dispatch` against a held lock, refused the same way every time, and an empty queue never refused at all |
 | `overrides` | The override commands: fork a setting out of the checkout, list it, promote it back |
 | `upgrade` | Whether this binary still reads what an older release wrote. A `.spoolway/` tree scaffolded by an old tag's own binary, under `scripts/e2e/fixtures/`, goes through a real `spoolway sync`. A value set under a retired table lands at its current home, and hand-written prose comes back byte for byte |
 | `warmth` | `cloud` tier. Real `claude-haiku-4-5` lanes, to check session reuse against a real transcript. |

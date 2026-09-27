@@ -29,7 +29,7 @@ same_repo_issue() {
 # Leading and trailing blank lines are trimmed off what is printed. Prints
 # nothing at all for a missing section, a missing file, or a blank
 # `$SPOOLWAY_TASK_FILE` — the `open` event may carry the empty string there
-# for a document with no file of its own (see `tracking.rs`'s own doc on
+# for a task with no file of its own (see `tracking.rs`'s own doc on
 # `open_env`).
 extract_section() {
   file=$1
@@ -64,7 +64,7 @@ extract_section() {
 }
 
 # `heading` and its content from `$SPOOLWAY_TASK_FILE`, blank-line-separated
-# the way a document's own headings are — or nothing when the document has
+# the way a task's own headings are — or nothing when the task has
 # no such section, so the ticket body never shows an empty one.
 ticket_section() {
   content=$(extract_section "$SPOOLWAY_TASK_FILE" "$1")
@@ -72,7 +72,7 @@ ticket_section() {
 }
 
 # The same, but tight against its heading — `## Status Log` and `##
-# Handoff` are already bulleted lists in the document, with no blank line
+# Handoff` are already bulleted lists in the task, with no blank line
 # under the heading, and a comment reproduces that instead of inventing one.
 comment_section() {
   content=$(extract_section "$SPOOLWAY_TASK_FILE" "$1")
@@ -114,7 +114,7 @@ hand_off_for_review() {
 
 # A `blocked` or `paused` comment carries only what just changed — the log
 # of steps taken and whatever the last one is handing forward — never the
-# whole document behind it.
+# whole task behind it.
 comment_snapshot() {
   {
     echo "**spoolway** — \`$SPOOLWAY_TASK\` is **$SPOOLWAY_EVENT** at \`$SPOOLWAY_FROM\`"
@@ -157,10 +157,10 @@ if [ "$SPOOLWAY_EVENT" = open ]; then
   # too, rather than folding its lone task straight under `$SPOOLWAY_SOURCE`:
   # one issue shape for every group, not two. `$SPOOLWAY_GROUP_DESCRIPTION`
   # is never blank here: `parse_submission` (queue.rs:730) already refuses
-  # any document with no `group:` before it ever reaches the open hook, so
+  # any task with no `group:` before it ever reaches the open hook, so
   # every task that gets here has a named group, and `require_group_
   # description` (queue.rs:890) in turn refuses a submission whose group
-  # sets no `group_description:` on any of its documents.
+  # sets no `group_description:` on any of its tasks.
   if [ -z "$epic" ]; then
     epic_title=$SPOOLWAY_GROUP
     # A `group_description: |` block scalar keeps its own trailing newline

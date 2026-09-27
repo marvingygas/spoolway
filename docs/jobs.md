@@ -16,7 +16,7 @@ spoolway has no clock of its own. The dispatcher fires a due job at the top of i
 While any job is enabled, `spoolway dispatch` stays up on an empty queue, so a dispatcher left
 running is all a job needs.
 
-A job only queues routine documents that already exist. It never changes them.
+A job only queues routine tasks that already exist. It never changes them.
 
 ## How it works
 
@@ -54,9 +54,9 @@ With no job enabled, an empty queue stops the run as usual. See
 
 <img src="screenshots/jobs.png" alt="the jobs screen">
 
-`spoolway jobs` opens the screen. It is the only thing that writes a job. The left pane lists
-every job from both stores. The right pane shows the highlighted job: its routine, schedule,
-pipeline, scope, next firing, last firing, and the documents it queues.
+Bare `spoolway`'s jobs tab opens this screen. It is the only thing that writes a job. The left
+pane lists every job from both stores. The right pane shows the highlighted job: its routine,
+schedule, pipeline, scope, next firing, last firing, and the tasks it queues.
 
 | Key | What it does |
 |---|---|
@@ -73,8 +73,8 @@ pipeline, scope, next firing, last firing, and the documents it queues.
 `n` and `e` walk three panels. `esc` on any of them writes nothing.
 
 1. The routine. This is the same routines browser as the queue screen's `r` pane. `space`
-   ticks a folder and `enter` picks it. `space` over a single document picks that document.
-   `o` opens the highlighted document, once the documents pane has focus.
+   ticks a folder and `enter` picks it. `space` over a single task picks that task.
+   `o` opens the highlighted task, once the tasks pane has focus.
 2. The schedule. The field states the expression in words and shows its next three firings as
    you type. `enter` is refused until the expression parses.
 3. The pipeline. The picker lists every pipeline the repo defines and narrows as you type.
@@ -83,7 +83,7 @@ pipeline, scope, next firing, last firing, and the documents it queues.
 ### What the screen decides for you
 
 A new job goes to the user store. Its name is the leaf of its routine: the folder `nightly`
-gives the job `nightly`, the document `nightly/audit.md` gives the job `audit`. A job in the
+gives the job `nightly`, the task `nightly/audit.md` gives the job `audit`. A job in the
 project store is written by hand once; the screen then edits it in place.
 
 ## The cron grammar
@@ -125,11 +125,13 @@ One name in both stores is refused.
 ## Usage
 
 ```
-spoolway jobs                      # the screen: write, edit, pause, delete, fire
+spoolway jobs                      # prints usage
 spoolway jobs list                 # every job across both stores
 spoolway jobs list --json          # the same rows as JSON
 spoolway jobs run <name>           # fire one job now
 ```
+
+Bare `spoolway`'s jobs tab is where a job is written, edited, paused or deleted.
 
 ```
 NAME           SCOPE    SCHEDULE      PIPELINE    NEXT        LAST

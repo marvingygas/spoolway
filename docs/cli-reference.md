@@ -1,6 +1,6 @@
 ---
 domain: cli
-covers: ["src/cli.rs", "src/commands/**", "src/main.rs"]
+covers: ["src/cli.rs", "src/commands/**", "src/main.rs", "src/screen/**"]
 ---
 
 # CLI reference
@@ -39,30 +39,89 @@ override`, `prompt contract`, `prompt list`, `prompt override`, `config show`, `
 
 ## Your work
 
+### `spoolway`
+
+At a terminal, with no other command typed, opens one screen: four tabs, dispatch, queue,
+jobs and eval, in that order. It opens on the queue tab.
+
+```
+spoolway
+```
+
+One `spoolway` runs per project at a time. A second bare `spoolway`, or a typed `spoolway
+dispatch`, refuses while this screen is open, or while a dispatcher started from the CLI is
+running, printing the one line and exiting without drawing anything:
+
+```
+$ spoolway
+Dispatcher already running
+```
+
+A project is `-C <DIR>` or the current directory's repository. A screen open in one project
+never refuses one opened in another.
+
+The open tab's label is in normal ink. The other three labels and both arrows are dim.
+`dispatch` is always in the accent colour: bright when it is the open tab, dim otherwise.
+
+| Key | What it does |
+|---|---|
+| `←` `→` | Move to the neighbouring tab, when no popup or sub-mode of the tab's own is open |
+| `q` | Quit the whole screen, when no popup or sub-mode of the tab's own is open |
+
+Inside the eval tab's filter panel and the queue tab's routines view, `←` and `→` keep their
+own meaning instead.
+
+Each tab draws its own screen, under the strip. The dispatch tab draws the board, from a
+`spoolway dispatch` child it starts and stops. The queue, jobs and eval tabs draw the queue,
+jobs and eval screens described below. Typed bare, `spoolway queue`, `spoolway jobs` and
+`spoolway eval` print their usage or their tables instead.
+
+The dispatch tab runs no pass itself. `enter` starts dispatching the way `unattended.enabled`
+says, asking the overrides and warnings gates as popups first, each only when it has something
+to say, then spawns a `spoolway dispatch` child. `enter` again stops that child straight away,
+with no question: nothing is torn down, and every lane keeps running. The header reads
+`dispatcher running` and the child's pid, or `dispatcher stopped` with no pid once it has
+stopped. `r`/`R`, `p`/`P` and `u`/`U` work whether or not a child is running. `q` or `ctrl-c`
+quits the whole screen and stops dispatching too.
+
+A child the tab started stays up on an empty queue and the board reads `nothing queued`; only
+`spoolway dispatch` run from a terminal exits on an empty queue. A child that exits on its own —
+a refusal, or a spend ceiling — shows the reason in a popup, closed with `enter`.
+
+<img src="screenshots/dispatch.png" alt="the dispatcher board">
+
+With stdout not a terminal — `spoolway | cat`, a script — it prints the grouped help instead,
+the same as `spoolway --help`.
+
 ### `spoolway queue`
 
-Open the queue screen. The left pane lists one row per `group:` across the pending, queue and
-archive directories. The right pane lists the highlighted group's tasks.
+With no subcommand, prints its usage and exits, the same as `spoolway queue --help`.
+
+Bare `spoolway`'s queue tab draws the queue screen. The left pane lists one row per `group:`
+across the pending, queue and archive directories. The right pane lists the highlighted group's
+tasks.
 
 <img src="screenshots/queue.png" alt="the queue screen">
 
 | Key | What it does |
 |---|---|
 | `↑` `↓` / `j` `k` | Move the cursor |
+| `tab` | Switch focus between the groups and tasks panes |
 | `space` | Select a group. A group is queued whole |
-| `enter` | Check the selection, queue it, and offer to start a dispatcher, or to go to one already running |
+| `enter` | Check the selection, queue it, and show what queued |
 | `g` | Set or clear a `gate_at` on the highlighted task |
-| `o` | Open the highlighted task's document in your editor |
+| `o` | Open the highlighted task in your editor |
 | `f` | Filter groups by name, task id and title. `enter` keeps the filter, `esc` clears it |
 | `h` | Show hidden groups: first the queued ones, then the finished ones |
 | `t` | Fork the group into a trial. See [Trials](planning.md#trials) |
 | `r` | Switch to the routines pane. See [Routines](planning.md#routines) |
 | `s` | Save the highlighted group into `.spoolway/routines/<name>/` |
 
-Queueing deletes the group's pending documents from the pending directory. A sibling task
+Queueing deletes the group's pending tasks from the pending directory. A sibling task
 already in the queue or the archive is left where it is. A group that
 fails validation is refused and nothing is deleted. See [Queueing a
-plan](planning.md#queueing-a-plan).
+plan](planning.md#queueing-a-plan). Queueing a group or a routine ends on a popup naming what
+queued; `enter` closes it back to the screen.
 
 With `[issue_tracking]` configured, `enter` first checks the hook's declared tool
 requirements. A requirement this machine does not meet draws a gate naming what is unmet:
@@ -70,9 +129,17 @@ requirements. A requirement this machine does not meet draws a gate naming what 
 screen with nothing queued. See [the shipped hook
 scripts](configuration.md#the-shipped-hook-scripts).
 
+When every requirement is met and the batch still has a task with no `ticket:`, `enter` asks
+before it opens any ticket. The question names the tracker and lists every task in the batch.
+`enter` opens the tickets and queues, `n` queues the batch with no hook call, and `esc` returns
+to the queue screen with nothing queued. Once the hook runs, a popup fills in each task's row
+as the hook answers it and takes `enter` only once every row is done. Queueing a routine from
+the routines pane asks the same question. A trial never asks and opens no ticket. See
+[`open`](configuration.md#open--a-fifth-event-run-by-queue-add-itself).
+
 ### `spoolway queue add`
 
-Queue task documents. This is the only way a task enters the queue. See [Queueing a
+Queue tasks. This is the only way a task enters the queue. See [Queueing a
 task](tasks.md#queueing-a-task).
 
 ```
@@ -81,21 +148,21 @@ spoolway queue add --from <PATH> --base <BRANCH>
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--from <PATH>` | | A document to queue: a file, a directory of `*.md` files, or `-` for a `---`-separated stream on stdin. Repeatable. Every document is validated together and written all or none |
-| `--base <BRANCH>` | | The branch the whole submission is cut from and merges into. A document's own `base:` wins over it |
+| `--from <PATH>` | | A task to queue: a file, a directory of `*.md` files, or `-` for a `---`-separated stream on stdin. Repeatable. Every task is validated together and written all or none |
+| `--base <BRANCH>` | | The branch the whole submission is cut from and merges into. A task's own `base:` wins over it |
 | `--dry-run` | | Validate and print what would happen. Writes nothing and opens no ticket |
 
-A document that sets neither its own `base:` nor `--base` is refused by name and nothing is
+A task that sets neither its own `base:` nor `--base` is refused by name and nothing is
 written.
 
-With no `--from`, it prints a skeleton document to fill in, with a `pipeline:` row to fill in.
+With no `--from`, it prints a skeleton task to fill in, with a `pipeline:` row to fill in.
 
 A `--from` path under this project's own pending directory is deleted once the batch is
 written. A `--from` path anywhere else, including `-`, is read and left alone.
 
 With `[issue_tracking]` configured, it checks the hook's declared tool requirements first; an
 unmet one prints the same gate the queue screen draws and proceeds without a ticket, since
-there is no key to wait on. Otherwise it opens a ticket per document. See
+there is no key to wait on. Otherwise it opens a ticket per task. See
 [`open`](configuration.md#open--a-fifth-event-run-by-queue-add-itself).
 
 ### `spoolway queue list`
@@ -132,7 +199,7 @@ Resume one task. Same as `spoolway resume <task>` with no other flags.
 
 ### `spoolway queue unqueue <task>`
 
-Carry a not-started task's document back to the pending directory, with every reserved key
+Carry a not-started task back to the pending directory, with every reserved key
 stripped. `spoolway queue add --from` takes the result again unchanged. The board's `u` key
 carries the same task and every unstarted task that depends on it; this command has no panel
 to list a chain on, so it refuses instead.
@@ -151,7 +218,7 @@ spoolway queue unqueue <task> --force
 A task that has started is refused, naming its stage, its checkout when it has one, and both
 routes onward: `spoolway queue pause <task>` to stop it in place, or `--force` to tear the
 checkout down and unqueue it anyway. A task another queued sibling names in `depends_on` is
-refused too, naming that sibling. A document already sitting in pending under the same id
+refused too, naming that sibling. A task already sitting in pending under the same id
 refuses the move and leaves the queue file in place.
 
 ### `spoolway group list`
@@ -166,27 +233,17 @@ pipeline-handover             1 open — pipeline-and-prompts
 
 ### `spoolway dispatch`
 
-Run the pipeline. It draws the live board and keeps running until the queue is empty.
-
-<img src="screenshots/dispatch.png" alt="the dispatcher board">
-
-| Key | What it does |
-|---|---|
-| `↑` `↓` | Move the cursor |
-| `r` / `R` | Resume the highlighted paused or blocked task / every paused task |
-| `p` / `P` | Interrupt and park the highlighted task / every live lane |
-| `u` / `U` | Move the highlighted queued task, and every unstarted task that depends on it, back to pending / do the same for every unstarted task in the run |
-| `ctrl-c` | Stop the run |
+Run the pipeline. It prints one line per pass and keeps running until the queue is empty.
+`ctrl-c` stops the run. Bare `spoolway`'s dispatch tab draws the board instead of printing —
+see [`spoolway`](#spoolway).
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--plain` | | Print one line per pass. The board is not drawn |
 | `--unattended` | `unattended.enabled` | Start a lane on `blocked` for every blocked task. Nothing waits for a person. See [Unattended runs](pipelines.md#unattended-runs) |
 | `--attended` | | Park blocked tasks for a person, whatever the config says |
-| `--force` | | Start past the restart guard |
 
 `spoolway dispatch` asks herdr which pane it is running in and refuses to start outside one.
-No flag exempts it, `--plain` included. See [The dispatcher](dispatcher.md#running-it).
+See [The dispatcher](dispatcher.md#running-it).
 
 Before anything else, each pre-loop check prints its own line as it returns:
 
@@ -202,9 +259,8 @@ Before anything else, each pre-loop check prints its own line as it returns:
     ✓ backend checkout
 ```
 
-A check still running names what it is waiting on, in place of the `✓`. `--plain` prints none
-of this; it keeps its own one-line-per-pass log instead. `backend available` names the backend,
-with no version.
+A check still running names what it is waiting on, in place of the `✓`. `backend available`
+names the backend, with no version.
 
 Before it starts, it checks every live task's `pipeline:` field. A missing or unknown pipeline
 refuses the whole start and dispatches nothing:
@@ -216,58 +272,18 @@ refusing to start: task `auth-refresh` has no `pipeline:`
 Nothing was dispatched.
 ```
 
-If another dispatcher already holds the lock, it prints that a dispatcher is already running,
-asks herdr to focus that dispatcher's pane, and exits without drawing a board. `--plain` prints
-its one-shot table headed `watching dispatcher (pid N)` instead.
-
-The restart guard refuses the fifth start in 30 seconds when the four before it could not
-run. See [Restarting into a repo that cannot run](dispatcher.md#restarting-into-a-repo-that-cannot-run).
-
-Before it starts, it shows the whole queue and waits for a key:
+If another dispatcher, or a screen opened with bare `spoolway`, already holds the project, it
+prints the same line and exits:
 
 ```
-  queued  3 groups · 6 tasks
-
-    TASK                PIPELINE    STEP      BASE
-
-  cart
-    cart-empty-state    impl_fast   review    main
-    cart-totals         impl        queued    main
-    cart-discounts      impl        queued    main
-
-  checkout
-    auth-verify         impl        implement main
-    checkout-charge     impl_tdd    queued    main
-
-  search
-    search-facets       impl        queued    release-2
-
-  [enter] start a dispatcher   [esc] back
+Dispatcher already running
 ```
 
-If another dispatcher already holds the lock, the same overview carries a pid line under the
-header and its own footer instead:
+Queueing a batch while another dispatcher already holds the lock works the same way: the batch
+is written, and the running dispatcher picks it up on its own next pass.
 
-```
-  queued  3 groups · 6 tasks
-  a dispatcher is already running (pid 250) — it takes these on its next pass
-
-    TASK                PIPELINE    STEP      BASE
-
-  cart
-    cart-empty-state    impl_fast   review    main
-    cart-totals         impl        queued    main
-    cart-discounts      impl        queued    main
-
-  [enter] go to the dispatcher   [esc] back
-```
-
-`enter` there brings the running dispatcher's workspace to the front and ends the command. No
-task document is written, moved or re-queued; the batch was already saved, and the running
-dispatcher picks it up on its own next pass.
-
-When an [overrides layer](configuration.md#the-overrides-layer) is active, `enter` there then
-shows what is patched and waits for a key:
+When an [overrides layer](configuration.md#the-overrides-layer) is active, it shows what is
+patched and waits for a key:
 
 ```
   overrides are active for this project
@@ -279,8 +295,8 @@ shows what is patched and waits for a key:
   [enter] start the run   [esc] back   [x] don't ask again until this changes
 ```
 
-`enter` there then shows a warnings screen, built from `spoolway doctor`'s own cheap
-checks, and waits for a key:
+It then shows a warnings screen, built from `spoolway doctor`'s own cheap checks, and waits for
+a key:
 
 ```
 before this run starts
@@ -304,8 +320,9 @@ whole screen is skipped, with nothing drawn, when all three are empty. `x` store
 fingerprint of the rendered lines, separate from the overrides screen's, and the screen returns
 as soon as any line differs from it.
 
-`esc` on any of the three screens ends the command. From the queue screen's own `enter`, `esc`
-on any of the three screens returns to browsing instead.
+`esc` on either screen ends the command. Bare `spoolway`'s dispatch tab asks the same two things
+as popups of its own before it starts a dispatcher — see [`spoolway`](#spoolway) — so `x` there
+quiets this screen too, and the other way round.
 
 Once the lock is taken, a last checklist row, `workspace`, prints once the run's own workspace
 is found or opened. A failure to find or open it is shown instead, on its own notice with only
@@ -315,8 +332,7 @@ is found or opened. A failure to find or open it is shown instead, on its own no
 |---|---|
 | `0` | The run finished |
 | `3` | Empty queue and no job enabled |
-| `4` | Another dispatcher holds the lock |
-| `5` | The restart guard refused the start |
+| `4` | Another dispatcher or screen already holds the project |
 | `1` | Any other error |
 
 ### `spoolway issue show <reference>`
@@ -334,7 +350,9 @@ is configured or the hook has no `fetch` branch. See
 
 ### `spoolway jobs`
 
-Open the jobs screen. It is the only place that writes a cron job.
+With no subcommand, prints its usage and exits, the same as `spoolway jobs --help`.
+
+Bare `spoolway`'s jobs tab draws the jobs screen. It is the only place that writes a cron job.
 
 <img src="screenshots/jobs.png" alt="the jobs screen">
 
@@ -366,12 +384,13 @@ Fire one job now. Its schedule is unchanged.
 
 ### `spoolway eval`
 
-What each pipeline costs to run, grouped one way at a time. Bare, in a terminal, it opens the
-eval screen. With any flag, or when stdout is not a terminal, it prints the lanes table.
+What each pipeline costs to run, grouped one way at a time. It always prints the lanes table.
 
 ```
 spoolway eval
 ```
+
+Bare `spoolway`'s eval tab draws the interactive eval screen instead.
 
 <img src="screenshots/eval.png" alt="the eval screen">
 
@@ -397,7 +416,7 @@ spoolway eval
 | `--all` | | Every project |
 | `--project <NAME>` | | One named project |
 | `--trial <ID>` | | One trial's arms. With `--by task`, one row per arm and a delta line per arm against the first |
-| `--discard <ID>` | | Delete a whole trial: every arm's document, worktree, branch, pane and run files. The ledger rows and the source group stay |
+| `--discard <ID>` | | Delete a whole trial: every arm's task, worktree, branch, pane and run files. The ledger rows and the source group stay |
 | `--force` | | `--discard` only: stop live lanes and discard anyway |
 | `--csv` | | Print the lanes table's rows as CSV |
 
@@ -446,7 +465,7 @@ See [Gates](pipelines.md#gates).
 
 ### `spoolway task edit <task>`
 
-Rewrite one section of a `paused` or `blocked` task's document, under its task lock. Refused
+Rewrite one section of a `paused` or `blocked` task, under its task lock. Refused
 against a task that is neither.
 
 ```
@@ -609,7 +628,7 @@ Neither `agent list` nor `agent verify` needs a project.
 
 ### `spoolway task contract`
 
-Print the task-document contract as JSON, or validate documents against it.
+Print the task contract as JSON, or validate tasks against it.
 
 ```
 spoolway task contract
@@ -618,8 +637,8 @@ spoolway task contract --from ~/.spoolway/<project>/pending/
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--from <PATH>` | | A document, a directory of `*.md` files, or `-` for stdin. Repeatable. Checked as one set. Writes nothing |
-| `--base <BRANCH>` | | The base to check a document against when it sets none of its own. Same rule as `queue add --base` |
+| `--from <PATH>` | | A task, a directory of `*.md` files, or `-` for stdin. Repeatable. Checked as one set. Writes nothing |
+| `--base <BRANCH>` | | The base to check a task against when it sets none of its own. Same rule as `queue add --base` |
 
 The contract holds every pipeline's longest agent step and body skeleton, the sizing guidance,
 the output directory, the allowed and refused keys, one sentence per key, and the rules that
@@ -834,10 +853,15 @@ a scan finds files to change, the command stops and draws a confirm panel titled
 installed, apply updates" before running. Enter runs `sync` for real, rewrites the stamp, and
 runs the command. Ctrl-c writes nothing, runs nothing, and restores the terminal.
 
-Where stdin or stdout is not a terminal, under `--json`, or inside a lane, no panel is drawn.
-One line goes to stderr instead and the command runs anyway; inside a lane the line omits the
-trailing "Open spoolway to apply them." sentence. `init`, `doctor`, `whats-new`, `update`,
-`config edit`, `config override` and `sync` itself never draw the panel or print the line.
+Bare `spoolway` asks the same question as a popup over the tab it opens on instead, closed by
+`[enter]` alone, unless the project's pipeline file cannot load, in which case its screen cannot
+open to show the popup and it draws the printed panel like every other command.
+
+Where stdin or stdout is not a terminal, under `--json`, or inside a lane, neither the panel nor
+the popup is drawn. One line goes to stderr instead and the command runs anyway; inside a lane
+the line omits the trailing "Open spoolway to apply them." sentence. `init`, `doctor`,
+`whats-new`, `update`, `config edit`, `config override` and `sync` itself never draw the panel,
+the popup, or print the line.
 
 ### `spoolway whats-new`
 
@@ -873,22 +897,21 @@ By default it prints only failures, notes and a closing line. A failing run exit
 
 ### `spoolway herdr bind`
 
-Print the four `[[keys.command]]` blocks this writes into herdr's
+Print the three `[[keys.command]]` blocks this writes into herdr's
 `~/.config/herdr/config.toml`, then write them once confirmed.
 
 ```
 $ spoolway herdr bind
 
-  ~/.config/herdr/config.toml — 4 bindings to add
+  ~/.config/herdr/config.toml — 3 bindings to add
 
   prefix+alt+s  popup   spoolway init
-  prefix+alt+d  popup   spoolway dispatch
-  prefix+alt+q  popup   spoolway queue
+  prefix+alt+d  popup   spoolway
   prefix+alt+k  popup   spoolway doctor
 
   Write them? [y/N] y
 
-  wrote 4 bindings to ~/.config/herdr/config.toml
+  wrote 3 bindings to ~/.config/herdr/config.toml
   reloaded the running herdr config
 ```
 
@@ -896,7 +919,7 @@ $ spoolway herdr bind
 |---|---|---|
 | `--yes` | | Answer the confirmation yes without asking |
 
-Each block opens `init`, `dispatch`, `queue` or `doctor` as an 80%×80% popup. A key already
+Each block opens `init`, bare `spoolway` or `doctor` as an 80%×80% popup. A key already
 bound, to this or to anything else, is skipped and reported, never overwritten. The command
 each block runs is `spoolway`, when that resolves on `PATH`; otherwise the absolute path to the
 plugin's own binary, read off `herdr plugin list --json`. After a successful write it runs
@@ -911,13 +934,13 @@ comment and table untouched.
 ```
 $ spoolway herdr unbind
 
-  ~/.config/herdr/config.toml — 4 bindings to remove
+  ~/.config/herdr/config.toml — 3 bindings to remove
 
-  prefix+alt+s   prefix+alt+d   prefix+alt+q   prefix+alt+k
+  prefix+alt+s   prefix+alt+d   prefix+alt+k
 
   Remove them? [y/N] y
 
-  removed 4 bindings from ~/.config/herdr/config.toml
+  removed 3 bindings from ~/.config/herdr/config.toml
   reloaded the running herdr config
 ```
 

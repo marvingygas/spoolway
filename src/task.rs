@@ -1,4 +1,4 @@
-//! The task file: a markdown document with YAML frontmatter that is the single
+//! The task file: markdown with YAML frontmatter that is the single
 //! source of truth for one unit of pipeline work.
 //!
 //! Layout on disk:
@@ -66,7 +66,7 @@ pub struct Patch {
 /// carrying one from before this shipped drops it on its next save rather
 /// than round-tripping it forever, the way an ordinary unrecognised key
 /// would. `pub(crate)` so `commands::queue::parse_submission`, which
-/// deserialises a submitted document's own frontmatter directly rather than
+/// deserialises a submitted task's own frontmatter directly rather than
 /// through [`Task::parse`], strips the same keys from its own `extra`.
 pub(crate) const RETIRED_PARK_KEYS: &[&str] = &[
     "usage_limit_hold",
@@ -93,8 +93,8 @@ pub struct Frontmatter {
     /// project's own template — the frontmatter is spoolway's, so this is.
     /// It is the subject of the squashed commit `spoolway stack` pushes,
     /// verbatim, and the pull request's title. Required:
-    /// `queue_add::parse_submission` refuses a document that leaves it
-    /// blank, naming the document and the field. The shape itself is not
+    /// `queue_add::parse_submission` refuses a task that leaves it
+    /// blank, naming the task and the field. The shape itself is not
     /// enforced anywhere — a task file older than this convention still
     /// lands, with its own line as the subject.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -119,7 +119,7 @@ pub struct Frontmatter {
     pub depends_on: Vec<String>,
 
     /// Marks a deliberate fan the planner judged independent, rather than as
-    /// one somebody forgot a `depends_on` for. A document's own key, written
+    /// one somebody forgot a `depends_on` for. A task's own key, written
     /// by whoever produced it — the two planning skills write `parallel:
     /// true`, judging from what each task changes whether a group's tasks
     /// may run side by side, never from any file overlap — not a flag on any
@@ -230,7 +230,7 @@ pub struct Frontmatter {
     /// hand-edited file predating that rule can still reach the live queue,
     /// and something has to be able to parse it far enough to name the
     /// problem — `queue add`'s own submission path is what actually refuses
-    /// a document naming none, and `spoolway dispatch`'s own start preflight
+    /// a task naming none, and `spoolway dispatch`'s own start preflight
     /// refuses the whole run over any live task still missing one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pipeline: Option<String>,
@@ -250,9 +250,9 @@ pub struct Frontmatter {
 
     /// The group's own words for the issue a mirror opens above it —
     /// carried verbatim into `SPOOLWAY_GROUP_DESCRIPTION` on the `open`
-    /// event, and into nothing else spoolway does. Only one document of a
+    /// event, and into nothing else spoolway does. Only one task of a
     /// group needs to set it; `queue add`'s own `validate_batch` looks at
-    /// every document of a submission's group together, not this one field
+    /// every task of a submission's group together, not this one field
     /// alone, and refuses the whole batch when a hook is configured and none
     /// of them carry it — an issue with a hook but no group description
     /// would have nothing of its own to say. Never required when no hook is
@@ -284,7 +284,7 @@ pub struct Frontmatter {
 
     /// A step this task pauses after, whatever it reports — see
     /// `spoolway report`, where the pause is decided. Set by whoever wrote
-    /// the task document, so a producer can hold work for a person without
+    /// the task, so a producer can hold work for a person without
     /// giving the task a pipeline of its own; a step's own `gate: true`
     /// still gates every task that reaches it, this or not, but on
     /// narrower terms than this field's: it only ever catches a pass, and
@@ -359,7 +359,7 @@ pub struct Frontmatter {
     /// way. What lets `spoolway eval --by task --trial <id>` find a trial's arms
     /// together in the ledger: a trial forks a whole group, one arm per
     /// source task (`alpha-1`, `beta-1`, …), so those arms come from
-    /// different source documents and share nothing else — not even an id
+    /// different source tasks and share nothing else — not even an id
     /// prefix — to group them by.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trial: Option<String>,
@@ -978,7 +978,7 @@ impl Task {
     }
 
     /// Replace a section's whole content with `text` — the road `spoolway
-    /// task edit` uses to hand a stopped task's document to whoever is
+    /// task edit` uses to hand a stopped task to whoever is
     /// reading its pane.
     ///
     /// Unlike [`Task::append_to_section`], which creates a heading it does
@@ -993,7 +993,7 @@ impl Task {
     /// the next heading onto its last line, and `## Non-goals` stops being a
     /// heading `find_section` can see at all. The trailing blank line is
     /// dropped for the body's own last section, matching the single newline
-    /// [`Task::render`] already ends every document with.
+    /// [`Task::render`] already ends every task with.
     pub fn replace_section(&mut self, heading: &str, text: &str) -> Result<()> {
         let (start, end) = self
             .find_section(heading)
@@ -1086,8 +1086,8 @@ impl Task {
 ///
 /// Shared by [`Task::parse`], which trusts every key the yaml half sets, and
 /// by `queue::parse_submission`, which trusts none of them until it has
-/// checked which ones a document may set at all — both need the same two
-/// fences found the same way, and a submitted document is this same shape
+/// checked which ones a task may set at all — both need the same two
+/// fences found the same way, and a submitted task is this same shape
 /// before it is anything spoolway's.
 pub fn split_fence(raw: &str) -> Result<(&str, &str)> {
     let rest = raw
@@ -1270,7 +1270,7 @@ pub fn find(dirs: &[&Path], id: &str) -> Result<Task> {
 mod tests {
     use super::*;
 
-    // `touches:` is no longer a typed field, but a document that still sets
+    // `touches:` is no longer a typed field, but a task that still sets
     // it must keep loading and round-tripping — the key survives as
     // passthrough in `extra`, the same as any other key spoolway does not
     // name.
@@ -1621,7 +1621,7 @@ mod tests {
     }
 
     /// The body's own last section gets no trailing blank line — just the
-    /// one newline [`Task::render`] already ends every document with — so a
+    /// one newline [`Task::render`] already ends every task with — so a
     /// repeated edit never grows a longer and longer gap at the end of the
     /// file.
     #[test]
@@ -1793,7 +1793,7 @@ mod tests {
     }
 
     /// `gate_at` is a plain frontmatter key, set by whoever wrote the
-    /// document — it round-trips like any other, and stays out of the file
+    /// task — it round-trips like any other, and stays out of the file
     /// entirely when a task never named one.
     #[test]
     fn gate_at_round_trips_and_stays_out_when_unset() {

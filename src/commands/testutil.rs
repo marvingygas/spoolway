@@ -2,10 +2,10 @@
 
 use super::*;
 
-/// A project on a branch of its own. Real git, because `check_document_base`
+/// A project on a branch of its own. Real git, because `check_task_base`
 /// looks a task's `base:` up against the repository's own local branches —
 /// `refs/heads/plan/demo` included, which needs a commit to exist at all: an
-/// unborn branch has no ref for `check_document_base`'s `rev-parse` to find.
+/// unborn branch has no ref for `check_task_base`'s `rev-parse` to find.
 pub fn fixture(name: &str) -> Repo {
     let root = crate::scratch::root(&format!("commands-{name}"));
     let _ = std::fs::remove_dir_all(&root);
@@ -37,7 +37,7 @@ pub fn add(repo: &Repo, id: &str, depends_on: &[&str]) {
     let doc = format!("---\n{frontmatter}---\n## Goal\n\nDo the thing.\n");
 
     let path = repo.root.join(format!(".{id}-doc.md"));
-    std::fs::write(&path, doc).unwrap_or_else(|e| panic!("writing {id}'s document: {e:#}"));
+    std::fs::write(&path, doc).unwrap_or_else(|e| panic!("writing {id}'s task: {e:#}"));
 
     // `--base plan/demo` — [`fixture`]'s own checkout branch — so a caller
     // needs no opinion of its own about a base to get a task queued.

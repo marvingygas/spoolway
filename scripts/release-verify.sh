@@ -16,11 +16,11 @@
 # `done` with no tag, no packages and nothing published. So the run is
 # anchored to the candidate it was cut for: `SPOOLWAY_TASK_FILE`, the one
 # variable a command step is given that leads back to this task, names the
-# document whose `base_commit:` is the commit `main` stood at when the lane
+# task whose `base_commit:` is the commit `main` stood at when the lane
 # was cut. If `origin/main` is still sitting on it, no release commit was
 # pushed and there is nothing here to verify. (Agent lanes are handed
 # `SPOOLWAY_HEAD`, which carries the same fact in one word; command steps
-# are not, so this reads the document instead.)
+# are not, so this reads the task instead.)
 #
 # Needs only git, curl, jq and gh for the checks that prove the release is
 # public. npm is used only for the one check that installs it — a release
@@ -38,10 +38,10 @@ registry=https://registry.npmjs.org
 git fetch --quiet --tags --force origin
 
 # The frozen candidate, read out of the leading `---` block of the task
-# document so a `base_commit:` written in the prose below it cannot be
+# file so a `base_commit:` written in the prose below it cannot be
 # mistaken for the key. Empty when the variable is unset — run by hand, or by
 # anything that is not a dispatched command step — and empty too when the
-# document carries no such key, which is what a borrowed checkout records:
+# task carries no such key, which is what a borrowed checkout records:
 # neither of those has a candidate to anchor to, and both keep the
 # unanchored behaviour rather than failing a release over a missing hint.
 anchor=""
@@ -71,7 +71,7 @@ if [ -n "$anchor" ]; then
   head="$(git rev-parse origin/main)"
   # Prefix rather than equality: `base_commit:` is a full rev-parse when the
   # dispatcher writes it, but an abbreviated one hand-edited into the
-  # document still names the same commit.
+  # task still names the same commit.
   if [ "${head#"$anchor"}" != "$head" ]; then
     die "origin/main is still at $head, the candidate this task was cut from — publish pushed no release commit, so there is nothing to verify"
   fi

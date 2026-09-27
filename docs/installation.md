@@ -1,6 +1,6 @@
 ---
 domain: installation
-covers: ["src/install.rs", "src/update.rs", "src/sync.rs", "src/release.rs", "src/release_notes.rs", "CHANGELOG.md", "src/assets.rs", "src/ask.rs", "src/gitignore.rs", "npm/**", "scripts/build-npm.mjs", "herdr-plugin.toml", "scripts/fetch-or-build.sh"]
+covers: ["src/install.rs", "src/update.rs", "src/sync.rs", "src/release.rs", "src/release_notes.rs", "src/gate.rs", "CHANGELOG.md", "src/assets.rs", "src/ask.rs", "src/gitignore.rs", "npm/**", "scripts/build-npm.mjs", "herdr-plugin.toml", "scripts/fetch-or-build.sh"]
 ---
 
 # Installation and setup
@@ -156,7 +156,7 @@ spoolway install codex
 | Skill | What it does |
 |---|---|
 | `spoolway-plan` | Turns one goal into a plan page. After you approve it, it cuts the tasks into the pending directory. |
-| `spoolway-tasks` | Cuts an agreed shape into task documents: pipeline, size, ids, globs, dependency order. |
+| `spoolway-tasks` | Cuts an agreed shape into tasks: pipeline, size, ids, globs, dependency order. |
 | `spoolway-config` | Changes pipelines, prompts, `config.toml`, templates and hooks, as an override or as an edit. Also repairs a project that is broken, refused or behind. |
 | `spoolway-calibrate` | Compares archived tasks, step-level evaluation results and spend data against the prompts and pipelines that produced them, then applies the changes you pick. |
 
@@ -232,8 +232,12 @@ A newer release is announced by one line on stderr before the command's own outp
 Update available: 0.2.0. Run "spoolway update"
 ```
 
-The line is not printed inside a lane, under `--json`, or when output is not a terminal. Turn
-it off with `housekeeping.update_check = false` in the config, or with
+Bare `spoolway` shows the same sentence as a popup over the tab it opens on instead, since a
+line on stderr ahead of the screen would be wiped by the screen's first frame. `[enter]` closes
+it.
+
+The line, or the popup, is not shown inside a lane, under `--json`, or when output is not a
+terminal. Turn it off with `housekeeping.update_check = false` in the config, or with
 `SPOOLWAY_SKIP_VERSION_CHECK=1` for one machine.
 
 ## Keeping a project's files current
@@ -297,16 +301,21 @@ matches and a scan finds files to change, the command stops and draws a confirm 
 Enter runs `sync` for real, rewrites the stamp, and then runs the command. Ctrl-c writes
 nothing, runs nothing, and restores the terminal. No other key does anything.
 
-Where stdin or stdout is not a terminal, under `--json`, or inside a lane, the panel is never
-drawn. Instead one line goes to stderr and the command runs anyway:
+Bare `spoolway` asks the same question as a popup over the tab it opens on, closed by
+`[enter]` alone, since the screen's first frame would wipe a panel printed ahead of it. When the
+project's pipeline file cannot load, the screen cannot open to show the popup, so bare
+`spoolway` falls back to the printed panel described above.
+
+Where stdin or stdout is not a terminal, under `--json`, or inside a lane, neither the panel nor
+the popup is drawn. Instead one line goes to stderr and the command runs anyway:
 
 ```
 spoolway wants to update: 1 file(s) in this checkout. Open spoolway to apply them.
 ```
 
 Inside a lane the line omits the trailing "Open spoolway to apply them." sentence. `init`, `doctor`,
-`whats-new`, `update`, `config edit`, `config override` and `sync` itself never draw the panel
-or print the line.
+`whats-new`, `update`, `config edit`, `config override` and `sync` itself never draw the panel,
+the popup, or print the line.
 
 ## Platform notes
 

@@ -2,10 +2,10 @@
 # CLI behaviour that needs a real process, a real project or a real forge,
 # and belongs to no domain of its own: scaffolding (`init`, `sync`), the
 # contracts (`task contract`, `pipeline contract`, `prompt contract`), the
-# queue screen read off a real pipe, the archive's own rows, `config`'s
-# checkout/project asymmetry, the overrides layer resolved through a linked
-# worktree, housekeeping's retention sweep, and the confirm-dialog gate driven
-# over a real pty.
+# queue tab of bare `spoolway` driven over a real pty, the archive's own rows,
+# `config`'s checkout/project asymmetry, the overrides layer resolved through
+# a linked worktree, housekeeping's retention sweep, and the confirm-dialog
+# gate driven over a real pty.
 #
 # This suite used to also assert the `agent list`/`agent verify` output, the
 # transcript an ambient session is read from, and every refusal `pipeline
@@ -485,9 +485,9 @@ CHECK_STATUS=$?
 AFTER_CHECK=$(ls "$SPOOLWAY_PROJECT_HOME/queue" 2>/dev/null | sort)
 
 if [ "$CHECK_STATUS" -ne 0 ]; then
-  ok "task contract --from a document setting run: exits non-zero"
+  ok "task contract --from a task setting run: exits non-zero"
 else
-  bad "task contract --from a document setting run: exits non-zero"
+  bad "task contract --from a task setting run: exits non-zero"
 fi
 if [ "$BEFORE_CHECK" = "$AFTER_CHECK" ]; then
   ok "and leaves the queue directory exactly as it was"
@@ -654,7 +654,7 @@ OWNBASE="$BASECHECK/ownbase.md"
   echo "---"
   cat "$BODY"
 } > "$OWNBASE"
-works "a document's own base wins over --base" \
+works "a task's own base wins over --base" \
   env -C "$BASECHECK" "$SPOOLWAY" queue add --from "$OWNBASE" --base other/base
 says "and the task is cut from the document's own branch, not the flag's" \
   "base: plan/x" env -C "$BASECHECK" "$SPOOLWAY" queue show ownbase
@@ -779,11 +779,11 @@ says "and still holds the pass for the person who opens the pane" \
 rm -f .spoolway/pipelines/gate-check.yml
 
 # ------------------------------------------------------------- the queue screen
-# The one thing no unit test can reach: `spoolway queue` reading real keystrokes
-# off a pipe, submitting a real group, and clearing that group's documents off
-# a real disk. `run_screen` is driven headlessly in Rust already — what is only
-# provable here is that the whole binary, invoked as a person invokes it, does
-# the same thing end to end.
+# The one thing no unit test can reach: bare `spoolway`'s queue tab reading
+# real keystrokes off a pipe, submitting a real group, and clearing that
+# group's documents off a real disk. `run_screen` is driven headlessly in Rust
+# already — what is only provable here is that the whole binary, invoked as a
+# person invokes it, does the same thing end to end.
 #
 # Two documents of one group, and a third of another, so "removes exactly that
 # group's documents" has something to be wrong about.
@@ -796,17 +796,18 @@ pending_doc screen-one "$BODY" "group: screen-batch"
 pending_doc screen-two "$BODY" "group: screen-batch" \
   "depends_on: [screen-one]"
 
-# space selects the highlighted group, enter submits it and reaches the
-# overview, `esc` declines it. The screen ends on its own the moment the
-# pipe runs dry — see `queue_screen`'s own doc comment on why a pipe is read
-# exactly as a terminal would be.
-printf ' \r\x1b' | "$SPOOLWAY" queue >/dev/null 2>&1
+# space selects the highlighted group, enter submits it and draws the
+# `queued` popup over the tab, which only `enter` closes — so the `esc` after
+# it is taken by the popup. The screen ends on its own the moment the
+# pipe runs dry — see `on_screen` in `lib.sh` on why the keys arrive on a
+# pipe while the screen draws to a pty.
+on_screen ' \r\x1b' /dev/null
 
 works "the screen queues the first task of the group it submitted" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/screen-one.md"
 works "and the second one with it — a group goes whole or not at all" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/screen-two.md"
-works "the submitted group's documents are gone from pending" \
+works "the submitted group's tasks are gone from pending" \
   test ! -e "$SPOOLWAY_PROJECT_HOME/pending/screen-one.md"
 works "both of them" \
   test ! -e "$SPOOLWAY_PROJECT_HOME/pending/screen-two.md"
@@ -823,12 +824,12 @@ works "which is still not in the queue" \
 # carries, and the report has to name it rather than silently dropping it.
 must "screen-two carried back out of the queue by hand" \
   "$SPOOLWAY" queue unqueue screen-two
-works "its document is back in the pending directory" \
+works "its task is back in the pending directory" \
   test -f "$SPOOLWAY_PROJECT_HOME/pending/screen-two.md"
 works "and gone from the queue" \
   test ! -e "$SPOOLWAY_PROJECT_HOME/queue/screen-two.md"
 
-printf ' \r\x1b' | "$SPOOLWAY" queue >"$LIVE/screen-requeue.out" 2>&1
+on_screen ' \r\x1b' "$LIVE/screen-requeue.out"
 
 works "screen-two reaches the queue again" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/screen-two.md"
@@ -837,13 +838,12 @@ works "and is gone from pending once more" \
 works "screen-one, already queued, is left exactly where it was" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/screen-one.md"
 # The report `enter` used to leave on screen, naming the sibling left alone,
-# is gone — replaced by the overview, which lists the whole queue instead of
-# one submission's own report. See the mockup on task `overview-and-gates`.
-# Anchored on the table header rather than "screen-batch": the browsing
-# pane's own group row already prints that name on every frame, long before
-# `enter` ever reaches the overview, so a match on it alone would pass
-# whether or not the overview drew at all.
-has "the overview it reaches draws its own table header" \
+# is gone, and so is the overview that replaced it: `enter` only queues, and
+# starting a dispatcher is the dispatch tab's own `enter`. Anchored on the
+# overview's table header rather than "screen-batch": the browsing pane's own
+# group row prints that name on every frame, so only the header can say the
+# overview was not drawn.
+lacks "enter only queues — no overview is drawn after it" \
   "TASK                PIPELINE    STEP      BASE" "$LIVE/screen-requeue.out"
 lacks "and never a 'left alone' line for the sibling still sitting there" \
   "left alone" "$LIVE/screen-requeue.out"
@@ -858,7 +858,7 @@ works "reaches the queue the same way" \
 # --from` clears it once the batch is written — the same "one inbox, whichever
 # door" rule the screen already keeps, so a task queued from the command line
 # is not left sitting in pending as well as in the queue.
-works "and clears the document out of the pending directory" \
+works "and clears the task out of the pending directory" \
   test ! -e "$SPOOLWAY_PROJECT_HOME/pending/screen-other.md"
 
 # --------------------------------------------- a group with no pending documents
@@ -878,16 +878,16 @@ works "it never touched the pending directory" \
 
 # The pending directory is empty at this point — both cases above already
 # cleared every document out of it — so this is also the one place proving
-# the screen opens on an empty pending directory rather than reporting "No
-# task documents", so long as the queue itself still holds a group.
-printf 'h' | "$SPOOLWAY" queue >"$LIVE/queue-screen-only.out" 2>&1
-if grep -q "No task documents" "$LIVE/queue-screen-only.out"; then
+# the screen opens on an empty pending directory rather than refusing with
+# "Nothing to list", so long as the queue itself still holds a group.
+on_screen 'h' "$LIVE/queue-screen-only.out"
+if grep -q "Nothing to list" "$LIVE/queue-screen-only.out"; then
   bad "a group with nothing left in pending still opens the screen"
   sed 's/^/        /' "$LIVE/queue-screen-only.out"
 else
   ok "a group with nothing left in pending still opens the screen"
 fi
-has "\`h\` still lists a group whose documents are only in the queue now" \
+has "\`h\` still lists a group whose tasks are only in the queue now" \
   "screen-shipped-group" "$LIVE/queue-screen-only.out"
 
 # --------------------------------------------------- the archive's own rows
@@ -914,7 +914,7 @@ works "and landed in the archive" \
 # python snippet below splits the raw output back into the four frames this
 # draws — opening, then one per press — rather than grepping the whole file,
 # which could never tell "shown once, then hidden again" from "never shown".
-printf 'hhh' | "$SPOOLWAY" queue >"$LIVE/queue-h-cycle.out" 2>&1
+on_screen 'hhh' "$LIVE/queue-h-cycle.out"
 if python3 - "$LIVE/queue-h-cycle.out" arch-row <<'PY'
 import sys
 

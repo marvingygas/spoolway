@@ -60,7 +60,7 @@ project](dispatcher.md#one-home-for-every-run-in-every-project).
 |---|---|---|
 | `queue/`, `pending/`, `worktrees/`, `plans/`, `overrides/` | Work in flight | No |
 | `archive/`, `scratch/`, `headless/`, `commands/`, `tracking/`, `system-prompts/` | What finished runs left behind | Yes |
-| `project.toml`, `lanes.json`, `usage.jsonl`, `dispatch.pid`, `jobs.toml`, `jobs.state.json` | Project records | No |
+| `project.toml`, `lanes.json`, `usage.jsonl`, `dispatch.pid`, `spoolway.pid`, `jobs.toml`, `jobs.state.json` | Project records | No |
 
 Every directory inside a home is created the first time something resolves it. `overrides/` is
 the exception. It is never created for you, because its absence is how the patch layer is
@@ -295,7 +295,7 @@ restart.
 | Event | When it fires | Waits for the script |
 |---|---|---|
 | `fetch` | `spoolway issue show <ref>` reads one issue | Yes |
-| `open` | `spoolway queue add` opens a ticket per document | Yes |
+| `open` | `spoolway queue add` opens a ticket per task | Yes |
 | `queued` | A task arrives in the queue | No |
 | `blocked` | A task comes to rest on `blocked` | No |
 | `paused` | A task arrives on the persisted `paused` stage | No |
@@ -324,16 +324,23 @@ the line's floor.
 
 ### `open` — a fifth event, run by `queue add` itself
 
-`spoolway queue add` calls the hook with `SPOOLWAY_EVENT=open` once per document that has no
+`spoolway queue add` calls the hook with `SPOOLWAY_EVENT=open` once per task that has no
 `ticket:` yet, in dependency order, before it writes anything. The script also gets
 `SPOOLWAY_DEPENDS_TICKETS` (the ticket ids of the task's `depends_on`), `SPOOLWAY_GROUP_DESCRIPTION`
-(the group's `group_description:`, blank if no document set one), `SPOOLWAY_EPIC_BODY` and
+(the group's `group_description:`, blank if no task set one), `SPOOLWAY_EPIC_BODY` and
 `SPOOLWAY_TICKET_BODY` (rendered from `.spoolway/templates/tracking/epic.md` and `ticket.md`).
-`SPOOLWAY_TASK_FILE` is the document's own path while this hook runs, blank when the document
+`SPOOLWAY_TASK_FILE` is the task's own path while this hook runs, blank when the task
 has no file of its own, such as a `queue add --from -` stream entry.
 
-The submission is refused, naming the group, when no document in a group sets
+The submission is refused, naming the group, when no task in a group sets
 `group_description:`.
+
+On the queue screen, `enter` asks before any of this runs. The question names the tracker,
+the hook script's own file name minus its extension (`github.sh` reads `github`), and lists
+every task in the batch: `enter` creates the tickets and queues, `n` queues the batch with no
+hook call, and `esc` goes back with nothing queued. Queueing a routine asks the same question.
+A trial never asks and opens no ticket. See [`spoolway
+queue`](cli-reference.md#spoolway-queue).
 
 A rendered `epic.md` or `ticket.md` line is dropped entirely, its own newline with it, when it
 holds at least one `${SPOOLWAY_*}` placeholder and every placeholder on that line resolves
@@ -350,7 +357,7 @@ The script answers by writing lines to the file named in `SPOOLWAY_OUT`:
 | `url=` | `url:` | Must be an absolute `http` or `https` URL. |
 
 A non-zero exit refuses the whole batch. Ids already returned are written back into the
-pending documents first, so running the command again resumes.
+pending tasks first, so running the command again resumes.
 
 ### `fetch` — a sixth event, run by `spoolway issue show`
 
@@ -373,11 +380,12 @@ comment line, one per tool. `spoolway doctor` reads these lines and checks each 
 `--version` output against the floor. Only `<tool> >= <version>` is understood; any other
 shape in the line is reported as unreadable rather than interpreted.
 
-Every submit route — the queue screen's `enter`, `spoolway queue add --from` and a routine —
-checks the same lines before it opens any ticket. A tool below its floor, or missing from
-PATH, gates the submission: the queue screen's `enter` shows what is unmet and waits for
-`enter` to queue without issue tracking or `esc` to back out, and a non-interactive submit
-prints the same notice and proceeds. See [`spoolway queue`](cli-reference.md#spoolway-queue).
+Every submit route — the queue screen's `enter`, the jobs screen's `r`, `spoolway queue add
+--from`, `spoolway jobs run` and a job the dispatcher fires — checks the same lines before it
+opens any ticket. A tool below its floor, or missing from PATH, gates the submission. On a
+screen it shows what is unmet as a popup: `enter` queues without issue tracking, `esc` backs
+out. From the CLI or the dispatcher, where there is no key to wait on, it prints the same
+notice and proceeds. See [`spoolway queue`](cli-reference.md#spoolway-queue).
 
 | Script | Needs | What it does |
 |---|---|---|

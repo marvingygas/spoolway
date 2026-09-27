@@ -58,7 +58,7 @@ works "dependent landed in pending with it" \
 works "neither is in the queue any more" \
   test ! -e "$SPOOLWAY_PROJECT_HOME/queue/base.md"
 
-must "the round-tripped document still passes the task contract" \
+must "the round-tripped task still passes the task contract" \
   "$SPOOLWAY" task contract --from "$SPOOLWAY_PROJECT_HOME/pending/base.md"
 must "queue add --from takes it again unchanged" \
   "$SPOOLWAY" queue add --from "$SPOOLWAY_PROJECT_HOME/pending/base.md"
@@ -165,7 +165,7 @@ fi
 has "it says the lane was interrupted" "interrupted lane implement/solo" "$FORCE_OUT"
 has "and that it unqueued" "unqueued \`solo\`" "$FORCE_OUT"
 works "the queue file is gone" test ! -e "$SPOOLWAY_PROJECT_HOME/queue/solo.md"
-works "the document reached pending" test -f "$SPOOLWAY_PROJECT_HOME/pending/solo.md"
+works "the task reached pending" test -f "$SPOOLWAY_PROJECT_HOME/pending/solo.md"
 lacks "with no checkout field left on it: worktree_path" \
   "worktree_path:" "$SPOOLWAY_PROJECT_HOME/pending/solo.md"
 lacks "workspace_id" "workspace_id:" "$SPOOLWAY_PROJECT_HOME/pending/solo.md"
@@ -219,17 +219,20 @@ chmod +x "$LOWVER_BIN/gh"
 pending_doc gate-esc "$BODY" "group: gate-esc"
 
 GATE_ESC_OUT="$LIVE/gate-esc.out"
-printf ' \r\x1b' | env PATH="$LOWVER_BIN:$PATH" "$SPOOLWAY" queue >"$GATE_ESC_OUT" 2>&1
+on_screen ' \r\x1b' "$GATE_ESC_OUT" PATH="$LOWVER_BIN:$PATH"
 has "the gate draws over an unmet gh version" \
   "issue tracking is not supported." "$GATE_ESC_OUT"
 has "naming the declared floor" "gh >= 2.97.0" "$GATE_ESC_OUT"
-works "esc leaves the document in pending, unqueued" \
+has "in a popup over the queue screen" "┌─ issue tracking " "$GATE_ESC_OUT"
+has "whose keys read as drawn" \
+  "[enter] queue anyway, without issue tracking   [esc] back" "$GATE_ESC_OUT"
+works "esc leaves the task in pending, unqueued" \
   test -f "$SPOOLWAY_PROJECT_HOME/pending/gate-esc.md"
 works "and nothing reached the queue" \
   test ! -e "$SPOOLWAY_PROJECT_HOME/queue/gate-esc.md"
 
 GATE_ENTER_OUT="$LIVE/gate-enter.out"
-printf ' \r\rn' | env PATH="$LOWVER_BIN:$PATH" "$SPOOLWAY" queue >"$GATE_ENTER_OUT" 2>&1
+on_screen ' \r\rn' "$GATE_ENTER_OUT" PATH="$LOWVER_BIN:$PATH"
 has "the gate draws the same way when enter is pressed instead" \
   "issue tracking is not supported." "$GATE_ENTER_OUT"
 works "enter over the gate queues the batch anyway" \

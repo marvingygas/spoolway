@@ -26,23 +26,6 @@ pub struct Cli {
 
     #[command(subcommand)]
     pub command: Command,
-
-    /// Whether `eval` was invoked with none of its *own* flags — filled in
-    /// by [`parse`] from the raw `ArgMatches`, not derived from `EvalArgs`
-    /// itself: `EvalArgs::is_bare` used to enumerate every one of its own
-    /// fields by hand, which meant a new flag on `EvalArgs` had to remember
-    /// to extend that list too, or bare `spoolway eval` would silently take
-    /// the wrong path. [`eval_is_bare`] answers the same question off the
-    /// parser's own bookkeeping instead, so nothing here grows when
-    /// `EvalArgs` does. `spoolway eval` bare opens the screen; any of
-    /// `eval`'s own flags, even one spelled out to its own default, takes
-    /// the printing path instead — see `main.rs`. `--repo`/`-C` and
-    /// `--json` are excluded on purpose: both are `global = true`, so they
-    /// answer a question about the whole invocation, not about `eval`, and a
-    /// person piping `-C ~/project` in front of a bare `eval` still wants
-    /// the screen.
-    #[arg(skip)]
-    pub eval_bare: bool,
 }
 
 // One of these exists per process; the spread between variants is the args
@@ -92,10 +75,18 @@ pub enum Command {
     #[command(name = crate::release::REFRESH_COMMAND, hide = true)]
     VersionCheck,
 
+    /// Bare `spoolway` in a terminal: the one screen, with its dispatch,
+    /// queue, jobs and eval tabs — see [`crate::screen::shell`].
+    ///
+    /// Skipped by the parser, so nobody can type it: [`parse`] is the only
+    /// thing that ever builds it, and only when no command was typed at all.
+    #[command(skip)]
+    Screen,
+
     /// Install pipeline skills and agent definitions for a coding agent.
     Install(InstallArgs),
 
-    /// Run the pipeline: a loop that draws the live board until the queue empties.
+    /// Run the pipeline: a loop that prints a line per pass until the queue empties.
     Dispatch(DispatchArgs),
 
     /// Read the model price table, or refresh it from litellm.
@@ -160,13 +151,12 @@ pub enum Command {
     /// session, and this says where it is.
     Lane(LaneArgs),
 
-    /// Work with the task queue. Bare, opens the queue screen.
-    Queue {
-        #[command(subcommand)]
-        command: Option<QueueCommand>,
-    },
+    /// Work with the task queue. Bare `spoolway`'s queue tab is the screen;
+    /// this prints its usage with no subcommand.
+    #[command(subcommand)]
+    Queue(QueueCommand),
 
-    /// Print or validate the task-document contract.
+    /// Print or validate the task contract.
     #[command(subcommand)]
     Task(TaskCommand),
 
@@ -191,11 +181,10 @@ pub enum Command {
     Group(GroupCommand),
 
     /// Read and fire cron jobs — routines the dispatcher runs on a schedule.
-    /// Bare, opens the jobs screen a person writes a job from.
-    Jobs {
-        #[command(subcommand)]
-        command: Option<JobsCommand>,
-    },
+    /// Bare `spoolway`'s jobs tab is the screen a person writes a job from;
+    /// this prints its usage with no subcommand.
+    #[command(subcommand)]
+    Jobs(JobsCommand),
 
     /// Read or write single config values non-interactively.
     #[command(subcommand)]
@@ -349,46 +338,51 @@ pub fn command() -> clap::Command {
 
 /// Parse the command line through [`command`], so the grouped help is what
 /// `spoolway --help` prints.
+///
+/// No command at all, with stdout on a terminal, is [`Command::Screen`]. Off a
+/// terminal — `spoolway | cat`, a script — it is exactly what it was before
+/// the screen existed: clap's own refusal, which prints the grouped help and
+/// exits 2.
 pub fn parse() -> Cli {
     use clap::FromArgMatches;
+    use std::io::IsTerminal;
 
     let base = command();
+    if std::io::stdout().is_terminal()
+        && let Some(cli) = bare(&base, std::env::args_os())
+    {
+        return cli;
+    }
     let matches = base.clone().get_matches();
-    let eval_bare = eval_is_bare(&base, &matches);
-    let mut cli = match Cli::from_arg_matches(&matches) {
+    match Cli::from_arg_matches(&matches) {
         Ok(cli) => cli,
         Err(err) => err.exit(),
-    };
-    cli.eval_bare = eval_bare;
-    cli
+    }
 }
 
-/// Whether the `eval` subcommand, if that is what was typed, carried none of
-/// its *own* flags — read off the raw `ArgMatches` rather than `EvalArgs`'s
-/// fields, so this never has to change when a flag is added to or removed
-/// from `EvalArgs`. `None` (no `eval` subcommand at all) is not bare: this is
-/// only ever consulted once `main.rs` has already matched `Command::Eval`.
-///
-/// `ArgMatches::args_present()` on `eval`'s own submatch is not enough on its
-/// own: `--repo`/`-C` and `--json` are declared `global = true` on [`Cli`]
-/// (so they can be typed after the subcommand, e.g. `eval --json`, and not
-/// only before it), and clap copies a typed global into every subcommand's
-/// matches — so `args_present()` sees one and reports "not bare" even though
-/// nothing about `eval` itself was asked for. Filtering to arguments this
-/// subcommand actually declares (`!a.is_global_set()`) and checking each was
-/// really typed on the command line, rather than merely defaulted, is what
-/// tells `spoolway -C ~/project eval` apart from `spoolway eval --csv`.
-fn eval_is_bare(command: &clap::Command, matches: &clap::ArgMatches) -> bool {
-    let Some(sub) = command.find_subcommand("eval") else {
-        return false;
-    };
-    let Some(sub_matches) = matches.subcommand_matches("eval") else {
-        return false;
-    };
-    !sub.get_arguments().any(|arg| {
-        !arg.is_global_set()
-            && sub_matches.value_source(arg.get_id().as_str())
-                == Some(clap::parser::ValueSource::CommandLine)
+/// `argv` as [`Command::Screen`] when it names no command — only the globals
+/// `--repo`/`-C` and `--json`, or nothing at all — and `None` for anything
+/// else, including `--help` and `--version`, which the ordinary parse answers.
+/// Parsed with the subcommand made optional rather than by reading `argv`
+/// by hand, so `-C dir`, `--repo=dir` and every other spelling clap accepts
+/// is accepted here too.
+fn bare(base: &clap::Command, argv: impl IntoIterator<Item = std::ffi::OsString>) -> Option<Cli> {
+    let matches = base
+        .clone()
+        .subcommand_required(false)
+        // The derive sets this beside `subcommand_required` for a required
+        // subcommand, and it alone would still turn an empty `argv` into the
+        // help screen.
+        .arg_required_else_help(false)
+        .try_get_matches_from(argv)
+        .ok()?;
+    if matches.subcommand().is_some() {
+        return None;
+    }
+    Some(Cli {
+        repo: matches.get_one::<PathBuf>("repo").cloned(),
+        json: matches.get_flag("json"),
+        command: Command::Screen,
     })
 }
 
@@ -544,7 +538,7 @@ pub struct EvalArgs {
     #[arg(long, value_name = "ID")]
     pub trial: Option<String>,
 
-    /// Throw a whole trial away now: every arm's task document, worktree,
+    /// Throw a whole trial away now: every arm's task, worktree,
     /// local branch, pane, scratch directory, session and run files, whether
     /// or not the arms have finished. The trial's own answer survives — its
     /// usage rows stay in the ledger, and the source group it forked is
@@ -780,22 +774,10 @@ impl Tracker {
 #[derive(Debug, Args, Default)]
 #[command(long_about = "Run the pipeline, and show what it is doing.\n\n\
         A resident run holds the terminal it was started in: each pass starts and tears down \
-        what the queue calls for, and between passes the live board is drawn there — a line per \
-        task with the step it is on and where it goes next, ordered top to bottom within its \
-        group by the order its tasks will run in. `ctrl-c` stops the run and leaves the last \
-        frame on screen.\n\n\
-        `--plain` keeps the loop but prints a line per pass instead of drawing. A run refuses \
-        to start at all outside a herdr pane, so there is always somewhere for that board to \
-        draw.")]
+        what the queue calls for, and prints a line per pass to say what it did. `ctrl-c` stops \
+        the run. Bare `spoolway`'s dispatch tab draws the live board instead — this is the \
+        plain print-per-pass command scripts, CI and the e2e suite drive.")]
 pub struct DispatchArgs {
-    /// Print a line per pass instead of drawing the live board.
-    ///
-    /// The board owns the terminal and redraws about once a second, which
-    /// is what you want in front of you and not what you want in a pipe, a CI
-    /// log or a terminal that mangles the redraw.
-    #[arg(long)]
-    pub plain: bool,
-
     /// Stop for nobody: a block starts a lane on `blocked` instead of parking
     /// the task in front of a person. Every pipeline stages `blocked` —
     /// `Pipelines::assemble` materialises one from `[unattended]`'s `blocked_*`
@@ -831,22 +813,15 @@ pub struct DispatchArgs {
     #[arg(long, overrides_with = "unattended")]
     pub attended: bool,
 
-    /// Start anyway, past the restart guard: four starts in a row that could
-    /// not run at all, inside 30 seconds, ordinarily refuse a fifth.
-    ///
-    /// Clears the count on this repo, the same as a start that actually
-    /// runs — whatever storm was building is over, one way or another.
-    #[arg(long)]
-    pub force: bool,
-
-    /// The overview and the overrides gate were already shown and answered
-    /// — never set from the CLI. `commands::queue::confirm_start` walks a
-    /// person through both from the queue screen's own `enter`, right
-    /// before this runs, so `dispatch` must not ask a second time; a bare
-    /// `spoolway dispatch` leaves this false, being the one caller nobody
-    /// has already asked.
-    #[arg(skip)]
-    pub confirmed: bool,
+    /// Started by bare `spoolway`'s dispatch tab — never typed. The screen
+    /// has already answered the overrides and warnings gates as popups of
+    /// its own, so this run asks neither again. It also owns no terminal:
+    /// it draws no board, prints nothing per pass, and stays up on an empty
+    /// queue until the screen stops it, since the screen, not an empty
+    /// queue, decides when dispatching ends. Why it ends on its own — a
+    /// refusal, a spend ceiling — goes to stderr for the screen to show.
+    #[arg(long = "from-screen", hide = true)]
+    pub screen: bool,
 }
 
 impl DispatchArgs {
@@ -965,7 +940,7 @@ pub enum QueueCommand {
     /// Print one task file.
     Show { task: String },
 
-    /// Queue whole task documents — the only way a task enters the queue.
+    /// Queue whole tasks — the only way a task enters the queue.
     Add(QueueAddArgs),
 
     /// Interrupt any live agent lane the task owns, then park it on `paused`
@@ -984,7 +959,7 @@ pub enum QueueCommand {
     Resume { task: String },
 
     /// What the board's `u`/`U` keys do to a row, from a script: carry a
-    /// not-started task's document back to the pending directory, stripped
+    /// not-started task back to the pending directory, stripped
     /// of every reserved key, so `queue add --from` takes it again
     /// unchanged.
     ///
@@ -1033,33 +1008,33 @@ pub struct QueuePauseArgs {
 
 #[derive(Debug, Args)]
 pub struct QueueAddArgs {
-    /// A task document to queue: a file, a directory of `*.md` files (read in
+    /// A task to queue: a file, a directory of `*.md` files (read in
     /// filename order), or `-` for a `---`-separated stream on standard
-    /// input. Repeatable — every document named across every `--from` is
+    /// input. Repeatable — every task named across every `--from` is
     /// validated together and written all or none, so one naming a sibling
     /// queued in the same breath is satisfied with nothing sorted first.
     ///
-    /// Each document is `---\n<frontmatter>\n---\n<body>`, the same shape a
+    /// Each task is `---\n<frontmatter>\n---\n<body>`, the same shape a
     /// queued task is kept in. `id`, `depends_on`, `parallel`, `group`,
     /// `source`, `plan`, `pipeline`, `gate_at` and `base` are a
-    /// document's to set; `stage`, `run`, `attempts`, `base_commit` and
-    /// `cut_from` are spoolway's alone, and a document setting one is
-    /// refused by name. A document's own `base:` wins over `--base`; a
-    /// document that sets neither is refused by name, naming the document,
+    /// task's to set; `stage`, `run`, `attempts`, `base_commit` and
+    /// `cut_from` are spoolway's alone, and a task setting one is
+    /// refused by name. A task's own `base:` wins over `--base`; a
+    /// task that sets neither is refused by name, naming the task,
     /// rather than based on whichever branch this checkout happens to have
     /// out. One that sets a base must name a branch this repository has
     /// locally. Any other key survives untouched, for a project's own
     /// metadata.
     ///
-    /// Omitted entirely, nothing is queued: the pipeline's skeleton document
+    /// Omitted entirely, nothing is queued: the pipeline's skeleton task
     /// is printed instead, for a person to save, fill in, and hand back
     /// through this same flag.
     #[arg(long = "from", value_name = "PATH")]
     pub from: Vec<String>,
 
-    /// The base every document in this submission is cut from and merges
-    /// back into, unless a document names its own `base:` — which always
-    /// wins. Required, here or in each document, since neither is invented
+    /// The base every task in this submission is cut from and merges
+    /// back into, unless a task names its own `base:` — which always
+    /// wins. Required, here or in each task, since neither is invented
     /// from the branch this checkout happens to have out any more.
     #[arg(long, value_name = "BRANCH")]
     pub base: Option<String>,
@@ -1071,25 +1046,25 @@ pub struct QueueAddArgs {
     pub dry_run: bool,
 }
 
-/// Print or validate the task-document contract — the same shape
+/// Print or validate the task contract — the same shape
 /// [`PromptCommand::Contract`] takes for a prompt.
 #[derive(Debug, Subcommand)]
 pub enum TaskCommand {
-    /// Print or validate the task-document contract itself.
+    /// Print or validate the task contract itself.
     ///
     /// Bare, prints the whole contract as JSON — this project's default
-    /// pipeline, every key a document may set, every key it may not, one
+    /// pipeline, every key a task may set, every key it may not, one
     /// sentence per settable key on how to fill it, each pipeline's longest
     /// agent step, the step ids `gate_at` accepts and the body skeleton a
     /// task on it is written from, and the rules that only hold across a set —
     /// so a producer that has never seen the planning skills can write
-    /// queueable tasks from it alone. `--from` checks a document against
+    /// queueable tasks from it alone. `--from` checks a task against
     /// that same contract and writes nothing, whichever way it comes out:
     /// this is `queue add --from`'s own validation, run with nothing saved
     /// at the end of it.
     Contract(TaskContractArgs),
 
-    /// Rewrite one section of a stopped task's document, under its task
+    /// Rewrite one section of a stopped task, under its task
     /// lock.
     ///
     /// Refused when the task is neither `paused` nor `blocked` — a task
@@ -1104,8 +1079,8 @@ pub enum TaskCommand {
 
 #[derive(Debug, Args)]
 pub struct TaskContractArgs {
-    /// A document to check, in any of the shapes `queue add --from` reads: a
-    /// file, a directory of `*.md` documents, or `-` for a `---`-separated
+    /// A task to check, in any of the shapes `queue add --from` reads: a
+    /// file, a directory of `*.md` tasks, or `-` for a `---`-separated
     /// stream on standard input. Repeatable, checked together as one set —
     /// the same batch `queue add --from` would validate before writing.
     ///
@@ -1114,8 +1089,8 @@ pub struct TaskContractArgs {
     #[arg(long = "from", value_name = "PATH")]
     pub from: Vec<String>,
 
-    /// The base to check a document against when it sets none of its own —
-    /// see `queue add --base`. A document that sets neither this nor its
+    /// The base to check a task against when it sets none of its own —
+    /// see `queue add --base`. A task that sets neither this nor its
     /// own `base:` is refused, exactly as `queue add --from` would refuse
     /// it.
     #[arg(long, value_name = "BRANCH")]
@@ -1301,7 +1276,7 @@ pub struct AgentVerifyArgs {
 ///
 /// `contract` is the one that matters: a prompt is written against what a lane
 /// is handed and what it may reach for, and that lives in the code rather than
-/// in any document. Printing it from the binary is the only version of it that
+/// in any task. Printing it from the binary is the only version of it that
 /// cannot be out of date.
 #[derive(Debug, Subcommand)]
 pub enum PromptCommand {
@@ -1500,6 +1475,61 @@ mod tests {
         );
     }
 
+    /// No command at all — only the globals, or nothing — is the screen;
+    /// anything clap would answer on its own, `--help` and `--version`
+    /// included, is not, and neither is any real command.
+    #[test]
+    fn bare_is_the_screen_only_with_no_command_typed() {
+        let bare_from = |argv: &[&str]| {
+            let argv = std::iter::once("spoolway").chain(argv.iter().copied());
+            bare(&command(), argv.map(std::ffi::OsString::from))
+        };
+
+        let cli = bare_from(&[]).expect("nothing typed is the screen");
+        assert!(matches!(cli.command, Command::Screen));
+        let cli = bare_from(&["-C", "/tmp/proj", "--json"]).expect("globals only");
+        assert_eq!(cli.repo, Some(PathBuf::from("/tmp/proj")));
+        assert!(cli.json);
+
+        assert!(bare_from(&["queue"]).is_none());
+        assert!(bare_from(&["--help"]).is_none());
+        assert!(bare_from(&["--version"]).is_none());
+        assert!(bare_from(&["no-such-command"]).is_none());
+    }
+
+    /// Only bare `spoolway` is a screen. `queue` and `jobs` typed alone are
+    /// refused with their usage, `dispatch --plain` is a flag that no longer
+    /// exists, and `eval` alone is the printing command, not a screen.
+    #[test]
+    fn the_old_screen_commands_are_plain() {
+        for verb in ["queue", "jobs"] {
+            let err = Cli::try_parse_from(["spoolway", verb])
+                .expect_err("a bare queue or jobs names no subcommand");
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand,
+                "`spoolway {verb}` prints its usage"
+            );
+            assert!(bare(&command(), ["spoolway", verb].map(Into::into)).is_none());
+        }
+
+        let err = Cli::try_parse_from(["spoolway", "dispatch", "--plain"])
+            .expect_err("`--plain` is gone");
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+        assert!(matches!(
+            Cli::try_parse_from(["spoolway", "dispatch"])
+                .unwrap()
+                .command,
+            Command::Dispatch(_)
+        ));
+
+        assert!(matches!(
+            Cli::try_parse_from(["spoolway", "eval"]).unwrap().command,
+            Command::Eval(_)
+        ));
+        assert!(bare(&command(), ["spoolway", "eval"].map(Into::into)).is_none());
+    }
+
     /// `--runs` is gone: `--by task` is the one-row-per-run table now, and
     /// `--group`, `--task` and `--trial` narrow any `by` without it.
     #[test]
@@ -1579,72 +1609,6 @@ mod tests {
     #[test]
     fn attach_requires_a_lane() {
         assert!(try_lane_args(&["--attach"]).is_err());
-    }
-
-    /// `eval_is_bare` reads the raw `ArgMatches` for the `eval` subcommand
-    /// rather than `EvalArgs`'s own fields, through the same `command()`
-    /// [`parse`] itself calls — so this exercises the real path, not a
-    /// second parse of the same argv.
-    fn eval_bare_from(argv: &[&str]) -> bool {
-        let mut full = vec!["spoolway", "eval"];
-        full.extend_from_slice(argv);
-        let base = command();
-        let matches = base.clone().try_get_matches_from(full).unwrap();
-        eval_is_bare(&base, &matches)
-    }
-
-    /// Argv built before the subcommand name, for a global flag typed the
-    /// way a person actually types it: `spoolway -C ~/project eval`, not
-    /// `spoolway eval -C ~/project`.
-    fn eval_bare_from_full(argv: &[&str]) -> bool {
-        let base = command();
-        let matches = base.clone().try_get_matches_from(argv).unwrap();
-        eval_is_bare(&base, &matches)
-    }
-
-    #[test]
-    fn truly_bare_eval_is_bare() {
-        assert!(eval_bare_from(&[]));
-    }
-
-    #[test]
-    fn any_other_flag_is_not_bare_either() {
-        assert!(!eval_bare_from(&["--pipeline", "default"]));
-        assert!(!eval_bare_from(&["--csv"]));
-        assert!(!eval_bare_from(&["--by", "step"]));
-        assert!(
-            !eval_bare_from(&["--by", "pipeline"]),
-            "spelled out to its own default, it still prints"
-        );
-    }
-
-    /// The mechanism this replaced — `EvalArgs::is_bare()` enumerating every
-    /// field by hand — silently stayed correct only as long as every new
-    /// flag remembered to add itself to the list. `eval_is_bare` reads
-    /// `args_present()` instead, so a flag this test adds without ever
-    /// touching `cli.rs`'s bareness logic still gets caught by it.
-    #[test]
-    fn a_flag_never_mentioned_by_name_still_defeats_bareness() {
-        assert!(!eval_bare_from(&["--trial", "solo"]));
-        assert!(!eval_bare_from(&["--task", "solo-1"]));
-        assert!(!eval_bare_from(&["--group", "audits"]));
-        assert!(!eval_bare_from(&["--pipeline-version", "1.0"]));
-    }
-
-    /// `--repo`/`-C` and `--json` are `global = true` on [`Cli`], so clap
-    /// copies a typed one into `eval`'s own submatches — the regression this
-    /// pins: an earlier version of `eval_is_bare` read `args_present()` on
-    /// that submatch directly, which saw the global and reported "not bare"
-    /// even though nothing about `eval` itself was asked for, so `spoolway
-    /// -C ~/project eval` silently stopped opening the screen.
-    #[test]
-    fn a_global_flag_never_defeats_bareness() {
-        assert!(eval_bare_from_full(&["spoolway", "-C", "/tmp", "eval"]));
-        assert!(eval_bare_from_full(&["spoolway", "eval", "-C", "/tmp"]));
-        assert!(eval_bare_from_full(&["spoolway", "--json", "eval"]));
-        assert!(!eval_bare_from_full(&[
-            "spoolway", "-C", "/tmp", "eval", "--csv"
-        ]));
     }
 
     /// `eval --month` was a deprecated alias for the removed `spend --month`

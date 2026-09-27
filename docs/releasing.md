@@ -56,7 +56,7 @@ so `done` means the release is actually public, not merely that a script or a la
 
 ## Cutting a release
 
-1. Open `spoolway queue`, press `r`, and queue `release-spoolway`.
+1. Open `spoolway`, press `r`, and queue `release-spoolway`.
 2. When the task pauses after `version`, read its recommendation in the task handoff.
 3. Approve it with `spoolway resume <task> -m "Approve X.Y.Z"`, or override it with
    `spoolway resume <task> -m "Use X.Y.Z"`.

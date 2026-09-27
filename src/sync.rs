@@ -1224,7 +1224,7 @@ const SKILL_STAMP_FILE: &str = "skill-stamp";
 /// before skill files became spoolway's outright. Best-effort, the same way
 /// [`write_stamp`] tolerates a home it cannot resolve: a stamp nobody reads
 /// any more is clutter, not a fact worth failing a sync over.
-fn remove_skill_stamp(home: &Path) {
+pub(crate) fn remove_skill_stamp(home: &Path) {
     let _ = std::fs::remove_file(home.join(SKILL_STAMP_FILE));
 }
 

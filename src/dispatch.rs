@@ -122,23 +122,6 @@ fn mmss(secs: u64) -> String {
 /// bug this exists to fix — see `.spoolway/plans/stop-the-blocked-loop.html`.
 const MAX_REMINDERS: u32 = 3;
 
-/// How many starts in a row that could not run at all get refused, by
-/// [`crate::lock::Restarts`] — see `commands::dispatch`.
-///
-/// Four rather than one or two: a person starting the dispatcher twice by
-/// habit, or a supervisor's own retry after a blip, is not the storm this
-/// guards against. A caller that is still failing to run a fifth time in a
-/// row, all inside [`RESTART_WINDOW`], is not going to stop on its own.
-pub const RESTART_MAX: u32 = 4;
-
-/// The window [`RESTART_MAX`] counts inside.
-///
-/// Long enough to catch a supervisor restarting at typical intervals of a
-/// few seconds, short enough that a caller which gave up for a while and
-/// tried again later — a person back at their desk, a cron job hours apart —
-/// starts its own count fresh rather than inheriting an old storm.
-pub const RESTART_WINDOW: Duration = Duration::from_secs(30);
-
 /// How many passes in a row may skip the interval wait, each because it
 /// moved a task and the next one is worth trying at once — see
 /// `commands::dispatch`'s pass loop — before a run is made to wait out the
@@ -234,6 +217,18 @@ const RELAUNCH_SEED: Duration = Duration::from_secs(10);
 /// on its own so nothing here depends on how often a pass actually runs.
 const LAUNCH_GRACE: Duration = Duration::from_secs(10);
 
+/// A spend ceiling this run has reached, said two ways.
+#[derive(Debug, Clone)]
+pub struct Ceiling {
+    /// The sentence the run logs, and `spoolway dispatch` prints as it ends:
+    /// what was spent against what, and what happens now.
+    pub note: String,
+    /// The same figures as the key that set them — `unattended.max_cost_usd
+    /// reached: $5.02 of $5.00` — for the dispatch tab's popup, where the
+    /// title already says the dispatcher stopped.
+    pub reached: String,
+}
+
 /// What one pass did, for printing and for the loop's own decisions.
 #[derive(Debug, Default)]
 pub struct Report {
@@ -241,9 +236,10 @@ pub struct Report {
     pub problems: Vec<String>,
     /// Nothing is running and nothing is waiting to run.
     pub quiet: bool,
-    /// This run has spent its `max_output_tokens` and started nothing, with the
-    /// figures. The run ends once [`Report::lanes_live`] goes false.
-    pub ceiling: Option<String>,
+    /// This run has spent its `max_output_tokens` or `max_cost_usd` and
+    /// started nothing, with the figures. The run ends once
+    /// [`Report::lanes_live`] goes false.
+    pub ceiling: Option<Ceiling>,
     /// Whether any lane of this run was still open at the end of the pass.
     pub lanes_live: bool,
     /// Whether this pass changed at least one task's own stage, freed a
@@ -885,7 +881,7 @@ impl<'a> Dispatcher<'a> {
         let all_lanes = self.mux.list_lanes()?;
 
         // Fire any cron job whose expression matches this minute, before the
-        // queue is read below, so its freshly queued documents are dispatched
+        // queue is read below, so its freshly queued tasks are dispatched
         // by this same pass. Trouble with a job is reported like any other
         // pass trouble and never fails the pass.
         crate::jobs::fire_due(
@@ -996,9 +992,9 @@ impl<'a> Dispatcher<'a> {
             .over_output_ceiling()
             .or_else(|| self.over_cost_ceiling())
         {
-            Some(note) => {
-                report.actions.push(note.clone());
-                report.ceiling = Some(note);
+            Some(ceiling) => {
+                report.actions.push(ceiling.note.clone());
+                report.ceiling = Some(ceiling);
             }
             None => self.start_lanes(
                 &mut tasks,
@@ -1157,7 +1153,7 @@ impl<'a> Dispatcher<'a> {
             // at every task rather than only once it is entirely done.
             tick();
 
-            // A base is chosen now — by a document's own `base:` or
+            // A base is chosen now — by a task's own `base:` or
             // `queue add --base` — never invented here from whichever branch
             // this dispatcher's own checkout happens to have out. A task
             // still missing one, queued before that rule held or edited by
@@ -1401,7 +1397,7 @@ impl<'a> Dispatcher<'a> {
                             // own caller keeps, a few dozen lines above.
                             // Forgetting anyway on that path is the exact
                             // failure this fix exists to close: the move
-                            // never reached the task document, so the code
+                            // never reached the task, so the code
                             // must stay on disk for the next pass to read.
                             if self.persist(&mut tasks[index])?
                                 && let Some(key) = command_forget
@@ -3170,10 +3166,10 @@ impl<'a> Dispatcher<'a> {
     /// Every attempt, ceiling one included, gets its own bounded notice
     /// (`! task: could not <verb> ... (attempt N of 3)`) on `report.actions`
     /// rather than `report.problems` — so it still prints every pass, the way
-    /// `report.problems` always did under `--plain`, but does *not* reach the
-    /// project's problem log every pass the way a `report.problems` line
-    /// always does; see `src/commands/dispatch.rs`'s unconditional `for
-    /// problem in &report.problems`.
+    /// every `report.actions` line does, but does *not* reach the project's
+    /// problem log every pass the way a `report.problems` line always does;
+    /// see `src/commands/dispatch.rs`'s unconditional `for problem in
+    /// &report.problems`.
     ///
     /// Below the ceiling this is the whole of it: `None`, and the task stays
     /// on `step` for the next pass to try again. At the ceiling the reason is
@@ -3917,7 +3913,7 @@ impl<'a> Dispatcher<'a> {
             crate::command_step::RunState::Exited(code) => {
                 // Left on disk here, not cleared — the caller forgets this
                 // key itself, once the destination below has actually been
-                // written to the task document. `reap_stale_runs`, in this
+                // written to the task. `reap_stale_runs`, in this
                 // same file, keeps the identical discipline for its own
                 // path and says why: an exit code forgotten before the move
                 // that depends on it is persisted is a failure nothing will
@@ -4433,7 +4429,7 @@ impl<'a> Dispatcher<'a> {
     /// an overnight run and your own context reads stop the dispatcher starting
     /// work. The ceiling is documented as the output tokens one unattended run
     /// may spend, and a lane is the only thing that run started.
-    fn over_output_ceiling(&mut self) -> Option<String> {
+    fn over_output_ceiling(&mut self) -> Option<Ceiling> {
         if !self.unattended {
             return None;
         }
@@ -4456,11 +4452,14 @@ impl<'a> Dispatcher<'a> {
         if spent < ceiling {
             return None;
         }
-        Some(format!(
-            "this run has spent {spent} output tokens against a max_output_tokens of {ceiling} — \
-             starting nothing further. Lanes still open will finish, and the queue keeps its \
-             place for the next run"
-        ))
+        Some(Ceiling {
+            note: format!(
+                "this run has spent {spent} output tokens against a max_output_tokens of \
+                 {ceiling} — starting nothing further. Lanes still open will finish, and the \
+                 queue keeps its place for the next run"
+            ),
+            reached: format!("unattended.max_output_tokens reached: {spent} of {ceiling}"),
+        })
     }
 
     /// [`Dispatcher::over_output_ceiling`]'s own counterpart in money rather
@@ -4475,7 +4474,7 @@ impl<'a> Dispatcher<'a> {
     /// heard of, with nothing in `[models]` either — contributes nothing to the
     /// sum rather than being estimated, the same rule `Entry::cost_usd` follows
     /// everywhere else: never invented, only read.
-    fn over_cost_ceiling(&mut self) -> Option<String> {
+    fn over_cost_ceiling(&mut self) -> Option<Ceiling> {
         if !self.unattended {
             return None;
         }
@@ -4498,11 +4497,14 @@ impl<'a> Dispatcher<'a> {
         if spent < ceiling {
             return None;
         }
-        Some(format!(
-            "this run has spent ${spent:.2} against a max_cost_usd of ${ceiling:.2} — starting \
-             nothing further. Lanes still open will finish, and the queue keeps its place for \
-             the next run"
-        ))
+        Some(Ceiling {
+            note: format!(
+                "this run has spent ${spent:.2} against a max_cost_usd of ${ceiling:.2} — \
+                 starting nothing further. Lanes still open will finish, and the queue keeps its \
+                 place for the next run"
+            ),
+            reached: format!("unattended.max_cost_usd reached: ${spent:.2} of ${ceiling:.2}"),
+        })
     }
 }
 
@@ -5358,12 +5360,12 @@ fn start_one(
     // Why a `session:` step opened fresh, written down rather than only said.
     //
     // It is also handed back as the pass's own note, and that is where it used
-    // to end: under `--plain` a log line, and under the board — which is how a
-    // person actually runs the dispatcher — a line in `RECENT` that scrolls away
-    // within a pass or two. So the question `session_reuse_ctx` exists to be
-    // asked about, *why did my expensive review conversation not get reused*,
-    // had no answer available afterwards at all. One line per fresh session, in
-    // the place somebody auditing a task already looks.
+    // to end: a plain log line, or, under bare `spoolway`'s dispatch tab, a
+    // line in `RECENT` that scrolls away within a pass or two. So the
+    // question `session_reuse_ctx` exists to be asked about, *why did my
+    // expensive review conversation not get reused*, had no answer available
+    // afterwards at all. One line per fresh session, in the place somebody
+    // auditing a task already looks.
     if let Some(note) = &session_miss {
         task.log_status(&format!("`{}`: {note}", step.id));
     }
@@ -5466,7 +5468,7 @@ struct Started {
     note: Option<String>,
     /// Whether `start_one`'s own stage-move write actually landed, or was
     /// dropped in favour of something — a `spoolway report`, a board
-    /// keypress — that beat it to the task document — see `persist_task`.
+    /// keypress — that beat it to the task — see `persist_task`.
     /// A caller cannot tell an `Ok(Started)`
     /// apart from a dropped write any other way, since `persist_task`
     /// answering `false` is not an error.
@@ -7206,7 +7208,7 @@ mod tests {
     }
 
     /// Acceptance criterion: once every task in a trial settles, its archive
-    /// documents are removed — not merely aged out by `retain.rs`'s own
+    /// tasks are removed — not merely aged out by `retain.rs`'s own
     /// `retention.days` — and the completion report names what was kept
     /// (the source group, the usage rows) and what was removed.
     #[test]
@@ -7235,7 +7237,7 @@ mod tests {
 
         assert!(
             !repo.archive_dir().join("alpha-1.md").exists(),
-            "every arm's archive document is removed once the trial settles"
+            "every arm's archive task is removed once the trial settles"
         );
         assert!(
             !repo.archive_dir().join("beta-1.md").exists(),
@@ -7250,7 +7252,7 @@ mod tests {
         );
         assert!(
             report.contains("removed") && report.contains("2"),
-            "both arms' documents are named as removed: {report}"
+            "both arms' tasks are named as removed: {report}"
         );
         assert!(
             report.contains("read      spoolway eval --by task --trial t1"),
@@ -7261,7 +7263,7 @@ mod tests {
 
     /// Acceptance criterion: a trial is cleaned up either once every arm
     /// settles or when it is explicitly discarded. This is the second
-    /// trigger, and it reaches every document a trial can have left lying
+    /// trigger, and it reaches every task a trial can have left lying
     /// about — one still in the pending directory, one live in the queue,
     /// one already archived — not only the queued ones.
     ///
@@ -7269,7 +7271,7 @@ mod tests {
     /// is the source group the trial forked, and a discard must never touch
     /// it however the arms were named.
     #[test]
-    fn discarding_a_trial_removes_every_arms_document_wherever_it_sits() {
+    fn discarding_a_trial_removes_every_arms_task_wherever_it_sits() {
         let repo = fixture("trial-discard-everywhere");
         std::fs::create_dir_all(repo.archive_dir()).unwrap();
         std::fs::write(
@@ -7296,7 +7298,7 @@ mod tests {
 
         assert!(
             !repo.archive_dir().join("alpha-1.md").exists(),
-            "an arm that already settled loses its archive document"
+            "an arm that already settled loses its archive task"
         );
         assert!(!queued.exists(), "an arm still in the queue loses its own");
         assert!(
@@ -7338,7 +7340,7 @@ mod tests {
     /// while `beta-1` is still in the queue — and inside a trial that
     /// dependent is a sibling arm being discarded in the same breath. Nothing
     /// revisits it afterwards either, since the sweep that ordinarily frees
-    /// an orphaned branch identifies its owner by reading the task document a
+    /// an orphaned branch identifies its owner by reading the task a
     /// discard has just removed.
     #[test]
     fn discarding_a_trial_frees_an_arms_branch_a_sibling_arm_was_holding() {
@@ -12062,10 +12064,14 @@ mod tests {
 
         // And one lane, which is what the ceiling is for.
         write_spend(&repo, "demo", 1_500);
-        let note = Dispatcher::new(&repo, &pipelines, &mux)
+        let ceiling = Dispatcher::new(&repo, &pipelines, &mux)
             .over_output_ceiling()
             .expect("the lane's own spend is over the ceiling");
-        assert!(note.contains("1500 output tokens"), "{note}");
+        assert!(ceiling.note.contains("1500 output tokens"), "{ceiling:?}");
+        assert_eq!(
+            ceiling.reached,
+            "unattended.max_output_tokens reached: 1500 of 1000"
+        );
     }
 
     /// `max_cost_usd`'s own counterpart of the test above: off by default, so
@@ -12113,11 +12119,16 @@ mod tests {
         );
 
         repo.config.unattended.max_cost_usd = 5.0;
-        let note = Dispatcher::new(&repo, &pipelines, &mux)
+        let ceiling = Dispatcher::new(&repo, &pipelines, &mux)
             .over_cost_ceiling()
             .expect("$7.50 spent is over a $5.00 ceiling");
-        assert!(note.contains("$7.50"), "{note}");
-        assert!(note.contains("$5.00"), "{note}");
+        assert!(ceiling.note.contains("$7.50"), "{ceiling:?}");
+        assert!(ceiling.note.contains("$5.00"), "{ceiling:?}");
+        // The dispatch tab's popup line, as step 30 of its mockup draws it.
+        assert_eq!(
+            ceiling.reached,
+            "unattended.max_cost_usd reached: $7.50 of $5.00"
+        );
     }
 
     /// Stopping a dispatcher must not block every task that was in flight.
@@ -12600,11 +12611,11 @@ mod tests {
             report.actions
         );
 
-        // And it survives the pass. The action line is a log line under
-        // `--plain` and a `RECENT` row under the board, gone within a pass or
-        // two either way — so *why an expensive conversation was not reused* had
-        // no answer available after the fact at all. Written to the task, it is
-        // where somebody auditing one already looks.
+        // And it survives the pass. The action line is a plain log line, or a
+        // `RECENT` row under bare `spoolway`'s dispatch tab, gone within a
+        // pass or two either way — so *why an expensive conversation was not
+        // reused* had no answer available after the fact at all. Written to
+        // the task, it is where somebody auditing one already looks.
         let log = repo
             .task("demo")
             .unwrap()
@@ -13427,7 +13438,7 @@ mod tests {
     #[test]
     fn a_task_whose_branch_is_already_checked_out_borrows_that_checkout() {
         let repo = fixture("in-place");
-        // A document may not set its own `branch:` — see
+        // A task may not set its own `branch:` — see
         // `queue::RESERVED_KEYS` — and this fixture never turns on
         // `issue_tracking.key_in_names`, so the branch is the plain
         // `task/<id>` and the "already checked out" case is the fixture root
@@ -17049,7 +17060,7 @@ mod tests {
         );
         // As the trial's only arm, reaching `done` also settles the trial —
         // see `Dispatcher::settle_trial_if_last_arm` — so its archive
-        // document is removed again immediately rather than left standing.
+        // task is removed again immediately rather than left standing.
         assert!(!repo.archive_dir().join("demo.md").exists());
     }
 

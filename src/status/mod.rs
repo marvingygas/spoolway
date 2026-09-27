@@ -1,10 +1,13 @@
-//! The live board `spoolway dispatch` draws in its own terminal, between passes.
+//! The live board bare `spoolway` draws on its dispatch tab, which runs no
+//! pass itself and draws what the dispatcher it started writes (see
+//! [`Phase::Watching`]). `spoolway dispatch` prints a line per pass instead
+//! of drawing a board of its own.
 //!
 //! A renderer, not a participant. Every frame is read from the same two sources
 //! of truth a pass reconciles from — the task files and the live lane list —
 //! plus the usage ledger for what the run has spent. It writes nothing and
-//! decides nothing: a run with the board up and a `--plain` run take exactly
-//! the same decisions in the same order.
+//! decides nothing: the board and the plain run take exactly the same
+//! decisions in the same order.
 //!
 //! Split across three files: this one holds the board's data model — the
 //! `Board` and `Row` themselves, their state transitions and key handling,
@@ -14,7 +17,6 @@
 //! nothing in it reads a task file or a lane list of its own.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
@@ -37,10 +39,10 @@ pub use view::{banner, plain_table};
 // out a second time — see `screen::key_hint`.
 use view::{
     AMBER, RecentEvent, Style, Verdict, clamp_rows, footer, group_totals, masthead, pane_height,
-    pane_width, pause_confirm_panel, resume_confirm_panel, spool_frame, strip_ansi, table, ticker,
+    pane_width, pause_confirm_panel, resume_confirm_panel, spool_frame, table, ticker,
     unqueue_all_confirm_panel, unqueue_confirm_panel,
 };
-pub(crate) use view::{DIM, GUTTER, RESET};
+pub(crate) use view::{DIM, GUTTER, RESET, strip_ansi};
 
 /// The redraw rate every screen's own wait polls stdin at — the jobs screen,
 /// the queue screen, and the dispatcher board, whose wait slices its whole
@@ -122,20 +124,24 @@ pub enum State {
 /// What the run is doing at the moment a frame is drawn, which is the one
 /// thing on the board that no task file records.
 ///
-/// Only [`Phase::Stopping`] changes what is drawn, and it is the one state a
-/// reader cannot infer from a frame sitting in front of them: a board between
-/// passes and a board mid-pass look identical, and how long until the next
-/// pass is not something a person watching can act on. The variants stay
-/// apart anyway — the dispatcher knows which it is in, and a board that had to
-/// guess would be the wrong shape for the next thing anyone wants to show.
+/// A board is only ever drawn one way now: bare `spoolway`'s dispatch tab,
+/// via [`Board::hosted_frame`]. `spoolway dispatch` prints a line per pass
+/// instead of drawing a board of its own, so the phases that once told a
+/// live pass, a wait between passes and the last frame of a stopped run
+/// apart are gone with it — `Watching` is what is left standing.
 #[derive(Clone, Copy)]
 pub enum Phase {
-    /// A pass is in flight right now.
-    Passing,
-    /// Between passes, with the next one due.
-    Waiting,
-    /// The last frame: the queue is empty and the run is ending.
-    Stopping,
+    /// A board no dispatcher is drawing: bare `spoolway`'s dispatch tab,
+    /// which runs no pass of its own. `holder` is the pid holding the
+    /// dispatch lock, if anything does, so the header names the process
+    /// actually dispatching — the child the tab started — rather than the
+    /// screen's own, and says `dispatcher stopped`, with no pid at all, when
+    /// nothing is. `dispatching` is whether the tab has a child up, which is
+    /// what its `enter` would stop rather than start.
+    Watching {
+        holder: Option<u32>,
+        dispatching: bool,
+    },
 }
 
 pub struct Row {
@@ -296,7 +302,10 @@ impl Row {
 /// Held by the dispatch loop, which draws a frame before each pass and then
 /// keeps drawing through the wait until the next one is due. There is no
 /// separate process and no lock to poll — the thing rendering the run *is* the
-/// run, so a frame is up exactly as long as the dispatcher is.
+/// run, so a frame is up exactly as long as the dispatcher is. The one
+/// exception is bare `spoolway`'s dispatch tab, which holds a
+/// [`Board::hosted`] of its own and reads the lock only to name who is
+/// dispatching.
 pub struct Board {
     /// Task id → the stage it was on at the last frame.
     stages: BTreeMap<String, String>,
@@ -350,16 +359,11 @@ pub struct Board {
     /// right, the same way [`render`] already re-seeds a cursor whose row has
     /// left the board.
     ///
-    /// Empty until the first frame, which is drawn before any key is read —
-    /// see the dispatch loop's own draw ahead of its first pass.
+    /// Empty until the first frame.
     drawn: Vec<String>,
 }
 
 impl Board {
-    pub fn new() -> Board {
-        Board::with_term(crate::platform::TermGuard::new())
-    }
-
     fn with_term(term: crate::platform::TermGuard) -> Board {
         Board {
             stages: BTreeMap::new(),
@@ -382,30 +386,65 @@ impl Board {
         Board::with_term(crate::platform::TermGuard::inert())
     }
 
-    /// Draw one frame over whatever is on the terminal.
+    /// A board drawn inside bare `spoolway`'s dispatch tab. Its guard is
+    /// inert for the same reason [`Board::for_test`]'s is, from the other
+    /// side: the screen already holds the terminal's one guard for every
+    /// tab, and a second one restoring on this board's drop would hand the
+    /// terminal back while the other tabs are still drawing on it.
+    pub(crate) fn hosted() -> Board {
+        Board::with_term(crate::platform::TermGuard::inert())
+    }
+
+    /// Whether no confirm panel is open — the one state in which `←`, `→`
+    /// and `q` belong to the screen around the board rather than to the
+    /// panel, which reads every key until it is answered.
+    pub(crate) fn at_rest(&self) -> bool {
+        matches!(self.mode, BoardMode::Browsing)
+    }
+
+    /// One frame for the dispatch tab: [`Board::frame`] under
+    /// [`Phase::Watching`], naming whichever process holds the dispatch lock.
+    /// A lock file that cannot be read reads as nobody holding it, since
+    /// this must never name a live pid it did not see.
     ///
-    /// `phase` is what the header reports the run is doing.
-    ///
-    /// The main screen buffer, not the alternate one: `ctrl-c` is how a run is
-    /// stopped, and it kills this process without unwinding, which would leave
-    /// a terminal stuck in a screen nothing is drawing to. Here the last frame
-    /// simply stays where it is and the shell prompt appears under it.
-    pub fn draw(
+    /// `popup` is the tab's own — a start gate, or why its dispatcher ended
+    /// — drawn over the table the same way the board's confirm panels are.
+    /// The board's own panel wins while one is open: the tab opens no popup
+    /// of its own until the board is at rest.
+    pub(crate) fn hosted_frame(
         &mut self,
         repo: &Repo,
         pipelines: &Pipelines,
-        phase: Phase,
-        out: &mut impl Write,
-    ) -> Result<()> {
-        let frame = self.frame(repo, pipelines, phase)?;
-        let _ = write!(out, "\x1b[2J\x1b[H{frame}");
-        let _ = out.flush();
-        Ok(())
+        dispatching: bool,
+        popup: Option<&[String]>,
+    ) -> Result<String> {
+        let holder = crate::lock::Lock::holder(&repo.lock_file()).unwrap_or(None);
+        let phase = Phase::Watching {
+            holder,
+            dispatching,
+        };
+        self.frame_with(repo, pipelines, phase, popup)
     }
 
     /// One frame, built whole before anything is written so a slow read never
     /// leaves a half-drawn board on screen.
+    ///
+    /// Only the tests below call this directly any more — production code
+    /// always reaches [`Phase::Watching`] through [`Board::hosted_frame`].
+    #[cfg(test)]
     fn frame(&mut self, repo: &Repo, pipelines: &Pipelines, phase: Phase) -> Result<String> {
+        self.frame_with(repo, pipelines, phase, None)
+    }
+
+    /// [`Board::frame`], with `popup` drawn over it wherever the board has
+    /// no panel of its own open — see [`Board::hosted_frame`].
+    fn frame_with(
+        &mut self,
+        repo: &Repo,
+        pipelines: &Pipelines,
+        phase: Phase,
+        popup: Option<&[String]>,
+    ) -> Result<String> {
         // `render` seeds `self.cursor` itself, from the very rows it composes
         // to draw the table — see the seeding block inline in its own body
         // for why — rather than this reading the queue a second time first.
@@ -430,45 +469,56 @@ impl Board {
         // because every other reader of `render`'s output — `draw`, the tests
         // below — wants one whole frame too, and a second return shape here
         // would be for this one caller alone.
-        Ok(match self.mode.panel() {
-            Some(panel) => {
-                // `overlay` reads its target width off line zero and writes
-                // each panel row by walking a target row's own characters —
-                // right for `spoolway queue`'s own frame, whose every row is
-                // one fixed-width pane with no colour under where a picker
-                // lands. This board's rows carry colour throughout — the
-                // state dot, the dimmed footer, the key hint — and `overlay`
-                // counts an escape byte as a column exactly like a visible
-                // one, so it writes at the wrong column and can slice a
-                // `DIM`/`RESET` pair in two, printing what is left of the
-                // code as stray text. A panel carries no colour of its own,
-                // so the frame under one loses its for the frame this draws
-                // — [`strip_ansi`] — and gets it back the moment the panel
-                // closes and the next frame is read fresh.
-                //
-                // Also opens on a blank spacer line, and has other blank
-                // rows through the ticker and the rule below it — a row
-                // `overlay` cannot write into at all, since it only ever
-                // replaces characters a row already has. Padding every row
-                // out to the widest one first, never shorter than
-                // `pane_width()`, gives every row the same floor to write
-                // onto and never truncates anything that already reached it.
-                let stripped: Vec<String> = frame.lines().map(strip_ansi).collect();
-                let width = stripped
-                    .iter()
-                    .map(|line| line.chars().count())
-                    .max()
-                    .unwrap_or(0)
-                    .max(pane_width());
-                let mut lines: Vec<String> = stripped
-                    .iter()
-                    .map(|line| crate::screen::pad_to(line, width))
-                    .collect();
-                crate::screen::overlay(&mut lines, &panel);
-                lines.join("\n")
-            }
-            None => frame,
-        })
+        Ok(
+            match self.mode.panel().or_else(|| popup.map(<[String]>::to_vec)) {
+                Some(panel) => {
+                    // `overlay` reads its target width off line zero and writes
+                    // each panel row by walking a target row's own characters —
+                    // right for `spoolway queue`'s own frame, whose every row is
+                    // one fixed-width pane with no colour under where a picker
+                    // lands. This board's rows carry colour throughout — the
+                    // state dot, the dimmed footer, the key hint — and `overlay`
+                    // counts an escape byte as a column exactly like a visible
+                    // one, so it writes at the wrong column and can slice a
+                    // `DIM`/`RESET` pair in two, printing what is left of the
+                    // code as stray text. A panel carries no colour of its own,
+                    // so the frame under one loses its for the frame this draws
+                    // — [`strip_ansi`] — and gets it back the moment the panel
+                    // closes and the next frame is read fresh.
+                    //
+                    // Also opens on a blank spacer line, and has other blank
+                    // rows through the ticker and the rule below it — a row
+                    // `overlay` cannot write into at all, since it only ever
+                    // replaces characters a row already has. Padding every row
+                    // out to the widest one first, never shorter than
+                    // `pane_width()`, gives every row the same floor to write
+                    // onto and never truncates anything that already reached it.
+                    let stripped: Vec<String> = frame.lines().map(strip_ansi).collect();
+                    let width = stripped
+                        .iter()
+                        .map(|line| line.chars().count())
+                        .max()
+                        .unwrap_or(0)
+                        .max(pane_width());
+                    let mut lines: Vec<String> = stripped
+                        .iter()
+                        .map(|line| crate::screen::pad_to(line, width))
+                        .collect();
+                    // `overlay` only writes into rows the frame already has,
+                    // so a panel taller than the frame under it — the
+                    // dispatch tab's warnings over an empty queue — would
+                    // lose its bottom rows, key line and all. Blank rows
+                    // under the frame give it somewhere to land, with one
+                    // row above and below it to spare.
+                    while lines.len() < panel.len() + 2 {
+                        lines.push(" ".repeat(width));
+                    }
+                    crate::screen::overlay(&mut lines, &panel);
+                    lines.join("\n")
+                }
+                None => frame,
+            },
+        )
     }
 
     /// Apply one key read while the board is up.
@@ -481,7 +531,7 @@ impl Board {
     /// started for it and no still-queued task depends on it, `U` does the
     /// same for every task that has not started. A run-wide key opens a
     /// confirm panel first wherever what it is about to do is not free to
-    /// undo — `u` and `U` open one unconditionally, since writing a document
+    /// undo — `u` and `U` open one unconditionally, since writing a task
     /// back to pending is exactly that — see [`BoardMode`]. With a panel
     /// already open every other key is read by that panel instead: `enter`
     /// confirms whatever it opened and `esc` cancels it, on every panel the
@@ -549,7 +599,7 @@ impl Board {
     /// `o`: open the cursor's task file in an editor, in a pane the
     /// multiplexer opens — a no-op with no cursor or a cursor on a row the
     /// board no longer draws. `repo.task` reads both the queue and the
-    /// archive, so this reaches a done row's document exactly as it does a
+    /// archive, so this reaches a done row's task exactly as it does a
     /// live one — [`render`]'s own composed row list, which [`Board::drawn`]
     /// is taken from, is what lets the cursor land on that row in the first
     /// place. Never blocks: the pane runs the editor on its
@@ -903,7 +953,7 @@ impl Board {
     }
 }
 
-/// The command line `o` runs on a document, everywhere `o` appears.
+/// The command line `o` runs on a task, everywhere `o` appears.
 ///
 /// The same resolution `spoolway config edit` already uses: `$VISUAL`, then
 /// `$EDITOR`, then `vi`. Shared between [`Board::open_cursor`]
@@ -919,9 +969,9 @@ pub(crate) fn editor_command(path: &Path) -> String {
 /// What a `p`, `P`, `R`, `u` or `U` keypress is waiting to be answered — a
 /// panel drawn over the table, and the one thing standing between an
 /// accidental press and the run it would otherwise change. `Default` is
-/// `Browsing`, both for [`Board::new`] and for [`std::mem::take`] inside
-/// [`Board::on_key`], which is what lets each key handler build the mode's
-/// replacement without holding a borrow of `self.mode` open across it.
+/// `Browsing`, both for [`Board::with_term`] and for [`std::mem::take`]
+/// inside [`Board::on_key`], which is what lets each key handler build the
+/// mode's replacement without holding a borrow of `self.mode` open across it.
 #[derive(Default)]
 enum BoardMode {
     #[default]
@@ -947,10 +997,10 @@ enum BoardMode {
     /// unstarted task that reaches it through `depends_on` — see
     /// [`unqueue_chain`] — and `dir`, this run's own [`Repo::pending_dir`],
     /// read once when the panel opened, so its panel can show where the
-    /// documents are about to land without a second lookup at answer time.
+    /// tasks are about to land without a second lookup at answer time.
     /// `chain` still needs a fresh [`Repo::task`] per id to answer with, the
-    /// same as every confirm panel here: a document a moment ago and the
-    /// document now are not guaranteed to be the same file.
+    /// same as every confirm panel here: a task a moment ago and the
+    /// task now are not guaranteed to be the same file.
     ConfirmUnqueue {
         chain: Vec<ChainEntry>,
         dir: PathBuf,
@@ -1279,24 +1329,24 @@ fn unqueue_chain(tasks: &[crate::task::Task], id: &str) -> Vec<ChainEntry> {
         .collect()
 }
 
-/// Move one task's document from the queue back to pending, dropping every
+/// Move one task from the queue back to pending, dropping every
 /// [`crate::commands::RESERVED_KEYS`] field from its frontmatter so `queue
-/// add --from` accepts it exactly as it would a document that had never been
+/// add --from` accepts it exactly as it would a task that had never been
 /// queued — the same fields `queue_add::parse_submission` refuses to see set
-/// on a document coming in.
+/// on a task coming in.
 ///
 /// `Task::save` cannot do this alone: `stage` is a plain `String` with no
 /// `skip_serializing_if`, so it always round-trips, and it is one of the
 /// keys that has to disappear entirely rather than clear to empty. The
 /// frontmatter goes through a bare YAML mapping instead, exactly as
-/// `parse_submission` reads one coming in, so the same keys that document
+/// `parse_submission` reads one coming in, so the same keys that task
 /// path refuses are the ones this path removes.
 ///
 /// Re-reads `id` fresh rather than trusting whatever `Task` a caller already
 /// has — the same reason [`resume_task`] does — and checks `not_started`
 /// again before touching anything: a task this key already refused a moment
 /// ago, or one a second process moved on since the panel opened, is left
-/// exactly where it is rather than risk carrying an archived document back
+/// exactly where it is rather than risk carrying an archived task back
 /// to pending.
 ///
 /// `pub(crate)`: `spoolway queue unqueue` is the third caller, for a task on
@@ -1329,14 +1379,14 @@ pub(crate) fn unqueue_task(repo: &Repo, id: &str) -> Result<()> {
     Ok(())
 }
 
-/// The move itself, shared with `spoolway queue unqueue`: `task`'s document
+/// The move itself, shared with `spoolway queue unqueue`: `task`'s task
 /// written to pending with every reserved key dropped, then its queue file
 /// removed. The caller decides whether `task` may go — the board's `u` and
 /// [`unqueue_task`] only carry a task that has not started, `queue unqueue
 /// --force` one whose checkout it has just torn down — and holds the task's
 /// lock while it does.
 ///
-/// `None` when a document already sits in `pending/` under this id: that is
+/// `None` when a task already sits in `pending/` under this id: that is
 /// a newer draft — a producer re-ran over work already submitted — and
 /// putting the queued copy back on top of it would silently lose that
 /// draft. Nothing is touched in that case.
@@ -1376,7 +1426,7 @@ pub(crate) fn carry_to_pending(repo: &Repo, task: &crate::task::Task) -> Result<
 /// Sets no `parked_from` at all when the task is still on `queued`: `queued`
 /// is not a step any pipeline declares, so a `parked_from: queued` would
 /// never match the step a launch is starting and would never be spent by
-/// `Dispatcher::start_one` — it would sit in the document for the rest of the
+/// `Dispatcher::start_one` — it would sit in the task for the rest of the
 /// run. `resume_target` already answers `queued` itself when nothing names a
 /// step, which is where a task that never started belongs — see
 /// [`build_rows`]'s `paused` arm, which reads the same answer to skip the
@@ -1540,12 +1590,6 @@ fn next_cursor_after_chain(ids: &[String], chain: &[ChainEntry]) -> Option<Strin
     }
 }
 
-impl Default for Board {
-    fn default() -> Board {
-        Board::new()
-    }
-}
-
 /// A row per task, whatever needs a person first.
 ///
 /// The board's own reading of the queue, available to anything that wants the
@@ -1684,20 +1728,32 @@ fn render(
     // the wordmark turns while a lane is running; with nothing running the
     // board holds still, and a still board over a still queue is the truth
     // rather than something to animate over.
-    let header = [
-        match phase {
-            Phase::Stopping => "dispatcher stopped".to_string(),
-            _ => "dispatcher running".to_string(),
-        },
-        format!("pid {}", std::process::id()),
-        version_label(crate::release::installed_newer().as_deref()),
-    ];
+    let version = version_label(crate::release::installed_newer().as_deref());
+    let header = match phase {
+        Phase::Watching {
+            holder: Some(pid), ..
+        } => {
+            vec![
+                "dispatcher running".to_string(),
+                format!("pid {pid}"),
+                version,
+            ]
+        }
+        // Nothing is dispatching, so there is no pid to name — this
+        // process's own would read as a dispatcher that is not there.
+        Phase::Watching { holder: None, .. } => vec!["dispatcher stopped".to_string(), version],
+    };
     let pane = pane_width();
     // One blank row before the lockup, so its ascenders have a margin to sit
     // in rather than landing flush on the pane's own top row. `masthead`
     // stays untouched: `init` prints its banner through the same function and
-    // must not gain a line it never asked for.
-    frame.push('\n');
+    // must not gain a line it never asked for. Inside bare `spoolway`'s
+    // dispatch tab the blank row under the tab strip is that margin already,
+    // and a second one would push the board a row lower than the mockup
+    // draws it.
+    if crate::screen::shell::hosted().is_none() {
+        frame.push('\n');
+    }
     // The spool only turns while something on the board reads `Running` — a
     // lane, a command step, or a row still inside its own handoff grace
     // window — so a queue with nothing to do, and nothing about to, prints
@@ -1779,15 +1835,31 @@ fn render(
     // row on its own, without naming `↑↓`: every screen this project draws
     // leaves the arrows and `q` off its own key line, since a person reads
     // those the same way everywhere.
-    tail.push_str(&format!(
-        "\n{}\n",
-        crate::screen::key_hint(&[
+    //
+    // `q` joins it only inside bare `spoolway`'s dispatch tab, the one place
+    // it quits — see `crate::screen::shell::quit_hint` — and so does `enter`,
+    // the one place it starts or stops dispatching.
+    let enter: &[(&str, &str)] = match phase {
+        Phase::Watching {
+            dispatching: false, ..
+        } => &[("enter", "start dispatching")],
+        Phase::Watching {
+            dispatching: true, ..
+        } => &[("enter", "stop dispatching")],
+    };
+    let keys = [
+        enter,
+        [
             ("o", "open task"),
             ("r/R", "resume / all"),
             ("p/P", "pause / all"),
             ("u/U", "unqueue / all"),
-        ])
-    ));
+        ]
+        .as_slice(),
+        crate::screen::shell::quit_hint(),
+    ]
+    .concat();
+    tail.push_str(&format!("\n{}\n", crate::screen::key_hint(&keys)));
 
     let height = pane_height();
     let rows = match height {
@@ -3353,21 +3425,35 @@ mod tests {
 
         let version = format!("v{}", crate::release::current());
         let mut board = Board::for_test();
-        let waiting = board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
-        assert!(waiting.contains("dispatcher running · "), "{waiting}");
-        assert!(waiting.contains(&format!("· {version}")), "{waiting}");
-        assert!(waiting.contains("→ review"), "{waiting}");
-        assert!(!waiting.contains("next pass"), "{waiting}");
+        let running = board
+            .frame(
+                &repo,
+                &pipelines,
+                Phase::Watching {
+                    holder: Some(1234),
+                    dispatching: true,
+                },
+            )
+            .unwrap();
+        assert!(running.contains("dispatcher running · "), "{running}");
+        assert!(running.contains(&format!("· {version}")), "{running}");
+        assert!(running.contains("→ review"), "{running}");
+        assert!(!running.contains("next pass"), "{running}");
         // The run clock the version replaced. `up ` rather than `up`, which
         // is a substring of ordinary words elsewhere on the frame.
-        assert!(!waiting.contains("· up "), "{waiting}");
-
-        let working = board.frame(&repo, &pipelines, Phase::Passing).unwrap();
-        assert!(!working.contains("pass running"), "{working}");
-        assert!(!working.contains("queue empty"), "{working}");
+        assert!(!running.contains("· up "), "{running}");
 
         // The one phase a frame in front of you cannot be read off the frame.
-        let over = board.frame(&repo, &pipelines, Phase::Stopping).unwrap();
+        let over = board
+            .frame(
+                &repo,
+                &pipelines,
+                Phase::Watching {
+                    holder: None,
+                    dispatching: false,
+                },
+            )
+            .unwrap();
         assert!(over.contains("dispatcher stopped · "), "{over}");
         // A stopped board still says which build it was, which is what
         // somebody reads it for once it has stopped.
@@ -3407,7 +3493,18 @@ mod tests {
         .unwrap();
 
         let mut board = Board::for_test();
-        let frame = strip(&board.frame(&repo, &pipelines, Phase::Waiting).unwrap());
+        let frame = strip(
+            &board
+                .frame(
+                    &repo,
+                    &pipelines,
+                    Phase::Watching {
+                        holder: None,
+                        dispatching: false,
+                    },
+                )
+                .unwrap(),
+        );
         assert!(frame.contains("1 job enabled"), "{frame}");
         assert!(frame.contains("staying up"), "{frame}");
         assert!(!frame.contains("nothing queued"), "{frame}");
@@ -3423,7 +3520,7 @@ mod tests {
 
     /// A task's `url:` frontmatter reaches the group band as a real OSC 8
     /// hyperlink in the frame the board hands back — the whole path from the
-    /// saved document through `Row::issue_url` into the painted bytes, not
+    /// saved task through `Row::issue_url` into the painted bytes, not
     /// just `view::table` exercised in isolation. Stripped, the band is still
     /// the plain heading a group search matches.
     #[test]
@@ -3444,7 +3541,16 @@ mod tests {
         task.save().unwrap();
 
         let mut board = Board::for_test();
-        let frame = board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
+        let frame = board
+            .frame(
+                &repo,
+                &pipelines,
+                Phase::Watching {
+                    holder: None,
+                    dispatching: false,
+                },
+            )
+            .unwrap();
         assert!(
             frame.contains(&format!("▌{OSC8}{url}{ST}proj-12-auth{OSC8}{ST}")),
             "the band should carry the issue hyperlink — {frame}"
@@ -3468,7 +3574,18 @@ mod tests {
         let pipelines = Pipelines::builtin();
 
         let mut board = Board::for_test();
-        let frame = strip(&board.frame(&repo, &pipelines, Phase::Waiting).unwrap());
+        let frame = strip(
+            &board
+                .frame(
+                    &repo,
+                    &pipelines,
+                    Phase::Watching {
+                        holder: None,
+                        dispatching: false,
+                    },
+                )
+                .unwrap(),
+        );
         assert!(
             frame.contains(
                 "[o] open task   [r/R] resume / all   [p/P] pause / all   [u/U] unqueue / all"
@@ -3477,7 +3594,18 @@ mod tests {
         );
 
         add(&repo, "login", &[], Some("implement"));
-        let frame = strip(&board.frame(&repo, &pipelines, Phase::Waiting).unwrap());
+        let frame = strip(
+            &board
+                .frame(
+                    &repo,
+                    &pipelines,
+                    Phase::Watching {
+                        holder: None,
+                        dispatching: false,
+                    },
+                )
+                .unwrap(),
+        );
         assert!(
             frame.contains(
                 "[o] open task   [r/R] resume / all   [p/P] pause / all   [u/U] unqueue / all"
@@ -4155,7 +4283,18 @@ mod tests {
         add(&repo, "login", &[], Some("implement"));
 
         let mut board = Board::for_test();
-        let frame = strip(&board.frame(&repo, &pipelines, Phase::Passing).unwrap());
+        let frame = strip(
+            &board
+                .frame(
+                    &repo,
+                    &pipelines,
+                    Phase::Watching {
+                        holder: None,
+                        dispatching: false,
+                    },
+                )
+                .unwrap(),
+        );
         let header = frame
             .lines()
             .find(|l| l.contains("STATE"))
@@ -4248,7 +4387,7 @@ mod tests {
             RecentEvent::Arrival {
                 at: "14:21".into(),
                 id: "gate-board".into(),
-                step: "document".into(),
+                step: "task".into(),
                 verdict: Verdict::None,
                 position: None,
             },
@@ -4301,7 +4440,16 @@ mod tests {
         add(&repo, "steady", &[], Some("implement"));
 
         let mut board = Board::for_test();
-        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
+        board
+            .frame(
+                &repo,
+                &pipelines,
+                Phase::Watching {
+                    holder: None,
+                    dispatching: false,
+                },
+            )
+            .unwrap();
         assert!(
             board.recent.is_empty(),
             "the board's first frame writes nothing to the ticker"
@@ -4309,7 +4457,16 @@ mod tests {
 
         // A new task enters the queue.
         add(&repo, "newcomer", &[], None);
-        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
+        board
+            .frame(
+                &repo,
+                &pipelines,
+                Phase::Watching {
+                    holder: None,
+                    dispatching: false,
+                },
+            )
+            .unwrap();
         assert!(
             board.recent.is_empty(),
             "a task entering the queue pushes no ticker entry"
@@ -4320,7 +4477,16 @@ mod tests {
         let mut task = repo.task("steady").unwrap();
         task.set_stage("review", None);
         task.save().unwrap();
-        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
+        board
+            .frame(
+                &repo,
+                &pipelines,
+                Phase::Watching {
+                    holder: None,
+                    dispatching: false,
+                },
+            )
+            .unwrap();
         assert!(
             !board.recent.is_empty(),
             "a real step change still reaches the ticker"
@@ -4331,7 +4497,16 @@ mod tests {
         // board rather than moved through a stage this board would see.
         std::fs::remove_file(repo.queue_dir().join("newcomer.md")).unwrap();
         let before = board.recent.len();
-        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
+        board
+            .frame(
+                &repo,
+                &pipelines,
+                Phase::Watching {
+                    holder: None,
+                    dispatching: false,
+                },
+            )
+            .unwrap();
         assert_eq!(
             board.recent.len(),
             before,
@@ -4392,7 +4567,16 @@ mod tests {
 
         let mut board = Board::for_test();
         assert_eq!(board.cursor, None, "nothing has drawn a frame yet");
-        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
+        board
+            .frame(
+                &repo,
+                &pipelines,
+                Phase::Watching {
+                    holder: None,
+                    dispatching: false,
+                },
+            )
+            .unwrap();
         assert_eq!(board.cursor.as_deref(), Some("login"));
     }
 
@@ -4410,7 +4594,16 @@ mod tests {
         add(&repo, "signup", &[], Some("implement"));
 
         let mut board = Board::for_test();
-        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
+        board
+            .frame(
+                &repo,
+                &pipelines,
+                Phase::Watching {
+                    holder: None,
+                    dispatching: false,
+                },
+            )
+            .unwrap();
         assert_eq!(board.drawn, vec!["login".to_string(), "signup".to_string()]);
 
         std::fs::remove_dir_all(repo.queue_dir()).unwrap();
@@ -4439,7 +4632,16 @@ mod tests {
         add(&repo, "other", &[], None);
 
         let mut board = Board::for_test();
-        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
+        board
+            .frame(
+                &repo,
+                &pipelines,
+                Phase::Watching {
+                    holder: None,
+                    dispatching: false,
+                },
+            )
+            .unwrap();
         board.cursor = Some("login".to_string());
 
         // "login" finishes and leaves the queue; nothing else in "auth" is
@@ -4447,7 +4649,16 @@ mod tests {
         // than lingering as a done row.
         std::fs::remove_file(repo.queue_dir().join("login.md")).unwrap();
 
-        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
+        board
+            .frame(
+                &repo,
+                &pipelines,
+                Phase::Watching {
+                    holder: None,
+                    dispatching: false,
+                },
+            )
+            .unwrap();
         assert_eq!(
             board.cursor.as_deref(),
             Some("other"),
@@ -4457,11 +4668,11 @@ mod tests {
 
     /// The cursor walks the archived rows the board draws too, not just the
     /// live queue: with a group holding one live task and one done one, `↓`
-    /// from the live row reaches the done row, and `o` opens its document by
+    /// from the live row reaches the done row, and `o` opens its task by
     /// way of `repo.task`'s own archive lookup rather than refusing because
     /// the queue no longer holds the file.
     #[test]
-    fn the_cursor_reaches_a_done_row_and_o_opens_its_document() {
+    fn the_cursor_reaches_a_done_row_and_o_opens_its_task() {
         let mut repo = fixture("cursor-reaches-done-row");
         repo.config.dispatch.backend = crate::config::Backend::Headless;
         let pipelines = Pipelines::builtin();
@@ -4474,7 +4685,16 @@ mod tests {
         .unwrap();
 
         let mut board = Board::for_test();
-        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
+        board
+            .frame(
+                &repo,
+                &pipelines,
+                Phase::Watching {
+                    holder: None,
+                    dispatching: false,
+                },
+            )
+            .unwrap();
         assert_eq!(
             board.cursor.as_deref(),
             Some("login"),
@@ -4626,7 +4846,16 @@ mod tests {
         let mut board = Board::for_test();
         // The cursor walks the last frame's own rows, so the board has to
         // have drawn one — the dispatch loop draws before it reads a key.
-        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
+        board
+            .frame(
+                &repo,
+                &pipelines,
+                Phase::Watching {
+                    holder: None,
+                    dispatching: false,
+                },
+            )
+            .unwrap();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -4656,7 +4885,16 @@ mod tests {
         let mut board = Board::for_test();
         // The cursor walks the last frame's own rows, so the board has to
         // have drawn one — the dispatch loop draws before it reads a key.
-        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
+        board
+            .frame(
+                &repo,
+                &pipelines,
+                Phase::Watching {
+                    holder: None,
+                    dispatching: false,
+                },
+            )
+            .unwrap();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -4687,7 +4925,16 @@ mod tests {
         let mut board = Board::for_test();
         // The cursor walks the last frame's own rows, so the board has to
         // have drawn one — the dispatch loop draws before it reads a key.
-        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
+        board
+            .frame(
+                &repo,
+                &pipelines,
+                Phase::Watching {
+                    holder: None,
+                    dispatching: false,
+                },
+            )
+            .unwrap();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -4768,7 +5015,16 @@ mod tests {
         let mut board = Board::for_test();
         // The cursor walks the last frame's own rows, so the board has to
         // have drawn one — the dispatch loop draws before it reads a key.
-        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
+        board
+            .frame(
+                &repo,
+                &pipelines,
+                Phase::Watching {
+                    holder: None,
+                    dispatching: false,
+                },
+            )
+            .unwrap();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -4796,7 +5052,16 @@ mod tests {
         let mut board = Board::for_test();
         // The cursor walks the last frame's own rows, so the board has to
         // have drawn one — the dispatch loop draws before it reads a key.
-        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
+        board
+            .frame(
+                &repo,
+                &pipelines,
+                Phase::Watching {
+                    holder: None,
+                    dispatching: false,
+                },
+            )
+            .unwrap();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -4812,8 +5077,35 @@ mod tests {
         let task = repo.task("gate-board").unwrap();
         assert_eq!(task.stage(), crate::pipeline::PAUSED);
         assert_eq!(task.front.paused_at.as_deref(), Some("implement"));
-        let frame = board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
+        let frame = board
+            .frame(
+                &repo,
+                &pipelines,
+                Phase::Watching {
+                    holder: None,
+                    dispatching: false,
+                },
+            )
+            .unwrap();
         assert!(!frame.contains("┌─"), "{frame}");
+    }
+
+    /// A popup taller than the frame under it — the dispatch tab's warnings
+    /// over an empty queue — still draws whole, down to its key line: the
+    /// frame grows blank rows for it rather than cutting it off.
+    #[test]
+    fn a_popup_taller_than_the_frame_still_draws_its_key_line() {
+        let repo = fixture("popup-taller-than-frame");
+        let pipelines = Pipelines::builtin();
+        let body: Vec<String> = (0..40).map(|i| format!("finding {i}")).collect();
+        let panel = crate::screen::panel("before dispatching", &body, "[enter] its own key");
+
+        let mut board = Board::for_test();
+        let frame = board
+            .hosted_frame(&repo, &pipelines, false, Some(&panel))
+            .unwrap();
+        assert!(frame.contains("finding 39"), "{frame}");
+        assert!(frame.contains("[enter] its own key"), "{frame}");
     }
 
     /// A confirm panel is drawn in plain text over a frame the table beneath
@@ -4839,7 +5131,16 @@ mod tests {
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Char('R'))
             .unwrap();
-        let frame = board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
+        let frame = board
+            .frame(
+                &repo,
+                &pipelines,
+                Phase::Watching {
+                    holder: None,
+                    dispatching: false,
+                },
+            )
+            .unwrap();
         assert!(
             frame.contains("resume all"),
             "the panel itself must have opened: {frame}"
@@ -4893,7 +5194,18 @@ mod tests {
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Char('P'))
             .unwrap();
-        let frame = strip(&board.frame(&repo, &pipelines, Phase::Waiting).unwrap());
+        let frame = strip(
+            &board
+                .frame(
+                    &repo,
+                    &pipelines,
+                    Phase::Watching {
+                        holder: None,
+                        dispatching: false,
+                    },
+                )
+                .unwrap(),
+        );
         assert!(frame.contains("pause all"), "{frame}");
         assert!(frame.contains("login · handover"), "{frame}");
         assert!(frame.contains("command"), "{frame}");
@@ -4942,12 +5254,32 @@ mod tests {
         let mut board = Board::for_test();
         // The cursor walks the last frame's own rows, so the board has to
         // have drawn one — the dispatch loop draws before it reads a key.
-        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
+        board
+            .frame(
+                &repo,
+                &pipelines,
+                Phase::Watching {
+                    holder: None,
+                    dispatching: false,
+                },
+            )
+            .unwrap();
         assert_eq!(board.cursor.as_deref(), Some("login"));
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Char('p'))
             .unwrap();
-        let frame = strip(&board.frame(&repo, &pipelines, Phase::Waiting).unwrap());
+        let frame = strip(
+            &board
+                .frame(
+                    &repo,
+                    &pipelines,
+                    Phase::Watching {
+                        holder: None,
+                        dispatching: false,
+                    },
+                )
+                .unwrap(),
+        );
         assert!(frame.contains("pause login"), "{frame}");
         assert!(!frame.contains("pause all"), "{frame}");
         assert!(frame.contains("handover"), "{frame}");
@@ -4990,7 +5322,18 @@ mod tests {
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Char('P'))
             .unwrap();
-        let frame = strip(&board.frame(&repo, &pipelines, Phase::Waiting).unwrap());
+        let frame = strip(
+            &board
+                .frame(
+                    &repo,
+                    &pipelines,
+                    Phase::Watching {
+                        holder: None,
+                        dispatching: false,
+                    },
+                )
+                .unwrap(),
+        );
         assert!(frame.contains("pause all"), "{frame}");
         assert!(frame.contains("login · implement"), "{frame}");
         assert!(frame.contains("agent"), "{frame}");
@@ -5041,7 +5384,16 @@ mod tests {
         let mut board = Board::for_test();
         // The cursor walks the last frame's own rows, so the board has to
         // have drawn one — the dispatch loop draws before it reads a key.
-        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
+        board
+            .frame(
+                &repo,
+                &pipelines,
+                Phase::Watching {
+                    holder: None,
+                    dispatching: false,
+                },
+            )
+            .unwrap();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -5050,7 +5402,18 @@ mod tests {
             .on_key(&repo, &pipelines, crate::screen::Key::Char('p'))
             .unwrap();
 
-        let frame = strip(&board.frame(&repo, &pipelines, Phase::Waiting).unwrap());
+        let frame = strip(
+            &board
+                .frame(
+                    &repo,
+                    &pipelines,
+                    Phase::Watching {
+                        holder: None,
+                        dispatching: false,
+                    },
+                )
+                .unwrap(),
+        );
         assert!(frame.contains("pause login"), "{frame}");
         assert!(frame.contains("implement"), "{frame}");
         assert!(frame.contains("agent"), "{frame}");
@@ -5087,7 +5450,16 @@ mod tests {
         let mut board = Board::for_test();
         // The cursor walks the last frame's own rows, so the board has to
         // have drawn one — the dispatch loop draws before it reads a key.
-        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
+        board
+            .frame(
+                &repo,
+                &pipelines,
+                Phase::Watching {
+                    holder: None,
+                    dispatching: false,
+                },
+            )
+            .unwrap();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -5120,7 +5492,16 @@ mod tests {
         let mut board = Board::for_test();
         // The cursor walks the last frame's own rows, so the board has to
         // have drawn one — the dispatch loop draws before it reads a key.
-        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
+        board
+            .frame(
+                &repo,
+                &pipelines,
+                Phase::Watching {
+                    holder: None,
+                    dispatching: false,
+                },
+            )
+            .unwrap();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -5210,7 +5591,16 @@ mod tests {
         let mut board = Board::for_test();
         // The cursor walks the last frame's own rows, so the board has to
         // have drawn one — the dispatch loop draws before it reads a key.
-        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
+        board
+            .frame(
+                &repo,
+                &pipelines,
+                Phase::Watching {
+                    holder: None,
+                    dispatching: false,
+                },
+            )
+            .unwrap();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -5246,7 +5636,16 @@ mod tests {
         let mut board = Board::for_test();
         // The cursor walks the last frame's own rows, so the board has to
         // have drawn one — the dispatch loop draws before it reads a key.
-        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
+        board
+            .frame(
+                &repo,
+                &pipelines,
+                Phase::Watching {
+                    holder: None,
+                    dispatching: false,
+                },
+            )
+            .unwrap();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -5430,7 +5829,18 @@ mod tests {
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Char('p'))
             .unwrap();
-        let frame = strip(&board.frame(&repo, &pipelines, Phase::Waiting).unwrap());
+        let frame = strip(
+            &board
+                .frame(
+                    &repo,
+                    &pipelines,
+                    Phase::Watching {
+                        holder: None,
+                        dispatching: false,
+                    },
+                )
+                .unwrap(),
+        );
         assert!(frame.contains("pause stuck"), "{frame}");
         assert_eq!(
             repo.task("stuck").unwrap().stage(),
@@ -5480,7 +5890,18 @@ mod tests {
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Char('P'))
             .unwrap();
-        let frame = strip(&board.frame(&repo, &pipelines, Phase::Waiting).unwrap());
+        let frame = strip(
+            &board
+                .frame(
+                    &repo,
+                    &pipelines,
+                    Phase::Watching {
+                        holder: None,
+                        dispatching: false,
+                    },
+                )
+                .unwrap(),
+        );
         assert!(frame.contains("login · handover"), "{frame}");
         assert!(!frame.contains("more task"), "{frame}");
         assert!(!frame.contains("nothing"), "{frame}");
@@ -5505,7 +5926,7 @@ mod tests {
 
     /// `u` on a queued row with nothing depending on it opens a panel naming
     /// the task and the pending path it would land at, and answering `u`
-    /// moves the document there with every reserved key gone from its
+    /// moves the task there with every reserved key gone from its
     /// frontmatter — accepted unchanged by a fresh `queue add --from`.
     #[test]
     fn pressing_u_on_an_unstarted_task_moves_it_back_to_pending() {
@@ -5517,7 +5938,16 @@ mod tests {
         let mut board = Board::for_test();
         // The cursor walks the last frame's own rows, so the board has to
         // have drawn one — the dispatch loop draws before it reads a key.
-        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
+        board
+            .frame(
+                &repo,
+                &pipelines,
+                Phase::Watching {
+                    holder: None,
+                    dispatching: false,
+                },
+            )
+            .unwrap();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -5525,7 +5955,18 @@ mod tests {
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Char('u'))
             .unwrap();
-        let frame = strip(&board.frame(&repo, &pipelines, Phase::Waiting).unwrap());
+        let frame = strip(
+            &board
+                .frame(
+                    &repo,
+                    &pipelines,
+                    Phase::Watching {
+                        holder: None,
+                        dispatching: false,
+                    },
+                )
+                .unwrap(),
+        );
         assert!(frame.contains("unqueue chain-refusals"), "{frame}");
         assert!(frame.contains("chain-refusals.md"), "{frame}");
         assert!(frame.contains("[enter] unqueue it"), "{frame}");
@@ -5550,14 +5991,14 @@ mod tests {
 
         // `spoolway task contract --from` — the acceptance criterion's own
         // words — runs the same validation `queue add --from` does and
-        // writes nothing; it has to accept the document exactly as it is.
+        // writes nothing; it has to accept the task exactly as it is.
         let contract_args = crate::cli::TaskContractArgs {
             from: vec![pending_doc.display().to_string()],
             base: None,
         };
         crate::commands::task_contract(&repo, &pipelines, &contract_args, &repo.root).unwrap();
 
-        // And the document a fresh `queue add --from` accepts unchanged,
+        // And the task a fresh `queue add --from` accepts unchanged,
         // exactly as it did the first time — so it can be queued again
         // without editing it by hand.
         let queue_args = crate::cli::QueueAddArgs {
@@ -5579,7 +6020,16 @@ mod tests {
         let mut board = Board::for_test();
         // The cursor walks the last frame's own rows, so the board has to
         // have drawn one — the dispatch loop draws before it reads a key.
-        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
+        board
+            .frame(
+                &repo,
+                &pipelines,
+                Phase::Watching {
+                    holder: None,
+                    dispatching: false,
+                },
+            )
+            .unwrap();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -5606,7 +6056,16 @@ mod tests {
         let mut board = Board::for_test();
         // The cursor walks the last frame's own rows, so the board has to
         // have drawn one — the dispatch loop draws before it reads a key.
-        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
+        board
+            .frame(
+                &repo,
+                &pipelines,
+                Phase::Watching {
+                    holder: None,
+                    dispatching: false,
+                },
+            )
+            .unwrap();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -5614,7 +6073,18 @@ mod tests {
             .on_key(&repo, &pipelines, crate::screen::Key::Char('u'))
             .unwrap();
 
-        let frame = strip(&board.frame(&repo, &pipelines, Phase::Waiting).unwrap());
+        let frame = strip(
+            &board
+                .frame(
+                    &repo,
+                    &pipelines,
+                    Phase::Watching {
+                        holder: None,
+                        dispatching: false,
+                    },
+                )
+                .unwrap(),
+        );
         assert!(!frame.contains("unqueue under-way"), "{frame}");
         assert_eq!(repo.task("under-way").unwrap().stage(), "implement");
     }
@@ -5632,7 +6102,16 @@ mod tests {
         let mut board = Board::for_test();
         // The cursor walks the last frame's own rows, so the board has to
         // have drawn one — the dispatch loop draws before it reads a key.
-        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
+        board
+            .frame(
+                &repo,
+                &pipelines,
+                Phase::Watching {
+                    holder: None,
+                    dispatching: false,
+                },
+            )
+            .unwrap();
         // `drop-walk` is the dependency, so it sorts first, and the frame
         // above already landed the cursor on it.
         assert_eq!(board.cursor.as_deref(), Some("drop-walk"));
@@ -5640,9 +6119,20 @@ mod tests {
             .on_key(&repo, &pipelines, crate::screen::Key::Char('u'))
             .unwrap();
 
-        let frame = strip(&board.frame(&repo, &pipelines, Phase::Waiting).unwrap());
+        let frame = strip(
+            &board
+                .frame(
+                    &repo,
+                    &pipelines,
+                    Phase::Watching {
+                        holder: None,
+                        dispatching: false,
+                    },
+                )
+                .unwrap(),
+        );
         assert!(frame.contains("unqueue drop-walk"), "{frame}");
-        assert!(frame.contains("2 documents go back to:"), "{frame}");
+        assert!(frame.contains("2 tasks go back to:"), "{frame}");
         assert!(frame.contains("drop-walk"), "{frame}");
         assert!(
             frame.contains("chain-refusals   (depends on drop-walk)"),
@@ -5682,15 +6172,35 @@ mod tests {
         let mut board = Board::for_test();
         // The cursor walks the last frame's own rows, so the board has to
         // have drawn one — the dispatch loop draws before it reads a key.
-        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
+        board
+            .frame(
+                &repo,
+                &pipelines,
+                Phase::Watching {
+                    holder: None,
+                    dispatching: false,
+                },
+            )
+            .unwrap();
         assert_eq!(board.cursor.as_deref(), Some("alpha"));
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Char('u'))
             .unwrap();
 
-        let frame = strip(&board.frame(&repo, &pipelines, Phase::Waiting).unwrap());
+        let frame = strip(
+            &board
+                .frame(
+                    &repo,
+                    &pipelines,
+                    Phase::Watching {
+                        holder: None,
+                        dispatching: false,
+                    },
+                )
+                .unwrap(),
+        );
         assert!(frame.contains("unqueue alpha"), "{frame}");
-        assert!(frame.contains("3 documents go back to:"), "{frame}");
+        assert!(frame.contains("3 tasks go back to:"), "{frame}");
         assert!(frame.contains("beta   (depends on alpha)"), "{frame}");
         assert!(frame.contains("gamma   (depends on beta)"), "{frame}");
 
@@ -5721,7 +6231,16 @@ mod tests {
         let mut board = Board::for_test();
         // The cursor walks the last frame's own rows, so the board has to
         // have drawn one — the dispatch loop draws before it reads a key.
-        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
+        board
+            .frame(
+                &repo,
+                &pipelines,
+                Phase::Watching {
+                    holder: None,
+                    dispatching: false,
+                },
+            )
+            .unwrap();
         assert_eq!(board.cursor.as_deref(), Some("chain-refusals"));
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Char('u'))
@@ -5747,7 +6266,16 @@ mod tests {
         let mut board = Board::for_test();
         // The cursor walks the last frame's own rows, so the board has to
         // have drawn one — the dispatch loop draws before it reads a key.
-        board.frame(&repo, &pipelines, Phase::Waiting).unwrap();
+        board
+            .frame(
+                &repo,
+                &pipelines,
+                Phase::Watching {
+                    holder: None,
+                    dispatching: false,
+                },
+            )
+            .unwrap();
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Down)
             .unwrap();
@@ -5778,7 +6306,18 @@ mod tests {
         board
             .on_key(&repo, &pipelines, crate::screen::Key::Char('U'))
             .unwrap();
-        let frame = strip(&board.frame(&repo, &pipelines, Phase::Waiting).unwrap());
+        let frame = strip(
+            &board
+                .frame(
+                    &repo,
+                    &pipelines,
+                    Phase::Watching {
+                        holder: None,
+                        dispatching: false,
+                    },
+                )
+                .unwrap(),
+        );
         assert!(frame.contains("unqueue all"), "{frame}");
         assert!(frame.contains("2 tasks have not started"), "{frame}");
         // Both unstarted ids appear, one per line — the running task is not
@@ -5858,7 +6397,18 @@ mod tests {
             .unwrap();
 
         // A gate is among them, so nothing moved yet — a panel names it.
-        let frame = strip(&board.frame(&repo, &pipelines, Phase::Waiting).unwrap());
+        let frame = strip(
+            &board
+                .frame(
+                    &repo,
+                    &pipelines,
+                    Phase::Watching {
+                        holder: None,
+                        dispatching: false,
+                    },
+                )
+                .unwrap(),
+        );
         assert!(frame.contains("resume all"), "{frame}");
         assert!(frame.contains("gate-board"), "{frame}");
         assert_eq!(

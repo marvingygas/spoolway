@@ -1,23 +1,23 @@
 ---
 name: spoolway-tasks
-description: Cut an already-approved shape into task documents in the pending directory — gather each pipeline's own contract, route each subject to one before sizing it, offer the shape, write the documents, verify the chain and its `last:` step, and prove the set with `spoolway task contract`. Invoked from another skill's own step, such as spoolway-plan's step 7 once a plan is approved, or run directly once a shape is already agreed.
+description: Cut an already-approved shape into tasks in the pending directory — gather each pipeline's own contract, route each subject to one before sizing it, offer the shape, write the tasks, verify the chain and its `last:` step, and prove the set with `spoolway task contract`. Invoked from another skill's own step, such as spoolway-plan's step 7 once a plan is approved, or run directly once a shape is already agreed.
 ---
 
 # spoolway-tasks
 
-Turn an agreed shape into the task documents that carry it — the one procedure every caller
+Turn an agreed shape into the tasks that carry it — the one procedure every caller
 that cuts a breakdown shares, so a second caller does not drift from the first the day either
 is fixed. Unlike the skills that call it, this one carries no invocation restriction in its
 frontmatter: it has to be reachable from inside another skill's own procedure, not only from a
 person's own prompt.
 
-A task is a document, and nothing else. It goes in the pending directory —
+A task is a markdown file, and nothing else. It goes in the pending directory —
 `~/.spoolway/<project>/pending/<task-id>.md`, `<project>` being the basename of the repo
 root — where `spoolway queue` reads it. Nothing is appended to whatever page or record the
 shape came from.
 
 **Refuse to re-cut a plan whose tasks already exist.** `ls ~/.spoolway/<project>/pending/`
-and `spoolway group list`: a document still pending, or a task of this group still in the
+and `spoolway group list`: a task still pending, or a task of this group still in the
 queue, means the breakdown is already out there. A further change is a new plan with a group
 of its own, or a revision above the tasks, not a re-cut.
 
@@ -99,14 +99,14 @@ reading the file whole.
    ```
 
    Number the tasks from 1 in `depends_on` order, so the chain reads down the page.
-   `<task-id>` is the id the document will carry, not a prose title. `<size>` is `small`,
+   `<task-id>` is the id the task will carry, not a prose title. `<size>` is `small`,
    `medium` or `large` — the sizing assumption you just made, put where a person can see it,
    so a `large` where they expected two tasks is something they can turn down by picking a
    different count. Line the three columns up with spaces, pipeline last, and wrap the
    sentences under each task at around 48 characters, because a narrow terminal is what reads
    them.
 
-3. **Write one document per task**, with **Write**, at
+3. **Write one file per task**, with **Write**, at
    `~/.spoolway/<project>/pending/<task-id>.md`. Frontmatter first, then the body in the shape
    step 1's contract already printed for this task's own pipeline — same headings, same order
    as the `body` field's `.spoolway/templates/tasks/<pipeline>.md`, with every `[[bracketed]]`
@@ -116,7 +116,7 @@ reading the file whole.
    un-bracketed guidance paragraph — "Three to five facts, one line each. …" under `## Context`,
    "Out of scope. Doing any of these is a review failure, not a bonus." under `## Non-goals`,
    "Read these before you start. …" under `## References`, and the like: that prose is an
-   instruction to you, not words for the finished document, and it is replaced by this task's
+   instruction to you, not words for the finished task, and it is replaced by this task's
    own answer or dropped with the rest of an unused heading — never left standing as if the
    task itself said it:
 
@@ -131,7 +131,7 @@ reading the file whole.
      commit's subject, as the pull request's title where nothing else sets one, and as the line
      the queue screen draws under the task — so the sentence still has to say what the task is
      for on its own.
-   - `group` — **the same string on every document of this breakdown**, read verbatim and
+   - `group` — **the same string on every task of this breakdown**, read verbatim and
      never a path. It is what makes them one row on the queue screen, one selection, and one
      tab at run time. The plan's own slug is the obvious value — the slug alone, with the
      `<YYYY-MM-DD>-` of the plan file's own name off it. A group carrying a date pins the
@@ -146,7 +146,7 @@ reading the file whole.
    - `depends_on`, `pipeline`, and `parallel: true` on each half of a deliberate fan.
 
    The body's `## Mockup` copies in the steps that task owns, from the calling record's own
-   Mockup, only when the task changes something a person opens. Never paste a document's
+   Mockup, only when the task changes something a person opens. Never paste a task's
    contents into the body — name the path instead. Include an end-to-end coverage line naming
    a test reached, or "none, and why". Never write an instruction to *run* anything — a lane
    reading it will try to.
@@ -154,18 +154,18 @@ reading the file whole.
    **Write every line of it in plain English.** One thing per sentence, in the shortest words
    that carry it — no story, no build-up, no buzzwords, and no reaching verbs: "reads",
    "writes", "moves", never "orchestrates", "leverages", "unlocks". Jargon costs more here
-   than on a plan page, because the reader is a lane holding nothing but this document: name
+   than on a plan page, because the reader is a lane holding nothing but this task: name
    a thing the way the code names it, and spell out anything the repo has not already named.
    Complete is the bar rather than terse — but a sentence that adds no fact is still cut.
 
-4. **Verify the shape.** Walk the `depends_on` of the documents you just wrote: a line —
+4. **Verify the shape.** Walk the `depends_on` of the tasks you just wrote: a line —
    exactly one task with no dependency, one with no dependent — except where two are
    `parallel: true`, a chosen gap. **A join has to be fixed before you go on**: re-run step 2
    rather than patch ids after the fact.
 
    Whether two tasks are safe to run side by side is yours to judge from what each one
    changes, not from a shared file — spoolway reports no overlap of its own, and `enter`
-   writes both documents straight through with no `depends_on` invented. So say the pair out
+   writes both tasks straight through with no `depends_on` invented. So say the pair out
    loud to the caller if you judged them safe beside each other on a shared file, and never
    tell them something downstream will check it; do not invent a section for it.
 
@@ -177,9 +177,9 @@ reading the file whole.
    every other task in the chain walks straight past. Re-route that one task to the first
    pipeline from step 1's gathering that carries a `last-of-chain` step — there is no project
    default to prefer over the rest — and say the swap out loud to the caller instead of just
-   writing a different `pipeline:` into its document.
+   writing a different `pipeline:` into its task.
 
-5. **Prove the documents.** `spoolway task contract --from ~/.spoolway/<project>/pending` —
+5. **Prove the tasks.** `spoolway task contract --from ~/.spoolway/<project>/pending` —
    the same validation `queue add --from` runs, stopping short of the save. Fix what it
    reports, re-run until it passes, never mention the loop to the human.
 
@@ -189,8 +189,8 @@ reading the file whole.
 ## Guardrails
 
 - Never invent a goal, criterion or reference the shape it came from doesn't support, and
-  never leave a document as the unfilled skeleton.
-- Never write a document anywhere but the pending directory, and never write anything else
-  there — it is a queue of task documents, not a scratch directory.
-- Never call `spoolway queue add` or start a dispatcher here — writing a document is not
+  never leave a task as the unfilled skeleton.
+- Never write a task anywhere but the pending directory, and never write anything else
+  there — it is a queue of tasks, not a scratch directory.
+- Never call `spoolway queue add` or start a dispatcher here — writing a task is not
   queueing it; that is the screen's job, done separately by a human.

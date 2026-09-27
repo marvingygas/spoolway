@@ -36,7 +36,7 @@ add model costs or depend on an agent's judgment.
 ## How does it work?
 
 spoolway gives each agent a system prompt that tells it how to report its outcome with
-`spoolway report`. The task document carries context between steps. Through herdr, agents can
+`spoolway report`. The task carries context between steps. Through herdr, agents can
 interact with one another across harnesses.
 
 An agent can report four outcomes:
@@ -107,13 +107,13 @@ spoolway init
 
 ### 2. Create queueable tasks
 
-Use `/spoolway-tasks` to cut an agreed plan or any other defined scope into Markdown task
-documents. It assigns each task to a suitable pipeline and writes the documents to
+Use `/spoolway-tasks` to cut an agreed plan or any other defined scope into Markdown tasks.
+It assigns each task to a suitable pipeline and writes the tasks to
 `~/.spoolway/<label>-<id>/pending/`. You can create specialized pipelines for different kinds
 of work. If you want help shaping the work first, use `/spoolway-plan`.
 
 You can also create tasks with your own skills. This command prints the frontmatter
-each task document must carry:
+each task must carry:
 
 ```
 spoolway task contract
@@ -122,21 +122,25 @@ spoolway task contract
 ### 3. Queue
 
 ```
-spoolway queue
+spoolway
 ```
 
 <img src="docs/screenshots/queue.png" alt="the queue screen">
 
-The queue groups pending tasks. Select a group and press `enter` to queue it.
+Bare `spoolway` opens on the queue tab, which groups pending tasks. Select a group and press
+`enter` to queue it.
 
 ### 4. Dispatch
 
 ```
 herdr
-spoolway dispatch
+spoolway
 ```
 
 <img src="docs/screenshots/dispatch.png" alt="the dispatcher board">
+
+`←` from the queue tab opens the dispatch tab. Press `enter` there to start dispatching, or run
+`spoolway dispatch` from a script to print a line per pass instead of drawing the board.
 
 Every task on the board is in one of a few states:
 
@@ -235,10 +239,12 @@ dispatcher stays up on an empty queue. A `spoolway dispatch` left running overni
 job needs.
 
 ```
-spoolway jobs              # the screen: write, edit, pause, delete, or fire a job
 spoolway jobs list         # every job, its schedule, and when it fires next
 spoolway jobs run <name>   # fire one now, ignoring its schedule
 ```
+
+Bare `spoolway` opens the jobs tab, the only place a job is written, edited, paused, resumed or
+deleted.
 
 <img src="docs/screenshots/jobs.png" alt="the jobs screen">
 
@@ -279,7 +285,7 @@ Event hooks can sync tasks with an issue tracker. Sample scripts for GitHub and 
 | Event | When it fires |
 |---|---|
 | `fetch` | `spoolway issue show <ref>` reads one issue out of the tracker |
-| `open` | `spoolway queue add` opens a ticket per document |
+| `open` | `spoolway queue add` opens a ticket per task |
 | `queued` | A task arrives in the queue |
 | `blocked` | A task comes to rest on `blocked` |
 | `paused` | A task arrives on the persisted `paused` stage |
@@ -369,9 +375,9 @@ pass rate and price.
 spoolway eval
 ```
 
-The eval screen opens on the lanes table, grouped by pipeline. `tab` switches to the directory
-table, `f` filters, and `e` exports CSV. `spoolway eval --by version` compares a pipeline's
-versions.
+`spoolway eval` prints the lanes table, grouped by pipeline. `spoolway eval --by version`
+compares a pipeline's versions. Bare `spoolway`'s eval tab opens the same table interactively:
+`tab` switches to the directory table, `f` filters, and `e` exports CSV.
 
 ## Documentation
 

@@ -1,23 +1,23 @@
-//! What the queue screen reads: task documents waiting in one flat
+//! What the queue screen reads: tasks waiting in one flat
 //! directory, gathered into the groups they name.
 //!
 //! spoolway has stopped knowing what a plan is. A producer — the shipped
 //! `/spoolway-plan` skill, a Jira ticket, a GitHub issue, a script — writes
-//! whole task documents into [`Repo::pending_dir`], and that directory is
+//! whole tasks into [`Repo::pending_dir`], and that directory is
 //! the main thing the screen scans. [`Repo::queue_dir`] and
 //! [`Repo::archive_dir`] are the other two: submitting a group deletes its
-//! pending documents (`queue::finish_submit`), so a group already queued has
+//! pending tasks (`queue::finish_submit`), so a group already queued has
 //! nothing left under `pending_dir` at all, and a task the pipeline ran to
 //! the end moves out of the queue directory into the archive one
 //! (`teardown`). Either way a row is built straight from whichever
-//! directory still holds the task's document — see [`list_groups`]. Nothing
-//! here parses a page, a card or a chip; a document is the unit, and its own
+//! directory still holds the task — see [`list_groups`]. Nothing
+//! here parses a page, a card or a chip; a task is the unit, and its own
 //! frontmatter is the whole of what this module reads.
 //!
 //! The reading is deliberately shallow. [`crate::commands::parse_submission`]
-//! is what actually validates a document, once a person has chosen to queue
-//! it; this only needs enough to draw two panes — which group a document
-//! belongs to, what it is called, and what it says it is for. A document
+//! is what actually validates a task, once a person has chosen to queue
+//! it; this only needs enough to draw two panes — which group a task
+//! belongs to, what it is called, and what it says it is for. A task
 //! that will be refused at submit time still lists here, and is refused
 //! there, with the real error.
 
@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 
 use super::*;
 
-/// Where a task's own document was read from, and what stage it has reached
+/// Where a task's own file was read from, and what stage it has reached
 /// — one word per task, since [`Group::state`] can no longer speak for every
 /// task it holds: a chain half archived and half still queued carries both
 /// at once, and this is what the tasks pane draws beside each task's own id.
@@ -40,20 +40,20 @@ pub(crate) enum TaskState {
     Done,
 }
 
-/// One pending task document, as the screen shows it.
+/// One pending task, as the screen shows it.
 pub(crate) struct PendingTask {
     /// The file it was read from — deleted when its group is queued, and the
-    /// name a submission failure reports this document by, so the two agree
+    /// name a submission failure reports this task by, so the two agree
     /// by construction.
     pub(crate) path: PathBuf,
-    /// The document's own `id:`, which is what the queue will call this task.
+    /// The task's own `id:`, which is what the queue will call this task.
     pub(crate) id: String,
-    /// The document's own `title:` — the one sentence the tasks pane draws
-    /// under what this task waits on. `None` for a document with no title to
+    /// The task's own `title:` — the one sentence the tasks pane draws
+    /// under what this task waits on. `None` for a task with no title to
     /// read, which the pane simply draws no line for rather than an empty
     /// one; `parse_submission` is what refuses it at submit time.
     pub(crate) description: Option<String>,
-    /// The document itself, unread and unmodified, ready to hand to
+    /// The task itself, unread and unmodified, ready to hand to
     /// `validate_batch` exactly as a `--from` entry would.
     pub(crate) doc: String,
     /// Where this task's own id currently sits — see [`TaskState`].
@@ -70,7 +70,7 @@ pub(crate) enum GroupState {
     /// is not every task queued yet, so it is the one `enter` may still
     /// submit.
     ///
-    /// A pending document naming a task id the queue or the archive already
+    /// A pending task naming a task id the queue or the archive already
     /// holds — a re-run of a producer over work already submitted, which
     /// cannot be queued again since `validate_batch` would refuse it — is
     /// *not* this case: that task's own state reads `Queued` or `Done`, not
@@ -87,25 +87,25 @@ pub(crate) enum GroupState {
     Done,
 }
 
-/// One `group:` across the pending documents: the left pane's unit.
+/// One `group:` across the pending tasks: the left pane's unit.
 ///
 /// A group is what a person selects and submits, whole. Its tasks are a
 /// chain — cut together, ordered by `depends_on` — and half a chain in the
 /// queue is a task waiting on a dependency nobody queued.
 pub(crate) struct Group {
     /// The `group:` value, verbatim. Never path-parsed and never split: two
-    /// documents group together only when they name exactly the same string,
+    /// tasks group together only when they name exactly the same string,
     /// the same rule `spoolway group list` reads the queue by.
     pub(crate) name: String,
-    /// Its documents, dependencies before dependents — see [`in_reading_order`].
+    /// Its tasks, dependencies before dependents — see [`in_reading_order`].
     pub(crate) tasks: Vec<PendingTask>,
     /// This group's own stage — see [`GroupState`] and [`group_state`], which
     /// is what [`list_groups`] computes this from once every task has been
     /// read.
     pub(crate) state: GroupState,
-    /// The newest of its documents' own birth times, which is what
+    /// The newest of its tasks' own birth times, which is what
     /// [`list_groups`] sorts on: the group somebody just wrote is the one
-    /// under the cursor on the first frame. `None` only when no document's
+    /// under the cursor on the first frame. `None` only when no task's
     /// time could be read at all, which sorts the group to the end rather
     /// than refusing the whole listing over one stat failure.
     pub(crate) created: Option<std::time::SystemTime>,
@@ -118,7 +118,7 @@ pub(crate) struct Group {
 /// there is no fourth bucket for it and it is not yet wholly finished.
 ///
 /// An empty group cannot happen through [`list_groups`] — a group only
-/// exists because a document named it — but reads `Queueable` rather than
+/// exists because a task named it — but reads `Queueable` rather than
 /// vacuously `Done` if that ever changes, the same way the bare `bool` this
 /// replaced started its own fold at `true` and was corrected the same way.
 fn group_state(tasks: &[PendingTask]) -> GroupState {
@@ -151,17 +151,17 @@ fn newest_first(
     }
 }
 
-/// A document's own birth time, falling back to its modification time where
+/// A task's own birth time, falling back to its modification time where
 /// the platform or filesystem has no birth time to give.
 fn created_time(path: &Path) -> Option<std::time::SystemTime> {
     let meta = std::fs::metadata(path).ok()?;
     meta.created().or_else(|_| meta.modified()).ok()
 }
 
-/// One string off a document's frontmatter, without any of
+/// One string off a task's frontmatter, without any of
 /// `parse_submission`'s validation.
 ///
-/// The screen has to draw a document before anyone has decided to submit it,
+/// The screen has to draw a task before anyone has decided to submit it,
 /// so a malformed one must come back as "nothing to show" rather than an
 /// error that would take the whole listing down with it. Every field below
 /// is read this way for that reason. `pub(crate)` rather than private: a
@@ -194,10 +194,10 @@ fn md_files(dir: &Path) -> Result<Vec<PathBuf>> {
 /// Two groups written in the same instant fall back to name order, so the
 /// list does not reshuffle between two draws that land in the same second.
 ///
-/// A document with no readable `group:` is skipped, not shown: there is no
+/// A task with no readable `group:` is skipped, not shown: there is no
 /// row for it to be one of, since a row *is* a `group:` value. It is not
 /// lost — `queue add --from <pending dir>` still reads the whole directory
-/// and refuses that document by name, with the real reason.
+/// and refuses that task by name, with the real reason.
 ///
 /// No "does not exist yet" case to handle: [`Repo::pending_dir`],
 /// [`Repo::queue_dir`] and [`Repo::archive_dir`] all create their directory
@@ -209,7 +209,7 @@ pub(crate) fn list_groups(repo: &Repo) -> Result<Vec<Group>> {
     let archive_dir = repo.archive_dir();
 
     // Grouped by `group:` verbatim, in a map ordered by that string, so a
-    // group's own identity never depends on which document happened to be
+    // group's own identity never depends on which task happened to be
     // read first.
     let mut groups: BTreeMap<String, Group> = BTreeMap::new();
     // Every id read out of the pending directory below, plus every one read
@@ -221,7 +221,7 @@ pub(crate) fn list_groups(repo: &Repo) -> Result<Vec<Group>> {
     for path in md_files(&dir)? {
         // A file that will not read — held open under an exclusive lock on
         // Windows, a broken symlink — is skipped like an unparsable one, not
-        // propagated: one bad document must not fail the whole listing. The
+        // propagated: one bad task must not fail the whole listing. The
         // same file is found again and named by [`unreadable`], which is
         // what the opening message reports it through.
         let Ok(doc) = std::fs::read_to_string(&path) else {
@@ -240,10 +240,10 @@ pub(crate) fn list_groups(repo: &Repo) -> Result<Vec<Group>> {
             continue;
         };
 
-        // A document still sitting in `pending/` ordinarily has no stamp
+        // A task still sitting in `pending/` ordinarily has no stamp
         // anywhere else — but a re-run of a producer over work already
         // submitted names an id the queue, or even the archive, already
-        // holds, and that document's own state has to say so rather than
+        // holds, and that task's own state has to say so rather than
         // read as still-queueable: `validate_batch` would refuse queueing it
         // again either way.
         let state = if archive_stamp(&archive_dir, &id) {
@@ -275,16 +275,16 @@ pub(crate) fn list_groups(repo: &Repo) -> Result<Vec<Group>> {
         });
     }
 
-    // A second source: documents that live only in the queue directory.
-    // Submitting a group deletes its pending documents in the same act that
+    // A second source: tasks that live only in the queue directory.
+    // Submitting a group deletes its pending tasks in the same act that
     // writes its queue ones (`queue::finish_submit`), so a group already
     // fully queued has nothing left under `dir` at all — this is the only
-    // way such a group still gets a row, built from its queue documents and
+    // way such a group still gets a row, built from its queue tasks and
     // marked `Queued` by construction: nothing here reads as anything else.
     for path in md_files(&queue_dir)? {
         // The queue file's own name is what `queue_stamp` above already keys
         // on, so this uses the same identity rather than trusting the
-        // document's own `id:` to agree with the name it was saved under.
+        // task's own `id:` to agree with the name it was saved under.
         let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
@@ -326,7 +326,7 @@ pub(crate) fn list_groups(repo: &Repo) -> Result<Vec<Group>> {
         });
     }
 
-    // A third source: documents the pipeline already ran to the end. Read
+    // A third source: tasks the pipeline already ran to the end. Read
     // last and skipped for any id the first two loops already claimed, so a
     // group half archived and half still queued lists its whole chain rather
     // than only the half still in the queue — the gap this whole feature
@@ -400,7 +400,7 @@ pub(crate) fn list_groups(repo: &Repo) -> Result<Vec<Group>> {
 /// queue: every one already `queued`, which is also true of an empty list.
 /// A person is otherwise looking at a pane with nothing selectable in it and
 /// a file sitting right there in the directory, unaccounted for. Whenever a
-/// real, queueable group exists too, the document is one row's worth of
+/// real, queueable group exists too, the task is one row's worth of
 /// nothing among rows that do exist, and `queue add --from <pending dir>` is
 /// what names it and says why.
 pub(crate) fn unreadable(repo: &Repo) -> Vec<PathBuf> {
@@ -444,7 +444,7 @@ fn archive_stamp(archive_dir: &Path, id: &str) -> bool {
 /// The pane is read top to bottom, and a chain read in the order it will run
 /// is the one a person can follow: the task that waits on nothing first, then
 /// whatever waits on it. Filename order alone would not give that — a
-/// document's name is its task id, and ids are not written to sort.
+/// task's name is its task id, and ids are not written to sort.
 ///
 /// A stable selection sort over the in-group edges only: at each step the
 /// first remaining task whose in-group dependencies have all been emitted.
@@ -473,9 +473,9 @@ fn in_reading_order(mut tasks: Vec<PendingTask>) -> Vec<PendingTask> {
     ordered
 }
 
-/// A peek at a document's own `depends_on` list, unvalidated — what the
+/// A peek at a task's own `depends_on` list, unvalidated — what the
 /// tasks pane's `waits on` line draws, and what [`in_reading_order`] sorts
-/// by. The screen only has to show what a document claims;
+/// by. The screen only has to show what a task claims;
 /// `parse_submission` is what checks the claim.
 pub(crate) fn depends_on(doc: &str) -> Vec<String> {
     let Ok((yaml, _)) = crate::task::split_fence(doc) else {
@@ -686,7 +686,7 @@ pub(crate) fn score(query: &str, field: &str) -> Option<i64> {
 mod tests {
     use super::*;
 
-    /// A whole task document, in the shape `--from` accepts.
+    /// A whole task, in the shape `--from` accepts.
     fn doc(id: &str, group: &str, extra: &str) -> String {
         format!(
             "---\nid: {id}\ntitle: {id}, done\ngroup: {group}\n{extra}---\n\
@@ -726,9 +726,9 @@ mod tests {
     }
 
     /// The left pane's whole unit: one row per distinct `group:`, however
-    /// many documents named it, and each row carrying every one of them.
+    /// many tasks named it, and each row carrying every one of them.
     #[test]
-    fn documents_gather_into_one_row_per_distinct_group() {
+    fn tasks_gather_into_one_row_per_distinct_group() {
         let repo = crate::commands::testutil::fixture("pending-groups");
         write(
             &repo,
@@ -815,13 +815,13 @@ mod tests {
         assert_eq!(list_groups(&repo).unwrap()[0].tasks.len(), 2);
     }
 
-    /// A document that names no `group:`, or whose frontmatter will not
+    /// A task that names no `group:`, or whose frontmatter will not
     /// parse at all, has no row to be one of — a row *is* a `group:` value.
     /// It is skipped rather than shown, and `queue add --from` is what
     /// refuses it by name. [`unreadable`] is what finds the same set again,
     /// for the one case the screen has to say so out loud.
     #[test]
-    fn a_document_with_no_readable_group_is_skipped() {
+    fn a_task_with_no_readable_group_is_skipped() {
         let repo = crate::commands::testutil::fixture("pending-ungrouped");
         write(&repo, "good.md", &doc("good", "issue-42", ""));
         std::fs::write(
@@ -829,7 +829,7 @@ mod tests {
             "---\nid: stray\ntitle: stray\n---\n## Goal\n\nx\n",
         )
         .unwrap();
-        std::fs::write(repo.pending_dir().join("garbage.md"), "not a document\n").unwrap();
+        std::fs::write(repo.pending_dir().join("garbage.md"), "not a task\n").unwrap();
 
         let groups = list_groups(&repo).unwrap();
         assert_eq!(groups.len(), 1);
@@ -843,12 +843,12 @@ mod tests {
         assert_eq!(names, vec!["garbage.md", "no-group.md"], "{names:?}");
     }
 
-    /// The screen only says anything about skipped documents when there is
+    /// The screen only says anything about skipped tasks when there is
     /// nothing else to list, so `unreadable` must come back empty on a
-    /// directory where every document reads — otherwise the ordinary case
+    /// directory where every task reads — otherwise the ordinary case
     /// would be paying for a listing nobody looks at.
     #[test]
-    fn unreadable_is_empty_when_every_document_reads() {
+    fn unreadable_is_empty_when_every_task_reads() {
         let repo = crate::commands::testutil::fixture("pending-all-readable");
         write(&repo, "a.md", &doc("a", "issue-42", ""));
         write(&repo, "b.md", &doc("b", "issue-42", ""));
@@ -856,10 +856,10 @@ mod tests {
         assert!(unreadable(&repo).is_empty());
     }
 
-    /// Only `.md` is read. Anything else in the directory is not a task
-    /// document, and above all no page is scanned for one.
+    /// Only `.md` is read. Anything else in the directory is not a task,
+    /// and above all no page is scanned for one.
     #[test]
-    fn only_markdown_documents_are_read() {
+    fn only_markdown_tasks_are_read() {
         let repo = crate::commands::testutil::fixture("pending-md-only");
         write(&repo, "a.md", &doc("a", "issue-42", ""));
         std::fs::write(repo.pending_dir().join("a.html"), "<html></html>").unwrap();
@@ -907,12 +907,12 @@ mod tests {
         assert_eq!(groups[0].state, GroupState::Queueable);
     }
 
-    /// Submitting a group deletes its pending documents (`finish_submit`),
+    /// Submitting a group deletes its pending tasks (`finish_submit`),
     /// so a group already queued in full has nothing left under the pending
     /// directory at all — this is the one case that still has to produce a
     /// row, built entirely from the queue directory instead.
     #[test]
-    fn a_group_with_no_pending_documents_still_lists_from_the_queue() {
+    fn a_group_with_no_pending_tasks_still_lists_from_the_queue() {
         let repo = crate::commands::testutil::fixture("pending-queue-only");
         std::fs::write(
             repo.queue_dir().join("shipped.md"),
@@ -934,7 +934,7 @@ mod tests {
     }
 
     /// A group wholly in the archive gets a row too, built from its archived
-    /// documents the same way a wholly-queued group is built from its queue
+    /// tasks the same way a wholly-queued group is built from its queue
     /// ones — the third source this whole feature adds.
     #[test]
     fn a_group_wholly_in_the_archive_still_lists() {
@@ -985,13 +985,13 @@ mod tests {
         assert_eq!(second.state, TaskState::Queued);
     }
 
-    /// A pending document naming an id the archive already holds — a re-run
+    /// A pending task naming an id the archive already holds — a re-run
     /// of a producer over work already finished — reads that task as `Done`,
     /// not `Pending`: `validate_batch` would refuse queueing it again either
     /// way, and the group must not read as still-queueable over a task that
     /// is not.
     #[test]
-    fn a_pending_document_already_archived_reads_as_done() {
+    fn a_pending_task_already_archived_reads_as_done() {
         let repo = crate::commands::testutil::fixture("pending-already-archived");
         write(&repo, "done.md", &doc("done", "old-group", ""));
         std::fs::create_dir_all(repo.archive_dir()).unwrap();
@@ -1006,8 +1006,8 @@ mod tests {
         assert_eq!(groups[0].tasks[0].state, TaskState::Done);
     }
 
-    /// The tasks pane draws a document's own `title:` under what it waits
-    /// on, and `waits on` reads `depends_on` off the same document without
+    /// The tasks pane draws a task's own `title:` under what it waits
+    /// on, and `waits on` reads `depends_on` off the same task without
     /// validating it.
     #[test]
     fn a_task_carries_its_title_and_its_waits_on() {
@@ -1025,13 +1025,13 @@ mod tests {
         assert_eq!(depends_on(&b.doc), vec!["a"]);
     }
 
-    /// A document carrying no `depends_on` — or no fence at all — reads as
+    /// A task carrying no `depends_on` — or no fence at all — reads as
     /// an empty list rather than an error: the pane shows "waits on nothing"
     /// for the first and never panics on either.
     #[test]
     fn depends_on_defaults_to_an_empty_list() {
         assert_eq!(depends_on(&doc("a", "g", "")), Vec::<String>::new());
-        assert_eq!(depends_on("not a document"), Vec::<String>::new());
+        assert_eq!(depends_on("not a task"), Vec::<String>::new());
     }
 
     /// The three worked examples in the scoring rule, tested directly

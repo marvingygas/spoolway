@@ -47,10 +47,10 @@
 # Uses whatever `spoolway` is on PATH; set SPOOLWAY to point at a build:
 #   SPOOLWAY=target/release/spoolway scripts/e2e/run.sh
 #
-# `--dry-run` is gone from `spoolway dispatch` — a run either draws where a
-# person can see it or it is refused outright, with no exemption left to
-# preview against. Nine cases across three suites used to prove something
-# with a throwaway pass, and each one is re-expressed or removed:
+# `--dry-run` is gone from `spoolway dispatch` — a run either really runs or
+# it is refused outright, with no exemption left to preview against. Nine
+# cases across three suites used to prove something with a throwaway pass, and
+# each one is re-expressed or removed:
 #
 #   stacking.sh   "nothing starts `top` while `base` is unfinished" is
 #                 re-expressed against the real, resident dispatcher `drive`
@@ -116,8 +116,8 @@ REPO=$(cd "$E2E_DIR/../.." && pwd)
 #   status      the board's *rendering* — every column, every row state:
 #               unit tests cover it through a real pass, and an e2e version
 #               would re-assert the same branches through a slower path.
-#               There is one board per run now, focused rather than drawn a
-#               second time — see `commands::dispatch::already_running`. The
+#               There is one board per run now: a second dispatcher is
+#               refused on the lock with one line naming the first. The
 #               board's keys are a different question and do have a suite:
 #               `board-pause` drives
 #               `p`, `P` and `U` as real keystrokes into a real dispatcher,
@@ -141,8 +141,8 @@ REPO=$(cd "$E2E_DIR/../.." && pwd)
 #               model (SPOOLWAY_E2E_CODEX_MODEL); pointed at a local endpoint
 #               it spends nothing.
 smoke_suites=(flow)
-pr_suites=(flow commands command-steps issue-tracking stacking stack conflicts forge disaster lock trials routines jobs jobs-screen board-pause queue-unqueue restart overrides herdr-bind)
-nightly_suites=(flow commands command-steps issue-tracking stacking stack conflicts forge disaster lock trials routines jobs jobs-screen board-pause queue-unqueue restart overrides upgrade herdr-bind)
+pr_suites=(flow commands command-steps issue-tracking stacking stack conflicts forge disaster lock trials routines jobs jobs-screen screen board-pause queue-unqueue restart overrides herdr-bind)
+nightly_suites=(flow commands command-steps issue-tracking stacking stack conflicts forge disaster lock trials routines jobs jobs-screen screen board-pause queue-unqueue restart overrides upgrade herdr-bind)
 cloud_suites=(warmth)
 live_suites=(live)
 
@@ -542,7 +542,7 @@ launch_suite() {
 # With more than one job at a time a suite's output is captured, never
 # streamed, and `$ROOT` goes with the run — so whatever is printed here is the
 # *whole* record of what failed. A blind `tail` is not that record: `forge`
-# ends its one failing scenario by dumping the task document it drove, which
+# ends its one failing scenario by dumping the task it drove, which
 # is longer than thirty lines, so all three of its failed checks were pushed
 # off the end and the run's own output named none of them. The suite had to be
 # re-run before the failure could be read at all.

@@ -33,7 +33,7 @@ command checks the two against each other and refuses when they disagree. See [R
 state](configuration.md#runtime-state).
 
 Everything spoolway writes while it runs lives in `~/.spoolway/<basename of the checkout>/`:
-the queue, the archive, pending documents, worktrees and the ledger. See
+the queue, the archive, pending tasks, worktrees and the ledger. See
 [Runtime state](configuration.md#runtime-state).
 
 Commands find the project through git. A command run inside a task worktree reaches the
@@ -115,7 +115,7 @@ The dispatcher composes it into the lane's system prompt. See [Prompts](prompts.
 ## Gate
 
 A step with `gate: true` stops the task on `paused` after its pass. A single task can do the
-same with `gate_at: <step>` in its document, and a `gate_at` catches whatever the step reports:
+same with `gate_at: <step>` in its task, and a `gate_at` catches whatever the step reports:
 pass, fail, block, or a loop-max bound for `blocked`. A `gate_at` is spent when it fires. The
 task pauses once, and a later report from the same step runs straight through unless something
 writes a fresh `gate_at`. `spoolway resume` sends a caught pass or fail on by `on_pass`, and

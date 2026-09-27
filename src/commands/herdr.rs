@@ -32,30 +32,28 @@ use anyhow::{Context, Result, bail};
 use crate::ask;
 use crate::cli::HerdrKeysArgs;
 
-/// One of the four keys `bind` wires up, and the spoolway subcommand it
-/// runs. Mnemonic, not systematic: `s`et up, `d`ispatch, `q`ueue, and
-/// doctor's own `k` — `d` and `q` are both taken.
+/// One of the three keys `bind` wires up, and the spoolway subcommand it
+/// runs — `None` for the one bare `spoolway` itself, which opens the one
+/// screen holding the dispatch, queue, jobs and eval tabs. Mnemonic, not
+/// systematic: `s`et up, `d`ispatch (now the one screen), and doctor's own
+/// `k` — `d` is taken.
 struct Binding {
     key: &'static str,
-    verb: &'static str,
+    verb: Option<&'static str>,
 }
 
 const BINDINGS: &[Binding] = &[
     Binding {
         key: "prefix+alt+s",
-        verb: "init",
+        verb: Some("init"),
     },
     Binding {
         key: "prefix+alt+d",
-        verb: "dispatch",
-    },
-    Binding {
-        key: "prefix+alt+q",
-        verb: "queue",
+        verb: None,
     },
     Binding {
         key: "prefix+alt+k",
-        verb: "doctor",
+        verb: Some("doctor"),
     },
 ];
 
@@ -76,7 +74,11 @@ pub fn herdr_bind(args: &HerdrKeysArgs) -> Result<()> {
         if let Some((_, command)) = existing.iter().find(|(key, _)| key == binding.key) {
             skipped.push((binding.key, command.clone()));
         } else {
-            to_write.push((binding, format!("{program} {}", binding.verb)));
+            let command = match binding.verb {
+                Some(verb) => format!("{program} {verb}"),
+                None => program.clone(),
+            };
+            to_write.push((binding, command));
         }
     }
 
@@ -295,17 +297,18 @@ fn render_block(key: &str, command: &str) -> String {
 }
 
 /// Whether `command` is one `bind` would write — a bare `spoolway`, or a
-/// path ending `/bin/spoolway`, followed by one of [`BINDINGS`]'s own verbs.
-/// Read off the shape alone, not off the currently resolved program: the
-/// plugin directory a binding named may already be gone by the time
-/// `unbind` runs (`herdr plugin uninstall` deletes it outright), so this
-/// must recognise the block without being able to reproduce it.
+/// path ending `/bin/spoolway`, on its own or followed by one of
+/// [`BINDINGS`]'s own verbs. Read off the shape alone, not off the currently
+/// resolved program: the plugin directory a binding named may already be
+/// gone by the time `unbind` runs (`herdr plugin uninstall` deletes it
+/// outright), so this must recognise the block without being able to
+/// reproduce it.
 fn written_by_bind(command: &str) -> bool {
-    let Some((prog, verb)) = command.rsplit_once(' ') else {
-        return false;
-    };
-    BINDINGS.iter().any(|b| b.verb == verb)
-        && (prog == "spoolway" || prog.ends_with("/bin/spoolway"))
+    let is_spoolway = |prog: &str| prog == "spoolway" || prog.ends_with("/bin/spoolway");
+    match command.rsplit_once(' ') {
+        Some((prog, verb)) => BINDINGS.iter().any(|b| b.verb == Some(verb)) && is_spoolway(prog),
+        None => BINDINGS.iter().any(|b| b.verb.is_none()) && is_spoolway(command),
+    }
 }
 
 /// Remove every `[[keys.command]]` block [`written_by_bind`] recognises from
@@ -442,8 +445,9 @@ mod tests {
         assert!(written_by_bind(
             "/home/x/.config/herdr/plugins/github/spoolway-abc/bin/spoolway doctor"
         ));
+        // The dispatch key's own binding: bare `spoolway`, no verb.
+        assert!(written_by_bind("spoolway"));
         assert!(!written_by_bind("lazygit"));
-        assert!(!written_by_bind("spoolway"));
         assert!(!written_by_bind("spoolway status"));
         // Any `/bin/spoolway` on the end is recognised, deliberately looser
         // than the one plugin root `resolve_program` would name today — see

@@ -11,9 +11,7 @@ lookup in a task file or in the list of live lanes.
 ## Running it
 
 ```
-spoolway dispatch                 # runs until the queue is empty
-spoolway dispatch --force         # start past the restart guard
-spoolway dispatch --plain         # print the board once as a plain table, for scripts
+spoolway dispatch                 # runs until the queue is empty, printing a line per pass
 ```
 
 `spoolway dispatch` asks herdr which pane it is running in and refuses to start outside one,
@@ -21,47 +19,40 @@ whatever flags are given:
 
 ```
 $ spoolway dispatch
-spoolway: a dispatcher has to be visible, and this is not a herdr pane.
+spoolway: Open herdr and start spoolway there:
 
-  Open one and run it there:
-
-    herdr
-    spoolway dispatch
+  herdr
+  spoolway
 ```
 
 An internal headless backend exists for automated tests only. It is not a supported runtime
 or an alternative to installing herdr. See [Testing](testing.md).
 
-One dispatcher serves the whole project. Every pass re-reads the queue, so a task queued
-while it runs is picked up on the next pass. A second `spoolway dispatch` on the same project
-prints that a dispatcher is already running, asks herdr to focus its pane, and exits without
-drawing a board:
+One `spoolway` serves the whole project at a time: a dispatcher started with `spoolway
+dispatch`, or a screen opened with bare `spoolway`. Every pass re-reads the queue, so a task
+queued while a dispatcher runs is picked up on the next pass. A second `spoolway dispatch`
+while either is up prints the same line and exits without drawing a board:
 
 ```
 $ spoolway dispatch
-  a dispatcher is already running for this repo (pid 8123)
-  → focusing its pane w1:p5
+Dispatcher already running
 ```
 
-`spoolway dispatch --plain` against the same held lock prints its own one-shot table headed
-`watching dispatcher (pid N)` instead, for scripts.
-
 Queueing a batch from the queue screen while another dispatcher holds the lock works the same
-way: the batch is written, and `enter` on the overview brings that dispatcher's workspace to
-the front instead of starting a second one. See [`spoolway queue`](cli-reference.md#spoolway-queue).
+way: the batch is written, and the running dispatcher picks it up on its next pass. See
+[`spoolway queue`](cli-reference.md#spoolway-queue).
 
-Before the first pass, `enter` on the queue screen and an [overrides
-layer](configuration.md#the-overrides-layer) screen, in turn, a warnings screen holds `spoolway
-doctor`'s cheap findings until a key answers it. See
-[`spoolway dispatch`](cli-reference.md#spoolway-dispatch). Once the run has taken the lock, a
-failure to find or open its own workspace gets a notice of its own.
+Before the first pass, an [overrides layer](configuration.md#the-overrides-layer) screen, then
+a warnings screen holding `spoolway doctor`'s cheap findings, each holds for a key, whenever
+either has something to say. See [`spoolway dispatch`](cli-reference.md#spoolway-dispatch). Once
+the run has taken the lock, a failure to find or open its own workspace gets a notice of its
+own.
 
 | Exit code | Meaning |
 |---|---|
 | 0 | The run dispatched and stopped on its own. |
 | 3 | The queue was empty and no job is enabled. |
-| 4 | Another dispatcher holds the lock. |
-| 5 | The restart guard refused the start. |
+| 4 | Another dispatcher or screen already holds the project. |
 | 1 | Any other error. |
 
 ### When it stops
@@ -75,11 +66,6 @@ lane stays where it is, and the next run picks it back up. Before it exits, the 
 still-running lane's spend in the usage ledger and forgives that lane's launch counter, so the
 next run does not treat a lane that survived the stop as a failed launch. A second `ctrl-c`
 kills the process at once.
-
-### Restarting into a repo that cannot run
-
-Four starts in a row that find another dispatcher holding the lock, inside 30 seconds, get the
-fifth refused with exit code 5. A start that runs clears the count, and so does `--force`.
 
 ## What a pass does
 
@@ -146,18 +132,22 @@ file's path. `spoolway prompt contract` prints the system prompt for a sample ta
 
 ## Reading the state
 
-The dispatcher draws the board in the terminal it runs in and runs a pass every ten seconds.
-That rate is not configurable, and stays the floor under how long a quiet run can go without a
-pass: a change in the queue or commands directory wakes the board or the next pass sooner, as
-described above. A pass that moves a task to a new stage, frees a lane or archives a task runs
-the next pass at once instead of waiting for the next one. A long run of such passes in a row
-eventually waits anyway.
+The dispatcher runs a pass every ten seconds. That rate is not configurable, and stays the floor
+under how long a quiet run can go without a pass: a change in the queue or commands directory
+wakes the next pass sooner, as described above. A pass that moves a task to a new stage, frees a
+lane or archives a task runs the next pass at once instead of waiting for the next one. A long
+run of such passes in a row eventually waits anyway.
 
 <img src="screenshots/dispatch.png" alt="the dispatcher board">
 
 The header above the task rows names the running dispatcher's version, next to its pid. If a
 `spoolway` executable on `PATH` reports a newer version, the header adds `(restart to use latest
 installed version)`.
+
+Bare `spoolway`'s dispatch tab draws the same board, under the tab strip, from a `spoolway
+dispatch` child the tab starts and stops on `enter` — the tab runs no pass itself. Its header
+names the pid of that child, or reads `dispatcher stopped` with no pid once it has stopped. See
+[`spoolway`](cli-reference.md#spoolway).
 
 Rows are grouped by `group:`. A `▌<group>` line opens each block, and a total line closes it.
 The total is the group's banked spend: every step that has settled, across every task in the
@@ -224,7 +214,7 @@ Lowercase acts on the row under the `▸` cursor. Uppercase acts on the whole ru
 | `p` | Pause the row, including a `blocked` one. Asks first if it would interrupt a running agent turn or command. |
 | `P` | Pause every task in the run, including any `blocked`. Asks first, listing what it would interrupt. |
 | `s` | On an open pause panel, schedule the pause instead of carrying it out. |
-| `u` | Take a `queued` task, and every unstarted task that depends on it, out of the queue and write their documents back to `~/.spoolway/<project>/pending/`. Asks first. |
+| `u` | Take a `queued` task, and every unstarted task that depends on it, out of the queue and write their tasks back to `~/.spoolway/<project>/pending/`. Asks first. |
 | `U` | Do the same for every task that has not started. Asks first. |
 | `ctrl-c` | Stop the run. |
 
@@ -321,8 +311,8 @@ separate from this. See [When a task needs a person](tasks.md#when-a-task-needs-
 | Limit | What it bounds | Reset by |
 |---|---|---|
 | Launch guard | A lane that dies at launch and leaves no session blocks the task. In an unattended run it is retried on a doubling delay, capped at one hour. | A pass that sees the lane; every stage transition; a dispatcher stop. |
-| Launch-failure ceiling | A launch that cannot start at all, such as a refused tab or an unconfigured model, is retried twice. The third failure in a row routes the task to the step's `on_fail`, or `blocked`. | A launch that starts; arriving at the step again; re-queueing the document. |
-| Pane-busy wait | A pane that has not reached its shell prompt refuses `agent start`. The task waits. After ten minutes it routes the way the launch-failure ceiling does. | A launch that starts; arriving at the step again; re-queueing the document. |
+| Launch-failure ceiling | A launch that cannot start at all, such as a refused tab or an unconfigured model, is retried twice. The third failure in a row routes the task to the step's `on_fail`, or `blocked`. | A launch that starts; arriving at the step again; re-queueing the task. |
+| Pane-busy wait | A pane that has not reached its shell prompt refuses `agent start`. The task waits. After ten minutes it routes the way the launch-failure ceiling does. | A launch that starts; arriving at the step again; re-queueing the task. |
 | A step's `loop:` | How many times a task may arrive at the step, by any route. | Never. A person's resume counts too, and refunds nothing. |
 | Reminder loop | Three reminders to a silent lane. | Anything the lane writes to its transcript. |
 | Live-child ceiling | How long a lane may hold a child process before it is escalated. | The process exiting. |
@@ -442,7 +432,7 @@ trial t9f3a settled
 
   kept      source group board-step-grace-window
   kept      usage rows for 3 trial tasks
-  removed   3 task documents, worktrees and local branches
+  removed   3 tasks, worktrees and local branches
   removed   3 panes, scratch dirs, sessions and run-file sets
 
   read      spoolway eval --by task --trial t9f3a

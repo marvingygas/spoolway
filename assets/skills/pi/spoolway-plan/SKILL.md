@@ -9,13 +9,13 @@ disable-model-invocation: true
 Turn one goal into a decision record a human can approve, published as one self-contained plan
 file. **The page is offered, never assumed** — a person who has settled the shape out loud may
 go straight to cutting tasks. The breakdown into tasks happens only once approved, and lands
-beside the page as task documents rather than on it — see "Cut the tasks" below.
+beside the page as tasks rather than on it — see "Cut the tasks" below.
 
 **This is planning, until the human says otherwise.** Nothing here writes code or starts a
-dispatcher — writing a task document does not queue it. Fixing something is a task for a lane,
+dispatcher — writing a task does not queue it. Fixing something is a task for a lane,
 not this session.
 
-**`cp` and Edit reach exactly two places: the plan file, and the task documents step 7 writes.**
+**`cp` and Edit reach exactly two places: the plan file, and the tasks step 7 writes.**
 Not the source you just read to understand it, not the typo you noticed, not this skill. Read
 anything; change nothing else — a fix made here is an unreviewed change on whatever branch the
 session sits on, landing under a task describing a starting state the code is no longer in. What
@@ -62,8 +62,8 @@ Every plan is written on the same spine, in this order:
 | **Context** | What is true today, and the pressure on it. One drawing of the system as it is. |
 | **Decisions** | One record per decision, each led by a figure, then its risks and how each is mitigated, then one highlighted sentence stating the change that will now happen. |
 | **Mockup** | The finished thing, drawn: the walkthrough, or the run end to end. One heading and figure per step, no prose. |
-**The page ends at the Mockup.** The breakdown is not on it: a task is a document, written into
-the pending directory at step 7, and the page argues the shape those documents were cut from.
+**The page ends at the Mockup.** The breakdown is not on it: a task is written into
+the pending directory at step 7, and the page argues the shape those tasks were cut from.
 Same headings, order and words on every plan.
 
 **A record names a choice, not a component.** "Rename the module" is not a decision.
@@ -107,8 +107,8 @@ No story, no build-up, no buzzwords, and no reaching verbs — "reads", "writes"
 "orchestrates", "leverages", "unlocks". A caption a tired reader gets on one pass.
 
 Catch the paragraph that defends a decision instead of stating it ("this matters because…") in
-your own draft, and draw the mechanism rather than narrating it. Verbosity's home is the task
-document written later, not this page: terse here, complete in the document.
+your own draft, and draw the mechanism rather than narrating it. Verbosity's home is the
+task written later, not this page: terse here, complete in the task.
 
 **Reference, never restate.** A paragraph explaining how the system works today is stale the
 day it changes; a path stays true. Name the file that already holds the ground needed, in the
@@ -177,12 +177,12 @@ day it changes; a path stays true. Name the file that already holds the ground n
 7. **Cut the tasks — only once approved**, step 6's question coming back *cut them now*, or
    step 3's answer skipping the page — never assumed from the page simply existing.
 
-   Invoke the **spoolway-tasks** skill to do it: the shape it cuts into documents is the
+   Invoke the **spoolway-tasks** skill to do it: the shape it cuts into tasks is the
    page's Decisions and Mockup, or — where no page was written — what step 2 settled. Where
-   step 1 read an issue, its own URL is the `source:` each document gets and the page's own
+   step 1 read an issue, its own URL is the `source:` each task gets and the page's own
    absolute path moves to `plan:` instead; with no issue behind it, the page's path stays
    `source:`, exactly as before `plan:` existed, and there is no `plan:`. Neither key is set
    when neither exists. `spoolway-tasks` decomposes, offers the shape, settles the pipeline,
-   reads the skeleton, writes the documents, verifies the chain and proves the set with
+   reads the skeleton, writes the tasks, verifies the chain and proves the set with
    `spoolway task contract` — the whole of the procedure and its guardrails live there now, so
    that a second caller cutting a breakdown shares it rather than drifting from it.

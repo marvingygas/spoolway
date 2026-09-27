@@ -1,11 +1,13 @@
-//! The queue and the pending documents over it: listing, adding, dependency
+//! The queue and the pending tasks over it: listing, adding, dependency
 //! checks, and write conflicts.
 
 use std::collections::BTreeMap;
 
 use super::*;
 use crate::platform::PathExt;
-use crate::screen::{Key, PollableRead, key_hint, overlay, pad_to, panel, read_key};
+use crate::screen::{
+    Key, Notice, PollableRead, hint, key_hint, keys, overlay, pad_to, panel, read_key,
+};
 
 /// Which dependencies a task on a wait step is still waiting for.
 ///
@@ -136,12 +138,12 @@ pub(crate) fn longest_agent_step(pipeline: &crate::pipeline::Pipeline) -> &str {
         .unwrap_or("")
 }
 
-/// Keys a task document may never set: spoolway writes every one of these
-/// itself, over the task's whole life, and a document that sets one is either
+/// Keys a task may never set: spoolway writes every one of these
+/// itself, over the task's whole life, and a task that sets one is either
 /// confused about what it owns or is trying to smuggle a task onto a step, a
 /// run or an attempt count that was never earned. `base` is not in this list
-/// — it is a document's to set, and [`parse_submission`] keeps it when it
-/// does; a submission that sets neither a document's own `base:` nor
+/// — it is a task's to set, and [`parse_submission`] keeps it when it
+/// does; a submission that sets neither a task's own `base:` nor
 /// `queue add --base` is refused rather than given one, since the branch a
 /// checkout happens to have out is never read as a base any more.
 ///
@@ -151,7 +153,7 @@ pub(crate) fn longest_agent_step(pipeline: &crate::pipeline::Pipeline) -> &str {
 /// `task/<slug>-<id>` when `issue_tracking.key_in_names` prefixes it — and
 /// stamps it in [`parse_submission`]; every dependency caller then reads that
 /// recorded field rather than rebuilding a shape of its own. A value starting
-/// with `-` would also reach `gh pr view` as a flag — so a document may not
+/// with `-` would also reach `gh pr view` as a flag — so a task may not
 /// name a branch at all.
 pub(crate) const RESERVED_KEYS: &[&str] = &[
     "stage",
@@ -167,7 +169,7 @@ pub fn queue_add(
     repo: &Repo,
     pipelines: &Pipelines,
     args: &QueueAddArgs,
-    // No longer read for a base: a document's own `base:` or `--base` is the
+    // No longer read for a base: a task's own `base:` or `--base` is the
     // whole of where one comes from now, never the branch a checkout
     // happens to have out. Kept in the signature rather than pulled from
     // every call site — `main.rs`'s dispatch table and every test in this
@@ -176,17 +178,17 @@ pub fn queue_add(
     in_lane: bool,
 ) -> Result<()> {
     if args.from.is_empty() {
-        return print_skeleton_document(repo, pipelines);
+        return print_skeleton_task(repo, pipelines);
     }
     refuse_from_lane("the queue is mutated", in_lane)?;
 
     let base = args.base.as_deref();
 
-    let documents = gather_documents(&args.from)?;
+    let tasks = gather_tasks(&args.from)?;
     if args.dry_run {
-        return queue_add_dry_run(repo, pipelines, base, &documents);
+        return queue_add_dry_run(repo, pipelines, base, &tasks);
     }
-    queue_add_documents(repo, pipelines, base, &documents)
+    queue_add_tasks(repo, pipelines, base, &tasks)
 }
 
 /// `--dry-run`: everything `queue add` decides, said out loud, and nothing
@@ -198,9 +200,9 @@ fn queue_add_dry_run(
     repo: &Repo,
     pipelines: &Pipelines,
     base: Option<&str>,
-    documents: &[(String, String)],
+    submitted: &[(String, String)],
 ) -> Result<()> {
-    let tasks = validate_batch(repo, pipelines, base, documents)?;
+    let tasks = validate_batch(repo, pipelines, base, submitted)?;
     println!("dry run — nothing written");
     println!("  project: {}", repo.root.display());
     println!("  home:    {}", repo.home.display());
@@ -220,7 +222,7 @@ fn queue_add_dry_run(
 }
 
 /// `spoolway queue unqueue <id>` / `--all`: the command form of the board's
-/// `u`/`U` keys — carry a not-started task's document back to the pending
+/// `u`/`U` keys — carry a not-started task back to the pending
 /// directory, with every reserved key stripped, so `queue add --from` takes
 /// it again unchanged. The move itself is [`crate::status::unqueue_task`]
 /// (or, for `--all`, one call of it per not-started task) — this only adds
@@ -322,7 +324,7 @@ fn queue_unqueue_one(repo: &Repo, pipelines: &Pipelines, id: &str, force: bool) 
     queue_unqueue_forced(repo, pipelines, id, &stage, checkout.as_deref())
 }
 
-/// Write `id`'s document into pending through
+/// Write `id`'s task into pending through
 /// [`crate::status::unqueue_task`] — the same call the board's bare `u`/`U`
 /// make — then check the queue file is actually gone: that function is
 /// silent about a newer draft already sitting in pending, right for a
@@ -348,8 +350,8 @@ fn unqueue_or_bail(repo: &Repo, id: &str) -> Result<()> {
 /// running command step, record uncommitted work through
 /// [`crate::commands::auto_commit`], tear the checkout down through
 /// [`crate::dispatch::Dispatcher::tear_down_checkout`] and only then carry
-/// the document to pending — all or nothing, so a teardown this stops
-/// partway through leaves the task queued and its document untouched.
+/// the task to pending — all or nothing, so a teardown this stops
+/// partway through leaves the task queued and its task untouched.
 ///
 /// Refused while a live dispatcher holds the run lock: it re-reads the
 /// queue every pass, and a checkout this tears down out from under it is
@@ -465,9 +467,9 @@ fn queue_unqueue_forced(
 
     // `tear_down_checkout` gives back the workspace and the worktree but
     // never clears the fields recording them — its own two callers either
-    // archive the document right after (`clean_up`) or delete it outright
+    // archive the task right after (`clean_up`) or delete it outright
     // (`discard_arm`), so a stale path in memory never reaches disk there.
-    // This caller carries the document on to pending instead, and every one
+    // This caller carries the task on to pending instead, and every one
     // of these has `skip_serializing_if = "Option::is_none"`, so clearing
     // them here is what keeps a torn-down checkout's path from riding along
     // into the copy `queue add --from` would hand straight back out.
@@ -491,16 +493,16 @@ fn queue_unqueue_forced(
 
 /// The pipeline skeleton, printed rather than written: there is no id yet to
 /// name a file after, and bare `queue add` no longer queues anything itself —
-/// a document, whole, is what `--from` needs, so this prints one unfilled,
+/// a task, whole, is what `--from` needs, so this prints one unfilled,
 /// for a person to save, fill in and hand back through `--from`.
-fn print_skeleton_document(repo: &Repo, pipelines: &Pipelines) -> Result<()> {
-    print!("{}", skeleton_document(repo, pipelines)?);
+fn print_skeleton_task(repo: &Repo, pipelines: &Pipelines) -> Result<()> {
+    print!("{}", skeleton_task(repo, pipelines)?);
     Ok(())
 }
 
-/// The text `print_skeleton_document` prints, pulled apart from the printing
+/// The text `print_skeleton_task` prints, pulled apart from the printing
 /// so it can be checked without capturing standard output.
-fn skeleton_document(repo: &Repo, pipelines: &Pipelines) -> Result<String> {
+fn skeleton_task(repo: &Repo, pipelines: &Pipelines) -> Result<String> {
     // The body preview is the generic skeleton every pipeline without one of
     // its own already falls back to — `task_template::FALLBACK` — rather
     // than any one pipeline's own, which the `pipeline:` line below still
@@ -538,23 +540,23 @@ fn skeleton_document(repo: &Repo, pipelines: &Pipelines) -> Result<String> {
     ))
 }
 
-/// Every document named by `--from`, in the order it names them: a directory
+/// Every task named by `--from`, in the order it names them: a directory
 /// expands to its `*.md` files in filename order, `-` reads a
 /// `---`-separated stream from standard input, and anything else is one
 /// file. Each entry is named for the errors below — a path, or `<stdin>#N`
-/// for a stream's Nth document — and holds the raw, unparsed document text.
+/// for a stream's Nth task — and holds the raw, unparsed task text.
 ///
-/// One file is one document, always. There is no page to lift several out
+/// One file is one task, always. There is no page to lift several out
 /// of any more: a producer that wants to queue a breakdown writes each task
 /// as its own `.md` file, and pointing `--from` at
 /// [`Repo::pending_dir`] queues every one of them.
-pub(crate) fn gather_documents(from: &[String]) -> Result<Vec<(String, String)>> {
-    let mut documents = Vec::new();
+pub(crate) fn gather_tasks(from: &[String]) -> Result<Vec<(String, String)>> {
+    let mut tasks = Vec::new();
     for source in from {
         if source == "-" {
             let stream = read_stdin()?;
             for (i, doc) in split_stream(&stream).into_iter().enumerate() {
-                documents.push((format!("<stdin>#{}", i + 1), doc));
+                tasks.push((format!("<stdin>#{}", i + 1), doc));
             }
             continue;
         }
@@ -569,31 +571,31 @@ pub(crate) fn gather_documents(from: &[String]) -> Result<Vec<(String, String)>>
                 .collect();
             entries.sort();
             for entry in entries {
-                gather_one(&entry, &mut documents)?;
+                gather_one(&entry, &mut tasks)?;
             }
         } else {
-            gather_one(path, &mut documents)?;
+            gather_one(path, &mut tasks)?;
         }
     }
-    Ok(documents)
+    Ok(tasks)
 }
 
 /// One `--from` entry that is neither a directory nor `-`.
-fn gather_one(path: &std::path::Path, documents: &mut Vec<(String, String)>) -> Result<()> {
+fn gather_one(path: &std::path::Path, tasks: &mut Vec<(String, String)>) -> Result<()> {
     let text =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    documents.push((path.display().to_string(), text));
+    tasks.push((path.display().to_string(), text));
     Ok(())
 }
 
-/// Split a `---`-separated stream into whole documents, each still in its own
+/// Split a `---`-separated stream into whole tasks, each still in its own
 /// `---\n<yaml>\n---\n<body>` shape.
 ///
 /// A body may not itself contain a line that is exactly `---`: that is the
-/// one thing a document trades away for a stream simple enough to split
-/// blind, without parsing each document's yaml first to know where it ends.
+/// one thing a task trades away for a stream simple enough to split
+/// blind, without parsing each task's yaml first to know where it ends.
 fn split_stream(input: &str) -> Vec<String> {
-    let mut documents = Vec::new();
+    let mut tasks = Vec::new();
     let mut offset = 0usize;
     loop {
         let remaining = &input[offset..];
@@ -601,8 +603,8 @@ fn split_stream(input: &str) -> Vec<String> {
             break;
         }
 
-        // The third bare `---` line — the first two are this document's own
-        // opening and closing fence — is the next document's opening fence,
+        // The third bare `---` line — the first two are this task's own
+        // opening and closing fence — is the next task's opening fence,
         // and where this one ends.
         let mut fences = 0usize;
         let mut cursor = 0usize;
@@ -620,30 +622,30 @@ fn split_stream(input: &str) -> Vec<String> {
 
         match cut {
             Some(cut) => {
-                documents.push(remaining[..cut].to_string());
+                tasks.push(remaining[..cut].to_string());
                 offset += cut;
             }
             None => {
-                documents.push(remaining.to_string());
+                tasks.push(remaining.to_string());
                 break;
             }
         }
     }
-    documents
+    tasks
 }
 
 fn read_stdin() -> Result<String> {
     let mut body = String::new();
     std::io::Read::read_to_string(&mut std::io::stdin(), &mut body)
-        .context("reading task documents from standard input")?;
+        .context("reading tasks from standard input")?;
     Ok(body)
 }
 
-/// Parse one document into a task, refusing the four keys spoolway owns and
-/// stamping in the ones a document may not set at all.
+/// Parse one task into a task, refusing the four keys spoolway owns and
+/// stamping in the ones a task may not set at all.
 ///
 /// Reuses [`crate::task::Frontmatter`]'s own `Deserialize` rather than a
-/// parallel struct: every field a document is not meant to carry —
+/// parallel struct: every field a task is not meant to carry —
 /// `worktree_path`, `prompts`, and the rest — lands in its typed
 /// slot exactly as it would in a task already on disk, and is then
 /// overwritten below the same way `queue_add` always constructed these by
@@ -651,7 +653,7 @@ fn read_stdin() -> Result<String> {
 /// wrong to accept even long enough to overwrite.
 pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Result<Task> {
     let (yaml, body) =
-        crate::task::split_fence(raw).with_context(|| format!("{name}: not a task document"))?;
+        crate::task::split_fence(raw).with_context(|| format!("{name}: not a task"))?;
 
     let value: serde_norway::Value = serde_norway::from_str(yaml)
         .with_context(|| format!("{name}: frontmatter is not valid YAML"))?;
@@ -663,12 +665,12 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Res
         if mapping.contains_key(*key) {
             bail!(
                 "{name} sets `{key}:`, which spoolway sets on every task itself — \
-                 remove it from the document"
+                 remove it from the task"
             );
         }
     }
 
-    // `stage` is the one field `Frontmatter` requires that a document never
+    // `stage` is the one field `Frontmatter` requires that a task never
     // carries — queue_add sets the real one below regardless of what is
     // written here, so any placeholder that deserialises cleanly does.
     let mut mapping = mapping.clone();
@@ -682,23 +684,23 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Res
             .with_context(|| format!("{name}: frontmatter is not valid task YAML"))?;
 
     // The retired quota-and-usage-limit park fields, same as `Task::parse`
-    // strips them for a file already on disk — a submitted document copied
+    // strips them for a file already on disk — a submitted task copied
     // from an older task carries them just as easily.
     for key in crate::task::RETIRED_PARK_KEYS {
         front.extra.remove(*key);
     }
 
     if front.id.trim().is_empty() {
-        bail!("{name}: a document must set `id:`");
+        bail!("{name}: a task must set `id:`");
     }
     // The squashed commit's subject, always — and the pull request's title,
     // always. No heading in the body can carry it: the body's shape is the
     // project's, and this needs to survive any template. Written
     // `feat(queue): add a --dry-run flag`, and only its presence is checked:
-    // a document predating that convention still queues, rather than being
+    // a task predating that convention still queues, rather than being
     // refused over its wording.
     if front.title.trim().is_empty() {
-        bail!("{name}: a document must set `title:`");
+        bail!("{name}: a task must set `title:`");
     }
     // A lane runs in the tab its group shares with its siblings, so a task
     // with no group has nowhere to run — refused here rather than discovered
@@ -707,17 +709,17 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Res
     // path entirely.
     if front.group.as_deref().unwrap_or("").trim().is_empty() {
         bail!(
-            "{name}: a document must set `group:` — a lane runs in the tab its group shares \
+            "{name}: a task must set `group:` — a lane runs in the tab its group shares \
              with its siblings, so a task with no group has nowhere to run"
         );
     }
     // The only routing source a task has — there is no project default to
-    // fall back to, so a document naming none has nowhere to run.
+    // fall back to, so a task naming none has nowhere to run.
     if front.pipeline.as_deref().unwrap_or("").trim().is_empty() {
-        bail!("{name}: a document must set `pipeline:` — spoolway routes a task on nothing else");
+        bail!("{name}: a task must set `pipeline:` — spoolway routes a task on nothing else");
     }
 
-    // Everything spoolway itself decides, whatever the document said —
+    // Everything spoolway itself decides, whatever the task said —
     // exactly the fields `queue_add` always built by hand rather than trusted
     // from a caller, now reset here instead of never having been set.
     front.stage = crate::pipeline::QUEUED.to_string();
@@ -728,10 +730,10 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Res
     front.escalated = false;
     front.resume = None;
     front.branch = Some(format!("task/{}", front.id));
-    // A document that names its own `base:` keeps it — a task cut for a
+    // A task that names its own `base:` keeps it — a task cut for a
     // branch other than the one `--base` named for the rest of the
     // submission — and `validate_batch` checks that branch is real before
-    // anything is written. A document naming neither is refused by name: a
+    // anything is written. A task naming neither is refused by name: a
     // base is chosen, never invented from whichever branch a checkout
     // happens to have out.
     front.base = Some(
@@ -742,7 +744,7 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Res
                 .with_context(|| {
                     format!(
                         "`{name}` sets no `base:` and no --base was given.\n\n  Set `base:` in \
-                     the document, or pass --base <branch>.\n\nNothing was queued."
+                     the task, or pass --base <branch>.\n\nNothing was queued."
                     )
                 })?
                 .to_string(),
@@ -778,51 +780,51 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Res
     Ok(Task { path, front, body })
 }
 
-/// Parse and validate every document as one set: a `depends_on` naming a
+/// Parse and validate every task as one set: a `depends_on` naming a
 /// sibling in the same submission is satisfied with nothing sorted first,
-/// and one bad document queues nothing. Split out from
-/// [`queue_add_documents`] so the queue screen can hold the validated batch
+/// and one bad task queues nothing. Split out from
+/// [`queue_add_tasks`] so the queue screen can hold the validated batch
 /// across its conflict gate instead of writing it the moment it parses —
 /// see that screen's own `begin_submission`.
 pub(crate) fn validate_batch(
     repo: &Repo,
     pipelines: &Pipelines,
     base: Option<&str>,
-    documents: &[(String, String)],
+    submitted: &[(String, String)],
 ) -> Result<Vec<Task>> {
-    if documents.is_empty() {
+    if submitted.is_empty() {
         bail!("`--from` named nothing to queue");
     }
 
     let mut tasks = Vec::new();
-    for (name, raw) in documents {
+    for (name, raw) in submitted {
         let mut task = parse_submission(name, raw, base)?;
-        // Whatever base a task ends up with — a document's own, or the
+        // Whatever base a task ends up with — a task's own, or the
         // submission's `--base` — has to be a branch this repository really
-        // has, checked here rather than only when a document's value
+        // has, checked here rather than only when a task's value
         // happens to differ from the flag: a `--base` is as much an
-        // arbitrary value as a document's own `base:` is, and both reach a
+        // arbitrary value as a task's own `base:` is, and both reach a
         // task file the same way.
         let resolved = task
             .front
             .base
             .as_deref()
-            .expect("parse_submission always resolves a base or refuses the document");
-        check_document_base(repo, name, resolved)?;
+            .expect("parse_submission always resolves a base or refuses the task");
+        check_task_base(repo, name, resolved)?;
 
         let pipeline_name = task
             .front
             .pipeline
             .as_deref()
-            .expect("parse_submission refuses a document with no `pipeline:`");
+            .expect("parse_submission refuses a task with no `pipeline:`");
         // Only checked for existing here, never read further: a lane's own
         // wire name no longer has to fit inside anything this pipeline
         // decides — see gh-359 — so a task id needs no pipeline at all to be
         // checked against, just the plain path-safety rule below.
         pipelines.get(pipeline_name)?;
         // A task id becomes a branch and a file name too. Both are checked
-        // here rather than only when a document's value happens to differ,
-        // the same as `check_document_base` above.
+        // here rather than only when a task's value happens to differ,
+        // the same as `check_task_base` above.
         crate::mux::check_task_id(&task.front.id)?;
 
         task.path = repo.queue_dir().join(format!("{}.md", task.front.id));
@@ -835,7 +837,7 @@ pub(crate) fn validate_batch(
         }
         if tasks.iter().any(|t: &Task| t.id() == task.id()) {
             bail!(
-                "`{}` is named by more than one document in this submission",
+                "`{}` is named by more than one task in this submission",
                 task.id()
             );
         }
@@ -857,7 +859,7 @@ fn has_group_description(task: &Task) -> bool {
 }
 
 /// Refuse this submission when a hook is configured and some group it names
-/// carries a `group_description:` on none of its documents — the group's
+/// carries a `group_description:` on none of its tasks — the group's
 /// issue would then have nothing of its own to say, only whatever a hook
 /// script guesses from a task's title. A no-op with no hook configured: the
 /// acceptance criteria are explicit that `group_description:` is never
@@ -905,9 +907,9 @@ fn require_group_description(repo: &Repo, tasks: &[Task]) -> Result<()> {
         });
         if !(in_batch || in_queue) {
             bail!(
-                "group `{group}` sets no `group_description:` on any of its documents, and \
+                "group `{group}` sets no `group_description:` on any of its tasks, and \
                  `issue_tracking.hook` names `{}` — the group's issue would have nothing to \
-                 say. Set it on one document of the group.",
+                 say. Set it on one task of the group.",
                 repo.config.issue_tracking.hook
             );
         }
@@ -938,9 +940,9 @@ fn existing_task_path(repo: &Repo, id: &str) -> Option<std::path::PathBuf> {
 /// so cannot see each other on disk yet.
 ///
 /// Starts at 1: an ordinary submission already reaches the queue under the
-/// document's own bare id (see [`parse_submission`]), so the first minted
+/// task's own bare id (see [`parse_submission`]), so the first minted
 /// arm is the first number that actually tells two runs of the same
-/// document apart.
+/// task apart.
 fn mint_id(repo: &Repo, base_id: &str, taken: &std::collections::BTreeSet<String>) -> String {
     let mut n = 1usize;
     loop {
@@ -952,8 +954,8 @@ fn mint_id(repo: &Repo, base_id: &str, taken: &std::collections::BTreeSet<String
     }
 }
 
-/// The base a task ends up with — a document's own `base:`, or the
-/// submission's `--base` where the document left it out — checked before
+/// The base a task ends up with — a task's own `base:`, or the
+/// submission's `--base` where the task left it out — checked before
 /// anything is written: it has to be a branch this repository actually has,
 /// since the worktree is cut from it and the pull request merges into it,
 /// and neither of those can wait until dispatch to find out it is not
@@ -964,7 +966,7 @@ fn mint_id(repo: &Repo, base_id: &str, taken: &std::collections::BTreeSet<String
 /// The leading `-` is refused before git sees the value at all: what
 /// reaches `rev-parse` and `check-ref-format` here would otherwise be read
 /// as a flag, the same reason `branch:` is refused outright.
-fn check_document_base(repo: &Repo, name: &str, base: &str) -> Result<()> {
+fn check_task_base(repo: &Repo, name: &str, base: &str) -> Result<()> {
     if base.starts_with('-') {
         bail!(
             "{name}: `base: {base}` starts with `-`, which git would read as a flag — name a \
@@ -993,7 +995,7 @@ fn check_document_base(repo: &Repo, name: &str, base: &str) -> Result<()> {
 
 /// The `based on` line every path that queues a batch prints: one line when
 /// the whole batch shares a base — the ordinary case, everything given the
-/// same `--base` — and one line per task when documents named bases of their
+/// same `--base` — and one line per task when tasks named bases of their
 /// own, so what is printed is always the base each task was actually given.
 /// Every task passed in has already been through [`validate_batch`], which
 /// never leaves `front.base` unset.
@@ -1013,30 +1015,33 @@ pub(crate) fn based_on_note(tasks: &[Task], base: &str) -> String {
     }
 }
 
-/// Validate every document as one set, then write all or none — the shape
+/// Validate every task as one set, then write all or none — the shape
 /// `queue add --from` needs, and the same all-or-nothing pass
 /// [`validate_batch`] runs, right before this saves what it validated.
-fn queue_add_documents(
+fn queue_add_tasks(
     repo: &Repo,
     pipelines: &Pipelines,
     base: Option<&str>,
-    documents: &[(String, String)],
+    submitted: &[(String, String)],
 ) -> Result<()> {
-    let mut tasks = validate_batch(repo, pipelines, base, documents)?;
+    let mut tasks = validate_batch(repo, pipelines, base, submitted)?;
     // `esc` from an interactive run — a real terminal on both ends of
     // `queue add --from` — is not a refusal: it means the same thing it
     // means on the queue screen, "go back", so it is caught here rather
     // than left to `?`, which would otherwise print it as an ordinary
     // error and exit 1 the way `dispatch::overrides_gate`'s own `esc`
     // never does (review finding 5).
-    let task_files = readable_task_files(documents);
+    let task_files = readable_task_files(submitted);
+    let gate = ToolGate::Print {
+        interactive: crate::ask::interactive(),
+    };
     if let Err(err) = open_and_prefix(
         repo,
-        documents,
+        submitted,
         &task_files,
         &mut tasks,
-        crate::ask::interactive(),
-        true,
+        gate,
+        &mut PrintedTickets,
     ) {
         return match err.downcast_ref::<GateCancelled>() {
             Some(_) => Ok(()),
@@ -1044,26 +1049,26 @@ fn queue_add_documents(
         };
     }
 
-    // All or none: every document above already parsed and validated, so
+    // All or none: every task above already parsed and validated, so
     // nothing left here can fail — the writes are the commit.
     for task in &tasks {
         task.save()?;
     }
 
-    // The same rule the queue screen's own `finish_submit` keeps: a document
+    // The same rule the queue screen's own `finish_submit` keeps: a task
     // that reached the queue is not still waiting to go there. Only a source
     // this project's own pending directory holds is removed — a `--from`
     // pointing anywhere else, including `<stdin>#N`, is read and left
     // exactly where it is, since it was never this batch's inbox copy to
     // begin with.
-    remove_pending_sources(repo, documents);
+    remove_pending_sources(repo, submitted);
 
     for task in &tasks {
         println!("queued {} at `{}`", task.id(), crate::pipeline::QUEUED);
         println!("  {}", task.path.display());
     }
     // Where this batch's worktrees will be cut from and where their pull
-    // requests will merge back to — worth saying, because a document that
+    // requests will merge back to — worth saying, because a task that
     // set its own base rather than taking `--base` (or the submission's
     // single shared one) is the exception worth seeing.
     println!("{}", based_on_note(&tasks, base.unwrap_or("")));
@@ -1075,10 +1080,10 @@ fn queue_add_documents(
     Ok(())
 }
 
-/// Delete every `--from` source document that lived in this project's own
+/// Delete every `--from` source task that lived in this project's own
 /// [`Repo::pending_dir`], now that the whole batch is safely on disk.
 ///
-/// `documents` names each source the way [`gather_documents`] read it —
+/// `tasks` names each source the way [`gather_tasks`] read it —
 /// a path exactly as `--from` gave it, or `<stdin>#N` for a stream entry,
 /// which has no file to delete and is simply not a match below. Compared
 /// through [`PathExt::comparable`] rather than by string equality, since a
@@ -1088,9 +1093,9 @@ fn queue_add_documents(
 /// runs after every task in the batch has already been written, so a failure
 /// here is not a reason to call the submission itself anything but a
 /// success.
-fn remove_pending_sources(repo: &Repo, documents: &[(String, String)]) {
+fn remove_pending_sources(repo: &Repo, tasks: &[(String, String)]) {
     let pending_dir = repo.pending_dir().comparable();
-    for (name, _) in documents {
+    for (name, _) in tasks {
         let path = std::path::Path::new(name).comparable();
         if path.parent() == Some(pending_dir.as_path()) {
             let _ = std::fs::remove_file(&path);
@@ -1098,18 +1103,18 @@ fn remove_pending_sources(repo: &Repo, documents: &[(String, String)]) {
     }
 }
 
-/// The path of each of `documents`, in order, that is actually a file on
+/// The path of each of `tasks`, in order, that is actually a file on
 /// disk right now — what [`open_and_prefix`]'s own `task_files` wants for a
-/// `--from` or queue-screen submission, where the document and the file a
+/// `--from` or queue-screen submission, where the task and the file a
 /// hook could read are normally the same thing. The empty string stands in
 /// for one that is not: a `--from -` stream entry is named `<stdin>#N` by
-/// [`gather_documents`], never a real path, and handing that to a hook as
+/// [`gather_tasks`], never a real path, and handing that to a hook as
 /// `SPOOLWAY_TASK_FILE` would be handing it something no `cat` can open —
 /// the same failure this whole `task_files` split exists to end.
 ///
 /// Canonicalised, not merely checked with `is_file`: a name here can be
 /// relative to wherever `spoolway` itself was started (`--from ../t.md`,
-/// or a `--from <dir>` whose entries [`gather_documents`] joins onto that
+/// or a `--from <dir>` whose entries [`gather_tasks`] joins onto that
 /// same relative `dir`), but the hook it is handed to runs with its
 /// current directory set to `repo.root` (see [`crate::tracking::open_ticket`]
 /// and, under it, `Runs::start`'s own `cwd`) — a relative name would resolve
@@ -1120,8 +1125,8 @@ fn remove_pending_sources(repo: &Repo, documents: &[(String, String)]) {
 /// the same empty-string case `is_file` caught, and every path it accepts
 /// comes back absolute, so `repo.root`'s cwd resolves it identically to
 /// wherever `spoolway` was actually run from (review round 2 finding 6).
-fn readable_task_files(documents: &[(String, String)]) -> Vec<String> {
-    documents
+fn readable_task_files(tasks: &[(String, String)]) -> Vec<String> {
+    tasks
         .iter()
         .map(|(name, _)| {
             std::fs::canonicalize(name)
@@ -1141,81 +1146,137 @@ fn readable_task_files(documents: &[(String, String)]) -> Vec<String> {
 /// mixed prefixed and bare names by the route each batch had taken (jobs
 /// review finding 6).
 ///
-/// `documents` are the files a failed hook call writes the ids it already
+/// `submitted` are the files a failed hook call writes the ids it already
 /// opened back into, so a re-run resumes rather than opening a second set —
 /// see [`write_back_ids`]. A routine hands an empty list: writing an id back
-/// into `.spoolway/routines/` would consume a document meant to be queued
+/// into `.spoolway/routines/` would consume a task meant to be queued
 /// again, not once.
 ///
 /// `task_files` is a *different* list, index-aligned with `tasks` rather
-/// than `documents`, naming the real path each task's document currently
+/// than `submitted`, naming the real path each task currently
 /// sits at for `SPOOLWAY_TASK_FILE` to point a hook at — never the same
-/// thing as `documents` staying empty: a routine's document is never
+/// thing as `submitted` staying empty: a routine's task is never
 /// written back into, but it is a real file under `.spoolway/routines/` a
 /// hook can safely be handed to read, and [`queue_routine_target`] and
-/// [`finish_routine`] pass it here while still passing `documents` as `&[]`.
+/// [`finish_routine`] pass it here while still passing `submitted` as `&[]`.
 /// An entry is the empty string when nothing backs it — a `--from -` stream
-/// document read from standard input, say — rather than a path nothing can
+/// task read from standard input, say — rather than a path nothing can
 /// open.
 ///
-/// `interactive` is not `crate::ask::interactive()`'s own tty check —
-/// callers driving the queue screen (`finish_submit`, `finish_routine`) pass
-/// `true` unconditionally, since the screen already blocks on a key for
-/// every other prompt it draws regardless of whether a real terminal is on
-/// the other end, and `read_key` returning `None` is what ends it gracefully
-/// under a script or a closed pane. Only a caller with no screen at all —
-/// `queue_add_documents`, `queue_routine_target` — asks `crate::ask` whether
-/// anyone is really there.
-///
-/// `own_terminal` is a separate question: whether the gate must take the
-/// terminal for itself before it can safely block on a key. A caller with
-/// no screen at all has taken no guard of its own, so it passes `true`. The
-/// queue screen has already taken one for the whole of `run_screen` (see
-/// `queue_screen`'s own doc comment on why that guard is dropped only once
-/// the screen itself is done), and passes `false`: a second `TermGuard`
-/// nested inside it would still be safe to construct, but its `Drop` runs
-/// `show_cursor` and `drain_stdin` the moment this call returns, undoing the
-/// outer guard's own hidden cursor and leaving the rest of the session with
-/// the cursor visible again — review finding 2.
+/// `gate` says how the tool-requirements gate is reached — see [`ToolGate`].
+/// `log` is where what the hook answers goes as it answers — see
+/// [`TicketLog`].
 fn open_and_prefix(
     repo: &Repo,
-    documents: &[(String, String)],
+    submitted: &[(String, String)],
     task_files: &[String],
     tasks: &mut [Task],
-    interactive: bool,
-    own_terminal: bool,
+    gate: ToolGate,
+    log: &mut dyn TicketLog,
 ) -> Result<()> {
     // Before `open_tickets` ever calls the hook: a declared requirement this
     // machine cannot meet means the call can only fail, and by the time it
     // does the group's epic may already exist on the forge — see
     // `tool_requirements_gate`. `true` means the gate drew and this
     // submission goes on with issue tracking switched off for it.
-    if tool_requirements_gate(repo, interactive, own_terminal)? {
+    let tracking_off = match gate {
+        ToolGate::Print { interactive } => tool_requirements_gate(repo, interactive)?,
+        ToolGate::Answered { tracking_off } => tracking_off,
+    };
+    if tracking_off {
         return Ok(());
     }
 
     // Before anything is queued: a ticket opened for a task that never made
-    // it into the queue — because a sibling document further down the batch
+    // it into the queue — because a sibling task further down the batch
     // turned out to be broken — would be a ticket nothing ever points back
     // at.
-    let group_slug = open_tickets(repo, documents, task_files, tasks)?;
+    let group_slug = open_tickets(repo, submitted, task_files, tasks, log)?;
 
     // The prefix goes on in a pass of its own, after the hook has answered:
     // the slug does not exist until `open_tickets` has run, and `branch:` was
     // already stamped and the lane name already checked by `validate_batch`.
-    prefix_generated_names(tasks, &group_slug);
+    prefix_generated_names(tasks, &group_slug, log);
     Ok(())
+}
+
+/// Where [`open_tickets`] reports each ticket as the hook answers it. A
+/// caller with no screen prints the rows under its own command line —
+/// [`PrintedTickets`]; the queue screen draws them into a popup over its tab
+/// instead, one row at a time — see [`PopupTickets`] — since a row printed
+/// under a drawn frame lands where no frame is and is cleared by the next
+/// draw.
+pub(crate) trait TicketLog {
+    /// `group`'s tickets are about to be opened.
+    fn group(&mut self, group: &str);
+    /// The hook is about to be called for task `id`, and nothing answers
+    /// until it returns.
+    fn waiting(&mut self, id: &str);
+    /// One ticket or epic: `kind`, what became of it, its id on the tracker
+    /// and the task or group it belongs to.
+    fn row(&mut self, kind: &str, status: &str, ticket: &str, name: &str);
+    /// A line that is not a ticket — a slug dropped, names prefixed.
+    fn note(&mut self, line: &str);
+    /// Every task in the batch has its answer.
+    fn done(&mut self);
+}
+
+/// [`TicketLog`] for a caller with no screen: `queue add --from`, `jobs run`
+/// and a job the dispatcher fires — the same lines those have always
+/// printed.
+pub(crate) struct PrintedTickets;
+
+impl TicketLog for PrintedTickets {
+    fn group(&mut self, group: &str) {
+        println!("issue_tracking: opening tickets for group `{group}`\n");
+    }
+
+    fn waiting(&mut self, _id: &str) {}
+
+    fn row(&mut self, kind: &str, status: &str, ticket: &str, name: &str) {
+        println!("  {kind:<8} {status:<9} {ticket:<13} {name}");
+    }
+
+    fn note(&mut self, line: &str) {
+        println!("{line}");
+    }
+
+    fn done(&mut self) {
+        println!();
+    }
+}
+
+/// How [`open_and_prefix`] reaches the tool-requirements gate.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ToolGate {
+    /// Nobody has asked yet: [`tool_requirements_gate`] prints it and, when
+    /// someone is there, reads the answer — a caller with no screen at all:
+    /// `queue add --from`, `jobs run`, or the dispatcher firing a job on its
+    /// schedule.
+    ///
+    /// `interactive` is that caller's own `crate::ask::interactive()`, whether
+    /// anyone is really there to answer. Such a caller holds no terminal
+    /// guard of its own, so the gate takes one before it reads a key.
+    Print { interactive: bool },
+    /// A screen has asked already, as a popup over its own tab — the queue
+    /// screen's [`Mode::ToolGate`], or the jobs screen's own over `r` — and
+    /// printing the gate again under the screen would draw it where no frame
+    /// is, and take a second terminal guard inside the screen's. See
+    /// [`tool_gate_popup`]. `tracking_off` is the answer: `true` when a
+    /// requirement was unmet and `enter` queued anyway, or when the queue
+    /// screen's [`Mode::IssueQuestion`] was answered `n`.
+    Answered { tracking_off: bool },
 }
 
 /// `esc` out of [`tool_requirements_gate_with`] — bailed as an ordinary
 /// `Err` so [`open_and_prefix`] stays the one place every route reaches
 /// [`open_tickets`] through, and told apart at each call site from a real
-/// refusal: `esc` means "go back", not "here is what went wrong". The queue
-/// screen's own callers — `begin_submission`, `begin_routine_queue`,
-/// `begin_routine_solo` — turn it into [`refusal_mode`]'s own `Mode::Outcome`
-/// rather than a message saying something failed; a caller with no screen at
-/// all — `queue_add_documents`, `queue_routine_target` — catches it and
-/// exits clean, the way `dispatch::overrides_gate`'s own `esc` does.
+/// refusal: `esc` means "go back", not "here is what went wrong". Only a
+/// caller with no screen at all ever sees it — `queue_add_tasks`, which
+/// catches it and exits clean the way `dispatch::overrides_gate`'s own `esc`
+/// does, and `queue_routine_target` under `jobs run`. The queue and jobs
+/// screens ask the gate in a popup of their own instead, whose `esc` goes
+/// back without an error at all.
 #[derive(Debug)]
 struct GateCancelled;
 
@@ -1226,21 +1287,6 @@ impl std::fmt::Display for GateCancelled {
 }
 
 impl std::error::Error for GateCancelled {}
-
-/// What an interactive screen submit's own `Err` becomes: every ordinary
-/// refusal keeps the `Mode::Outcome` a person has always seen here, and
-/// [`GateCancelled`] gets one too, rather than `Mode::Browsing` — the mode
-/// the screen was already showing when `enter` was pressed, and so a frame
-/// `draw`'s own unchanged-frame check (review finding 1) would never
-/// repaint over the gate's own printed block. `Mode::Outcome` always renders
-/// as a new frame, so the next draw clears it away; any key from there
-/// returns to browsing exactly as every other outcome message does.
-fn refusal_mode(prefix: &str, err: anyhow::Error) -> Mode {
-    match err.downcast_ref::<GateCancelled>() {
-        Some(_) => Mode::Outcome("nothing was queued.".to_string()),
-        None => Mode::Outcome(format!("{prefix}: {err:#}")),
-    }
-}
 
 /// One `# spoolway-requires:` declaration the configured hook's own text
 /// carries that this machine cannot meet right now — what
@@ -1339,6 +1385,13 @@ fn unmet_requirements(repo: &Repo) -> Vec<UnmetRequirement> {
     unmet
 }
 
+/// The line under the gate's rows saying what they mean — the same words
+/// printed by [`print_tool_gate_notice`] and in the queue screen's popup.
+const TOOL_GATE_VERDICT: &str = "issue tracking is not supported.";
+
+/// The gate's two keys, printed and in the popup alike.
+const TOOL_GATE_KEYS: &str = "[enter] queue anyway, without issue tracking   [esc] back";
+
 /// The gate's own box, drawn once per unmet requirement pair — the
 /// declaration line and what this machine actually has — followed by the
 /// one line saying what it means. Column widths grow with the content
@@ -1346,6 +1399,39 @@ fn unmet_requirements(repo: &Repo) -> Vec<UnmetRequirement> {
 /// sizes its own rows, so a longer hook name or tool never runs its column
 /// into the next.
 fn print_tool_gate_notice(out: &mut impl std::io::Write, unmet: &[UnmetRequirement]) -> Result<()> {
+    writeln!(out)?;
+    for row in tool_gate_rows(unmet) {
+        writeln!(out, "    {row}")?;
+    }
+    writeln!(out)?;
+    writeln!(out, "  {TOOL_GATE_VERDICT}")?;
+    writeln!(out)?;
+    Ok(())
+}
+
+/// The gate as a popup, for a screen to lay over its tab before it queues —
+/// `None` when every requirement is met and there is nothing to ask. The
+/// queue screen's [`Mode::ToolGate`] and the jobs screen's `r` both draw it,
+/// and answer [`open_and_prefix`] with [`ToolGate::Answered`].
+pub(crate) fn tool_gate_popup(repo: &Repo) -> Option<Vec<String>> {
+    let unmet = unmet_requirements(repo);
+    (!unmet.is_empty()).then(|| tool_gate_panel(&unmet))
+}
+
+/// The screens' own popup for the gate: the same rows and the same line
+/// under them as [`print_tool_gate_notice`], in a box over the tab, as step
+/// 14 of the screen's mockup draws it.
+fn tool_gate_panel(unmet: &[UnmetRequirement]) -> Vec<String> {
+    let mut body = vec![String::new()];
+    body.extend(tool_gate_rows(unmet));
+    body.push(String::new());
+    body.push(TOOL_GATE_VERDICT.to_string());
+    panel("issue tracking", &body, TOOL_GATE_KEYS)
+}
+
+/// One pair of rows per unmet requirement, unindented — see
+/// [`print_tool_gate_notice`] on how the columns are sized.
+fn tool_gate_rows(unmet: &[UnmetRequirement]) -> Vec<String> {
     let col1 = unmet
         .iter()
         .flat_map(|u| [u.hook.len(), u.tool.len()])
@@ -1363,22 +1449,18 @@ fn print_tool_gate_notice(out: &mut impl std::io::Write, unmet: &[UnmetRequireme
         .unwrap_or(0)
         + 3;
 
-    writeln!(out)?;
+    let mut rows = Vec::new();
     for u in unmet {
-        writeln!(
-            out,
-            "    {:<col1$}{:<col2$}{} >= {}",
+        rows.push(format!(
+            "{:<col1$}{:<col2$}{} >= {}",
             u.hook, "requires", u.tool, u.floor
-        )?;
-        match &u.found {
-            Some((found, path)) => writeln!(out, "    {:<col1$}{:<col2$}{}", u.tool, found, path)?,
-            None => writeln!(out, "    {:<col1$}not on PATH", u.tool)?,
-        }
+        ));
+        rows.push(match &u.found {
+            Some((found, path)) => format!("{:<col1$}{:<col2$}{}", u.tool, found, path),
+            None => format!("{:<col1$}not on PATH", u.tool),
+        });
     }
-    writeln!(out)?;
-    writeln!(out, "  issue tracking is not supported.")?;
-    writeln!(out)?;
-    Ok(())
+    rows
 }
 
 /// Whether a batch's configured hook declares a tool requirement this
@@ -1387,15 +1469,9 @@ fn print_tool_gate_notice(out: &mut impl std::io::Write, unmet: &[UnmetRequireme
 /// submission, `false` means every requirement is met (or none exist) and
 /// [`open_and_prefix`] goes on exactly as it does today. The one `Err` this
 /// ever returns is [`GateCancelled`], `esc`'s own signal back up to the
-/// caller that drove the screen.
+/// caller.
 ///
-/// `interactive` is [`open_and_prefix`]'s own — not decided here, since
-/// whether anyone is there to answer means something different for a
-/// caller with no screen at all than for one already mid-way through
-/// driving one; see that function's own doc comment. `own_terminal` is the
-/// same function's own second question — whether this call must take the
-/// terminal for itself before blocking on a key, or whether a caller
-/// already holds one (see review finding 2).
+/// `interactive` is [`ToolGate::Print`]'s own — not decided here; see there.
 ///
 /// A thin wrapper over [`tool_requirements_gate_with`], the same split
 /// [`dispatch::overrides_gate`] draws around [`dispatch::overrides_gate_with`]
@@ -1403,13 +1479,13 @@ fn print_tool_gate_notice(out: &mut impl std::io::Write, unmet: &[UnmetRequireme
 /// process's real stdio, so a test can drive every branch — including the
 /// no-tty print-and-proceed path — against an injected reader and writer
 /// instead.
-fn tool_requirements_gate(repo: &Repo, interactive: bool, own_terminal: bool) -> Result<bool> {
+fn tool_requirements_gate(repo: &Repo, interactive: bool) -> Result<bool> {
     tool_requirements_gate_with(
         repo,
         interactive,
         &mut crate::screen::RawStdin,
         &mut std::io::stdout(),
-        own_terminal.then_some(crate::platform::TermGuard::new as fn() -> _),
+        crate::platform::TermGuard::new,
     )
 }
 
@@ -1419,22 +1495,18 @@ fn tool_requirements_gate(repo: &Repo, interactive: bool, own_terminal: bool) ->
 /// unattended path [`dispatch::overrides_gate_with`] takes for a layer
 /// notice.
 ///
-/// `term` is `None` for a caller already holding a terminal guard of its
-/// own — the queue screen, for the whole of `run_screen` — and `Some` for
-/// one that is not, taken only just before the first blocking read for the
-/// same reason `dispatch::overrides_gate_with`'s own guard is: every early
-/// return above it constructs nothing, hides nothing and shows nothing. A
-/// second guard nested inside the screen's own would still be memory-safe
-/// to build, but its `Drop` shows the cursor and drains stdin the moment
-/// this call returns — undoing the outer guard's own hidden cursor for the
-/// rest of the session (review finding 2), which is why the screen's own
-/// callers pass `None` rather than a second `TermGuard::new`.
+/// `term` takes the terminal only just before the first blocking read, for
+/// the same reason `dispatch::overrides_gate_with`'s own guard waits: every
+/// early return above it constructs nothing, hides nothing and shows
+/// nothing. Neither the queue screen nor the jobs screen calls this — each
+/// holds a guard of its own for as long as it is open, and asks the gate as
+/// a popup instead; see [`ToolGate::Answered`].
 fn tool_requirements_gate_with(
     repo: &Repo,
     interactive: bool,
     input: &mut impl PollableRead,
     out: &mut impl std::io::Write,
-    term: Option<impl FnOnce() -> crate::platform::TermGuard>,
+    term: impl FnOnce() -> crate::platform::TermGuard,
 ) -> Result<bool> {
     let unmet = unmet_requirements(repo);
     if unmet.is_empty() {
@@ -1445,12 +1517,9 @@ fn tool_requirements_gate_with(
     if !interactive {
         return Ok(true);
     }
-    writeln!(
-        out,
-        "  [enter] queue anyway, without issue tracking   [esc] back"
-    )?;
+    writeln!(out, "  {TOOL_GATE_KEYS}")?;
 
-    let _term = term.map(|term| term());
+    let _term = term();
     loop {
         match read_key(input) {
             Some(Key::Enter) => return Ok(true),
@@ -1468,7 +1537,7 @@ fn tool_requirements_gate_with(
 /// task/<slug>-<id>`. A no-op for any group with no slug, which is every group
 /// when `issue_tracking.key_in_names` is off, so with the flag off every
 /// generated name is byte-for-byte what it is today. The group is stripped
-/// of the slug before it is reapplied, so a document that comes back through
+/// of the slug before it is reapplied, so a task that comes back through
 /// the queue already carrying the prefix — `carry_to_pending` keeps `group:`
 /// as written — gets it exactly once, not stacked on again.
 ///
@@ -1477,7 +1546,11 @@ fn tool_requirements_gate_with(
 /// find these branches where they look today; the worktree directory follows
 /// the branch and so picks the prefix up on its own — see
 /// [`crate::mux::branch_slug`].
-fn prefix_generated_names(tasks: &mut [Task], group_slug: &BTreeMap<String, String>) {
+fn prefix_generated_names(
+    tasks: &mut [Task],
+    group_slug: &BTreeMap<String, String>,
+    log: &mut dyn TicketLog,
+) {
     // The one winning slug per group onto every `slug:` first — the same
     // stamp the failure path runs before `write_back_ids`.
     stamp_group_slugs(tasks, group_slug);
@@ -1497,24 +1570,26 @@ fn prefix_generated_names(tasks: &mut [Task], group_slug: &BTreeMap<String, Stri
         task.front.branch = Some(format!("task/{slug}-{}", task.front.id));
         task.front.group = Some(prefixed_group.clone());
         if announced.insert((slug.clone(), prefixed_group.clone())) {
-            println!("issue_tracking: names prefixed `{slug}` — group `{prefixed_group}`\n");
+            log.note(&format!(
+                "issue_tracking: names prefixed `{slug}` — group `{prefixed_group}`\n"
+            ));
         }
     }
 }
 
-/// Call the `[issue_tracking]` open hook once for every document in the
+/// Call the `[issue_tracking]` open hook once for every task in the
 /// batch that does not already name a `ticket:`, before any of them is
 /// queued — a no-op start to finish when no hook is configured at all.
 ///
 /// Walks the batch in dependency order, so a task's own call always has its
 /// dependencies' ticket ids already in hand for `SPOOLWAY_DEPENDS_TICKETS`,
 /// and tracks one epic id per `group:` — the first non-empty `epic=` a
-/// hook answers with, or whatever a document already names, whichever this
+/// hook answers with, or whatever a task already names, whichever this
 /// batch reaches first — so a group opens at most one epic across however
 /// many of its tasks actually call the hook.
 ///
 /// A failing call bails out — nothing in this batch is queued — but not
-/// before every id already answered is written back into the document it
+/// before every id already answered is written back into the task it
 /// came from, in place on disk: see [`write_back_ids`], which is what makes
 /// re-running the same `queue add` resume rather than open a second set.
 ///
@@ -1524,16 +1599,17 @@ fn prefix_generated_names(tasks: &mut [Task], group_slug: &BTreeMap<String, Stri
 /// `issue_tracking.key_in_names` is on and a hook actually answered a slug;
 /// [`prefix_generated_names`] is what applies it.
 ///
-/// `task_files` is index-aligned with `tasks`, not `documents` — see
+/// `task_files` is index-aligned with `tasks`, not `submitted` — see
 /// [`open_and_prefix`]'s own doc comment on why the two lists differ — and
 /// is what `SPOOLWAY_TASK_FILE` is resolved from below.
 fn open_tickets(
     repo: &Repo,
-    documents: &[(String, String)],
+    submitted: &[(String, String)],
     task_files: &[String],
     tasks: &mut [Task],
+    log: &mut dyn TicketLog,
 ) -> Result<BTreeMap<String, String>> {
-    // `group:` on every task in this batch is still the bare name a document
+    // `group:` on every task in this batch is still the bare name a task
     // wrote — `validate_batch` never prefixes it — so every map here is keyed
     // by the bare group.
     let mut group_slug: BTreeMap<String, String> = BTreeMap::new();
@@ -1545,7 +1621,7 @@ fn open_tickets(
 
     let mut group_size: BTreeMap<String, usize> = BTreeMap::new();
     // The group's own words for the issue this batch is about to open —
-    // whichever document of the group set `group_description:` first, in
+    // whichever task of the group set `group_description:` first, in
     // batch order, or an already-queued sibling's if none in the batch did
     // (seeded below, alongside `group_epic`). `require_group_description`
     // has already refused the batch outright when a hook is configured and
@@ -1572,7 +1648,7 @@ fn open_tickets(
     // a sibling this batch never mentions. A queued sibling's `group:` already
     // carries the `<slug>-` prefix from its own `queue add`, so a recognised
     // prefix is stripped before comparing: a person writes the bare `group:`
-    // in every document they ever cut, and the second `queue add` still finds
+    // in every task they ever cut, and the second `queue add` still finds
     // the first one's epic instead of opening a second.
     let mut group_epic: BTreeMap<String, String> = BTreeMap::new();
     for sibling in repo.tasks().unwrap_or_default() {
@@ -1607,11 +1683,11 @@ fn open_tickets(
                 .or_insert_with(|| sib_slug.to_string());
         }
     }
-    // And from this batch: a document already carrying `slug:` — one reported
+    // And from this batch: a task already carrying `slug:` — one reported
     // `kept`, or one a prior failed run wrote back — pins its group's slug
     // the same way a queued sibling does, so a hook answering a different
     // slug on the re-run cannot displace the first non-blank answer. This
-    // document *is* this command's input, so a bad `slug:` here is reported —
+    // task *is* this command's input, so a bad `slug:` here is reported —
     // and stripped from the task, so what queues does not carry the value
     // the note just said was dropped.
     if key_in_names {
@@ -1623,11 +1699,11 @@ fn open_tickets(
             if accept_slug(&slug) {
                 group_slug.entry(group).or_insert(slug);
             } else {
-                println!(
+                log.note(&format!(
                     "  issue_tracking: slug `{slug}` on `{}` is not a valid name \
                      (lowercase letters, digits and hyphens) — ignored",
                     task.id()
-                );
+                ));
                 task.front.extra.remove("slug");
             }
         }
@@ -1642,7 +1718,7 @@ fn open_tickets(
     for i in open_order(tasks) {
         let group = tasks[i].front.group.clone().unwrap_or_default();
         if printed_header.insert(group.clone()) {
-            println!("issue_tracking: opening tickets for group `{group}`\n");
+            log.group(&group);
         }
 
         let already = tasks[i].extra_str("ticket").to_string();
@@ -1651,13 +1727,7 @@ fn open_tickets(
             if !epic.is_empty() {
                 group_epic.entry(group.clone()).or_insert(epic);
             }
-            println!(
-                "  {:<8} {:<9} {:<13} {}",
-                "ticket",
-                "kept",
-                already,
-                tasks[i].id()
-            );
+            log.row("ticket", "kept", &already, tasks[i].id());
             continue;
         }
 
@@ -1671,12 +1741,13 @@ fn open_tickets(
         let known_epic = group_epic.get(&group).cloned().unwrap_or_default();
         let known_description = group_description.get(&group).cloned().unwrap_or_default();
         let size = *group_size.get(&group).unwrap_or(&1);
-        // The path this document actually sits at right now — the caller's
+        // The path this task actually sits at right now — the caller's
         // to resolve, and never `tasks[i].path`: that names where
         // `validate_batch` intends to save the task, a file that does not
-        // exist until every document in this batch has opened its ticket.
+        // exist until every task in this batch has opened its ticket.
         let task_file = task_files.get(i).cloned().unwrap_or_default();
 
+        log.waiting(tasks[i].id());
         match crate::tracking::open_ticket(
             repo,
             &tasks[i],
@@ -1695,7 +1766,7 @@ fn open_tickets(
             } => {
                 if !epic.is_empty() && !group_epic.contains_key(&group) {
                     group_epic.insert(group.clone(), epic.clone());
-                    println!("  {:<8} {:<9} {:<13} {}", "epic", "created", epic, group);
+                    log.row("epic", "created", &epic, &group);
                     opened.push(format!("epic {epic} (`{group}`)"));
                 }
                 if !epic.is_empty() {
@@ -1713,28 +1784,16 @@ fn open_tickets(
                     &group,
                     &mut group_slug,
                 );
-                println!(
-                    "  {:<8} {:<9} {:<13} {}",
-                    "ticket",
-                    "created",
-                    ticket,
-                    tasks[i].id()
-                );
+                log.row("ticket", "created", &ticket, tasks[i].id());
             }
             crate::tracking::OpenResult::Failed { exit_code } => {
-                println!(
-                    "  {:<8} {:<9} {:<13} {}",
-                    "ticket",
-                    "FAILED",
-                    "—",
-                    tasks[i].id()
-                );
+                log.row("ticket", "FAILED", "—", tasks[i].id());
                 // The group's winning slug onto every task first, so the
                 // ids written back carry the dependency-order decision — not
-                // a later task's own raw answer, which document order would
+                // a later task's own raw answer, which task order would
                 // otherwise let win the re-run.
                 stamp_group_slugs(tasks, &group_slug);
-                let written_back = write_back_ids(documents, tasks)?;
+                let written_back = write_back_ids(submitted, tasks)?;
                 let code = exit_code
                     .map(|c| c.to_string())
                     .unwrap_or_else(|| "no code".to_string());
@@ -1759,7 +1818,7 @@ fn open_tickets(
                     let ids = if written_back {
                         "written into pending/".to_string()
                     } else {
-                        "not written — no document on disk to record them in; close those \
+                        "not written — no task on disk to record them in; close those \
                          by hand first"
                             .to_string()
                     };
@@ -1773,13 +1832,13 @@ fn open_tickets(
             }
         }
     }
-    println!();
+    log.done();
     Ok(group_slug)
 }
 
 /// The bare `group:` name, with a recognised `<slug>-` prefix removed. A
 /// queued sibling carries the prefix its own `queue add` applied; comparing
-/// against the bare name a fresh document writes is what lets the epic and
+/// against the bare name a fresh task writes is what lets the epic and
 /// slug lookups in [`open_tickets`] span more than one `queue add`.
 fn strip_slug_prefix<'a>(group: &'a str, slug: &str) -> &'a str {
     if slug.is_empty() {
@@ -1791,7 +1850,7 @@ fn strip_slug_prefix<'a>(group: &'a str, slug: &str) -> &'a str {
         .unwrap_or(group)
 }
 
-/// Whether a slug a hook or a document offered is one spoolway will build a
+/// Whether a slug a hook or a task offered is one spoolway will build a
 /// name out of: non-blank and inside [`crate::config::check_id`]'s alphabet,
 /// the same one every task id, group and branch already uses.
 fn accept_slug(slug: &str) -> bool {
@@ -1928,11 +1987,11 @@ fn open_order(tasks: &[Task]) -> Vec<usize> {
     order
 }
 
-/// The ticket id `dep` already carries — a sibling document in this same
+/// The ticket id `dep` already carries — a sibling task in this same
 /// batch, already processed by the time `open_order` reaches whatever
 /// depends on it, or a task already queued or archived from an earlier
 /// call. Errors only if `dep` names neither, which `validate_batch`'s own
-/// `check_dependencies_set` has already ruled out for every document that
+/// `check_dependencies_set` has already ruled out for every task that
 /// reaches here.
 fn dependency_ticket(repo: &Repo, tasks: &[Task], dep: &str) -> Result<String> {
     if let Some(task) = tasks.iter().find(|t| t.id() == dep) {
@@ -1943,25 +2002,25 @@ fn dependency_ticket(repo: &Repo, tasks: &[Task], dep: &str) -> Result<String> {
     Ok(existing.extra_str("ticket").to_string())
 }
 
-/// Write every value `open_tickets` already secured back into the document it
+/// Write every value `open_tickets` already secured back into the task it
 /// came from, in place on disk — called only once a hook call has failed,
-/// so a re-run of the same `queue add` sees those documents already carrying
+/// so a re-run of the same `queue add` sees those tasks already carrying
 /// `epic:`/`ticket:`/`slug:`/`url:` and does not undo the first call's work:
-/// a `ticket:` reports the document `kept` and skips the hook, and a `slug:`
+/// a `ticket:` reports the task `kept` and skips the hook, and a `slug:`
 /// pins the group's prefix so the re-run's hook cannot answer a different
 /// one.
 ///
-/// `documents` and `tasks` are index-aligned: `validate_batch` parses one
-/// [`Task`] per document, in the order `documents` names them, and never
-/// reorders that top-level list — only a task's own `depends_on` is ever
-/// reordered. A document read from `-` (standard input) has no file to write
-/// back to and is silently skipped; there is nowhere on disk for its answer
-/// to resume from anyway. Returns whether any document was written at all,
-/// so the failure message can say where the ids went — or that they went
-/// nowhere.
-fn write_back_ids(documents: &[(String, String)], tasks: &[Task]) -> Result<bool> {
+/// `submitted` and `tasks` are index-aligned: `validate_batch` parses one
+/// [`Task`] per submitted item, in the order `submitted` names them, and
+/// never reorders that top-level list — only a task's own `depends_on` is
+/// ever reordered. A task read from `-` (standard input) has no file to
+/// write back to and is silently skipped; there is nowhere on disk for its
+/// answer to resume from anyway. Returns whether any task was written at
+/// all, so the failure message can say where the ids went — or that they
+/// went nowhere.
+fn write_back_ids(submitted: &[(String, String)], tasks: &[Task]) -> Result<bool> {
     let mut written = false;
-    for (task, (name, raw)) in tasks.iter().zip(documents.iter()) {
+    for (task, (name, raw)) in tasks.iter().zip(submitted.iter()) {
         let path = std::path::Path::new(name);
         if !path.is_file() {
             continue;
@@ -1997,9 +2056,9 @@ fn ends_with_newline(mut body: String) -> String {
 /// satisfiable, and put each survivor's `depends_on` in the order its cut
 /// needs.
 ///
-/// Run over the whole submission at once, not one document at a time: a
+/// Run over the whole submission at once, not one task at a time: a
 /// `depends_on` naming a sibling submitted alongside it has to resolve
-/// against that sibling, which is not in `repo.tasks()` until every document
+/// against that sibling, which is not in `repo.tasks()` until every task
 /// in this batch has already passed. Every failure this catches is silent
 /// otherwise: the task sits on the wait step for as long as anyone leaves it
 /// there, looking like ordinary queued work, or its worktree quietly misses
@@ -2047,7 +2106,7 @@ fn check_dependencies_set(repo: &Repo, batch: &mut [Task]) -> Result<()> {
             //
             // Compared bare: a queued sibling's `group:` already carries the
             // `<slug>-` prefix its own `queue add` applied when
-            // `issue_tracking.key_in_names` is on, while this document still
+            // `issue_tracking.key_in_names` is on, while this task still
             // reads what the person wrote — `open_tickets` runs after this
             // check. The same strip `open_tickets` uses for its epic lookup,
             // so a group that spans two `queue add` calls chains the way it
@@ -2230,17 +2289,18 @@ pub fn queue_resume(repo: &Repo, pipelines: &Pipelines, id: &str) -> Result<()> 
 
 // ----------------------------------------------------------------- the screen
 //
-// Bare `spoolway queue` opens this rather than listing anything: the queue's
-// own subcommands are unchanged, but where the work actually enters the
-// queue used to be an agent skill typing `queue add --from` on a human's say-
-// so is now this screen, reading the same task documents any producer writes
-// into the pending directory and submitting through the very same `--from`
-// path below. Nothing here decides a split or a pipeline — that stayed with
-// whoever wrote the documents; the screen's whole job is picking which
+// Bare `spoolway`'s queue tab is the only thing that opens this any more —
+// `spoolway queue` bare now prints its usage instead. The queue's own
+// subcommands are unchanged, but where the work actually enters the queue
+// used to be an agent skill typing `queue add --from` on a human's say-so is
+// now this screen, reading the same tasks any producer writes into
+// the pending directory and submitting through the very same `--from` path
+// below. Nothing here decides a split or a pipeline — that stayed with
+// whoever wrote the tasks; the screen's whole job is picking which
 // already-written groups go, and when.
 //
 // spoolway does not know what a plan is any more. A group is a `group:`
-// string a set of documents share, and that is the only structure this reads:
+// string a set of tasks share, and that is the only structure this reads:
 // no page, no cards, no chips. A Jira ticket, a GitHub issue and the shipped
 // `/spoolway-plan` skill all reach this list the same way, by writing `.md`
 // files into one directory.
@@ -2261,9 +2321,9 @@ use super::routines::{RoutineFolder, RoutineTask};
 
 /// Which pane a `Char(' ')` or an arrow acts on.
 ///
-/// `pub(super)` because the `spoolway jobs` screen reuses this module's
-/// routines browser whole to pick a job's target — see
-/// [`super::jobs::jobs_screen`].
+/// `pub(super)` because bare `spoolway`'s jobs tab reuses this module's
+/// routines browser — its keys and its navigation — to pick a job's target
+/// — see [`super::jobs::jobs_tab`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Focus {
     Groups,
@@ -2292,47 +2352,311 @@ enum Mode {
     /// screen dropping this mode is what "leaves the selection exactly as
     /// it was" means.
     Trial(TrialState),
-    /// What validating or writing a submission came back with, held on
-    /// screen until the next key press dismisses it. This exists because
-    /// `draw`'s first act is always to clear the screen — a message written
-    /// straight to `out` and then let the loop redraw over would never be
-    /// read at all.
-    Outcome(String),
+    /// What validating or writing a submission came back with — a refusal,
+    /// a result — in a popup over the screen it came from, held until
+    /// `enter` closes it. This exists because `draw`'s first act is always
+    /// to clear the screen — a message written straight to `out` and then
+    /// let the loop redraw over would never be read at all.
+    ///
+    /// `routines` is the routines pane the popup was opened over, when it
+    /// was: that pane stays drawn under it, and closing it goes back there
+    /// rather than to the pending screen.
+    Outcome {
+        notice: Notice,
+        routines: Option<RoutineNav>,
+    },
+    /// The tool-requirements gate, asked in a popup over the screen before
+    /// a submit reaches the hook — the printed form is
+    /// [`tool_requirements_gate`]. `panel` is [`tool_gate_panel`]'s; `then`
+    /// is the submit `enter` goes back and finishes with issue tracking
+    /// switched off, and the screen `esc` goes back to having queued
+    /// nothing.
+    ToolGate {
+        panel: Vec<String>,
+        then: Resume,
+    },
+    /// The question a submit stops at before any ticket is opened, with
+    /// issue tracking on — [`issue_question`]'s panel. A ticket on a public
+    /// tracker is seen by other people and hard to take back, so nothing
+    /// reaches the hook until a person says yes here. `enter` runs `then`
+    /// again and opens the tickets, `n` runs it with issue tracking switched
+    /// off for it, and `esc` goes back having queued nothing.
+    IssueQuestion {
+        panel: Vec<String>,
+        then: Resume,
+    },
+    /// What a screen submit queued — [`queued_panel`]'s popup, the tickets
+    /// the hook opened when it opened any. `enter` closes it, the same as
+    /// [`Mode::Outcome`].
+    Queued(Vec<String>),
+    /// The sync gate bare `spoolway` opens on — [`crate::gate::sync_popup`]'s
+    /// panel. `enter` applies the updates, the only key it reads; `ctrl-c`
+    /// quits the screen with nothing written, as it does the printed gate.
+    SyncGate(Vec<String>),
     /// `r`'s own screen: the left pane swapped for the folder tree under
     /// `.spoolway/routines/` — see [`RoutineNav`] for what it tracks between
-    /// keys. The folders and documents themselves live in `run_screen`'s own
+    /// keys. The folders and tasks themselves live in `run_screen`'s own
     /// `routines`, read fresh every time this mode is entered, the same way
     /// `groups` is read once up front rather than carried on the mode.
     Routines(RoutineNav),
     /// `s`'s own panel, over the pending screen: saving the named group's
-    /// documents into `.spoolway/routines/<name>/`, `name` typed and edited
+    /// tasks into `.spoolway/routines/<name>/`, `name` typed and edited
     /// the same way `Mode::Filter`'s query is. `group` is fixed at the
     /// moment `s` was pressed, so moving the cursor underneath this panel
     /// — which nothing here lets happen, but the field says so regardless —
-    /// could never save the wrong group's documents.
+    /// could never save the wrong group's tasks.
     SaveRoutine {
         group: GroupKey,
         name: String,
     },
 }
 
-/// How the screen ended, and the one thing it cannot do for itself.
+/// A [`Mode::Outcome`] over the pending screen.
+fn outcome(title: &str, text: impl Into<String>) -> Mode {
+    outcome_over(None, title, text)
+}
+
+/// A [`Mode::Outcome`] over the routines pane `routines` describes, or over
+/// the pending screen with none.
+fn outcome_over(routines: Option<&RoutineNav>, title: &str, text: impl Into<String>) -> Mode {
+    Mode::Outcome {
+        notice: Notice::new(title, text),
+        routines: routines.cloned(),
+    }
+}
+
+/// The submit [`Mode::ToolGate`] or [`Mode::IssueQuestion`] finishes once it
+/// is answered, run again from the start as the answer says — see
+/// [`resume`].
+#[derive(Debug, Clone)]
+enum Resume {
+    /// The pending screen's `enter`, over `ScreenState::selected`.
+    Selection,
+    /// The routines pane's `enter`, over the folders ticked in `nav`.
+    Routines(RoutineNav),
+    /// The routines pane's `space`, over the task under `nav`'s cursor.
+    RoutineTask(RoutineNav),
+}
+
+impl Resume {
+    /// Where `esc` off the gate goes back to: the screen the submit started
+    /// from.
+    fn back(&self) -> Mode {
+        match self {
+            Resume::Selection => Mode::Browsing,
+            Resume::Routines(nav) | Resume::RoutineTask(nav) => Mode::Routines(nav.clone()),
+        }
+    }
+}
+
+/// Whether a screen submit may still stop at the tool-requirements gate or
+/// the issue question, and how it answered them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tracking {
+    /// Ask first: an unmet requirement opens [`Mode::ToolGate`], and with
+    /// issue tracking on [`Mode::IssueQuestion`] asks before any ticket is
+    /// opened. Nothing is queued until each is answered.
+    Ask,
+    /// `enter` on the tool gate, or `n` on the question: queue with issue
+    /// tracking switched off.
+    Off,
+    /// `enter` on the question: open the tickets and queue.
+    Open,
+}
+
+/// The gate a submit about to reach [`open_and_prefix`] stops at, or `None`
+/// when it goes straight on: already answered, or every requirement met.
+/// `Open` has passed the gate on the way to the question.
+fn tool_gate(repo: &Repo, tracking: Tracking, then: Resume) -> Option<Mode> {
+    if tracking != Tracking::Ask {
+        return None;
+    }
+    tool_gate_popup(repo).map(|panel| Mode::ToolGate { panel, then })
+}
+
+/// The issue question's keys, in its popup.
+fn issue_keys() -> String {
+    keys(&[
+        ("enter", "create and queue"),
+        ("n", "queue only"),
+        ("esc", "back"),
+    ])
+}
+
+/// A body for one of the issue popups — the question, the tickets opening,
+/// what was queued — opening on a blank row as wide as the question's own
+/// key row. The three follow one another over the same spot, and holding
+/// them to one width keeps the box from jumping between them as each
+/// replaces the last, or growing a column every time a row comes in.
+fn issue_body(lines: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut body = vec![" ".repeat(issue_keys().chars().count())];
+    body.extend(lines);
+    body
+}
+
+/// [`Mode::IssueQuestion`] over the batch `tasks`, or `None` when there is
+/// nothing to ask: the submit has already been answered, no hook is
+/// configured, or every task already names its `ticket:` — a batch a failed
+/// hook wrote back, which [`open_tickets`] reports `kept` and never hands
+/// the hook again.
 ///
-/// [`run_screen`] is what learns a person wants a dispatcher, but
-/// [`queue_screen`] is what holds the [`TermGuard`]: raw mode and a hidden
-/// cursor would fight the dispatch board's own guard and the `ctrl-c` handler
-/// it installs. So the answer leaves the loop as data, the guard is dropped,
-/// and only then does `commands::dispatch` take the terminal.
-///
-/// [`TermGuard`]: crate::platform::TermGuard
+/// Lists every task in the batch and names the tracker — see
+/// [`crate::tracking::tracker`]. The count is the tickets still to open.
+fn issue_question(repo: &Repo, tracking: Tracking, tasks: &[Task], then: Resume) -> Option<Mode> {
+    if tracking != Tracking::Ask || !crate::tracking::configured(repo) {
+        return None;
+    }
+    let opening = tasks
+        .iter()
+        .filter(|task| task.extra_str("ticket").is_empty())
+        .count();
+    if opening == 0 {
+        return None;
+    }
+    let mut groups: Vec<&str> = Vec::new();
+    for group in tasks.iter().filter_map(|task| task.front.group.as_deref()) {
+        if !groups.contains(&group) {
+            groups.push(group);
+        }
+    }
+    let ask = format!(
+        "create {} on {} for {}",
+        plural(opening, "issue"),
+        crate::tracking::tracker(repo),
+        groups.join(", ")
+    );
+    let tasks = tasks.iter().map(|task| format!("  {}", task.id()));
+    let body = issue_body(std::iter::once(ask).chain(tasks));
+    Some(Mode::IssueQuestion {
+        panel: panel("issue tracking", &body, &issue_keys()),
+        then,
+    })
+}
+
+/// One ticket row in the issue popups — narrower than the printed form's
+/// id column, which leaves room for a jira key the popup's width has no
+/// room to spare for.
+fn ticket_row(kind: &str, status: &str, ticket: &str, name: &str) -> String {
+    format!("{kind:<8} {status:<9} {ticket:<6} {name}")
+}
+
+/// [`TicketLog`] for the queue screen: each row goes into the `opening
+/// issues` popup as the hook answers it, and `redraw` lays the popup over
+/// the tab again straight away — the hook runs on the screen's own thread,
+/// so nothing else draws until it returns. The task at the hook is drawn
+/// as a `…` row until its answer replaces it, over room for every row the
+/// batch can still add, so the box does not grow row by row under the
+/// person watching it.
+struct PopupTickets<'a> {
+    rows: Vec<String>,
+    waiting: Option<String>,
+    /// A ticket per task and an epic per group: the most rows the batch can
+    /// answer with.
+    room: usize,
+    redraw: &'a mut dyn FnMut(&[String]),
+}
+
+impl<'a> PopupTickets<'a> {
+    fn new(tasks: &[Task], redraw: &'a mut dyn FnMut(&[String])) -> PopupTickets<'a> {
+        let groups: std::collections::BTreeSet<_> = tasks
+            .iter()
+            .filter_map(|task| task.front.group.as_deref())
+            .collect();
+        PopupTickets {
+            rows: Vec::new(),
+            waiting: None,
+            room: tasks.len() + groups.len(),
+            redraw,
+        }
+    }
+
+    /// The popup while the hook is still answering.
+    fn panel(&self) -> Vec<String> {
+        let mut rows = self.rows.clone();
+        rows.extend(
+            self.waiting
+                .as_deref()
+                .map(|id| ticket_row("ticket", "…", "", id)),
+        );
+        while rows.len() < self.room {
+            rows.push(String::new());
+        }
+        rows.extend([
+            String::new(),
+            String::new(),
+            "waiting on the hook".to_string(),
+        ]);
+        crate::screen::boxed("opening issues", &issue_body(rows))
+    }
+
+    fn show(&mut self) {
+        let panel = self.panel();
+        (self.redraw)(&panel);
+    }
+}
+
+impl TicketLog for PopupTickets<'_> {
+    fn group(&mut self, _group: &str) {}
+
+    fn waiting(&mut self, id: &str) {
+        self.waiting = Some(id.to_string());
+        self.show();
+    }
+
+    fn row(&mut self, kind: &str, status: &str, ticket: &str, name: &str) {
+        // An epic is answered in the same call as the first ticket of its
+        // group, and drawn above it — the task stays at the hook until its
+        // own row comes in.
+        if kind != "epic" {
+            self.waiting = None;
+        }
+        self.rows.push(ticket_row(kind, status, ticket, name));
+        self.show();
+    }
+
+    /// Left off the popup. The popups draw tickets and nothing else, and a
+    /// note is no ticket: the names-prefixed line — which the shipped
+    /// `github.sh` earns on every batch by always answering `slug=` — comes
+    /// after [`TicketLog::done`], so drawing it would put `waiting on the
+    /// hook` back up once the hook has finished, and it is wider than
+    /// [`issue_body`]'s width, so it would stretch the box. The prefix
+    /// itself is on every queued name the tab lists.
+    fn note(&mut self, _line: &str) {}
+
+    fn done(&mut self) {
+        self.waiting = None;
+    }
+}
+
+/// [`Mode::Queued`] for a batch that queued `ids`: the tickets the hook
+/// answered with, when it was asked, over the count queued; or, with no
+/// ticket to show, the count over every task it queued.
+fn queued_panel(ids: &[String], tickets: &[String]) -> Mode {
+    let queued = format!("queued {}", plural(ids.len(), "task"));
+    let (title, body) = if tickets.is_empty() {
+        let ids = ids.iter().map(|id| format!("  {id}"));
+        ("queued", issue_body(std::iter::once(queued).chain(ids)))
+    } else {
+        let mut lines = tickets.to_vec();
+        lines.extend([String::new(), queued]);
+        ("issues created", issue_body(lines))
+    };
+    Mode::Queued(panel(title, &body, &keys(&[("enter", "close")])))
+}
+
+/// How the screen ended: on its own, or — inside bare `spoolway`'s queue tab
+/// — handing a key back to the shell around it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScreenExit {
     Quit,
-    StartDispatcher,
+    /// `←`, `→` or `q` while browsing, inside bare `spoolway`'s queue tab —
+    /// see [`crate::screen::shell::leave_on`]. Never reached outside that
+    /// tab, where nothing is hosting the screen to hand a key back to.
+    Leave(crate::screen::shell::Leave),
 }
 
-/// A task, addressed by the path of the document it is written in — exactly
-/// the name [`gather_one`] gives that same document, so the key a person's
+/// A task, addressed by the path of the task it is written in — exactly
+/// the name [`gather_one`] gives that same task, so the key a person's
 /// gate is held under is the name a submission failure would report by.
 type TaskKey = String;
 
@@ -2352,7 +2676,7 @@ fn group_key(group: &Group) -> GroupKey {
     group.name.clone()
 }
 
-/// Whether a group can be submitted at all: it has to have documents, and at
+/// Whether a group can be submitted at all: it has to have tasks, and at
 /// least one of them must still be waiting in the pending directory — see
 /// [`GroupState`], which is what `h`'s first widening hides on.
 fn selectable(group: &Group) -> bool {
@@ -2369,7 +2693,7 @@ fn selectable(group: &Group) -> bool {
 /// error over.
 ///
 /// `pub(super)` along with its fields so the `spoolway jobs` screen can drive
-/// the same browser and then read back which folder or document was picked.
+/// the same browser and then read back which folder or task was picked.
 #[derive(Debug, Clone)]
 pub(super) struct RoutineNav {
     pub(super) path: Vec<String>,
@@ -2430,8 +2754,8 @@ struct TrialState {
 
 impl TrialState {
     /// Opened by `t`: every task in `group` starts out assigned its own
-    /// document's `pipeline:` when it names one. There is no project default
-    /// to fall back to any more, so a legacy or hand-edited document naming
+    /// task's `pipeline:` when it names one. There is no project default
+    /// to fall back to any more, so a legacy or hand-edited task naming
     /// none opens unassigned instead — `←`/`→` on [`TrialStage::AssignPipelines`]
     /// is what has to give it one before `enter` can advance, rather than the
     /// picker silently choosing for it.
@@ -2512,10 +2836,14 @@ struct ScreenState {
     group_cursor: usize,
     task_cursor: usize,
     selected: std::collections::BTreeSet<GroupKey>,
-    /// A gate chosen from the screen, kept apart from the document itself —
+    /// A gate chosen from the screen, kept apart from the task itself —
     /// see `with_gate` for why the file on disk is never rewritten to record
     /// one.
     gates: std::collections::BTreeMap<TaskKey, String>,
+    /// Popups waiting behind the one on screen, each opened in turn as the
+    /// one before it closes — the notices bare `spoolway` opens with, which
+    /// can be more than one at once.
+    waiting: std::collections::VecDeque<Mode>,
 }
 
 impl ScreenState {
@@ -2534,7 +2862,14 @@ impl ScreenState {
             task_cursor: 0,
             selected: Default::default(),
             gates: Default::default(),
+            waiting: Default::default(),
         }
+    }
+
+    /// What the screen shows once the popup on it closes: the next one
+    /// waiting, or `closed` with none.
+    fn after_popup(&mut self, closed: Mode) -> Mode {
+        self.waiting.pop_front().unwrap_or(closed)
     }
 }
 
@@ -2608,33 +2943,33 @@ fn group_score(group: &Group, query: &str) -> Option<i64> {
     best.filter(|&s| s >= super::pending::MATCH_FLOOR)
 }
 
-/// What `queue_screen` prints instead of opening — or `None` when there is
+/// What the queue tab holds as its opening message — or `None` when there is
 /// nothing wrong with the pending directory worth saying first.
 ///
 /// An empty pending directory is not one of those things. The screen opens
 /// on it like any other, and its own empty left pane says there is nothing
 /// to queue. It used to print a message here naming `/spoolway-plan` as the
 /// way to fill the directory, which made a bundled sample skill look like a
-/// dependency of the binary; documents reach that directory from anywhere,
+/// dependency of the binary; tasks reach that directory from anywhere,
 /// and this screen has no business naming one writer of them.
 ///
-/// The unreadable-documents check is gated on no group being
+/// The unreadable-tasks check is gated on no group being
 /// [`super::pending::GroupState::Queueable`] any more — true both when
 /// `groups` is empty outright and when it holds only rows nobody can select
 /// — rather than on `groups.is_empty()` alone. `groups` now also reflects
 /// the queue and archive directories (see [`super::pending::list_groups`]),
 /// so a group already queued or archived can leave it non-empty even when
-/// every document actually sitting in the pending directory is unreadable;
+/// every task actually sitting in the pending directory is unreadable;
 /// gating on emptiness alone would either hide the diagnostic behind that
 /// unrelated row, or — the fix that overcorrected the first time — hide a
-/// perfectly queueable group behind a stray document that has nothing to do
+/// perfectly queueable group behind a stray task that has nothing to do
 /// with it. `all` on an empty slice is `true`, so this one condition covers
 /// the ordinary empty-pending case together with both the queue-only and
 /// archive-only ones.
 ///
-/// Pulled out of [`queue_screen`] so this can be checked without a real
-/// terminal or a captured stdout — the same split `skeleton_document` makes
-/// from `print_skeleton_document`.
+/// Pulled out of [`queue_tab`] so this can be checked without a real
+/// terminal or a captured stdout — the same split `skeleton_task` makes
+/// from `print_skeleton_task`.
 fn opening_message(repo: &Repo, groups: &[Group]) -> Option<String> {
     let dir = repo.pending_dir();
     if groups
@@ -2650,10 +2985,10 @@ fn opening_message(repo: &Repo, groups: &[Group]) -> Option<String> {
             return Some(format!(
                 "Nothing to list under {} — {} there {} no `group:` this could read:\n\n\
                  {}\n\n\
-                 A row on this screen is a `group:` value, so a document without one has no row \
+                 A row on this screen is a `group:` value, so a task without one has no row \
                  to be. Run `spoolway task contract --from {}` for the real reason on each.",
                 dir.display(),
-                plural(skipped.len(), "document"),
+                plural(skipped.len(), "task"),
                 match skipped.len() {
                     1 => "has",
                     _ => "have",
@@ -2667,95 +3002,89 @@ fn opening_message(repo: &Repo, groups: &[Group]) -> Option<String> {
     None
 }
 
-/// Open the queue screen: list every group waiting in the pending directory
-/// and the queue directory, let a person choose which to queue and where to
-/// gate their tasks, and submit the chosen documents through
-/// [`validate_batch`] — the same validation `queue add --from` runs — with
-/// nothing drawn between `enter` and the write.
+/// Bare `spoolway`'s queue tab: the same screen `spoolway queue` used to open
+/// on its own, over the terminal the shell around it already holds — so no
+/// guard and no `ctrl-c` handler of its own. Answers the [`Leave`] that ended
+/// it.
 ///
-/// Degrades rather than crashes with no terminal to drive: [`TermGuard`]
-/// only changes stdin's mode on a real tty, so a redirected or piped stdin
-/// is read exactly as written, and running out of it — `read_key` returning
-/// `None`, the same as `ctrl-c` caught and noticed by `wait_for_key` —
-/// ends the screen rather than blocking on a read that will never come.
-/// That is also what lets the end-to-end suite
-/// drive the submit path headlessly: a script's `printf '...' | spoolway
-/// queue` plays a key sequence in and the screen ends the moment the pipe is
-/// empty.
+/// Where the old standalone screen printed its opening message and ended,
+/// the tab has a strip and three other tabs to keep drawing, so the message
+/// is held on the tab as its [`Mode::Outcome`] instead, closed like any
+/// other.
 ///
-/// [`TermGuard`]: crate::platform::TermGuard
-pub fn queue_screen(repo: &Repo, pipelines: &Pipelines, cwd: &std::path::Path) -> Result<()> {
+/// `on_open` is what the screen has to say the moment it opens — the sync
+/// gate and the update notice, see [`crate::screen::shell::OnOpen`] — shown
+/// as popups over this tab, the one the screen opens on, in that order and
+/// ahead of the opening message.
+///
+/// [`Leave`]: crate::screen::shell::Leave
+pub(crate) fn queue_tab(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    cwd: &std::path::Path,
+    on_open: crate::screen::shell::OnOpen,
+    input: &mut impl PollableRead,
+    out: &mut impl std::io::Write,
+) -> Result<crate::screen::shell::Leave> {
+    use crate::screen::shell::Leave;
+
     let groups = super::pending::list_groups(repo)?;
-    if let Some(msg) = opening_message(repo, &groups) {
-        println!("{msg}");
-        return Ok(());
-    }
-    // Read once here rather than lazily on the first `r` — the same
-    // up-front read `groups` gets, and cheap for the same reason: a
-    // routines tree is at most a handful of small documents.
     let routines = super::routines::list_routines(repo)?;
-
-    let mut stdin = crate::screen::RawStdin;
-    let mut stdout = std::io::stdout();
-
-    // Installed before the guard takes the terminal, the same order
-    // `commands::dispatch` uses for its own board: a `ctrl-c` between the two
-    // calls would otherwise kill the process with the terminal already raw
-    // and nothing left to restore it.
-    crate::platform::stop::catch_interrupt();
-
-    let exit = {
-        // Scoped so the guard is dropped before anything else can want the
-        // terminal: `commands::dispatch` installs a board with a guard of its
-        // own and a `ctrl-c` handler, and a second raw mode still in force
-        // under it is a cursor that never comes back. `_term` is a real
-        // binding rather than a `_` wildcard so it lives to the closing brace,
-        // and its own drop drains stdin before restoring the mode — nothing
-        // typed at the screen leaks into the dispatcher's first read.
-        let _term = crate::platform::TermGuard::new();
-        run_screen(
-            repo,
-            pipelines,
-            cwd,
-            groups,
-            routines,
-            &mut stdin,
-            &mut stdout,
-        )?
-    };
-
-    match exit {
-        ScreenExit::Quit => Ok(()),
-        // The exit code `dispatch` returns is for a process about to end —
-        // this screen's own caller keeps running afterwards, so there is no
-        // process exit to carry it into.
-        //
-        // `confirmed: true`: `run_screen`'s own `enter` already walked
-        // whoever is here through the overview, the overrides gate and the
-        // warnings screen, via `confirm_start` — `dispatch` must not ask a
-        // second time now that its `TermGuard` is gone.
-        ScreenExit::StartDispatcher => super::dispatch(
-            repo,
-            pipelines,
-            &crate::cli::DispatchArgs {
-                confirmed: true,
-                ..Default::default()
-            },
-        )
-        .map(|_| ()),
+    let mut state = ScreenState::new();
+    state.waiting.extend(on_open.sync.map(Mode::SyncGate));
+    state
+        .waiting
+        .extend(on_open.update.map(|line| outcome("update available", line)));
+    if let Some(msg) = opening_message(repo, &groups) {
+        state.waiting.push_back(outcome("nothing to queue", msg));
     }
+    state.mode = state.after_popup(Mode::Browsing);
+    let exit = run_screen_from(repo, pipelines, cwd, (groups, routines), state, input, out)?;
+    Ok(match exit {
+        ScreenExit::Quit => Leave::Quit,
+        ScreenExit::Leave(leave) => leave,
+    })
 }
 
+// Only the tests below open the screen through a fresh `ScreenState` any
+// more — `spoolway queue` no longer does, and `queue_tab` needs the opening
+// message held on its own state instead (see `queue_tab`'s `opening_message`
+// call), so this wrapper has no production caller left.
+#[cfg(test)]
 fn run_screen(
     repo: &Repo,
     pipelines: &Pipelines,
     cwd: &std::path::Path,
-    mut groups: Vec<Group>,
-    mut routines: Vec<RoutineFolder>,
+    groups: Vec<Group>,
+    routines: Vec<RoutineFolder>,
     input: &mut impl PollableRead,
     out: &mut impl std::io::Write,
 ) -> Result<ScreenExit> {
-    let mut state = ScreenState::new();
+    run_screen_from(
+        repo,
+        pipelines,
+        cwd,
+        (groups, routines),
+        ScreenState::new(),
+        input,
+        out,
+    )
+}
+
+/// [`run_screen`], opening on `state` rather than a fresh one — the queue
+/// tab's opening message is the one caller that needs another. `lists` is the
+/// pending groups and the routine folders, paired so this stays inside the
+/// argument count the rest of this module keeps to.
+fn run_screen_from(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    cwd: &std::path::Path,
+    lists: (Vec<Group>, Vec<RoutineFolder>),
+    mut state: ScreenState,
+    input: &mut impl PollableRead,
+    out: &mut impl std::io::Write,
+) -> Result<ScreenExit> {
+    let (mut groups, mut routines) = lists;
     let mut last = None;
     let routines_dir = repo.routines_dir();
 
@@ -2777,13 +3106,32 @@ fn run_screen(
             break;
         };
 
+        // Inside bare `spoolway`'s queue tab, `←`, `→` and `q` belong to the
+        // shell while browsing — the one mode with no popup or sub-mode
+        // open. Every other mode keeps them: the routines pane's own arrows,
+        // the trial picker's, the filter's `q` typed into its query.
+        if matches!(state.mode, Mode::Browsing)
+            && let Some(leave) = crate::screen::shell::leave_on(key)
+        {
+            return Ok(ScreenExit::Leave(leave));
+        }
+        // The routines pane reads the arrows itself, to move between its
+        // own two panes, but nothing of its own on `q` — so there `q` alone
+        // is the shell's, as the pane's own key line says.
+        if matches!(state.mode, Mode::Routines(_))
+            && key == Key::Char('q')
+            && let Some(leave) = crate::screen::shell::leave_on(key)
+        {
+            return Ok(ScreenExit::Leave(leave));
+        }
+
         // No mode reads a quit key of its own any more — `ctrl-c` is the one
-        // way out, caught above `run_screen` and noticed by `wait_for_key`
-        // — so every mode's match is just its own keys, with `q` falling to
-        // whatever an unrecognised character already does there. Only
-        // `Mode::Filter` gives that character any meaning of its own,
-        // appending it to the query the same as any other letter — see
-        // `handle_filter_key`'s own doc comment.
+        // way out, caught by bare `spoolway`'s own screen and noticed by
+        // `wait_for_key` — so every mode's match is just its own keys,
+        // with `q` falling to whatever an unrecognised character already
+        // does there. Only `Mode::Filter` gives that character any meaning of
+        // its own, appending it to the query the same as any other letter —
+        // see `handle_filter_key`'s own doc comment.
         match &state.mode {
             Mode::Filter => handle_filter_key(&groups, &mut state, key),
             Mode::Gate(cursor) => {
@@ -2793,7 +3141,7 @@ fn run_screen(
             Mode::Trial(trial) => match key {
                 // The first screen's own `enter`: advance to the second
                 // rather than launch anything — but only once every task has
-                // an assignment. A legacy or hand-edited document names none
+                // an assignment. A legacy or hand-edited task names none
                 // (see `TrialState::new`), and `begin_trial` has no default
                 // left to fall back to, so a task still unassigned here would
                 // otherwise be silently dropped from the batch rather than
@@ -2819,12 +3167,7 @@ fn run_screen(
                 Key::Enter if trial.stage == TrialStage::ChooseSkips => {
                     let trial = trial.clone();
                     let base = crate::repo::branch_at(cwd)?;
-                    let outcome = begin_trial(repo, pipelines, &base, &groups, &trial);
-                    if let Some(exit) =
-                        apply_submit_outcome(repo, pipelines, outcome, &mut state, input, out)?
-                    {
-                        return Ok(exit);
-                    }
+                    state.mode = begin_trial(repo, pipelines, &base, &groups, &trial);
                 }
                 _ => {
                     let trial = trial.clone();
@@ -2834,13 +3177,104 @@ fn run_screen(
                     };
                 }
             },
-            Mode::Outcome(_) => match key {
-                Key::Char('q') => break,
-                // Any other key dismisses it. The message was already read
-                // on the draw that preceded this key — holding it in
-                // `state` rather than writing it straight to `out` is what
-                // let it survive that draw at all.
-                _ => state.mode = Mode::Browsing,
+            // `enter` closes it, and nothing else does: a popup takes every
+            // key while it is open, so a key meant for the screen under it
+            // cannot slip past a message not yet read. The message was
+            // already drawn on the frame that preceded this key — holding it
+            // in `state` rather than writing it straight to `out` is what let
+            // it survive that draw at all.
+            Mode::Outcome { routines, .. } => {
+                if key == Key::Enter {
+                    let closed = match routines {
+                        Some(nav) => Mode::Routines(nav.clone()),
+                        None => Mode::Browsing,
+                    };
+                    state.mode = state.after_popup(closed);
+                }
+            }
+            Mode::Queued(_) => {
+                if key == Key::Enter {
+                    state.mode = state.after_popup(Mode::Browsing);
+                }
+            }
+            Mode::SyncGate(_) => {
+                if key == Key::Enter {
+                    state.mode = match crate::gate::apply(repo) {
+                        Ok(()) => state.after_popup(Mode::Browsing),
+                        Err(err) => outcome("updates not applied", format!("{err:#}")),
+                    };
+                }
+            }
+            Mode::ToolGate { then, .. } => match key {
+                Key::Enter => {
+                    let then = then.clone();
+                    let base = crate::repo::branch_at(cwd)?;
+                    let at = Submitting {
+                        repo,
+                        pipelines,
+                        base: &base,
+                        routines: &routines,
+                    };
+                    state.mode = resume(
+                        &at,
+                        &then,
+                        Tracking::Off,
+                        &mut groups,
+                        &mut state,
+                        &mut |_| {},
+                    );
+                }
+                Key::Esc => state.mode = then.back(),
+                _ => {}
+            },
+            Mode::IssueQuestion { then, .. } => match key {
+                // Yes: the hook runs here, on this thread, and the tab under
+                // the question is held as it stands while it does — each
+                // ticket it answers is laid over that frame as it comes in.
+                // Whatever was typed while the hook ran is thrown away once it
+                // returns: the result popup takes `enter` only once it is on
+                // screen, never an `enter` pressed at the one still filling.
+                Key::Enter => {
+                    let then = then.clone();
+                    let base = crate::repo::branch_at(cwd)?;
+                    let at = Submitting {
+                        repo,
+                        pipelines,
+                        base: &base,
+                        routines: &routines,
+                    };
+                    let held = Held::new(&groups, &panes, &state);
+                    let mut redraw = |panel: &[String]| held.draw(panel, &mut last, out);
+                    state.mode = resume(
+                        &at,
+                        &then,
+                        Tracking::Open,
+                        &mut groups,
+                        &mut state,
+                        &mut redraw,
+                    );
+                    input.discard_typed();
+                }
+                Key::Char('n') => {
+                    let then = then.clone();
+                    let base = crate::repo::branch_at(cwd)?;
+                    let at = Submitting {
+                        repo,
+                        pipelines,
+                        base: &base,
+                        routines: &routines,
+                    };
+                    state.mode = resume(
+                        &at,
+                        &then,
+                        Tracking::Off,
+                        &mut groups,
+                        &mut state,
+                        &mut |_| {},
+                    );
+                }
+                Key::Esc => state.mode = then.back(),
+                _ => {}
             },
             Mode::SaveRoutine { group, name } => match key {
                 // The name field reads every ordinary character it is typed,
@@ -2877,31 +3311,37 @@ fn run_screen(
                 Key::Enter if nav.focus == Focus::Groups && !nav.selected.is_empty() => {
                     let nav = nav.clone();
                     let base = crate::repo::branch_at(cwd)?;
-                    let outcome = begin_routine_queue(repo, pipelines, &base, &routines, &nav);
-                    if let Some(exit) =
-                        apply_submit_outcome(repo, pipelines, outcome, &mut state, input, out)?
-                    {
-                        return Ok(exit);
-                    }
+                    state.mode = begin_routine_queue(
+                        repo,
+                        pipelines,
+                        &base,
+                        &routines,
+                        &nav,
+                        Tracking::Ask,
+                        &mut |_| {},
+                    );
                 }
-                // `space` over the tasks pane queues that one document alone
+                // `space` over the tasks pane queues that one task alone
                 // — over the folders pane it is `handle_routine_key`'s own
                 // business instead, ticking the highlighted folder.
                 Key::Char(' ') if nav.focus == Focus::Tasks => {
                     let nav = nav.clone();
                     let base = crate::repo::branch_at(cwd)?;
-                    let outcome = begin_routine_solo(repo, pipelines, &base, &routines, &nav);
-                    if let Some(exit) =
-                        apply_submit_outcome(repo, pipelines, outcome, &mut state, input, out)?
-                    {
-                        return Ok(exit);
-                    }
+                    state.mode = begin_routine_solo(
+                        repo,
+                        pipelines,
+                        &base,
+                        &routines,
+                        &nav,
+                        Tracking::Ask,
+                        &mut |_| {},
+                    );
                 }
-                // `o` over the documents pane: open the highlighted document
+                // `o` over the tasks pane: open the highlighted task
                 // in an editor pane, the same shape `open_highlighted` gives
                 // the pending screen — see `open_highlighted_routine`. Gated
                 // the same way the pending screen's own `o` is: live only
-                // with a document actually under the cursor to open.
+                // with a task actually under the cursor to open.
                 Key::Char('o')
                     if nav.focus == Focus::Tasks
                         && highlighted_routine_task(&routines, nav).is_some() =>
@@ -2916,22 +3356,26 @@ fn run_screen(
             },
             Mode::Browsing => match key {
                 // `enter` validates the selection and writes it straight
-                // through — nothing is drawn in between any more. A
-                // validation failure hands back `Mode::Outcome`; a clean
-                // write goes on to the overview, the overrides gate and the
-                // warnings screen, reached the same way a bare `spoolway
-                // dispatch` reaches them — see `confirm_start`.
+                // through — nothing is drawn in between but the
+                // tool-requirements gate and the issue question, when each
+                // has something to ask. A refusal hands back
+                // `Mode::Outcome`; a clean write says what it queued in
+                // `Mode::Queued`. Starting a dispatcher is the dispatch
+                // tab's `enter`, not this one's.
                 Key::Enter if !state.selected.is_empty() => {
                     let base = crate::repo::branch_at(cwd)?;
-                    let outcome = begin_submission(repo, pipelines, &base, &mut groups, &mut state);
-                    if let Some(exit) =
-                        apply_submit_outcome(repo, pipelines, outcome, &mut state, input, out)?
-                    {
-                        return Ok(exit);
-                    }
+                    state.mode = begin_submission(
+                        repo,
+                        pipelines,
+                        &base,
+                        &mut groups,
+                        &mut state,
+                        Tracking::Ask,
+                        &mut |_| {},
+                    );
                 }
                 // Gated exactly the way `g` is — see `handle_browse_key`'s
-                // own `g` arm — since a document only exists to open when
+                // own `g` arm — since a task only exists to open when
                 // the tasks pane is focused on one.
                 Key::Char('o')
                     if state.focus == Focus::Tasks
@@ -2963,6 +3407,77 @@ fn run_screen(
     Ok(ScreenExit::Quit)
 }
 
+/// What a submit resumed off the tool gate or the issue question runs
+/// against, bundled to keep [`resume`] inside the argument count this module
+/// keeps to.
+struct Submitting<'a> {
+    repo: &'a Repo,
+    pipelines: &'a Pipelines,
+    base: &'a str,
+    routines: &'a [RoutineFolder],
+}
+
+/// Run the submit `then` names again from the start, answered as `tracking`
+/// says — validating it again is cheap, and it is what a person would see had
+/// they pressed the key that opened the popup a second time.
+fn resume(
+    at: &Submitting,
+    then: &Resume,
+    tracking: Tracking,
+    groups: &mut Vec<Group>,
+    state: &mut ScreenState,
+    redraw: &mut dyn FnMut(&[String]),
+) -> Mode {
+    let Submitting {
+        repo,
+        pipelines,
+        base,
+        routines,
+    } = *at;
+    match then {
+        Resume::Selection => {
+            begin_submission(repo, pipelines, base, groups, state, tracking, redraw)
+        }
+        Resume::Routines(nav) => {
+            begin_routine_queue(repo, pipelines, base, routines, nav, tracking, redraw)
+        }
+        Resume::RoutineTask(nav) => {
+            begin_routine_solo(repo, pipelines, base, routines, nav, tracking, redraw)
+        }
+    }
+}
+
+/// The tab as it stood when the issue question was answered, with no popup
+/// on it — what the `opening issues` popup is laid over while the hook runs.
+/// Rendered once and owned, so drawing it again borrows nothing the submit
+/// itself is busy changing.
+struct Held {
+    frame: Vec<String>,
+    footer: String,
+}
+
+impl Held {
+    fn new(groups: &[Group], panes: &Panes, state: &ScreenState) -> Held {
+        let footer = footer(groups, state);
+        Held {
+            frame: beneath(groups, panes, state, &footer),
+            footer,
+        }
+    }
+
+    /// The held tab with `panel` over it, written the way [`draw`] writes
+    /// any frame.
+    fn draw(
+        &self,
+        panel: &[String],
+        last: &mut Option<Vec<String>>,
+        out: &mut impl std::io::Write,
+    ) {
+        let frame = compose(self.frame.clone(), Some(panel), self.footer.clone());
+        paint(frame, last, out);
+    }
+}
+
 fn clamp_cursors(groups: &[Group], state: &mut ScreenState) {
     let count = shown(groups, state).len();
     if count == 0 {
@@ -2981,7 +3496,7 @@ fn clamp_cursors(groups: &[Group], state: &mut ScreenState) {
 }
 
 /// Wait for the next keystroke, redrawing the screen on every poll slice —
-/// see [`draw`] — so a resized terminal or a pending document someone just
+/// see [`draw`] — so a resized terminal or a pending task someone just
 /// edited reaches the screen without a key being typed at all. `None` once
 /// the input is exhausted, exactly what a direct [`read_key`] would report —
 /// and also once `ctrl-c` has been pressed: `stop::asked()` is checked on
@@ -3024,7 +3539,7 @@ fn wait_for_key(
 /// Re-read the pending directory into `groups`, keeping `group_cursor` on
 /// whatever group it was pointing at, by name, rather than by index — a
 /// reload can reorder the list out from under it, since `list_groups` sorts
-/// newest first and an edit touches a document's own modified time — and
+/// newest first and an edit touches a task's own modified time — and
 /// clamping it back on screen the ordinary way when that group is gone.
 ///
 /// A pending directory that fails to read this tick is not a reason to blank
@@ -3074,6 +3589,11 @@ fn trial_target<'a>(groups: &'a [Group], state: &ScreenState) -> Option<&'a Grou
 /// and `t` needs the pipelines to seed the trial picker's first screen — so
 /// nothing this reads can leave the screen or reach outside it. `q` reaches
 /// this function like any other unrecognised character and does nothing.
+///
+/// `tab` is the one key that moves focus between the two panes. `←` and `→`
+/// used to as well, but inside bare `spoolway` they move between tabs, and
+/// one screen reading them two ways depending on where it was opened would
+/// be one more thing to remember — so they do nothing here.
 fn handle_browse_key(groups: &[Group], state: &mut ScreenState, key: Key) {
     match key {
         Key::Char('h') => {
@@ -3081,7 +3601,7 @@ fn handle_browse_key(groups: &[Group], state: &mut ScreenState, key: Key) {
             clamp_cursors(groups, state);
         }
         Key::Char('f') => state.mode = Mode::Filter,
-        Key::Tab | Key::Left | Key::Right => {
+        Key::Tab => {
             state.focus = match state.focus {
                 Focus::Groups => Focus::Tasks,
                 Focus::Tasks => Focus::Groups,
@@ -3173,8 +3693,8 @@ pub(super) fn highlighted_routine_folder<'a>(
     routine_level(routines, &nav.path).get(nav.folder_cursor)
 }
 
-/// The document the right pane's cursor sits on, at the current breadcrumb —
-/// `None` with no folder highlighted, or a folder with fewer documents than
+/// The task the right pane's cursor sits on, at the current breadcrumb —
+/// `None` with no folder highlighted, or a folder with fewer tasks than
 /// `nav.task_cursor` names.
 pub(super) fn highlighted_routine_task<'a>(
     routines: &'a [RoutineFolder],
@@ -3187,7 +3707,7 @@ pub(super) fn highlighted_routine_task<'a>(
 
 /// One key over the routines pane — everything but `esc`, `enter` on a
 /// selected folder, `space` over the tasks pane and `o` over a highlighted
-/// document, which all need the repo to act on or leave this mode outright,
+/// task, which all need the repo to act on or leave this mode outright,
 /// so `run_screen` reads those first and only falls through to this for the
 /// rest, the same split it makes for `handle_browse_key`. `q` is part of
 /// that rest, and does nothing here either.
@@ -3214,10 +3734,10 @@ pub(super) fn handle_routine_key(routines: &[RoutineFolder], nav: &mut RoutineNa
             }
         },
         // Opens whatever is highlighted, one step at a time so both a
-        // folder's own documents and its subfolders stay reachable — a
+        // folder's own tasks and its subfolders stay reachable — a
         // folder holding both is not rare enough to make either side
         // permanently unreachable behind the other. From the folders pane:
-        // focus this folder's own tasks pane if it has any documents of its
+        // focus this folder's own tasks pane if it has any tasks of its
         // own (see `RoutineFolder::own`), or descend into its subfolders if
         // it has none. From the tasks pane: descend into the same folder's
         // subfolders, if it has any — the second step for a folder that had
@@ -3322,7 +3842,7 @@ fn highlighted_task_key(groups: &[Group], state: &ScreenState) -> Option<TaskKey
     Some(task_key(group.tasks.get(state.task_cursor)?))
 }
 
-/// `o`: open the highlighted task's document in an editor, in a pane the
+/// `o`: open the highlighted task in an editor, in a pane the
 /// multiplexer opens — gated the same as `g`: live only with the tasks pane
 /// focused and a task actually highlighted under it, which is checked by the
 /// caller before this is reached. Never blocks: the pane runs the editor on
@@ -3349,18 +3869,19 @@ fn open_highlighted(repo: &Repo, groups: &[Group], state: &ScreenState) -> Mode 
     let command = crate::status::editor_command(&task.path);
     let mux = match crate::mux::backend(repo) {
         Ok(mux) => mux,
-        Err(err) => return Mode::Outcome(format!("o: {err:#}")),
+        Err(err) => return outcome("open task", format!("o: {err:#}")),
     };
     match mux.open_command(&repo.root, &format!("{} · edit", task.id), &command) {
         Ok(()) => Mode::Browsing,
-        Err(err) => Mode::Outcome(format!("o: {err:#}")),
+        Err(err) => outcome("open task", format!("o: {err:#}")),
     }
 }
 
 /// `o` over the routines pane's own tasks pane: open the highlighted
-/// document in an editor pane — the same shape [`open_highlighted`] gives
+/// task in an editor pane — the same shape [`open_highlighted`] gives
 /// the pending screen, including the same [`Mode::Outcome`] a backend with
-/// no pane to open one in is surfaced through. Returns to [`Mode::Routines`]
+/// no pane to open one in is surfaced through — drawn over this pane, and
+/// closed back onto it. Returns to [`Mode::Routines`]
 /// with `nav` exactly as it was rather than [`Mode::Browsing`], since this
 /// key never leaves the pane the way the pending screen's `o` has nothing to
 /// stay in.
@@ -3371,26 +3892,26 @@ fn open_highlighted_routine(repo: &Repo, routines: &[RoutineFolder], nav: &Routi
     let command = crate::status::editor_command(&task.path);
     let mux = match crate::mux::backend(repo) {
         Ok(mux) => mux,
-        Err(err) => return Mode::Outcome(format!("o: {err:#}")),
+        Err(err) => return outcome_over(Some(nav), "open task", format!("o: {err:#}")),
     };
     match mux.open_command(&repo.root, &format!("{} · edit", task.id), &command) {
         Ok(()) => Mode::Routines(nav.clone()),
-        Err(err) => Mode::Outcome(format!("o: {err:#}")),
+        Err(err) => outcome_over(Some(nav), "open task", format!("o: {err:#}")),
     }
 }
 
-/// The pipeline a highlighted task's own document names. `parse_submission`
-/// refuses a document naming none, so a document still missing one here —
+/// The pipeline a highlighted task itself names. `parse_submission`
+/// refuses a task naming none, so a task still missing one here —
 /// still being edited, not yet queueable — resolves nothing rather than
 /// guessing at a pipeline no real submission would end up on.
 fn task_pipeline<'a>(doc: &str, pipelines: &'a Pipelines) -> Result<&'a Pipeline> {
-    let name = doc_pipeline_name(doc).context("document names no `pipeline:`")?;
+    let name = doc_pipeline_name(doc).context("task names no `pipeline:`")?;
     pipelines.get(&name)
 }
 
-/// A peek at a document's own `pipeline:` key, without the rest of
+/// A peek at a task's own `pipeline:` key, without the rest of
 /// `parse_submission`'s validation — the gate picker needs a pipeline's
-/// steps before a document has a `base:` to be validated against at all,
+/// steps before a task has a `base:` to be validated against at all,
 /// and the tasks pane's own `Pipeline:` row needs nothing more than this.
 fn doc_pipeline_name(doc: &str) -> Option<String> {
     let (yaml, _) = crate::task::split_fence(doc).ok()?;
@@ -3421,7 +3942,7 @@ fn handle_gate_key(
         state.mode = Mode::Browsing;
         return;
     };
-    // The same pipeline `parse_submission` would resolve this document
+    // The same pipeline `parse_submission` would resolve this task
     // against once it is actually submitted — a malformed `pipeline:` on it
     // degrades to "no steps to page through" here rather than a panic, and is
     // caught properly, with a real error, at submit time.
@@ -3450,7 +3971,7 @@ fn handle_gate_key(
     }
 }
 
-/// Insert or replace a `<key>: <value>` line right after a document's
+/// Insert or replace a `<key>: <value>` line right after a task's
 /// opening `---` fence, dropping any line already there for that same key —
 /// and, with it, the indented or `- ` lines that continued it, so a
 /// block-list `depends_on:` is replaced whole rather than leaving its items
@@ -3499,19 +4020,19 @@ fn with_frontmatter_field(doc: &str, key: &str, value: &str) -> String {
     out
 }
 
-/// Insert a `gate_at: <step>` line into a task's document, in memory only —
+/// Insert a `gate_at: <step>` line into a task, in memory only —
 /// the file in the pending directory is never rewritten to record one. The
 /// only write the screen makes there is the deletion that follows a
 /// submission, and it says nothing about any single task's gate. Any
-/// `gate_at:` the document already carried is dropped, so the screen's own
+/// `gate_at:` the task already carried is dropped, so the screen's own
 /// choice — the last thing a person actually picked before submitting — is
 /// always the one that wins.
 fn with_gate(doc: &str, step: &str) -> String {
     with_frontmatter_field(doc, "gate_at", step)
 }
 
-/// The groups a person has selected — what `selected_documents` below turns
-/// into the pending batch, and whose documents `finish_submit` deletes once
+/// The groups a person has selected — what `selected_tasks` below turns
+/// into the pending batch, and whose tasks `finish_submit` deletes once
 /// that batch is actually written.
 fn selected_groups<'a>(
     groups: &'a [Group],
@@ -3523,17 +4044,17 @@ fn selected_groups<'a>(
         .collect()
 }
 
-/// Every document a selection puts in the queue, in group order, each
+/// Every task a selection puts in the queue, in group order, each
 /// carrying whatever gate the screen recorded against it.
 ///
-/// Only a task still [`TaskState::Pending`] is a document this submission
+/// Only a task still [`TaskState::Pending`] is a task this submission
 /// can write at all — a sibling already read out of `queue/` or `archive/`
 /// carries `stage:` and the rest of [`RESERVED_KEYS`], which
 /// `parse_submission` refuses on sight. A group is offered here only while
 /// it still has a pending task (see [`super::pending::group_state`]), so
 /// that task is never the one filtered away.
-fn selected_documents(groups: &[Group], state: &ScreenState) -> Vec<(TaskKey, String)> {
-    let mut documents = Vec::new();
+fn selected_tasks(groups: &[Group], state: &ScreenState) -> Vec<(TaskKey, String)> {
+    let mut tasks = Vec::new();
     for group in selected_groups(groups, &state.selected) {
         for task in &group.tasks {
             if task.state != TaskState::Pending {
@@ -3544,10 +4065,10 @@ fn selected_documents(groups: &[Group], state: &ScreenState) -> Vec<(TaskKey, St
                 Some(step) => with_gate(&task.doc, step),
                 None => task.doc.clone(),
             };
-            documents.push((key, doc));
+            tasks.push((key, doc));
         }
     }
-    documents
+    tasks
 }
 
 /// How wide each pane's content is and how many rows the pair of them get,
@@ -3627,16 +4148,36 @@ const PANE_CHROME_ROWS: usize = 4;
 const SPARE_COLUMN: usize = 1;
 
 /// The layout for this frame, measured fresh every draw so a resized
-/// terminal reflows on the next one.
-pub(super) fn layout() -> Layout {
+/// terminal reflows on the next one — less the rows bare `spoolway`'s tab
+/// strip takes off the top when it hosts this screen or the jobs screen,
+/// which lays itself out through this too (zero everywhere else; see
+/// `crate::screen::shell::strip_rows`), and less every row past the first
+/// that `footer` wraps onto. The queue's own key line is wider than a
+/// 100-column terminal, and each row it wraps onto pushes the frame's top
+/// row — the strip, or the box's own border — off the top of the screen.
+pub(super) fn layout(footer: &str) -> Layout {
     match terminal_size::terminal_size() {
-        Some((width, height)) => layout_for(width.0 as usize, height.0 as usize),
+        Some((width, height)) => layout_for(
+            width.0 as usize,
+            (height.0 as usize)
+                .saturating_sub(crate::screen::shell::strip_rows())
+                .saturating_sub(wrapped_rows(footer, width.0 as usize) - 1),
+        ),
         None => Layout {
             left: LEFT_PANE_WIDTH,
             right: RIGHT_PANE_WIDTH,
             rows: None,
         },
     }
+}
+
+/// How many terminal rows `line` takes at `width` columns: one, plus one for
+/// every time its visible text runs past the right edge. A line exactly as
+/// wide as the terminal still takes one — its newline lands on the wrap the
+/// terminal was already holding back.
+fn wrapped_rows(line: &str, width: usize) -> usize {
+    let columns = crate::status::strip_ansi(line).chars().count();
+    columns.div_ceil(width.max(1)).max(1)
 }
 
 /// How a terminal that size is split between the two panes. The left pane
@@ -3777,7 +4318,7 @@ fn group_line_index(cursor: usize, boundaries: &[usize]) -> usize {
 }
 
 /// The left pane's rows: one per distinct `group:` across the pending
-/// documents, its checkbox, and whether the queue already holds it — or,
+/// tasks, its checkbox, and whether the queue already holds it — or,
 /// once `h` has hidden every one of them, a single line saying so rather
 /// than an empty pane a person could mistake for a project with nothing
 /// pending at all.
@@ -3893,7 +4434,7 @@ fn task_tail(state: TaskState) -> &'static str {
 /// One task's own row in the tasks pane — the cursor marker, its id, and its
 /// own state's tail once a group can hold more than one (`tail` empty
 /// otherwise, as the routines pane's own tasks always pass it: a routine's
-/// documents carry no state of their own to draw).
+/// tasks carry no state of their own to draw).
 ///
 /// Budgets the name the same way [`groups_pane_lines`] budgets a group's own
 /// — a floor at [`MIN_NAME_COLUMN`] the tail may not shrink past — so a task
@@ -3952,7 +4493,7 @@ fn tasks_pane_lines(
         };
         lines.push(task_row(marker, &task.id, tail, width));
 
-        // There is no project default any more, so a document naming no
+        // There is no project default any more, so a task naming no
         // pipeline of its own reads as unassigned here — the same as
         // `task_pipeline` resolves nothing for it, and `parse_submission`
         // refuses it outright once it is actually submitted.
@@ -3970,7 +4511,7 @@ fn tasks_pane_lines(
         if let Some(step) = state.gates.get(&task_key(task)) {
             lines.extend(labeled_row("Gate:", step, width));
         }
-        // A document with no `title:` draws no row at all rather than an
+        // A task with no `title:` draws no row at all rather than an
         // empty one — `parse_submission` is what refuses it, at submit time.
         if let Some(description) = &task.description {
             lines.extend(labeled_row("Description:", description, width));
@@ -3984,7 +4525,7 @@ fn tasks_pane_lines(
 }
 
 /// The routines pane's own left-hand rows: the current level's folders, each
-/// with its checkbox and how many documents sit at or below it — the same
+/// with its checkbox and how many tasks sit at or below it — the same
 /// `N tasks` tail the mockup draws, and what `enter` on a ticked one queues
 /// whole.
 ///
@@ -4036,7 +4577,7 @@ fn routine_folder_lines(
 }
 
 /// The routines pane's own right-hand rows: the highlighted folder's own
-/// documents — every one at or below it, the same set `enter` would queue —
+/// tasks — every one at or below it, the same set `enter` would queue —
 /// each drawn the same `labeled_row` way [`tasks_pane_lines`] draws a
 /// pending task, minus the `Gate:` row a routine has no gate picker to set.
 fn routine_task_lines(
@@ -4059,7 +4600,7 @@ fn routine_task_lines(
         } else {
             " "
         };
-        // A routine's own documents carry no queue/archive state of their
+        // A routine's own tasks carry no queue/archive state of their
         // own to draw — see `task_row`'s own doc comment.
         lines.push(task_row(marker, &task.id, "", width));
 
@@ -4087,14 +4628,15 @@ fn routine_task_lines(
 
 /// The whole of [`Mode::Routines`]'s own frame: the same two-pane geometry
 /// [`two_pane_frame`] lays the pending screen out with, folders on the left
-/// and the highlighted one's own documents on the right.
-pub(super) fn render_routines(
+/// and the highlighted one's own tasks on the right.
+fn render_routines(
     routines: &[RoutineFolder],
     routines_dir: &std::path::Path,
     pipelines: &Pipelines,
     nav: &RoutineNav,
+    footer: &str,
 ) -> Vec<String> {
-    let layout = layout();
+    let layout = layout(footer);
     let level = routine_level(routines, &nav.path);
     let left = routine_folder_lines(routines_dir, level, nav, layout.left);
     let highlighted = level.get(nav.folder_cursor);
@@ -4199,55 +4741,88 @@ pub(super) fn two_pane_frame(
 /// second hand-spelled literal, so a key line here reads exactly the same
 /// way the board's own does — see that function's own doc comment.
 ///
-/// The arrows that move the cursor are never named: naming every key a
-/// screen reads would crowd out the ones a person actually has to be told
-/// about, and `↑↓` are read the same way by every screen in this project
-/// regardless. `q` is not named for the opposite reason — no mode reads it
-/// as anything special any more, so there is nothing about it to say;
-/// `ctrl-c` is the way out, and a footer line has no key of its own to name
-/// for that either.
+/// The arrows that move the cursor are never named on the ordinary line:
+/// naming every key a screen reads would crowd out the ones a person
+/// actually has to be told about, and `↑↓` are read the same way by every
+/// screen in this project regardless. The trial picker's own lines are the
+/// exception — they repeat the key row inside its popup, which names them.
+/// `q` is not named outside bare `spoolway`, where no mode reads it as
+/// anything special, so there is nothing about it to say; `ctrl-c` is the
+/// way out, and a footer line has no key of its own to name for that
+/// either. Inside bare `spoolway`'s queue tab it does quit, while browsing
+/// and over the routines pane, and those two lines name it there.
+///
+/// While a picker is open over the screen — [`Mode::Gate`], [`Mode::Trial`],
+/// [`Mode::SaveRoutine`] — none of the ordinary line's keys is read, so this
+/// draws the picker's own key row instead, the same keys its popup names. A
+/// notice is different: it reads only `enter` to close it, which its own
+/// popup says, and the line under the frame stays the one the screen will
+/// read again once it is closed.
 ///
 /// While [`Mode::Filter`] is open the ordinary line makes no sense at all —
 /// none of `space select` through `enter queue` reads a key while the filter
 /// box has focus — so this draws the filter's own line instead, naming
 /// exactly the one key [`handle_filter_key`] does not simply append to the
 /// query: `enter`, which leaves it.
-fn footer(state: &ScreenState) -> String {
+fn footer(groups: &[Group], state: &ScreenState) -> String {
     match &state.mode {
         Mode::Filter => key_hint(&[("enter", "leave search")]),
         // The save panel reads a name the same way the filter box reads a
         // query, so its own line names the same two keys the filter's does
         // to leave it — `enter`/`esc` — rather than any of the ordinary
         // line's, none of which this mode reads as anything but a letter.
-        Mode::SaveRoutine { .. } => key_hint(&[("enter", "save"), ("esc", "cancel")]),
+        Mode::SaveRoutine { .. } => key_hint(SAVE_KEYS),
+        Mode::Gate(_) => key_hint(GATE_KEYS),
+        Mode::Trial(trial) => match trial.stage {
+            TrialStage::AssignPipelines => hint(&assign_keys(
+                trial_group(groups, trial).is_some_and(|group| trial_fully_assigned(group, trial)),
+            )),
+            TrialStage::ChooseSkips => key_hint(SKIP_KEYS),
+        },
         // Its own screen, not an overlay over the pending one — so its own
         // line, naming exactly the keys `handle_routine_key`,
         // `open_highlighted_routine` and `run_screen`'s own `Mode::Routines`
         // arm read, rather than the ordinary line's `f`/`g`/`t`/`s`, none of
-        // which apply here. `esc` is what leaves the pane now, not `r`.
-        Mode::Routines(_) => key_hint(&[
-            ("o", "open task"),
-            ("space", "select"),
-            ("enter", "queue"),
-            ("esc", "back"),
-        ]),
+        // which apply here. `esc` is what leaves the pane now, not `r`. The
+        // same line under a notice drawn over the pane.
+        _ if routines_beneath(&state.mode).is_some() => key_hint(
+            &[
+                [
+                    ("o", "open task"),
+                    ("space", "select"),
+                    ("enter", "queue"),
+                    ("esc", "back"),
+                ]
+                .as_slice(),
+                crate::screen::shell::quit_hint(),
+            ]
+            .concat(),
+        ),
         _ => {
             let hide = match state.hide_scope {
                 HideScope::Pending => "show queued",
                 HideScope::PlusQueued => "show done",
                 HideScope::PlusDone => "hide all",
             };
-            key_hint(&[
-                ("space", "select"),
-                ("f", "find"),
-                ("g", "gate"),
-                ("o", "open task"),
-                ("t", "trial"),
-                ("r", "routines"),
-                ("s", "save routine"),
-                ("enter", "queue"),
-                ("h", hide),
-            ])
+            // `q` only inside bare `spoolway`'s queue tab, the one place it
+            // quits — see `crate::screen::shell::quit_hint`.
+            let keys = [
+                [
+                    ("space", "select"),
+                    ("f", "find"),
+                    ("g", "gate"),
+                    ("o", "open task"),
+                    ("t", "trial"),
+                    ("r", "routines"),
+                    ("s", "save routine"),
+                    ("enter", "queue"),
+                    ("h", hide),
+                ]
+                .as_slice(),
+                crate::screen::shell::quit_hint(),
+            ]
+            .concat();
+            key_hint(&keys)
         }
     }
 }
@@ -4267,30 +4842,170 @@ struct Panes<'a> {
     pipelines: &'a Pipelines,
 }
 
-fn render(groups: &[Group], panes: &Panes, state: &ScreenState) -> Vec<String> {
-    match &state.mode {
-        Mode::Outcome(msg) => {
-            return vec![
-                msg.clone(),
-                String::new(),
-                "press any key to continue".to_string(),
-            ];
-        }
-        Mode::Routines(nav) => {
-            let mut frame =
-                render_routines(panes.routines, panes.routines_dir, panes.pipelines, nav);
-            frame.push(footer(state));
-            return frame;
-        }
-        Mode::Browsing
-        | Mode::Gate(_)
-        | Mode::Trial(_)
-        | Mode::Filter
-        | Mode::SaveRoutine { .. } => {}
-    }
+/// The gate picker's keys, in its popup and on the line under the frame.
+const GATE_KEYS: &[(&str, &str)] = &[("enter", "set"), ("g", "clear"), ("esc", "cancel")];
 
-    let pipelines = panes.pipelines;
-    let layout = layout();
+/// The save panel's keys, in its popup and on the line under the frame.
+const SAVE_KEYS: &[(&str, &str)] = &[("enter", "save"), ("esc", "cancel")];
+
+/// The trial picker's second screen's keys, in its popup and on the line
+/// under the frame.
+const SKIP_KEYS: &[(&str, &str)] = &[
+    ("↑↓", "move"),
+    ("space", "toggle"),
+    ("enter", "run"),
+    ("esc", "pipelines"),
+];
+
+/// The trial picker's first screen's key row. `enter` refuses to advance
+/// until every task has an assignment (see `handle_trial_key`) — silently,
+/// unless the row says why, which is what the unassigned form is for.
+fn assign_keys(assigned: bool) -> String {
+    let moves = keys(&[("↑↓", "task"), ("←→", "pipeline")]);
+    match assigned {
+        true => format!(
+            "{moves}{}{}",
+            crate::status::GUTTER,
+            keys(&[("enter", "next"), ("esc", "cancel")])
+        ),
+        false => format!(
+            "{moves}{gutter}assign every task, then [enter]{gutter}{}",
+            keys(&[("esc", "cancel")]),
+            gutter = crate::status::GUTTER,
+        ),
+    }
+}
+
+/// A trial popup's key row, kept inside `width` like every other row it
+/// draws — the bracketed row is often its widest, and on a narrow frame it
+/// would otherwise push the popup's right border off it. Tightened to two
+/// spaces between keys first, as step 5 of the screen's mockup draws a
+/// cramped one, and cut only when even that does not fit.
+fn fit_keys(row: String, width: usize) -> String {
+    if row.chars().count() <= width {
+        return row;
+    }
+    clip(row.replace(crate::status::GUTTER, "  "), width)
+}
+
+/// The routines pane a mode is drawn over, when it is: the pane itself, a
+/// notice opened from it, or the tool-requirements gate or the issue
+/// question a routine submit stopped at. `None` for everything drawn over
+/// the pending screen.
+fn routines_beneath(mode: &Mode) -> Option<&RoutineNav> {
+    match mode {
+        Mode::Routines(nav)
+        | Mode::Outcome {
+            routines: Some(nav),
+            ..
+        }
+        | Mode::ToolGate {
+            then: Resume::Routines(nav) | Resume::RoutineTask(nav),
+            ..
+        }
+        | Mode::IssueQuestion {
+            then: Resume::Routines(nav) | Resume::RoutineTask(nav),
+            ..
+        } => Some(nav),
+        _ => None,
+    }
+}
+
+/// A frame: the pending screen, or the routines pane, with whatever popup
+/// the mode has open laid over it and the key line under it.
+fn render(groups: &[Group], panes: &Panes, state: &ScreenState) -> Vec<String> {
+    let footer = footer(groups, state);
+    let frame = beneath(groups, panes, state, &footer);
+    let popup = popup(groups, panes.pipelines, state, layout(&footer));
+    compose(frame, popup.as_deref(), footer)
+}
+
+/// The pending screen or the routines pane the mode is drawn over, with no
+/// popup on it and no key line under it.
+fn beneath(groups: &[Group], panes: &Panes, state: &ScreenState, footer: &str) -> Vec<String> {
+    match routines_beneath(&state.mode) {
+        Some(nav) => render_routines(
+            panes.routines,
+            panes.routines_dir,
+            panes.pipelines,
+            nav,
+            footer,
+        ),
+        None => pending_frame(groups, panes.pipelines, state, layout(footer)),
+    }
+}
+
+/// `frame` with `popup` laid over it and `footer` under it.
+fn compose(mut frame: Vec<String>, popup: Option<&[String]>, footer: String) -> Vec<String> {
+    if let Some(popup) = popup {
+        stretch(&mut frame, popup.len() + 4);
+        overlay(&mut frame, popup);
+    }
+    frame.push(footer);
+    frame
+}
+
+/// Lengthen a [`two_pane_frame`] to at least `lines` lines, borders
+/// included, with empty rows above its bottom border.
+///
+/// A frame drawn with no terminal to measure is only as tall as its content
+/// — see [`two_pane_frame`]'s `rows: None` — and [`overlay`] writes nothing
+/// past the frame's last line, so a popup taller than a short list would
+/// lose its key row and its bottom border. A real terminal's frame already
+/// fills the rows it has, and is left as it is.
+fn stretch(frame: &mut Vec<String>, lines: usize) {
+    let Some(bottom) = frame.last() else {
+        return;
+    };
+    // The bottom border with its corners and dashes blanked is exactly an
+    // empty row of the same two panes.
+    let empty: String = bottom
+        .chars()
+        .map(|c| match c {
+            '└' | '┴' | '┘' => '│',
+            _ => ' ',
+        })
+        .collect();
+    while frame.len() < lines {
+        let at = frame.len() - 1;
+        frame.insert(at, empty.clone());
+    }
+}
+
+/// The popup the mode has open over the screen, if any. A picker whose
+/// group or task has gone from under it draws none — see [`gate_panel`].
+fn popup(
+    groups: &[Group],
+    pipelines: &Pipelines,
+    state: &ScreenState,
+    layout: Layout,
+) -> Option<Vec<String>> {
+    match &state.mode {
+        Mode::Gate(cursor) => gate_panel(groups, pipelines, state, *cursor),
+        Mode::Trial(trial) => trial_panel(groups, pipelines, trial, checkbox_row_cap(layout)),
+        Mode::SaveRoutine { group, name } => save_routine_panel(groups, group, name),
+        // Wrapped no wider than the frame has room for, so a narrow
+        // terminal still sees the popup's right border — see
+        // `checkbox_row_cap`.
+        Mode::Outcome { notice, .. } => {
+            Some(notice.panel(crate::screen::NOTICE_WRAP.min(checkbox_row_cap(layout))))
+        }
+        Mode::ToolGate { panel, .. }
+        | Mode::IssueQuestion { panel, .. }
+        | Mode::Queued(panel)
+        | Mode::SyncGate(panel) => Some(panel.clone()),
+        Mode::Browsing | Mode::Filter | Mode::Routines(_) => None,
+    }
+}
+
+/// The pending screen's own two panes, groups on the left and the
+/// highlighted group's tasks on the right.
+fn pending_frame(
+    groups: &[Group],
+    pipelines: &Pipelines,
+    state: &ScreenState,
+    layout: Layout,
+) -> Vec<String> {
     let shown = shown(groups, state);
     let left = groups_pane_lines(groups, &shown, state, layout.left);
     let (right, focus) = tasks_pane_lines(groups, pipelines, state, layout.right);
@@ -4308,35 +5023,13 @@ fn render(groups: &[Group], panes: &Panes, state: &ScreenState) -> Vec<String> {
     // the filter's own row is added on top of that.
     let query_row = usize::from(matches!(state.mode, Mode::Filter));
     let group_line = query_row + group_line_index(state.group_cursor, &boundary_for(&shown, state));
-    let mut frame = two_pane_frame(
+    two_pane_frame(
         &window(&left, (group_line, group_line), layout.rows),
         &window(&right, focus, layout.rows),
         &left_title,
         title,
         layout,
-    );
-
-    match &state.mode {
-        Mode::Gate(cursor) => {
-            if let Some(picker) = gate_panel(groups, pipelines, state, *cursor) {
-                overlay(&mut frame, &picker);
-            }
-        }
-        Mode::Trial(trial) => {
-            if let Some(picker) = trial_panel(groups, pipelines, trial, checkbox_row_cap(layout)) {
-                overlay(&mut frame, &picker);
-            }
-        }
-        Mode::SaveRoutine { group, name } => {
-            if let Some(picker) = save_routine_panel(groups, group, name) {
-                overlay(&mut frame, &picker);
-            }
-        }
-        Mode::Browsing | Mode::Outcome(_) | Mode::Filter | Mode::Routines(_) => {}
-    }
-
-    frame.push(footer(state));
-    frame
+    )
 }
 
 /// Redraw the screen, but only when [`render`] actually comes back
@@ -4354,7 +5047,16 @@ fn draw(
     last: &mut Option<Vec<String>>,
     out: &mut impl std::io::Write,
 ) {
-    let frame = render(groups, panes, state);
+    // Under the strip when bare `spoolway` hosts this screen as its queue
+    // tab, and exactly as before everywhere else — see
+    // `crate::screen::shell::under_strip`.
+    paint(render(groups, panes, state), last, out);
+}
+
+/// Write `frame`, unless it is the one `last` already holds — [`draw`]'s own
+/// write, shared with [`Held::draw`].
+fn paint(frame: Vec<String>, last: &mut Option<Vec<String>>, out: &mut impl std::io::Write) {
+    let frame = crate::screen::shell::under_strip(frame);
     if last.as_ref() == Some(&frame) {
         return;
     }
@@ -4367,7 +5069,7 @@ fn draw(
 
 /// The gate picker: the highlighted task's own pipeline, a step at a time,
 /// with the one currently chosen marked. `None` when there is no task under
-/// the cursor to gate, or its document names a pipeline that will not
+/// the cursor to gate, or its task names a pipeline that will not
 /// resolve — the same degradation [`handle_gate_key`] already makes.
 fn gate_panel(
     groups: &[Group],
@@ -4380,21 +5082,17 @@ fn gate_panel(
     let pipeline = task_pipeline(&task.doc, pipelines).ok()?;
 
     let chosen = state.gates.get(&task_key(task));
-    let body: Vec<String> = pipeline
-        .steps
-        .iter()
-        .enumerate()
-        .map(|(i, step)| {
-            let marker = if i == cursor { ">" } else { " " };
-            let mark = if chosen == Some(&step.id) { " ·" } else { "" };
-            format!("{marker} {}{mark}", step.id)
-        })
-        .collect();
+    let mut body = vec![String::new()];
+    body.extend(pipeline.steps.iter().enumerate().map(|(i, step)| {
+        let marker = if i == cursor { ">" } else { " " };
+        let mark = if chosen == Some(&step.id) { " ·" } else { "" };
+        format!("{marker} {}{mark}", step.id)
+    }));
 
     Some(panel(
         &format!("gate {} at", task.id),
         &body,
-        "enter set   g clear   esc cancel",
+        &keys(GATE_KEYS),
     ))
 }
 
@@ -4407,7 +5105,7 @@ fn trial_pipeline_names(pipelines: &Pipelines) -> Vec<&str> {
 
 /// The pipeline `trial` has assigned a given task, or `None` for a task the
 /// picker has not been given one for yet — still unassigned, since
-/// [`TrialState::new`] seeds one only from the task's own document — or for
+/// [`TrialState::new`] seeds one only from the task itself — or for
 /// one whose assignment named a pipeline a reload swapped out from under an
 /// open picker, handled the same careful way [`trial_group`] handles a group
 /// that moved.
@@ -4468,6 +5166,7 @@ fn assign_pipelines_panel(
         .min(id_budget);
 
     let mut body = vec![
+        String::new(),
         "assign one pipeline to every task".to_string(),
         String::new(),
     ];
@@ -4489,15 +5188,12 @@ fn assign_pipelines_panel(
         ));
     }
 
-    // `enter` on this screen silently refuses to advance until every task
-    // has an assignment (see `handle_trial_key`) — silently unless the
-    // footer says why, which is what it is here for.
-    let footer = if trial_fully_assigned(group, trial) {
-        "↑↓ task   ←→ pipeline   enter next   esc cancel"
-    } else {
-        "↑↓ task   ←→ pipeline   assign every task, then enter   esc cancel"
-    };
-    panel(&clip(format!("trial {}", group.name), width), &body, footer)
+    let footer = fit_keys(assign_keys(trial_fully_assigned(group, trial)), width);
+    panel(
+        &clip(format!("trial {}", group.name), width),
+        &body,
+        &footer,
+    )
 }
 
 /// The widest a line [`choose_skips_panel`] draws may run before it wraps
@@ -4531,7 +5227,7 @@ const ASSIGN_ROW_CHROME_COLUMNS: usize = 11;
 
 /// What [`assign_pipelines_panel`] shows in the pipeline column for a task
 /// the trial picker has not been given one for yet — there is no project
-/// default to show instead, so this is what a legacy or hand-edited document
+/// default to show instead, so this is what a legacy or hand-edited task
 /// naming none reads as until `←`/`→` gives it one.
 const TRIAL_UNASSIGNED: &str = "(unset)";
 
@@ -4573,7 +5269,11 @@ fn choose_skips_panel(
     trial: &TrialState,
     width: usize,
 ) -> Vec<String> {
-    let mut body = vec!["choose steps to skip".to_string(), String::new()];
+    let mut body = vec![
+        String::new(),
+        "choose steps to skip".to_string(),
+        String::new(),
+    ];
     let mut flat = 0usize;
     for task in &group.tasks {
         let key = task_key(task);
@@ -4619,7 +5319,7 @@ fn choose_skips_panel(
     panel(
         &clip(format!("trial {}", group.name), width),
         &body,
-        "↑↓ move   space toggle   enter run   esc pipelines",
+        &fit_keys(keys(SKIP_KEYS), width),
     )
 }
 
@@ -4648,7 +5348,7 @@ fn trial_panel(
 }
 
 /// The save panel: the folder `name` would save under, and how many
-/// documents it would copy there unchanged — `None` when the group `s` was
+/// tasks it would copy there unchanged — `None` when the group `s` was
 /// pressed over is no longer among `groups` at all, which nothing on this
 /// screen can actually make happen since the panel only opens with one under
 /// the cursor, but a stale key kept past a reload is handled the same
@@ -4660,16 +5360,18 @@ fn save_routine_panel(groups: &[Group], group: &GroupKey, name: &str) -> Option<
     // — `crate::config::ROUTINES_DIR` is that relative path already, so
     // this needs no `Repo` to build it from.
     let body = vec![
+        String::new(),
         format!("{}/{name}_", crate::config::ROUTINES_DIR),
+        String::new(),
         format!(
             "copies {} unchanged, same ids",
-            plural(group.tasks.len(), "document")
+            plural(group.tasks.len(), "task")
         ),
     ];
     Some(panel(
         &format!("save {} as a routine", group.name),
         &body,
-        "enter save   esc cancel",
+        &keys(SAVE_KEYS),
     ))
 }
 
@@ -4764,237 +5466,80 @@ fn plural(n: usize, noun: &str) -> String {
     }
 }
 
-/// What [`begin_submission`] comes back with: either an ordinary [`Mode`] to
-/// show — a refusal — or word that a clean batch landed, either onto an idle
-/// queue, where the caller still has the overview, the overrides gate and
-/// the warnings screen of its own to run, or onto one a dispatcher already
-/// holds the lock on, where there is nothing left to run but the "go to the
-/// dispatcher" screen instead. All three need `input`/`out` and can end the
-/// whole loop, none of which `begin_submission` has any business holding.
-#[derive(Debug)]
-enum SubmitOutcome {
-    Mode(Mode),
-    Confirmed,
-    DispatcherRunning(u32),
-}
-
-/// The common tail every batch-writing key in [`run_screen`] shares once it
-/// has its [`SubmitOutcome`]: an ordinary [`Mode`] goes straight onto
-/// `state.mode`; a landed batch onto an idle queue runs the overview, the
-/// overrides gate and the warnings screen; a landed batch onto one a
-/// dispatcher already holds runs [`join_running_dispatcher`] instead —
-/// [`Some`] to leave `run_screen` for good, in either landed case, `None`
-/// (back to [`Mode::Browsing`]) for `esc` off any of them.
-fn apply_submit_outcome(
-    repo: &Repo,
-    pipelines: &Pipelines,
-    outcome: SubmitOutcome,
-    state: &mut ScreenState,
-    input: &mut impl PollableRead,
-    out: &mut impl std::io::Write,
-) -> Result<Option<ScreenExit>> {
-    match outcome {
-        SubmitOutcome::Mode(mode) => {
-            state.mode = mode;
-            Ok(None)
-        }
-        SubmitOutcome::Confirmed => {
-            if confirm_start(repo, pipelines, input, out)? {
-                return Ok(Some(ScreenExit::StartDispatcher));
-            }
-            state.mode = Mode::Browsing;
-            Ok(None)
-        }
-        SubmitOutcome::DispatcherRunning(pid) => {
-            if join_running_dispatcher(repo, pid, input, out)? {
-                return Ok(Some(ScreenExit::Quit));
-            }
-            state.mode = Mode::Browsing;
-            Ok(None)
-        }
-    }
-}
-
 /// Validate the selection and write it — the whole of what pressing `enter`
-/// does. Nothing is drawn in between: a validation failure hands back
-/// [`Mode::Outcome`], the same refusal `queue_add_documents` used to hand
-/// straight back, and a clean batch goes on to [`finish_submit`] and then
-/// [`after_write`]'s own check for a dispatcher already running.
+/// does. Nothing is drawn in between but the tool-requirements gate, when
+/// the hook declares a tool this machine cannot meet, and with issue
+/// tracking on the question [`issue_question`] asks before any ticket is
+/// opened: a validation failure hands back a [`Mode::Outcome`] titled
+/// `submission refused`, the same refusal `queue_add_tasks` hands back,
+/// and a clean batch goes on to [`finish_submit`] and to the
+/// [`Mode::Queued`] popup saying what it queued. A failure past validation
+/// — the hook's own, most often — is titled `queue refused`, as the
+/// screen's mockup draws a failed hook. Queuing is all `enter` does:
+/// starting a dispatcher is the dispatch tab's own `enter`.
 ///
-/// Takes `state` mutably rather than by reference: `selected_documents` reads
+/// Takes `state` mutably rather than by reference: `selected_tasks` reads
 /// it to build the batch, and a landed write clears its selection and gates
-/// right here, before the caller ever sees the resulting outcome — see
-/// [`after_write`]'s own doc comment on why that can no longer be read back
-/// off it.
+/// right here, before the caller ever sees the resulting mode.
+///
+/// `redraw` lays the `opening issues` popup over the tab as each ticket
+/// comes in — see [`PopupTickets`].
 fn begin_submission(
     repo: &Repo,
     pipelines: &Pipelines,
     base: &str,
     groups: &mut Vec<Group>,
     state: &mut ScreenState,
-) -> SubmitOutcome {
-    let documents = selected_documents(groups, state);
-    let pending = match validate_batch(repo, pipelines, Some(base), &documents) {
+    tracking: Tracking,
+    redraw: &mut dyn FnMut(&[String]),
+) -> Mode {
+    let tasks = selected_tasks(groups, state);
+    let pending = match validate_batch(repo, pipelines, Some(base), &tasks) {
         Ok(pending) => pending,
-        Err(err) => {
-            return SubmitOutcome::Mode(Mode::Outcome(format!("submission refused: {err:#}")));
-        }
+        Err(err) => return outcome("submission refused", format!("{err:#}")),
     };
+    if let Some(gate) = tool_gate(repo, tracking, Resume::Selection) {
+        return gate;
+    }
+    if let Some(question) = issue_question(repo, tracking, &pending, Resume::Selection) {
+        return question;
+    }
+    let ids: Vec<String> = pending.iter().map(|task| task.id().to_string()).collect();
+    let mut tickets = PopupTickets::new(&pending, redraw);
     let selected = state.selected.clone();
-    match finish_submit(repo, groups, pending, &documents, base, &selected) {
+    let submit = Submit {
+        tasks: &tasks,
+        base,
+        selected: &selected,
+        tracking_off: tracking == Tracking::Off,
+    };
+    match finish_submit(repo, groups, pending, &submit, &mut tickets) {
         Ok(_msg) => {
             state.selected.clear();
             state.gates.clear();
             clamp_cursors(groups, state);
-            after_write(repo)
+            queued_panel(&ids, &tickets.rows)
         }
-        Err(err) => SubmitOutcome::Mode(refusal_mode("submission refused", err)),
+        Err(err) => outcome("queue refused", format!("{err:#}")),
     }
 }
 
-/// What a landed write becomes: [`SubmitOutcome::Confirmed`], sending the
-/// caller on to the overview, the overrides gate and the warnings screen —
-/// unless a dispatcher already holds the queue's own lock, in which case
-/// there is nothing left to start (`commands::dispatch` would only refuse
-/// it, see `Lock::acquire`'s own bail) and this becomes
-/// [`SubmitOutcome::DispatcherRunning`] instead, so the batch that was just
-/// written is joined rather than offered a second start it cannot have.
-///
-/// Takes no report of what was just written: every caller's own batch is
-/// already saved by the time this runs, and the screen that comes next —
-/// [`confirm_start`]'s overview on the lock-free path,
-/// [`dispatcher_running_gate_with`] on the held-lock one — draws the queue
-/// fresh from disk rather than echoing back what a caller wrote to it. A
-/// caller that builds its own per-task report anyway, the way
-/// [`finish_submit`] still does, has that report read back by a test
-/// directly rather than shown on any screen.
-///
-/// A lock file `Lock::holder` could not even read falls back to the
-/// ordinary path: an unreadable file is closer to "no answer" than to "a
-/// dispatcher is running", and this must never claim a live pid it did not
-/// actually see.
-fn after_write(repo: &Repo) -> SubmitOutcome {
-    match crate::lock::Lock::holder(&repo.lock_file()) {
-        Ok(Some(pid)) => SubmitOutcome::DispatcherRunning(pid),
-        _ => SubmitOutcome::Confirmed,
-    }
+/// What [`finish_submit`] writes beside the batch itself: the tasks it
+/// came from, the branch it is based on, the groups it was selected as, and
+/// whether the tool-requirements gate or the issue question switched issue
+/// tracking off for it.
+struct Submit<'a> {
+    tasks: &'a [(String, String)],
+    base: &'a str,
+    selected: &'a std::collections::BTreeSet<GroupKey>,
+    tracking_off: bool,
 }
 
-/// The overview, then the overrides gate, then doctor's own warnings —
-/// all three reached by `enter`, once a submission has just landed.
-/// `Ok(true)` to leave the loop and start a dispatcher; `Ok(false)` for
-/// `esc` off any of the three screens, back to [`Mode::Browsing`] rather
-/// than ending the whole command — the one thing `commands::dispatch`'s own
-/// copies of this trio could not do on their own before this task, since
-/// they only ever ran after `run_screen` had already returned and this
-/// screen's own `TermGuard` had already dropped.
-///
-/// The warnings screen sees no workspace-open error here — nothing has
-/// tried opening the workspace yet, since that only happens inside
-/// `dispatch` itself, well after this function has returned — so
-/// `dispatch` still holds a second, narrower notice of its own for that one
-/// failure; see `dispatch::workspace_open_notice`.
-///
-/// `term: None` throughout all three calls: `run_screen` already holds its
-/// own `TermGuard` for the whole of this loop, so nothing here may
-/// construct a second one — see `tool_requirements_gate_with`'s own doc on
-/// why that is a bug, not just redundant. `interactive: true`
-/// unconditionally, for the same reason `finish_submit` gives
-/// `open_and_prefix`: this screen already blocks on a key for every other
-/// prompt it draws, whether or not the process happens to have a real
-/// terminal.
-fn confirm_start(
-    repo: &Repo,
-    pipelines: &Pipelines,
-    input: &mut impl PollableRead,
-    out: &mut impl std::io::Write,
-) -> Result<bool> {
-    if !super::dispatch::overview_gate_with(
-        repo,
-        true,
-        input,
-        out,
-        None::<fn() -> crate::platform::TermGuard>,
-    )? {
-        return Ok(false);
-    }
-    if !super::dispatch::overrides_gate_with(
-        repo,
-        true,
-        input,
-        out,
-        None::<fn() -> crate::platform::TermGuard>,
-    )? {
-        return Ok(false);
-    }
-    super::dispatch::warnings_gate_with(
-        repo,
-        pipelines,
-        true,
-        input,
-        out,
-        None::<fn() -> crate::platform::TermGuard>,
-    )
-}
-
-/// The one thing left to do once [`after_write`] finds the queue's lock
-/// already held: draw [`super::dispatch::dispatcher_running_gate_with`]'s
-/// own overview and, on `enter`, bring the running dispatcher's workspace to
-/// the front and let this screen end. The batch was already written and
-/// saved by [`finish_submit`] before `after_write` ever ran — nothing here
-/// writes, moves or re-queues a task document; the running dispatcher picks
-/// it up on its own next pass, exactly as the drawn notice says.
-///
-/// `Ok(true)` only for `enter`, so [`apply_submit_outcome`] knows to end
-/// `run_screen`; `Ok(false)` for `esc`, back to browsing. A focus that fails
-/// — no workspace [`crate::mux::Mux::dispatch_workspace`] can find (headless
-/// has none to find at all), or herdr refusing the call — is folded into
-/// the same `Ok(true)` rather than trapping a person on a screen that
-/// cannot help them either way: it is reported to `out` first, so the
-/// failure is not silent, but there is still nothing left here to start or
-/// retry.
-fn join_running_dispatcher(
-    repo: &Repo,
-    pid: u32,
-    input: &mut impl PollableRead,
-    out: &mut impl std::io::Write,
-) -> Result<bool> {
-    if !super::dispatch::dispatcher_running_gate_with(repo, pid, input, out)? {
-        return Ok(false);
-    }
-    match crate::mux::backend(repo) {
-        Ok(mux) => match mux.dispatch_workspace(&repo.root, false) {
-            Ok(Some(workspace_id)) => {
-                if let Err(err) = mux.focus_workspace(&workspace_id) {
-                    let _ = writeln!(out, "could not focus the running dispatcher: {err:#}");
-                }
-            }
-            // Headless names no workspace at all, and a backend that names
-            // one but cannot find it right now has nothing this screen can
-            // do about it either — the pid line already drawn is where the
-            // run is, and this screen's job ends the same way regardless.
-            Ok(None) => {}
-            Err(err) => {
-                let _ = writeln!(
-                    out,
-                    "could not find the running dispatcher's workspace: {err:#}"
-                );
-            }
-        },
-        Err(err) => {
-            let _ = writeln!(out, "could not focus the running dispatcher: {err:#}");
-        }
-    }
-    Ok(true)
-}
-
-/// Open the batch's tickets and name it, save it, clear the documents it
+/// Open the batch's tickets and name it, save it, clear the tasks it
 /// came from out of the pending directory, and build the per-task report
 /// this function's own return value carries — read back by a test directly
-/// rather than by any caller here: neither outcome [`after_write`] can now
-/// reach, [`SubmitOutcome::Confirmed`] or [`SubmitOutcome::DispatcherRunning`],
-/// shows it, since the screen either one goes on to draws the queue fresh
-/// from disk instead of echoing back what this just wrote to it.
+/// rather than by any caller here: a landed batch's popup names only the
+/// tasks it queued and the tickets opened for them — see [`queued_panel`].
 ///
 /// The order is the whole guarantee behind "a submission that fails
 /// validation removes nothing". Nothing is deleted until every task file has
@@ -5004,21 +5549,26 @@ fn join_running_dispatcher(
 /// failed hook call had already secured, written back so the next `enter`
 /// resumes (see [`open_and_prefix`]).
 ///
-/// Only the selected groups' own documents go, and only the ones this batch
-/// actually queued: a sibling [`selected_documents`] left out because it was
+/// Only the selected groups' own tasks go, and only the ones this batch
+/// actually queued: a sibling [`selected_tasks`] left out because it was
 /// already [`TaskState::Queued`] or [`TaskState::Done`] keeps its own file —
 /// deleting it would be putting one task back by erasing another one's place
-/// in the queue or the archive. Another group's documents sit in the same
+/// in the queue or the archive. Another group's tasks sit in the same
 /// flat directory and are not this submission's to touch either, so the
 /// deletion walks the groups it was handed rather than the directory.
 fn finish_submit(
     repo: &Repo,
     groups: &mut Vec<Group>,
     mut pending: Vec<Task>,
-    documents: &[(String, String)],
-    base: &str,
-    selected: &std::collections::BTreeSet<GroupKey>,
+    submit: &Submit,
+    log: &mut dyn TicketLog,
 ) -> Result<String> {
+    let Submit {
+        tasks,
+        base,
+        selected,
+        tracking_off,
+    } = *submit;
     // `validate_batch` already ran this over the same batch, and nothing
     // between there and here mutates it any more, so today this is a repeat
     // of a check `pending` already passed. Kept anyway as this function's own
@@ -5026,16 +5576,12 @@ fn finish_submit(
     // next, with whatever batch, saves nothing without this check standing
     // between it and disk.
     check_dependencies_set(repo, &mut pending)?;
-    // `interactive: true` unconditionally: the queue screen already blocks
-    // on a key for every other prompt it draws — `confirm_start`'s own
-    // overview and overrides gate, `Mode::SaveRoutine` — whether or not the
-    // process happens to have a real terminal, and relies on `read_key`
-    // answering `None` to end gracefully under a script or a closed pane.
-    // `own_terminal: false` since `queue_screen` already holds a `TermGuard`
-    // for the whole of `run_screen` — see `open_and_prefix`'s own doc
-    // comment.
-    let task_files = readable_task_files(documents);
-    open_and_prefix(repo, documents, &task_files, &mut pending, true, false)?;
+    // The screen asked the tool-requirements gate and the issue question
+    // already, in its own popups — see `begin_submission` — so they are
+    // answered here, not printed.
+    let task_files = readable_task_files(tasks);
+    let gate = ToolGate::Answered { tracking_off };
+    open_and_prefix(repo, tasks, &task_files, &mut pending, gate, log)?;
 
     for task in &pending {
         task.save()?;
@@ -5043,7 +5589,7 @@ fn finish_submit(
 
     // Past this point the queue holds the work, so a failure to unlink is
     // not a reason to refuse a submission that has already landed: the
-    // document is left where it is, and the group it belongs to drops off
+    // task is left where it is, and the group it belongs to drops off
     // the pane anyway, because the queue now holds every task it names.
     let mut left_alone: Vec<(TaskState, String)> = Vec::new();
     for group in selected_groups(groups, selected) {
@@ -5060,7 +5606,7 @@ fn finish_submit(
     // The same report `queue add --from` prints for the same batch, so a
     // person reading one has read the other. The branch comes last, because
     // it comes from the checkout this was run in rather than from anything
-    // in a document, and somebody on the wrong branch has no other way to
+    // in a task, and somebody on the wrong branch has no other way to
     // find that out.
     let mut msg = String::new();
     for task in &pending {
@@ -5104,11 +5650,11 @@ fn left_alone_note(left_alone: &[(TaskState, String)]) -> String {
         .collect()
 }
 
-/// Every typed [`crate::task::Frontmatter`] field a document's author may set
+/// Every typed [`crate::task::Frontmatter`] field a task's author may set
 /// — the allowlist [`reset_for_reuse`] keeps. Everything else typed is
 /// spoolway's own stamp, dropped on reset the same way `parse_submission`
 /// already overwrites it on the way in; the difference here is that this
-/// runs *before* a reserved key would refuse the document at all.
+/// runs *before* a reserved key would refuse the task at all.
 const AUTHORED_FIELDS: &[&str] = &[
     "id",
     "title",
@@ -5124,9 +5670,9 @@ const AUTHORED_FIELDS: &[&str] = &[
 /// Passthrough keys that still have to go, despite landing in
 /// [`crate::task::Frontmatter`]'s own untyped `extra` map the same as a
 /// project's real metadata does: all four are a hook's own answer for the
-/// *finished* run. A document that kept `epic:` or `ticket:` into a fresh
+/// *finished* run. A task that kept `epic:` or `ticket:` into a fresh
 /// submission would point the new run at the old run's ticket — `queue add`
-/// reports such a document `kept` and never calls the `open` hook for it, so
+/// reports such a task `kept` and never calls the `open` hook for it, so
 /// the new run gets no ticket of its own either. `slug:` and `url:` are the
 /// machine-written pair from the same answer: a kept `slug:` would pin the
 /// new run's group prefix to the old issue's key, and a kept `url:` would
@@ -5134,15 +5680,15 @@ const AUTHORED_FIELDS: &[&str] = &[
 /// `set_extra_str` for how they are carried.
 const DROPPED_PASSTHROUGH_FIELDS: &[&str] = &["epic", "ticket", "slug", "url"];
 
-/// A document's text with its frontmatter reduced to what its author owns —
+/// A task's text with its frontmatter reduced to what its author owns —
 /// [`AUTHORED_FIELDS`], plus any key that is not a typed `Frontmatter` field
 /// at all, so a project's own metadata keeps passing through. The body
 /// travels byte for byte; only the frontmatter mapping is rebuilt, in its own
-/// original key order, so a document already free of stamped keys reads back
+/// original key order, so a task already free of stamped keys reads back
 /// unchanged.
 ///
 /// The untyped set is read off `Frontmatter` itself rather than a copied
-/// list of every stamped field's name: the document is deserialised into a
+/// list of every stamped field's name: the task is deserialised into a
 /// real `Frontmatter` — with the same placeholder `stage:` `parse_submission`
 /// inserts, since that field alone has no serde default — and a key survives
 /// only if it is in [`AUTHORED_FIELDS`] or it landed in the deserialised
@@ -5152,17 +5698,17 @@ const DROPPED_PASSTHROUGH_FIELDS: &[&str] = &["epic", "ticket", "slug", "url"];
 /// slot, not `extra`, and is dropped by construction — there is no second
 /// list of stamped names to forget to update alongside it.
 ///
-/// This is where `s` and `t` make a document handed to them from `queue/` or
+/// This is where `s` and `t` make a task handed to them from `queue/` or
 /// `archive/` — carrying every key spoolway stamped on its earlier run —
 /// safe to hand to `save_routine` and `build_trial_arm`: both go on to call
-/// `parse_submission`, which rightly refuses a document that sets a reserved
-/// key like `stage:`, and the reset is what makes that document's *reuse*
-/// look like the document a producer would have written for a fresh run in
-/// the first place. The file on disk this document was read from is never
+/// `parse_submission`, which rightly refuses a task that sets a reserved
+/// key like `stage:`, and the reset is what makes that task's *reuse*
+/// look like the task a producer would have written for a fresh run in
+/// the first place. The file on disk this task was read from is never
 /// touched — this only ever returns new text.
 pub(crate) fn reset_for_reuse(name: &str, doc: &str) -> Result<String> {
     let (yaml, body) =
-        crate::task::split_fence(doc).with_context(|| format!("{name}: not a task document"))?;
+        crate::task::split_fence(doc).with_context(|| format!("{name}: not a task"))?;
     let value: serde_norway::Value = serde_norway::from_str(yaml)
         .with_context(|| format!("{name}: frontmatter is not valid YAML"))?;
     let mapping = value
@@ -5171,7 +5717,7 @@ pub(crate) fn reset_for_reuse(name: &str, doc: &str) -> Result<String> {
         .clone();
 
     // `Frontmatter::stage` is the one field with no serde default, so a
-    // document missing it — everything off `queue/` or `archive/` sets it,
+    // task missing it — everything off `queue/` or `archive/` sets it,
     // but nothing requires that of a hand-edited one — has to get the same
     // placeholder `parse_submission` stamps in before this can deserialise
     // at all. The placeholder is never read back: only which keys landed in
@@ -5203,26 +5749,26 @@ pub(crate) fn reset_for_reuse(name: &str, doc: &str) -> Result<String> {
     Ok(format!("---\n{yaml}---\n{body}"))
 }
 
-/// The pipeline the trial picker assigned this task, written into its document
+/// The pipeline the trial picker assigned this task, written into its task
 /// before [`parse_submission`] is given it.
 ///
-/// The picker's first screen exists precisely to route a document that names
+/// The picker's first screen exists precisely to route a task that names
 /// no pipeline of its own: [`TrialState::new`] opens such a task unassigned,
 /// the panel draws it `(unset)`, and that screen's `enter` refuses to advance
 /// until `←`/`→` has given every task one. But `parse_submission` refuses a
-/// document with no `pipeline:`, and it is handed the *source* document — so
+/// task with no `pipeline:`, and it is handed the *source* task — so
 /// without this the picker refused every task it was built to route, the whole
 /// batch was abandoned with `trial refused:`, and nothing was minted. Stamping
 /// `front.pipeline` on the arm afterwards cannot save it: the refusal has
 /// already happened by then.
 ///
-/// Written over whatever the document said rather than only filled in when it
+/// Written over whatever the task said rather than only filled in when it
 /// is blank, because the screen may equally have cycled a task *off* the
-/// pipeline its own document named — `trial.pipeline` is the authority here,
+/// pipeline its own task named — `trial.pipeline` is the authority here,
 /// which is the same order of precedence `front.pipeline` is stamped in below.
 fn with_trial_pipeline(name: &str, doc: &str, pipeline: &str) -> Result<String> {
     let (yaml, body) =
-        crate::task::split_fence(doc).with_context(|| format!("{name}: not a task document"))?;
+        crate::task::split_fence(doc).with_context(|| format!("{name}: not a task"))?;
     let value: serde_norway::Value = serde_norway::from_str(yaml)
         .with_context(|| format!("{name}: frontmatter is not valid YAML"))?;
     let mut mapping = value
@@ -5238,26 +5784,26 @@ fn with_trial_pipeline(name: &str, doc: &str, pipeline: &str) -> Result<String> 
     Ok(format!("---\n{yaml}---\n{body}"))
 }
 
-/// One trial arm: the source document parsed exactly as `queue add --from`
+/// One trial arm: the source task parsed exactly as `queue add --from`
 /// would, with the four things a trial names for the task itself stamped
 /// on afterwards — the id spoolway minted, the trial the whole batch shares,
 /// the pipeline this arm runs, and the ticked steps that pipeline is asked
 /// to walk past.
 ///
-/// `parse_submission` always resets `front.skip` to empty, since a document
+/// `parse_submission` always resets `front.skip` to empty, since a task
 /// may not set it itself (see that function's own comment); this is the one
 /// caller allowed to put it back; here it is spoolway naming the task, not
-/// the document. `front.branch` is recomputed too, after the id changes —
-/// `parse_submission` already built one, but off the document's own bare
+/// the task. `front.branch` is recomputed too, after the id changes —
+/// `parse_submission` already built one, but off the task's own bare
 /// id, before this ever had a minted one to use.
 ///
-/// `doc` is reset with [`reset_for_reuse`] before it is parsed, so a document
+/// `doc` is reset with [`reset_for_reuse`] before it is parsed, so a task
 /// that came from `queue/` or `archive/` — carrying `stage:` and every other
 /// key an earlier run stamped on it — reaches `parse_submission` looking like
-/// a document a producer wrote for a fresh run, rather than being refused for
+/// a task a producer wrote for a fresh run, rather than being refused for
 /// setting a reserved key spoolway itself put there.
 ///
-/// The picker's chosen pipeline goes into that document *before* it is parsed,
+/// The picker's chosen pipeline goes into that task *before* it is parsed,
 /// by [`with_trial_pipeline`], and not only onto the arm afterwards — see that
 /// function for why stamping `front.pipeline` below is too late on its own.
 fn build_trial_arm(
@@ -5293,7 +5839,7 @@ fn build_trial_arm(
 /// group, build that task's own arm on the pipeline and skip set the two
 /// screens chose for it, and write the whole set — or refuse, and touch
 /// nothing. Mirrors [`begin_submission`], but over a group forked whole
-/// rather than chosen piece by piece, and the source documents are never
+/// rather than chosen piece by piece, and the source tasks are never
 /// deleted: they were templates for the arms, not themselves submitted, and
 /// stay in whichever directory `t` found them in exactly as it found them —
 /// the same "nothing minted is ever written back" the doc comment on
@@ -5304,12 +5850,12 @@ fn begin_trial(
     base: &str,
     groups: &[Group],
     trial: &TrialState,
-) -> SubmitOutcome {
+) -> Mode {
     let Some(group) = trial_group(groups, trial) else {
-        return SubmitOutcome::Mode(Mode::Browsing);
+        return Mode::Browsing;
     };
     if group.tasks.is_empty() {
-        return SubmitOutcome::Mode(Mode::Browsing);
+        return Mode::Browsing;
     }
 
     // Minted fresh, not the group's own name or any one task's — two
@@ -5337,7 +5883,7 @@ fn begin_trial(
         let pipeline = match pipelines.get(&pipeline_name) {
             Ok(pipeline) => pipeline,
             Err(err) => {
-                return SubmitOutcome::Mode(Mode::Outcome(format!("trial refused: {err:#}")));
+                return outcome("trial refused", format!("{err:#}"));
             }
         };
 
@@ -5345,7 +5891,7 @@ fn begin_trial(
         // ordinary submission runs in `validate_batch`.
         let id = mint_id(repo, &task.id, &minted);
         if let Err(err) = crate::mux::check_task_id(&id) {
-            return SubmitOutcome::Mode(Mode::Outcome(format!("trial refused: {err:#}")));
+            return outcome("trial refused", format!("{err:#}"));
         }
         minted.insert(id.clone());
         id_map.insert(task.id.clone(), id.clone());
@@ -5362,7 +5908,7 @@ fn begin_trial(
         ) {
             Ok(arm) => arm,
             Err(err) => {
-                return SubmitOutcome::Mode(Mode::Outcome(format!("trial refused: {err:#}")));
+                return outcome("trial refused", format!("{err:#}"));
             }
         };
 
@@ -5371,9 +5917,9 @@ fn begin_trial(
         // queued by a trial (see `build_trial_arm`), so this is what keeps
         // the chain the source group named intact inside the batch. A
         // dependency outside the batch is left exactly as it read, unless
-        // this task's own document is already archived: `retain` sweeps a
+        // this task itself is already archived: `retain` sweeps a
         // finished predecessor out of `archive/`, so a stale reference an
-        // archived document still carries cannot be trusted to resolve, and
+        // archived task still carries cannot be trusted to resolve, and
         // is dropped instead — the same emptying a lone archived fork always
         // made, generalised from "the one task this forked" to "this task,
         // whichever one of the group it is".
@@ -5393,15 +5939,15 @@ fn begin_trial(
     }
 
     match finish_trial(repo, arms) {
-        Ok(()) => after_write(repo),
-        Err(err) => SubmitOutcome::Mode(Mode::Outcome(format!("trial refused: {err:#}"))),
+        Ok(()) => Mode::Browsing,
+        Err(err) => outcome("trial refused", format!("{err:#}")),
     }
 }
 
 /// Validate the minted arms as one set and save them — or none, on any
 /// failure. Mirrors [`finish_submit`]'s own all-or-nothing write, minus the
 /// pending-directory deletion that function makes: a trial's source
-/// documents are never among the tasks being written.
+/// tasks are never among the tasks being written.
 fn finish_trial(repo: &Repo, mut arms: Vec<Task>) -> Result<()> {
     check_dependencies_set(repo, &mut arms)?;
     for arm in &arms {
@@ -5412,8 +5958,8 @@ fn finish_trial(repo: &Repo, mut arms: Vec<Task>) -> Result<()> {
 
 // ============================= The routines pane ===========================
 
-/// `s`'s own write: copy `group`'s documents into `.spoolway/routines/<name>/`,
-/// each reset with [`reset_for_reuse`] so a document that came from `queue/`
+/// `s`'s own write: copy `group`'s tasks into `.spoolway/routines/<name>/`,
+/// each reset with [`reset_for_reuse`] so a task that came from `queue/`
 /// or `archive/` saves the way a producer would have written it fresh —
 /// refusing a folder that already holds any, the one non-goal this whole
 /// feature draws a hard line at, since resolving a merge is a person's call
@@ -5433,61 +5979,86 @@ fn save_routine(repo: &Repo, groups: &[Group], group: &GroupKey, name: &str) -> 
             Some(std::path::Component::Normal(_))
         )
     {
-        return Mode::Outcome(format!(
-            "`{name}` is not a folder name — one plain name, no `/` and no `..`"
-        ));
+        return outcome(
+            "not saved",
+            format!("`{name}` is not a folder name — one plain name, no `/` and no `..`"),
+        );
     }
     let dir = repo.routines_dir().join(name);
 
     match std::fs::read_dir(&dir) {
         Ok(mut entries) => {
             if entries.next().is_some() {
-                return Mode::Outcome(format!(
-                    "`{}` already holds documents — pick another name, or clear it first",
-                    dir.display()
-                ));
+                return outcome(
+                    "not saved",
+                    format!(
+                        "`{}` already holds tasks — pick another name, or clear it first",
+                        dir.display()
+                    ),
+                );
             }
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-        Err(err) => return Mode::Outcome(format!("s: reading {}: {err:#}", dir.display())),
+        Err(err) => {
+            return outcome(
+                "not saved",
+                format!("s: reading {}: {err:#}", dir.display()),
+            );
+        }
     }
 
     if let Err(err) = std::fs::create_dir_all(&dir) {
-        return Mode::Outcome(format!("s: creating {}: {err:#}", dir.display()));
+        return outcome(
+            "not saved",
+            format!("s: creating {}: {err:#}", dir.display()),
+        );
     }
     for task in &group.tasks {
         let path = dir.join(format!("{}.md", task.id));
         let reset = match reset_for_reuse(&task.path.display().to_string(), &task.doc) {
             Ok(reset) => reset,
             Err(err) => {
-                return Mode::Outcome(format!("s: resetting {}: {err:#}", task.path.display()));
+                return outcome(
+                    "not saved",
+                    format!("s: resetting {}: {err:#}", task.path.display()),
+                );
             }
         };
         if let Err(err) = std::fs::write(&path, &reset) {
-            return Mode::Outcome(format!("s: writing {}: {err:#}", path.display()));
+            return outcome(
+                "not saved",
+                format!("s: writing {}: {err:#}", path.display()),
+            );
         }
     }
 
-    Mode::Outcome(format!(
-        "saved {} to {}",
-        plural(group.tasks.len(), "document"),
-        dir.display()
-    ))
+    // Named from the checkout, as the save panel names it and step 8 of the
+    // screen's mockup draws it: the absolute path is the same for every
+    // routine a person saves, and only pushes the part they chose off the
+    // popup's right edge.
+    outcome(
+        "saved",
+        format!(
+            "saved {} to {}",
+            plural(group.tasks.len(), "task"),
+            crate::platform::relative(&repo.checkout, &dir)
+        ),
+    )
 }
 
-/// Every document at or below the ticked folders at the routines pane's
+/// Every task at or below the ticked folders at the routines pane's
 /// current level, each minted a fresh id — never the bare one a routine's
-/// own document carries, since a routine exists to be queued more than
+/// own task carries, since a routine exists to be queued more than
 /// once, and the second run would collide with the first at the id the
-/// document itself always names. `group:` and the body travel unchanged;
+/// task itself always names. `group:` and the body travel unchanged;
 /// only `id:` and any `depends_on:` naming a sibling in this same batch are
 /// rewritten, to the same minted ids, so a chain saved together still
 /// resolves once every id in it has changed.
 ///
 /// A folder appearing under more than one ticked ancestor — ticking both a
-/// folder and one it already contains — is not doubled: each document's own
+/// folder and one it already contains — is not doubled: each task's own
 /// path is only ever queued once.
-fn routine_batch_documents(
+fn routine_batch_tasks(
     repo: &Repo,
     routines: &[RoutineFolder],
     nav: &RoutineNav,
@@ -5509,12 +6080,12 @@ fn routine_batch_documents(
     mint_routine_batch(repo, &tasks)
 }
 
-/// Mint a fresh id for every routine document and rewrite its `id:` line,
+/// Mint a fresh id for every routine task and rewrite its `id:` line,
 /// and any `depends_on:` naming a sibling in this same batch, onto the
 /// minted ids — the transform the queue screen's `enter` and a scheduled
-/// job both run once they have the list of documents to queue. `tasks` is
+/// job both run once they have the list of tasks to queue. `tasks` is
 /// already deduped and in the order the batch should keep. Nothing is
-/// written: the returned `(source path, rewritten document)` pairs are the
+/// written: the returned `(source path, rewritten task)` pairs are the
 /// shape [`validate_batch`] takes.
 fn mint_routine_batch(repo: &Repo, tasks: &[&RoutineTask]) -> Vec<(String, String)> {
     let mut minted: std::collections::BTreeSet<String> = Default::default();
@@ -5547,14 +6118,18 @@ fn mint_routine_batch(repo: &Repo, tasks: &[&RoutineTask]) -> Vec<(String, Strin
 
 /// Queue a routine target the way the `r` pane does, but driven by a job
 /// rather than the screen's nav. `target` is an absolute path under
-/// [`Repo::routines_dir`]: a folder queues every document at or below it as
+/// [`Repo::routines_dir`]: a folder queues every task at or below it as
 /// one batch, exactly as `enter` does, and a single `.md` file queues that
 /// task alone with its `depends_on` emptied, exactly as `space` does. Every
-/// queued document is put on `pipeline` — a job names its own, where the `r`
-/// pane leaves each document on whatever it carried. The batch goes through
+/// queued task is put on `pipeline` — a job names its own, where the `r`
+/// pane leaves each task on whatever it carried. The batch goes through
 /// [`validate_batch`] all-or-nothing and the saved tasks are handed back so
-/// a caller can record which ids it minted. The source documents under
+/// a caller can record which ids it minted. The source tasks under
 /// `.spoolway/routines/` are never touched.
+///
+/// Asks the tool-requirements gate printed, as a caller with no screen does
+/// — the dispatcher's scheduled firing. A caller that asked it already, in a
+/// popup of its own, uses [`queue_routine_target_with`].
 pub(crate) fn queue_routine_target(
     repo: &Repo,
     pipelines: &Pipelines,
@@ -5562,12 +6137,29 @@ pub(crate) fn queue_routine_target(
     target: &std::path::Path,
     pipeline: &str,
 ) -> Result<Vec<Task>> {
-    let mut documents = if target.is_dir() {
+    let gate = ToolGate::Print {
+        interactive: crate::ask::interactive(),
+    };
+    queue_routine_target_with(repo, pipelines, base, (target, pipeline), gate)
+}
+
+/// [`queue_routine_target`], reaching the tool-requirements gate the way
+/// `gate` says: `job` is the routine target and the pipeline it is queued
+/// on, paired to keep this inside the argument count the module keeps to.
+pub(crate) fn queue_routine_target_with(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    base: &str,
+    job: (&std::path::Path, &str),
+    gate: ToolGate,
+) -> Result<Vec<Task>> {
+    let (target, pipeline) = job;
+    let mut submitted = if target.is_dir() {
         let folder = super::routines::read_folder_at(target)?;
-        // `folder.tasks` is already this folder's own documents plus every
+        // `folder.tasks` is already this folder's own tasks plus every
         // nested subfolder's, depth-first — the same list `enter` queues.
         if folder.tasks.is_empty() {
-            bail!("{} holds no task documents", target.display());
+            bail!("{} holds no tasks", target.display());
         }
         let tasks: Vec<&RoutineTask> = folder.tasks.iter().collect();
         mint_routine_batch(repo, &tasks)
@@ -5576,44 +6168,44 @@ pub(crate) fn queue_routine_target(
         let id = mint_id(repo, &task.id, &Default::default());
         let mut doc = with_frontmatter_field(&task.doc, "id", &id);
         // Emptied for the same reason `begin_routine_solo` empties it: a
-        // lone document names no sibling in this batch, so a real
+        // lone task names no sibling in this batch, so a real
         // `depends_on` would be refused by `check_dependencies_set`.
         doc = with_frontmatter_field(&doc, "depends_on", "[]");
         vec![(task.path.display().to_string(), doc)]
     };
 
-    for (_, doc) in &mut documents {
+    for (_, doc) in &mut submitted {
         *doc = with_frontmatter_field(doc, "pipeline", pipeline);
     }
 
-    let mut tasks = validate_batch(repo, pipelines, Some(base), &documents)?;
-    // No document to write ids back into — see `open_and_prefix`. This route
-    // has no screen at all — a job, or `--pipeline`'s own CLI caller — so it
-    // asks `crate::ask` whether anyone is really there and takes its own
-    // terminal, the same way `queue_add_documents` does. `esc`'s
-    // `GateCancelled` is left to propagate as an ordinary `Err` rather than
-    // caught here: both callers — `jobs::fire_job`'s dispatcher loop and its
-    // own `jobs run` — already treat any `Err` as "did not fire" and neither
-    // marks the job fired nor records queued ids, which is the one honest
-    // answer for a run a person actually declined. Turning it into a fake
-    // empty success here would let the dispatcher believe this minute's
-    // firing already happened.
+    let mut tasks = validate_batch(repo, pipelines, Some(base), &submitted)?;
+    // No task to write ids back into — see `open_and_prefix`. A caller
+    // with no screen — the dispatcher firing a job, or `jobs run` — passes
+    // `ToolGate::Print`, which asks `crate::ask` whether anyone is really
+    // there and takes its own terminal, the same way `queue_add_tasks`
+    // does; the jobs screen's `r` has asked in its own popup and passes
+    // `ToolGate::Answered`. `esc`'s `GateCancelled` is left to propagate as
+    // an ordinary `Err` rather than caught here: every caller already treats
+    // any `Err` as "did not fire" and neither marks the job fired nor records
+    // queued ids, which is the one honest answer for a run a person actually
+    // declined. Turning it into a fake empty success here would let the
+    // dispatcher believe this minute's firing already happened.
     //
-    // `documents` is `&[]` — nothing here is ever written back into — but
-    // `task_files` is not: a routine's own document is a real file under
+    // `submitted` is `&[]` — nothing here is ever written back into — but
+    // `task_files` is not: a routine's own task is a real file under
     // `.spoolway/routines/`, safe for a hook to read, only never to write
     // to.
-    let task_files = readable_task_files(&documents);
+    let task_files = readable_task_files(&submitted);
     open_and_prefix(
         repo,
         &[],
         &task_files,
         &mut tasks,
-        crate::ask::interactive(),
-        true,
+        gate,
+        &mut PrintedTickets,
     )?;
     // All or none: everything above parsed and validated, so these writes
-    // are the commit — the same discipline `queue_add_documents` follows.
+    // are the commit — the same discipline `queue_add_tasks` follows.
     for task in &tasks {
         task.save()?;
     }
@@ -5621,20 +6213,28 @@ pub(crate) fn queue_routine_target(
 }
 
 /// Open the batch's tickets, save every task `validate_batch` handed back
-/// — the whole of what queuing a routine does, now that [`after_write`]
-/// takes no report from any caller to show it: `finish_trial` never built
-/// one either, and this no longer does. The source documents under
+/// — the whole of what queuing a routine does; the popup a landed batch
+/// opens is built from the ids and the tickets `log` saw, not from a report
+/// here. The source tasks under
 /// `.spoolway/routines/` are never touched — a routine is meant to be
 /// queued again, not consumed by being queued once — which is why nothing
 /// is handed to [`open_and_prefix`] to write ids back into.
 /// `task_files` still names each one's real path, for a hook's own
 /// `SPOOLWAY_TASK_FILE` to point at — see [`open_and_prefix`]'s own doc
-/// comment on why that is a different list from the empty `documents`.
-fn finish_routine(repo: &Repo, tasks: &mut [Task], task_files: &[String]) -> Result<()> {
-    // `interactive: true`, `own_terminal: false` — driven from the queue
-    // screen's own routines pane, which already holds the terminal for the
-    // whole of `run_screen`; see `open_and_prefix`'s own doc comment.
-    open_and_prefix(repo, &[], task_files, tasks, true, false)?;
+/// comment on why that is a different list from the empty `tasks`.
+///
+/// `tracking_off` is the answer of the tool-requirements gate or the issue
+/// question, asked already in the screen's own popup — see
+/// [`ToolGate::Answered`].
+fn finish_routine(
+    repo: &Repo,
+    tasks: &mut [Task],
+    task_files: &[String],
+    tracking_off: bool,
+    log: &mut dyn TicketLog,
+) -> Result<()> {
+    let gate = ToolGate::Answered { tracking_off };
+    open_and_prefix(repo, &[], task_files, tasks, gate, log)?;
     for task in tasks.iter() {
         task.save()?;
     }
@@ -5642,32 +6242,82 @@ fn finish_routine(repo: &Repo, tasks: &mut [Task], task_files: &[String]) -> Res
 }
 
 /// `enter` over the routines pane's folders: mint every ticked folder's
-/// documents through [`routine_batch_documents`] and queue them as one
+/// tasks through [`routine_batch_tasks`] and queue them as one
 /// batch through [`validate_batch`] — the same all-or-nothing write
 /// [`begin_submission`] gives a pending selection.
+///
+/// A refusal is a popup over the routines pane, which closing it goes back
+/// to; the tool-requirements gate and the issue question stop it first the
+/// way they stop [`begin_submission`].
 fn begin_routine_queue(
     repo: &Repo,
     pipelines: &Pipelines,
     base: &str,
     routines: &[RoutineFolder],
     nav: &RoutineNav,
-) -> SubmitOutcome {
-    let documents = routine_batch_documents(repo, routines, nav);
-    if documents.is_empty() {
-        return SubmitOutcome::Mode(Mode::Browsing);
+    tracking: Tracking,
+    redraw: &mut dyn FnMut(&[String]),
+) -> Mode {
+    let tasks = routine_batch_tasks(repo, routines, nav);
+    if tasks.is_empty() {
+        return Mode::Browsing;
     }
-    let task_files = readable_task_files(&documents);
-    match validate_batch(repo, pipelines, Some(base), &documents) {
-        Ok(mut tasks) => match finish_routine(repo, &mut tasks, &task_files) {
-            Ok(()) => after_write(repo),
-            Err(err) => SubmitOutcome::Mode(refusal_mode("queue refused", err)),
-        },
-        Err(err) => SubmitOutcome::Mode(Mode::Outcome(format!("queue refused: {err:#}"))),
+    let task_files = readable_task_files(&tasks);
+    finish_routine_mode(
+        repo,
+        pipelines,
+        base,
+        (&tasks, &task_files),
+        nav,
+        tracking,
+        redraw,
+    )
+}
+
+/// The end both routine submits share: validate `batch` — the tasks
+/// and the task files behind them — stop at the tool-requirements gate and
+/// the issue question when each has something to ask, and queue it. `nav`
+/// is the routines pane it came from: a refusal is drawn over it, and the
+/// gate and the question name it as the place `esc` goes back to. A landed
+/// batch says what it queued over the pending screen, the one closing it
+/// goes back to.
+fn finish_routine_mode(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    base: &str,
+    batch: (&[(String, String)], &[String]),
+    nav: &RoutineNav,
+    tracking: Tracking,
+    redraw: &mut dyn FnMut(&[String]),
+) -> Mode {
+    let (tasks, task_files) = batch;
+    let mut tasks = match validate_batch(repo, pipelines, Some(base), tasks) {
+        Ok(tasks) => tasks,
+        Err(err) => return outcome_over(Some(nav), "queue refused", format!("{err:#}")),
+    };
+    // Which of the two submits this was, for `enter` on the gate to run
+    // again: a batch built from ticked folders, or one task on its own.
+    let then = match nav.focus {
+        Focus::Groups => Resume::Routines(nav.clone()),
+        Focus::Tasks => Resume::RoutineTask(nav.clone()),
+    };
+    if let Some(gate) = tool_gate(repo, tracking, then.clone()) {
+        return gate;
+    }
+    if let Some(question) = issue_question(repo, tracking, &tasks, then) {
+        return question;
+    }
+    let ids: Vec<String> = tasks.iter().map(|task| task.id().to_string()).collect();
+    let mut tickets = PopupTickets::new(&tasks, redraw);
+    let tracking_off = tracking == Tracking::Off;
+    match finish_routine(repo, &mut tasks, task_files, tracking_off, &mut tickets) {
+        Ok(()) => queued_panel(&ids, &tickets.rows),
+        Err(err) => outcome_over(Some(nav), "queue refused", format!("{err:#}")),
     }
 }
 
 /// `space` over the routines pane's own tasks pane: queue the highlighted
-/// document alone, under a minted id, with its `depends_on` emptied before
+/// task alone, under a minted id, with its `depends_on` emptied before
 /// [`validate_batch`] ever sees it. Emptied here rather than left for
 /// [`check_dependencies_set`] to refuse: a solo pick names no sibling in
 /// this batch for a dependency on one to resolve against, and that check
@@ -5679,27 +6329,30 @@ fn begin_routine_solo(
     base: &str,
     routines: &[RoutineFolder],
     nav: &RoutineNav,
-) -> SubmitOutcome {
+    tracking: Tracking,
+    redraw: &mut dyn FnMut(&[String]),
+) -> Mode {
     let Some(folder) = highlighted_routine_folder(routines, nav) else {
-        return SubmitOutcome::Mode(Mode::Browsing);
+        return Mode::Browsing;
     };
     let Some(task) = folder.tasks.get(nav.task_cursor) else {
-        return SubmitOutcome::Mode(Mode::Browsing);
+        return Mode::Browsing;
     };
 
     let id = mint_id(repo, &task.id, &Default::default());
     let mut doc = with_frontmatter_field(&task.doc, "id", &id);
     doc = with_frontmatter_field(&doc, "depends_on", "[]");
-    let documents = vec![(task.path.display().to_string(), doc)];
-    let task_files = readable_task_files(&documents);
-
-    match validate_batch(repo, pipelines, Some(base), &documents) {
-        Ok(mut tasks) => match finish_routine(repo, &mut tasks, &task_files) {
-            Ok(()) => after_write(repo),
-            Err(err) => SubmitOutcome::Mode(refusal_mode("queue refused", err)),
-        },
-        Err(err) => SubmitOutcome::Mode(Mode::Outcome(format!("queue refused: {err:#}"))),
-    }
+    let tasks = vec![(task.path.display().to_string(), doc)];
+    let task_files = readable_task_files(&tasks);
+    finish_routine_mode(
+        repo,
+        pipelines,
+        base,
+        (&tasks, &task_files),
+        nav,
+        tracking,
+        redraw,
+    )
 }
 
 #[cfg(test)]
@@ -5823,8 +6476,8 @@ mod tests {
     /// A hook runs with its own current directory set to `repo.root`, not
     /// wherever `spoolway` itself happened to be started from — so
     /// `readable_task_files` must hand back an absolute path even for a
-    /// document named relatively (`--from ../t.md`, or an entry
-    /// `gather_documents` joined onto a relative `--from <dir>`); a relative
+    /// task named relatively (`--from ../t.md`, or an entry
+    /// `gather_tasks` joined onto a relative `--from <dir>`); a relative
     /// name would resolve against the wrong directory once the hook reads it
     /// (review round 2 finding 6). This does not switch the process's own
     /// working directory to prove it — that is global state shared by every
@@ -5832,7 +6485,7 @@ mod tests {
     /// relative in, absolute out, matching what `canonicalize` itself
     /// resolves the same name to.
     ///
-    /// The document deliberately does *not* come from [`crate::scratch::
+    /// The task deliberately does *not* come from [`crate::scratch::
     /// root`], unlike every other fixture in this crate: that helper only
     /// ever answers a path already absolute under the system temp
     /// directory, and this test's whole premise needs a name that starts
@@ -5852,13 +6505,13 @@ mod tests {
         let relative = dir.join("doc.md");
         std::fs::write(&relative, "hi").unwrap();
 
-        let documents = vec![(relative.display().to_string(), String::new())];
-        let resolved = readable_task_files(&documents);
+        let tasks = vec![(relative.display().to_string(), String::new())];
+        let resolved = readable_task_files(&tasks);
 
         assert_eq!(resolved.len(), 1);
         assert!(
             std::path::Path::new(&resolved[0]).is_absolute(),
-            "a relative document name must resolve to an absolute path: {resolved:?}"
+            "a relative task name must resolve to an absolute path: {resolved:?}"
         );
         assert_eq!(
             std::fs::canonicalize(&relative)
@@ -5871,13 +6524,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A name naming nothing real — the `<stdin>#N` [`gather_documents`]
+    /// A name naming nothing real — the `<stdin>#N` [`gather_tasks`]
     /// mints for a stream entry, chief among them — resolves to the empty
     /// string, the same as it did under the old `is_file` check.
     #[test]
     fn readable_task_files_is_empty_for_a_name_that_resolves_to_nothing() {
-        let documents = vec![("<stdin>#1".to_string(), String::new())];
-        assert_eq!(readable_task_files(&documents), vec![String::new()]);
+        let tasks = vec![("<stdin>#1".to_string(), String::new())];
+        assert_eq!(readable_task_files(&tasks), vec![String::new()]);
     }
 
     #[test]
@@ -5923,12 +6576,12 @@ mod tests {
         assert!(!is_absolute_http_url("https://host:123456"));
     }
 
-    /// A whole task document, in the shape `--from` accepts: `id:` plus
+    /// A whole task, in the shape `--from` accepts: `id:` plus
     /// whatever else `extra` puts in the frontmatter, then `body`. `pipeline:`
     /// is required now, so this fills in the built-in `default` pipeline
     /// unless `extra` already names one — a test after the unassigned shape
-    /// itself builds its own document instead, bypassing this default.
-    fn document(id: &str, extra: &str, body: &str) -> String {
+    /// itself builds its own task instead, bypassing this default.
+    fn task_text(id: &str, extra: &str, body: &str) -> String {
         let pipeline = if extra.contains("pipeline:") {
             ""
         } else {
@@ -5947,8 +6600,8 @@ mod tests {
 
     /// `--base` set to the fixture's own checkout branch — the ambient value
     /// every one of these tests relied on before a base had to be chosen —
-    /// so a document under test can still leave `base:` out unless the test
-    /// is about `base:` itself, which passes its own document with `base:`
+    /// so a task under test can still leave `base:` out unless the test
+    /// is about `base:` itself, which passes its own task with `base:`
     /// set and so overrides this anyway.
     fn from_args(paths: &[&str]) -> QueueAddArgs {
         QueueAddArgs {
@@ -5963,7 +6616,7 @@ mod tests {
     #[test]
     fn queue_add_refuses_from_inside_a_lanes_own_environment() {
         let repo = fixture("queue-add-in-lane");
-        let text = document("login", "", BODY);
+        let text = task_text("login", "", BODY);
         let path = write_doc(&repo, "login.md", &text);
 
         let err = queue_add(
@@ -5982,7 +6635,7 @@ mod tests {
         );
     }
 
-    /// A task's base is what a document's own `base:` or `queue add --base`
+    /// A task's base is what a task's own `base:` or `queue add --base`
     /// chose, never the branch of whichever checkout this was run in — a
     /// worktree on an entirely different branch changes nothing about the
     /// base a submission gets.
@@ -6007,7 +6660,7 @@ mod tests {
             ],
         );
 
-        let text = document("login", "group: b\n", BODY);
+        let text = task_text("login", "group: b\n", BODY);
         let path = write_doc(&repo, "login.md", &text);
         queue_add(
             &repo,
@@ -6057,7 +6710,7 @@ mod tests {
         let repo = fixture("unknown-dep");
         add(&repo, "login", &[]);
 
-        let text = document("sessions", "group: demo\ndepends_on: [lgoin]\n", BODY);
+        let text = task_text("sessions", "group: demo\ndepends_on: [lgoin]\n", BODY);
         let path = write_doc(&repo, "sessions.md", &text);
         let err = queue_add(
             &repo,
@@ -6092,7 +6745,7 @@ mod tests {
         )
         .unwrap();
 
-        let text = document("sessions", "group: demo\ndepends_on: [login]\n", BODY);
+        let text = task_text("sessions", "group: demo\ndepends_on: [login]\n", BODY);
         let path = write_doc(&repo, "sessions.md", &text);
         queue_add(
             &repo,
@@ -6150,7 +6803,7 @@ mod tests {
     #[test]
     fn a_task_may_not_depend_on_itself() {
         let repo = fixture("self-dep");
-        let text = document("a", "group: demo\ndepends_on: [a]\n", BODY);
+        let text = task_text("a", "group: demo\ndepends_on: [a]\n", BODY);
         let path = write_doc(&repo, "a.md", &text);
         let err = queue_add(
             &repo,
@@ -6171,7 +6824,7 @@ mod tests {
         let repo = fixture("cross-group-dep");
         add(&repo, "login", &[]);
 
-        let text = document("sessions", "group: other\ndepends_on: [login]\n", BODY);
+        let text = task_text("sessions", "group: other\ndepends_on: [login]\n", BODY);
         let path = write_doc(&repo, "sessions.md", &text);
         let err = queue_add(
             &repo,
@@ -6193,7 +6846,7 @@ mod tests {
 
     /// With `issue_tracking.key_in_names` on, a sibling queued by an
     /// earlier `queue add` carries `group: <slug>-<group>`, and a later
-    /// document still writes the bare group — the check has to see them as
+    /// task still writes the bare group — the check has to see them as
     /// one group, or a chain can never span two `queue add` calls (jobs
     /// review finding 3). Only a recognised prefix, and only with the flag
     /// on: with it off the same two groups are still two groups.
@@ -6210,7 +6863,7 @@ mod tests {
             .insert("slug".into(), serde_norway::Value::String("proj-12".into()));
         parent.save().unwrap();
 
-        let text = document("auth-02", "group: demo\ndepends_on: [auth-01]\n", BODY);
+        let text = task_text("auth-02", "group: demo\ndepends_on: [auth-01]\n", BODY);
         let path = write_doc(&repo, "auth-02.md", &text);
         let args = from_args(&[&path]);
 
@@ -6232,7 +6885,7 @@ mod tests {
     /// A dependent is cut from `depends_on.first()`'s branch, so a list
     /// naming two parents only means something if the first one already
     /// carries the second's work — `check_dependencies_set` puts that id
-    /// first itself rather than trusting the document's own order.
+    /// first itself rather than trusting the task's own order.
     #[test]
     fn a_depends_on_naming_two_parents_is_reordered_so_the_deeper_one_leads() {
         let repo = fixture("reorder-dep");
@@ -6241,7 +6894,7 @@ mod tests {
 
         // `top` already reaches `base`, so naming `base` first here is the
         // order that buys nothing — `top`'s own history already holds it.
-        let text = document("apex", "group: demo\ndepends_on: [base, top]\n", BODY);
+        let text = task_text("apex", "group: demo\ndepends_on: [base, top]\n", BODY);
         let path = write_doc(&repo, "apex.md", &text);
         queue_add(
             &repo,
@@ -6255,7 +6908,7 @@ mod tests {
         assert_eq!(
             queued(&repo, "apex").front.depends_on,
             vec!["top".to_string(), "base".to_string()],
-            "the id reaching the other one leads, whatever order the document gave"
+            "the id reaching the other one leads, whatever order the task gave"
         );
     }
 
@@ -6283,7 +6936,7 @@ mod tests {
         add(&repo, "a", &[]);
         add(&repo, "b", &[]);
 
-        let text = document("c", "group: demo\ndepends_on: [a, b]\n", BODY);
+        let text = task_text("c", "group: demo\ndepends_on: [a, b]\n", BODY);
         let path = write_doc(&repo, "c.md", &text);
         let err = queue_add(
             &repo,
@@ -6489,14 +7142,14 @@ mod tests {
     }
 
     /// Bare `queue add` no longer queues anything with no `--from`: there is
-    /// no id to name a file after, so what it hands back is the document to
+    /// no id to name a file after, so what it hands back is the task to
     /// fill one in with, still unfilled.
     #[test]
-    fn bare_queue_add_prints_an_unfilled_skeleton_document() {
+    fn bare_queue_add_prints_an_unfilled_skeleton_task() {
         let repo = fixture("skeleton");
         let pipelines = Pipelines::builtin();
 
-        let doc = skeleton_document(&repo, &pipelines).unwrap();
+        let doc = skeleton_task(&repo, &pipelines).unwrap();
 
         assert!(doc.starts_with("---\nid:"), "{doc}");
         assert!(doc.contains("## Intend"), "{doc}");
@@ -6543,7 +7196,7 @@ mod tests {
     /// later `## Status Log` entry is appended line by line.
     #[test]
     fn a_body_is_taken_as_given_however_it_is_shaped() {
-        let text = document(
+        let text = task_text(
             "demo",
             "group: demo\n",
             "Just do the thing. No headings anywhere.",
@@ -6557,18 +7210,18 @@ mod tests {
     /// nothing to work from, and the frontmatter alone says nothing about what
     /// to build.
     #[test]
-    fn a_document_with_an_empty_body_is_refused() {
-        let text = document("demo", "group: demo\n", "   \n\n");
+    fn a_task_with_an_empty_body_is_refused() {
+        let text = task_text("demo", "group: demo\n", "   \n\n");
         let err = parse_submission("demo.md", &text, Some("plan/demo")).unwrap_err();
         assert!(err.to_string().contains("empty"), "{err:#}");
     }
 
     /// `title:` is the squashed commit's subject and the pull request's
-    /// title — no heading in the body can supply one, so a document leaving
-    /// it blank is refused before anything is queued, naming the document
+    /// title — no heading in the body can supply one, so a task leaving
+    /// it blank is refused before anything is queued, naming the task
     /// and the field.
     #[test]
-    fn a_document_with_no_title_is_refused() {
+    fn a_task_with_no_title_is_refused() {
         let text = "---\nid: demo\ngroup: demo\n---\n## Goal\n\nDo the thing.\n";
         let err = parse_submission("mine.md", text, Some("plan/demo")).unwrap_err();
         assert!(err.to_string().contains("`title:`"), "{err:#}");
@@ -6576,11 +7229,11 @@ mod tests {
     }
 
     /// The keys spoolway sets on every task itself are refused by name, and
-    /// the document they came from is named too — this is the whole
+    /// the task they came from is named too — this is the whole
     /// enforcement that a producer cannot smuggle a task onto an arbitrary
     /// step, run or attempt count.
     #[test]
-    fn a_document_setting_a_reserved_key_is_refused_by_name() {
+    fn a_task_setting_a_reserved_key_is_refused_by_name() {
         for key in [
             "stage",
             "run",
@@ -6590,39 +7243,39 @@ mod tests {
             "trial",
             "branch",
         ] {
-            let text = document("demo", &format!("group: demo\n{key}: bogus\n"), BODY);
+            let text = task_text("demo", &format!("group: demo\n{key}: bogus\n"), BODY);
             let err = parse_submission("mine.md", &text, Some("plan/demo")).unwrap_err();
             assert!(err.to_string().contains(key), "{key}: {err:#}");
             assert!(err.to_string().contains("mine.md"), "{key}: {err:#}");
         }
     }
 
-    /// `base:` is a document's to set, and what it sets is kept — a branch
+    /// `base:` is a task's to set, and what it sets is kept — a branch
     /// this repository really has is checked for by `validate_batch`, not
-    /// here. A document that leaves it out, or writes it blank, takes the
+    /// here. A task that leaves it out, or writes it blank, takes the
     /// submission's own base instead — the `--base` flag or the checkout's
     /// branch, whichever `parse_submission` was handed.
     #[test]
-    fn a_document_setting_base_keeps_it_and_one_without_takes_the_submissions() {
-        let text = document("demo", "group: demo\nbase: some/other/branch\n", BODY);
+    fn a_task_setting_base_keeps_it_and_one_without_takes_the_submissions() {
+        let text = task_text("demo", "group: demo\nbase: some/other/branch\n", BODY);
         let task = parse_submission("mine.md", &text, Some("plan/live")).unwrap();
         assert_eq!(task.front.base.as_deref(), Some("some/other/branch"));
 
-        let blank = document("demo", "group: demo\nbase: \"  \"\n", BODY);
+        let blank = task_text("demo", "group: demo\nbase: \"  \"\n", BODY);
         let task = parse_submission("mine.md", &blank, Some("plan/live")).unwrap();
         assert_eq!(task.front.base.as_deref(), Some("plan/live"));
 
-        let plain = document("demo", "group: demo\n", BODY);
+        let plain = task_text("demo", "group: demo\n", BODY);
         let task = parse_submission("mine.md", &plain, Some("plan/live")).unwrap();
         assert_eq!(task.front.base.as_deref(), Some("plan/live"));
     }
 
-    /// A document that sets no `base:` of its own, submitted with no
+    /// A task that sets no `base:` of its own, submitted with no
     /// `--base` either, is refused by name — never based on whichever
     /// branch a checkout happens to have out.
     #[test]
-    fn a_document_with_no_base_and_no_flag_is_refused() {
-        let text = document("demo", "group: demo\n", BODY);
+    fn a_task_with_no_base_and_no_flag_is_refused() {
+        let text = task_text("demo", "group: demo\n", BODY);
         let err = parse_submission("explicit-task-base.md", &text, None).unwrap_err();
         assert!(err.to_string().contains("explicit-task-base.md"), "{err:#}");
         assert!(err.to_string().contains("sets no `base:`"), "{err:#}");
@@ -6630,22 +7283,22 @@ mod tests {
     }
 
     /// There is no project default to route an omission through any more, so
-    /// a document naming no `pipeline:` is refused the same way one naming
+    /// a task naming no `pipeline:` is refused the same way one naming
     /// no `group:` already is — built by hand rather than through
-    /// `document`, which now fills the key in.
+    /// `task`, which now fills the key in.
     #[test]
-    fn a_document_with_no_pipeline_is_refused() {
+    fn a_task_with_no_pipeline_is_refused() {
         let text = format!("---\nid: demo\ntitle: demo, done\ngroup: demo\n---\n{BODY}");
         let err = parse_submission("no-pipeline.md", &text, Some("plan/demo")).unwrap_err();
         assert!(err.to_string().contains("no-pipeline.md"), "{err:#}");
         assert!(err.to_string().contains("must set `pipeline:`"), "{err:#}");
     }
 
-    /// A document that sets `pipeline:` to nothing but whitespace is refused
+    /// A task that sets `pipeline:` to nothing but whitespace is refused
     /// the same as one that omits the key outright — blank counts as absent,
     /// the same courtesy `group:` already gets.
     #[test]
-    fn a_document_with_a_blank_pipeline_is_refused() {
+    fn a_task_with_a_blank_pipeline_is_refused() {
         let text =
             format!("---\nid: demo\ntitle: demo, done\ngroup: demo\npipeline: \"  \"\n---\n{BODY}");
         let err = parse_submission("blank-pipeline.md", &text, Some("plan/demo")).unwrap_err();
@@ -6654,11 +7307,11 @@ mod tests {
 
     /// The retired quota-and-usage-limit park fields have no struct home any
     /// more — a submission that still carries one from an earlier run has it
-    /// dropped on parse, the same as any other document `Task::parse` refuses
+    /// dropped on parse, the same as any other task `Task::parse` refuses
     /// to round-trip.
     #[test]
-    fn a_document_carrying_park_fields_has_them_dropped() {
-        let text = document(
+    fn a_task_carrying_park_fields_has_them_dropped() {
+        let text = task_text(
             "demo",
             "group: demo\nparked_at: 1788793980\nparked_until: 1788801180\nparked_window: five_hour\n",
             BODY,
@@ -6671,7 +7324,7 @@ mod tests {
     }
 
     /// `launch_failures` is a dispatcher-owned counter too — see
-    /// `IGNORED_KEYS` in `src/commands/task.rs` — and a document that carries
+    /// `IGNORED_KEYS` in `src/commands/task.rs` — and a task that carries
     /// one in from an earlier run must not have it survive back into the
     /// queue: a re-queued task that parked with a step's count already at
     /// the ceiling would otherwise write the very first failure of its next
@@ -6680,8 +7333,8 @@ mod tests {
     /// `Dispatcher::note_launch_failure` fires only on the attempt that
     /// exactly spends the ceiling, and a count that starts at 3 skips it.
     #[test]
-    fn a_document_carrying_launch_failures_has_them_reset() {
-        let text = document(
+    fn a_task_carrying_launch_failures_has_them_reset() {
+        let text = task_text(
             "demo",
             "group: demo\nlaunch_failures:\n  implement: 3\n",
             BODY,
@@ -6703,7 +7356,7 @@ mod tests {
             "---\nid: taken\ntitle: taken\nstage: queued\n---\nbody\n",
         )
         .unwrap();
-        let text = document("taken", "group: demo\n", BODY);
+        let text = task_text("taken", "group: demo\n", BODY);
         let err = validate_batch(
             &repo,
             &Pipelines::builtin(),
@@ -6723,7 +7376,7 @@ mod tests {
             "---\nid: done\ntitle: done\nstage: done\n---\nbody\n",
         )
         .unwrap();
-        let text = document("done", "group: demo\n", BODY);
+        let text = task_text("done", "group: demo\n", BODY);
         let err = validate_batch(
             &repo,
             &Pipelines::builtin(),
@@ -6738,14 +7391,14 @@ mod tests {
         );
     }
 
-    /// `--base` is as arbitrary a value as a document's own `base:` — a
+    /// `--base` is as arbitrary a value as a task's own `base:` — a
     /// leading `-` or a branch this repository does not have locally is
-    /// refused whichever of the two named it, not only when a document's
+    /// refused whichever of the two named it, not only when a task's
     /// own value happens to disagree with the flag.
     #[test]
-    fn a_flags_base_is_checked_the_same_as_a_documents_own() {
+    fn a_flags_base_is_checked_the_same_as_a_tasks_own() {
         let repo = fixture("flag-base-checked");
-        let text = document("demo", "group: demo\n", BODY);
+        let text = task_text("demo", "group: demo\n", BODY);
         let err = validate_batch(
             &repo,
             &Pipelines::builtin(),
@@ -6755,7 +7408,7 @@ mod tests {
         .unwrap_err();
         assert!(err.to_string().contains("does not have locally"), "{err:#}");
 
-        let text = document("demo", "group: demo\n", BODY);
+        let text = task_text("demo", "group: demo\n", BODY);
         let err = validate_batch(
             &repo,
             &Pipelines::builtin(),
@@ -6766,13 +7419,13 @@ mod tests {
         assert!(err.to_string().contains("would read as a flag"), "{err:#}");
     }
 
-    /// A document naming its own `base:` is checked even when that value
+    /// A task naming its own `base:` is checked even when that value
     /// happens to equal the submission's `--base` — the two are not allowed
     /// to shadow each other into skipping the check.
     #[test]
-    fn a_documents_own_base_is_checked_even_when_it_matches_the_flag() {
+    fn a_tasks_own_base_is_checked_even_when_it_matches_the_flag() {
         let repo = fixture("own-base-matches-flag");
-        let text = document("demo", "group: demo\nbase: no/such/branch\n", BODY);
+        let text = task_text("demo", "group: demo\nbase: no/such/branch\n", BODY);
         let err = validate_batch(
             &repo,
             &Pipelines::builtin(),
@@ -6787,7 +7440,7 @@ mod tests {
     /// business, and survive a round trip through `Frontmatter`'s `extra`.
     #[test]
     fn unrecognised_keys_survive_through_extra() {
-        let text = document("demo", "group: demo\nsize: small\ncomplexity: 3\n", BODY);
+        let text = task_text("demo", "group: demo\nsize: small\ncomplexity: 3\n", BODY);
         let task = parse_submission("mine.md", &text, Some("plan/demo")).unwrap();
 
         assert_eq!(
@@ -6804,23 +7457,23 @@ mod tests {
         assert!(rendered.contains("complexity: 3"), "{rendered}");
     }
 
-    /// `gate_at` is a document's to set, read by `commands::report` the same
+    /// `gate_at` is a task's to set, read by `commands::report` the same
     /// way whoever wrote it by hand or the board's own `s` key would have —
     /// though unlike `step.gate`, it catches whatever that step reports, not
     /// only its pass.
     #[test]
-    fn gate_at_is_read_from_a_document() {
-        let text = document("demo", "group: demo\ngate_at: handover\n", BODY);
+    fn gate_at_is_read_from_a_task() {
+        let text = task_text("demo", "group: demo\ngate_at: handover\n", BODY);
         let task = parse_submission("mine.md", &text, Some("plan/demo")).unwrap();
         assert_eq!(task.front.gate_at.as_deref(), Some("handover"));
     }
 
-    /// `source` is a document's to set, optionally, and lands on the task
+    /// `source` is a task's to set, optionally, and lands on the task
     /// verbatim — nothing in `parse_submission` parses it, the same as
     /// nothing anywhere else in spoolway does.
     #[test]
-    fn source_is_read_from_a_document_verbatim() {
-        let text = document(
+    fn source_is_read_from_a_task_verbatim() {
+        let text = task_text(
             "demo",
             "group: demo\nsource: https://github.com/x/y/issues/42\n",
             BODY,
@@ -6839,8 +7492,8 @@ mod tests {
     #[test]
     fn a_sibling_in_the_same_submission_satisfies_depends_on() {
         let repo = fixture("sibling-dep");
-        let login = document("login", "group: demo\n", BODY);
-        let sessions = document("sessions", "group: demo\ndepends_on: [login]\n", BODY);
+        let login = task_text("login", "group: demo\n", BODY);
+        let sessions = task_text("sessions", "group: demo\ndepends_on: [login]\n", BODY);
         let login_path = write_doc(&repo, "login.md", &login);
         let sessions_path = write_doc(&repo, "sessions.md", &sessions);
 
@@ -6857,13 +7510,13 @@ mod tests {
         assert!(repo.queue_dir().join("sessions.md").exists());
     }
 
-    /// Written all or none: one document that fails validation must not
+    /// Written all or none: one task that fails validation must not
     /// leave the ones that would have passed sitting in the queue.
     #[test]
-    fn one_bad_document_queues_nothing_from_the_same_submission() {
+    fn one_bad_task_queues_nothing_from_the_same_submission() {
         let repo = fixture("all-or-none");
-        let good = document("wire", "group: demo\n", BODY);
-        let bad = document("bogus", "group: demo\ndepends_on: [ghost]\n", BODY);
+        let good = task_text("wire", "group: demo\n", BODY);
+        let bad = task_text("bogus", "group: demo\ndepends_on: [ghost]\n", BODY);
         let good_path = write_doc(&repo, "wire.md", &good);
         let bad_path = write_doc(&repo, "bogus.md", &bad);
 
@@ -6883,12 +7536,12 @@ mod tests {
         );
     }
 
-    /// A `---`-separated stream is split back into whole documents, each
+    /// A `---`-separated stream is split back into whole tasks, each
     /// still fenced on both sides — this is what `--from -` reads.
     #[test]
-    fn a_stream_splits_into_whole_documents() {
-        let a = document("a", "group: demo\n", "## Goal\nFirst.\n");
-        let b = document("b", "group: demo\n", "## Goal\nSecond.\n");
+    fn a_stream_splits_into_whole_tasks() {
+        let a = task_text("a", "group: demo\n", "## Goal\nFirst.\n");
+        let b = task_text("b", "group: demo\n", "## Goal\nSecond.\n");
         let stream = format!("{a}{b}");
 
         let docs = split_stream(&stream);
@@ -6899,17 +7552,17 @@ mod tests {
     }
 
     /// A directory named by `--from` expands to every `*.md` file in it, in
-    /// filename order — non-markdown files beside them are not documents.
+    /// filename order — non-markdown files beside them are not tasks.
     #[test]
     fn a_directory_expands_to_its_md_files_in_order() {
         let repo = fixture("from-dir");
         let dir = repo.root.join("tasks");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("b.md"), document("b", "group: demo\n", BODY)).unwrap();
-        std::fs::write(dir.join("a.md"), document("a", "group: demo\n", BODY)).unwrap();
-        std::fs::write(dir.join("notes.txt"), "not a document").unwrap();
+        std::fs::write(dir.join("b.md"), task_text("b", "group: demo\n", BODY)).unwrap();
+        std::fs::write(dir.join("a.md"), task_text("a", "group: demo\n", BODY)).unwrap();
+        std::fs::write(dir.join("notes.txt"), "not a task").unwrap();
 
-        let docs = gather_documents(&[dir.display().to_string()]).unwrap();
+        let docs = gather_tasks(&[dir.display().to_string()]).unwrap();
 
         assert_eq!(docs.len(), 2, "{docs:?}");
         assert!(docs[0].0.ends_with("a.md"), "{docs:?}");
@@ -6945,8 +7598,8 @@ mod tests {
         );
     }
 
-    /// One pending task document, written into the directory
-    /// `list_groups` scans. `doc` is the whole document, its own `group:`
+    /// One pending task, written into the directory
+    /// `list_groups` scans. `doc` is the whole task, its own `group:`
     /// and all — the same bytes `--from` would read.
     fn write_pending(repo: &Repo, id: &str, doc: &str) -> std::path::PathBuf {
         let path = repo.pending_dir().join(format!("{id}.md"));
@@ -6954,14 +7607,14 @@ mod tests {
         path
     }
 
-    /// Two documents of one group, in dependency order — what a test needs
-    /// whenever one document is not enough to say what it is about.
+    /// Two tasks of one group, in dependency order — what a test needs
+    /// whenever one task is not enough to say what it is about.
     fn write_pending_two(repo: &Repo, a_id: &str, a_doc: &str, b_id: &str, b_doc: &str) {
         write_pending(repo, a_id, a_doc);
         write_pending(repo, b_id, b_doc);
     }
 
-    /// The groups those documents gather into, in the order the left pane
+    /// The groups those tasks gather into, in the order the left pane
     /// draws them.
     fn listed(repo: &Repo) -> Vec<Group> {
         super::pending::list_groups(repo).unwrap()
@@ -7009,22 +7662,202 @@ mod tests {
         drawn.rsplit("\x1b[2J\x1b[H").next().unwrap_or(drawn)
     }
 
+    /// `←` and `→` no longer move focus between the two panes — `tab` is the
+    /// one key for that now, so the same arrows can move between tabs inside
+    /// bare `spoolway` without meaning two things on one screen.
+    #[test]
+    fn only_tab_moves_focus_between_the_two_panes() {
+        let repo = fixture("screen-focus-tab-only");
+        write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
+        let groups = listed(&repo);
+        let mut state = ScreenState::new();
+
+        handle_browse_key(&groups, &mut state, Key::Right);
+        assert_eq!(state.focus, Focus::Groups);
+        handle_browse_key(&groups, &mut state, Key::Tab);
+        assert_eq!(state.focus, Focus::Tasks);
+        handle_browse_key(&groups, &mut state, Key::Left);
+        assert_eq!(state.focus, Focus::Tasks);
+    }
+
+    /// Hosted as bare `spoolway`'s queue tab, `←`, `→` and `q` while
+    /// browsing hand the screen back to the shell, and the frame opens under
+    /// the strip.
+    #[test]
+    fn hosted_the_arrows_and_q_leave_the_tab_while_browsing() {
+        use crate::screen::shell::{Hosting, Leave, Tab, Toward};
+        let repo = fixture("screen-hosted-leave");
+        write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
+        let _hosting = Hosting::open(Tab::Queue);
+
+        let (exit, drawn) = screen_exit(&repo, listed(&repo), "\x1b[D");
+        assert_eq!(exit, ScreenExit::Leave(Leave::Switch(Toward::Left)));
+        assert!(last_frame(&drawn).contains("dispatch"), "{drawn}");
+        assert!(last_frame(&drawn).contains("[q] quit"), "{drawn}");
+
+        let (exit, _) = screen_exit(&repo, listed(&repo), "\x1b[C");
+        assert_eq!(exit, ScreenExit::Leave(Leave::Switch(Toward::Right)));
+        let (exit, _) = screen_exit(&repo, listed(&repo), "q");
+        assert_eq!(exit, ScreenExit::Leave(Leave::Quit));
+    }
+
+    /// The routines pane reads nothing of its own on `q`, so hosted it
+    /// quits there as it does while browsing — and its key line says so, as
+    /// step 9 of the screen's mockup draws it.
+    #[test]
+    fn hosted_q_quits_from_the_routines_pane_and_its_line_names_it() {
+        use crate::screen::shell::{Hosting, Leave, Tab};
+        let repo = fixture("screen-hosted-routines-q");
+        write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
+        let _hosting = Hosting::open(Tab::Queue);
+
+        let (exit, drawn) = screen_exit(&repo, listed(&repo), "rq");
+        assert_eq!(exit, ScreenExit::Leave(Leave::Quit));
+        assert!(
+            last_frame(&drawn)
+                .contains("[o] open task   [space] select   [enter] queue   [esc] back   [q] quit"),
+            "{drawn}"
+        );
+    }
+
+    /// Inside a sub-mode the arrows keep their own meaning even when hosted:
+    /// the routines view reads `→` itself, and the filter reads `q` into its
+    /// query — neither leaves the tab.
+    #[test]
+    fn hosted_a_sub_mode_keeps_the_arrows_and_q_for_itself() {
+        use crate::screen::shell::{Hosting, Tab};
+        let repo = fixture("screen-hosted-sub-mode");
+        write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
+        let _hosting = Hosting::open(Tab::Queue);
+
+        let (exit, _) = screen_exit(&repo, listed(&repo), "r\x1b[C\x1b[D");
+        assert_eq!(
+            exit,
+            ScreenExit::Quit,
+            "the input ran out inside the routines view"
+        );
+        let (exit, _) = screen_exit(&repo, listed(&repo), "fq\x1b[D");
+        assert_eq!(
+            exit,
+            ScreenExit::Quit,
+            "the input ran out inside the filter"
+        );
+    }
+
+    /// Where the old standalone screen printed its opening message and
+    /// ended, the queue tab holds it on screen under the strip, as a popup
+    /// over the tab — every key but `enter` is the popup's to ignore, `enter`
+    /// closes it onto the ordinary screen, and `←` then leaves.
+    #[test]
+    fn the_queue_tab_holds_its_opening_message_instead_of_ending() {
+        use crate::screen::shell::{Hosting, Leave, Tab, Toward};
+        let repo = fixture("queue-tab-opening-message");
+        std::fs::write(
+            repo.pending_dir().join("no-group.md"),
+            "---\nid: stray\ntitle: stray\n---\n## Goal\n\nx\n",
+        )
+        .unwrap();
+        let _hosting = Hosting::open(Tab::Queue);
+
+        let mut input = keys("x\x1b[D\r\x1b[D");
+        let mut out = Vec::new();
+        let leave = queue_tab(
+            &repo,
+            &Pipelines::builtin(),
+            &repo.root,
+            crate::screen::shell::OnOpen::default(),
+            &mut input,
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(leave, Leave::Switch(Toward::Left));
+        let drawn = String::from_utf8(out).unwrap();
+        let first = drawn.split("\x1b[2J\x1b[H").nth(1).unwrap();
+        assert!(first.contains("┌─ nothing to queue "), "{first}");
+        assert!(first.contains("no-group.md"), "{first}");
+        assert!(first.contains("[enter] close"), "{first}");
+        assert!(first.contains("─ groups"), "the tab under it: {first}");
+        assert!(first.contains("dispatch"), "under the strip: {first}");
+    }
+
+    /// What the screen opens with — the sync gate, then the update notice —
+    /// is shown over the queue tab in that order, each closed by `enter`
+    /// alone, before the tab is the person's.
+    #[test]
+    fn the_queue_tab_opens_with_the_sync_gate_then_the_update_notice() {
+        use crate::screen::shell::{Hosting, OnOpen, Tab};
+        let repo = fixture("queue-tab-on-open");
+        write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
+        let _hosting = Hosting::open(Tab::Queue);
+        let on_open = OnOpen {
+            sync: Some(panel(
+                "new version installed, apply updates",
+                &[],
+                "[enter] confirm",
+            )),
+            update: Some("Update available: 0.42.0. Run \"spoolway update\"".to_string()),
+        };
+
+        // A stand-in sync popup whose `enter` finds nothing to write: the
+        // fixture's own stamp is never behind, so `gate::apply` only stamps.
+        let mut input = keys("x\r");
+        let mut out = Vec::new();
+        queue_tab(
+            &repo,
+            &Pipelines::builtin(),
+            &repo.root,
+            on_open,
+            &mut input,
+            &mut out,
+        )
+        .unwrap();
+        let drawn = String::from_utf8(out).unwrap();
+        let frames: Vec<&str> = drawn.split("\x1b[2J\x1b[H").skip(1).collect();
+        assert!(
+            frames[0].contains("┌─ new version installed, apply updates "),
+            "{}",
+            frames[0]
+        );
+        assert!(frames[0].contains("─ groups"), "{}", frames[0]);
+        let last = frames.last().unwrap();
+        assert!(last.contains("┌─ update available "), "{last}");
+        assert!(
+            last.contains("Update available: 0.42.0. Run \"spoolway update\""),
+            "{last}"
+        );
+        assert!(last.contains("[enter] close"), "{last}");
+    }
+
+    /// Driven through [`run_screen`] directly rather than through the tab,
+    /// so nothing hosts the screen: no strip, no `q` on the key line, and
+    /// `←` leaves nothing.
+    #[test]
+    fn unhosted_the_screen_draws_no_strip_and_the_arrows_do_not_leave() {
+        let repo = fixture("screen-unhosted");
+        write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
+
+        let (exit, drawn) = screen_exit(&repo, listed(&repo), "\x1b[Dq");
+        assert_eq!(exit, ScreenExit::Quit);
+        assert!(!last_frame(&drawn).contains("dispatch"), "{drawn}");
+        assert!(!last_frame(&drawn).contains("[q] quit"), "{drawn}");
+    }
+
     /// `with_gate` is the one place a gate chosen on the screen reaches a
-    /// task's document — in memory only, since the file in the pending
+    /// task — in memory only, since the file in the pending
     /// directory is never rewritten to record one.
     #[test]
     fn with_gate_inserts_after_the_opening_fence() {
-        let doc = document("wire", "group: demo\n", BODY);
+        let doc = task_text("wire", "group: demo\n", BODY);
         let gated = with_gate(&doc, "handover");
         assert!(gated.starts_with("---\ngate_at: handover\n"), "{gated}");
         assert!(gated.contains("id: wire\n"), "{gated}");
     }
 
-    /// The screen's own choice always wins, even over a `gate_at` a task's
-    /// document already happened to carry.
+    /// The screen's own choice always wins, even over a `gate_at` a task
+    /// already happened to carry.
     #[test]
-    fn with_gate_replaces_a_gate_the_document_already_carried() {
-        let doc = document("wire", "group: demo\ngate_at: fix\n", BODY);
+    fn with_gate_replaces_a_gate_the_task_already_carried() {
+        let doc = task_text("wire", "group: demo\ngate_at: fix\n", BODY);
         let gated = with_gate(&doc, "handover");
         assert_eq!(gated.matches("gate_at:").count(), 1, "{gated}");
         assert!(gated.contains("gate_at: handover"), "{gated}");
@@ -7032,8 +7865,8 @@ mod tests {
     }
 
     #[test]
-    fn with_gate_leaves_a_document_with_no_fence_untouched() {
-        assert_eq!(with_gate("not a document", "handover"), "not a document");
+    fn with_gate_leaves_a_task_with_no_fence_untouched() {
+        assert_eq!(with_gate("not a task", "handover"), "not a task");
     }
 
     /// A block-list `depends_on:` — the form `pending::depends_on` reads
@@ -7061,12 +7894,12 @@ mod tests {
     }
 
     /// The task pane's `Depends on:` row reads `depends_on` straight off a
-    /// document, without validating it — and reads nothing else. The
-    /// document here carries a `touches` too, to hold the pane to not
+    /// task, without validating it — and reads nothing else. The
+    /// task here carries a `touches` too, to hold the pane to not
     /// showing it.
     #[test]
-    fn depends_on_reads_the_list_off_the_document() {
-        let doc = document(
+    fn depends_on_reads_the_list_off_the_task() {
+        let doc = task_text(
             "wire",
             "group: demo\ntouches: [src/a.rs, src/b.rs]\ndepends_on: [login]\n",
             BODY,
@@ -7074,15 +7907,15 @@ mod tests {
         assert_eq!(super::pending::depends_on(&doc), vec!["login"]);
     }
 
-    /// A document naming no `depends_on` — or carrying no fence at all — reads as
+    /// A task naming no `depends_on` — or carrying no fence at all — reads as
     /// an empty list rather than an error: the pane shows `Depends on:  -`
     /// for the first case and never panics on either.
     #[test]
     fn depends_on_defaults_to_an_empty_list() {
-        let doc = document("wire", "group: demo\n", BODY);
+        let doc = task_text("wire", "group: demo\n", BODY);
         assert_eq!(super::pending::depends_on(&doc), Vec::<String>::new());
         assert_eq!(
-            super::pending::depends_on("not a document"),
+            super::pending::depends_on("not a task"),
             Vec::<String>::new()
         );
     }
@@ -7106,7 +7939,7 @@ mod tests {
         write_pending(
             &repo,
             "wire",
-            &document(
+            &task_text(
                 "wire",
                 "group: one\ntouches: [src/wire.rs]\ndepends_on: [login]\n",
                 BODY,
@@ -7234,6 +8067,24 @@ mod tests {
         assert_eq!(layout_for(100, 1).rows, Some(1), "one row is still a row");
     }
 
+    /// The queue's key line is wider than a 100-column terminal, and every
+    /// row it wraps onto has to come off the panes, or the frame's top row —
+    /// bare `spoolway`'s tab strip — is scrolled off the screen.
+    #[test]
+    fn wrapped_rows_counts_the_rows_a_key_line_wraps_onto() {
+        let line = footer(&[], &ScreenState::new());
+        let columns = crate::status::strip_ansi(&line).chars().count();
+        assert!(columns > 100, "the key line fits in 100 columns now");
+        assert_eq!(wrapped_rows(&line, 100), 2);
+        assert_eq!(
+            wrapped_rows(&line, columns),
+            1,
+            "exactly as wide is one row"
+        );
+        assert_eq!(wrapped_rows(&line, columns - 1), 2);
+        assert_eq!(wrapped_rows("", 100), 1, "an empty line is still a row");
+    }
+
     /// A pane taller than the terminal scrolls to the highlighted block and
     /// says how much is out of sight, rather than letting the frame run off
     /// the bottom of the screen.
@@ -7265,18 +8116,18 @@ mod tests {
         assert_eq!(window(&lines[..3], (0, 0), Some(9)).len(), 3);
     }
 
-    /// Selecting a group queues every document in it. A group's tasks are
+    /// Selecting a group queues every task in it. A group's tasks are
     /// one chain, and half a chain in the queue is a task waiting on a
     /// dependency nobody sent.
     #[test]
-    fn selecting_a_group_queues_every_document_in_it() {
+    fn selecting_a_group_queues_every_task_in_it() {
         let repo = fixture("screen-whole-group");
         write_pending_two(
             &repo,
             "first",
-            &document("first", "group: one\ntouches: [src/a.rs]\n", BODY),
+            &task_text("first", "group: one\ntouches: [src/a.rs]\n", BODY),
             "second",
-            &document(
+            &task_text(
                 "second",
                 "group: one\ntouches: [src/b.rs]\ndepends_on: [first]\n",
                 BODY,
@@ -7284,9 +8135,8 @@ mod tests {
         );
         let groups = listed(&repo);
 
-        // One space on the group, enter to submit it, `esc` to decline the
-        // overview the screen then reaches.
-        screen(&repo, groups, " \r\x1b");
+        // One space on the group, enter to submit it.
+        screen(&repo, groups, " \r");
 
         assert!(repo.queue_dir().join("first.md").exists(), "first task");
         assert!(repo.queue_dir().join("second.md").exists(), "second task");
@@ -7298,7 +8148,7 @@ mod tests {
     #[test]
     fn a_queued_group_cannot_be_selected_again() {
         let repo = fixture("screen-queued-group");
-        write_pending(&repo, "wire", &document("wire", "group: one\n", BODY));
+        write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
         already_queued(&repo, "wire");
         let groups = listed(&repo);
         let mut state = ScreenState::new();
@@ -7328,12 +8178,12 @@ mod tests {
     #[test]
     fn groups_pane_lines_draws_one_unmarked_separator_between_the_two_groups() {
         let repo = fixture("screen-separator-row");
-        write_pending(&repo, "wire", &document("wire", "group: unqueued\n", BODY));
+        write_pending(&repo, "wire", &task_text("wire", "group: unqueued\n", BODY));
         // A birth time has no `set_*` the way a modification time does —
         // see `pending::list_groups`' own tests — so this sleeps to
-        // guarantee the second document really is the later-written one.
+        // guarantee the second task really is the later-written one.
         std::thread::sleep(std::time::Duration::from_millis(5));
-        write_pending(&repo, "cook", &document("cook", "group: cook\n", BODY));
+        write_pending(&repo, "cook", &task_text("cook", "group: cook\n", BODY));
         already_queued(&repo, "cook");
         let groups = listed(&repo);
 
@@ -7380,9 +8230,9 @@ mod tests {
     #[test]
     fn two_separators_are_drawn_once_every_state_is_on_screen() {
         let repo = fixture("screen-two-separators");
-        write_pending(&repo, "wire", &document("wire", "group: unqueued\n", BODY));
+        write_pending(&repo, "wire", &task_text("wire", "group: unqueued\n", BODY));
         std::thread::sleep(std::time::Duration::from_millis(5));
-        write_pending(&repo, "cook", &document("cook", "group: cook\n", BODY));
+        write_pending(&repo, "cook", &task_text("cook", "group: cook\n", BODY));
         already_queued(&repo, "cook");
         std::fs::create_dir_all(repo.archive_dir()).unwrap();
         std::fs::write(
@@ -7420,7 +8270,7 @@ mod tests {
     #[test]
     fn the_queued_tail_is_the_bare_word() {
         let repo = fixture("screen-queued-tail");
-        write_pending(&repo, "wire", &document("wire", "group: one\n", BODY));
+        write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
         already_queued(&repo, "wire");
         let groups = listed(&repo);
 
@@ -7448,7 +8298,7 @@ mod tests {
             write_pending(
                 &repo,
                 name,
-                &document(name, &format!("group: {name}\n"), BODY),
+                &task_text(name, &format!("group: {name}\n"), BODY),
             );
             already_queued(&repo, name);
         }
@@ -7482,7 +8332,7 @@ mod tests {
         write_pending(
             &repo,
             &name,
-            &document(&name, &format!("group: {name}\n"), BODY),
+            &task_text(&name, &format!("group: {name}\n"), BODY),
         );
         already_queued(&repo, &name);
         let groups = listed(&repo);
@@ -7508,7 +8358,7 @@ mod tests {
     #[test]
     fn the_queued_tail_never_truncates_from_min_left_pane_up() {
         let repo = fixture("screen-queued-tail-never-truncates");
-        write_pending(&repo, "wire", &document("wire", "group: one\n", BODY));
+        write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
         already_queued(&repo, "wire");
         let groups = listed(&repo);
 
@@ -7533,7 +8383,7 @@ mod tests {
         write_pending(
             &repo,
             "bound-loops",
-            &document("bound-loops", "group: one\n", BODY),
+            &task_text("bound-loops", "group: one\n", BODY),
         );
         already_queued(&repo, "bound-loops");
         let groups = listed(&repo);
@@ -7555,7 +8405,7 @@ mod tests {
 
     /// A landed submission clears the group out of the pane the same act it
     /// clears it off disk: `list_groups` runs once per screen session, so
-    /// nothing else would ever pick up that the documents are gone, and a
+    /// nothing else would ever pick up that the tasks are gone, and a
     /// row left behind is one a person can select and submit a second time.
     /// Drives `begin_submission` directly, not through `run_screen`, so the
     /// pane's own copy of the list is what gets inspected afterward.
@@ -7565,7 +8415,7 @@ mod tests {
         let path = write_pending(
             &repo,
             "wire",
-            &document("wire", "group: one\ntouches: [src/wire.rs]\n", BODY),
+            &task_text("wire", "group: one\ntouches: [src/wire.rs]\n", BODY),
         );
         let mut groups = listed(&repo);
         assert_eq!(groups.len(), 1);
@@ -7574,13 +8424,21 @@ mod tests {
         handle_browse_key(&groups, &mut state, Key::Char(' '));
 
         let pipelines = Pipelines::builtin();
-        let outcome = begin_submission(&repo, &pipelines, "plan/demo", &mut groups, &mut state);
+        let outcome = begin_submission(
+            &repo,
+            &pipelines,
+            "plan/demo",
+            &mut groups,
+            &mut state,
+            Tracking::Ask,
+            &mut |_| {},
+        );
         assert!(
-            matches!(outcome, SubmitOutcome::Confirmed),
-            "expected a clean submission to reach SubmitOutcome::Confirmed, got {outcome:?}"
+            matches!(outcome, Mode::Queued(_)),
+            "expected a clean submission to say what it queued, got {outcome:?}"
         );
 
-        assert!(!path.exists(), "the document must be gone from pending");
+        assert!(!path.exists(), "the task must be gone from pending");
         assert!(
             groups.is_empty(),
             "the pane's own list must lose the group it just queued"
@@ -7605,16 +8463,16 @@ mod tests {
     }
 
     /// A group whose sibling is already queued must still let its pending
-    /// task through: `selected_documents` puts every task of the group in
-    /// one batch, including the sibling's document read straight out of
+    /// task through: `selected_tasks` puts every task of the group in
+    /// one batch, including the sibling's task read straight out of
     /// `queue/`, which carries `stage:` — and `parse_submission`'s
-    /// `RESERVED_KEYS` check refuses any document that sets it, so today the
+    /// `RESERVED_KEYS` check refuses any task that sets it, so today the
     /// whole submission is refused rather than just queueing the pending one
     /// and leaving the queued sibling alone.
     #[test]
     fn queueing_a_group_leaves_its_queued_sibling_alone_and_queues_the_pending_task() {
         let repo = fixture("screen-requeue-group");
-        let beta_path = write_pending(&repo, "beta", &document("beta", "group: one\n", BODY));
+        let beta_path = write_pending(&repo, "beta", &task_text("beta", "group: one\n", BODY));
         let alpha_path = repo.queue_dir().join("alpha.md");
         std::fs::write(
             &alpha_path,
@@ -7632,27 +8490,22 @@ mod tests {
         let pipelines = Pipelines::builtin();
         // Driven straight through `finish_submit` rather than
         // `begin_submission`: the "left alone" note it builds is no longer
-        // shown on any screen a clean submission reaches (see the mockup on
-        // task `overview-and-gates`), so this is the one place left that can
-        // still read it back.
-        let documents = selected_documents(&groups, &state);
-        let pending = validate_batch(&repo, &pipelines, Some("plan/demo"), &documents).unwrap();
+        // shown on any screen — a clean submission's popup names only what it
+        // queued —
+        // so this is the one place left that can still read it back.
+        let tasks = selected_tasks(&groups, &state);
+        let pending = validate_batch(&repo, &pipelines, Some("plan/demo"), &tasks).unwrap();
         let selected = state.selected.clone();
-        let msg = finish_submit(
-            &repo,
-            &mut groups,
-            pending,
-            &documents,
-            "plan/demo",
-            &selected,
-        )
-        .unwrap();
+        let submit = Submit {
+            tasks: &tasks,
+            base: "plan/demo",
+            selected: &selected,
+            tracking_off: false,
+        };
+        let msg = finish_submit(&repo, &mut groups, pending, &submit, &mut PrintedTickets).unwrap();
 
-        assert!(!beta_path.exists(), "beta's pending document must be gone");
-        assert!(
-            alpha_path.exists(),
-            "alpha's queue document must be untouched"
-        );
+        assert!(!beta_path.exists(), "beta's pending task must be gone");
+        assert!(alpha_path.exists(), "alpha's queue task must be untouched");
         assert!(
             repo.queue_dir().join("beta.md").exists(),
             "beta must have landed in the queue"
@@ -7670,7 +8523,7 @@ mod tests {
     #[test]
     fn queueing_a_group_leaves_its_archived_sibling_alone_and_names_it() {
         let repo = fixture("screen-requeue-group-archived");
-        let beta_path = write_pending(&repo, "beta", &document("beta", "group: one\n", BODY));
+        let beta_path = write_pending(&repo, "beta", &task_text("beta", "group: one\n", BODY));
         std::fs::create_dir_all(repo.archive_dir()).unwrap();
         let alpha_path = repo.archive_dir().join("alpha.md");
         std::fs::write(
@@ -7689,20 +8542,18 @@ mod tests {
         let pipelines = Pipelines::builtin();
         // See the sibling test above on why this reads `finish_submit`
         // directly rather than `begin_submission`.
-        let documents = selected_documents(&groups, &state);
-        let pending = validate_batch(&repo, &pipelines, Some("plan/demo"), &documents).unwrap();
+        let tasks = selected_tasks(&groups, &state);
+        let pending = validate_batch(&repo, &pipelines, Some("plan/demo"), &tasks).unwrap();
         let selected = state.selected.clone();
-        let msg = finish_submit(
-            &repo,
-            &mut groups,
-            pending,
-            &documents,
-            "plan/demo",
-            &selected,
-        )
-        .unwrap();
+        let submit = Submit {
+            tasks: &tasks,
+            base: "plan/demo",
+            selected: &selected,
+            tracking_off: false,
+        };
+        let msg = finish_submit(&repo, &mut groups, pending, &submit, &mut PrintedTickets).unwrap();
 
-        assert!(!beta_path.exists(), "beta's pending document must be gone");
+        assert!(!beta_path.exists(), "beta's pending task must be gone");
         assert!(
             alpha_path.exists(),
             "alpha's archived record must be untouched"
@@ -7726,7 +8577,7 @@ mod tests {
         write_pending(
             &repo,
             "wire",
-            &document("wire", "group: one\ntouches: [src/wire.rs]\n", BODY),
+            &task_text("wire", "group: one\ntouches: [src/wire.rs]\n", BODY),
         );
         let groups = listed(&repo);
         let pipelines = Pipelines::builtin();
@@ -7756,21 +8607,21 @@ mod tests {
             "the task still says what it depends on, got {lines:?}"
         );
 
-        // The document above carries `touches: [src/wire.rs]`, and the pane shows
+        // The task above carries `touches: [src/wire.rs]`, and the pane shows
         // neither the label nor the glob. They were the widest thing drawn
         // here, and a person choosing what to queue does not pick by glob.
         assert!(
             !lines
                 .iter()
                 .any(|line| line.contains("touches") || line.contains("src/wire.rs")),
-            "the pane never draws a document's touches, got {lines:?}"
+            "the pane never draws a task's touches, got {lines:?}"
         );
     }
 
-    /// A document's own `title:` reaches the tasks pane under its own
+    /// A task's own `title:` reaches the tasks pane under its own
     /// `Description:` label — the one sentence a person picks by.
     #[test]
-    fn a_documents_title_reaches_the_tasks_pane() {
+    fn a_tasks_title_reaches_the_tasks_pane() {
         let repo = fixture("screen-description");
         write_pending(
             &repo,
@@ -7789,7 +8640,7 @@ mod tests {
         );
     }
 
-    /// A document with no `title:` at all draws no `Description:` row,
+    /// A task with no `title:` at all draws no `Description:` row,
     /// rather than an empty one. `parse_submission` is what refuses it, at
     /// submit time — the pane just has nothing to draw.
     #[test]
@@ -7807,8 +8658,8 @@ mod tests {
         let (lines, _) = tasks_pane_lines(&groups, &pipelines, &state, 46);
         // Only the blank separator the loop always opens a task with, the
         // task row, its Pipeline: row and its Depends on: row — nothing
-        // past it, since this document has no title to draw a Description:
-        // row from. The document names no `pipeline:` either, and there is
+        // past it, since this task has no title to draw a Description:
+        // row from. The task names no `pipeline:` either, and there is
         // no project default to show in its place any more.
         assert_eq!(
             lines,
@@ -7833,7 +8684,7 @@ mod tests {
         write_pending(
             &repo,
             "third",
-            &document("third", "group: chain\ndepends_on: [second]\n", BODY),
+            &task_text("third", "group: chain\ndepends_on: [second]\n", BODY),
         );
         std::fs::write(
             repo.queue_dir().join("second.md"),
@@ -7911,7 +8762,7 @@ mod tests {
         write_pending(
             &repo,
             "tracking-open",
-            &document(
+            &task_text(
                 "tracking-open",
                 "group: one\npipeline: default\ndepends_on: [tracking-core]\n",
                 BODY,
@@ -7948,7 +8799,7 @@ mod tests {
         write_pending(
             &repo,
             "wire",
-            &document("wire", "group: one\npipeline: default\n", BODY),
+            &task_text("wire", "group: one\npipeline: default\n", BODY),
         );
         let groups = listed(&repo);
         let pipelines = Pipelines::builtin();
@@ -7971,14 +8822,14 @@ mod tests {
         );
     }
 
-    /// A reload can reorder `shown` out from under the cursor — a document
+    /// A reload can reorder `shown` out from under the cursor — a task
     /// just edited moves to the front of `list_groups`' own newest-first
     /// order — but the group the cursor was on stays highlighted, found
     /// again by name rather than by the index it no longer sits at.
     #[test]
     fn reload_keeps_the_cursor_on_the_same_group_after_a_reorder() {
         let repo = fixture("screen-reload-cursor");
-        write_pending(&repo, "older", &document("older", "group: older\n", BODY));
+        write_pending(&repo, "older", &task_text("older", "group: older\n", BODY));
         let mut groups = listed(&repo);
         let mut state = ScreenState::new();
         state.group_cursor = shown(&groups, &state)
@@ -7986,11 +8837,11 @@ mod tests {
             .position(|group| group.name == "older")
             .unwrap();
 
-        // A second, newer document sorts ahead of the first — see
+        // A second, newer task sorts ahead of the first — see
         // `list_groups`' own newest-first order — so a naive reload that
         // kept the cursor's index rather than its group would now be
         // pointing at this one instead.
-        write_pending(&repo, "newer", &document("newer", "group: newer\n", BODY));
+        write_pending(&repo, "newer", &task_text("newer", "group: newer\n", BODY));
         reload(&repo, &mut groups, &mut state);
 
         let cursor_group = &shown(&groups, &state)[state.group_cursor];
@@ -8007,7 +8858,7 @@ mod tests {
     #[test]
     fn draw_writes_nothing_when_the_frame_has_not_changed() {
         let repo = fixture("screen-idle-draw");
-        write_pending(&repo, "wire", &document("wire", "group: one\n", BODY));
+        write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
         let groups = listed(&repo);
         let pipelines = Pipelines::builtin();
         let state = ScreenState::new();
@@ -8052,7 +8903,7 @@ mod tests {
             &panel(
                 "gate wire at",
                 &["> implement".to_string(), "  review".to_string()],
-                "enter set   g clear   esc cancel",
+                &crate::screen::keys(GATE_KEYS),
             ),
         );
 
@@ -8079,13 +8930,13 @@ mod tests {
     }
 
     /// `t`'s own first screen: every task in the group, its own row, and a
-    /// task whose document names its own `pipeline:` shown assigned to it
+    /// task that names its own `pipeline:` shown assigned to it
     /// already — one that names none shows unassigned instead, there being
     /// no project default left to seed it with.
     #[test]
     fn assign_pipelines_panel_lists_every_task_already_assigned_a_pipeline() {
         let repo = fixture("screen-trial-assign");
-        // Built by hand rather than through `document`, which now fills in
+        // Built by hand rather than through `task`, which now fills in
         // `pipeline: default` — alpha's own point here is that it names
         // none, so the picker opens it unassigned.
         write_pending(
@@ -8096,7 +8947,7 @@ mod tests {
         write_pending(
             &repo,
             "beta",
-            &document(
+            &task_text(
                 "beta",
                 "group: chain\ndepends_on: [alpha]\npipeline: bugfix\n",
                 BODY,
@@ -8122,9 +8973,12 @@ mod tests {
         assert!(flat.contains("beta"), "{flat}");
         assert!(flat.contains("bugfix"), "{flat}");
         // alpha is still unassigned, so the footer says so rather than
-        // offering an `enter` that would silently refuse to advance.
+        // offering an `enter` that would silently refuse to advance —
+        // tightened to two spaces a key, to fit the headless frame's width.
         assert!(
-            flat.contains("↑↓ task   ←→ pipeline   assign every task, then enter   esc cancel"),
+            flat.contains(
+                "[↑↓] task  [←→] pipeline  assign every task, then [enter]  [esc] cancel"
+            ),
             "{flat}"
         );
     }
@@ -8137,7 +8991,7 @@ mod tests {
     fn left_right_cycles_only_the_highlighted_tasks_own_pipeline() {
         let repo = fixture("screen-trial-cycle");
         // Built by hand, the same as the panel test above — both tasks have
-        // to open unassigned, and `document` would otherwise fill in
+        // to open unassigned, and `task` would otherwise fill in
         // `pipeline: default` for them.
         write_pending(
             &repo,
@@ -8157,7 +9011,7 @@ mod tests {
             !TrialState::new(&pipelines, group)
                 .pipeline
                 .contains_key(&beta_key),
-            "a document naming no `pipeline:` opens unassigned"
+            "a task naming no `pipeline:` opens unassigned"
         );
 
         let trial = TrialState::new(&pipelines, group);
@@ -8185,7 +9039,7 @@ mod tests {
     #[test]
     fn esc_off_the_skip_screen_returns_to_pipelines_without_losing_picks() {
         let repo = fixture("screen-trial-esc-back");
-        write_pending(&repo, "solo", &document("solo", "group: audits\n", BODY));
+        write_pending(&repo, "solo", &task_text("solo", "group: audits\n", BODY));
         let groups = listed(&repo);
         let pipelines = Pipelines::builtin();
         let group = &groups[0];
@@ -8219,12 +9073,12 @@ mod tests {
         write_pending(
             &repo,
             "alpha",
-            &document("alpha", "group: chain\npipeline: bugfix\n", BODY),
+            &task_text("alpha", "group: chain\npipeline: bugfix\n", BODY),
         );
         write_pending(
             &repo,
             "beta",
-            &document(
+            &task_text(
                 "beta",
                 "group: chain\ndepends_on: [alpha]\npipeline: default\n",
                 BODY,
@@ -8259,7 +9113,7 @@ mod tests {
         // never ticked by alpha's own skip set.
         assert_eq!(flat.matches("[x]").count(), 1, "{flat}");
         assert!(
-            flat.contains("↑↓ move   space toggle   enter run   esc pipelines"),
+            flat.contains("[↑↓] move   [space] toggle   [enter] run   [esc] pipelines"),
             "{flat}"
         );
     }
@@ -8281,7 +9135,7 @@ mod tests {
         write_pending(
             &repo,
             "solo",
-            &document("solo", "group: audits\npipeline: bugfix\n", BODY),
+            &task_text("solo", "group: audits\npipeline: bugfix\n", BODY),
         );
         let groups = listed(&repo);
         let pipelines = Pipelines::builtin();
@@ -8339,9 +9193,9 @@ mod tests {
         write_pending_two(
             &repo,
             "alpha",
-            &document("alpha", "group: audits\npipeline: bugfix\n", BODY),
+            &task_text("alpha", "group: audits\npipeline: bugfix\n", BODY),
             "beta",
-            &document("beta", "group: audits\npipeline: bugfix\n", BODY),
+            &task_text("beta", "group: audits\npipeline: bugfix\n", BODY),
         );
         let groups = listed(&repo);
         let pipelines = Pipelines::builtin();
@@ -8441,13 +9295,13 @@ mod tests {
         write_pending_two(
             &repo,
             long,
-            &document(
+            &task_text(
                 long,
                 "group: a-group-with-a-long-name-of-its-own\npipeline: bugfix\n",
                 BODY,
             ),
             "beta",
-            &document(
+            &task_text(
                 "beta",
                 "group: a-group-with-a-long-name-of-its-own\npipeline: bugfix\n",
                 BODY,
@@ -8533,7 +9387,7 @@ mod tests {
     #[test]
     fn browsing_keys_select_move_focus_and_hide_queued_groups() {
         let repo = fixture("screen-browse");
-        write_pending(&repo, "wire", &document("wire", "group: a\n", BODY));
+        write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
         let groups = listed(&repo);
         let mut state = ScreenState::new();
 
@@ -8557,7 +9411,7 @@ mod tests {
     #[test]
     fn the_screen_opens_with_queued_groups_hidden_and_h_brings_them_back() {
         let repo = fixture("screen-opens-hidden");
-        write_pending(&repo, "wire", &document("wire", "group: one\n", BODY));
+        write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
         already_queued(&repo, "wire");
         let groups = listed(&repo);
 
@@ -8636,7 +9490,7 @@ mod tests {
     #[test]
     fn the_first_drawn_frame_hides_queued_groups_and_h_shows_them() {
         let repo = fixture("screen-first-frame-hidden");
-        write_pending(&repo, "wire", &document("wire", "group: one\n", BODY));
+        write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
         already_queued(&repo, "wire");
         let groups = listed(&repo);
 
@@ -8692,12 +9546,12 @@ mod tests {
     #[test]
     fn pressing_down_across_the_separator_lands_on_the_first_queued_group() {
         let repo = fixture("screen-cross-separator");
-        write_pending(&repo, "wire", &document("wire", "group: unqueued\n", BODY));
+        write_pending(&repo, "wire", &task_text("wire", "group: unqueued\n", BODY));
         // Written after the group above, so it is not already the newest —
         // being in the queue does not move a group inside its own half of
         // the list, only across the boundary between the two halves.
         std::thread::sleep(std::time::Duration::from_millis(5));
-        write_pending(&repo, "cook", &document("cook", "group: cook\n", BODY));
+        write_pending(&repo, "cook", &task_text("cook", "group: cook\n", BODY));
         already_queued(&repo, "cook");
         let groups = listed(&repo);
 
@@ -8723,7 +9577,7 @@ mod tests {
     #[test]
     fn enter_does_nothing_with_no_selection() {
         let repo = fixture("screen-enter-empty");
-        write_pending(&repo, "wire", &document("wire", "group: a\n", BODY));
+        write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
         let groups = listed(&repo);
         let mut state = ScreenState::new();
 
@@ -8736,156 +9590,51 @@ mod tests {
     /// — no terminal, stdin exhausted at the end of the script, and the
     /// screen stopping on its own rather than hanging on the next read.
     #[test]
-    fn the_screen_submits_a_selected_group_and_clears_its_documents() {
+    fn the_screen_submits_a_selected_group_and_clears_its_tasks() {
         let repo = fixture("screen-submit");
         write_pending(
             &repo,
             "wire",
-            &document("wire", "group: one\ntouches: [src/wire.rs]\n", BODY),
+            &task_text("wire", "group: one\ntouches: [src/wire.rs]\n", BODY),
         );
         let groups = listed(&repo);
 
         // Tab onto the tasks pane, space to select the one group, enter to
-        // submit it, `esc` to decline the overview it lands on.
-        screen(&repo, groups, "\t \r\x1b");
+        // submit it.
+        screen(&repo, groups, "\t \r");
 
         assert!(
             repo.queue_dir().join("wire.md").exists(),
-            "the document was not queued"
+            "the task was not queued"
         );
         assert!(
             !repo.pending_dir().join("wire.md").exists(),
-            "the queued group's document must be gone from pending"
+            "the queued group's task must be gone from pending"
         );
     }
 
-    /// `enter` submits straight through to the overview — nothing drawn in
-    /// between, and no per-submission report above it the way the old
-    /// dispatcher offer used to draw. The overview lists the whole queue by
-    /// `group:`, not just what this submission just wrote — see the mockup
-    /// on task `overview-and-gates`.
+    /// With a dispatcher already holding the queue's lock, a clean
+    /// submission still writes and still only says what it queued — there is
+    /// nothing to join and nothing to focus: the running dispatcher picks
+    /// the task up on its next pass.
     #[test]
-    fn a_clean_submission_reaches_the_overview_with_nothing_drawn_first() {
-        let repo = fixture("gate-clean");
+    fn a_dispatcher_already_holding_the_lock_changes_nothing_about_enter() {
+        let repo = fixture("gate-clean-locked");
         write_pending(
             &repo,
             "wire",
-            &document("wire", "group: one\ntouches: [src/wire.rs]\n", BODY),
-        );
-        let groups = listed(&repo);
-
-        // `esc` declines the overview afterward, so `last_frame` — the
-        // ordinary browsing screen `esc` returns to — is not what this
-        // checks; the overview is written straight to `out` rather than
-        // through `draw`, so it is found the same way `last_frame` finds
-        // any other frame: between two of `draw`'s own clear-screen writes.
-        let drawn = screen(&repo, groups, "\t \r\x1b");
-
-        assert!(repo.queue_dir().join("wire.md").exists());
-
-        let overview = drawn
-            .split("\x1b[2J\x1b[H")
-            .find(|frame| frame.starts_with("queued  "))
-            .unwrap_or_else(|| panic!("no overview frame in {drawn:?}"));
-        let lines: Vec<&str> = overview.lines().collect();
-        assert_eq!(lines[0], "queued  1 group · 1 task", "{lines:?}");
-        assert_eq!(
-            lines[2], "  TASK                PIPELINE    STEP      BASE",
-            "{lines:?}"
-        );
-        assert_eq!(lines[4], "one", "{lines:?}");
-        assert_eq!(
-            lines[5], "  wire                default     queued    plan/demo",
-            "{lines:?}"
-        );
-        assert_eq!(
-            lines[7], "[enter] start a dispatcher   [esc] back",
-            "{lines:?}"
-        );
-    }
-
-    /// With a dispatcher already holding the queue's lock, a clean submission
-    /// still writes — the task reaches the queue exactly as it would with no
-    /// dispatcher running — but `enter` lands on the "go to the dispatcher"
-    /// draw rather than `confirm_start`'s own overview, since starting a
-    /// second dispatcher would only be refused once `commands::dispatch`
-    /// actually ran. Takes a real `Lock::acquire` rather than writing the
-    /// lock file's bytes by hand, so this exercises the same holder check
-    /// every other caller of `Lock::holder` does.
-    ///
-    /// `Backend::Headless` rather than the fixture's default herdr: headless
-    /// names no workspace at all (`Mux::dispatch_workspace`'s own default),
-    /// so `join_running_dispatcher` has nothing to focus and this passes
-    /// without a real multiplexer to talk to — see
-    /// `pressing_o_with_no_multiplexer_surfaces_the_refusal`'s own doc
-    /// comment for the same reasoning applied to `o`.
-    #[test]
-    fn a_dispatcher_already_holding_the_lock_is_joined_on_enter() {
-        let mut repo = fixture("gate-clean-locked");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
-        write_pending(
-            &repo,
-            "wire",
-            &document("wire", "group: one\ntouches: [src/wire.rs]\n", BODY),
-        );
-        let groups = listed(&repo);
-
-        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
-        let pid = std::process::id();
-
-        // `\t \r` selects and submits; the extra `\r` answers the "go to
-        // the dispatcher" draw `after_write` now lands on instead of the
-        // old `Mode::Outcome` report.
-        let (exit, drawn) = screen_exit(&repo, groups, "\t \r\r");
-
-        // The write landed whether or not the dispatcher-running draw
-        // follows it.
-        assert!(repo.queue_dir().join("wire.md").exists());
-        assert_eq!(exit, ScreenExit::Quit);
-
-        assert!(
-            !drawn.contains("[enter] start a dispatcher"),
-            "the ordinary overview must never appear while a dispatcher already holds the lock:\n{drawn}"
-        );
-        assert!(
-            drawn.contains(&format!(
-                "a dispatcher is already running (pid {pid}) — it takes these on its next pass"
-            )),
-            "{drawn}"
-        );
-        assert!(
-            drawn.contains("[enter] go to the dispatcher   [esc] back"),
-            "{drawn}"
-        );
-    }
-
-    /// `esc` off the "go to the dispatcher" draw is the one path back to
-    /// browsing — the write already landed and stays landed, the same as
-    /// `enter`'s own path; only where the screen goes next differs.
-    #[test]
-    fn esc_off_the_dispatcher_running_draw_returns_to_browsing() {
-        let mut repo = fixture("gate-clean-locked-esc");
-        repo.config.dispatch.backend = crate::config::Backend::Headless;
-        write_pending(
-            &repo,
-            "wire",
-            &document("wire", "group: one\ntouches: [src/wire.rs]\n", BODY),
+            &task_text("wire", "group: one\ntouches: [src/wire.rs]\n", BODY),
         );
         let groups = listed(&repo);
 
         let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
 
-        // `\t \r` selects and submits; `\x1b` declines the "go to the
-        // dispatcher" draw, and the trailing `q` quits the browsing screen
-        // it lands back on, rather than relying on end-of-input to do it.
-        let (exit, drawn) = screen_exit(&repo, groups, "\t \r\x1bq");
+        let (exit, drawn) = screen_exit(&repo, groups, "\t \r");
 
         assert!(repo.queue_dir().join("wire.md").exists());
         assert_eq!(exit, ScreenExit::Quit);
-        assert!(
-            drawn.contains("[enter] go to the dispatcher   [esc] back"),
-            "{drawn}"
-        );
+        assert!(!drawn.contains("go to the dispatcher"), "{drawn}");
+        assert!(!drawn.contains("already running"), "{drawn}");
     }
 
     /// Two tasks in different groups that both change the same file: an edge
@@ -8897,14 +9646,13 @@ mod tests {
     #[test]
     fn two_groups_write_with_no_edge_added() {
         let repo = fixture("overlap-across-groups");
-        write_pending(&repo, "left", &document("left", "group: one\n", BODY));
-        write_pending(&repo, "right", &document("right", "group: two\n", BODY));
+        write_pending(&repo, "left", &task_text("left", "group: one\n", BODY));
+        write_pending(&repo, "right", &task_text("right", "group: two\n", BODY));
         let groups = listed(&repo);
 
         // Space selects the highlighted group, `j` moves onto the other,
-        // space selects it too, `enter` submits both, `esc` declines the
-        // overview.
-        screen(&repo, groups, " j \r\x1b");
+        // space selects it too, `enter` submits both.
+        screen(&repo, groups, " j \r");
 
         assert!(repo.queue_dir().join("left.md").exists());
         assert!(repo.queue_dir().join("right.md").exists());
@@ -8914,21 +9662,21 @@ mod tests {
 
     /// A gate chosen from the screen — `g`, down onto the second step, enter
     /// to pick it — reaches the queued task file without ever rewriting the
-    /// document it came from.
+    /// task it came from.
     #[test]
     fn a_gate_chosen_on_the_screen_reaches_the_queued_task() {
         let repo = fixture("screen-gate");
         write_pending(
             &repo,
             "wire",
-            &document("wire", "group: one\ntouches: [src/wire.rs]\n", BODY),
+            &task_text("wire", "group: one\ntouches: [src/wire.rs]\n", BODY),
         );
         let groups = listed(&repo);
 
         // Tab onto tasks, space to select, g to open the gate picker, down
         // onto the pipeline's second step (`review`), enter to pick it,
-        // enter to submit, `esc` to decline the overview.
-        screen(&repo, groups, "\t g\x1b[B\r\r\x1b");
+        // enter to submit.
+        screen(&repo, groups, "\t g\x1b[B\r\r");
 
         let saved = std::fs::read_to_string(repo.queue_dir().join("wire.md")).unwrap();
         assert!(saved.contains("gate_at: review"), "{saved}");
@@ -8940,7 +9688,7 @@ mod tests {
 
     /// `t` on a group forks every one of its tasks, one arm each, on the
     /// pipeline the first screen assigned it and the steps the second
-    /// screen ticked to skip — and the source document, never itself
+    /// screen ticked to skip — and the source task, never itself
     /// submitted, is left exactly where it was.
     #[test]
     fn a_trial_forks_every_task_on_its_own_assigned_pipeline() {
@@ -8948,7 +9696,7 @@ mod tests {
         write_pending(
             &repo,
             "solo",
-            &document("solo", "group: audits\ntouches: [src/solo.rs]\n", BODY),
+            &task_text("solo", "group: audits\ntouches: [src/solo.rs]\n", BODY),
         );
         let groups = listed(&repo);
         let pipelines = Pipelines::builtin();
@@ -8964,9 +9712,8 @@ mod tests {
         // focus. One `→` cycles `solo`'s own assignment from the project
         // default to `bugfix` (the two builtin pipelines sort `bugfix`
         // first), `enter` advances to the skip screen, `handover_at` more
-        // `↓` walks onto its last step, `space` ticks it, `enter` launches,
-        // `n` declines the dispatcher.
-        let keys = format!("t\x1b[C\r{} \rn", "\x1b[B".repeat(handover_at));
+        // `↓` walks onto its last step, `space` ticks it, `enter` launches.
+        let keys = format!("t\x1b[C\r{} \r", "\x1b[B".repeat(handover_at));
         screen(&repo, groups, &keys);
 
         let arm = queued(&repo, "solo-1");
@@ -8985,7 +9732,7 @@ mod tests {
 
         assert!(
             repo.pending_dir().join("solo.md").exists(),
-            "the source document is a template for the arm, not itself submitted"
+            "the source task is a template for the arm, not itself submitted"
         );
         assert!(
             !repo.queue_dir().join("solo.md").exists(),
@@ -8994,25 +9741,25 @@ mod tests {
     }
 
     /// The picker's whole reason to exist, and the one case nothing covered:
-    /// a document naming no pipeline at all. Every other trial test goes
-    /// through `document`, which fills in `pipeline: default` unless the
-    /// document names one — so all of them arrived already routed, and the
+    /// a task naming no pipeline at all. Every other trial test goes
+    /// through `task`, which fills in `pipeline: default` unless the
+    /// task names one — so all of them arrived already routed, and the
     /// unassigned task the assign screen is *for* was never driven end to
     /// end. It did not work: `build_trial_arm` hands `parse_submission` the
-    /// source document, which refuses one with no `pipeline:`, so the whole
+    /// source task, which refuses one with no `pipeline:`, so the whole
     /// batch was abandoned with `trial refused:` and nothing was minted.
     ///
-    /// A bare `pipeline:` rather than no line at all, so `document`'s own
-    /// fill-in steps aside and the document reads exactly as unassigned as
+    /// A bare `pipeline:` rather than no line at all, so `task`'s own
+    /// fill-in steps aside and the task reads exactly as unassigned as
     /// one a person left blank by hand — the same shape `scripts/e2e`'s
     /// `task_doc` writes for this.
     #[test]
-    fn a_trial_routes_a_document_that_names_no_pipeline_of_its_own() {
+    fn a_trial_routes_a_task_that_names_no_pipeline_of_its_own() {
         let repo = fixture("screen-trial-unassigned");
         write_pending(
             &repo,
             "solo",
-            &document(
+            &task_text(
                 "solo",
                 "group: audits\ntouches: [src/solo.rs]\npipeline:\n",
                 BODY,
@@ -9024,8 +9771,8 @@ mod tests {
         // alone will not advance past. One `→` lands it on `bugfix` — the
         // pipeline that sorts first, there being no current position to
         // cycle away from — `enter` advances to the skips screen, `enter`
-        // launches with nothing ticked, and `esc` declines the overview.
-        screen(&repo, groups, "t\x1b[C\r\r\x1b");
+        // launches with nothing ticked.
+        screen(&repo, groups, "t\x1b[C\r\r");
 
         let arm = queued(&repo, "solo-1");
         assert_eq!(arm.front.pipeline.as_deref(), Some("bugfix"));
@@ -9040,17 +9787,17 @@ mod tests {
     #[test]
     fn a_trial_remaps_depends_on_to_the_sibling_arms_own_minted_ids() {
         let repo = fixture("screen-trial-chain");
-        write_pending(&repo, "alpha", &document("alpha", "group: chain\n", BODY));
+        write_pending(&repo, "alpha", &task_text("alpha", "group: chain\n", BODY));
         write_pending(
             &repo,
             "beta",
-            &document("beta", "group: chain\ndepends_on: [alpha]\n", BODY),
+            &task_text("beta", "group: chain\ndepends_on: [alpha]\n", BODY),
         );
         let groups = listed(&repo);
 
         // `t`, `enter` twice past both screens (nothing changed — both tasks
-        // keep the project default), `esc` declines the overview.
-        screen(&repo, groups, "t\r\r\x1b");
+        // keep the project default).
+        screen(&repo, groups, "t\r\r");
 
         let alpha = queued(&repo, "alpha-1");
         let beta = queued(&repo, "beta-1");
@@ -9077,15 +9824,15 @@ mod tests {
     #[test]
     fn two_trials_of_the_same_source_mint_two_different_trial_ids() {
         let repo = fixture("screen-trial-two-launches-a");
-        write_pending(&repo, "solo", &document("solo", "group: audits\n", BODY));
+        write_pending(&repo, "solo", &task_text("solo", "group: audits\n", BODY));
         let groups = listed(&repo);
-        screen(&repo, groups, "t\r\r\x1b");
+        screen(&repo, groups, "t\r\r");
         let first_trial = queued(&repo, "solo-1").front.trial;
 
         let repo = fixture("screen-trial-two-launches-b");
-        write_pending(&repo, "solo", &document("solo", "group: audits\n", BODY));
+        write_pending(&repo, "solo", &task_text("solo", "group: audits\n", BODY));
         let groups = listed(&repo);
-        screen(&repo, groups, "t\r\r\x1b");
+        screen(&repo, groups, "t\r\r");
         let second_trial = queued(&repo, "solo-1").front.trial;
 
         assert!(first_trial.is_some() && second_trial.is_some());
@@ -9102,7 +9849,7 @@ mod tests {
     #[test]
     fn a_trial_mints_around_ids_already_on_disk() {
         let repo = fixture("screen-trial-mint");
-        write_pending(&repo, "solo", &document("solo", "group: audits\n", BODY));
+        write_pending(&repo, "solo", &task_text("solo", "group: audits\n", BODY));
         already_queued(&repo, "solo-1");
         std::fs::create_dir_all(repo.archive_dir()).unwrap();
         std::fs::write(
@@ -9112,8 +9859,8 @@ mod tests {
         .unwrap();
         let groups = listed(&repo);
 
-        // `t`, `enter` twice past both screens, `esc` declines the overview.
-        screen(&repo, groups, "t\r\r\x1b");
+        // `t`, `enter` twice past both screens.
+        screen(&repo, groups, "t\r\r");
 
         assert!(
             repo.queue_dir().join("solo-3.md").exists(),
@@ -9140,8 +9887,8 @@ mod tests {
 
         // `h` twice widens the scope all the way to `done`, where the
         // archived group actually lists; `t` opens the picker on it, `enter`
-        // twice past both screens, `esc` declines the overview.
-        screen(&repo, groups, "hht\r\r\x1b");
+        // twice past both screens.
+        screen(&repo, groups, "hht\r\r");
 
         let arm = queued(&repo, "finished-1");
         assert_eq!(
@@ -9162,7 +9909,7 @@ mod tests {
         write_pending(
             &repo,
             &base_id,
-            &document(&base_id, "group: audits\n", BODY),
+            &task_text(&base_id, "group: audits\n", BODY),
         );
         let groups = listed(&repo);
 
@@ -9188,33 +9935,32 @@ mod tests {
         write_pending(
             &repo,
             "bogus",
-            &document("bogus", "group: one\nstage: taken\n", BODY),
+            &task_text("bogus", "group: one\nstage: taken\n", BODY),
         );
         // Groups list newest-written-first, and this test's key script walks
         // the list in a fixed order — so the two birth times are pulled
         // apart with a sleep rather than trusted to land far enough apart on
         // their own. A birth time has no `set_*` counterpart the way a
         // modification time does, so this cannot be pinned after the fact.
-        // Group `two` (the good document), written second, ends up first.
+        // Group `two` (the good task), written second, ends up first.
         std::thread::sleep(std::time::Duration::from_millis(5));
-        write_pending(&repo, "good", &document("good", "group: two\n", BODY));
+        write_pending(&repo, "good", &task_text("good", "group: two\n", BODY));
         let groups = listed(&repo);
 
         // space selects `two`, the highlighted (newest) group; j moves to
         // `one`; space selects it too; enter submits both and is refused — a
-        // refusal shows an outcome and never the overview, which is half of
-        // what this test guards; any key (`x`) dismisses it; space
-        // deselects `one`, which is still highlighted; enter resubmits with
-        // `two` alone, and `esc` declines the overview that one does reach.
-        screen(&repo, groups, " j \rx \r\x1b");
+        // refusal shows an outcome, which is half of what this test guards;
+        // `x` is the popup's to ignore and `enter` closes it; space deselects
+        // `one`, which is still highlighted; enter resubmits with `two` alone.
+        screen(&repo, groups, " j \rx\r \r");
 
         assert!(
             repo.queue_dir().join("good.md").exists(),
-            "the good document was never queued after the fixed resubmission"
+            "the good task was never queued after the fixed resubmission"
         );
         assert!(
             !repo.queue_dir().join("bogus.md").exists(),
-            "the refused document must never reach the queue"
+            "the refused task must never reach the queue"
         );
         assert!(
             !repo.pending_dir().join("good.md").exists(),
@@ -9231,7 +9977,7 @@ mod tests {
     #[test]
     fn ending_the_screen_queues_nothing() {
         let repo = fixture("screen-quit");
-        write_pending(&repo, "wire", &document("wire", "group: one\n", BODY));
+        write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
         let groups = listed(&repo);
 
         screen(&repo, groups, "\t ");
@@ -9250,7 +9996,7 @@ mod tests {
     #[test]
     fn q_does_nothing_while_browsing() {
         let repo = fixture("screen-q-inert");
-        write_pending(&repo, "wire", &document("wire", "group: one\n", BODY));
+        write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
         let groups = listed(&repo);
 
         // `q` first, then a real select-and-submit: if `q` still quit,
@@ -9264,142 +10010,68 @@ mod tests {
         );
     }
 
-    /// `q` ends the screen from a mode that is not browsing — the bug this
-    /// fixes. The confirmation panel `enter` used to open swallowed the key
-    /// through its own catch-all arm, dropping back to browsing instead of
-    /// quitting, so a person who pressed enter and then `q` saw nothing
-    /// happen. `Mode::Outcome`, reached here by a refused submission, is
-    /// where that same catch-all lives now that `Mode::Dispatch` is gone —
-    /// the overview and the overrides gate that replaced it read no `q` at
-    /// all (see the mockup on task `overview-and-gates`), so neither could
-    /// reintroduce the bug even silently.
+    /// A popup takes every key until `enter` closes it — `q` included. A
+    /// refused submission puts one up; `q` under it neither quits nor
+    /// closes it, so a message nobody has read yet is never taken away by a
+    /// key meant for the screen underneath.
     ///
-    /// End of input ends the loop too, so a run that merely stops proves
-    /// nothing. The frames are the evidence: `q` quitting means no further
-    /// draw, and the footer is drawn once per browsing frame.
+    /// End of input ends the loop too, so the run ending proves nothing on
+    /// its own. The last frame is the evidence: the popup is still on it.
     #[test]
-    fn q_quits_from_a_mode_that_is_not_browsing() {
+    fn q_under_a_popup_is_the_popups_to_ignore() {
         let repo = fixture("screen-quit-report");
         write_pending(
             &repo,
             "bogus",
-            &document("bogus", "group: one\nstage: taken\n", BODY),
+            &task_text("bogus", "group: one\nstage: taken\n", BODY),
         );
         let groups = listed(&repo);
-        // Computed before `groups` moves into `run_screen`, but the
-        // footer's own text does not change across these two frames either
-        // way — no group here is queued yet, and `h` is never pressed.
-        let ordinary_footer = footer(&ScreenState::new());
 
         // Space selects, enter submits and is refused for a reserved key,
-        // putting the outcome up; `q` quits from under it.
+        // putting the refusal up; `q` is pressed under it.
         let (exit, drawn) = screen_exit(&repo, groups, " \rq");
 
-        assert_eq!(exit, ScreenExit::Quit);
-
-        // Two browsing frames — one before the space, one before the enter —
-        // and then the outcome, which draws no footer. A third would mean
-        // `q` had dropped back to browsing rather than quitting.
-        let frames = drawn.matches(&ordinary_footer).count();
-        assert_eq!(
-            frames, 2,
-            "`q` drew another browsing frame instead of quitting"
-        );
+        assert_eq!(exit, ScreenExit::Quit, "the input ran out");
+        let frame = last_frame(&drawn);
+        assert!(frame.contains("┌─ submission refused "), "{frame}");
+        assert!(frame.contains("[enter] close"), "{frame}");
+        assert!(frame.contains("─ groups"), "the tab under it: {frame}");
     }
 
-    /// `enter` on the overview asks for a dispatcher. The screen only says so
-    /// and stops — starting one is `queue_screen`'s, once the `TermGuard` it
-    /// holds has come off — which is also why no test here can launch
-    /// anything.
+    /// `enter` only queues. A clean submission lands and the screen says
+    /// what it queued in a popup: no overview, no overrides gate and no warnings
+    /// screen, even with `unattended.enabled` on and something to warn
+    /// about — asking those is the dispatch tab's `enter`, before it starts
+    /// a dispatcher, and this screen never starts one.
     #[test]
-    fn confirming_the_overview_asks_the_caller_to_start_a_dispatcher() {
-        let repo = fixture("screen-dispatch-yes");
-        write_pending(&repo, "wire", &document("wire", "group: one\n", BODY));
-        let groups = listed(&repo);
-
-        // Space selects, enter submits, a second enter confirms the overview
-        // — this fixture carries no overrides layer, so nothing stands
-        // between the overview and the offer.
-        let (exit, _) = screen_exit(&repo, groups, " \r\r");
-
-        assert_eq!(exit, ScreenExit::StartDispatcher);
-        assert!(repo.queue_dir().join("wire.md").exists());
-    }
-
-    /// Review finding 1: `confirm_start` runs doctor's warnings screen too,
-    /// after the overview and the overrides gate — `enter` off it starts the
-    /// dispatcher exactly as the other two do. `unattended.enabled` is
-    /// turned on so the screen has something to say (its own "no ceiling"
-    /// note), rather than being skipped for having nothing to draw.
-    #[test]
-    fn confirming_the_warnings_screen_with_enter_also_starts_a_dispatcher() {
-        let mut repo = fixture("screen-warnings-enter");
+    fn enter_only_queues_and_says_what_it_queued() {
+        let mut repo = fixture("screen-enter-only-queues");
         repo.config.unattended.enabled = true;
-        write_pending(&repo, "wire", &document("wire", "group: one\n", BODY));
+        write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
         let groups = listed(&repo);
 
-        // Space selects, enter submits, enter confirms the overview (no
-        // overrides layer here, so that gate asks nothing), enter confirms
-        // the warnings screen.
-        let (exit, drawn) = screen_exit(&repo, groups, " \r\r\r");
+        let (exit, drawn) = screen_exit(&repo, groups, " \r");
 
-        assert_eq!(exit, ScreenExit::StartDispatcher);
+        assert_eq!(exit, ScreenExit::Quit);
         assert!(repo.queue_dir().join("wire.md").exists());
-        assert!(
-            drawn.contains("before this run starts"),
-            "the warnings screen must actually have drawn: {drawn}"
-        );
-    }
-
-    /// The other half of review finding 1, and acceptance criterion 3 for
-    /// the queue's own path: `esc` off the warnings screen returns to
-    /// browsing rather than ending the whole command — before this fix,
-    /// `dispatch`'s own copy of this gate ran after `run_screen` had already
-    /// returned, so `esc` there could only end the process outright.
-    #[test]
-    fn esc_off_the_warnings_screen_returns_to_browsing_not_out_of_the_command() {
-        let mut repo = fixture("screen-warnings-esc");
-        repo.config.unattended.enabled = true;
-        write_pending(&repo, "wire", &document("wire", "group: one\n", BODY));
-        let groups = listed(&repo);
-
-        let (exit, _) = screen_exit(&repo, groups, " \r\r\x1b");
-
-        // Back to browsing, not `StartDispatcher` — and with nothing left in
-        // the scripted input, `run_screen` ends the same way the empty
-        // screen does, on its own.
-        assert_eq!(exit, ScreenExit::Quit);
-        assert!(
-            repo.queue_dir().join("wire.md").exists(),
-            "the submission still landed; only the dispatcher was declined"
-        );
-    }
-
-    /// A stray key on the overview — anything but `enter` or `esc` — does
-    /// nothing at all; only an explicit `esc` declines the dispatcher it
-    /// offers.
-    #[test]
-    fn a_stray_key_on_the_overview_declines_only_on_esc() {
-        let repo = fixture("screen-dispatch-stray");
-        write_pending(&repo, "wire", &document("wire", "group: one\n", BODY));
-        let groups = listed(&repo);
-
-        let (exit, _) = screen_exit(&repo, groups, " \rz\x1b");
-
-        assert_eq!(exit, ScreenExit::Quit);
-        assert!(
-            repo.queue_dir().join("wire.md").exists(),
-            "the submission still landed; only the dispatcher was declined"
-        );
+        assert!(!drawn.contains("queued  1 group"), "{drawn}");
+        assert!(!drawn.contains("before this run starts"), "{drawn}");
+        assert!(!drawn.contains("start a dispatcher"), "{drawn}");
+        // With issue tracking off nothing is asked: the popup says what was
+        // queued, and `enter` closes it.
+        let frame = last_frame(&drawn);
+        assert!(frame.contains("┌─ queued "), "{frame}");
+        assert!(frame.contains("queued 1 task"), "{frame}");
+        assert!(!drawn.contains("┌─ issue tracking "), "{drawn}");
     }
 
     /// Nothing in the pending directory is not an error — the screen opens
     /// onto an empty list rather than refusing. Driven through `run_screen`
-    /// with a scripted input, never `queue_screen`: that one reads the test
-    /// process's own stdin, and whether it ever returns depends on what the
-    /// harness handed it — a closed `/dev/null` ends the screen at once, a
-    /// pipe with a writer that never closes keeps it redrawing forever,
-    /// which is how this test once hung `cargo test` for ten minutes.
+    /// with a scripted input, never the process's own stdin: whether that
+    /// ever returns depends on what the harness handed it — a closed
+    /// `/dev/null` ends the screen at once, a pipe with a writer that never
+    /// closes keeps it redrawing forever, which is how this test once hung
+    /// `cargo test` for ten minutes.
     #[test]
     fn opening_the_screen_with_nothing_pending_does_not_error() {
         let repo = fixture("screen-nothing-pending");
@@ -9459,10 +10131,10 @@ mod tests {
         );
     }
 
-    /// A document with no readable `group:` is named, not silently skipped —
+    /// A task with no readable `group:` is named, not silently skipped —
     /// the one diagnostic `pending::unreadable` exists for.
     #[test]
-    fn opening_message_names_an_unreadable_document() {
+    fn opening_message_names_an_unreadable_task() {
         let repo = fixture("opening-message-unreadable");
         std::fs::write(
             repo.pending_dir().join("no-group.md"),
@@ -9477,11 +10149,11 @@ mod tests {
 
     /// The regression this guards: a group already queued fills `groups`
     /// from the queue directory alone (see `list_groups`), which used to
-    /// make `groups.is_empty()` false and hide the unreadable-document
-    /// diagnostic behind that unrelated row — even though the document named
+    /// make `groups.is_empty()` false and hide the unreadable-task
+    /// diagnostic behind that unrelated row — even though the task named
     /// above has nothing to do with the group already queued below.
     #[test]
-    fn opening_message_still_names_an_unreadable_document_beside_an_unrelated_queued_group() {
+    fn opening_message_still_names_an_unreadable_task_beside_an_unrelated_queued_group() {
         let repo = fixture("opening-message-unreadable-and-queued");
         std::fs::write(
             repo.pending_dir().join("no-group.md"),
@@ -9496,26 +10168,25 @@ mod tests {
 
         let groups = listed(&repo);
         assert!(!groups.is_empty(), "the queue-only group fills the list");
-        let msg =
-            opening_message(&repo, &groups).expect("the unreadable document must still be named");
+        let msg = opening_message(&repo, &groups).expect("the unreadable task must still be named");
         assert!(msg.contains("no-group.md"), "{msg}");
     }
 
-    /// The regression the fix above overcorrected into: a stray document with
+    /// The regression the fix above overcorrected into: a stray task with
     /// no `group:` must not swallow the whole screen when a real, queueable
     /// group is sitting right beside it in the same directory. Before this,
     /// `opening_message` checked `unreadable` unconditionally, so a single
-    /// bad document anywhere in pending refused to open the screen at all —
+    /// bad task anywhere in pending refused to open the screen at all —
     /// verified against a real build, where a directory holding one good
-    /// document and one stray one used to draw the good group's row and now
+    /// task and one stray one used to draw the good group's row and now
     /// printed "Nothing to list" instead.
     #[test]
-    fn opening_message_opens_the_screen_past_a_stray_document_beside_a_real_group() {
+    fn opening_message_opens_the_screen_past_a_stray_task_beside_a_real_group() {
         let repo = fixture("opening-message-stray-beside-real-group");
         write_pending(
             &repo,
             "wire",
-            &document("wire", "group: real-group\n", BODY),
+            &task_text("wire", "group: real-group\n", BODY),
         );
         std::fs::write(
             repo.pending_dir().join("no-group.md"),
@@ -9531,19 +10202,19 @@ mod tests {
         assert_eq!(
             opening_message(&repo, &groups),
             None,
-            "a queueable group beside a stray document must still open the screen"
+            "a queueable group beside a stray task must still open the screen"
         );
     }
 
     /// An empty pending directory used to be indistinguishable from a project
-    /// with nothing queued at all, and `queue_screen` printed "No task
-    /// documents" instead of opening. A group whose documents have already
+    /// with nothing queued at all, and the screen printed "No
+    /// tasks" instead of opening. A group whose tasks have already
     /// been submitted still has a row — built from the queue directory — so
     /// the screen has something to open onto even here.
     #[test]
     fn a_queue_only_group_still_opens_the_screen_over_an_empty_pending_directory() {
         let repo = fixture("screen-queue-only");
-        // Not `already_queued`: that helper writes a minimal document with
+        // Not `already_queued`: that helper writes a minimal task with
         // no `group:` at all, which `list_groups` cannot file under any row
         // — this is the shape a real submission would actually leave behind.
         std::fs::write(
@@ -9579,13 +10250,13 @@ mod tests {
     #[test]
     fn o_does_nothing_while_the_groups_pane_has_focus() {
         let repo = fixture("screen-open-groups-focus");
-        write_pending(&repo, "wire", &document("wire", "group: one\n", BODY));
+        write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
         let groups = listed(&repo);
 
         let drawn = screen(&repo, groups, "o");
 
         assert!(
-            !drawn.contains("press any key to continue"),
+            !drawn.contains("┌─ open task "),
             "`o` with the groups pane focused must never reach `Mode::Outcome`:\n{drawn}"
         );
     }
@@ -9599,7 +10270,7 @@ mod tests {
     fn pressing_o_with_no_multiplexer_surfaces_the_refusal() {
         let mut repo = fixture("screen-open-headless");
         repo.config.dispatch.backend = crate::config::Backend::Headless;
-        write_pending(&repo, "wire", &document("wire", "group: one\n", BODY));
+        write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
         let groups = listed(&repo);
 
         // `Tab` moves focus onto the tasks pane, where `o` is gated live —
@@ -9608,6 +10279,8 @@ mod tests {
 
         let last = last_frame(&drawn);
         assert!(last.contains("o:"), "{last}");
+        assert!(last.contains("┌─ open task "), "in a popup: {last}");
+        assert!(last.contains("─ groups"), "over the tab: {last}");
     }
 
     // -------------------------------------------------------------- the filter
@@ -9622,7 +10295,7 @@ mod tests {
             write_pending(
                 &repo,
                 name,
-                &document(name, &format!("group: {name}\n"), BODY),
+                &task_text(name, &format!("group: {name}\n"), BODY),
             );
         }
         let groups = listed(&repo);
@@ -9647,7 +10320,7 @@ mod tests {
     #[test]
     fn every_letter_types_while_the_filter_box_has_focus() {
         let repo = fixture("screen-filter-every-letter");
-        write_pending(&repo, "solo", &document("solo", "group: demo\n", BODY));
+        write_pending(&repo, "solo", &task_text("solo", "group: demo\n", BODY));
         let groups = listed(&repo);
 
         let drawn = screen(&repo, groups, "ftsp");
@@ -9668,7 +10341,7 @@ mod tests {
     #[test]
     fn the_filter_footer_names_only_leaving_search() {
         let repo = fixture("screen-filter-footer");
-        write_pending(&repo, "wire", &document("wire", "group: one\n", BODY));
+        write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
         let groups = listed(&repo);
 
         let drawn = screen(&repo, groups, "f");
@@ -9692,7 +10365,7 @@ mod tests {
         write_pending(
             &repo,
             "wire",
-            &document("wire", "group: queue-browse\n", BODY),
+            &task_text("wire", "group: queue-browse\n", BODY),
         );
         already_queued(&repo, "wire");
         let groups = listed(&repo);
@@ -9726,7 +10399,7 @@ mod tests {
         write_pending(
             &repo,
             "wire",
-            &document("wire", "group: queue-browse\n", BODY),
+            &task_text("wire", "group: queue-browse\n", BODY),
         );
         let groups = listed(&repo);
 
@@ -9759,7 +10432,7 @@ mod tests {
         write_pending(
             &repo,
             "wire",
-            &document("wire", "group: queue-browse\n", BODY),
+            &task_text("wire", "group: queue-browse\n", BODY),
         );
         let groups = listed(&repo);
 
@@ -9774,7 +10447,7 @@ mod tests {
 
     // ---------------------------------------------------------- the routines pane
 
-    /// One document under `.spoolway/routines/<folder>/`, the same bytes a
+    /// One task under `.spoolway/routines/<folder>/`, the same bytes a
     /// `--from` entry would read.
     fn write_routine(repo: &Repo, folder: &str, id: &str, doc: &str) -> std::path::PathBuf {
         let dir = repo.routines_dir().join(folder);
@@ -9794,7 +10467,7 @@ mod tests {
             &repo,
             "nightly",
             "audit-deps",
-            &document("audit-deps", "group: nightly\n", BODY),
+            &task_text("audit-deps", "group: nightly\n", BODY),
         );
 
         let drawn = screen(&repo, Vec::new(), "r");
@@ -9810,7 +10483,7 @@ mod tests {
     }
 
     /// `o` does nothing while the folders pane has focus — a folder has no
-    /// document of its own to open — the same gate [`open_highlighted`]
+    /// task of its own to open — the same gate [`open_highlighted`]
     /// gives the pending screen's own `o`.
     #[test]
     fn o_does_nothing_while_the_folders_pane_has_focus_in_routines() {
@@ -9819,13 +10492,13 @@ mod tests {
             &repo,
             "nightly",
             "audit-deps",
-            &document("audit-deps", "group: nightly\n", BODY),
+            &task_text("audit-deps", "group: nightly\n", BODY),
         );
 
         let drawn = screen(&repo, Vec::new(), "ro");
 
         assert!(
-            !drawn.contains("press any key to continue"),
+            !drawn.contains("┌─ open task "),
             "`o` with the folders pane focused must never reach `Mode::Outcome`:\n{drawn}"
         );
     }
@@ -9842,7 +10515,7 @@ mod tests {
             &repo,
             "nightly",
             "audit-deps",
-            &document("audit-deps", "group: nightly\n", BODY),
+            &task_text("audit-deps", "group: nightly\n", BODY),
         );
 
         // `r` opens the pane, `→` focuses the tasks pane on `audit-deps`,
@@ -9851,6 +10524,8 @@ mod tests {
 
         let last = last_frame(&drawn);
         assert!(last.contains("o:"), "{last}");
+        assert!(last.contains("┌─ open task "), "in a popup: {last}");
+        assert!(last.contains("─ routines"), "over the pane: {last}");
     }
 
     /// `→` descends into a folder holding subfolders of its own, and `←`
@@ -9866,7 +10541,7 @@ mod tests {
             &repo,
             "maintenance/weekly",
             "prune",
-            &document("prune", "group: maintenance\n", BODY),
+            &task_text("prune", "group: maintenance\n", BODY),
         );
         let routines = super::routines::list_routines(&repo).unwrap();
 
@@ -9884,28 +10559,28 @@ mod tests {
         assert!(nav.path.is_empty(), "back at the root");
     }
 
-    /// A folder holding both its own documents and a subfolder must not
+    /// A folder holding both its own tasks and a subfolder must not
     /// have either shadowed by the other: the first `→` focuses this
     /// folder's own tasks pane rather than descending, and a second `→`
     /// from there descends into its subfolders — `→` is a two-step for
     /// exactly this shape, never a choice between the two. This is the
     /// shape a review round caught twice: first a fix that only ever
-    /// descended, shadowing a folder's own documents; then a fix that only
+    /// descended, shadowing a folder's own tasks; then a fix that only
     /// ever focused tasks, shadowing its subfolders in the other direction.
     #[test]
-    fn a_folder_with_both_its_own_documents_and_a_subfolder_reaches_both() {
+    fn a_folder_with_both_its_own_tasks_and_a_subfolder_reaches_both() {
         let repo = fixture("routines-mixed-folder");
         write_routine(
             &repo,
             "maintenance",
             "sweep",
-            &document("sweep", "group: maintenance\n", BODY),
+            &task_text("sweep", "group: maintenance\n", BODY),
         );
         write_routine(
             &repo,
             "maintenance/weekly",
             "prune",
-            &document("prune", "group: maintenance\n", BODY),
+            &task_text("prune", "group: maintenance\n", BODY),
         );
         let routines = super::routines::list_routines(&repo).unwrap();
         assert_eq!(routines[0].own, 1, "only `sweep` sits directly in it");
@@ -9936,7 +10611,7 @@ mod tests {
 
     /// `→` over a leaf folder's own tasks pane — nothing further down to
     /// open — must leave the cursor exactly where it was, not reset it back
-    /// to the first document the way it would if this reused the same
+    /// to the first task the way it would if this reused the same
     /// unconditional `task_cursor = 0` the first `→` into the pane sets.
     #[test]
     fn arrow_right_over_a_leaf_tasks_pane_moves_nothing() {
@@ -9945,19 +10620,19 @@ mod tests {
             &repo,
             "nightly",
             "audit-deps",
-            &document("audit-deps", "group: nightly\n", BODY),
+            &task_text("audit-deps", "group: nightly\n", BODY),
         );
         write_routine(
             &repo,
             "nightly",
             "audit-docs",
-            &document("audit-docs", "group: nightly\n", BODY),
+            &task_text("audit-docs", "group: nightly\n", BODY),
         );
         let routines = super::routines::list_routines(&repo).unwrap();
 
         let mut nav = RoutineNav::new();
         handle_routine_key(&routines, &mut nav, Key::Right); // into the tasks pane
-        handle_routine_key(&routines, &mut nav, Key::Down); // off the first document
+        handle_routine_key(&routines, &mut nav, Key::Down); // off the first task
         assert_eq!(nav.task_cursor, 1);
 
         handle_routine_key(&routines, &mut nav, Key::Right); // nothing further down
@@ -9970,7 +10645,7 @@ mod tests {
     #[test]
     fn esc_returns_to_the_pending_screen() {
         let repo = fixture("routines-esc-back");
-        write_pending(&repo, "wire", &document("wire", "group: one\n", BODY));
+        write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
         let groups = listed(&repo);
 
         let drawn = screen(&repo, groups, "r\x1b");
@@ -9990,7 +10665,7 @@ mod tests {
             &repo,
             "nightly",
             "audit-deps",
-            &document("audit-deps", "group: nightly\n", BODY),
+            &task_text("audit-deps", "group: nightly\n", BODY),
         );
 
         let drawn = screen(&repo, Vec::new(), "rr");
@@ -10018,32 +10693,31 @@ mod tests {
         );
     }
 
-    /// `enter` on a selected folder queues every document under it through
+    /// `enter` on a selected folder queues every task under it through
     /// `validate_batch`, under minted ids rather than the bare ones the
-    /// documents themselves carry, with `group:` and the body untouched —
+    /// tasks themselves carry, with `group:` and the body untouched —
     /// and the source files under `.spoolway/routines/` left exactly where
     /// they were.
     #[test]
-    fn enter_on_a_selected_folder_queues_every_document_under_minted_ids() {
+    fn enter_on_a_selected_folder_queues_every_task_under_minted_ids() {
         let repo = fixture("routines-enter-mints");
         let deps = write_routine(
             &repo,
             "nightly",
             "audit-deps",
-            &document("audit-deps", "group: nightly\n", BODY),
+            &task_text("audit-deps", "group: nightly\n", BODY),
         );
         let docs = write_routine(
             &repo,
             "nightly",
             "audit-docs",
-            &document("audit-docs", "group: nightly\n", BODY),
+            &task_text("audit-docs", "group: nightly\n", BODY),
         );
         let deps_text = std::fs::read_to_string(&deps).unwrap();
         let docs_text = std::fs::read_to_string(&docs).unwrap();
 
-        // r (open routines), space (select `nightly`), enter (queue it),
-        // esc (decline the overview it reaches).
-        let (exit, _) = screen_exit(&repo, Vec::new(), "r \r\x1b");
+        // r (open routines), space (select `nightly`), enter (queue it).
+        let (exit, _) = screen_exit(&repo, Vec::new(), "r \r");
         assert_eq!(exit, ScreenExit::Quit);
 
         assert!(
@@ -10077,7 +10751,7 @@ mod tests {
 
     /// A chain saved together still resolves once every id in it has been
     /// minted: `depends_on` is rewritten to the new id, even though nothing
-    /// else in the document is.
+    /// else in the task is.
     #[test]
     fn enter_remaps_depends_on_between_siblings_in_the_same_folder() {
         let repo = fixture("routines-enter-remaps-depends-on");
@@ -10085,20 +10759,20 @@ mod tests {
             &repo,
             "chain",
             "split-fields",
-            &document("split-fields", "group: chain\n", BODY),
+            &task_text("split-fields", "group: chain\n", BODY),
         );
         write_routine(
             &repo,
             "chain",
             "scan-pending",
-            &document(
+            &task_text(
                 "scan-pending",
                 "group: chain\ndepends_on: [split-fields]\n",
                 BODY,
             ),
         );
 
-        let (exit, _) = screen_exit(&repo, Vec::new(), "r \r\x1b");
+        let (exit, _) = screen_exit(&repo, Vec::new(), "r \r");
         assert_eq!(exit, ScreenExit::Quit);
 
         let scan = queued(&repo, "scan-pending-1");
@@ -10106,7 +10780,7 @@ mod tests {
     }
 
     /// `space` over a single task in the routines pane's own tasks list
-    /// queues that document alone, with its `depends_on` emptied before
+    /// queues that task alone, with its `depends_on` emptied before
     /// `validate_batch` ever sees it — so a task naming a sibling nobody
     /// queued is not refused for a dependency this solo pick dropped.
     #[test]
@@ -10116,13 +10790,13 @@ mod tests {
             &repo,
             "chain",
             "split-fields",
-            &document("split-fields", "group: chain\n", BODY),
+            &task_text("split-fields", "group: chain\n", BODY),
         );
         write_routine(
             &repo,
             "chain",
             "scan-pending",
-            &document(
+            &task_text(
                 "scan-pending",
                 "group: chain\ndepends_on: [split-fields]\n",
                 BODY,
@@ -10131,9 +10805,8 @@ mod tests {
 
         // r (open routines), → (the folder has no subfolders, so this moves
         // focus onto its own tasks, already on `scan-pending` — the first
-        // one in filename order), space (queue it alone), esc (decline the
-        // overview it reaches).
-        let (exit, drawn) = screen_exit(&repo, Vec::new(), "r\x1b[C \x1b");
+        // one in filename order), space (queue it alone).
+        let (exit, drawn) = screen_exit(&repo, Vec::new(), "r\x1b[C ");
         assert_eq!(exit, ScreenExit::Quit);
         let last = last_frame(&drawn);
 
@@ -10156,7 +10829,7 @@ mod tests {
     }
 
     /// `s` on a highlighted pending group opens the save panel, and `enter`
-    /// there copies its documents into `.spoolway/routines/<name>/`
+    /// there copies its tasks into `.spoolway/routines/<name>/`
     /// unchanged, same ids.
     #[test]
     fn s_saves_a_pending_group_into_routines_unchanged() {
@@ -10164,7 +10837,7 @@ mod tests {
         write_pending(
             &repo,
             "audit-deps",
-            &document("audit-deps", "group: nightly\n", BODY),
+            &task_text("audit-deps", "group: nightly\n", BODY),
         );
         let groups = listed(&repo);
 
@@ -10177,7 +10850,7 @@ mod tests {
              own absolute path:\n{panel}"
         );
         assert!(
-            panel.contains("copies 1 document unchanged, same ids"),
+            panel.contains("copies 1 task unchanged, same ids"),
             "{panel}"
         );
 
@@ -10185,12 +10858,12 @@ mod tests {
         write_pending(
             &repo2,
             "audit-deps",
-            &document("audit-deps", "group: nightly\n", BODY),
+            &task_text("audit-deps", "group: nightly\n", BODY),
         );
         let groups2 = listed(&repo2);
         let drawn2 = screen(&repo2, groups2, "s\r");
         let last2 = last_frame(&drawn2);
-        assert!(last2.contains("saved 1 document"), "{last2}");
+        assert!(last2.contains("saved 1 task"), "{last2}");
 
         let saved = repo2.routines_dir().join("nightly").join("audit-deps.md");
         let original = std::fs::read_to_string(repo2.pending_dir().join("audit-deps.md")).unwrap();
@@ -10209,7 +10882,7 @@ mod tests {
         write_pending(
             &repo,
             "audit-deps",
-            &document("audit-deps", "group: nightly\n", BODY),
+            &task_text("audit-deps", "group: nightly\n", BODY),
         );
         let groups = listed(&repo);
 
@@ -10232,7 +10905,7 @@ mod tests {
         write_pending(
             &repo,
             "audit-deps",
-            &document("audit-deps", "group: nightly\n", BODY),
+            &task_text("audit-deps", "group: nightly\n", BODY),
         );
         let groups = listed(&repo);
 
@@ -10257,27 +10930,27 @@ mod tests {
     }
 
     /// The non-goal this feature draws a hard line at: `s` refuses to save
-    /// into a folder that already holds documents, rather than merging into
+    /// into a folder that already holds tasks, rather than merging into
     /// it.
     #[test]
-    fn s_refuses_a_folder_that_already_holds_documents() {
+    fn s_refuses_a_folder_that_already_holds_tasks() {
         let repo = fixture("routines-save-refuses-merge");
         write_pending(
             &repo,
             "audit-deps",
-            &document("audit-deps", "group: nightly\n", BODY),
+            &task_text("audit-deps", "group: nightly\n", BODY),
         );
         let groups = listed(&repo);
         write_routine(
             &repo,
             "nightly",
             "already-here",
-            &document("already-here", "group: nightly\n", BODY),
+            &task_text("already-here", "group: nightly\n", BODY),
         );
 
         let drawn = screen(&repo, groups, "s\r");
         let last = last_frame(&drawn);
-        assert!(last.contains("already holds documents"), "{last}");
+        assert!(last.contains("already holds tasks"), "{last}");
         assert!(
             !repo
                 .routines_dir()
@@ -10288,7 +10961,7 @@ mod tests {
         );
     }
 
-    // The `[issue_tracking]` open hook: `queue add` runs it once per document
+    // The `[issue_tracking]` open hook: `queue add` runs it once per task
     // before anything is queued, writes `epic:`/`ticket:` into the result,
     // and refuses the whole batch — while saving what already succeeded —
     // the moment one call fails. A hook run is `sh -c` under `libc::setsid()`
@@ -10316,7 +10989,7 @@ mod tests {
         #[test]
         fn no_hook_configured_is_a_no_op() {
             let repo = fixture("open-no-hook");
-            let text = document("login", "group: demo\n", BODY);
+            let text = task_text("login", "group: demo\n", BODY);
             let path = write_doc(&repo, "login.md", &text);
             queue_add(
                 &repo,
@@ -10343,13 +11016,13 @@ mod tests {
 
         /// The mockup this covers verbatim: a hook is configured, and the
         /// group being submitted sets `group_description:` on none of its
-        /// documents — refused, naming the group and the hook, before
+        /// tasks — refused, naming the group and the hook, before
         /// anything is queued or the hook is ever run.
         #[test]
         fn a_group_with_no_description_is_refused_once_a_hook_is_configured() {
             let mut repo = fixture("open-no-description");
             with_hook(&mut repo, "exit 1");
-            let text = document("mirrored", "group: issue-mirror\n", BODY);
+            let text = task_text("mirrored", "group: issue-mirror\n", BODY);
             let path = write_doc(&repo, "mirrored.md", &text);
 
             let err = queue_add(
@@ -10377,11 +11050,11 @@ mod tests {
         }
 
         /// A project with no hook configured pays for none of this: the same
-        /// group with no `group_description:` on any document queues cleanly.
+        /// group with no `group_description:` on any task queues cleanly.
         #[test]
         fn a_group_with_no_description_is_fine_with_no_hook_configured() {
             let repo = fixture("open-no-description-no-hook");
-            let text = document("mirrored", "group: issue-mirror\n", BODY);
+            let text = task_text("mirrored", "group: issue-mirror\n", BODY);
             let path = write_doc(&repo, "mirrored.md", &text);
 
             queue_add(
@@ -10396,29 +11069,38 @@ mod tests {
             assert!(repo.queue_dir().join("mirrored.md").exists());
         }
 
-        /// `gather_documents` names a `--from -` stream entry `<stdin>#N`,
+        /// `gather_tasks` names a `--from -` stream entry `<stdin>#N`,
         /// never a path — [`readable_task_files`] must not hand that name to
         /// the hook as `SPOOLWAY_TASK_FILE` just because it looks like one:
         /// the empty string, not a name nothing can open.
         #[test]
-        fn a_document_with_no_backing_file_gets_an_empty_task_file() {
+        fn a_task_with_no_backing_file_gets_an_empty_task_file() {
             let mut repo = fixture("open-no-backing-file");
             with_hook(
                 &mut repo,
                 r#"printf '%s' "$SPOOLWAY_TASK_FILE" >"$(dirname "$SPOOLWAY_OUT")/task-file.seen"
                    echo "ticket=T-1" >"$SPOOLWAY_OUT""#,
             );
-            let doc = document(
+            let doc = task_text(
                 "streamed",
                 "group: streamed\ngroup_description: read from stdin\n",
                 BODY,
             );
-            let documents = vec![("<stdin>#1".to_string(), doc)];
+            let submitted = vec![("<stdin>#1".to_string(), doc)];
             let mut tasks =
-                validate_batch(&repo, &Pipelines::builtin(), Some("plan/demo"), &documents)
+                validate_batch(&repo, &Pipelines::builtin(), Some("plan/demo"), &submitted)
                     .unwrap();
-            let task_files = readable_task_files(&documents);
-            open_and_prefix(&repo, &documents, &task_files, &mut tasks, false, true).unwrap();
+            let task_files = readable_task_files(&submitted);
+            let gate = ToolGate::Print { interactive: false };
+            open_and_prefix(
+                &repo,
+                &submitted,
+                &task_files,
+                &mut tasks,
+                gate,
+                &mut PrintedTickets,
+            )
+            .unwrap();
 
             let seen = std::fs::read_to_string(repo.tracking_dir().join("task-file.seen"));
             assert_eq!(
@@ -10429,13 +11111,13 @@ mod tests {
             );
         }
 
-        /// The hook runs once per document, in dependency order, and its
+        /// The hook runs once per task, in dependency order, and its
         /// `epic=`/`ticket=` answer — read from the file at `SPOOLWAY_OUT` —
-        /// lands in the queued document's own frontmatter. The dependent's
+        /// lands in the queued task's own frontmatter. The dependent's
         /// call also gets its parent's ticket id in
         /// `SPOOLWAY_DEPENDS_TICKETS`.
         #[test]
-        fn the_hook_runs_per_document_in_dependency_order_and_writes_both_ids() {
+        fn the_hook_runs_per_task_in_dependency_order_and_writes_both_ids() {
             let mut repo = fixture("open-runs");
             with_hook(
                 &mut repo,
@@ -10445,13 +11127,13 @@ mod tests {
                    } >"$SPOOLWAY_OUT""#,
             );
 
-            let parent = document(
+            let parent = task_text(
                 "scan-pending",
                 "group: scanner-rework\ngroup_description: scanning rework\n",
                 BODY,
             );
             let parent_path = write_doc(&repo, "scan-pending.md", &parent);
-            let child = document(
+            let child = task_text(
                 "split-fields",
                 "group: scanner-rework\ndepends_on: [scan-pending]\n",
                 BODY,
@@ -10486,14 +11168,14 @@ mod tests {
             );
         }
 
-        /// A document that already names a `ticket:` is reported `kept` and
+        /// A task that already names a `ticket:` is reported `kept` and
         /// never reaches the hook at all — proven here by a hook that fails
         /// the moment it is ever invoked.
         #[test]
-        fn a_document_already_naming_a_ticket_skips_the_hook() {
+        fn a_task_already_naming_a_ticket_skips_the_hook() {
             let mut repo = fixture("open-kept");
             with_hook(&mut repo, "exit 1");
-            let text = document(
+            let text = task_text(
                 "retry-drops",
                 "group: scanner-rework\ngroup_description: scanning rework\n\
                  epic: acme/app#42\nticket: acme/app#45\n",
@@ -10516,7 +11198,7 @@ mod tests {
 
         /// A hook that fails partway through a batch queues nothing at all —
         /// but every id already answered is written back into the pending
-        /// document it came from, so a second run of the same command sees
+        /// task it came from, so a second run of the same command sees
         /// it already there and resumes rather than opening a second set.
         #[test]
         fn a_failing_hook_queues_nothing_and_resumes_on_the_next_run() {
@@ -10527,13 +11209,13 @@ mod tests {
                    { echo "epic=acme/app#42"; echo "ticket=acme/app#43"; } >"$SPOOLWAY_OUT""#,
             );
 
-            let first = document(
+            let first = task_text(
                 "scan-pending",
                 "group: scanner-rework\ngroup_description: scanning rework\n",
                 BODY,
             );
             let first_path = write_doc(&repo, "scan-pending.md", &first);
-            let second = document("split-fields", "group: scanner-rework\n", BODY);
+            let second = task_text("split-fields", "group: scanner-rework\n", BODY);
             let second_path = write_doc(&repo, "split-fields.md", &second);
 
             let err = queue_add(
@@ -10561,16 +11243,16 @@ mod tests {
             );
             assert!(
                 !repo.queue_dir().join("scan-pending.md").exists(),
-                "nothing was queued, including the document that succeeded"
+                "nothing was queued, including the task that succeeded"
             );
 
-            // The succeeded document's own id was written back into it, in
+            // The succeeded task's own id was written back into it, in
             // place — read straight off the file `--from` still names.
             let rewritten = std::fs::read_to_string(&first_path).unwrap();
             assert!(rewritten.contains("ticket: acme/app#43"));
             assert!(rewritten.contains("epic: acme/app#42"));
 
-            // A second run over the same two documents: the first is now
+            // A second run over the same two tasks: the first is now
             // `kept`, the hook only runs for the one that never got an
             // answer, and this time it succeeds because the hook no longer
             // refuses `split-fields`.
@@ -10612,7 +11294,7 @@ mod tests {
         fn a_hook_failing_on_the_first_call_says_so_with_nothing_to_resume_from() {
             let mut repo = fixture("open-fails-first-call");
             with_hook(&mut repo, "exit 3");
-            let text = document(
+            let text = task_text(
                 "opens-first",
                 "group: solo\ngroup_description: opens first\n",
                 BODY,
@@ -10640,14 +11322,14 @@ mod tests {
                 !repo.queue_dir().join("opens-first.md").exists(),
                 "nothing was queued"
             );
-            // Nothing to write back either — the pending document is
+            // Nothing to write back either — the pending task is
             // untouched, since the hook never answered with anything.
             let untouched = std::fs::read_to_string(&path).unwrap();
             assert_eq!(untouched, text);
         }
 
         /// A slug a successful call secured is written back into its pending
-        /// document when a later call in the batch fails, so the re-run reads
+        /// task when a later call in the batch fails, so the re-run reads
         /// it as `slug:` and pins the group's prefix — a hook answering a
         /// different slug on the re-run cannot displace the first one.
         #[test]
@@ -10660,13 +11342,13 @@ mod tests {
                    { echo "ticket=PROJ-13"; echo "slug=proj-12"; } >"$SPOOLWAY_OUT""#,
             );
 
-            let a = document(
+            let a = task_text(
                 "auth-01",
                 "group: auth-rework\ngroup_description: auth rework\n",
                 BODY,
             );
             let a_path = write_doc(&repo, "auth-01.md", &a);
-            let b = document("auth-02", "group: auth-rework\n", BODY);
+            let b = task_text("auth-02", "group: auth-rework\n", BODY);
             let b_path = write_doc(&repo, "auth-02.md", &b);
             queue_add(
                 &repo,
@@ -10677,7 +11359,7 @@ mod tests {
             )
             .unwrap_err();
 
-            // `auth-01`'s slug landed in its pending document, in place.
+            // `auth-01`'s slug landed in its pending task, in place.
             assert!(
                 std::fs::read_to_string(&a_path)
                     .unwrap()
@@ -10711,13 +11393,13 @@ mod tests {
         }
 
         /// The winner is the first valid answer in *dependency* order, not
-        /// document order — and it stays the winner across a mid-batch
-        /// failure even when the documents were submitted back to front.
-        /// Documents `[c, b, a]`, chained `a <- b <- c`: the hook answers a
+        /// task order — and it stays the winner across a mid-batch
+        /// failure even when the tasks were submitted back to front.
+        /// Shows `[c, b, a]`, chained `a <- b <- c`: the hook answers a
         /// different valid slug for `a` and `b`, then fails for `c`. `a`'s
-        /// slug is what every document of the group carries afterwards.
+        /// slug is what every task of the group carries afterwards.
         #[test]
-        fn the_dependency_order_winner_survives_reversed_document_order() {
+        fn the_dependency_order_winner_survives_reversed_task_order() {
             let mut repo = fixture("open-slug-dep-order");
             repo.config.issue_tracking.key_in_names = true;
             with_hook(
@@ -10730,15 +11412,15 @@ mod tests {
                    { echo "ticket=t-$SPOOLWAY_TASK"; echo "slug=$slug"; } >"$SPOOLWAY_OUT""#,
             );
 
-            let a = document(
+            let a = task_text(
                 "chain-a",
                 "group: chain\ngroup_description: chained work\n",
                 BODY,
             );
             let a_path = write_doc(&repo, "chain-a.md", &a);
-            let b = document("chain-b", "group: chain\ndepends_on: [chain-a]\n", BODY);
+            let b = task_text("chain-b", "group: chain\ndepends_on: [chain-a]\n", BODY);
             let b_path = write_doc(&repo, "chain-b.md", &b);
-            let c = document("chain-c", "group: chain\ndepends_on: [chain-b]\n", BODY);
+            let c = task_text("chain-c", "group: chain\ndepends_on: [chain-b]\n", BODY);
             let c_path = write_doc(&repo, "chain-c.md", &c);
 
             // Submitted back to front.
@@ -10760,7 +11442,7 @@ mod tests {
                 );
             }
 
-            // The re-run queues the lot; every document is prefixed `aa-1`.
+            // The re-run queues the lot; every task is prefixed `aa-1`.
             with_hook(
                 &mut repo,
                 r#"{ echo "ticket=t-$SPOOLWAY_TASK"; echo "slug=late-9"; } >"$SPOOLWAY_OUT""#,
@@ -10799,13 +11481,13 @@ mod tests {
                      echo "url=https://acme.atlassian.net/browse/PROJ-12"; } >"$SPOOLWAY_OUT""#,
             );
 
-            let parent = document(
+            let parent = task_text(
                 "auth-01",
                 "group: auth-rework\ngroup_description: auth rework\n",
                 BODY,
             );
             let parent_path = write_doc(&repo, "auth-01.md", &parent);
-            let child = document(
+            let child = task_text(
                 "auth-02",
                 "group: auth-rework\ndepends_on: [auth-01]\n",
                 BODY,
@@ -10841,19 +11523,19 @@ mod tests {
             );
         }
 
-        /// A document that has already been through the queue once —
+        /// A task that has already been through the queue once —
         /// unqueued and re-submitted — carries its `group:` already
         /// prefixed with the slug, and its own `slug:` alongside it (see
         /// `carry_to_pending`, which drops `branch:` but keeps both). Queued
         /// a second time, the group must come out with exactly one `proj-12-`
         /// on it, not two.
         #[test]
-        fn a_document_whose_group_already_carries_the_slug_is_not_prefixed_twice() {
+        fn a_task_whose_group_already_carries_the_slug_is_not_prefixed_twice() {
             let mut repo = fixture("open-prefix-twice");
             repo.config.issue_tracking.key_in_names = true;
             with_hook(&mut repo, "exit 1");
 
-            let text = document(
+            let text = task_text(
                 "auth-01",
                 "group: proj-12-auth-rework\ngroup_description: auth rework\n\
                  slug: proj-12\nticket: PROJ-13\n",
@@ -10930,7 +11612,7 @@ mod tests {
                 "the routine's source is never written to"
             );
             // The hook could actually open `SPOOLWAY_TASK_FILE` and read the
-            // real document — the routine's own file under
+            // real task — the routine's own file under
             // `.spoolway/routines/`, not the nonexistent queue path a
             // routine mint never gets written to before this call.
             assert_eq!(
@@ -10939,7 +11621,7 @@ mod tests {
             );
         }
 
-        /// A routine has no document on disk for a failed batch's ids to be
+        /// A routine has no task on disk for a failed batch's ids to be
         /// written back into, so the failure must not send a person to
         /// `pending/` to look for them: it says the ids went nowhere, and
         /// that running it again opens a second set.
@@ -10968,7 +11650,7 @@ mod tests {
             .to_string();
 
             assert!(
-                err.contains("ids      not written — no document on disk"),
+                err.contains("ids      not written — no task on disk"),
                 "{err}"
             );
             assert!(err.contains("close those by hand first"), "{err}");
@@ -10984,7 +11666,8 @@ mod tests {
 
         /// The queue screen's `enter` is the third way a batch arrives, and
         /// it takes the same prefix: driven through `begin_submission` the
-        /// way the screen's own tests do.
+        /// way the screen's own tests do, with the issue question already
+        /// answered yes.
         #[test]
         fn a_screen_submission_takes_the_prefix_like_queue_add() {
             let mut repo = fixture("open-screen-prefix");
@@ -10996,7 +11679,7 @@ mod tests {
             write_pending(
                 &repo,
                 "wire",
-                &document(
+                &task_text(
                     "wire",
                     "group: one\ngroup_description: wiring it up\n",
                     BODY,
@@ -11012,8 +11695,10 @@ mod tests {
                 "plan/demo",
                 &mut groups,
                 &mut state,
+                Tracking::Open,
+                &mut |_| {},
             );
-            assert!(matches!(outcome, SubmitOutcome::Confirmed), "{outcome:?}");
+            assert!(matches!(outcome, Mode::Queued(_)), "{outcome:?}");
 
             let task = queued(&repo, "wire");
             assert_eq!(task.front.group.as_deref(), Some("proj-12-one"));
@@ -11034,7 +11719,7 @@ mod tests {
                      echo "url=https://acme.atlassian.net/browse/PROJ-12"; } >"$SPOOLWAY_OUT""#,
             );
 
-            let doc = document(
+            let doc = task_text(
                 "auth-01",
                 "group: auth-rework\ngroup_description: auth rework\n",
                 BODY,
@@ -11072,7 +11757,7 @@ mod tests {
                 r#"{ echo "ticket=PROJ-13"; echo "slug=PROJ-12"; } >"$SPOOLWAY_OUT""#,
             );
 
-            let doc = document(
+            let doc = task_text(
                 "auth-01",
                 "group: auth-rework\ngroup_description: auth rework\n",
                 BODY,
@@ -11093,7 +11778,7 @@ mod tests {
             assert_eq!(task.extra_str("slug"), "");
         }
 
-        /// A `slug:` a person authored (or hand-edited) onto a document is
+        /// A `slug:` a person authored (or hand-edited) onto a task is
         /// held to the same `check_id` alphabet as one a hook answers: an
         /// invalid one is dropped, and the batch queues with no prefix rather
         /// than an invalid branch.
@@ -11103,7 +11788,7 @@ mod tests {
             repo.config.issue_tracking.key_in_names = true;
             with_hook(&mut repo, r#"{ echo "ticket=PROJ-13"; } >"$SPOOLWAY_OUT""#);
 
-            let doc = document(
+            let doc = task_text(
                 "auth-01",
                 "group: auth-rework\ngroup_description: auth rework\nslug: PROJ-12\n",
                 BODY,
@@ -11135,7 +11820,7 @@ mod tests {
                 r#"{ echo "ticket=PROJ-13"; echo "url=/browse/PROJ-12"; } >"$SPOOLWAY_OUT""#,
             );
 
-            let doc = document(
+            let doc = task_text(
                 "auth-01",
                 "group: auth-rework\ngroup_description: auth rework\n",
                 BODY,
@@ -11170,13 +11855,13 @@ mod tests {
                      echo "url=https://acme.atlassian.net/browse/${epic:-PROJ-13}"; } >"$SPOOLWAY_OUT""#,
             );
 
-            let a = document(
+            let a = task_text(
                 "auth-01",
                 "group: auth-rework\ngroup_description: auth rework\n",
                 BODY,
             );
             let a_path = write_doc(&repo, "auth-01.md", &a);
-            let b = document("auth-02", "group: auth-rework\n", BODY);
+            let b = task_text("auth-02", "group: auth-rework\n", BODY);
             let b_path = write_doc(&repo, "auth-02.md", &b);
             queue_add(
                 &repo,
@@ -11190,7 +11875,7 @@ mod tests {
 
             // A second call, naming the bare group the way a person always
             // writes it.
-            let c = document("auth-03", "group: auth-rework\n", BODY);
+            let c = task_text("auth-03", "group: auth-rework\n", BODY);
             let c_path = write_doc(&repo, "auth-03.md", &c);
             queue_add(
                 &repo,
@@ -11213,7 +11898,7 @@ mod tests {
 
         /// A queued sibling whose stored `slug:` was hand-edited to something
         /// `check_id` rejects is not a recognised prefix: its `<slug>-` is not
-        /// stripped off its group for the epic lookup, so a fresh document
+        /// stripped off its group for the epic lookup, so a fresh task
         /// naming a *different* group that merely shares the suffix does not
         /// inherit that sibling's epic.
         #[test]
@@ -11236,7 +11921,7 @@ mod tests {
                 r#"{ echo "epic=$SPOOLWAY_EPIC"; echo "ticket=t-$SPOOLWAY_TASK"
                      echo "slug=re-1"; } >"$SPOOLWAY_OUT""#,
             );
-            let doc = document(
+            let doc = task_text(
                 "fresh",
                 "group: rework\ngroup_description: fresh rework\n",
                 BODY,
@@ -11254,6 +11939,279 @@ mod tests {
             // `rework` and `PROJ-rework` are unrelated groups once `PROJ` is
             // rejected, so `fresh` did not inherit `EPIC-1`.
             assert_ne!(queued(&repo, "fresh").extra_str("epic"), "EPIC-1");
+        }
+
+        /// The queue screen's own issue question: with a hook configured,
+        /// nothing reaches it until a person says yes on the tab.
+        mod issue_question {
+            use super::*;
+
+            /// A hook that logs every call it gets and answers an epic and a
+            /// ticket numbered by the call, and one pending group `cart` of
+            /// two tasks, ready to select with `space`.
+            fn cart(name: &str) -> Repo {
+                let mut repo = fixture(name);
+                with_hook(
+                    &mut repo,
+                    r#"log="$(dirname "$SPOOLWAY_OUT")/calls.log"
+                       echo "$SPOOLWAY_TASK" >>"$log"
+                       n=$(wc -l <"$log")
+                       { echo "epic=#410"; echo "ticket=#$(( 410 + n ))"; } >"$SPOOLWAY_OUT""#,
+                );
+                write_pending_two(
+                    &repo,
+                    "cart-empty-state",
+                    &task_text(
+                        "cart-empty-state",
+                        "group: cart
+group_description: the cart
+",
+                        BODY,
+                    ),
+                    "cart-totals",
+                    &task_text(
+                        "cart-totals",
+                        "group: cart
+depends_on: [cart-empty-state]
+",
+                        BODY,
+                    ),
+                );
+                repo
+            }
+
+            fn hook_calls(repo: &Repo) -> Vec<String> {
+                std::fs::read_to_string(repo.tracking_dir().join("calls.log"))
+                    .unwrap_or_default()
+                    .lines()
+                    .map(str::to_string)
+                    .collect()
+            }
+
+            /// `enter` stops at the question before the hook runs: it lists
+            /// every task in the batch and names the tracker, over the tab.
+            #[test]
+            fn enter_asks_before_the_hook_runs() {
+                let repo = cart("issue-question-asks");
+                let drawn = screen(&repo, listed(&repo), " \r");
+                let frame = last_frame(&drawn);
+                assert!(frame.contains("┌─ issue tracking "), "{frame}");
+                assert!(
+                    frame.contains("create 2 issues on open for cart"),
+                    "{frame}"
+                );
+                assert!(frame.contains("    cart-empty-state"), "{frame}");
+                assert!(frame.contains("    cart-totals"), "{frame}");
+                assert!(
+                    frame.contains("[enter] create and queue   [n] queue only   [esc] back"),
+                    "{frame}"
+                );
+                assert!(frame.contains("─ groups"), "the tab under it: {frame}");
+                assert!(hook_calls(&repo).is_empty(), "the hook ran unasked");
+                assert!(repo.queued_ids().is_empty());
+            }
+
+            /// `n` queues the group with issue tracking off: no hook call,
+            /// no ticket, and a popup naming what it queued.
+            #[test]
+            fn n_queues_with_no_hook_call() {
+                let repo = cart("issue-question-n");
+                let drawn = screen(&repo, listed(&repo), " \rn");
+                assert!(hook_calls(&repo).is_empty(), "the hook ran on `n`");
+                let task = queued(&repo, "cart-totals");
+                assert_eq!(task.extra_str("ticket"), "");
+                assert_eq!(queued(&repo, "cart-empty-state").extra_str("ticket"), "");
+
+                let frame = last_frame(&drawn);
+                assert!(frame.contains("┌─ queued "), "{frame}");
+                assert!(frame.contains("queued 2 tasks"), "{frame}");
+                assert!(frame.contains("    cart-empty-state"), "{frame}");
+                assert!(frame.contains("[enter] close"), "{frame}");
+            }
+
+            /// `esc` queues nothing and opens nothing, and leaves the
+            /// selection as it was.
+            #[test]
+            fn esc_queues_nothing_and_opens_nothing() {
+                let repo = cart("issue-question-esc");
+                let drawn = screen(&repo, listed(&repo), " \r\x1b");
+                assert!(hook_calls(&repo).is_empty());
+                assert!(repo.queued_ids().is_empty());
+                let frame = last_frame(&drawn);
+                assert!(!frame.contains("issue tracking"), "{frame}");
+                assert!(frame.contains("[x] cart"), "still selected: {frame}");
+            }
+
+            /// `enter` opens the tickets and queues. The popup fills in row
+            /// by row while the hook answers — the task at the hook drawn as
+            /// `…` — and once it is done says what was opened and queued,
+            /// taking `enter` to close.
+            #[test]
+            fn enter_opens_the_tickets_row_by_row_and_queues() {
+                let repo = cart("issue-question-enter");
+                let drawn = screen(&repo, listed(&repo), " \r\r");
+                assert_eq!(hook_calls(&repo), ["cart-empty-state", "cart-totals"]);
+                assert_eq!(
+                    queued(&repo, "cart-empty-state").extra_str("ticket"),
+                    "#411"
+                );
+                assert_eq!(queued(&repo, "cart-totals").extra_str("ticket"), "#412");
+
+                let frames: Vec<&str> = drawn.split("\x1b[2J\x1b[H").collect();
+                let opening: Vec<&&str> = frames
+                    .iter()
+                    .filter(|frame| frame.contains("┌─ opening issues "))
+                    .collect();
+                assert!(
+                    opening
+                        .iter()
+                        .all(|frame| frame.contains("waiting on the hook")),
+                    "{opening:?}"
+                );
+                // The second task at the hook, under the first one's answer.
+                assert!(
+                    opening.iter().any(|frame| {
+                        frame.contains("epic     created   #410   cart")
+                            && frame.contains("ticket   created   #411   cart-empty-state")
+                            && frame.contains("ticket   …                cart-totals")
+                    }),
+                    "{opening:?}"
+                );
+                assert!(
+                    !opening.iter().any(|frame| frame.contains("[enter] close")),
+                    "a popup still filling takes no key: {opening:?}"
+                );
+
+                let frame = last_frame(&drawn);
+                assert!(frame.contains("┌─ issues created "), "{frame}");
+                assert!(
+                    frame.contains("ticket   created   #412   cart-totals"),
+                    "{frame}"
+                );
+                assert!(frame.contains("queued 2 tasks"), "{frame}");
+                assert!(frame.contains("[enter] close"), "{frame}");
+                // Nothing printed under the frame: every byte went out after a
+                // clear-screen, as part of one frame or another.
+                assert!(drawn.starts_with("\x1b[2J\x1b[H"), "{drawn}");
+                assert!(
+                    !drawn.contains("issue_tracking: opening tickets"),
+                    "{drawn}"
+                );
+            }
+
+            /// A hook answering `slug=` with `key_in_names` on prefixes the
+            /// names, as the shipped `github.sh` does on every batch — and
+            /// the result is still step 12: ticket rows, then what was
+            /// queued, the box held to the question's width, and no
+            /// `opening issues` frame drawn once the last ticket is in.
+            #[test]
+            fn a_slug_answer_keeps_the_result_to_the_ticket_rows() {
+                let mut repo = cart("issue-question-slug");
+                repo.config.issue_tracking.key_in_names = true;
+                with_hook(
+                    &mut repo,
+                    r#"log="$(dirname "$SPOOLWAY_OUT")/calls.log"
+                       echo "$SPOOLWAY_TASK" >>"$log"
+                       n=$(wc -l <"$log")
+                       { echo "epic=#410"; echo "ticket=#$(( 410 + n ))"
+                         echo "slug=gh-410"; } >"$SPOOLWAY_OUT""#,
+                );
+                let drawn = screen(&repo, listed(&repo), " \r\r");
+                assert_eq!(
+                    queued(&repo, "cart-totals").front.group.as_deref(),
+                    Some("gh-410-cart")
+                );
+
+                let frames: Vec<&str> = drawn.split("\x1b[2J\x1b[H").collect();
+                let last_opening = frames
+                    .iter()
+                    .rposition(|frame| frame.contains("┌─ opening issues "))
+                    .unwrap();
+                assert!(
+                    frames[last_opening].contains("#412   cart-totals"),
+                    "the last `opening issues` frame is the last ticket's: {}",
+                    frames[last_opening]
+                );
+
+                let frame = last_frame(&drawn);
+                assert!(!frame.contains("names prefixed"), "{frame}");
+                let body: Vec<String> = frame
+                    .lines()
+                    .skip_while(|line| !line.contains("┌─ issues created "))
+                    .skip(1)
+                    .take_while(|line| !line.contains('└') || line.contains('│'))
+                    .map(|line| line.split('│').nth(2).unwrap_or("").trim().to_string())
+                    .collect();
+                assert_eq!(
+                    body[..7],
+                    [
+                        "",
+                        "epic     created   #410   cart",
+                        "ticket   created   #411   cart-empty-state",
+                        "ticket   created   #412   cart-totals",
+                        "",
+                        "queued 2 tasks",
+                        "",
+                    ],
+                    "{frame}"
+                );
+                let top = frame
+                    .lines()
+                    .find(|line| line.contains("┌─ issues created "))
+                    .unwrap();
+                let width = top
+                    .chars()
+                    .skip_while(|c| *c != '┌')
+                    .take_while(|c| *c != '┐')
+                    .count()
+                    + 1;
+                assert_eq!(width, 60, "held to the question's width: {frame}");
+            }
+
+            /// Queuing a routine asks the same question, over the routines
+            /// pane, and `n` there queues it with no hook call.
+            #[test]
+            fn queuing_a_routine_asks_the_same_question() {
+                let repo = cart("issue-question-routine");
+                write_routine(
+                    &repo,
+                    "nightly",
+                    "audit",
+                    &task_text(
+                        "audit",
+                        "group: nightly
+group_description: audit
+",
+                        BODY,
+                    ),
+                );
+                let drawn = screen(&repo, listed(&repo), "r \r");
+                let frame = last_frame(&drawn);
+                assert!(frame.contains("┌─ issue tracking "), "{frame}");
+                assert!(
+                    frame.contains("create 1 issue on open for nightly"),
+                    "{frame}"
+                );
+                assert!(
+                    frame.contains("─ routines"),
+                    "over the routines pane: {frame}"
+                );
+                assert!(repo.queued_ids().is_empty());
+
+                screen(&repo, listed(&repo), "r \rn");
+                assert!(hook_calls(&repo).is_empty(), "the hook ran on `n`");
+                assert_eq!(repo.queued_ids().len(), 1, "{:?}", repo.queued_ids());
+            }
+
+            /// A trial never asks and opens no tickets, as before.
+            #[test]
+            fn a_trial_never_asks_and_opens_no_tickets() {
+                let repo = cart("issue-question-trial");
+                let drawn = screen(&repo, listed(&repo), "t\r\r");
+                assert!(!drawn.contains("issue tracking"), "{drawn}");
+                assert!(hook_calls(&repo).is_empty());
+                assert_eq!(repo.queued_ids().len(), 2, "{:?}", repo.queued_ids());
+            }
         }
     }
 
@@ -11304,7 +12262,7 @@ mod tests {
                 true,
                 &mut input,
                 &mut out,
-                Some(crate::platform::TermGuard::inert),
+                crate::platform::TermGuard::inert,
             )
             .unwrap();
             assert!(!skip, "nothing unmet means issue tracking stays on");
@@ -11329,7 +12287,7 @@ mod tests {
                 false,
                 &mut input,
                 &mut out,
-                Some(crate::platform::TermGuard::inert),
+                crate::platform::TermGuard::inert,
             )
             .unwrap();
             assert!(skip, "issue tracking must be switched off for this run");
@@ -11362,7 +12320,7 @@ mod tests {
                 true,
                 &mut input,
                 &mut out,
-                Some(crate::platform::TermGuard::inert),
+                crate::platform::TermGuard::inert,
             )
             .unwrap();
             assert!(skip);
@@ -11371,8 +12329,8 @@ mod tests {
         }
 
         /// `esc` is the one path that must reach the caller as `GateCancelled`
-        /// — [`open_and_prefix`]'s own callers turn that into `Mode::Browsing`
-        /// rather than a refusal, since nothing here failed.
+        /// — `queue_add_tasks` turns that into a clean exit rather than
+        /// a refusal, since nothing here failed.
         #[test]
         fn esc_over_the_gate_cancels() {
             let mut repo = fixture("tool-gate-esc");
@@ -11385,34 +12343,76 @@ mod tests {
                 true,
                 &mut input,
                 &mut out,
-                Some(crate::platform::TermGuard::inert),
+                crate::platform::TermGuard::inert,
             )
             .unwrap_err();
             assert!(err.downcast_ref::<GateCancelled>().is_some(), "{err:#}");
         }
 
-        /// Review finding 1: `Mode::Browsing` is exactly the mode the
-        /// screen was already showing when `enter` fired the submission
-        /// that hit the gate, so returning it on `esc` would render the
-        /// same frame `draw`'s own unchanged-frame check already has
-        /// cached and never repaint over the gate's raw-printed block.
-        /// `refusal_mode` must hand back a *different* mode instead, so the
-        /// next `draw` clears the screen — `Mode::Outcome` is what every
-        /// other refusal here already uses for exactly that reason.
-        #[test]
-        fn refusal_mode_never_returns_to_the_frame_that_was_already_on_screen() {
-            let cancelled = refusal_mode("submission refused", GateCancelled.into());
-            assert!(
-                !matches!(cancelled, Mode::Browsing),
-                "esc must not redraw the identical frame `enter` was pressed on: {cancelled:?}"
+        /// A pending group whose hook declares a floor this machine cannot
+        /// meet, selected and submitted on the queue screen: `enter` draws
+        /// the gate as a popup over the tab — the tab still drawn under it,
+        /// nothing printed outside the frame — and queues nothing yet.
+        fn submit_over_the_gate(name: &str, then: &str) -> (Repo, String) {
+            let mut repo = fixture(name);
+            with_versioned_hook(&mut repo, "999.0.0");
+            write_pending(
+                &repo,
+                "wire",
+                &task_text("wire", "group: a\ngroup_description: a\n", BODY),
             );
-            assert!(matches!(cancelled, Mode::Outcome(_)), "{cancelled:?}");
+            let (_, drawn) = screen_exit(&repo, listed(&repo), &format!(" \r{then}"));
+            (repo, drawn)
+        }
 
-            let refused = refusal_mode("submission refused", anyhow::anyhow!("bad batch"));
-            match refused {
-                Mode::Outcome(msg) => assert!(msg.contains("bad batch"), "{msg}"),
-                other => panic!("{other:?}"),
-            }
+        #[test]
+        fn the_screen_draws_the_gate_in_a_popup_over_the_tab() {
+            let (repo, drawn) = submit_over_the_gate("tool-gate-popup", "");
+            let frame = last_frame(&drawn);
+            assert!(frame.contains("┌─ issue tracking "), "{frame}");
+            assert!(frame.contains("versioned.sh"), "{frame}");
+            assert!(frame.contains("cargo >= 999.0.0"), "{frame}");
+            assert!(
+                frame.contains("issue tracking is not supported."),
+                "{frame}"
+            );
+            assert!(
+                frame.contains("[enter] queue anyway, without issue tracking   [esc] back"),
+                "{frame}"
+            );
+            assert!(frame.contains("─ groups"), "the tab under it: {frame}");
+            // Nothing outside the frame: every byte written went out after
+            // a clear-screen, as part of one frame or another.
+            assert!(drawn.starts_with("\x1b[2J\x1b[H"), "{drawn}");
+            assert!(!repo.queue_dir().join("wire.md").exists());
+        }
+
+        /// `esc` goes back to the screen the submit started from, having
+        /// queued nothing and said nothing more.
+        #[test]
+        fn esc_off_the_gate_popup_goes_back_and_queues_nothing() {
+            let (repo, drawn) = submit_over_the_gate("tool-gate-popup-esc", "\x1b");
+            let frame = last_frame(&drawn);
+            assert!(!frame.contains("issue tracking"), "{frame}");
+            assert!(frame.contains("[x] a"), "still selected: {frame}");
+            assert!(!repo.queue_dir().join("wire.md").exists());
+        }
+
+        /// `enter` queues the batch with issue tracking switched off for it:
+        /// the hook is never called.
+        #[test]
+        fn enter_on_the_gate_popup_queues_without_tracking() {
+            let (repo, drawn) = submit_over_the_gate("tool-gate-popup-enter", "\r");
+            let frame = last_frame(&drawn);
+            assert!(!frame.contains("issue tracking"), "{frame}");
+            let task = queued(&repo, "wire");
+            assert_eq!(task.extra_str("ticket"), "");
+            assert!(
+                std::fs::read_dir(repo.tracking_dir())
+                    .map(|mut d| d.next().is_none())
+                    .unwrap_or(true),
+                "the hook must never have been called"
+            );
         }
 
         /// A tool the declared floor names but that is not on PATH at all is
@@ -11455,14 +12455,14 @@ mod tests {
         /// requirement never reaches `open_tickets` at all, so no `epic:` or
         /// `ticket:` lands on the task — the batch queues exactly as it
         /// would with issue tracking switched off. Driven with
-        /// `interactive: false` — `queue_add_documents`'s own path when
+        /// `interactive: false` — `queue_add_tasks`'s own path when
         /// `crate::ask::interactive()` says nobody is there — the same
         /// no-tty branch the test above drives directly.
         #[test]
         fn open_and_prefix_skips_open_tickets_when_a_requirement_is_unmet() {
             let mut repo = fixture("tool-gate-open-and-prefix");
             with_versioned_hook(&mut repo, "999.0.0");
-            let doc = document(
+            let doc = task_text(
                 "solo",
                 "group: solo\ngroup_description: a solo task\n",
                 BODY,
@@ -11475,7 +12475,8 @@ mod tests {
             )
             .unwrap();
 
-            open_and_prefix(&repo, &[], &[], &mut tasks, false, true).unwrap();
+            let gate = ToolGate::Print { interactive: false };
+            open_and_prefix(&repo, &[], &[], &mut tasks, gate, &mut PrintedTickets).unwrap();
 
             assert_eq!(tasks[0].extra_str("ticket"), "");
             assert_eq!(tasks[0].extra_str("epic"), "");
@@ -11491,7 +12492,7 @@ mod tests {
     mod reset_for_reuse_tests {
         use super::*;
 
-        /// A document in the shape a queued or archived task actually has on
+        /// A task in the shape a queued or archived task actually has on
         /// disk: every key spoolway stamps over a task's life, alongside what
         /// its author wrote. `epic:`/`ticket:`/`slug:`/`url:` stand in for the
         /// passthrough keys the reset has to name specially; `my_custom:`
@@ -11586,24 +12587,24 @@ body\n";
             );
         }
 
-        /// A document already free of every stamped key — the shape a
+        /// A task already free of every stamped key — the shape a
         /// producer actually writes — reads back unchanged: nothing here has
         /// anything to drop, and re-serialising a mapping that lost no keys
         /// is a no-op on its contents (block style throughout, so the
         /// re-serialised form matches the written one byte for byte).
         #[test]
-        fn a_document_with_no_stamped_keys_round_trips() {
-            let doc = document("solo", "touches:\n- src/**\ngroup: g\n", BODY);
+        fn a_task_with_no_stamped_keys_round_trips() {
+            let doc = task_text("solo", "touches:\n- src/**\ngroup: g\n", BODY);
             let reset = reset_for_reuse("solo.md", &doc).unwrap();
             assert_eq!(reset, doc);
         }
 
         /// `parse_submission` refuses `STAMPED_DOC` outright, over `stage:`
-        /// — the exact refusal a re-used queued or archived document hits
+        /// — the exact refusal a re-used queued or archived task hits
         /// today. Resetting it first is what lets it reach `parse_submission`
         /// at all.
         #[test]
-        fn parse_submission_refuses_the_stamped_document_but_not_its_reset() {
+        fn parse_submission_refuses_the_stamped_task_but_not_its_reset() {
             let err =
                 parse_submission("board-key-map.md", STAMPED_DOC, Some("master")).unwrap_err();
             assert!(format!("{err:#}").contains("sets `stage:`"));
@@ -11639,7 +12640,7 @@ body\n";
         }
     }
 
-    /// `queue unqueue` on a task that has not started: the document goes
+    /// `queue unqueue` on a task that has not started: the task goes
     /// back to pending with the stamped keys dropped — the board's own
     /// unqueue, from a script — and the queue file is gone.
     #[test]
@@ -11664,7 +12665,7 @@ body\n";
         }
         assert!(text.contains("id: login"), "{text}");
 
-        // And it is a document again: the same path in queues it back.
+        // And it is a task again: the same path in queues it back.
         queue_add(
             &repo,
             &Pipelines::builtin(),
@@ -11731,7 +12732,7 @@ body\n";
     /// A task that has started is refused without `--force`, naming its
     /// stage, its checkout, and both routes onward — and nothing on disk
     /// moves. The same task with `--force` tears the checkout down and
-    /// unqueues it, leaving no checkout field behind on the document that
+    /// unqueues it, leaving no checkout field behind on the task that
     /// reaches pending.
     #[test]
     fn queue_unqueue_refuses_a_started_task_without_force_and_tears_down_with_it() {
@@ -11742,7 +12743,7 @@ body\n";
         // No workspace recorded, no real worktree cut: `tear_down_checkout`
         // treats an already-gone checkout as a fine outcome rather than an
         // error, and this test's own job is only the road around it — that
-        // the reserved fields are cleared before the document reaches
+        // the reserved fields are cleared before the task reaches
         // pending — not the removal itself, which `teardown.rs`'s own
         // callers already cover.
         let worktree = repo.root.join("wt-solo");
@@ -11789,7 +12790,7 @@ body\n";
         std::fs::create_dir_all(repo.pending_dir()).unwrap();
         std::fs::write(
             repo.pending_dir().join("login.md"),
-            document("login", "group: demo\n", BODY),
+            task_text("login", "group: demo\n", BODY),
         )
         .unwrap();
 
@@ -11824,7 +12825,7 @@ body\n";
         std::fs::create_dir_all(repo.pending_dir()).unwrap();
         std::fs::write(
             repo.pending_dir().join("solo.md"),
-            document("solo", "group: demo\n", BODY),
+            task_text("solo", "group: demo\n", BODY),
         )
         .unwrap();
 
@@ -11851,7 +12852,7 @@ body\n";
     #[test]
     fn queue_add_dry_run_writes_nothing() {
         let repo = fixture("queue-add-dry-run");
-        let text = document("login", "group: demo\n", BODY);
+        let text = task_text("login", "group: demo\n", BODY);
         let path = write_doc(&repo, "login.md", &text);
         let mut args = from_args(&[&path]);
         args.dry_run = true;
@@ -11867,12 +12868,12 @@ body\n";
         assert!(files.is_empty(), "a dry run wrote under home: {files:?}");
         assert!(
             std::path::Path::new(&path).exists(),
-            "the document itself is left where it was"
+            "the task itself is left where it was"
         );
 
-        // A broken document still fails the dry run, the way the real thing
+        // A broken task still fails the dry run, the way the real thing
         // would — that is what it is for.
-        let broken = write_doc(&repo, "broken.md", &document("nogroup", "", BODY));
+        let broken = write_doc(&repo, "broken.md", &task_text("nogroup", "", BODY));
         let mut args = from_args(&[&broken]);
         args.dry_run = true;
         let err = queue_add(&repo, &Pipelines::builtin(), &args, &repo.root, false).unwrap_err();
@@ -11880,15 +12881,15 @@ body\n";
     }
 
     /// `queue add --from` a path under this project's own pending directory:
-    /// once the batch is written, the source document is gone from there —
+    /// once the batch is written, the source task is gone from there —
     /// it reached the queue, so it is not still waiting to go there — and
     /// unqueueing the same task afterwards is free to write its clean
-    /// document back without tripping the "newer draft" refusal a leftover
+    /// task back without tripping the "newer draft" refusal a leftover
     /// copy would cause.
     #[test]
     fn queue_add_from_the_pending_directory_removes_its_own_source() {
         let repo = fixture("queue-add-from-pending");
-        let text = document("beta", "group: one\n", BODY);
+        let text = task_text("beta", "group: one\n", BODY);
         let path = write_pending(&repo, "beta", &text);
 
         queue_add(
@@ -11910,12 +12911,12 @@ body\n";
         );
 
         // The round trip this leftover used to break: unqueue must be free
-        // to write beta's clean document back, with nothing already sitting
+        // to write beta's clean task back, with nothing already sitting
         // in its way.
         crate::status::unqueue_task(&repo, "beta").unwrap();
         assert!(
             path.exists(),
-            "unqueue must be able to write beta's document back to pending"
+            "unqueue must be able to write beta's task back to pending"
         );
         assert!(
             !repo.queue_dir().join("beta.md").exists(),
@@ -11924,12 +12925,12 @@ body\n";
     }
 
     /// A `--from` path outside this project's own pending directory is read
-    /// and left exactly where it is — only a document this batch's own inbox
+    /// and left exactly where it is — only a task this batch's own inbox
     /// held is ever removed.
     #[test]
     fn queue_add_from_outside_pending_leaves_the_source_alone() {
         let repo = fixture("queue-add-from-elsewhere");
-        let text = document("login", "group: demo\n", BODY);
+        let text = task_text("login", "group: demo\n", BODY);
         let path = write_doc(&repo, "login.md", &text);
 
         queue_add(
@@ -11965,13 +12966,13 @@ body\n";
         }
     }
 
-    /// A document may name the branch it is cut from and merges into. One
+    /// A task may name the branch it is cut from and merges into. One
     /// that does keeps it — verified against the repository's own branches
     /// first — and one that does not takes the submission's own `--base`
     /// instead.
     #[test]
-    fn a_document_naming_its_own_base_is_cut_from_that_branch() {
-        let repo = fixture("document-base");
+    fn a_task_naming_its_own_base_is_cut_from_that_branch() {
+        let repo = fixture("task-base");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "t"]);
@@ -11981,9 +12982,13 @@ body\n";
         let own = write_doc(
             &repo,
             "own.md",
-            &document("own", "group: demo\nbase: release/1.x\n", BODY),
+            &task_text("own", "group: demo\nbase: release/1.x\n", BODY),
         );
-        let plain = write_doc(&repo, "plain.md", &document("plain", "group: demo\n", BODY));
+        let plain = write_doc(
+            &repo,
+            "plain.md",
+            &task_text("plain", "group: demo\n", BODY),
+        );
         queue_add(
             &repo,
             &Pipelines::builtin(),
@@ -11996,12 +13001,12 @@ body\n";
         assert_eq!(
             queued(&repo, "own").front.base.as_deref(),
             Some("release/1.x"),
-            "the document's own base is what its worktree is cut from"
+            "the task's own base is what its worktree is cut from"
         );
         assert_eq!(
             queued(&repo, "plain").front.base.as_deref(),
             Some("plan/demo"),
-            "a document without `base:` takes the submission's own `--base`"
+            "a task without `base:` takes the submission's own `--base`"
         );
         assert_eq!(
             based_on_note(&[queued(&repo, "own"), queued(&repo, "plain")], "plan/demo"),
@@ -12018,7 +13023,7 @@ body\n";
         let dep = write_doc(
             &repo,
             "dep.md",
-            &document("dep", "group: demo\ndepends_on: [own]\n", BODY),
+            &task_text("dep", "group: demo\ndepends_on: [own]\n", BODY),
         );
         let err = queue_add(
             &repo,
@@ -12035,11 +13040,11 @@ body\n";
     }
 
     /// The three values `base:` is refused for, each named back at the
-    /// document: a branch the repository does not have, a name git will not
+    /// task: a branch the repository does not have, a name git will not
     /// accept, and anything that would reach git as a flag.
     #[test]
-    fn a_document_base_that_is_not_a_local_branch_is_refused() {
-        let repo = fixture("document-base-refused");
+    fn a_task_base_that_is_not_a_local_branch_is_refused() {
+        let repo = fixture("task-base-refused");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "t"]);
@@ -12053,7 +13058,7 @@ body\n";
             let path = write_doc(
                 &repo,
                 "t.md",
-                &document("t", &format!("group: demo\nbase: {base}\n"), BODY),
+                &task_text("t", &format!("group: demo\nbase: {base}\n"), BODY),
             );
             let err = queue_add(
                 &repo,

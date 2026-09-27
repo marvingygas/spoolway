@@ -1,14 +1,8 @@
 #!/usr/bin/env bash
-# The restart guard: a caller in a tight loop against a repo that cannot run
-# is eventually refused, rather than restarted forever.
-#
-# `pipeline check` already refuses a cycle no `loop:` bounds, inside one
-# pipeline's own graph. A caller restarting `spoolway dispatch` against a repo
-# whose pipeline is broken — or that just keeps another dispatcher held —
-# is the same shape one level up: nothing inside a single pass loops, but the
-# process outside it does, and the engine has just as little business
-# trusting that it will stop on its own. This is the guard that answers it,
-# and the exit codes a script needs to tell an ordinary ending from a refusal.
+# One `spoolway` per project: a second `spoolway dispatch` against a repo
+# another dispatcher already holds refuses every time with the same line,
+# `Dispatcher already running`, and its own exit code — never a count that
+# eventually gives up and never one that is let through.
 #
 # `dispatch.lane_child_ceiling` has no case here: it needs a lane actually
 # holding a process open, which this suite's empty-queue and held-lock
@@ -28,13 +22,12 @@ new_repo "$WORK/proj"
 works "init scaffolds .spoolway" "$SPOOLWAY" init --yes
 project_home_after_init
 agent_models
-# Pin the backend. Every start below is meant to be answered by the restart
-# guard, the dispatch lock, the empty queue or the missing git identity — and
-# `dispatch` checks its backend is reachable before it ever reaches the
-# identity check. The shipped default is herdr, so on a machine with no herdr
-# running the last scenario here is refused for the wrong reason. Headless
-# needs nothing to be running and changes none of the answers this suite
-# asserts.
+# Pin the backend. Every start below is meant to be answered by the dispatch
+# lock, the empty queue or the missing git identity — and `dispatch` checks
+# its backend is reachable before it ever reaches the identity check. The
+# shipped default is herdr, so on a machine with no herdr running the last
+# scenario here is refused for the wrong reason. Headless needs nothing to
+# be running and changes none of the answers this suite asserts.
 #
 # The marker with it: `spoolway dispatch` refuses `backend = headless`
 # outright unless this is set, since the backend draws nowhere a person can
@@ -43,8 +36,8 @@ agent_models
 # builds its project by hand. Nothing here asserts on that refusal, and
 # nothing here reaches it either: every start below is answered by a check
 # that sits ahead of the pane gate. Exported anyway, so the day one of these
-# scenarios does reach it, it is answered by the guard this suite is about
-# rather than by a backend it only ever picked for being quiet.
+# scenarios does reach it, it is answered by one of the checks this suite is
+# about rather than by a backend it only ever picked for being quiet.
 export SPOOLWAY_TEST_BACKEND=1
 must "the headless backend" "$SPOOLWAY" config set dispatch.backend headless
 must "the spoolway commit" git add -A
@@ -60,42 +53,29 @@ must "the plan branch" git checkout -q -b plan/demo
 # silently miss the lock check and read straight through to the empty queue.
 echo $$ > "$SPOOLWAY_PROJECT_HOME/dispatch.pid"
 
-# Four in a row, each an ordinary "deferred", each its own exit code — not the
-# generic 1 an error gets, because a script restarting this in a loop needs to
-# tell "deferred" from "the guard has had enough" before the fifth call ever
-# happens.
-# `--plain`, on every call below: without it a start that finds the lock held
-# still returns at once with exit 4, but it also tries to focus a pane —
-# not what this suite is testing, and this hand-written lock file names none
-# to focus anyway. `--plain` keeps every call here to exactly the plain
-# table and the exit code the suite is actually asserting on.
-for n in 1 2 3 4; do
-  exit_code "start $n could not run and says so, not an error" 4 "$SPOOLWAY" dispatch --plain
+# Five in a row, each an ordinary "deferred", each its own exit code — not
+# the generic 1 an error gets — and each the exact same line, with no count
+# behind it that eventually gives up and no count that lets a later one
+# through either.
+# A start that finds the lock held returns at once with exit 4 and one
+# line either way — `dispatch` prints a line per pass now, not a board, so
+# every call here is exactly the plain output and the exit code the suite
+# is actually asserting on.
+for n in 1 2 3 4 5; do
+  exit_code "start $n could not run and says so, not an error" 4 "$SPOOLWAY" dispatch
+  says "start $n prints the same line every time" \
+    "Dispatcher already running" "$SPOOLWAY" dispatch
 done
-
-# The fifth is refused outright: the guard, not the lock check, answers first.
-says "a fifth start in the same window is refused" \
-  "4 starts in a row could not run" "$SPOOLWAY" dispatch --plain
-says "naming the last reason" "already running" "$SPOOLWAY" dispatch --plain
-says "and the way out" "spoolway dispatch --force" "$SPOOLWAY" dispatch --plain
-exit_code "with its own exit code" 5 "$SPOOLWAY" dispatch --plain
-
-# --force starts one anyway — still deferred, because the lock is still held,
-# but no longer refused — and clears the count behind it.
-exit_code "--force starts one anyway" 4 "$SPOOLWAY" dispatch --plain --force
-exit_code "and the guard is not still tripped on the very next start" 4 \
-  "$SPOOLWAY" dispatch --plain
 
 rm -f "$SPOOLWAY_PROJECT_HOME/dispatch.pid"
 
 # ---------------------------------------------------------- an ordinary ending
-# An empty queue is not a start that could not run — it is a fact about the
-# project, and restarting into one forever is a caller's own choice, never the
-# guard's business. Run past the threshold on empty queues alone and nothing
-# trips: exit 3 every time, never 5.
+# An empty queue is not a dispatcher already running — it is a fact about
+# the project, and restarting into one forever is a caller's own choice.
+# Exit 3 every time, never the lock's own exit 4.
 for n in 1 2 3 4 5 6; do
-  exit_code "an empty queue never counts against the guard (start $n)" 3 \
-    "$SPOOLWAY" dispatch --plain
+  exit_code "an empty queue is an ordinary ending, not a refusal (start $n)" 3 \
+    "$SPOOLWAY" dispatch
 done
 
 # ------------------------------- state that already exists: a workspace on the checkout
@@ -145,7 +125,7 @@ task_doc selfsweep.md selfsweep "$SELFSWEEP_BODY" "group: demo" \
 must "a task queues behind the planted workspace" "$SPOOLWAY" queue add --from selfsweep.md
 
 exit_code "the run settles once its one step passes, with a workspace on the checkout already present" 0 \
-  "$SPOOLWAY" dispatch --plain
+  "$SPOOLWAY" dispatch
 
 # The planted rows by name, not the table's line count: the task's own tab —
 # renamed to its bare slug, `selfsweep`, the moment it is cut, rather than
@@ -195,10 +175,10 @@ task_doc identity.md identity identity-body.md "group: demo"
 must "a task queues" "$SPOOLWAY" queue add --from identity.md
 
 exit_code "no git identity refuses outright, not an empty queue" 1 \
-  "$SPOOLWAY" dispatch --plain
-says "refusing to start" "refusing to start" "$SPOOLWAY" dispatch --plain
-says "naming the missing key" "user.email" "$SPOOLWAY" dispatch --plain
+  "$SPOOLWAY" dispatch
+says "refusing to start" "refusing to start" "$SPOOLWAY" dispatch
+says "naming the missing key" "user.email" "$SPOOLWAY" dispatch
 says "and a command that sets it" "git config --global user.email" \
-  "$SPOOLWAY" dispatch --plain
+  "$SPOOLWAY" dispatch
 
 finish

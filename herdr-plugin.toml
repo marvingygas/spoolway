@@ -17,7 +17,7 @@ platforms = ["linux", "macos"]
 platforms = ["linux", "macos"]
 command = ["/bin/sh", "scripts/fetch-or-build.sh"]
 
-# Four panes. Every command is ./bin/spoolway, by relative path — the plugin
+# Three panes. Every command is ./bin/spoolway, by relative path — the plugin
 # root is the working directory herdr hands them, and scripts/fetch-or-build.sh
 # is what puts a binary there.
 [[panes]]
@@ -28,17 +28,14 @@ width = "80%"
 height = "80%"
 command = ["./bin/spoolway", "init"]
 
-[[panes]]
-id = "queue"
-title = "Queue"
-placement = "tab"
-command = ["./bin/spoolway", "queue"]
-
+# Bare `spoolway`, no subcommand: the one screen, holding the dispatch,
+# queue, jobs and eval tabs. The queue and dispatch panes this used to be
+# two of are one now — see `src/commands/herdr.rs`'s own module doc.
 [[panes]]
 id = "dispatch"
-title = "Dispatch"
+title = "Spoolway"
 placement = "tab"
-command = ["./bin/spoolway", "dispatch"]
+command = ["./bin/spoolway"]
 
 [[panes]]
 id = "doctor"
@@ -59,17 +56,9 @@ command = ["herdr", "plugin", "pane", "open",
            "--plugin", "spoolway", "--entrypoint", "init", "--focus"]
 
 [[actions]]
-id = "queue"
-title = "Show the queue"
-description = "Open this workspace's task queue."
-contexts = ["workspace"]
-command = ["herdr", "plugin", "pane", "open",
-           "--plugin", "spoolway", "--entrypoint", "queue", "--focus"]
-
-[[actions]]
 id = "dispatch"
-title = "Run the dispatcher"
-description = "Run this workspace's dispatcher."
+title = "Open spoolway"
+description = "Open this workspace's screen: dispatch, queue, jobs and eval."
 contexts = ["workspace"]
 command = ["herdr", "plugin", "pane", "open",
            "--plugin", "spoolway", "--entrypoint", "dispatch", "--focus"]

@@ -326,25 +326,29 @@ fn all_pause_panel(aborts: &[Abort]) -> Vec<String> {
         ));
     }
     body.push(String::new());
-    body.push("[enter] pause the run".to_string());
+    body.push("[enter] pause them".to_string());
     body.push("[s] schedule   [esc] cancel".to_string());
     crate::screen::boxed("pause all", &body)
 }
 
+/// [`BoardMode::ConfirmResume`]'s panel: the gated tasks, named, and nothing
+/// more — the ids are the whole of what a person needs to see before `enter`
+/// carries them past their gates. One blank row above the body and one under
+/// the key line, as the dispatch tab's mockup draws it.
 pub(super) fn resume_confirm_panel(gated: &[String]) -> Vec<String> {
     let mut body = vec![
+        String::new(),
         format!(
             "{} task{} waiting at a gate:",
             gated.len(),
             if gated.len() == 1 { "" } else { "s" }
         ),
-        String::new(),
     ];
-    body.extend(gated.iter().cloned());
+    body.extend(gated.iter().map(|id| format!("  {id}")));
     body.push(String::new());
-    body.push("Resuming sends every one of them past its gate,".to_string());
-    body.push("with nobody having looked at it first.".to_string());
-    crate::screen::panel("resume all", &body, "[enter] resume them   [esc] cancel")
+    body.push("[enter] resume them   [esc] cancel".to_string());
+    body.push(String::new());
+    crate::screen::boxed("resume all", &body)
 }
 
 /// [`BoardMode::ConfirmUnqueue`]'s panel — today's single-line panel
@@ -358,12 +362,13 @@ pub(super) fn unqueue_confirm_panel(chain: &[ChainEntry], dir: &std::path::Path)
     };
     if chain.len() == 1 {
         let body = vec![
+            String::new(),
             "Nothing has run for it yet.".to_string(),
             String::new(),
-            "The document goes back to:".to_string(),
+            "The task goes back to:".to_string(),
             shorten_home(&dir.join(format!("{}.md", head.id))),
             String::new(),
-            "`spoolway queue` is what sends it again.".to_string(),
+            "The queue tab is what sends it again.".to_string(),
         ];
         return crate::screen::panel(
             &format!("unqueue {}", head.id),
@@ -373,9 +378,10 @@ pub(super) fn unqueue_confirm_panel(chain: &[ChainEntry], dir: &std::path::Path)
     }
 
     let mut body = vec![
+        String::new(),
         "Nothing has run for these yet.".to_string(),
         String::new(),
-        format!("{} documents go back to:", chain.len()),
+        format!("{} tasks go back to:", chain.len()),
         format!("{}/", shorten_home(dir)),
         String::new(),
     ];
@@ -391,7 +397,7 @@ pub(super) fn unqueue_confirm_panel(chain: &[ChainEntry], dir: &std::path::Path)
         }
     }
     body.push(String::new());
-    body.push("`spoolway queue` is what sends them again.".to_string());
+    body.push("The queue tab is what sends them again.".to_string());
     crate::screen::panel(
         &format!("unqueue {}", head.id),
         &body,
@@ -406,15 +412,15 @@ pub(super) fn unqueue_confirm_panel(chain: &[ChainEntry], dir: &std::path::Path)
 /// longest id: five or more unstarted tasks pushed it past 80 columns.
 pub(super) fn unqueue_all_confirm_panel(ids: &[String]) -> Vec<String> {
     let mut body = vec![
+        String::new(),
         format!(
             "{} task{} {} not started:",
             ids.len(),
             if ids.len() == 1 { "" } else { "s" },
             if ids.len() == 1 { "has" } else { "have" }
         ),
-        String::new(),
     ];
-    body.extend(ids.iter().cloned());
+    body.extend(ids.iter().map(|id| format!("  {id}")));
     body.push(String::new());
     body.push("Each goes back to pending. Running, paused and".to_string());
     body.push("blocked tasks stay where they are.".to_string());
@@ -1425,16 +1431,14 @@ pub(super) fn masthead(header: &str, pane: usize, frame: usize) -> String {
 /// The lockup with one line of prose beside it, for a command that introduces
 /// itself before it does anything.
 ///
-/// `init` and `commands::dispatch`'s own "starting" checklist are the two
-/// callers, and the reason either goes through the board's own [`masthead`]
-/// rather than printing `LOCKUP` itself is that there is one piece of art
-/// here: whatever the generator draws next, and whatever the header does at
-/// a narrow width, both surfaces do the same thing without either knowing
-/// about the other.
+/// `init` is the one caller, and the reason it goes through the board's own
+/// [`masthead`] rather than printing `LOCKUP` itself is that there is one
+/// piece of art here: whatever the generator draws next, and whatever the
+/// header does at a narrow width, both surfaces do the same thing without
+/// either knowing about the other.
 ///
 /// Empty when stdout is not a terminal. The escapes it carries are noise in
-/// a pipe, and `init`'s output is read by scripts; `dispatch` never reaches
-/// this call at all under `--plain`, which keeps its own log instead.
+/// a pipe, and `init`'s output is read by scripts.
 pub fn banner(header: &str) -> String {
     use std::io::IsTerminal;
     match std::io::stdout().is_terminal() {
@@ -1485,8 +1489,13 @@ pub(super) fn pane_width() -> usize {
 /// fallback height: output that is not a terminal has no bottom to fall off,
 /// and a board redirected to a file should keep every line it was going to
 /// write rather than being cut to a guess.
+///
+/// Inside bare `spoolway`'s dispatch tab the tab strip takes its own rows off
+/// the top first — see `crate::screen::shell::strip_rows`, zero everywhere
+/// else — so the board is measured against what is actually left under it.
 pub(super) fn pane_height() -> Option<usize> {
-    terminal_size::terminal_size().map(|(_, h)| h.0 as usize)
+    terminal_size::terminal_size()
+        .map(|(_, h)| (h.0 as usize).saturating_sub(crate::screen::shell::strip_rows()))
 }
 
 /// `text` cut to `room` visible characters, ending in `…` when anything had
@@ -1636,7 +1645,7 @@ pub(super) fn clamp_rows(frame: &str, height: Option<usize>) -> String {
 /// carries no colour of its own, so the frame beneath one can afford to lose
 /// its while it is up; the next frame, once the panel closes, is read fresh
 /// and in colour again.
-pub(super) fn strip_ansi(text: &str) -> String {
+pub(crate) fn strip_ansi(text: &str) -> String {
     let mut out = String::new();
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {

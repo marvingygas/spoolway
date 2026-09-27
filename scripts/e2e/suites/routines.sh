@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Repeatable task documents under `.spoolway/routines/`, driven end to end
-# through `spoolway queue`'s own `r` pane and `s` panel — the one path no
-# unit test can drive, since `run_screen` is exercised headlessly in Rust
-# already, but never as the whole binary reading real keystrokes off a real
-# pipe against a real, tracked `.spoolway/routines/` tree.
+# Repeatable tasks under `.spoolway/routines/`, driven end to end
+# through bare `spoolway`'s queue tab, its `r` pane and `s` panel — the one
+# path no unit test can drive, since `run_screen` is exercised headlessly in
+# Rust already, but never as the whole binary reading real keystrokes off a
+# real pipe, under the pty `on_screen` gives it, against a real, tracked
+# `.spoolway/routines/` tree.
 #
 # Nothing here drives a dispatcher: what is asserted is that `enter` lands
 # the right task files in the queue directory, under minted ids, with their
@@ -44,20 +45,21 @@ task_doc .spoolway/routines/maintenance/weekly/prune.md prune "$BODY" "group: ma
 
 # `r` swaps the pending screen for the folder tree; `j` moves the cursor off
 # `maintenance` (alphabetically first) onto `nightly`; `space` ticks it;
-# `enter` queues both its documents as one batch and reaches the overview;
-# the trailing `n` is noise it ignores, and the pipe running dry after it
-# declines, the same way `trials.sh` does.
-printf 'rj \rn' | "$SPOOLWAY" queue >/dev/null 2>&1
+# `enter` queues both its documents as one batch and goes back to browsing
+# — starting a dispatcher is the dispatch tab's `enter`, not this one's; the
+# trailing `n` is noise it ignores, and the pipe running dry ends the screen,
+# the same way `trials.sh` does.
+on_screen 'rj \rn' /dev/null
 
-works "the first document reaches the queue under a minted id" \
+works "the first task reaches the queue under a minted id" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/audit-deps-1.md"
 works "and the second beside it" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/audit-docs-1.md"
-works "never the documents' own bare ids" \
+works "never the tasks' own bare ids" \
   bash -c '[ ! -e "$1/queue/audit-deps.md" ] && [ ! -e "$1/queue/audit-docs.md" ]' \
   _ "$SPOOLWAY_PROJECT_HOME"
 
-has "the minted copy keeps the document's own group" "group: nightly" \
+has "the minted copy keeps the task's own group" "group: nightly" \
   "$SPOOLWAY_PROJECT_HOME/queue/audit-deps-1.md"
 has "and its body, untouched" "Add \`notes/<id>.md\`" \
   "$SPOOLWAY_PROJECT_HOME/queue/audit-deps-1.md"
@@ -75,9 +77,9 @@ has "unminted, unmodified" "id: audit-deps" \
 # A second, solo pick: `→` opens `maintenance` (it holds a subfolder, so this
 # descends rather than focusing its own tasks pane, which it has none of
 # directly); `→` again opens `weekly`, a leaf, which focuses its one task;
-# `space` queues it alone and reaches the overview again; the trailing `n`
-# is noise it ignores, and the pipe running dry after it declines.
-printf 'r\x1b[C\x1b[C n' | "$SPOOLWAY" queue >/dev/null 2>&1
+# `space` queues it alone and goes back to browsing; the trailing `n` is
+# noise it ignores, and the pipe running dry ends the screen.
+on_screen 'r\x1b[C\x1b[C n' /dev/null
 
 works "a solo pick under a nested folder reaches the queue too" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/prune-1.md"
@@ -87,7 +89,7 @@ works "a solo pick under a nested folder reaches the queue too" \
 # one document into `.spoolway/routines/release/`, unchanged; the screen
 # then ends as the pipe drains.
 pending_doc release-notes "$BODY" "group: release"
-printf 's\r' | "$SPOOLWAY" queue >/dev/null 2>&1
+on_screen 's\r' /dev/null
 
 works "the saved routine landed in the checkout" \
   test -f .spoolway/routines/release/release-notes.md
@@ -125,9 +127,9 @@ task_doc "$SPOOLWAY_PROJECT_HOME/queue/archived-reuse.md" archived-reuse "$BODY"
   "epic: https://example.invalid/epic/9" \
   "ticket: https://example.invalid/ticket/9"
 
-printf 'farchived-\rs\r' | "$SPOOLWAY" queue >/dev/null 2>&1
+on_screen 'farchived-\rs\r' /dev/null
 
-works "a document an earlier run already stamped still saves as a routine" \
+works "a task an earlier run already stamped still saves as a routine" \
   test -f .spoolway/routines/archived-reuse/archived-reuse.md
 has "the author's own group survives the reset" "group: archived-reuse" \
   .spoolway/routines/archived-reuse/archived-reuse.md
@@ -144,7 +146,7 @@ lacks "and the epic a fresh run must not inherit" "epic:" \
 # `archived-reuse` sorts before every routine folder this suite wrote earlier
 # — so `space` ticks it and `enter` queues it straight from there, the same
 # `n`-declines-the-dispatcher shape every other queueing keystroke here uses.
-printf 'r \rn' | "$SPOOLWAY" queue >/dev/null 2>&1
+on_screen 'r \rn' /dev/null
 
 works "the saved routine queues back, past the refusal a stamped copy would hit" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/archived-reuse-1.md"

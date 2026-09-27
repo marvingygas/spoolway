@@ -475,7 +475,7 @@ TASKBODY
 
 # task_doc <path> <id> <body-file> [extra frontmatter lines...]
 #
-# Writes a whole task document to <path>: `id: <id>`, whatever extra
+# Writes a whole task to <path>: `id: <id>`, whatever extra
 # frontmatter lines a suite names, and the given body underneath — the shape
 # `queue add --from` reads, since the per-task flags it used to take
 # (`--body-file`, `--depends-on`, `--plan`, `--pipeline`, `--parallel`) are
@@ -523,7 +523,7 @@ task_doc() {
 
 # pending_doc <id> <body-file> [extra frontmatter lines...]
 #
-# One task document in the pending directory the queue screen scans — the
+# One task in the pending directory the queue screen scans — the
 # same document `task_doc` writes, put where a producer leaves it rather than
 # where a `--from` argument would name it.
 pending_doc() {

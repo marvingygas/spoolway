@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# The queue screen's `t` picker, driven end to end — the one path no unit
-# test can drive, since `run_screen` is exercised headlessly in Rust
-# already, but never as the whole binary reading real keystrokes off a real
-# pipe. `t` forks a whole group: one pipeline assigned per task on the first
-# popup, one skip set per task on the second, one new arm per source task
-# under one freshly minted trial id.
+# The queue tab's `t` picker, driven end to end — the one path no unit test
+# can drive, since `run_screen` is exercised headlessly in Rust already, but
+# never as the whole binary reading real keystrokes off a real pipe, under
+# the pty `on_screen` gives it. `t` forks a whole group: one pipeline
+# assigned per task on the first popup, one skip set per task on the second,
+# one new arm per source task under one freshly minted trial id.
 #
 # The first half of this suite drives no dispatcher: a trial's whole setup job
 # is landing arms in the queue directory with the right `pipeline:`, `skip:`,
@@ -64,16 +64,15 @@ pending_doc beta "$BODY" "group: audits" "pipeline:" \
 # loses a step. `alpha` contributes seven checkboxes, not the six steps
 # `bugfix` declares, because every pipeline is loaded with a `blocked` step
 # appended to it; `beta` contributes five the same way. `enter` mints and
-# writes both arms and reaches the overview; the trailing `n` is noise the
-# overview ignores, and the pipe running dry after it declines the same way
-# `esc` would.
-printf '\tt\x1b[Dj\x1b[C\x1b[C\rj jjjjjjjj \rn' | "$SPOOLWAY" queue >/dev/null 2>&1
+# writes both arms and goes back to browsing; the trailing `n` is noise the
+# screen ignores, and the pipe running dry ends it the same way `esc` would.
+on_screen '\tt\x1b[Dj\x1b[C\x1b[C\rj jjjjjjjj \rn' /dev/null
 
 works "the alpha arm reaches the queue" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/alpha-1.md"
 works "and the beta arm beside it" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/beta-1.md"
-works "two distinct minted ids — never either document's own bare one" \
+works "two distinct minted ids — never either task's own bare one" \
   bash -c '[ ! -e "$1/queue/alpha.md" ] && [ ! -e "$1/queue/beta.md" ]' \
   _ "$SPOOLWAY_PROJECT_HOME"
 
@@ -87,7 +86,7 @@ works "alpha's own ticked skip, and none of beta's" \
 works "beta's own ticked skip, and none of alpha's" \
   bash -c 'grep -A1 "^skip:" "$1" | tail -1 | grep -qxF -- "- document"' \
   _ "$SPOOLWAY_PROJECT_HOME/queue/beta-1.md"
-has "both arms keep the document's own group" "group: audits" \
+has "both arms keep the task's own group" "group: audits" \
   "$SPOOLWAY_PROJECT_HOME/queue/alpha-1.md"
 has "on both arms" "group: audits" \
   "$SPOOLWAY_PROJECT_HOME/queue/beta-1.md"
@@ -111,7 +110,7 @@ works "not left naming the bare id nothing in this batch is queued under" \
 # A trial forks the documents; it does not submit them. The pending copies
 # are templates the picker read from, not a batch the screen queued and
 # cleared.
-works "both source documents are left exactly where they were" \
+works "both source tasks are left exactly where they were" \
   bash -c 'test -f "$1/pending/alpha.md" && test -f "$1/pending/beta.md"' \
   _ "$SPOOLWAY_PROJECT_HOME"
 
@@ -138,9 +137,9 @@ task_doc "$SPOOLWAY_PROJECT_HOME/queue/old-run.md" old-run "$BODY" \
   "attempts: 2" \
   "pipeline:"
 
-printf 'fold-run\rt\x1b[C\x1b[C\r\rn' | "$SPOOLWAY" queue >/dev/null 2>&1
+on_screen 'fold-run\rt\x1b[C\x1b[C\r\rn' /dev/null
 
-works "the reset lets a stamped document reach \`finish_trial\` at all" \
+works "the reset lets a stamped task reach \`finish_trial\` at all" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/old-run-1.md"
 has "under the pipeline cycled onto it" "pipeline: default" \
   "$SPOOLWAY_PROJECT_HOME/queue/old-run-1.md"
@@ -253,10 +252,10 @@ done
 # document, worktree and branch survive exactly as before, so the trial
 # arms' disappearance is the trial boundary and not ordinary teardown acting
 # on everyone alike.
-has "the control keeps its archive document, the durable record cleanup means" \
+has "the control keeps its archive task, the durable record cleanup means" \
   "id: control" "$SPOOLWAY_PROJECT_HOME/archive/control.md"
 for arm in alpha-1 beta-1; do
-  works "$arm's archive document is gone, not merely queued for retention" \
+  works "$arm's archive task is gone, not merely queued for retention" \
     bash -c '[ ! -e "$1" ]' _ "$SPOOLWAY_PROJECT_HOME/archive/$arm.md"
   works "$arm's local branch is gone" \
     bash -c '! git rev-parse --verify -q "task/$1" >/dev/null' _ "$arm"
@@ -295,9 +294,9 @@ works "and compares the second arm against the first on one delta line" \
 # A trial of its own group, so the discard below has nothing in common with
 # the two arms already settled. `t`'s minimal form: `f` narrows to the group
 # by name, `enter` leaves the search box keeping the query, `t` opens the
-# picker, two `enter`s take both screens' defaults, reaching the overview;
-# the trailing `n` is noise it ignores, and the pipe running dry after it
-# declines.
+# picker, two `enter`s take both screens' defaults and queue the trial;
+# the trailing `n` is noise it ignores, and the pipe running dry ends the
+# screen.
 #
 # Mid-flight is a state this makes rather than one it catches. A mock lane's
 # step is over in a couple of hundred milliseconds and `drive` looks every two
@@ -326,7 +325,7 @@ for pipeline_file in .spoolway/pipelines/*.yml; do
 done
 
 pending_doc oneoff "$BODY" "group: oneoff"
-printf 'foneoff\rt\r\rn' | "$SPOOLWAY" queue >/dev/null 2>&1
+on_screen 'foneoff\rt\r\rn' /dev/null
 
 works "the one-task trial's arm reaches the queue" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/oneoff-1.md"
@@ -353,7 +352,7 @@ says "the discard names the trial it threw away" "discarded" \
 says "and points back at the same ledger the settlement path reads" \
   "eval --by task --trial $SOLO_TRIAL" \
   bash -c 'printf "%s" "$1"' _ "$DISCARD_OUT"
-works "the discarded arm's task document is gone" \
+works "the discarded arm's task is gone" \
   bash -c '[ ! -e "$1" ]' _ "$SPOOLWAY_PROJECT_HOME/queue/oneoff-1.md"
 works "its worktree is gone" \
   bash -c '[ ! -e "$1" ]' _ "$SPOOLWAY_PROJECT_HOME/worktrees/task-oneoff-1"
@@ -363,7 +362,7 @@ works "its local branch is gone, though nothing ever pushed it" \
 # Acceptance criterion: the original source group is never modified or removed
 # by trial cleanup — a discard reaches further than settlement does, and still
 # must not reach this.
-works "the source document the trial forked is left where it was" \
+works "the source task the trial forked is left where it was" \
   test -f "$SPOOLWAY_PROJECT_HOME/pending/oneoff.md"
 
 # A trial id nothing carries is a typo, and removing nothing quietly reads

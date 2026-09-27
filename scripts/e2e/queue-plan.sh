@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Queue a plan's tasks into the project scripts/e2e/scaffold.sh just built.
 #
-# The `spoolway queue` screen is what queues a plan in real life, and it asks a
+# Bare `spoolway`'s queue tab is what queues a plan in real life, and it asks a
 # person to pick which plan, which cards, and any gates on the way. A plan
 # under scripts/e2e/plans/ has already answered all of that: it is named on
 # the command line, every task in it carries `"pipeline"`, and starting the

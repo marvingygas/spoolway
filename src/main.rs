@@ -95,27 +95,18 @@ fn main() {
 /// `Ok(0)` — a run that dispatched and stopped on its own, or any other
 /// ordinary success this command has not given its own code — takes the
 /// normal `Ok(())` path below and so exits 0 like every other command.
-/// `Ok(n)` for any other `n` exits directly with that code. A restart storm's
-/// own [`commands::RestartsRefused`] is downcast out of the error and exits
-/// 5; every other error falls through to `run`'s usual `Err` handling above,
-/// which prints it and exits 1.
+/// `Ok(n)` for any other `n` exits directly with that code. Every error
+/// falls through to `run`'s usual `Err` handling above, which prints it and
+/// exits 1.
 fn exit_dispatch(result: Result<i32>) -> Result<()> {
     match result {
         Ok(0) => Ok(()),
         Ok(code) => std::process::exit(code),
-        Err(err) => match err.downcast::<commands::RestartsRefused>() {
-            Ok(refused) => {
-                eprintln!("spoolway: {refused}");
-                std::process::exit(5);
-            }
-            Err(err) => Err(err),
-        },
+        Err(err) => Err(err),
     }
 }
 
 fn run() -> Result<()> {
-    use std::io::IsTerminal;
-
     let cli = cli::parse();
 
     // Before anything else, and before a repo is looked for: this is the
@@ -136,7 +127,9 @@ fn run() -> Result<()> {
     }
 
     let cwd = cli.repo.clone().unwrap_or(std::env::current_dir()?);
-    notify(&cli, &cwd);
+    // Bare `spoolway` shows the notice as a popup over its screen — see
+    // `notify` — so it is held here until the screen is open.
+    let update = notify(&cli, &cwd);
 
     match &cli.command {
         // `init` is the one command that runs before a project exists, so it
@@ -278,13 +271,22 @@ fn run() -> Result<()> {
             // Whether this checkout has fallen behind a `spoolway update`
             // that already ran, before anything else here reads a file:
             // `sync` is the one command this must never draw in front of —
-            // it *is* the thing the panel offers to run — so it is the one
-            // exclusion named here rather than left to fall out of the
-            // match below. Every other excluded command (`init`, `doctor`,
-            // `whats-new`, `update`, `config edit`, `config override`) is
-            // answered in an earlier arm of the outer match and never
-            // reaches this one at all.
+            // it *is* the thing the panel offers to run — so it is excluded
+            // by name here rather than left to fall out of the match below.
+            // Every other excluded command (`init`, `doctor`, `whats-new`,
+            // `update`, `config edit`, `config override`) is answered in an
+            // earlier arm of the outer match and never reaches this one at
+            // all.
+            //
+            // Bare `spoolway` asks the same question as a popup over the tab
+            // it opens on instead — see `gate::sync_popup` — which reads the
+            // project's pipelines first, the one file read ahead of the
+            // question. When they do not load, the screen could not open to
+            // ask, and it is asked here, printed, like every other command:
+            // see `gate::asks_as_popup`.
+            let popup = matches!(command, Command::Screen) && gate::asks_as_popup(&repo);
             if !matches!(command, Command::Sync(_))
+                && !popup
                 && !gate::confirm_sync_gate(
                     &repo,
                     std::env::var_os(dispatch::ENV_STEP).is_some(),
@@ -348,24 +350,6 @@ fn run() -> Result<()> {
                 Command::Models {
                     command: Some(ModelsCommand::Refresh(args)),
                 } => models::refresh(&repo, args),
-                // Bare `spoolway eval`, none of `eval`'s own flags and no
-                // `--json`: the screen. Any of `eval`'s own flags — including
-                // one spelled out to its own default — takes the printing
-                // path instead, unchanged. The globals `--repo`/`-C` and
-                // `--json` are not `eval`'s own, so neither of them makes an
-                // otherwise bare `eval` print; `--json` is turned away by the
-                // separate `!cli.json` guard below, which is about the output
-                // format rather than about bareness. The screen also needs
-                // a real tty: it draws with raw mode and full-screen
-                // escapes, which is exactly the frame of garbage
-                // `spoolway eval > report.txt` used to write when nothing
-                // here checked for a pipe — the same check `paint` and
-                // `banner` already make before colouring a line.
-                Command::Eval(_)
-                    if cli.eval_bare && !cli.json && std::io::stdout().is_terminal() =>
-                {
-                    eval::screen(&repo, routing(&graph)?)
-                }
                 // `--discard` is the one thing `eval` does rather than
                 // prints, so it is answered before the printing path and
                 // never reaches `eval::run`. It needs the two things a
@@ -407,31 +391,28 @@ fn run() -> Result<()> {
                         cli.json,
                     )
                 }
-                // Bare `spoolway queue`, with no subcommand: the screen.
-                Command::Queue { command: None } => {
-                    commands::queue_screen(&repo, routing(&graph)?, &cwd)
+                // Bare `spoolway` in a terminal: the one screen, holding the
+                // dispatch, queue, jobs and eval tabs. Off a terminal no
+                // command at all never gets this far — `cli::parse` prints
+                // the grouped help instead.
+                Command::Screen => screen::shell::run(&repo, routing(&graph)?, &cwd, update),
+                Command::Queue(QueueCommand::List) => {
+                    commands::queue_list(&repo, routing(&graph)?, cli.json)
                 }
-                Command::Queue {
-                    command: Some(QueueCommand::List),
-                } => commands::queue_list(&repo, routing(&graph)?, cli.json),
-                Command::Queue {
-                    command: Some(QueueCommand::Show { task }),
-                } => commands::queue_show(&repo, task),
-                Command::Queue {
-                    command: Some(QueueCommand::Add(args)),
-                } => {
+                Command::Queue(QueueCommand::Show { task }) => commands::queue_show(&repo, task),
+                Command::Queue(QueueCommand::Add(args)) => {
                     let in_lane = std::env::var(commands::TASK_ENV).is_ok();
                     commands::queue_add(&repo, routing(&graph)?, args, &cwd, in_lane)
                 }
-                Command::Queue {
-                    command: Some(QueueCommand::Pause(args)),
-                } => commands::queue_pause(&repo, routing(&graph)?, &args.task, args.force),
-                Command::Queue {
-                    command: Some(QueueCommand::Resume { task }),
-                } => commands::queue_resume(&repo, routing(&graph)?, task),
-                Command::Queue {
-                    command: Some(QueueCommand::Unqueue(args)),
-                } => commands::queue_unqueue(&repo, routing(&graph)?, args),
+                Command::Queue(QueueCommand::Pause(args)) => {
+                    commands::queue_pause(&repo, routing(&graph)?, &args.task, args.force)
+                }
+                Command::Queue(QueueCommand::Resume { task }) => {
+                    commands::queue_resume(&repo, routing(&graph)?, task)
+                }
+                Command::Queue(QueueCommand::Unqueue(args)) => {
+                    commands::queue_unqueue(&repo, routing(&graph)?, args)
+                }
 
                 // `cwd`, for the same reason `queue add` reads it: `--from`
                 // resolves `base` the same way, and the cross-base rule it
@@ -502,16 +483,8 @@ fn run() -> Result<()> {
 
                 Command::Group(GroupCommand::List) => commands::group_list(&repo),
 
-                // Bare `spoolway jobs`, with no subcommand: the screen.
-                Command::Jobs { command: None } => {
-                    commands::jobs_screen(&repo, routing(&graph)?, &cwd)
-                }
-                Command::Jobs {
-                    command: Some(JobsCommand::List),
-                } => commands::jobs_list(&repo, cli.json),
-                Command::Jobs {
-                    command: Some(JobsCommand::Run(args)),
-                } => {
+                Command::Jobs(JobsCommand::List) => commands::jobs_list(&repo, cli.json),
+                Command::Jobs(JobsCommand::Run(args)) => {
                     let in_lane = std::env::var(commands::TASK_ENV).is_ok();
                     commands::jobs_run(&repo, routing(&graph)?, &args.name, in_lane)
                 }
@@ -550,7 +523,9 @@ fn routing(graph: &Result<Pipelines>) -> Result<&Pipelines> {
 }
 
 /// Say, once, that a newer release is out — if there is a person here to say
-/// it to.
+/// it to. Bare `spoolway` gets the line back instead of printed, for its
+/// screen to show as a popup: printed ahead of the screen, it would be wiped
+/// by the first frame before anybody could read it.
 ///
 /// In front of every command rather than inside any of them, because "which
 /// commands should mention this" has exactly one defensible answer and it is
@@ -560,7 +535,7 @@ fn routing(graph: &Result<Pipelines>) -> Result<&Pipelines> {
 /// The config read is deliberately lenient and deliberately discarded: a
 /// project whose config does not parse still gets its notice, and a directory
 /// that is no project at all — somebody about to run `init` — gets one too.
-fn notify(cli: &Cli, cwd: &std::path::Path) {
+fn notify(cli: &Cli, cwd: &std::path::Path) -> Option<String> {
     use std::io::IsTerminal;
 
     // Not in front of the command it would advise. `update` says what it is
@@ -577,14 +552,14 @@ fn notify(cli: &Cli, cwd: &std::path::Path) {
         cli.command,
         Command::Update(_) | Command::WhatsNew(_) | Command::Herdr(_)
     ) {
-        return;
+        return None;
     }
 
     let enabled = Repo::discover_lenient(cwd)
         .map(|(repo, _, _)| repo.config.housekeeping.update_check)
         .unwrap_or(true);
 
-    release::notify(release::Audience {
+    let audience = release::Audience {
         // The dispatcher exports this into every lane it launches. A lane that
         // reads "Run spoolway update" is a lane that runs it, mid-step, in a
         // worktree it is being reviewed on.
@@ -593,7 +568,12 @@ fn notify(cli: &Cli, cwd: &std::path::Path) {
         tty: std::io::stderr().is_terminal(),
         enabled,
         skipped: std::env::var_os(release::ENV_SKIP).is_some(),
-    });
+    };
+    if matches!(cli.command, Command::Screen) {
+        return release::notice(audience);
+    }
+    release::notify(audience);
+    None
 }
 
 /// Where `spoolway init` should place `.spoolway/`: the git toplevel if there is

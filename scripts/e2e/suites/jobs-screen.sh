@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# The `spoolway jobs` screen, driven end to end as the whole binary reading
-# real keystrokes off a real pipe against a real, tracked
-# `.spoolway/routines/` tree — the one path no unit test covers, since
-# `run_jobs_screen` is exercised headlessly in Rust already but never as the
-# installed binary.
+# Bare `spoolway`'s jobs tab, one `→` from the queue tab it opens on, driven
+# end to end as the whole binary reading real keystrokes off a real pipe
+# against a real, tracked `.spoolway/routines/` tree — the one path no unit
+# test covers, since `run_jobs_screen` is exercised headlessly in Rust already
+# but never as the installed binary.
 #
 # What is asserted is the TOML the screen writes: a completed walk lands a
 # `[jobs.<name>]` table in the user store, `space` pauses it, `x`+`y` removes
@@ -35,13 +35,13 @@ task_doc .spoolway/routines/nightly/audit-deps.md audit-deps "$BODY" "group: nig
 
 STORE="$SPOOLWAY_PROJECT_HOME/jobs.toml"
 
-# n opens the routines browser; space ticks the first folder (`nightly`);
-# enter uses it; the expression is typed; enter accepts it; enter chooses
-# whichever pipeline the picker opens on — there is no project default any
-# more, so it opens on the alphabetically first of the shipped set
-# (`bugfix`, `default`), which is `bugfix`. The screen then ends as the pipe
-# drains.
-printf 'n \r0 3 * * 1-5\r\r' | "$SPOOLWAY" jobs >/dev/null 2>&1
+# `→` opens the jobs tab; n opens the routines browser; space ticks the first
+# folder (`nightly`); enter uses it; the expression is typed; enter accepts
+# it; enter chooses whichever pipeline the picker opens on — there is no
+# project default any more, so it opens on the alphabetically first of the
+# shipped set (`bugfix`, `default`), which is `bugfix`. The screen then ends
+# as the pipe drains.
+on_screen '\033[Cn \r0 3 * * 1-5\r\r' /dev/null
 
 works "the walk writes a job store" test -f "$STORE"
 has "under a table named for the routine" "[jobs.nightly]" "$STORE"
@@ -54,15 +54,15 @@ says "and jobs list now shows it" "nightly" "$SPOOLWAY" jobs list
 
 # space over the highlighted job pauses it; the screen then ends as the pipe
 # drains, the same as the walk above.
-printf ' ' | "$SPOOLWAY" jobs >/dev/null 2>&1
+on_screen '\033[C ' /dev/null
 has "space pauses the job" "enabled = false" "$STORE"
 
 # space again resumes it — the key is dropped, not written back as true.
-printf ' ' | "$SPOOLWAY" jobs >/dev/null 2>&1
+on_screen '\033[C ' /dev/null
 lacks "space again resumes it" "enabled" "$STORE"
 
 # x asks, y confirms.
-printf 'xy' | "$SPOOLWAY" jobs >/dev/null 2>&1
+on_screen '\033[Cxy' /dev/null
 lacks "x then y deletes the job" "[jobs.nightly]" "$STORE"
 
 finish

@@ -25,7 +25,7 @@
 //! [`Runs::forget`] is [`retry_if_failed`] — see there for why a `done` hold
 //! is the one event this must not be true of forever. [`open_ticket`] needs
 //! none of that: `queue add` is the only caller there ever is, and it means
-//! "run this now" every time it calls at all — a document already naming a
+//! "run this now" every time it calls at all — a task already naming a
 //! `ticket:` is what its own caller, `queue::open_tickets`, reads as
 //! "already open" and skips before this is ever reached.
 
@@ -250,7 +250,7 @@ pub(crate) const COMMON_EVENT_VARS: &[(&str, &str)] = &[
 /// the two never drift apart.
 pub(crate) const OPEN_EVENT_VARS: &[(&str, &str)] = &[
     ("SPOOLWAY_TASK", "the id it is about to be queued under"),
-    ("SPOOLWAY_SOURCE", "the task document's own `source:`"),
+    ("SPOOLWAY_SOURCE", "the task's own `source:`"),
     ("SPOOLWAY_GROUP", "its `group:`"),
     (
         "SPOOLWAY_GROUP_DESCRIPTION",
@@ -260,7 +260,7 @@ pub(crate) const OPEN_EVENT_VARS: &[(&str, &str)] = &[
     ("SPOOLWAY_TITLE", "its title"),
     (
         "SPOOLWAY_TASK_FILE",
-        "the document's path while this hook runs; blank when it has no file of its own",
+        "the task's path while this hook runs; blank when it has no file of its own",
     ),
     (
         "SPOOLWAY_GROUP_SIZE",
@@ -297,15 +297,15 @@ pub(crate) const OPEN_EVENT_VARS: &[(&str, &str)] = &[
 /// `task_file` is handed in rather than read off `task.path`: at the moment
 /// this hook runs the task has not been written to the queue yet — `task.
 /// path` already names where `validate_batch` intends to save it, a file
-/// that does not exist until after every document in the batch has opened
-/// its ticket. The caller passes the path the document actually sits at
+/// that does not exist until after every task in the batch has opened
+/// its ticket. The caller passes the path the task actually sits at
 /// right now instead, which is what usually makes `SPOOLWAY_TASK_FILE` a
-/// path a hook can open — usually, not always: a document with no file of
+/// path a hook can open — usually, not always: a task with no file of
 /// its own at all, such as a `queue add --from -` stream entry, has nothing
 /// truthful to hand over, and the caller passes the empty string for that
 /// case rather than a name nothing can open. `group_description` is
 /// likewise the caller's to resolve — `open_tickets` reads it off whichever
-/// document in the group set it,
+/// task in the group set it,
 /// this task's own frontmatter included.
 fn open_env(
     repo: &Repo,
@@ -435,7 +435,7 @@ fn fetch_env(reference: &str, project_key: &str) -> BTreeMap<String, String> {
 
 /// A filesystem-safe stem for one `fetch` run's tracking files, keyed on the
 /// issue reference rather than a task id — `spoolway issue show` runs before
-/// any document naming the issue exists, so there is no task to key on.
+/// any task naming the issue exists, so there is no task to key on.
 ///
 /// [`Runs::key`]'s `<step> · <reference>` cannot be used here: the shipped
 /// `github.sh` hook takes a URL, so a URL is the natural thing to type, and a
@@ -479,7 +479,7 @@ fn fetch_key(reference: &str) -> String {
 /// back to a caller with nothing useful to do with either.
 ///
 /// Unlike every other event this one has no task behind it at all — it runs
-/// before any document naming this issue even exists — so its tracking files
+/// before any task naming this issue even exists — so its tracking files
 /// are keyed on the reference through [`fetch_key`], and the environment
 /// carries none of a task's own fields: no `SPOOLWAY_TASK`, no
 /// `SPOOLWAY_SOURCE`, nothing but the event, the reference and the project
@@ -634,9 +634,22 @@ pub(crate) fn missing_fetch_branch(checkout: &Path, hook_name: &str) -> Option<S
 
 /// Whether a hook is configured at all — what lets `queue add` skip
 /// [`open_ticket`] and its own report entirely rather than call it once per
-/// document only to have every call answer [`OpenResult::NoHook`].
+/// task only to have every call answer [`OpenResult::NoHook`].
 pub fn configured(repo: &Repo) -> bool {
     hook_path(repo).is_some()
+}
+
+/// The tracker a configured hook opens tickets on, as the queue screen's
+/// question names it before any is opened: the hook's own filename with its
+/// extension dropped — `github.sh` is `github`, `jira.sh` is `jira`. A hook
+/// says nothing else about where its tickets go, and the shipped hooks are
+/// named for their trackers, so the name is the one honest thing to say.
+pub(crate) fn tracker(repo: &Repo) -> String {
+    let hook = repo.config.issue_tracking.hook.trim();
+    Path::new(hook)
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_else(|| hook.to_string())
 }
 
 /// Whether `config.toml`'s `on_fail` asks a failed hook to hold the task
@@ -1510,11 +1523,11 @@ mod tests {
             f.source = Some("/plans/scanner-rework.html".into());
         });
 
-        // The document this task came from, sitting wherever `queue add`
+        // The task this task came from, sitting wherever `queue add`
         // reads it from mid-flight — not `t.path`, which names where it
         // will land in the queue, a file that does not exist yet.
         let source_doc = repo.root.join("scan-pending.md");
-        std::fs::write(&source_doc, "the document's own live contents\n").unwrap();
+        std::fs::write(&source_doc, "the task's own live contents\n").unwrap();
 
         let result = open_ticket(
             &repo,
@@ -1544,14 +1557,14 @@ mod tests {
         assert!(seen.contains("/plans/scanner-rework.html"), "{seen}");
 
         // `SPOOLWAY_TASK_FILE` names a path the hook can actually open and
-        // read — the document's real, current contents, not the queue path
+        // read — the task's real, current contents, not the queue path
         // `validate_batch` has merely decided on.
         let task_file_seen = std::fs::read_to_string(
             repo.tracking_dir()
                 .join(format!("{key}.epic-body.md.task-file.seen")),
         )
         .unwrap();
-        assert_eq!(task_file_seen, "the document's own live contents\n");
+        assert_eq!(task_file_seen, "the task's own live contents\n");
 
         let description_seen = std::fs::read_to_string(
             repo.tracking_dir()
