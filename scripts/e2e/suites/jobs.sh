@@ -79,15 +79,15 @@ poll_until 20 test -f "$SPOOLWAY_PROJECT_HOME/queue/audit-docs-1.md" \
   && ok "the job fired: the routine's second document reached the queue under a minted id" \
   || bad "the job never queued audit-docs-1 (dispatch log follows)"
 
-works "and the first document too, in the queue or already archived" \
+works "and the first task too, in the queue or already archived" \
   bash -c '[ -f "$1/queue/audit-deps-1.md" ] || [ -f "$1/archive/audit-deps-1.md" ]' \
   _ "$SPOOLWAY_PROJECT_HOME"
 
-works "never the routine documents' own bare ids" \
+works "never the routine tasks' own bare ids" \
   bash -c '[ ! -e "$1/queue/audit-deps.md" ] && [ ! -e "$1/queue/audit-docs.md" ]' \
   _ "$SPOOLWAY_PROJECT_HOME"
 
-has "the minted copy keeps the document's own group" "group: nightly" \
+has "the minted copy keeps the task's own group" "group: nightly" \
   "$SPOOLWAY_PROJECT_HOME/queue/audit-docs-1.md"
 has "and is put on the job's pipeline" "pipeline: default" \
   "$SPOOLWAY_PROJECT_HOME/queue/audit-docs-1.md"

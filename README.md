@@ -36,7 +36,7 @@ add model costs or depend on an agent's judgment.
 ## How does it work?
 
 spoolway gives each agent a system prompt that tells it how to report its outcome with
-`spoolway report`. The task document carries context between steps. Through herdr, agents can
+`spoolway report`. The task carries context between steps. Through herdr, agents can
 interact with one another across harnesses.
 
 An agent can report four outcomes:
@@ -107,13 +107,13 @@ spoolway init
 
 ### 2. Create queueable tasks
 
-Use `/spoolway-tasks` to cut an agreed plan or any other defined scope into Markdown task
-documents. It assigns each task to a suitable pipeline and writes the documents to
+Use `/spoolway-tasks` to cut an agreed plan or any other defined scope into Markdown tasks.
+It assigns each task to a suitable pipeline and writes the tasks to
 `~/.spoolway/<label>-<id>/pending/`. You can create specialized pipelines for different kinds
 of work. If you want help shaping the work first, use `/spoolway-plan`.
 
 You can also create tasks with your own skills. This command prints the frontmatter
-each task document must carry:
+each task must carry:
 
 ```
 spoolway task contract
@@ -287,7 +287,7 @@ Event hooks can sync tasks with an issue tracker. Sample scripts for GitHub and 
 | Event | When it fires |
 |---|---|
 | `fetch` | `spoolway issue show <ref>` reads one issue out of the tracker |
-| `open` | `spoolway queue add` opens a ticket per document |
+| `open` | `spoolway queue add` opens a ticket per task |
 | `queued` | A task arrives in the queue |
 | `blocked` | A task comes to rest on `blocked` |
 | `paused` | A task arrives on the persisted `paused` stage |

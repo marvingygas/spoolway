@@ -10,7 +10,7 @@ covers the task file, queueing it, ordering tasks, and getting a stuck task movi
 
 ```mermaid
 flowchart LR
-  A[document in pending/] -->|spoolway queue| B[task file in queue/]
+  A[task in pending/] -->|spoolway queue| B[task file in queue/]
   B --> C[worktree and branch]
   C --> D[steps of its pipeline]
   D -->|done| E[archive/]
@@ -57,7 +57,7 @@ as JSON.
 | `source` | you | Where the task came from: an issue URL, a plan page path, a name. Never parsed. |
 | `plan` | you | The plan page's absolute path, when `source` holds an issue. Never parsed. |
 | `group_description` | you | The group's own words for its tracker issue. See [Issue tracking](configuration.md#open--a-fifth-event-run-by-queue-add-itself). |
-| `epic`, `ticket` | the `open` hook, or you | Tracker references. A document that sets `ticket:` itself skips the hook. See [Issue tracking](configuration.md#open--a-fifth-event-run-by-queue-add-itself). |
+| `epic`, `ticket` | the `open` hook, or you | Tracker references. A task that sets `ticket:` itself skips the hook. See [Issue tracking](configuration.md#open--a-fifth-event-run-by-queue-add-itself). |
 | `stage` | the pipeline | The step the task is on. |
 | `branch` | the dispatcher | `task/<id>`, or `task/<slug>-<id>` with `issue_tracking.key_in_names`. |
 | `cut_from` | the dispatcher | The branch the worktree was cut from: the first dependency's branch, else `base`. The pull request opens against it. |
@@ -73,20 +73,20 @@ as JSON.
 
 Keys not in this table are kept as they are, so a project can add its own metadata.
 
-### What a document may set
+### What a task may set
 
-`id`, `title` and `group` are required. The other keys marked "you" are optional. A document
+`id`, `title` and `group` are required. The other keys marked "you" are optional. A task
 with an empty body is refused.
 
-Six keys are refused in a document: `stage`, `run`, `attempts`, `base_commit`, `cut_from` and
+Six keys are refused in a task: `stage`, `run`, `attempts`, `base_commit`, `cut_from` and
 `branch`.
 
 ```
 $ spoolway queue add --from mine.md
-mine.md sets `run:`, which spoolway sets on every task itself — remove it from the document
+mine.md sets `run:`, which spoolway sets on every task itself — remove it from the task
 ```
 
-Every other dispatcher field in a document is dropped.
+Every other dispatcher field in a task is dropped.
 
 ### One constraint no key can express
 
@@ -107,8 +107,8 @@ When `depends_on` names more than one id, the first must be the one whose branch
 contains the others. `queue add` reorders the list to put it first. A list with no such id is
 refused.
 
-When `issue_tracking.hook` is set, one document in a group must set `group_description:`. A
-document already queued in the same group also satisfies it. A submission is refused, naming
+When `issue_tracking.hook` is set, one task in a group must set `group_description:`. A
+task already queued in the same group also satisfies it. A submission is refused, naming
 the group, when none does.
 
 ### The body is the project's
@@ -146,7 +146,7 @@ their `## Handoff`, the scope its `touches` globs set, and the scratch directory
 ### Get the skeleton
 
 ```
-spoolway queue add                 # prints a document skeleton with a `pipeline:` row to fill in
+spoolway queue add                 # prints a task skeleton with a `pipeline:` row to fill in
 ```
 
 The skeleton's `pipeline:` row names the first pipeline alphabetically and lists every other
@@ -157,7 +157,7 @@ a file of its own.
 ### Add it
 
 `spoolway queue add --from` is the only way into the queue. The queue screen uses it too. All
-documents in one call are checked together and written all or none.
+tasks in one call are checked together and written all or none.
 
 ```
 spoolway queue add --from task.md               # one file
@@ -166,7 +166,7 @@ spoolway queue add --from tasks/                # every *.md in a directory
 spoolway queue add --from -                     # a `---`-separated stream on stdin
 ```
 
-Producers write documents to `~/.spoolway/<project>/pending/`. The queue screen lists that
+Producers write tasks to `~/.spoolway/<project>/pending/`. The queue screen lists that
 directory and `.spoolway/routines/`. See [Queueing a plan](planning.md#queueing-a-plan).
 
 <img src="screenshots/queue.png" alt="the queue screen">
@@ -180,7 +180,7 @@ step.
 |---|---|
 | `spoolway queue list` | Whether a dispatcher runs, and where every task is. |
 | `spoolway queue show <task>` | Prints one task file. |
-| `spoolway queue add --from <path>` | Queues documents. |
+| `spoolway queue add --from <path>` | Queues tasks. |
 | `spoolway queue conflicts` | Reports overlapping `touches` with no order between them. |
 | `spoolway queue pause <task>` | Stops the task's lane and parks it on `paused`. |
 | `spoolway queue resume <task>` | Same as `r` on the board. |
@@ -262,7 +262,7 @@ The pane a stop left open is still there. Type into it, and the lane does what y
 including work its own step would otherwise leave to another. Only resuming stays a person's:
 a lane cannot call `spoolway resume` on its own task.
 
-`spoolway task edit` rewrites one section of the task's document while it sits on `paused` or
+`spoolway task edit` rewrites one section of the task while it sits on `paused` or
 `blocked`, under the same task lock `spoolway report` takes.
 
 ```

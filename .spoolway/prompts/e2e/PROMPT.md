@@ -92,12 +92,12 @@ and the suite stops testing anything.
 - **A change that narrows what is accepted needs the case it now refuses.** A field made
   required, a default removed, a fallback retired: the coverage that decides it is the input
   *without* the value, and the input with one proves only what already worked. Check first
-  whether a helper is filling it in for you — `document` in `src/commands/queue.rs` supplies
-  `pipeline: default` to any test document that does not name one, so when `pipeline:` became
+  whether a helper is filling it in for you — `task_text` in `src/commands/queue.rs` supplies
+  `pipeline: default` to any test task that does not name one, so when `pipeline:` became
   required, seventeen hundred unit tests asserted the present case and not one asserted its
-  absence. The screen built to route an unrouted document refused every one of them, and
+  absence. The screen built to route an unrouted task refused every one of them, and
   nothing said so until a person drove it by hand. Write the absent case so no helper can
-  reach it: where the helper matches on the key, a bare `pipeline:` line leaves the document
+  reach it: where the helper matches on the key, a bare `pipeline:` line leaves the task
   genuinely unset in a way an omitted line does not.
 
 ## Never

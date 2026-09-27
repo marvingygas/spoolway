@@ -227,15 +227,15 @@ must "a dependent pair queues in one call, opening a ticket for each" \
 
 OPENED_A="$SPOOLWAY_PROJECT_HOME/queue/opened-a.md"
 OPENED_B="$SPOOLWAY_PROJECT_HOME/queue/opened-b.md"
-has "the group's epic landed in the first document" "epic: acme/app#" "$OPENED_A"
-has "the first document's own ticket" "ticket: acme/app#" "$OPENED_A"
-has "the same epic landed in the dependent's document" \
+has "the group's epic landed in the first task" "epic: acme/app#" "$OPENED_A"
+has "the first task's own ticket" "ticket: acme/app#" "$OPENED_A"
+has "the same epic landed in the dependent's task" \
   "$(grep '^epic:' "$OPENED_A")" "$OPENED_B"
 has "the dependent's own, different ticket" "ticket: acme/app#" "$OPENED_B"
 has "the dependent's call carried its parent's ticket id" \
   "$(grep '^ticket:' "$OPENED_A" | awk '{print $2}')" \
   "$SPOOLWAY_PROJECT_HOME/tracking/depends.opened-b"
-has "the open hook read the real, live contents of the document" \
+has "the open hook read the real, live contents of the task" \
   "id: opened-a" "$SPOOLWAY_PROJECT_HOME/tracking/task-file.opened-a"
 has "the group's own words reached the hook on the first task" \
   "a mirrored pair of tasks" "$SPOOLWAY_PROJECT_HOME/tracking/group-description.opened-a"
@@ -254,9 +254,9 @@ refuses "a mid-batch hook failure queues nothing" "opened-fails" \
   "$SPOOLWAY" queue add --from "$LIVE/opened-ok.md" --from "$LIVE/opened-fails.md"
 if [ ! -e "$SPOOLWAY_PROJECT_HOME/queue/opened-ok.md" ] \
   && [ ! -e "$SPOOLWAY_PROJECT_HOME/queue/opened-fails.md" ]; then
-  ok "neither document of the failed batch was queued"
+  ok "neither task of the failed batch was queued"
 else
-  bad "neither document of the failed batch was queued"
+  bad "neither task of the failed batch was queued"
 fi
 has "the one that succeeded had its ticket written back into the pending file" \
   "ticket: acme/app#" "$LIVE/opened-ok.md"
@@ -381,7 +381,7 @@ on_screen ' \r\r' "$ASK_YES"; sed -i 's/\x1b\[[0-9;]*m//g' "$ASK_YES"
 works "enter on the question queues the group" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/asked-yes.md"
 works "after calling the hook for it" test -e "$TRACKING/task-file.asked-yes"
-has "whose ticket landed on the document" "ticket: acme/app#" \
+has "whose ticket landed on the task" "ticket: acme/app#" \
   "$SPOOLWAY_PROJECT_HOME/queue/asked-yes.md"
 has "and the result popup names what was created" "┌─ issues created " "$ASK_YES"
 

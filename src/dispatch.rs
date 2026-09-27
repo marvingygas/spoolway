@@ -881,7 +881,7 @@ impl<'a> Dispatcher<'a> {
         let all_lanes = self.mux.list_lanes()?;
 
         // Fire any cron job whose expression matches this minute, before the
-        // queue is read below, so its freshly queued documents are dispatched
+        // queue is read below, so its freshly queued tasks are dispatched
         // by this same pass. Trouble with a job is reported like any other
         // pass trouble and never fails the pass.
         crate::jobs::fire_due(
@@ -1153,7 +1153,7 @@ impl<'a> Dispatcher<'a> {
             // at every task rather than only once it is entirely done.
             tick();
 
-            // A base is chosen now — by a document's own `base:` or
+            // A base is chosen now — by a task's own `base:` or
             // `queue add --base` — never invented here from whichever branch
             // this dispatcher's own checkout happens to have out. A task
             // still missing one, queued before that rule held or edited by
@@ -1397,7 +1397,7 @@ impl<'a> Dispatcher<'a> {
                             // own caller keeps, a few dozen lines above.
                             // Forgetting anyway on that path is the exact
                             // failure this fix exists to close: the move
-                            // never reached the task document, so the code
+                            // never reached the task, so the code
                             // must stay on disk for the next pass to read.
                             if self.persist(&mut tasks[index])?
                                 && let Some(key) = command_forget
@@ -3913,7 +3913,7 @@ impl<'a> Dispatcher<'a> {
             crate::command_step::RunState::Exited(code) => {
                 // Left on disk here, not cleared — the caller forgets this
                 // key itself, once the destination below has actually been
-                // written to the task document. `reap_stale_runs`, in this
+                // written to the task. `reap_stale_runs`, in this
                 // same file, keeps the identical discipline for its own
                 // path and says why: an exit code forgotten before the move
                 // that depends on it is persisted is a failure nothing will
@@ -5468,7 +5468,7 @@ struct Started {
     note: Option<String>,
     /// Whether `start_one`'s own stage-move write actually landed, or was
     /// dropped in favour of something — a `spoolway report`, a board
-    /// keypress — that beat it to the task document — see `persist_task`.
+    /// keypress — that beat it to the task — see `persist_task`.
     /// A caller cannot tell an `Ok(Started)`
     /// apart from a dropped write any other way, since `persist_task`
     /// answering `false` is not an error.
@@ -7211,7 +7211,7 @@ mod tests {
     }
 
     /// Acceptance criterion: once every task in a trial settles, its archive
-    /// documents are removed — not merely aged out by `retain.rs`'s own
+    /// tasks are removed — not merely aged out by `retain.rs`'s own
     /// `retention.days` — and the completion report names what was kept
     /// (the source group, the usage rows) and what was removed.
     #[test]
@@ -7240,7 +7240,7 @@ mod tests {
 
         assert!(
             !repo.archive_dir().join("alpha-1.md").exists(),
-            "every arm's archive document is removed once the trial settles"
+            "every arm's archive task is removed once the trial settles"
         );
         assert!(
             !repo.archive_dir().join("beta-1.md").exists(),
@@ -7255,7 +7255,7 @@ mod tests {
         );
         assert!(
             report.contains("removed") && report.contains("2"),
-            "both arms' documents are named as removed: {report}"
+            "both arms' tasks are named as removed: {report}"
         );
         assert!(
             report.contains("read      spoolway eval --by task --trial t1"),
@@ -7266,7 +7266,7 @@ mod tests {
 
     /// Acceptance criterion: a trial is cleaned up either once every arm
     /// settles or when it is explicitly discarded. This is the second
-    /// trigger, and it reaches every document a trial can have left lying
+    /// trigger, and it reaches every task a trial can have left lying
     /// about — one still in the pending directory, one live in the queue,
     /// one already archived — not only the queued ones.
     ///
@@ -7274,7 +7274,7 @@ mod tests {
     /// is the source group the trial forked, and a discard must never touch
     /// it however the arms were named.
     #[test]
-    fn discarding_a_trial_removes_every_arms_document_wherever_it_sits() {
+    fn discarding_a_trial_removes_every_arms_task_wherever_it_sits() {
         let repo = fixture("trial-discard-everywhere");
         std::fs::create_dir_all(repo.archive_dir()).unwrap();
         std::fs::write(
@@ -7301,7 +7301,7 @@ mod tests {
 
         assert!(
             !repo.archive_dir().join("alpha-1.md").exists(),
-            "an arm that already settled loses its archive document"
+            "an arm that already settled loses its archive task"
         );
         assert!(!queued.exists(), "an arm still in the queue loses its own");
         assert!(
@@ -7343,7 +7343,7 @@ mod tests {
     /// while `beta-1` is still in the queue — and inside a trial that
     /// dependent is a sibling arm being discarded in the same breath. Nothing
     /// revisits it afterwards either, since the sweep that ordinarily frees
-    /// an orphaned branch identifies its owner by reading the task document a
+    /// an orphaned branch identifies its owner by reading the task a
     /// discard has just removed.
     #[test]
     fn discarding_a_trial_frees_an_arms_branch_a_sibling_arm_was_holding() {
@@ -13441,7 +13441,7 @@ mod tests {
     #[test]
     fn a_task_whose_branch_is_already_checked_out_borrows_that_checkout() {
         let repo = fixture("in-place");
-        // A document may not set its own `branch:` — see
+        // A task may not set its own `branch:` — see
         // `queue::RESERVED_KEYS` — and this fixture never turns on
         // `issue_tracking.key_in_names`, so the branch is the plain
         // `task/<id>` and the "already checked out" case is the fixture root
@@ -17063,7 +17063,7 @@ mod tests {
         );
         // As the trial's only arm, reaching `done` also settles the trial —
         // see `Dispatcher::settle_trial_if_last_arm` — so its archive
-        // document is removed again immediately rather than left standing.
+        // task is removed again immediately rather than left standing.
         assert!(!repo.archive_dir().join("demo.md").exists());
     }
 

@@ -12,7 +12,7 @@ them, and finishing the plan.
 ```mermaid
 flowchart LR
   A[goal] -->|/spoolway-plan| B[plan page]
-  B -->|/spoolway-tasks| C[task documents in pending/]
+  B -->|/spoolway-tasks| C[tasks in pending/]
   C -->|spoolway| D[queue]
   D -->|spoolway dispatch| E[pull requests]
 ```
@@ -20,7 +20,7 @@ flowchart LR
 ## Why a plan is a branch
 
 Each task's `base:` is the branch the plan lands in, such as `main` or a release branch. Set it
-in each task document, or once with `spoolway queue add --base` for the whole submission.
+in each task, or once with `spoolway queue add --base` for the whole submission.
 Several plans can be queued from one checkout. They all share one queue and one dispatcher.
 
 ## Two skills, cut at approval
@@ -28,15 +28,15 @@ Several plans can be queued from one checkout. They all share one queue and one 
 `/spoolway-plan` talks the goal through with you and writes a plan page. It names no task, no
 pipeline and no glob. When you approve the shape, it calls `/spoolway-tasks`.
 
-`/spoolway-tasks` cuts the shape into task documents. It picks a pipeline per task, sizes each
+`/spoolway-tasks` cuts the shape into tasks. It picks a pipeline per task, sizes each
 task, chooses ids and globs, and writes the dependency order. You can also run it directly when
 the shape is already agreed.
 
 When the goal names an issue, both skills read it with `spoolway issue show <ref>`. The issue's
 URL goes into each task's `source:`.
 
-Both skills are optional. The queue screen reads task documents, so any script or tool that
-writes a document into the pending directory works too.
+Both skills are optional. The queue screen reads tasks, so any script or tool that
+writes a task into the pending directory works too.
 
 ## The plan file
 
@@ -70,8 +70,8 @@ that block; `/spoolway-tasks` reads it instead of the page around it.
 
 ## Queueing a plan
 
-`/spoolway-tasks` writes each task as its own document into
-`~/.spoolway/<project>/pending/<task-id>.md`. Every document names the same `group:`. It then
+`/spoolway-tasks` writes each task as its own file into
+`~/.spoolway/<project>/pending/<task-id>.md`. Every task names the same `group:`. It then
 runs `spoolway task contract --from` over the directory to check the set.
 
 <img src="screenshots/queue.png" alt="the queue screen">
@@ -84,7 +84,7 @@ pending directory. The right pane lists the highlighted group's tasks and what e
 | `space` | Select a group. |
 | `enter` | Check the selection and queue it. |
 | `g` | Set or clear a gate on the highlighted task. |
-| `o` | Open the highlighted document in your editor. |
+| `o` | Open the highlighted task in your editor. |
 | `f` | Filter the group list. `enter` keeps the filter, `esc` clears it. |
 | `t` | Fork the group as a trial. See [Trials](#trials). |
 | `r` | Show the routines pane. See [Routines](#routines). |
@@ -92,14 +92,14 @@ pending directory. The right pane lists the highlighted group's tasks and what e
 | `h` | Show hidden groups, such as ones already queued. |
 | `ctrl-c` | Leave the screen. |
 
-Queueing deletes the group's pending documents from the pending directory. A sibling task
+Queueing deletes the group's pending tasks from the pending directory. A sibling task
 already in the queue or the archive is left exactly where it is. A
 group with a validation error is refused and nothing is deleted. If a dispatcher already holds
 the queue, that dispatcher picks the tasks up on its next pass.
 
-`spoolway queue add --from <dir>` queues every document in a directory without the screen. A
-document under this project's own pending directory is deleted once the batch is written. A
-document anywhere else is left alone.
+`spoolway queue add --from <dir>` queues every task in a directory without the screen. A
+task under this project's own pending directory is deleted once the batch is written. A
+task anywhere else is left alone.
 
 Two more commands:
 
@@ -118,7 +118,7 @@ A trial runs one group under several pipelines to compare them. Press `t` on a g
    `enter` runs the trial.
 
 Each task becomes one arm, queued under its assigned pipeline, with a minted id such as
-`<id>-1`. All arms share one trial id. The source documents stay in the pending directory.
+`<id>-1`. All arms share one trial id. The source tasks stay in the pending directory.
 
 An arm never pushes a branch or opens a pull request. Compare the arms with
 `spoolway eval --by task --trial <id>`. When the last arm finishes, every arm's copy is removed.
@@ -135,17 +135,17 @@ Press `r` on the queue screen to browse routines.
 | Key | What it does |
 |---|---|
 | `→` / `←` | Open or leave a folder. |
-| `o` | Open the highlighted document in your editor. |
-| `space` | Tick a folder. Over a single document on the right, queue that one task alone. |
-| `enter` | Queue every document under every ticked folder as one batch. |
+| `o` | Open the highlighted task in your editor. |
+| `space` | Tick a folder. Over a single task on the right, queue that one task alone. |
+| `enter` | Queue every task under every ticked folder as one batch. |
 | `esc` | Return to the pending pane. |
 
 Every queued copy gets a fresh id, so a routine can run again. A `depends_on` on a sibling in
 the same batch is rewritten to the sibling's new id. The saved files are never changed.
 
 Press `s` on a pending group to save it as a routine. The panel is prefilled with the group's
-name, and `enter` copies the documents into `.spoolway/routines/<name>/`. Keys from an earlier
-run are removed on the way. A folder that already holds documents is refused.
+name, and `enter` copies the tasks into `.spoolway/routines/<name>/`. Keys from an earlier
+run are removed on the way. A folder that already holds tasks is refused.
 
 A job queues a routine on a cron schedule. See [Jobs](jobs.md).
 
@@ -169,7 +169,7 @@ pull requests possible.
 | Fan: no dependencies | One flat pull request per task. Mark the tasks `parallel: true`. |
 | Join: one task depends on two | Broken. The task is based on one parent only and ships without the other's work. |
 
-`/spoolway-tasks` checks the chain when it writes the documents. The binary does not check it
+`/spoolway-tasks` checks the chain when it writes the tasks. The binary does not check it
 again, so a task file edited afterwards can break the shape. `spoolway queue conflicts` reports
 a `touches` overlap between two tasks with no order between them, including two marked
 `parallel: true`.

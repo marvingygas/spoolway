@@ -13,7 +13,7 @@ pub fn strip(text: &str) -> String {
 }
 
 /// A queue on disk, two tasks deep: one at a step, one waiting on it. Real
-/// git, and a seed commit: `check_document_base` looks every task's base up
+/// git, and a seed commit: `check_task_base` looks every task's base up
 /// against the repository's own local branches, `refs/heads/group/demo`
 /// included, and an unborn branch has no ref for that lookup to find.
 pub fn fixture(name: &str) -> Repo {
@@ -65,7 +65,7 @@ pub fn add_to(
         dry_run: false,
     };
     crate::commands::queue_add(repo, &Pipelines::builtin(), &args, &repo.root, false).unwrap();
-    // `group` is set above so the document always validates; a task
+    // `group` is set above so the task always validates; a task
     // attributed to no group at all — the shape a replay once left behind
     // — is still simulated below, by clearing it after the fact.
     if stage.is_some() || group.is_none() {

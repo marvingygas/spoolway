@@ -34,7 +34,7 @@
 #
 # What is asserted is the two things a keypress leaves behind: the panel text
 # in the board's own frames, which `script` writes to a file here, and the
-# `stage:` in the task document. A live lane is the `hang` mode `agents/pi`
+# `stage:` in the task. A live lane is the `hang` mode `agents/pi`
 # already has — it sleeps for five minutes and never reports — reached by
 # seeding `$CTL/<task>` before the task is queued, exactly as `disaster.sh`
 # does.
@@ -469,7 +469,7 @@ _gone() { [ ! -e "$SPOOLWAY_PROJECT_HOME/queue/$1.md" ]; }
 press $'\r'
 if poll_until 25 _gone stalled; then ok "enter carries out the unqueue"
 else bad "enter carries out the unqueue"; tail -30 "$BOARD_LOG" | sed 's/^/        /'; fi
-has "the document lands back in pending" "id: stalled" "$SPOOLWAY_PROJECT_HOME/pending/stalled.md"
+has "the task lands back in pending" "id: stalled" "$SPOOLWAY_PROJECT_HOME/pending/stalled.md"
 has "and so does the one that never ran" "id: never-run" "$SPOOLWAY_PROJECT_HOME/pending/never-run.md"
 
 # ------------------------------------------- `u` carries a dependent chain
@@ -527,7 +527,7 @@ if poll_until 25 _gone chain-head; then ok "enter carries the head back to pendi
 else bad "enter carries the head back to pending"; tail -30 "$BOARD_LOG" | sed 's/^/        /'; fi
 if poll_until 25 _gone chain-tail; then ok "and carries the dependent along with it"
 else bad "and carries the dependent along with it"; tail -30 "$BOARD_LOG" | sed 's/^/        /'; fi
-has "the head's document lands back in pending" "id: chain-head" \
+has "the head's task lands back in pending" "id: chain-head" \
   "$SPOOLWAY_PROJECT_HOME/pending/chain-head.md"
 has "and so does the dependent's" "id: chain-tail" \
   "$SPOOLWAY_PROJECT_HOME/pending/chain-tail.md"
@@ -651,7 +651,7 @@ draws "the board's row offers the key before the command it fires" \
 
 MOCKUP="$LIVE/mockup-section.txt"
 printf 'held here for a person, edited from outside the lane\n' > "$MOCKUP"
-must "\`task edit\` rewrites the stopped document's own section" \
+must "\`task edit\` rewrites the stopped task's own section" \
   "$SPOOLWAY" task edit gate-edit --section Non-goals --from "$MOCKUP"
 has "the change is on disk" "held here for a person, edited from outside the lane" \
   "$SPOOLWAY_PROJECT_HOME/queue/gate-edit.md"
@@ -710,7 +710,7 @@ lacks "carrying no leftover \`parked_from\`" "parked_from:" \
 # own later write of a task it read before the park lands — is proven at the
 # unit level, by `persist_task_does_not_overwrite_a_park_typed_mid_pass` in
 # `src/dispatch.rs`; this is a real keystroke, read off a real pipe, reaching
-# a real task document under a real dispatcher either way.
+# a real task under a real dispatcher either way.
 #
 # `P` rather than a single row's `p`, so this does not also depend on the
 # cursor's position among the dozens of rows the suite has already built —

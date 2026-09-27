@@ -228,7 +228,7 @@ impl<'a> Dispatcher<'a> {
     }
 
     /// Once a trial arm reaches `done`, ask whether it was the trial's last
-    /// one still active — and if so, remove every arm's archive document
+    /// one still active — and if so, remove every arm's archive task
     /// rather than leave them for `retain.rs`'s own `retention.days` to age
     /// out eventually. Everything else a settled trial disposes of (its
     /// worktrees, branches, panes, scratch directories, sessions and run
@@ -237,7 +237,7 @@ impl<'a> Dispatcher<'a> {
     /// [`Dispatcher::tear_down_checkout`] already drops a trial arm's branch
     /// whether or not it was ever pushed. What is left standing only for a
     /// trial is the archive copy itself, since an ordinary task's archive
-    /// document is exactly the durable record cleanup means to keep.
+    /// task is exactly the durable record cleanup means to keep.
     ///
     /// `remaining` is the queue read *after* `task`'s own file left it for
     /// the archive (see the rename above), so a sibling arm still on any
@@ -291,7 +291,7 @@ impl<'a> Dispatcher<'a> {
             "  kept      usage rows for {usage_tasks} trial tasks"
         ));
         report.actions.push(format!(
-            "  removed   {removed} task documents, worktrees and local branches"
+            "  removed   {removed} tasks, worktrees and local branches"
         ));
         report.actions.push(format!(
             "  removed   {removed} panes, scratch dirs, sessions and run-file sets"
@@ -821,8 +821,8 @@ impl<'a> Dispatcher<'a> {
         // is a sibling arm being discarded in the same breath, so the reason
         // to keep it is gone before the call even returns. Nothing else will
         // free it either: `sweep_orphaned_branches` finds a branch's owner by
-        // reading the task document that recorded it, and a discard has just
-        // removed that document. So the arm's own branch goes here, directly.
+        // reading the task that recorded it, and a discard has just
+        // removed that task. So the arm's own branch goes here, directly.
         // A second delete of one `tear_down_checkout` already took is a git
         // failure and nothing more.
         if let Some(branch) = task.front.branch.clone().filter(|_| !task.front.borrowed) {
@@ -886,17 +886,17 @@ fn task_for_branch(repo: &crate::repo::Repo, branch: &str) -> Option<Task> {
     }
 }
 
-/// Every task document that belongs to `trial`, wherever it is sitting.
+/// Every task that belongs to `trial`, wherever it is sitting.
 ///
 /// Read straight off the three directories rather than through
 /// [`crate::repo::Repo::tasks`], which only ever reads the queue: a discard
 /// has to reach a pending arm nobody dispatched and an archived arm that
-/// already settled as well as the live ones. A document that will not parse
+/// already settled as well as the live ones. A task that will not parse
 /// is skipped rather than guessed at — it carries no readable `trial:`, so
 /// nothing here can claim it belongs to this trial.
 ///
 /// Matching is on `trial:` alone, which is the whole safety argument for
-/// this command: the source group's own documents never carry one, so a
+/// this command: the source group's own tasks never carry one, so a
 /// discard cannot reach them however the arms were named.
 fn trial_arms(repo: &crate::repo::Repo, trial: &str) -> Vec<Task> {
     let mut arms = Vec::new();
@@ -933,7 +933,7 @@ fn trial_arms(repo: &crate::repo::Repo, trial: &str) -> Vec<Task> {
 ///
 /// **What this destroys.** Every arm's worktree, local branch (pushed or
 /// not), pane, workspace, scratch directory, session home, command run files
-/// and hook run files, and its task document wherever it sits. Uncommitted
+/// and hook run files, and its task wherever it sits. Uncommitted
 /// work in an arm's worktree goes with it, unasked — see
 /// [`Dispatcher::discard_arm`] for why that is the right trade for an arm
 /// and would not be for an ordinary task.
@@ -945,7 +945,7 @@ fn trial_arms(repo: &crate::repo::Repo, trial: &str) -> Vec<Task> {
 /// `--force` says the caller already knows what it is choosing. This is the
 /// same trade `spoolway queue pause --force` makes, for the same reason. A
 /// trial with nothing running needs no flag: the arms are idle, and the
-/// documents are a copy of documents that still exist.
+/// tasks are a copy of tasks that still exist.
 pub fn discard_trial(
     repo: &crate::repo::Repo,
     pipelines: &crate::pipeline::Pipelines,
@@ -1012,7 +1012,7 @@ pub fn discard_trial(
         println!("  kept      source group {source_group}");
     }
     println!("  kept      usage rows for {usage_tasks} trial tasks");
-    println!("  removed   {removed} task documents, worktrees and local branches");
+    println!("  removed   {removed} tasks, worktrees and local branches");
     println!("  removed   {removed} panes, scratch dirs, sessions and run-file sets");
     println!("  read      spoolway eval --by task --trial {trial}");
     for problem in &report.problems {

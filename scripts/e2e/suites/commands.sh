@@ -485,9 +485,9 @@ CHECK_STATUS=$?
 AFTER_CHECK=$(ls "$SPOOLWAY_PROJECT_HOME/queue" 2>/dev/null | sort)
 
 if [ "$CHECK_STATUS" -ne 0 ]; then
-  ok "task contract --from a document setting run: exits non-zero"
+  ok "task contract --from a task setting run: exits non-zero"
 else
-  bad "task contract --from a document setting run: exits non-zero"
+  bad "task contract --from a task setting run: exits non-zero"
 fi
 if [ "$BEFORE_CHECK" = "$AFTER_CHECK" ]; then
   ok "and leaves the queue directory exactly as it was"
@@ -654,7 +654,7 @@ OWNBASE="$BASECHECK/ownbase.md"
   echo "---"
   cat "$BODY"
 } > "$OWNBASE"
-works "a document's own base wins over --base" \
+works "a task's own base wins over --base" \
   env -C "$BASECHECK" "$SPOOLWAY" queue add --from "$OWNBASE" --base other/base
 says "and the task is cut from the document's own branch, not the flag's" \
   "base: plan/x" env -C "$BASECHECK" "$SPOOLWAY" queue show ownbase
@@ -807,7 +807,7 @@ works "the screen queues the first task of the group it submitted" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/screen-one.md"
 works "and the second one with it — a group goes whole or not at all" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/screen-two.md"
-works "the submitted group's documents are gone from pending" \
+works "the submitted group's tasks are gone from pending" \
   test ! -e "$SPOOLWAY_PROJECT_HOME/pending/screen-one.md"
 works "both of them" \
   test ! -e "$SPOOLWAY_PROJECT_HOME/pending/screen-two.md"
@@ -824,7 +824,7 @@ works "which is still not in the queue" \
 # carries, and the report has to name it rather than silently dropping it.
 must "screen-two carried back out of the queue by hand" \
   "$SPOOLWAY" queue unqueue screen-two
-works "its document is back in the pending directory" \
+works "its task is back in the pending directory" \
   test -f "$SPOOLWAY_PROJECT_HOME/pending/screen-two.md"
 works "and gone from the queue" \
   test ! -e "$SPOOLWAY_PROJECT_HOME/queue/screen-two.md"
@@ -858,7 +858,7 @@ works "reaches the queue the same way" \
 # --from` clears it once the batch is written — the same "one inbox, whichever
 # door" rule the screen already keeps, so a task queued from the command line
 # is not left sitting in pending as well as in the queue.
-works "and clears the document out of the pending directory" \
+works "and clears the task out of the pending directory" \
   test ! -e "$SPOOLWAY_PROJECT_HOME/pending/screen-other.md"
 
 # --------------------------------------------- a group with no pending documents
@@ -878,16 +878,16 @@ works "it never touched the pending directory" \
 
 # The pending directory is empty at this point — both cases above already
 # cleared every document out of it — so this is also the one place proving
-# the screen opens on an empty pending directory rather than reporting "No
-# task documents", so long as the queue itself still holds a group.
+# the screen opens on an empty pending directory rather than refusing with
+# "Nothing to list", so long as the queue itself still holds a group.
 on_screen 'h' "$LIVE/queue-screen-only.out"
-if grep -q "No task documents" "$LIVE/queue-screen-only.out"; then
+if grep -q "Nothing to list" "$LIVE/queue-screen-only.out"; then
   bad "a group with nothing left in pending still opens the screen"
   sed 's/^/        /' "$LIVE/queue-screen-only.out"
 else
   ok "a group with nothing left in pending still opens the screen"
 fi
-has "\`h\` still lists a group whose documents are only in the queue now" \
+has "\`h\` still lists a group whose tasks are only in the queue now" \
   "screen-shipped-group" "$LIVE/queue-screen-only.out"
 
 # --------------------------------------------------- the archive's own rows

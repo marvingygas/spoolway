@@ -542,7 +542,7 @@ launch_suite() {
 # With more than one job at a time a suite's output is captured, never
 # streamed, and `$ROOT` goes with the run — so whatever is printed here is the
 # *whole* record of what failed. A blind `tail` is not that record: `forge`
-# ends its one failing scenario by dumping the task document it drove, which
+# ends its one failing scenario by dumping the task it drove, which
 # is longer than thirty lines, so all three of its failed checks were pushed
 # off the end and the run's own output named none of them. The suite had to be
 # re-run before the failure could be read at all.

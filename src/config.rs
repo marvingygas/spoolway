@@ -30,7 +30,7 @@ pub const TASK_TEMPLATES_DIR: &str = ".spoolway/templates/tasks";
 /// are the body a tracker's issue starts from, and the two are never
 /// selected the same way (one by pipeline name, these by a fixed pair).
 pub const TRACKING_TEMPLATES_DIR: &str = ".spoolway/templates/tracking";
-/// Repeatable task documents a project keeps to re-run, nested however it
+/// Repeatable tasks a project keeps to re-run, nested however it
 /// likes and tracked in git alongside the prompts and task templates above.
 /// Unlike those, `spoolway init` never writes this directory and never seeds
 /// it — a routine only exists once a person saves one with `s` from the
@@ -343,7 +343,7 @@ pub struct HousekeepingConfig {
     /// [`crate::release::ENV_SKIP`], which needs no file to be committed.
     pub update_check: bool,
 
-    /// How far back a calibration session reads: archived task documents
+    /// How far back a calibration session reads: archived tasks
     /// finished inside the window, and the ledger entries beside them.
     ///
     /// Same spelling `--since` already takes, and the same parser —
@@ -611,7 +611,7 @@ pub struct DispatchConfig {
     auto_unblock: bool,
 
     /// Retired: the pipeline a task ran on when its own `pipeline:` was
-    /// absent. Every task now names its pipeline itself — a document with
+    /// absent. Every task now names its pipeline itself — a task with
     /// none is refused before it can queue, and dispatch refuses the whole
     /// start over any live task still missing one — so there is nothing left
     /// for a project-wide default to answer. Kept only so an existing config

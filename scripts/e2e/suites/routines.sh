@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Repeatable task documents under `.spoolway/routines/`, driven end to end
+# Repeatable tasks under `.spoolway/routines/`, driven end to end
 # through bare `spoolway`'s queue tab, its `r` pane and `s` panel — the one
 # path no unit test can drive, since `run_screen` is exercised headlessly in
 # Rust already, but never as the whole binary reading real keystrokes off a
@@ -51,15 +51,15 @@ task_doc .spoolway/routines/maintenance/weekly/prune.md prune "$BODY" "group: ma
 # the same way `trials.sh` does.
 on_screen 'rj \rn' /dev/null
 
-works "the first document reaches the queue under a minted id" \
+works "the first task reaches the queue under a minted id" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/audit-deps-1.md"
 works "and the second beside it" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/audit-docs-1.md"
-works "never the documents' own bare ids" \
+works "never the tasks' own bare ids" \
   bash -c '[ ! -e "$1/queue/audit-deps.md" ] && [ ! -e "$1/queue/audit-docs.md" ]' \
   _ "$SPOOLWAY_PROJECT_HOME"
 
-has "the minted copy keeps the document's own group" "group: nightly" \
+has "the minted copy keeps the task's own group" "group: nightly" \
   "$SPOOLWAY_PROJECT_HOME/queue/audit-deps-1.md"
 has "and its body, untouched" "Add \`notes/<id>.md\`" \
   "$SPOOLWAY_PROJECT_HOME/queue/audit-deps-1.md"
@@ -129,7 +129,7 @@ task_doc "$SPOOLWAY_PROJECT_HOME/queue/archived-reuse.md" archived-reuse "$BODY"
 
 on_screen 'farchived-\rs\r' /dev/null
 
-works "a document an earlier run already stamped still saves as a routine" \
+works "a task an earlier run already stamped still saves as a routine" \
   test -f .spoolway/routines/archived-reuse/archived-reuse.md
 has "the author's own group survives the reset" "group: archived-reuse" \
   .spoolway/routines/archived-reuse/archived-reuse.md

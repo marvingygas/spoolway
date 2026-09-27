@@ -7,7 +7,7 @@ judgement — what a decision says, how a mockup is drawn, how a task is sized �
 `SKILL.md`'s, argued once and not repeated here.
 
 **The page carries no tasks.** It ends at the Mockup, and nothing on it is left for later. A
-breakdown is a set of task documents written beside the page, into the pending
+breakdown is a set of tasks written beside the page, into the pending
 directory — see `SKILL.md`'s step 7 — never markup appended here.
 
 ## Copy the skeleton
@@ -208,7 +208,7 @@ already exists are correct, and re-emitting them is how they stop being. Re-run 
 above when done.
 
 A page whose tasks have already been cut is still just a page — there is nothing on it to freeze
-or to stamp. The documents are what carry the breakdown, and revising the page above them does
+or to stamp. The tasks are what carry the breakdown, and revising the page above them does
 not revise them. Say so to the human: whatever is still pending, or already in the queue,
 describes a shape this revision has moved past, and re-cutting is step 7's decision, not a side
 effect of an edit here.

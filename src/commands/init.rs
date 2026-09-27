@@ -1064,7 +1064,7 @@ mod tests {
             std::fs::write(home.join("queue").join(name), "---\n---\n").unwrap();
         }
         std::fs::write(home.join("archive").join("done.md"), "---\n---\n").unwrap();
-        // A stray non-task file must not be counted as a queued document.
+        // A stray non-task file must not be counted as a queued task.
         std::fs::write(home.join("queue").join("notes.txt"), "not a task").unwrap();
         std::fs::write(home.join("usage.jsonl"), "{}\n").unwrap();
 

@@ -156,7 +156,7 @@ pub enum Command {
     #[command(subcommand)]
     Queue(QueueCommand),
 
-    /// Print or validate the task-document contract.
+    /// Print or validate the task contract.
     #[command(subcommand)]
     Task(TaskCommand),
 
@@ -538,7 +538,7 @@ pub struct EvalArgs {
     #[arg(long, value_name = "ID")]
     pub trial: Option<String>,
 
-    /// Throw a whole trial away now: every arm's task document, worktree,
+    /// Throw a whole trial away now: every arm's task, worktree,
     /// local branch, pane, scratch directory, session and run files, whether
     /// or not the arms have finished. The trial's own answer survives — its
     /// usage rows stay in the ledger, and the source group it forked is
@@ -940,7 +940,7 @@ pub enum QueueCommand {
     /// Print one task file.
     Show { task: String },
 
-    /// Queue whole task documents — the only way a task enters the queue.
+    /// Queue whole tasks — the only way a task enters the queue.
     Add(QueueAddArgs),
 
     /// Check queued tasks for overlapping `touches` globs.
@@ -962,7 +962,7 @@ pub enum QueueCommand {
     Resume { task: String },
 
     /// What the board's `u`/`U` keys do to a row, from a script: carry a
-    /// not-started task's document back to the pending directory, stripped
+    /// not-started task back to the pending directory, stripped
     /// of every reserved key, so `queue add --from` takes it again
     /// unchanged.
     ///
@@ -1011,33 +1011,33 @@ pub struct QueuePauseArgs {
 
 #[derive(Debug, Args)]
 pub struct QueueAddArgs {
-    /// A task document to queue: a file, a directory of `*.md` files (read in
+    /// A task to queue: a file, a directory of `*.md` files (read in
     /// filename order), or `-` for a `---`-separated stream on standard
-    /// input. Repeatable — every document named across every `--from` is
+    /// input. Repeatable — every task named across every `--from` is
     /// validated together and written all or none, so one naming a sibling
     /// queued in the same breath is satisfied with nothing sorted first.
     ///
-    /// Each document is `---\n<frontmatter>\n---\n<body>`, the same shape a
+    /// Each task is `---\n<frontmatter>\n---\n<body>`, the same shape a
     /// queued task is kept in. `id`, `touches`, `depends_on`, `parallel`,
     /// `group`, `source`, `plan`, `pipeline`, `gate_at` and `base` are a
-    /// document's to set; `stage`, `run`, `attempts`, `base_commit` and
-    /// `cut_from` are spoolway's alone, and a document setting one is
-    /// refused by name. A document's own `base:` wins over `--base`; a
-    /// document that sets neither is refused by name, naming the document,
+    /// task's to set; `stage`, `run`, `attempts`, `base_commit` and
+    /// `cut_from` are spoolway's alone, and a task setting one is
+    /// refused by name. A task's own `base:` wins over `--base`; a
+    /// task that sets neither is refused by name, naming the task,
     /// rather than based on whichever branch this checkout happens to have
     /// out. One that sets a base must name a branch this repository has
     /// locally. Any other key survives untouched, for a project's own
     /// metadata.
     ///
-    /// Omitted entirely, nothing is queued: the pipeline's skeleton document
+    /// Omitted entirely, nothing is queued: the pipeline's skeleton task
     /// is printed instead, for a person to save, fill in, and hand back
     /// through this same flag.
     #[arg(long = "from", value_name = "PATH")]
     pub from: Vec<String>,
 
-    /// The base every document in this submission is cut from and merges
-    /// back into, unless a document names its own `base:` — which always
-    /// wins. Required, here or in each document, since neither is invented
+    /// The base every task in this submission is cut from and merges
+    /// back into, unless a task names its own `base:` — which always
+    /// wins. Required, here or in each task, since neither is invented
     /// from the branch this checkout happens to have out any more.
     #[arg(long, value_name = "BRANCH")]
     pub base: Option<String>,
@@ -1049,25 +1049,25 @@ pub struct QueueAddArgs {
     pub dry_run: bool,
 }
 
-/// Print or validate the task-document contract — the same shape
+/// Print or validate the task contract — the same shape
 /// [`PromptCommand::Contract`] takes for a prompt.
 #[derive(Debug, Subcommand)]
 pub enum TaskCommand {
-    /// Print or validate the task-document contract itself.
+    /// Print or validate the task contract itself.
     ///
     /// Bare, prints the whole contract as JSON — this project's default
-    /// pipeline, every key a document may set, every key it may not, one
+    /// pipeline, every key a task may set, every key it may not, one
     /// sentence per settable key on how to fill it, each pipeline's longest
     /// agent step, the step ids `gate_at` accepts and the body skeleton a
     /// task on it is written from, and the rules that only hold across a set —
     /// so a producer that has never seen the planning skills can write
-    /// queueable tasks from it alone. `--from` checks a document against
+    /// queueable tasks from it alone. `--from` checks a task against
     /// that same contract and writes nothing, whichever way it comes out:
     /// this is `queue add --from`'s own validation, run with nothing saved
     /// at the end of it.
     Contract(TaskContractArgs),
 
-    /// Rewrite one section of a stopped task's document, under its task
+    /// Rewrite one section of a stopped task, under its task
     /// lock.
     ///
     /// Refused when the task is neither `paused` nor `blocked` — a task
@@ -1082,8 +1082,8 @@ pub enum TaskCommand {
 
 #[derive(Debug, Args)]
 pub struct TaskContractArgs {
-    /// A document to check, in any of the shapes `queue add --from` reads: a
-    /// file, a directory of `*.md` documents, or `-` for a `---`-separated
+    /// A task to check, in any of the shapes `queue add --from` reads: a
+    /// file, a directory of `*.md` tasks, or `-` for a `---`-separated
     /// stream on standard input. Repeatable, checked together as one set —
     /// the same batch `queue add --from` would validate before writing.
     ///
@@ -1092,8 +1092,8 @@ pub struct TaskContractArgs {
     #[arg(long = "from", value_name = "PATH")]
     pub from: Vec<String>,
 
-    /// The base to check a document against when it sets none of its own —
-    /// see `queue add --base`. A document that sets neither this nor its
+    /// The base to check a task against when it sets none of its own —
+    /// see `queue add --base`. A task that sets neither this nor its
     /// own `base:` is refused, exactly as `queue add --from` would refuse
     /// it.
     #[arg(long, value_name = "BRANCH")]
@@ -1279,7 +1279,7 @@ pub struct AgentVerifyArgs {
 ///
 /// `contract` is the one that matters: a prompt is written against what a lane
 /// is handed and what it may reach for, and that lives in the code rather than
-/// in any document. Printing it from the binary is the only version of it that
+/// in any task. Printing it from the binary is the only version of it that
 /// cannot be out of date.
 #[derive(Debug, Subcommand)]
 pub enum PromptCommand {

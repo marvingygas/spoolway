@@ -110,14 +110,14 @@ tasks.
 | `space` | Select a group. A group is queued whole |
 | `enter` | Check the selection, queue it, and show what queued |
 | `g` | Set or clear a `gate_at` on the highlighted task |
-| `o` | Open the highlighted task's document in your editor |
+| `o` | Open the highlighted task in your editor |
 | `f` | Filter groups by name, task id and title. `enter` keeps the filter, `esc` clears it |
 | `h` | Show hidden groups: first the queued ones, then the finished ones |
 | `t` | Fork the group into a trial. See [Trials](planning.md#trials) |
 | `r` | Switch to the routines pane. See [Routines](planning.md#routines) |
 | `s` | Save the highlighted group into `.spoolway/routines/<name>/` |
 
-Queueing deletes the group's pending documents from the pending directory. A sibling task
+Queueing deletes the group's pending tasks from the pending directory. A sibling task
 already in the queue or the archive is left where it is. A group that
 fails validation is refused and nothing is deleted. See [Queueing a
 plan](planning.md#queueing-a-plan). Queueing a group or a routine ends on a popup naming what
@@ -139,7 +139,7 @@ the routines pane asks the same question. A trial never asks and opens no ticket
 
 ### `spoolway queue add`
 
-Queue task documents. This is the only way a task enters the queue. See [Queueing a
+Queue tasks. This is the only way a task enters the queue. See [Queueing a
 task](tasks.md#queueing-a-task).
 
 ```
@@ -148,21 +148,21 @@ spoolway queue add --from <PATH> --base <BRANCH>
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--from <PATH>` | | A document to queue: a file, a directory of `*.md` files, or `-` for a `---`-separated stream on stdin. Repeatable. Every document is validated together and written all or none |
-| `--base <BRANCH>` | | The branch the whole submission is cut from and merges into. A document's own `base:` wins over it |
+| `--from <PATH>` | | A task to queue: a file, a directory of `*.md` files, or `-` for a `---`-separated stream on stdin. Repeatable. Every task is validated together and written all or none |
+| `--base <BRANCH>` | | The branch the whole submission is cut from and merges into. A task's own `base:` wins over it |
 | `--dry-run` | | Validate and print what would happen. Writes nothing and opens no ticket |
 
-A document that sets neither its own `base:` nor `--base` is refused by name and nothing is
+A task that sets neither its own `base:` nor `--base` is refused by name and nothing is
 written.
 
-With no `--from`, it prints a skeleton document to fill in, with a `pipeline:` row to fill in.
+With no `--from`, it prints a skeleton task to fill in, with a `pipeline:` row to fill in.
 
 A `--from` path under this project's own pending directory is deleted once the batch is
 written. A `--from` path anywhere else, including `-`, is read and left alone.
 
 With `[issue_tracking]` configured, it checks the hook's declared tool requirements first; an
 unmet one prints the same gate the queue screen draws and proceeds without a ticket, since
-there is no key to wait on. Otherwise it opens a ticket per document. See
+there is no key to wait on. Otherwise it opens a ticket per task. See
 [`open`](configuration.md#open--a-fifth-event-run-by-queue-add-itself).
 
 ### `spoolway queue list`
@@ -203,7 +203,7 @@ Resume one task. Same as `spoolway resume <task>` with no other flags.
 
 ### `spoolway queue unqueue <task>`
 
-Carry a not-started task's document back to the pending directory, with every reserved key
+Carry a not-started task back to the pending directory, with every reserved key
 stripped. `spoolway queue add --from` takes the result again unchanged. The board's `u` key
 carries the same task and every unstarted task that depends on it; this command has no panel
 to list a chain on, so it refuses instead.
@@ -222,7 +222,7 @@ spoolway queue unqueue <task> --force
 A task that has started is refused, naming its stage, its checkout when it has one, and both
 routes onward: `spoolway queue pause <task>` to stop it in place, or `--force` to tear the
 checkout down and unqueue it anyway. A task another queued sibling names in `depends_on` is
-refused too, naming that sibling. A document already sitting in pending under the same id
+refused too, naming that sibling. A task already sitting in pending under the same id
 refuses the move and leaves the queue file in place.
 
 ### `spoolway group list`
@@ -420,7 +420,7 @@ Bare `spoolway`'s eval tab draws the interactive eval screen instead.
 | `--all` | | Every project |
 | `--project <NAME>` | | One named project |
 | `--trial <ID>` | | One trial's arms. With `--by task`, one row per arm and a delta line per arm against the first |
-| `--discard <ID>` | | Delete a whole trial: every arm's document, worktree, branch, pane and run files. The ledger rows and the source group stay |
+| `--discard <ID>` | | Delete a whole trial: every arm's task, worktree, branch, pane and run files. The ledger rows and the source group stay |
 | `--force` | | `--discard` only: stop live lanes and discard anyway |
 | `--csv` | | Print the lanes table's rows as CSV |
 
@@ -469,7 +469,7 @@ See [Gates](pipelines.md#gates).
 
 ### `spoolway task edit <task>`
 
-Rewrite one section of a `paused` or `blocked` task's document, under its task lock. Refused
+Rewrite one section of a `paused` or `blocked` task, under its task lock. Refused
 against a task that is neither.
 
 ```
@@ -632,7 +632,7 @@ Neither `agent list` nor `agent verify` needs a project.
 
 ### `spoolway task contract`
 
-Print the task-document contract as JSON, or validate documents against it.
+Print the task contract as JSON, or validate tasks against it.
 
 ```
 spoolway task contract
@@ -641,8 +641,8 @@ spoolway task contract --from ~/.spoolway/<project>/pending/
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--from <PATH>` | | A document, a directory of `*.md` files, or `-` for stdin. Repeatable. Checked as one set. Writes nothing |
-| `--base <BRANCH>` | | The base to check a document against when it sets none of its own. Same rule as `queue add --base` |
+| `--from <PATH>` | | A task, a directory of `*.md` files, or `-` for stdin. Repeatable. Checked as one set. Writes nothing |
+| `--base <BRANCH>` | | The base to check a task against when it sets none of its own. Same rule as `queue add --base` |
 
 The contract holds every pipeline's longest agent step and body skeleton, the sizing guidance,
 the output directory, the allowed and refused keys, one sentence per key, and the rules that

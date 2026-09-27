@@ -489,7 +489,7 @@ pub fn route(
     // wait longer for the person who will.
     // Two ways a step earns this, not one: the pipeline's own `gate: true`,
     // which holds every task that reaches the step and only ever catches its
-    // pass, and a task's own `gate_at`, set by whoever wrote its document to
+    // pass, and a task's own `gate_at`, set by whoever wrote its task to
     // hold this one task without giving it a pipeline of its own — and which
     // catches this step's outcome whatever it was, `destination` already
     // carrying whatever `apply_loop_budget` and the `blocked` check above made
@@ -515,7 +515,7 @@ pub fn route(
             Gate::Step => "held by this step's own gate".to_string(),
         });
         // Spent, not standing, whoever wrote it — the board's `s` is the
-        // example, but a `gate_at` typed by hand into the document fires and
+        // example, but a `gate_at` typed by hand into the task fires and
         // clears exactly the same way. A step's own `gate: true` is the one
         // that holds every task that ever reaches it. Left set, a later
         // route that brought this task back onto the same step — a loop, a
@@ -983,7 +983,7 @@ pub fn resume_target(task: &Task, pipeline: &Pipeline) -> String {
 /// outcome and the destination it just resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Gate {
-    /// A task's own `gate_at`, set by whoever wrote its document — catches
+    /// A task's own `gate_at`, set by whoever wrote its task — catches
     /// this step's outcome whatever it was.
     Schedule,
     /// A step's own `gate: true` — catches a pass and only a pass, and only
@@ -3574,7 +3574,7 @@ mod tests {
     }
 
     /// The other road to the same pause: a task's own `gate_at`, set by
-    /// whoever wrote its document, holds it after a step the pipeline never
+    /// whoever wrote its task, holds it after a step the pipeline never
     /// declared `gate: true` on — `build` here, which routes straight to
     /// `deploy` for every other task on this pipeline.
     #[test]

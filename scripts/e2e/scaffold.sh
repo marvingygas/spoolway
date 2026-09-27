@@ -410,7 +410,7 @@ fi
 # --------------------------------------------------------------------- config
 
 say "configuring $MODEL, $WORKERS lanes, ${CTX} tokens"
-# No `dispatch.default_pipeline` to set any more — every task document this
+# No `dispatch.default_pipeline` to set any more — every task this
 # suite queues names `pipeline: end-to-end` itself (see queue-plan.sh), the
 # only pipeline this project has.
 spoolway config set agents.pi.concurrency "$WORKERS"

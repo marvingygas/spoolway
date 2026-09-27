@@ -114,7 +114,7 @@ pub fn jobs_run(repo: &Repo, pipelines: &Pipelines, name: &str, in_lane: bool) -
         println!("queued {} at `{}`", task.id(), crate::pipeline::QUEUED);
     }
     println!(
-        "  {} document{} from routine `{}` queued under pipeline `{}`.",
+        "  {} task{} from routine `{}` queued under pipeline `{}`.",
         tasks.len(),
         if tasks.len() == 1 { "" } else { "s" },
         job.spec.routine,
@@ -497,17 +497,17 @@ fn run_jobs_screen(
                     }
                 }
                 Key::Char(' ') if nav.focus == Focus::Tasks => {
-                    if let Some(rel) = picked_document(&routines, nav, &routines_dir) {
+                    if let Some(rel) = picked_task(&routines, nav, &routines_dir) {
                         let mut draft = draft.clone();
                         draft.routine = rel;
                         state.mode = JobMode::Schedule { draft };
                     }
                 }
-                // `o` over the documents pane: open the highlighted document
+                // `o` over the tasks pane: open the highlighted task
                 // in an editor pane, exactly the shape the queue screen's own
                 // routines pane gives it — see
                 // `open_highlighted_job_routine`. Gated the same way: live
-                // only with a document actually under the cursor.
+                // only with a task actually under the cursor.
                 Key::Char('o')
                     if nav.focus == Focus::Tasks
                         && highlighted_routine_task(&routines, nav).is_some() =>
@@ -726,7 +726,7 @@ fn fire_now(
                 "run now",
                 if ids.is_empty() {
                     format!(
-                        "Fired `{}` now, but its routine had no documents to queue.",
+                        "Fired `{}` now, but its routine had no tasks to queue.",
                         job.name
                     )
                 } else {
@@ -829,8 +829,8 @@ fn picked_folder(
     relative_routine(&folder.path, routines_dir)
 }
 
-/// The highlighted document in the browser's tasks pane, same relative form.
-fn picked_document(
+/// The highlighted task in the browser's tasks pane, same relative form.
+fn picked_task(
     routines: &[RoutineFolder],
     nav: &RoutineNav,
     routines_dir: &Path,
@@ -841,7 +841,7 @@ fn picked_document(
 }
 
 /// `o` over the routine picker's own tasks pane: open the highlighted
-/// document in an editor pane, the same shape [`crate::commands::queue`]'s
+/// task in an editor pane, the same shape [`crate::commands::queue`]'s
 /// own `open_highlighted_routine` gives the queue screen's routines pane,
 /// including the same [`JobMode::Outcome`] a backend with no pane to open
 /// one in is surfaced through. Returns to [`JobMode::PickRoutine`] with
@@ -1156,17 +1156,17 @@ fn jobs_detail_lines(
     let mut lines = vec![String::new(), format!("  {}", job.name)];
 
     let target = job.target(repo);
-    let documents = target
+    let tasks = target
         .as_ref()
         .ok()
-        .map(|path| routine_documents(path))
+        .map(|path| routine_tasks(path))
         .unwrap_or_default();
     let routine_value = match &target {
         Ok(path) if path.exists() => format!(
-            "{}  ({} document{})",
+            "{}  ({} task{})",
             job.spec.routine,
-            documents.len(),
-            if documents.len() == 1 { "" } else { "s" }
+            tasks.len(),
+            if tasks.len() == 1 { "" } else { "s" }
         ),
         _ => format!("{}  (missing)", job.spec.routine),
     };
@@ -1179,16 +1179,16 @@ fn jobs_detail_lines(
     lines.extend(labeled_row("Last:", &detail_last(repo, &job.name), width));
     lines.push(String::new());
 
-    if documents.is_empty() {
-        lines.push("  no documents under this routine".to_string());
+    if tasks.is_empty() {
+        lines.push("  no tasks under this routine".to_string());
     } else {
-        lines.push("  the documents it queues".to_string());
-        let id_width = documents
+        lines.push("  the tasks it queues".to_string());
+        let id_width = tasks
             .iter()
             .map(|(id, _)| id.chars().count())
             .max()
             .unwrap_or(0);
-        for (id, description) in &documents {
+        for (id, description) in &tasks {
             lines.push(format!("    {id:<id_width$}    {description}"));
         }
     }
@@ -1196,9 +1196,9 @@ fn jobs_detail_lines(
     (lines, (0, 0))
 }
 
-/// A routine target's own documents — `(id, one-line description)` each — for
+/// A routine target's own tasks — `(id, one-line description)` each — for
 /// the detail pane. Empty when the path is gone or will not read.
-fn routine_documents(path: &Path) -> Vec<(String, String)> {
+fn routine_tasks(path: &Path) -> Vec<(String, String)> {
     if path.is_dir() {
         super::routines::read_folder_at(path)
             .map(|folder| {
@@ -1350,7 +1350,7 @@ const ROUTINE_KEYS: &[(&str, &str)] = &[
 
 /// The routine picker's overlay, as step 32 of the screen's mockup draws it:
 /// the folders at the browser's current level, each with its tick, and under
-/// them the highlighted folder's own documents — the ones `enter` would use
+/// them the highlighted folder's own tasks — the ones `enter` would use
 /// — by id and title. The same browser the queue screen's routines pane
 /// drives, [`handle_routine_key`] and all, drawn in a box over the list
 /// rather than in place of it.
@@ -1416,7 +1416,7 @@ mod tests {
     use super::*;
     use crate::commands::testutil::fixture;
 
-    /// A routine folder with one queueable document, and a job in the user
+    /// A routine folder with one queueable task, and a job in the user
     /// store pointing at it.
     fn one_job(repo: &Repo) {
         let dir = repo.routines_dir().join("nightly");
@@ -1435,7 +1435,7 @@ mod tests {
     }
 
     #[test]
-    fn jobs_run_queues_the_minted_documents_and_records_the_firing() {
+    fn jobs_run_queues_the_minted_tasks_and_records_the_firing() {
         let repo = fixture("jobs-run");
         one_job(&repo);
 
@@ -1449,7 +1449,7 @@ mod tests {
         assert_eq!(
             minted.len(),
             1,
-            "the routine's one document, minted: {minted:?}"
+            "the routine's one task, minted: {minted:?}"
         );
         assert_eq!(
             repo.task(&minted[0]).unwrap().front.pipeline.as_deref(),
@@ -1518,7 +1518,7 @@ mod tests {
 
     // --------------------------------------------------------------- the screen
 
-    /// A routines tree with two folders, one document in each — enough to walk
+    /// A routines tree with two folders, one task in each — enough to walk
     /// the browser and pick a target.
     fn seed_routines(repo: &Repo) {
         for (folder, id) in [("nightly", "audit"), ("weekly", "deps")] {
@@ -1529,7 +1529,7 @@ mod tests {
                 // The title is quoted: an unquoted `chore(id): text` reads as
                 // a YAML mapping value past its own colon, which used to
                 // leave `read_task` silently parsing nothing — every folder
-                // one own task short — for anything that reads the document
+                // one own task short — for anything that reads the task
                 // itself rather than just the folder it sits in.
                 format!(
                     "---\nid: {id}\ntitle: \"chore({id}): do the {id}\"\ngroup: demo\n---\n\
@@ -1864,7 +1864,7 @@ mod tests {
 
     /// `n` opens the routine picker as a popup over the list, as step 32 of
     /// the screen's mockup draws it: the folders with their ticks, the
-    /// highlighted folder's documents under them, and the keys in brackets.
+    /// highlighted folder's tasks under them, and the keys in brackets.
     #[test]
     fn the_routine_picker_is_a_popup_over_the_list() {
         let repo = fixture("jobs-screen-routine-popup");
@@ -1985,7 +1985,7 @@ mod tests {
     }
 
     /// `o` does nothing while the folders pane has focus — a folder has no
-    /// document of its own to open — the same gate the queue screen's own
+    /// task of its own to open — the same gate the queue screen's own
     /// routines pane gives it.
     #[test]
     fn o_does_nothing_while_the_folders_pane_has_focus_in_the_routine_picker() {

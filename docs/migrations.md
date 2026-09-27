@@ -73,10 +73,10 @@ Two commands changed shape. The update does not rewrite scripts that call them:
   `headless` in `.spoolway/config.toml`, and delete `dispatch.tmux_mode`; a config still naming
   `tmux` loads as `herdr` with a note and rewrites both keys on the next save.
 - `dispatch.default_pipeline` is gone. Add `pipeline: <name>` naming one of the project's
-  pipelines to every task document that relied on the default; a run refuses to start with one
+  pipelines to every task that relied on the default; a run refuses to start with one
   missing.
 - A task no longer inherits `base:` from the checked-out branch. Set `base: <branch>` on every
-  task document that relied on the fallback.
+  task that relied on the fallback.
 - `[pipeline_gen]` and the rest of pipeline generation are gone, including the fallback that
   answered a missing `.spoolway/pipelines/` directory from the pipelines built into the binary.
   Delete the `[pipeline_gen]` table from `.spoolway/config.toml`; if the directory is missing,

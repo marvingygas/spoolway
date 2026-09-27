@@ -1,7 +1,7 @@
 //! A job: a five-field cron expression plus a pipeline, pointed at a routine
 //! target. The dispatcher's own pass fires a job when the local clock crosses
 //! its expression, queueing the routine through the same path the queue
-//! screen's `r` pane runs — a folder as one batch, a single document alone
+//! screen's `r` pane runs — a folder as one batch, a single task alone
 //! with its `depends_on` emptied.
 //!
 //! A job lives in one of two TOML stores: `jobs.toml` in this machine's
@@ -68,7 +68,7 @@ pub struct JobSpec {
     /// a store with one bad expression still lists the rest and `spoolway
     /// doctor` is what names the bad one.
     pub schedule: String,
-    /// The pipeline every document of the routine is queued under.
+    /// The pipeline every task of the routine is queued under.
     pub pipeline: String,
     /// A path under `.spoolway/routines/`, relative: a folder queued as one
     /// batch, or a single `.md` file queued alone.
@@ -356,7 +356,7 @@ fn write_state(repo: &Repo, state: &State) -> Result<()> {
 
 /// Fire every enabled job whose expression matches the current local minute,
 /// recording the minute in machine home. Called at the top of a dispatcher
-/// pass, before it reads the queue, so a job's freshly queued documents are
+/// pass, before it reads the queue, so a job's freshly queued tasks are
 /// dispatched by the same pass.
 ///
 /// Trouble with one job goes to `problems` and the rest still run. A job
@@ -1204,7 +1204,7 @@ mod tests {
         );
     }
 
-    /// A routine folder with one queueable document, and a job pointing at it
+    /// A routine folder with one queueable task, and a job pointing at it
     /// on `pipeline` with an expression that matches every minute.
     fn every_minute_job(repo: &Repo, routine: &str, pipeline: &str) {
         scheduled_job(repo, routine, pipeline, "* * * * *");
@@ -1242,7 +1242,7 @@ mod tests {
     fn a_due_job_fires_onto_its_own_pipeline_and_records_the_minute() {
         let repo = fixture("jobs-fire");
         // `bugfix`, not the default: the job names its own pipeline and every
-        // queued document has to land on it.
+        // queued task has to land on it.
         every_minute_job(&repo, "nightly", "bugfix");
 
         let (actions, problems) = fire(&repo);
@@ -1258,7 +1258,7 @@ mod tests {
             .into_iter()
             .filter(|id| id.starts_with("audit-"))
             .collect();
-        assert_eq!(minted.len(), 1, "one document, one minted id: {minted:?}");
+        assert_eq!(minted.len(), 1, "one task, one minted id: {minted:?}");
         assert_eq!(
             repo.task(&minted[0]).unwrap().front.pipeline.as_deref(),
             Some("bugfix")

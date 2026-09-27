@@ -156,7 +156,7 @@ spoolway install codex
 | Skill | What it does |
 |---|---|
 | `spoolway-plan` | Turns one goal into a plan page. After you approve it, it cuts the tasks into the pending directory. |
-| `spoolway-tasks` | Cuts an agreed shape into task documents: pipeline, size, ids, globs, dependency order. |
+| `spoolway-tasks` | Cuts an agreed shape into tasks: pipeline, size, ids, globs, dependency order. |
 | `spoolway-config` | Changes pipelines, prompts, `config.toml`, templates and hooks, as an override or as an edit. Also repairs a project that is broken, refused or behind. |
 | `spoolway-calibrate` | Compares archived tasks, step-level evaluation results and spend data against the prompts and pipelines that produced them, then applies the changes you pick. |
 

@@ -469,7 +469,7 @@ ends at the push is claiming something it never checked.
   expansion first. Backticks around a command name in that prose are not decoration; they
   are command substitution, and `` `spoolway dispatch` `` in a sentence *starts a
   dispatcher*. It did: three lanes, three worktrees, three panes and three live agents, from
-  a call whose visible purpose was to add a description to a task document. The shell gave no
+  a call whose visible purpose was to add a description to a task. The shell gave no
   hint — the call simply hung, because the dispatcher it had started does not return.
   Quote the delimiter, always: `<<'PY'`. Nothing inside then means anything to the shell.
   The general form is that this pass writes a lot of text containing command names, and text

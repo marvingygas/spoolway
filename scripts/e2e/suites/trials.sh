@@ -72,7 +72,7 @@ works "the alpha arm reaches the queue" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/alpha-1.md"
 works "and the beta arm beside it" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/beta-1.md"
-works "two distinct minted ids — never either document's own bare one" \
+works "two distinct minted ids — never either task's own bare one" \
   bash -c '[ ! -e "$1/queue/alpha.md" ] && [ ! -e "$1/queue/beta.md" ]' \
   _ "$SPOOLWAY_PROJECT_HOME"
 
@@ -86,7 +86,7 @@ works "alpha's own ticked skip, and none of beta's" \
 works "beta's own ticked skip, and none of alpha's" \
   bash -c 'grep -A1 "^skip:" "$1" | tail -1 | grep -qxF -- "- document"' \
   _ "$SPOOLWAY_PROJECT_HOME/queue/beta-1.md"
-has "both arms keep the document's own group" "group: audits" \
+has "both arms keep the task's own group" "group: audits" \
   "$SPOOLWAY_PROJECT_HOME/queue/alpha-1.md"
 has "on both arms" "group: audits" \
   "$SPOOLWAY_PROJECT_HOME/queue/beta-1.md"
@@ -110,7 +110,7 @@ works "not left naming the bare id nothing in this batch is queued under" \
 # A trial forks the documents; it does not submit them. The pending copies
 # are templates the picker read from, not a batch the screen queued and
 # cleared.
-works "both source documents are left exactly where they were" \
+works "both source tasks are left exactly where they were" \
   bash -c 'test -f "$1/pending/alpha.md" && test -f "$1/pending/beta.md"' \
   _ "$SPOOLWAY_PROJECT_HOME"
 
@@ -140,7 +140,7 @@ task_doc "$SPOOLWAY_PROJECT_HOME/queue/old-run.md" old-run "$BODY" \
 
 on_screen 'fold-run\rt\x1b[C\x1b[C\r\rn' /dev/null
 
-works "the reset lets a stamped document reach \`finish_trial\` at all" \
+works "the reset lets a stamped task reach \`finish_trial\` at all" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/old-run-1.md"
 has "under the pipeline cycled onto it" "pipeline: default" \
   "$SPOOLWAY_PROJECT_HOME/queue/old-run-1.md"
@@ -253,10 +253,10 @@ done
 # document, worktree and branch survive exactly as before, so the trial
 # arms' disappearance is the trial boundary and not ordinary teardown acting
 # on everyone alike.
-has "the control keeps its archive document, the durable record cleanup means" \
+has "the control keeps its archive task, the durable record cleanup means" \
   "id: control" "$SPOOLWAY_PROJECT_HOME/archive/control.md"
 for arm in alpha-1 beta-1; do
-  works "$arm's archive document is gone, not merely queued for retention" \
+  works "$arm's archive task is gone, not merely queued for retention" \
     bash -c '[ ! -e "$1" ]' _ "$SPOOLWAY_PROJECT_HOME/archive/$arm.md"
   works "$arm's local branch is gone" \
     bash -c '! git rev-parse --verify -q "task/$1" >/dev/null' _ "$arm"
@@ -353,7 +353,7 @@ says "the discard names the trial it threw away" "discarded" \
 says "and points back at the same ledger the settlement path reads" \
   "eval --by task --trial $SOLO_TRIAL" \
   bash -c 'printf "%s" "$1"' _ "$DISCARD_OUT"
-works "the discarded arm's task document is gone" \
+works "the discarded arm's task is gone" \
   bash -c '[ ! -e "$1" ]' _ "$SPOOLWAY_PROJECT_HOME/queue/oneoff-1.md"
 works "its worktree is gone" \
   bash -c '[ ! -e "$1" ]' _ "$SPOOLWAY_PROJECT_HOME/worktrees/task-oneoff-1"
@@ -363,7 +363,7 @@ works "its local branch is gone, though nothing ever pushed it" \
 # Acceptance criterion: the original source group is never modified or removed
 # by trial cleanup — a discard reaches further than settlement does, and still
 # must not reach this.
-works "the source document the trial forked is left where it was" \
+works "the source task the trial forked is left where it was" \
   test -f "$SPOOLWAY_PROJECT_HOME/pending/oneoff.md"
 
 # A trial id nothing carries is a typo, and removing nothing quietly reads

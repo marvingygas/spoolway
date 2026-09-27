@@ -371,7 +371,7 @@ else
 fi
 
 # ------------------------------------------- a task may not name its own branch
-# `branch:` is spoolway's field outright. A task document that sets it to
+# `branch:` is spoolway's field outright. A task that sets it to
 # anything spoolway would not have stamped itself — `task/<id>`, or the
 # `task/<slug>-<id>` form `issue_tracking.key_in_names` prefixes — is refused
 # when the task file is loaded, well before `spoolway stack` could force-push

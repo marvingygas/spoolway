@@ -531,7 +531,7 @@ impl Board {
     /// started for it and no still-queued task depends on it, `U` does the
     /// same for every task that has not started. A run-wide key opens a
     /// confirm panel first wherever what it is about to do is not free to
-    /// undo — `u` and `U` open one unconditionally, since writing a document
+    /// undo — `u` and `U` open one unconditionally, since writing a task
     /// back to pending is exactly that — see [`BoardMode`]. With a panel
     /// already open every other key is read by that panel instead: `enter`
     /// confirms whatever it opened and `esc` cancels it, on every panel the
@@ -599,7 +599,7 @@ impl Board {
     /// `o`: open the cursor's task file in an editor, in a pane the
     /// multiplexer opens — a no-op with no cursor or a cursor on a row the
     /// board no longer draws. `repo.task` reads both the queue and the
-    /// archive, so this reaches a done row's document exactly as it does a
+    /// archive, so this reaches a done row's task exactly as it does a
     /// live one — [`render`]'s own composed row list, which [`Board::drawn`]
     /// is taken from, is what lets the cursor land on that row in the first
     /// place. Never blocks: the pane runs the editor on its
@@ -953,7 +953,7 @@ impl Board {
     }
 }
 
-/// The command line `o` runs on a document, everywhere `o` appears.
+/// The command line `o` runs on a task, everywhere `o` appears.
 ///
 /// The same resolution `spoolway config edit` already uses: `$VISUAL`, then
 /// `$EDITOR`, then `vi`. Shared between [`Board::open_cursor`]
@@ -997,10 +997,10 @@ enum BoardMode {
     /// unstarted task that reaches it through `depends_on` — see
     /// [`unqueue_chain`] — and `dir`, this run's own [`Repo::pending_dir`],
     /// read once when the panel opened, so its panel can show where the
-    /// documents are about to land without a second lookup at answer time.
+    /// tasks are about to land without a second lookup at answer time.
     /// `chain` still needs a fresh [`Repo::task`] per id to answer with, the
-    /// same as every confirm panel here: a document a moment ago and the
-    /// document now are not guaranteed to be the same file.
+    /// same as every confirm panel here: a task a moment ago and the
+    /// task now are not guaranteed to be the same file.
     ConfirmUnqueue {
         chain: Vec<ChainEntry>,
         dir: PathBuf,
@@ -1329,24 +1329,24 @@ fn unqueue_chain(tasks: &[crate::task::Task], id: &str) -> Vec<ChainEntry> {
         .collect()
 }
 
-/// Move one task's document from the queue back to pending, dropping every
+/// Move one task from the queue back to pending, dropping every
 /// [`crate::commands::RESERVED_KEYS`] field from its frontmatter so `queue
-/// add --from` accepts it exactly as it would a document that had never been
+/// add --from` accepts it exactly as it would a task that had never been
 /// queued — the same fields `queue_add::parse_submission` refuses to see set
-/// on a document coming in.
+/// on a task coming in.
 ///
 /// `Task::save` cannot do this alone: `stage` is a plain `String` with no
 /// `skip_serializing_if`, so it always round-trips, and it is one of the
 /// keys that has to disappear entirely rather than clear to empty. The
 /// frontmatter goes through a bare YAML mapping instead, exactly as
-/// `parse_submission` reads one coming in, so the same keys that document
+/// `parse_submission` reads one coming in, so the same keys that task
 /// path refuses are the ones this path removes.
 ///
 /// Re-reads `id` fresh rather than trusting whatever `Task` a caller already
 /// has — the same reason [`resume_task`] does — and checks `not_started`
 /// again before touching anything: a task this key already refused a moment
 /// ago, or one a second process moved on since the panel opened, is left
-/// exactly where it is rather than risk carrying an archived document back
+/// exactly where it is rather than risk carrying an archived task back
 /// to pending.
 ///
 /// `pub(crate)`: `spoolway queue unqueue` is the third caller, for a task on
@@ -1379,14 +1379,14 @@ pub(crate) fn unqueue_task(repo: &Repo, id: &str) -> Result<()> {
     Ok(())
 }
 
-/// The move itself, shared with `spoolway queue unqueue`: `task`'s document
+/// The move itself, shared with `spoolway queue unqueue`: `task`'s task
 /// written to pending with every reserved key dropped, then its queue file
 /// removed. The caller decides whether `task` may go — the board's `u` and
 /// [`unqueue_task`] only carry a task that has not started, `queue unqueue
 /// --force` one whose checkout it has just torn down — and holds the task's
 /// lock while it does.
 ///
-/// `None` when a document already sits in `pending/` under this id: that is
+/// `None` when a task already sits in `pending/` under this id: that is
 /// a newer draft — a producer re-ran over work already submitted — and
 /// putting the queued copy back on top of it would silently lose that
 /// draft. Nothing is touched in that case.
@@ -1426,7 +1426,7 @@ pub(crate) fn carry_to_pending(repo: &Repo, task: &crate::task::Task) -> Result<
 /// Sets no `parked_from` at all when the task is still on `queued`: `queued`
 /// is not a step any pipeline declares, so a `parked_from: queued` would
 /// never match the step a launch is starting and would never be spent by
-/// `Dispatcher::start_one` — it would sit in the document for the rest of the
+/// `Dispatcher::start_one` — it would sit in the task for the rest of the
 /// run. `resume_target` already answers `queued` itself when nothing names a
 /// step, which is where a task that never started belongs — see
 /// [`build_rows`]'s `paused` arm, which reads the same answer to skip the
@@ -3520,7 +3520,7 @@ mod tests {
 
     /// A task's `url:` frontmatter reaches the group band as a real OSC 8
     /// hyperlink in the frame the board hands back — the whole path from the
-    /// saved document through `Row::issue_url` into the painted bytes, not
+    /// saved task through `Row::issue_url` into the painted bytes, not
     /// just `view::table` exercised in isolation. Stripped, the band is still
     /// the plain heading a group search matches.
     #[test]
@@ -4387,7 +4387,7 @@ mod tests {
             RecentEvent::Arrival {
                 at: "14:21".into(),
                 id: "gate-board".into(),
-                step: "document".into(),
+                step: "task".into(),
                 verdict: Verdict::None,
                 position: None,
             },
@@ -4668,11 +4668,11 @@ mod tests {
 
     /// The cursor walks the archived rows the board draws too, not just the
     /// live queue: with a group holding one live task and one done one, `↓`
-    /// from the live row reaches the done row, and `o` opens its document by
+    /// from the live row reaches the done row, and `o` opens its task by
     /// way of `repo.task`'s own archive lookup rather than refusing because
     /// the queue no longer holds the file.
     #[test]
-    fn the_cursor_reaches_a_done_row_and_o_opens_its_document() {
+    fn the_cursor_reaches_a_done_row_and_o_opens_its_task() {
         let mut repo = fixture("cursor-reaches-done-row");
         repo.config.dispatch.backend = crate::config::Backend::Headless;
         let pipelines = Pipelines::builtin();
@@ -5926,7 +5926,7 @@ mod tests {
 
     /// `u` on a queued row with nothing depending on it opens a panel naming
     /// the task and the pending path it would land at, and answering `u`
-    /// moves the document there with every reserved key gone from its
+    /// moves the task there with every reserved key gone from its
     /// frontmatter — accepted unchanged by a fresh `queue add --from`.
     #[test]
     fn pressing_u_on_an_unstarted_task_moves_it_back_to_pending() {
@@ -5991,14 +5991,14 @@ mod tests {
 
         // `spoolway task contract --from` — the acceptance criterion's own
         // words — runs the same validation `queue add --from` does and
-        // writes nothing; it has to accept the document exactly as it is.
+        // writes nothing; it has to accept the task exactly as it is.
         let contract_args = crate::cli::TaskContractArgs {
             from: vec![pending_doc.display().to_string()],
             base: None,
         };
         crate::commands::task_contract(&repo, &pipelines, &contract_args, &repo.root).unwrap();
 
-        // And the document a fresh `queue add --from` accepts unchanged,
+        // And the task a fresh `queue add --from` accepts unchanged,
         // exactly as it did the first time — so it can be queued again
         // without editing it by hand.
         let queue_args = crate::cli::QueueAddArgs {

@@ -1,30 +1,30 @@
-//! Repeatable task documents kept in `.spoolway/routines/`, nested however a
+//! Repeatable tasks kept in `.spoolway/routines/`, nested however a
 //! project likes and tracked in git — the counterpart to [`super::pending`]'s
 //! read of the single flat pending directory.
 //!
 //! Read only, and just as shallow as `pending.rs`'s own read: the queue
 //! screen's `r` pane only needs enough to draw a folder tree and the
-//! documents under it, and `super::queue::validate_batch` is still what
-//! actually validates a document once a person queues one, exactly as it is
+//! tasks under it, and `super::queue::validate_batch` is still what
+//! actually validates a task once a person queues one, exactly as it is
 //! for a pending group.
 
 use std::path::{Path, PathBuf};
 
 use super::*;
 
-/// One task document under a routines folder, read the same shallow way
+/// One task under a routines folder, read the same shallow way
 /// [`super::pending::PendingTask`] is.
 pub(crate) struct RoutineTask {
     /// The file it was read from, under `.spoolway/routines/` — never
     /// written to or removed by anything in this module; a routine's
-    /// documents move only when a person edits them by hand.
+    /// tasks move only when a person edits them by hand.
     pub(crate) path: PathBuf,
-    /// The document's own `id:`, before any minting a submission gives it.
+    /// The task's own `id:`, before any minting a submission gives it.
     pub(crate) id: String,
-    /// The document's own `title:`, the same optional one-line description
+    /// The task's own `title:`, the same optional one-line description
     /// [`super::pending::PendingTask::description`] is.
     pub(crate) description: Option<String>,
-    /// The document itself, unread and unmodified.
+    /// The task itself, unread and unmodified.
     pub(crate) doc: String,
 }
 
@@ -40,7 +40,7 @@ pub(crate) struct RoutineFolder {
     /// This folder's own immediate subfolders, name order — what `→`
     /// descends into.
     pub(crate) folders: Vec<RoutineFolder>,
-    /// Every `*.md` at or below this folder — its own documents first, then
+    /// Every `*.md` at or below this folder — its own tasks first, then
     /// each subfolder's, recursively depth-first. What the left pane's own
     /// "N tasks" tail counts, what the right pane lists for the highlighted
     /// folder, and what `enter` queues whole.
@@ -48,7 +48,7 @@ pub(crate) struct RoutineFolder {
     /// How many of `tasks` sit directly in this folder, rather than folded
     /// in from a subfolder — the first `own` entries of `tasks`, by
     /// construction. What decides `→`'s own choice for a folder holding
-    /// both: a document of its own to focus, or nothing here but subfolders
+    /// both: a task of its own to focus, or nothing here but subfolders
     /// left to descend into. See `queue::handle_routine_key`.
     pub(crate) own: usize,
 }
@@ -86,21 +86,21 @@ pub(crate) fn read_folder_at(path: &Path) -> Result<RoutineFolder> {
     read_folder(path)
 }
 
-/// One document at a known path, read the same tolerant way [`read_task`]
+/// One task at a known path, read the same tolerant way [`read_task`]
 /// reads one found by walking a folder — but an error rather than `None`
 /// when it will not parse, since a job named this file directly and a silent
 /// skip would look like the job fired nothing.
 pub(crate) fn read_task_at(path: &Path) -> Result<RoutineTask> {
     read_task(path).with_context(|| {
         format!(
-            "{} is not a readable task document (needs a `---` fence and an `id:`)",
+            "{} is not a readable task (needs a `---` fence and an `id:`)",
             path.display()
         )
     })
 }
 
-/// One folder, read recursively: its own subfolders and its own documents,
-/// then every document any of those subfolders hold, folded in after.
+/// One folder, read recursively: its own subfolders and its own tasks,
+/// then every task any of those subfolders hold, folded in after.
 fn read_folder(path: &Path) -> Result<RoutineFolder> {
     let name = path
         .file_name()
@@ -125,10 +125,10 @@ fn read_folder(path: &Path) -> Result<RoutineFolder> {
             tasks.push(task);
         }
     }
-    // Taken before folding a subfolder's documents in below, so `own` counts
+    // Taken before folding a subfolder's tasks in below, so `own` counts
     // only what actually sits directly in this folder.
     let own = tasks.len();
-    // A subfolder's own documents are already gathered into its `tasks` by
+    // A subfolder's own tasks are already gathered into its `tasks` by
     // this same recursion, so folding them in here — after this folder's
     // own — is what makes a parent's count and listing cover everything at
     // or below it, not just what sits directly inside.
@@ -146,7 +146,7 @@ fn read_folder(path: &Path) -> Result<RoutineFolder> {
 }
 
 /// [`RoutineTask`] carries no `Clone` of its own — nothing else needs one,
-/// and deriving it would suggest a document is ever duplicated for any
+/// and deriving it would suggest a task is ever duplicated for any
 /// reason but folding a subfolder's list into its parent's, right here.
 fn clone_task(task: &RoutineTask) -> RoutineTask {
     RoutineTask {
@@ -157,7 +157,7 @@ fn clone_task(task: &RoutineTask) -> RoutineTask {
     }
 }
 
-/// One document, read the same tolerant way [`super::pending::list_groups`]
+/// One task, read the same tolerant way [`super::pending::list_groups`]
 /// reads a pending one: no fence, no readable YAML or no `id:` at all is
 /// `None` rather than an error, so one bad file does not take a whole
 /// folder's listing down with it. `super::queue::validate_batch` is what
@@ -199,10 +199,10 @@ mod tests {
         assert!(list_routines(&repo).unwrap().is_empty());
     }
 
-    /// A flat folder of documents: every one is this folder's own task, none
+    /// A flat folder of tasks: every one is this folder's own task, none
     /// of it a subfolder.
     #[test]
-    fn a_flat_folder_lists_its_own_documents() {
+    fn a_flat_folder_lists_its_own_tasks() {
         let repo = crate::commands::testutil::fixture("routines-flat");
         let dir = repo.routines_dir().join("nightly");
         write(&dir, "audit-deps.md", "audit-deps", "");
@@ -219,7 +219,7 @@ mod tests {
     /// A folder's own "at or below it" count and listing reach into every
     /// subfolder, recursively — not just what sits directly inside it.
     #[test]
-    fn a_nested_folder_counts_every_document_below_it() {
+    fn a_nested_folder_counts_every_task_below_it() {
         let repo = crate::commands::testutil::fixture("routines-nested");
         let top = repo.routines_dir().join("maintenance");
         write(&top, "sweep.md", "sweep", "");
@@ -237,14 +237,14 @@ mod tests {
         assert_eq!(routines[0].folders[0].own, 2, "both of `weekly`'s own");
     }
 
-    /// A document with no readable `id:` is skipped, the same tolerance
-    /// [`super::pending::list_groups`] gives a document with no `group:`.
+    /// A task with no readable `id:` is skipped, the same tolerance
+    /// [`super::pending::list_groups`] gives a task with no `group:`.
     #[test]
-    fn a_document_with_no_readable_id_is_skipped() {
+    fn a_task_with_no_readable_id_is_skipped() {
         let repo = crate::commands::testutil::fixture("routines-unreadable");
         let dir = repo.routines_dir().join("release");
         write(&dir, "good.md", "good", "");
-        std::fs::write(dir.join("garbage.md"), "not a document\n").unwrap();
+        std::fs::write(dir.join("garbage.md"), "not a task\n").unwrap();
 
         let routines = list_routines(&repo).unwrap();
         assert_eq!(routines[0].tasks.len(), 1);

@@ -1,13 +1,13 @@
-//! The task-document contract, and checking a document against it before it
+//! The task contract, and checking a task against it before it
 //! is queued.
 //!
 //! `spoolway task contract` is the whole interface a producer needs. Printed
-//! bare, it is every key a document may set, every key it may not, a
+//! bare, it is every key a task may set, every key it may not, a
 //! sentence on how to size a breakdown, and — per pipeline — its longest
 //! agent step, the steps `gate_at` accepts, its own `description:`, which step is
 //! `last-of-chain`, and the
 //! body skeleton itself; under `output` it is the directory a finished
-//! document is written to, what to name it there, and the two commands that
+//! task is written to, what to name it there, and the two commands that
 //! check it and send it. One call, so a producer never has to be told
 //! anything a person read somewhere else: a model handed this JSON and a
 //! goal has everything it needs to leave a queueable task on disk. Run with
@@ -15,18 +15,18 @@
 //! nothing written at the end of it.
 //!
 //! Both modes are read straight off [`super::queue::RESERVED_KEYS`],
-//! [`super::queue::longest_agent_step`], [`super::queue::gather_documents`]
+//! [`super::queue::longest_agent_step`], [`super::queue::gather_tasks`]
 //! and [`super::queue::validate_batch`] — the functions that actually
 //! enforce the contract — so this can never say something the enforcement
 //! does not, or the other way round.
 
 use super::*;
 
-/// Keys a document must set — refused by `parse_submission` when blank or
+/// Keys a task must set — refused by `parse_submission` when blank or
 /// absent.
 const REQUIRED_KEYS: &[&str] = &["id", "title", "group", "pipeline"];
 
-/// Keys a document may set, and spoolway keeps exactly what it wrote.
+/// Keys a task may set, and spoolway keeps exactly what it wrote.
 const OPTIONAL_KEYS: &[&str] = &[
     "source",
     "plan",
@@ -41,16 +41,16 @@ const OPTIONAL_KEYS: &[&str] = &[
 ];
 
 /// The keys spoolway's own dispatcher machinery throws away unconditionally
-/// once a document reaches `parse_submission`, whatever value the document
+/// once a task reaches `parse_submission`, whatever value the task
 /// gave them. Distinct from [`super::queue::RESERVED_KEYS`]: setting one of
-/// *these* is not refused, it is simply thrown away, because a document
+/// *these* is not refused, it is simply thrown away, because a task
 /// cannot know the run id, the worktree path or the launch counters before
 /// any of them exist.
 ///
 /// Most of these are overwritten by one of the `front.<field> = ...`
 /// assignments in `parse_submission` — everything but the five quota-park
 /// keys at the end, which have no `Frontmatter` field left to assign: a
-/// document still carrying one of those five is a task file that predates
+/// task still carrying one of those five is a task file that predates
 /// their retirement, and `RETIRED_PARK_KEYS` (`src/task.rs`) strips it out
 /// of `extra` instead, the same way `Task::parse` drops one already queued.
 const IGNORED_KEYS: &[&str] = &[
@@ -83,7 +83,7 @@ const IGNORED_KEYS: &[&str] = &[
     "parked_at",
 ];
 
-/// What a document does with a key none of the four groups above name.
+/// What a task does with a key none of the four groups above name.
 const PASSTHROUGH: &str = "any key not named here survives untouched, for a project's own metadata";
 
 /// One sentence per settable key — [`REQUIRED_KEYS`] and [`OPTIONAL_KEYS`],
@@ -159,9 +159,9 @@ const FIELD_SENTENCES: &[(&str, &str)] = &[
         "ticket",
         "The `[issue_tracking]` open hook's own ticket id for this task, opaque \
          and never parsed. This is the key an inbound producer sets to hand a \
-         document a ticket it already knows about, rather than have `open` mint \
+         task a ticket it already knows about, rather than have `open` mint \
          one — and, the same way, the resume path a failed batch leaves behind: a \
-         document that already sets this is reported `kept` at `queue add` and \
+         task that already sets this is reported `kept` at `queue add` and \
          the hook never runs for it.",
     ),
     (
@@ -169,29 +169,29 @@ const FIELD_SENTENCES: &[(&str, &str)] = &[
         "The branch this task is cut from and merges back into — must name a \
          branch the repository already has locally. Leave it unset to take the \
          submission's own `queue add --base` instead; a submission that sets \
-         neither is refused, naming the document.",
+         neither is refused, naming the task.",
     ),
     (
         "group_description",
         "The group's own words for the issue a mirror opens above it — carried \
          verbatim into the open hook's `SPOOLWAY_GROUP_DESCRIPTION`. Only one \
-         document of a group needs to set it; a submission is refused, naming \
-         the group, when a hook is configured and none of the group's documents \
+         task of a group needs to set it; a submission is refused, naming \
+         the group, when a hook is configured and none of the group's tasks \
          set it. Never required when no hook is configured.",
     ),
 ];
 
 /// Rules `check_dependencies_set` and `validate_batch` enforce over a whole
-/// submission, not any one document alone — worded for a reader with no
+/// submission, not any one task alone — worded for a reader with no
 /// access to either function's source.
 fn set_rules() -> Vec<String> {
     vec![
-        "no two documents in one submission may share an `id`, and none may name \
+        "no two tasks in one submission may share an `id`, and none may name \
          an `id` already queued"
             .to_string(),
-        "a `depends_on` may not name the document's own `id`".to_string(),
+        "a `depends_on` may not name the task's own `id`".to_string(),
         "a `depends_on` must name a task already in the queue or the archive, or a \
-         document in this same submission — not one queued nowhere at all"
+         task in this same submission — not one queued nowhere at all"
             .to_string(),
         "a `depends_on` may not close a cycle, however many hops long".to_string(),
         "a dependency and its dependent must share the same `base` — a dependent's \
@@ -199,14 +199,14 @@ fn set_rules() -> Vec<String> {
          back into its own group's base"
             .to_string(),
         "when `issue_tracking.hook` is configured, every group must set \
-         `group_description:` on at least one of its documents — never required \
+         `group_description:` on at least one of its tasks — never required \
          with no hook configured"
             .to_string(),
     ]
 }
 
-/// Where a finished document goes, and what happens to it there — the half
-/// of the contract that is not about a document's own content.
+/// Where a finished task goes, and what happens to it there — the half
+/// of the contract that is not about a task's own content.
 ///
 /// Read off [`Repo::pending_dir`] rather than spelled out as
 /// `~/.spoolway/<project>/pending`, so a producer is handed the path this
@@ -263,7 +263,7 @@ const SIZING: &str = "Cut a reasonable number of tasks for the shape at hand, ea
                       one of the pipelines below. No arithmetic: judge the split by subject, \
                       and keep each task's criteria under five bullets.";
 
-/// The whole task-document contract, printed as JSON by bare `spoolway task
+/// The whole task contract, printed as JSON by bare `spoolway task
 /// contract`.
 #[derive(Debug, serde::Serialize)]
 struct Contract {
@@ -314,9 +314,9 @@ fn build_contract(repo: &Repo, pipelines: &Pipelines) -> Contract {
         output: ContractOutput {
             verify: format!("spoolway task contract --from {pending}"),
             dir: pending,
-            filename: "<id>.md, one document per file — this directory holds task \
-                       documents and nothing else",
-            queue: "spoolway queue — writing a document does not queue it; a person \
+            filename: "<id>.md, one task per file — this directory holds task \
+                       tasks and nothing else",
+            queue: "spoolway queue — writing a task does not queue it; a person \
                     selects a group there and sends it",
         },
         keys: ContractKeys {
@@ -342,9 +342,9 @@ fn print_contract(repo: &Repo, pipelines: &Pipelines) -> Result<()> {
     Ok(())
 }
 
-/// `spoolway task contract --from`, once every document has passed: the same
+/// `spoolway task contract --from`, once every task has passed: the same
 /// four things a person would otherwise have to read the code to know were
-/// checked, one line each, for every document in the batch.
+/// checked, one line each, for every task in the batch.
 fn print_check_report(tasks: &[Task], repo: &Repo, pipelines: &Pipelines) -> Result<()> {
     let existing = repo.tasks()?;
 
@@ -357,9 +357,9 @@ fn print_check_report(tasks: &[Task], repo: &Repo, pipelines: &Pipelines) -> Res
             .front
             .pipeline
             .as_deref()
-            .expect("validate_batch refuses a document with no `pipeline:`");
+            .expect("validate_batch refuses a task with no `pipeline:`");
         // Only checked for existing — `validate_batch` runs the same check
-        // before ever writing a document, and this report exists to say what
+        // before ever writing a task, and this report exists to say what
         // that check already confirmed, not to run a second one.
         pipelines.get(pipeline_name)?;
 
@@ -417,7 +417,7 @@ fn print_check_report(tasks: &[Task], repo: &Repo, pipelines: &Pipelines) -> Res
 }
 
 /// `spoolway task contract`: the contract itself with no arguments, or a
-/// document checked against it with `--from` — the same validation `queue
+/// task checked against it with `--from` — the same validation `queue
 /// add --from` runs, [`super::queue::validate_batch`] and all, with nothing
 /// saved at the end of it. A refusal propagates exactly as `queue add
 /// --from`'s own does, which is what gives the two the same wording: this is
@@ -435,12 +435,12 @@ pub fn task_contract(
         return print_contract(repo, pipelines);
     }
 
-    let documents = super::queue::gather_documents(&args.from)?;
-    let tasks = super::queue::validate_batch(repo, pipelines, args.base.as_deref(), &documents)?;
+    let tasks = super::queue::gather_tasks(&args.from)?;
+    let tasks = super::queue::validate_batch(repo, pipelines, args.base.as_deref(), &tasks)?;
     print_check_report(&tasks, repo, pipelines)
 }
 
-/// `spoolway task edit`: rewrite one section of a stopped task's document,
+/// `spoolway task edit`: rewrite one section of a stopped task,
 /// under its task lock.
 ///
 /// A stopped task belongs to whoever is looking at its pane — see
@@ -472,7 +472,7 @@ pub fn task_edit(repo: &Repo, args: &TaskEditArgs) -> Result<()> {
     let stage = task.stage();
     if stage != crate::pipeline::PAUSED && stage != crate::pipeline::BLOCKED {
         bail!(
-            "task `{}` is at `{stage}`, not `{}` or `{}` — only a stopped task's document may \
+            "task `{}` is at `{stage}`, not `{}` or `{}` — only a stopped task may \
              be rewritten this way.",
             args.task,
             crate::pipeline::PAUSED,
@@ -490,7 +490,7 @@ pub fn task_edit(repo: &Repo, args: &TaskEditArgs) -> Result<()> {
     // person reading this pane can, and it is named key first, then the
     // command, exactly as every other choice a stop offers is now — see
     // `commands::report::stop_choices`, printed at the moment a report first
-    // parks a task here rather than every time its document changes.
+    // parks a task here rather than every time its task changes.
     println!(
         "{}: `{heading}` rewritten, {} lines\n\n  resuming it is still a person's:\n  resume   \
          [r]   spoolway resume {}",
@@ -502,8 +502,8 @@ pub fn task_edit(repo: &Repo, args: &TaskEditArgs) -> Result<()> {
 }
 
 /// `--from`'s content: a file, or `-` for standard input — the same two
-/// shapes `queue add --from` reads a document from, minus the directory and
-/// stream-of-documents cases neither makes sense for one section.
+/// shapes `queue add --from` reads a task from, minus the directory and
+/// stream-of-tasks cases neither makes sense for one section.
 fn read_section_content(from: &str) -> Result<String> {
     if from == "-" {
         let mut body = String::new();
@@ -523,11 +523,11 @@ mod tests {
     /// to exist, not to say anything in particular.
     const BODY: &str = "## Goal\n\nDo the thing.\n";
 
-    /// A whole task document, in the shape `--from` accepts: `id:` plus
+    /// A whole task, in the shape `--from` accepts: `id:` plus
     /// whatever else `extra` puts in the frontmatter, then `body`.
     /// `pipeline:` is required now, so this fills in the built-in `default`
     /// pipeline unless `extra` already names one.
-    fn document(id: &str, extra: &str, body: &str) -> String {
+    fn task_text(id: &str, extra: &str, body: &str) -> String {
         let pipeline = if extra.contains("pipeline:") {
             ""
         } else {
@@ -577,7 +577,7 @@ mod tests {
         let fields = frontmatter_field_names();
         assert!(!fields.is_empty(), "found no fields to check at all");
         for field in fields {
-            // `extra` is not a document key at all — it is the map every
+            // `extra` is not a task key at all — it is the map every
             // unrecognised key round-trips through, which `keys.passthrough`
             // already describes in prose rather than by name.
             if field == "extra" {
@@ -591,7 +591,7 @@ mod tests {
         }
     }
 
-    /// A key a document may actually set — `required` or `optional` — has to
+    /// A key a task may actually set — `required` or `optional` — has to
     /// carry one sentence in `fields` on how to fill it, read off the same
     /// contract rather than a hand-copied list: a key added to one group and
     /// forgotten in the other fails the build the same way a forgotten
@@ -607,7 +607,7 @@ mod tests {
         for key in settable {
             assert!(
                 contract.fields.contains_key(key),
-                "`{key}` may be set by a document but has no `fields` entry — add one"
+                "`{key}` may be set by a task but has no `fields` entry — add one"
             );
         }
     }
@@ -757,12 +757,12 @@ mod tests {
         assert_eq!(bugfix_out.first_of_chain, None);
     }
 
-    /// The contract names the directory a document is written to, and names
+    /// The contract names the directory a task is written to, and names
     /// the one this machine actually resolves — a producer that writes where
     /// `output.dir` says has written where `spoolway queue` reads, with no
     /// path pattern for it to expand on its own.
     #[test]
-    fn the_contract_names_the_directory_documents_are_written_to() {
+    fn the_contract_names_the_directory_tasks_are_written_to() {
         let repo = fixture("contract-output");
         let contract = build_contract(&repo, &Pipelines::builtin());
 
@@ -777,12 +777,12 @@ mod tests {
         );
     }
 
-    /// A document `queue add --from` would accept is reported with no
+    /// A task `queue add --from` would accept is reported with no
     /// problems, and nothing is written — the whole point of the command.
     #[test]
-    fn from_accepts_a_good_document_and_writes_nothing() {
+    fn from_accepts_a_good_task_and_writes_nothing() {
         let repo = fixture("check-good");
-        let text = document(
+        let text = task_text(
             "checked",
             "group: demo\ntouches: [notes/checked.md]\n",
             BODY,
@@ -800,19 +800,19 @@ mod tests {
         );
         assert!(
             !repo.queue_dir().join("checked.md").exists(),
-            "a check must never write the document it validated"
+            "a check must never write the task it validated"
         );
     }
 
     /// `task contract --from` runs `queue add --from`'s own base rule, not
-    /// an ambient one of its own: a document with no `base:` and no
+    /// an ambient one of its own: a task with no `base:` and no
     /// `--base` is refused here exactly as `queue add` would refuse it,
     /// rather than checking out clean because this command reads the
     /// checkout's branch instead.
     #[test]
-    fn from_refuses_a_document_with_no_base_and_no_flag() {
+    fn from_refuses_a_task_with_no_base_and_no_flag() {
         let repo = fixture("check-no-base");
-        let text = document("checked", "group: demo\n", BODY);
+        let text = task_text("checked", "group: demo\n", BODY);
         let path = write_doc(&repo, "checked.md", &text);
 
         let err = task_contract(
@@ -842,18 +842,18 @@ mod tests {
         );
     }
 
-    /// The same refusal `queue add --from` gives for a document setting a
+    /// The same refusal `queue add --from` gives for a task setting a
     /// reserved key, word for word — because this reaches the very same
     /// `parse_submission` rather than a second copy of its checks.
     #[test]
     fn from_refuses_a_reserved_key_the_same_way_add_does() {
         // One repo and one path for both calls: `contract --from` writes
-        // nothing, so `add` afterwards sees the very same document at the
+        // nothing, so `add` afterwards sees the very same task at the
         // very same path, and the two error strings can be compared for
         // real — a second fixture would only ever differ by its own temp
         // path.
         let repo = fixture("check-reserved");
-        let text = document("bad", "group: demo\nrun: r00001\n", BODY);
+        let text = task_text("bad", "group: demo\nrun: r00001\n", BODY);
         let path = write_doc(&repo, "bad.md", &text);
 
         let check_err = task_contract(
@@ -880,7 +880,7 @@ mod tests {
         assert_eq!(format!("{check_err:#}"), format!("{add_err:#}"));
     }
 
-    /// The whole point: a stopped task's document is rewritten in place, and
+    /// The whole point: a stopped task is rewritten in place, and
     /// the rest of the file — frontmatter, every other section — survives
     /// untouched.
     #[test]
@@ -919,7 +919,7 @@ mod tests {
 
     /// Nothing still moving may be rewritten this way — the boundary the
     /// acceptance criteria draw between a lane's own report and a person (or
-    /// a lane speaking for one) editing the document out from under it.
+    /// a lane speaking for one) editing the task out from under it.
     #[test]
     fn task_edit_refuses_a_task_that_is_neither_paused_nor_blocked() {
         let repo = fixture("edit-not-stopped");
@@ -941,7 +941,7 @@ mod tests {
         assert_eq!(
             task.section("## Goal").unwrap(),
             "Do the thing.",
-            "refused, so the document is untouched"
+            "refused, so the task is untouched"
         );
     }
 
