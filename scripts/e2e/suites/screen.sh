@@ -7,8 +7,9 @@
 #
 # What is asserted is the order of the frames it drew: the first is the queue
 # tab, and `←` from there draws the dispatch tab's board, where `enter` starts
-# and stops a dispatcher. Off a terminal, bare `spoolway` still prints the
-# grouped help.
+# and stops a dispatcher. While one screen is open, a second `spoolway` or
+# `spoolway dispatch` in the same project refuses. Off a terminal, bare
+# `spoolway` still prints the grouped help.
 #
 # No `covers:` tag — the coverage map only enumerates `config.toml` keys and
 # pipeline step keys, and a screen gesture is neither.
@@ -90,6 +91,43 @@ child_gone() {
 }
 if poll_until 10 child_gone; then ok "the child is gone once the screen has ended"
 else bad "the child is gone once the screen has ended"; fi
+
+# One `spoolway` per project. A screen held open by a pipe that stays open
+# for a few seconds takes `spoolway.pid`; while it is up, a second bare
+# `spoolway` and a typed `spoolway dispatch` both refuse with the one line.
+# A real second process against a real one holding the lock, which a unit
+# test's in-process lock cannot stand in for.
+SCREEN_LOCK="$SPOOLWAY_PROJECT_HOME/spoolway.pid"
+screen_held() {
+  local p
+  p=$(head -1 "$SCREEN_LOCK" 2>/dev/null) && [ -n "$p" ] && kill -0 "$p" 2>/dev/null
+}
+HELD="$LIVE/held.txt"
+script -qec "sleep 8 | '$SPOOLWAY'" "$HELD" >/dev/null 2>&1 &
+HELD_PID=$!
+if poll_until 10 screen_held; then ok "an open screen holds spoolway.pid"
+else bad "an open screen holds spoolway.pid"; fi
+
+SECOND="$LIVE/second.txt"
+works "a second bare spoolway in the same project ends on its own" \
+  script -qec "printf '' | '$SPOOLWAY'" "$SECOND"
+sed 's/\x1b\[[0-9;]*m//g' "$SECOND" >"$SECOND.plain"
+has "and says the one line" "Dispatcher already running" "$SECOND.plain"
+lacks "without drawing a screen" "dispatch        queue        jobs        eval" "$SECOND.plain"
+says "spoolway dispatch refuses while the screen is open" \
+  "Dispatcher already running" "$SPOOLWAY" dispatch --plain
+exit_code "with the lock's own exit code" 4 "$SPOOLWAY" dispatch --plain
+
+wait "$HELD_PID"
+if poll_until 10 bash -c '! kill -0 "$(head -1 "$1" 2>/dev/null)" 2>/dev/null' _ "$SCREEN_LOCK"
+then ok "the screen lets go of spoolway.pid when it quits"
+else bad "the screen lets go of spoolway.pid when it quits"; fi
+AFTER="$LIVE/after.txt"
+works "a screen opened after it opens as usual" \
+  script -qec "printf '' | '$SPOOLWAY'" "$AFTER"
+sed 's/\x1b\[[0-9;]*m//g' "$AFTER" >"$AFTER.plain"
+lacks "not refused" "Dispatcher already running" "$AFTER.plain"
+has "drawing the strip" "dispatch        queue        jobs        eval" "$AFTER.plain"
 
 # Off a terminal: the grouped help, on stderr, the way it always was.
 HELP="$LIVE/help.txt"

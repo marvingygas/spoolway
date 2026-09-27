@@ -122,23 +122,6 @@ fn mmss(secs: u64) -> String {
 /// bug this exists to fix — see `.spoolway/plans/stop-the-blocked-loop.html`.
 const MAX_REMINDERS: u32 = 3;
 
-/// How many starts in a row that could not run at all get refused, by
-/// [`crate::lock::Restarts`] — see `commands::dispatch`.
-///
-/// Four rather than one or two: a person starting the dispatcher twice by
-/// habit, or a supervisor's own retry after a blip, is not the storm this
-/// guards against. A caller that is still failing to run a fifth time in a
-/// row, all inside [`RESTART_WINDOW`], is not going to stop on its own.
-pub const RESTART_MAX: u32 = 4;
-
-/// The window [`RESTART_MAX`] counts inside.
-///
-/// Long enough to catch a supervisor restarting at typical intervals of a
-/// few seconds, short enough that a caller which gave up for a while and
-/// tried again later — a person back at their desk, a cron job hours apart —
-/// starts its own count fresh rather than inheriting an old storm.
-pub const RESTART_WINDOW: Duration = Duration::from_secs(30);
-
 /// How many passes in a row may skip the interval wait, each because it
 /// moved a task and the next one is worth trying at once — see
 /// `commands::dispatch`'s pass loop — before a run is made to wait out the

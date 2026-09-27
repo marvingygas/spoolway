@@ -48,6 +48,18 @@ jobs and eval, in that order. It opens on the queue tab.
 spoolway
 ```
 
+One `spoolway` runs per project at a time. A second bare `spoolway`, or a typed `spoolway
+dispatch`, refuses while this screen is open, or while a dispatcher started from the CLI is
+running, printing the one line and exiting without drawing anything:
+
+```
+$ spoolway
+Dispatcher already running
+```
+
+A project is `-C <DIR>` or the current directory's repository. A screen open in one project
+never refuses one opened in another.
+
 The open tab's label is in normal ink. The other three labels and both arrows are dim.
 `dispatch` is always in the accent colour: bright when it is the open tab, dim otherwise.
 
@@ -226,7 +238,6 @@ Run the pipeline. It draws the live board and keeps running until the queue is e
 | `--plain` | | Print one line per pass. The board is not drawn |
 | `--unattended` | `unattended.enabled` | Start a lane on `blocked` for every blocked task. Nothing waits for a person. See [Unattended runs](pipelines.md#unattended-runs) |
 | `--attended` | | Park blocked tasks for a person, whatever the config says |
-| `--force` | | Start past the restart guard |
 
 `spoolway dispatch` asks herdr which pane it is running in and refuses to start outside one.
 No flag exempts it, `--plain` included. See [The dispatcher](dispatcher.md#running-it).
@@ -259,18 +270,15 @@ refusing to start: task `auth-refresh` has no `pipeline:`
 Nothing was dispatched.
 ```
 
-If another dispatcher already holds the lock, it prints that a dispatcher is already running and
-exits without drawing a board:
+If another dispatcher, or a screen opened with bare `spoolway`, already holds the project, it
+prints the same line and exits without drawing a board:
 
 ```
-  a dispatcher is already running for this repo (pid 250)
+Dispatcher already running
 ```
 
 Queueing a batch while another dispatcher already holds the lock works the same way: the batch
 is written, and the running dispatcher picks it up on its own next pass.
-
-The restart guard refuses the fifth start in 30 seconds when the four before it could not
-run. See [Restarting into a repo that cannot run](dispatcher.md#restarting-into-a-repo-that-cannot-run).
 
 When an [overrides layer](configuration.md#the-overrides-layer) is active, it shows what is
 patched and waits for a key:
@@ -322,8 +330,7 @@ is found or opened. A failure to find or open it is shown instead, on its own no
 |---|---|
 | `0` | The run finished |
 | `3` | Empty queue and no job enabled |
-| `4` | Another dispatcher holds the lock |
-| `5` | The restart guard refused the start |
+| `4` | Another dispatcher or screen already holds the project |
 | `1` | Any other error |
 
 ### `spoolway issue show <reference>`

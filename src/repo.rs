@@ -447,10 +447,12 @@ impl Repo {
         self.home().join("task-locks").join(format!("{id}.lock"))
     }
 
-    /// How many starts in a row could not run at all, and since when — see
-    /// [`crate::lock::Restarts`].
-    pub fn restarts_file(&self) -> PathBuf {
-        self.home().join(crate::lock::RESTART_FILE)
+    /// Bare `spoolway`'s own lock: written when the screen opens, and
+    /// removed when it quits — see [`crate::lock::SCREEN_LOCK_FILE`]. A
+    /// second `spoolway` or `spoolway dispatch` in the same project refuses
+    /// while this, or [`Repo::lock_file`], names a live process.
+    pub fn screen_lock_file(&self) -> PathBuf {
+        self.home().join(crate::lock::SCREEN_LOCK_FILE)
     }
 
     /// Every active task, in id order.

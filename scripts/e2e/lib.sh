@@ -324,9 +324,8 @@ lane_on_record() {
 # dispatcher" holds for the whole suite rather than only while there is work.
 
 # How many rounds the supervisor below will run before giving up on its own,
-# whatever `spoolway dispatch` keeps exiting. Not a guard against the restart
-# storm `spoolway`'s own restart guard now refuses on its own account — this
-# is the harness's own backstop, for the shape of bug that guard cannot see:
+# whatever `spoolway dispatch` keeps exiting. This is the harness's own
+# backstop, for the shape of bug nothing in `spoolway` itself can see:
 # a `dispatch` that keeps exiting 0 or 3, cleanly, forever, because a suite
 # left something re-queuing itself. Sixty rounds at up to 4s apart is minutes,
 # comfortably past any suite that is actually making progress.
@@ -382,12 +381,12 @@ dispatcher_start() {
     while :; do
       round=$((round + 1))
       if [ "$round" -gt "$max_rounds" ]; then
-        # The harness'"'"'s own backstop, not `spoolway`'"'"'s: a `dispatch` that
-        # keeps exiting cleanly, forever, is not a caller in a restart storm
-        # the engine can refuse — every one of these rounds genuinely ran.
-        # `drive` reads the same marker either way, so a suite stuck on this
-        # fails exactly as it would on a real refusal, with the reason on the
-        # line above it rather than a bare timeout.
+        # The harness'"'"'s own backstop: a `dispatch` that keeps exiting
+        # cleanly, forever, is not something `spoolway` itself has any way
+        # to refuse — every one of these rounds genuinely ran. `drive` reads
+        # the same marker either way, so a suite stuck on this fails exactly
+        # as it would on a real refusal, with the reason on the line above
+        # it rather than a bare timeout.
         echo "E2E-DISPATCH-REFUSED (round cap $max_rounds reached)" >> "$log"
         exit 0
       fi

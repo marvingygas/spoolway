@@ -96,21 +96,14 @@ fn main() {
 /// `Ok(0)` — a run that dispatched and stopped on its own, or any other
 /// ordinary success this command has not given its own code — takes the
 /// normal `Ok(())` path below and so exits 0 like every other command.
-/// `Ok(n)` for any other `n` exits directly with that code. A restart storm's
-/// own [`commands::RestartsRefused`] is downcast out of the error and exits
-/// 5; every other error falls through to `run`'s usual `Err` handling above,
-/// which prints it and exits 1.
+/// `Ok(n)` for any other `n` exits directly with that code. Every error
+/// falls through to `run`'s usual `Err` handling above, which prints it and
+/// exits 1.
 fn exit_dispatch(result: Result<i32>) -> Result<()> {
     match result {
         Ok(0) => Ok(()),
         Ok(code) => std::process::exit(code),
-        Err(err) => match err.downcast::<commands::RestartsRefused>() {
-            Ok(refused) => {
-                eprintln!("spoolway: {refused}");
-                std::process::exit(5);
-            }
-            Err(err) => Err(err),
-        },
+        Err(err) => Err(err),
     }
 }
 

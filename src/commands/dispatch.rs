@@ -3,7 +3,7 @@
 use anyhow::anyhow;
 
 use super::*;
-use crate::dispatch::{RESTART_MAX, RESTART_WINDOW, skip_wait};
+use crate::dispatch::skip_wait;
 use crate::screen::PollableRead;
 
 /// An empty queue is an ordinary ending: nothing was there to dispatch, and
@@ -15,36 +15,39 @@ use crate::screen::PollableRead;
 /// it.
 pub const EXIT_EMPTY_QUEUE: i32 = 3;
 
-/// Another dispatcher already holds the repo lock. Ordinary too — the
-/// caller's own next pass, or the one already running, will pick up
-/// whatever it queued — but distinct from an empty queue, since a caller
-/// restarting a dispatcher forever needs to be able to tell the two apart.
+/// Another dispatcher, or bare `spoolway`'s own screen, already owns this
+/// project. Ordinary too — the caller's own next pass, or the one already
+/// running, will pick up whatever it queued — but distinct from an empty
+/// queue, since a caller restarting a dispatcher forever needs to be able
+/// to tell the two apart.
 pub const EXIT_ALREADY_RUNNING: i32 = 4;
 
-/// One start that could not run at all, refused by the restart guard,
-/// naming the count, the last reason and the way out.
+/// The one line either refusal prints, every time, with no count or pid
+/// behind it — a person reading two different starts a minute apart must
+/// see the same words, not a message that happens to differ because one
+/// was refused by the screen's lock and the other by the dispatcher's own.
 ///
-/// A distinct error type, downcast at the top of [`crate::main`], because a
-/// restart storm needs its own exit code — 5 — where every other failure
-/// this command can have exits 1.
-#[derive(Debug)]
-pub struct RestartsRefused {
-    pub count: u32,
-    pub reason: String,
-}
+/// `pub(crate)` so bare `spoolway`'s own refusal, in
+/// [`crate::screen::shell::run`], prints this exact constant rather than a
+/// second copy of the words that could drift from it.
+pub(crate) const ALREADY_RUNNING: &str = "Dispatcher already running";
 
-impl std::fmt::Display for RestartsRefused {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "refusing to start: {} starts in a row could not run at all, the last because {}. \
-             Fix the reason above, or run `spoolway dispatch --force` to start anyway.",
-            self.count, self.reason
-        )
+/// Whether this project already has a `spoolway` in it — its screen, or a
+/// dispatcher, whichever is up.
+///
+/// `from_screen` is `args.screen` — [`DispatchArgs::screen`], the hidden
+/// `--from-screen` bare `spoolway`'s dispatch tab starts its own child
+/// with. That child skips the screen's own lock: it is the screen's, not a
+/// second `spoolway`, and checking it here would refuse the child against
+/// its own parent. It still checks the dispatcher's lock, the same as every
+/// other caller, since another dispatcher already running is exactly the
+/// case that lock exists to catch.
+pub(crate) fn already_running(repo: &Repo, from_screen: bool) -> Result<bool> {
+    if !from_screen && crate::lock::Lock::holder(&repo.screen_lock_file())?.is_some() {
+        return Ok(true);
     }
+    Ok(crate::lock::Lock::holder(&repo.lock_file())?.is_some())
 }
-
-impl std::error::Error for RestartsRefused {}
 
 /// Run the pipeline: one pass, or a loop on the dispatcher's fixed poll rate.
 ///
@@ -52,8 +55,8 @@ impl std::error::Error for RestartsRefused {}
 /// caller restarting this in a tight loop against a repo that cannot run
 /// can tell an empty queue (3), a lock already held (4), and a run that
 /// dispatched and stopped on its own (0) apart. Every genuine error is
-/// still `Err`, including a restart storm's own [`RestartsRefused`] — see
-/// `crate::main` for where each of these becomes a process exit code.
+/// still `Err` — see `crate::main` for where each of these becomes a
+/// process exit code.
 pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Result<i32> {
     // The mode is settled here, once, and written into the lock — every lane's
     // own `spoolway report` reads it back from there, so a `--unattended` typed
@@ -86,41 +89,19 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         );
     }
 
-    // The guard for a caller restarting this in a tight loop against a repo
-    // that cannot run at all: refused ahead of the checks below, since it is
-    // exactly the endings those checks produce that count towards it.
-    //
-    // `--force` clears the count rather than merely stepping past this one
-    // refusal, on the same reasoning as a start that actually runs, below:
-    // whatever was building is over, one way or another, and the next
-    // restart storm starts its own count from zero.
-    if args.force {
-        crate::lock::Restarts::clear(&repo.restarts_file())?;
-    } else if let Some((count, reason)) =
-        crate::lock::Restarts::status(&repo.restarts_file(), RESTART_MAX, RESTART_WINDOW)?
-    {
-        return Err(anyhow!(RestartsRefused { count, reason }));
-    }
-
-    // One dispatcher serves the whole repo, whichever worktree it was started
-    // in: the queue belongs to the main checkout, and a task carries the branch
-    // it was queued on. So a dispatcher that is already running will pick up
-    // what was just queued from another plan's worktree on its next pass —
-    // there is nothing to start, and saying so is not a failure.
-    if let Some(pid) = crate::lock::Lock::holder(&repo.lock_file())? {
-        // Could not run — counted so the guard above can eventually refuse a
-        // caller that keeps restarting into the same held lock.
-        crate::lock::Restarts::note_refusal(
-            &repo.restarts_file(),
-            &format!("a dispatcher is already running for this repo (pid {pid})"),
-            RESTART_WINDOW,
-        )?;
+    // One dispatcher, or one screen, serves the whole repo, whichever
+    // worktree it was started in: the queue belongs to the main checkout,
+    // and a task carries the branch it was queued on. So a dispatcher that
+    // is already running will pick up what was just queued from another
+    // plan's worktree on its next pass — there is nothing to start, and
+    // saying so is not a failure. The same line every time, with no count
+    // behind it: see [`already_running`].
+    if already_running(repo, args.screen)? {
         // To stderr under the screen, which shows it as the reason this
         // start did not happen; stdout otherwise, where it always was.
-        let held = format!("a dispatcher is already running for this repo (pid {pid})");
         match args.screen {
-            true => eprintln!("{held}"),
-            false => println!("  {held}"),
+            true => eprintln!("{ALREADY_RUNNING}"),
+            false => println!("{ALREADY_RUNNING}"),
         }
         return Ok(EXIT_ALREADY_RUNNING);
     }
@@ -206,11 +187,6 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         "task routes",
         &task_route_names(&live_tasks),
     )?;
-
-    // A start that gets this far can actually run. Whatever the guard above
-    // was counting, it was counting starts that could not — this is not one
-    // of them, so the slate is clean again.
-    crate::lock::Restarts::clear(&repo.restarts_file())?;
 
     let mux = crate::mux::backend(repo)?;
     checklist_row(
@@ -1496,8 +1472,7 @@ fn wrap_indent(text: &str, indent: &str, width: usize) -> Vec<String> {
 /// clear it, added only to `dispatch`'s own refusal below, which is the one
 /// place "what do I type" actually belongs.
 ///
-/// A distinct error type, downcast out of the three checks' `?` the same way
-/// [`RestartsRefused`] already is downcast in `crate::main` — plain `?`
+/// A distinct error type, downcast out of the three checks' `?` — plain `?`
 /// alone would flatten this to `reason`, which is right for `doctor` and
 /// wrong for `dispatch`.
 #[derive(Debug)]
@@ -2153,16 +2128,13 @@ mod tests {
         );
     }
 
-    /// Four starts in a row that could not run at all — here, four starts
-    /// against a repo whose lock another dispatcher already holds — have to
-    /// get the fifth refused, naming the count, the last reason and
-    /// `spoolway dispatch --force`. Nothing today counts a start that could
-    /// not run, so this run of five plain, back-to-back calls all return
-    /// `Ok`: the fifth watches the held lock exactly like the first four,
-    /// instead of being turned away as a restart storm.
+    /// The same line every time, with no count behind it — five plain,
+    /// back-to-back calls against a repo whose lock another dispatcher
+    /// already holds all read exactly `Dispatcher already running`, the
+    /// fifth exactly like the first.
     #[test]
-    fn four_starts_that_could_not_run_get_the_fifth_refused() {
-        let repo = fixture("restart-storm");
+    fn a_held_lock_is_refused_the_same_way_every_time() {
+        let repo = fixture("repeated-refusal");
         let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
 
         let args = DispatchArgs {
@@ -2170,25 +2142,13 @@ mod tests {
             ..Default::default()
         };
 
-        for attempt in 1..=4 {
-            let result = dispatch(&repo, &Pipelines::builtin(), &args);
-            assert!(
-                result.is_ok(),
-                "attempt {attempt} of 4 should still just watch the held lock, not refuse yet: \
-                 {result:?}"
+        for attempt in 1..=5 {
+            assert_eq!(
+                dispatch(&repo, &Pipelines::builtin(), &args).unwrap(),
+                EXIT_ALREADY_RUNNING,
+                "attempt {attempt} of 5 should be refused the same way as every other"
             );
         }
-
-        let fifth = dispatch(&repo, &Pipelines::builtin(), &args);
-        assert!(
-            fifth.is_err(),
-            "a fifth start, after four in a row that could not run at all, should be refused \
-             naming the count and `spoolway dispatch --force` — instead it watched the held \
-             lock like any other start: {fifth:?}"
-        );
-        let message = format!("{:#}", fifth.unwrap_err());
-        assert!(message.contains("4 starts in a row"), "{message}");
-        assert!(message.contains("spoolway dispatch --force"), "{message}");
     }
 
     /// An empty queue is an ordinary ending, exit code 3 — distinct from a
@@ -2292,66 +2252,46 @@ mod tests {
         );
     }
 
-    /// An empty queue is never counted towards the restart guard: a repo
-    /// with nothing to do is not a storm, so restarting into one forever —
-    /// far more than four times — must never be refused.
+    /// `spoolway dispatch` refuses the same way while the screen's own
+    /// lock, not the dispatcher's, names a live process — the screen holds
+    /// `spoolway.pid` for as long as it is open, with no dispatcher of its
+    /// own running yet.
     #[test]
-    fn an_empty_queue_is_never_counted_towards_a_restart_storm() {
-        let repo = fixture("empty-queue-not-counted");
+    fn a_live_screen_lock_refuses_a_typed_dispatch() {
+        let repo = fixture("screen-lock-refuses");
+        let _lock = crate::lock::Lock::acquire(&repo.screen_lock_file(), false, None).unwrap();
         let args = DispatchArgs {
             plain: true,
-            ..Default::default()
-        };
-        for attempt in 1..=8 {
-            let result = dispatch(&repo, &Pipelines::builtin(), &args);
-            assert!(
-                result.is_ok(),
-                "attempt {attempt} against an empty queue should never be refused: {result:?}"
-            );
-        }
-    }
-
-    /// `--force` clears an already-standing count, the same as a start that
-    /// actually runs — the fifth start, refused above, goes through once
-    /// asked to force its way past the guard.
-    #[test]
-    fn force_clears_the_restart_counter() {
-        let repo = fixture("force-clears-storm");
-        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
-
-        let args = DispatchArgs {
-            plain: true,
-            ..Default::default()
-        };
-        for _ in 1..=4 {
-            dispatch(&repo, &Pipelines::builtin(), &args).unwrap();
-        }
-        assert!(dispatch(&repo, &Pipelines::builtin(), &args).is_err());
-
-        let forced = DispatchArgs {
-            plain: true,
-            force: true,
             ..Default::default()
         };
         assert_eq!(
-            dispatch(&repo, &Pipelines::builtin(), &forced).unwrap(),
-            EXIT_ALREADY_RUNNING,
-            "a forced start should go through even with a storm standing, and clear it"
+            dispatch(&repo, &Pipelines::builtin(), &args).unwrap(),
+            EXIT_ALREADY_RUNNING
         );
+    }
 
-        // The forced start itself still could not run — the lock is held
-        // throughout this test — so it counts as one refusal of its own
-        // fresh count, cleared and restarted at zero by `--force`. Three
-        // more take it to 4 again; the fourth of those is the one refused.
-        for attempt in 1..=3 {
-            let result = dispatch(&repo, &Pipelines::builtin(), &args);
-            assert!(
-                result.is_ok(),
-                "attempt {attempt} of 3 after --force cleared the count should not be refused: \
-                 {result:?}"
-            );
-        }
-        assert!(dispatch(&repo, &Pipelines::builtin(), &args).is_err());
+    /// The child bare `spoolway`'s dispatch tab starts (`--from-screen`)
+    /// must not be refused against its own parent's `spoolway.pid` — see
+    /// [`already_running`]. With no other dispatcher up, it goes on to
+    /// take the dispatcher's own lock and run.
+    #[test]
+    fn a_screen_started_child_is_not_refused_by_its_own_parent() {
+        let repo = fixture("screen-child-not-refused");
+        let _screen_lock =
+            crate::lock::Lock::acquire(&repo.screen_lock_file(), false, None).unwrap();
+        assert!(!already_running(&repo, true).unwrap());
+        assert!(already_running(&repo, false).unwrap());
+    }
+
+    /// A `spoolway.pid` or `dispatch.pid` naming a process that has already
+    /// exited is stale, not a live holder — the same rule [`crate::lock::Lock::holder`]
+    /// already applies to the dispatcher's own lock.
+    #[test]
+    fn a_dead_process_in_either_lock_does_not_refuse() {
+        let repo = fixture("dead-holder-not-refused");
+        std::fs::write(repo.screen_lock_file(), "0\n").unwrap();
+        std::fs::write(repo.lock_file(), "0\n").unwrap();
+        assert!(!already_running(&repo, false).unwrap());
     }
 
     /// A pipeline whose only step names no `run:` at all — standing in for a

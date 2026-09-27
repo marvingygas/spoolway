@@ -12,9 +12,12 @@ use anyhow::{Context, Result, bail};
 
 pub const LOCK_FILE: &str = "dispatch.pid";
 
-/// Beside `dispatch.pid`: how many starts in a row could not run at all, and
-/// since when — see [`Restarts`].
-pub const RESTART_FILE: &str = "dispatch.restarts";
+/// Bare `spoolway`'s own lock, beside `dispatch.pid`: written when the
+/// screen opens and removed when it quits, so a second `spoolway` or
+/// `spoolway dispatch` in the same project can see it is there without
+/// having to be the dispatcher it is about to start — see
+/// [`crate::repo::Repo::screen_lock_file`].
+pub const SCREEN_LOCK_FILE: &str = "spoolway.pid";
 
 /// The third line of the lock file: how the run answers to a task that cannot
 /// go on. Words rather than a bare bool, because this file is read by people
@@ -337,114 +340,6 @@ impl Drop for LedgerLock {
     }
 }
 
-/// How many consecutive starts have failed to run at all, and why the last
-/// one did — the state a caller restarting the engine in a tight loop is
-/// finally refused by.
-///
-/// A cycle inside a pipeline is refused by `pipeline check` because a graph
-/// with no way out is a defect the engine can see on its own. A caller
-/// restarting a dispatcher that can never run is the same shape one level
-/// up — nothing inside a single pass loops, but the process outside it does
-/// — and the engine has just as little business trusting that it will stop
-/// on its own. This is what counts it.
-///
-/// Only a start that *could not run at all* counts — the lock already held
-/// by another dispatcher, today. An empty queue is an ordinary ending, not a
-/// failure to run, and never touches this file. A start that does run, or
-/// one made with `--force`, clears it: the guard is for a restart storm
-/// against a repo that can never move, not for the ordinary idle stretches
-/// between real runs.
-pub struct Restarts;
-
-impl Restarts {
-    /// Record one start that could not run, for `reason`. Returns the count
-    /// now standing — restarted at 1 if the *previous* refusal fell more
-    /// than `window` ago, since a caller that gave up for a while and tried
-    /// again is not the tight loop this guards against.
-    ///
-    /// The window is judged from that previous refusal, not from the first
-    /// one in the run: a fixed start would mean a caller restarting every
-    /// `window`-minus-a-second, forever, eventually ages out of its own
-    /// window and is let through, which is exactly the storm this exists to
-    /// catch. Sliding it to the most recent refusal instead means the count
-    /// only ever resets on an actual gap — the caller genuinely stopping
-    /// and trying again later, not just the clock outrunning where the
-    /// window happened to start.
-    pub fn note_refusal(path: &Path, reason: &str, window: Duration) -> Result<u32> {
-        let now = now_secs();
-        let count = match Self::read(path)? {
-            Some((count, last, _)) if now - last <= window.as_secs() as i64 => count,
-            // No file, an unreadable one, or one whose last refusal is
-            // further back than `window`: a fresh count starts here.
-            _ => 0,
-        };
-        let count = count + 1;
-        Self::write(path, count, now, reason)?;
-        Ok(count)
-    }
-
-    /// The count and last reason, if a caller asking right now would be
-    /// refused: at least `threshold` refusals, the most recent inside
-    /// `window`.
-    pub fn status(path: &Path, threshold: u32, window: Duration) -> Result<Option<(u32, String)>> {
-        let now = now_secs();
-        Ok(match Self::read(path)? {
-            Some((count, last, reason))
-                if count >= threshold && now - last <= window.as_secs() as i64 =>
-            {
-                Some((count, reason))
-            }
-            _ => None,
-        })
-    }
-
-    /// A start that ran, or `--force`: the storm is over, whichever it was.
-    pub fn clear(path: &Path) -> Result<()> {
-        match std::fs::remove_file(path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e).with_context(|| format!("removing {}", path.display())),
-        }
-    }
-
-    /// `count\nlast\nreason`, where `last` is when the most recent refusal
-    /// landed. Unreadable, short or otherwise corrupt is no different from
-    /// absent — a file mangled by a crash or a hand edit must not itself
-    /// refuse every start from then on; see [`note_refusal`](Self::note_refusal)
-    /// and [`status`](Self::status), which both fall back to "no storm
-    /// standing" the same way an absent file does.
-    fn read(path: &Path) -> Result<Option<(u32, i64, String)>> {
-        let raw = match std::fs::read_to_string(path) {
-            Ok(raw) => raw,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
-        };
-        let mut lines = raw.lines();
-        let count = lines.next().and_then(|l| l.trim().parse().ok());
-        let last = lines.next().and_then(|l| l.trim().parse().ok());
-        let reason = lines.next().unwrap_or_default().to_string();
-        Ok(match (count, last) {
-            (Some(count), Some(last)) => Some((count, last, reason)),
-            _ => None,
-        })
-    }
-
-    fn write(path: &Path, count: u32, last: i64, reason: &str) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        // One line: a reason with a newline in it would shift the fields
-        // after it on the next read.
-        let reason = reason.replace('\n', " ");
-        std::fs::write(path, format!("{count}\n{last}\n{reason}\n"))
-            .with_context(|| format!("writing {}", path.display()))
-    }
-}
-
-fn now_secs() -> i64 {
-    chrono::Utc::now().timestamp()
-}
-
 /// Puts `contents` at `path`, but only if nothing is there yet — `true` on
 /// success, `false` if `path` was already taken.
 ///
@@ -739,126 +634,5 @@ mod tests {
             started.elapsed() < Duration::from_secs(1),
             "a dead holder is cleared immediately, not waited out"
         );
-    }
-
-    /// [`Restarts`]' own path, beside the lock file `scratch` returns.
-    fn restarts_scratch(name: &str) -> PathBuf {
-        scratch(name).with_file_name(RESTART_FILE)
-    }
-
-    /// Below the threshold, nothing is refused — a caller that has only just
-    /// started failing to run has not yet shown a pattern worth stopping.
-    #[test]
-    fn fewer_refusals_than_the_threshold_are_not_refused() {
-        let path = restarts_scratch("below-threshold");
-        for _ in 0..3 {
-            Restarts::note_refusal(&path, "reason", Duration::from_secs(30)).unwrap();
-        }
-        assert_eq!(
-            Restarts::status(&path, 4, Duration::from_secs(30)).unwrap(),
-            None
-        );
-    }
-
-    /// At the threshold, inside the window, a caller is refused — and told
-    /// the count and the last of the reasons it was refused for.
-    #[test]
-    fn enough_refusals_inside_the_window_are_refused_with_the_count_and_reason() {
-        let path = restarts_scratch("at-threshold");
-        for reason in [
-            "first reason",
-            "second reason",
-            "third reason",
-            "fourth reason",
-        ] {
-            Restarts::note_refusal(&path, reason, Duration::from_secs(30)).unwrap();
-        }
-        let (count, reason) = Restarts::status(&path, 4, Duration::from_secs(30))
-            .unwrap()
-            .expect("four refusals inside the window should refuse the fifth start");
-        assert_eq!(count, 4);
-        assert_eq!(reason, "fourth reason");
-    }
-
-    /// A refusal outside the window does not accumulate onto an older one —
-    /// a caller that gave up for a while and tried again starts its own
-    /// count fresh, rather than inheriting a storm from an hour ago.
-    #[test]
-    fn a_refusal_outside_the_window_restarts_the_count() {
-        let path = restarts_scratch("stale-window");
-        // Written directly with an hour-old `last`, standing in for a
-        // caller that gave up and tried again later — cheaper than a test
-        // that actually sleeps out a window.
-        Restarts::write(&path, 3, now_secs() - 3600, "old reason").unwrap();
-        let count = Restarts::note_refusal(&path, "new reason", Duration::from_secs(30)).unwrap();
-        assert_eq!(count, 1);
-    }
-
-    /// A refusal slides the window forward onto itself. Judging it from the
-    /// first refusal in a run instead let a caller restarting every few
-    /// seconds age out of a window anchored where it started, and be let
-    /// through on the fifth try.
-    ///
-    /// Goes through `note_refusal` rather than hand-writing the final
-    /// count, unlike the test this replaced — the bug lived entirely in
-    /// which timestamp `note_refusal` carries forward, so a test built only
-    /// from `Restarts::write` and `Restarts::status` cannot tell the
-    /// anchored version from the sliding one; both read back whatever was
-    /// written.
-    #[test]
-    fn a_refusal_slides_the_window_onto_itself() {
-        let path = restarts_scratch("window-slides");
-        // One refusal 20 seconds back, then a second one right now.
-        Restarts::write(&path, 1, now_secs() - 20, "first").unwrap();
-        let count = Restarts::note_refusal(&path, "second", Duration::from_secs(30)).unwrap();
-        assert_eq!(count, 2);
-        // Ten seconds is narrower than the 20-second gap to the first
-        // refusal and wider than the zero-second gap to the second, so
-        // this holds only if the window is judged from the most recent
-        // one.
-        assert!(
-            Restarts::status(&path, 2, Duration::from_secs(10))
-                .unwrap()
-                .is_some()
-        );
-    }
-
-    /// `clear` is what a start that actually runs, or `--force`, calls — and
-    /// it has to make the file behave exactly as if it had never existed.
-    #[test]
-    fn clearing_the_counter_lets_a_fresh_storm_start_from_one() {
-        let path = restarts_scratch("cleared");
-        for _ in 0..4 {
-            Restarts::note_refusal(&path, "reason", Duration::from_secs(30)).unwrap();
-        }
-        assert!(
-            Restarts::status(&path, 4, Duration::from_secs(30))
-                .unwrap()
-                .is_some()
-        );
-
-        Restarts::clear(&path).unwrap();
-        assert_eq!(
-            Restarts::status(&path, 4, Duration::from_secs(30)).unwrap(),
-            None
-        );
-
-        let count = Restarts::note_refusal(&path, "reason", Duration::from_secs(30)).unwrap();
-        assert_eq!(count, 1);
-    }
-
-    /// A counter file that is absent, short or corrupt is treated as
-    /// absent — a mangled file must not itself refuse every start.
-    #[test]
-    fn a_corrupt_counter_file_is_treated_as_absent() {
-        let path = restarts_scratch("corrupt");
-        std::fs::write(&path, "not-a-number\n").unwrap();
-        assert_eq!(
-            Restarts::status(&path, 4, Duration::from_secs(30)).unwrap(),
-            None
-        );
-        // And still writable from here, rather than wedged.
-        let count = Restarts::note_refusal(&path, "reason", Duration::from_secs(30)).unwrap();
-        assert_eq!(count, 1);
     }
 }

@@ -12,7 +12,6 @@ lookup in a task file or in the list of live lanes.
 
 ```
 spoolway dispatch                 # runs until the queue is empty
-spoolway dispatch --force         # start past the restart guard
 spoolway dispatch --plain         # print the board once as a plain table, for scripts
 ```
 
@@ -30,13 +29,14 @@ spoolway: Open herdr and start spoolway there:
 An internal headless backend exists for automated tests only. It is not a supported runtime
 or an alternative to installing herdr. See [Testing](testing.md).
 
-One dispatcher serves the whole project. Every pass re-reads the queue, so a task queued
-while it runs is picked up on the next pass. A second `spoolway dispatch` on the same project
-prints that a dispatcher is already running and exits without drawing a board:
+One `spoolway` serves the whole project at a time: a dispatcher started with `spoolway
+dispatch`, or a screen opened with bare `spoolway`. Every pass re-reads the queue, so a task
+queued while a dispatcher runs is picked up on the next pass. A second `spoolway dispatch`
+while either is up prints the same line and exits without drawing a board:
 
 ```
 $ spoolway dispatch
-  a dispatcher is already running for this repo (pid 8123)
+Dispatcher already running
 ```
 
 Queueing a batch from the queue screen while another dispatcher holds the lock works the same
@@ -53,8 +53,7 @@ own.
 |---|---|
 | 0 | The run dispatched and stopped on its own. |
 | 3 | The queue was empty and no job is enabled. |
-| 4 | Another dispatcher holds the lock. |
-| 5 | The restart guard refused the start. |
+| 4 | Another dispatcher or screen already holds the project. |
 | 1 | Any other error. |
 
 ### When it stops
@@ -68,11 +67,6 @@ lane stays where it is, and the next run picks it back up. Before it exits, the 
 still-running lane's spend in the usage ledger and forgives that lane's launch counter, so the
 next run does not treat a lane that survived the stop as a failed launch. A second `ctrl-c`
 kills the process at once.
-
-### Restarting into a repo that cannot run
-
-Four starts in a row that find another dispatcher holding the lock, inside 30 seconds, get the
-fifth refused with exit code 5. A start that runs clears the count, and so does `--force`.
 
 ## What a pass does
 

@@ -221,6 +221,14 @@ fn strip_line(open: Tab, width: usize) -> String {
 
 /// Open the screen: bare `spoolway` in a terminal.
 ///
+/// One `spoolway` at a time per project: refuses with exactly `Dispatcher
+/// already running` while [`crate::repo::Repo::screen_lock_file`] or
+/// [`crate::repo::Repo::lock_file`] names a live process — a second screen
+/// in this project, or a dispatcher already running from the CLI. The lock
+/// this screen takes on the way in is what a second `spoolway` or
+/// `spoolway dispatch` sees; it is released on drop, whenever and however
+/// this returns, so it is gone the moment the screen quits.
+///
 /// Holds the one [`crate::platform::TermGuard`] every tab draws under and
 /// installs the one `ctrl-c` handler, in the same order `queue_screen` does
 /// for its own — see there for why the order matters. Opens on the queue tab.
@@ -228,6 +236,17 @@ fn strip_line(open: Tab, width: usize) -> String {
 /// A dispatcher the dispatch tab started stops when this returns, however it
 /// returns — see [`super::dispatcher::Dispatcher`]'s own `Drop`.
 pub(crate) fn run(repo: &Repo, pipelines: &Pipelines, cwd: &Path) -> Result<()> {
+    // `false`: bare `spoolway` is never the `--from-screen` child, so both
+    // locks are checked, the same as a typed `spoolway dispatch`. Shared
+    // with `commands::dispatch` rather than written out a second time here,
+    // so the one line either refusal prints — [`crate::commands::ALREADY_RUNNING`]
+    // — cannot drift between the two.
+    if crate::commands::already_running(repo, false)? {
+        println!("{}", crate::commands::ALREADY_RUNNING);
+        return Ok(());
+    }
+    let _lock = crate::lock::Lock::acquire(&repo.screen_lock_file(), false, None)?;
+
     crate::platform::stop::catch_interrupt();
     let _term = crate::platform::TermGuard::new();
     let mut stdin = RawStdin;
@@ -539,6 +558,35 @@ mod tests {
             }
         }
         out
+    }
+
+    /// A live `dispatch.pid` — a dispatcher started from the CLI — refuses
+    /// bare `spoolway` exactly as a second screen would. Against
+    /// [`crate::commands::already_running`] itself, the one check `run`
+    /// shares with `commands::dispatch` rather than a copy of its own — see
+    /// that call site's own comment.
+    #[test]
+    fn a_live_dispatcher_lock_refuses_the_screen() {
+        let repo = crate::status::testutil::fixture("shell-already-running-dispatch");
+        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
+        assert!(crate::commands::already_running(&repo, false).unwrap());
+    }
+
+    /// A live `spoolway.pid` — another screen already open in this project
+    /// — refuses too.
+    #[test]
+    fn a_live_screen_lock_refuses_a_second_screen() {
+        let repo = crate::status::testutil::fixture("shell-already-running-screen");
+        let _lock = crate::lock::Lock::acquire(&repo.screen_lock_file(), false, None).unwrap();
+        assert!(crate::commands::already_running(&repo, false).unwrap());
+    }
+
+    /// Neither lock naming a live process — the ordinary case — lets the
+    /// screen open.
+    #[test]
+    fn no_live_lock_lets_the_screen_open() {
+        let repo = crate::status::testutil::fixture("shell-already-running-clear");
+        assert!(!crate::commands::already_running(&repo, false).unwrap());
     }
 
     // The mockup's own strip, drawn to 100 columns, column for column.

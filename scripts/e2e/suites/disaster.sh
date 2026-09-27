@@ -196,7 +196,7 @@ new_holder() {
 dispatcher_start
 if [ -n "$OLD_LOCK_PID" ] && ! kill -0 "$OLD_LOCK_PID" 2>/dev/null \
    && poll_until 10 new_holder \
-   && ! grep -q 'already running for this repo' "$E2E_DISPATCH_LOG"; then
+   && ! grep -q 'Dispatcher already running' "$E2E_DISPATCH_LOG"; then
   ok "the lock file a killed dispatcher left behind is not a holder"
 else
   bad "the lock file a killed dispatcher left behind is not a holder"

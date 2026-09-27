@@ -879,14 +879,6 @@ pub struct DispatchArgs {
     #[arg(long, overrides_with = "unattended")]
     pub attended: bool,
 
-    /// Start anyway, past the restart guard: four starts in a row that could
-    /// not run at all, inside 30 seconds, ordinarily refuse a fifth.
-    ///
-    /// Clears the count on this repo, the same as a start that actually
-    /// runs — whatever storm was building is over, one way or another.
-    #[arg(long)]
-    pub force: bool,
-
     /// Started by bare `spoolway`'s dispatch tab — never typed. The screen
     /// has already answered the overrides and warnings gates as popups of
     /// its own, so this run asks neither again. It also owns no terminal:
