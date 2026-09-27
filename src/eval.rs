@@ -1945,7 +1945,6 @@ struct Loaded {
     spans_by_session: Spans,
     fallback: HashMap<(String, String), String>,
     models: BTreeMap<String, ModelPrice>,
-    scope_label: String,
 }
 
 fn load(repo: &Repo, filters: &Filters) -> Result<Loaded> {
@@ -2018,7 +2017,6 @@ fn load(repo: &Repo, filters: &Filters) -> Result<Loaded> {
         spans_by_session,
         fallback,
         models: repo.config.models.clone(),
-        scope_label: filters.scope.label(repo),
     })
 }
 
@@ -2593,8 +2591,10 @@ fn cursor_line_index(lines: &[Line], cursor: usize) -> usize {
 /// The right side of the top border: the scope, every filter row the table
 /// on screen has narrowed by, and the window — so a frame read on its own
 /// still says what it is a table of. The left side names only the `by`.
-fn filters_label(loaded: &Loaded, filters: &Filters, table: TableKind) -> String {
-    let mut parts = vec![loaded.scope_label.clone()];
+/// `scope` is the screen's own [`Scope::label`], not [`Loaded`]'s: the
+/// frame is drawn before the first load has landed.
+fn filters_label(scope: &str, filters: &Filters, table: TableKind) -> String {
+    let mut parts = vec![scope.to_string()];
     let named: Vec<(&str, &Option<String>)> = match table {
         TableKind::Lanes => vec![
             ("group", &filters.group),
@@ -2651,9 +2651,11 @@ fn footer(table: TableKind) -> String {
     )
 }
 
+/// One frame. `loaded` is `None` only on a visit whose first load has not
+/// landed yet: the frame is drawn empty under the loading popup.
 fn draw(
     pipelines: &Pipelines,
-    loaded: &Loaded,
+    loaded: Option<&Loaded>,
     state: &ScreenState,
     out: &mut impl std::io::Write,
 ) {
@@ -2667,12 +2669,16 @@ fn draw(
     // Computed before `frame_rows`, which has to know how many of these are
     // about to take a row of their own — see `frame_rows`'s own doc comment.
     let mut notes = Vec::new();
-    if let Some(note) = screen_unpriced_note(loaded, &state.filters, state.table) {
+    if let Some(note) =
+        loaded.and_then(|loaded| screen_unpriced_note(loaded, &state.filters, state.table))
+    {
         notes.push(note);
     }
 
-    let lines = view_lines(loaded, &state.filters, pipelines, state.table);
-    let right = filters_label(loaded, &state.filters, state.table);
+    let lines = loaded.map_or_else(Vec::new, |loaded| {
+        view_lines(loaded, &state.filters, pipelines, state.table)
+    });
+    let right = filters_label(&state.scope_label, &state.filters, state.table);
     let title = format!("by {}", by_label(&state.filters, state.table));
     // Wide enough for the widest line plus its marker column, and for the
     // top border's own title and label with a dash or two between them.
@@ -2716,6 +2722,7 @@ fn draw(
                 None => boxed(title, &lines),
             })
         }
+        Mode::Loading { .. } => Some(boxed("eval", &["Loading…".to_string()])),
         Mode::Filter(draft) => Some(filter_panel(draft)),
         Mode::Calendar {
             field,
@@ -2823,7 +2830,7 @@ fn filter_fields(table: TableKind) -> &'static [FilterField] {
 /// row the cursor is on and which table's rows it draws — fixed at the
 /// moment `f` opened the panel, since nothing in [`Mode::Filter`] lets `tab`
 /// change the table while it is up. `esc` drops this untouched; `enter`
-/// turns it back into the real `Filters` and reloads — see `run_screen`'s
+/// turns it back into the real `Filters` and reloads — see `run_screen_with`'s
 /// own handling of [`Mode::Filter`].
 #[derive(Debug, Clone)]
 struct Draft {
@@ -2879,6 +2886,52 @@ enum Mode {
         body: String,
         keys: Option<&'static str>,
     },
+    /// A [`load`] running on its own thread, under a keyless `eval` popup
+    /// reading `Loading…` — over an empty frame on a visit's first load, and
+    /// over the table already shown on `r` or the filter panel's `enter`.
+    /// Only `←`, `→` and `q` are read: every other key would act on a table
+    /// that is about to be replaced. `filters` are the ones loaded through,
+    /// the screen's own once the result lands; `reset_cursor` is set by the
+    /// filter panel, whose new filters can leave the old row far past the
+    /// end.
+    ///
+    /// The screen owns the only receiver, so a load replaced by a newer one,
+    /// or one still running when the person leaves the tab, sends into a
+    /// dropped channel: its thread finishes on its own and its result is
+    /// never read.
+    Loading {
+        pending: Pending,
+        filters: Filters,
+        reset_cursor: bool,
+    },
+}
+
+/// The result of a [`load`] running on its own thread — see
+/// [`load_in_background`].
+type Pending = std::sync::mpsc::Receiver<Result<Loaded>>;
+
+/// Run [`load`] on a thread of its own and hand back where its result will
+/// land. `load` sweeps the ledger and reads every session's transcript,
+/// which on a large transcript tree takes long enough that a screen waiting
+/// on it would leave the previous tab's frame up — see [`Mode::Loading`].
+fn load_in_background(repo: &Repo, filters: &Filters) -> Pending {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let failed = tx.clone();
+    let repo = repo.clone();
+    let filters = filters.clone();
+    // The fallible builder, not `thread::spawn`, which panics when the OS
+    // cannot start a thread: that reason reaches the person as a failed
+    // load instead of tearing the whole shell down.
+    if let Err(err) = std::thread::Builder::new().spawn(move || {
+        // A send into a dropped receiver is the screen having moved on — a
+        // newer load, or the person leaving the tab — and nothing to report.
+        let _ = tx.send(load(&repo, &filters));
+    }) {
+        let _ = failed.send(Err(
+            anyhow::Error::new(err).context("could not start the load")
+        ));
+    }
+    rx
 }
 
 /// The hint under an error notice.
@@ -2888,17 +2941,81 @@ struct ScreenState {
     table: TableKind,
     cursor: usize,
     filters: Filters,
+    /// The top border's scope, read once up front: the frame is drawn before
+    /// any load has landed, and nothing on the screen changes the scope.
+    scope_label: String,
     mode: Mode,
 }
 
 impl ScreenState {
-    fn new(args: &EvalArgs) -> ScreenState {
+    fn new(repo: &Repo, args: &EvalArgs) -> ScreenState {
+        let filters = Filters::from_args(args);
         ScreenState {
             table: TableKind::Lanes,
             cursor: 0,
-            filters: Filters::from_args(args),
+            scope_label: filters.scope.label(repo),
+            filters,
             mode: Mode::Browsing,
         }
+    }
+
+    /// Start loading through `filters`, under the loading popup.
+    fn start_loading(
+        &mut self,
+        start: &mut impl FnMut(&Filters) -> Pending,
+        filters: Filters,
+        reset_cursor: bool,
+    ) {
+        self.mode = Mode::Loading {
+            pending: start(&filters),
+            filters,
+            reset_cursor,
+        };
+    }
+
+    /// Pick up the load in flight, if it has landed. `true` when it has, and
+    /// the screen needs drawing again. A failure with a table already on
+    /// screen becomes the same notice every other failure here is; one on
+    /// the visit's first load has no table to sit over, and lands in
+    /// `failed` for [`run_screen_with`] to hold on the tab.
+    fn settle(&mut self, loaded: &mut Option<Loaded>, failed: &mut Option<String>) -> bool {
+        let Mode::Loading { pending, .. } = &self.mode else {
+            return false;
+        };
+        let result = match pending.try_recv() {
+            Ok(result) => result,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
+            // The thread ended without sending: `load` panicked.
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err(anyhow::anyhow!("the load stopped before it finished"))
+            }
+        };
+        let Mode::Loading {
+            filters,
+            reset_cursor,
+            ..
+        } = std::mem::replace(&mut self.mode, Mode::Browsing)
+        else {
+            unreachable!("matched as loading above");
+        };
+        match result {
+            Ok(fresh) => {
+                *loaded = Some(fresh);
+                self.filters = filters;
+                if reset_cursor {
+                    self.cursor = 0;
+                }
+            }
+            Err(err) if loaded.is_none() => *failed = Some(format!("spoolway eval: {err:#}")),
+            Err(err) => {
+                self.mode = Mode::Notice {
+                    title: "eval",
+                    body: format!("{err:#}"),
+                    keys: Some(NOTICE_KEYS),
+                }
+            }
+        }
+        true
     }
 }
 
@@ -2939,11 +3056,8 @@ fn bare_args() -> EvalArgs {
     }
 }
 
-/// The screen's own loop. Ends in [`Leave::Quit`] on `q` or when the input
-/// runs out, and in whatever [`crate::screen::shell::leave_on`] reads off
-/// `←` or `→` while browsing when bare `spoolway` hosts this as its eval tab.
-///
-/// [`Leave::Quit`]: crate::screen::shell::Leave::Quit
+/// The screen's own loop, loading on a thread of its own — see
+/// [`run_screen_with`].
 fn run_screen(
     repo: &Repo,
     pipelines: &Pipelines,
@@ -2951,38 +3065,83 @@ fn run_screen(
     input: &mut impl PollableRead,
     out: &mut impl std::io::Write,
 ) -> Result<crate::screen::shell::Leave> {
+    run_screen_with(
+        repo,
+        pipelines,
+        args,
+        |filters| load_in_background(repo, filters),
+        input,
+        out,
+    )
+}
+
+/// The screen's own loop. Ends in [`Leave::Quit`] on `q` or when the input
+/// runs out, and in whatever [`crate::screen::shell::leave_on`] reads off
+/// `←` or `→` while browsing or loading when bare `spoolway` hosts this as
+/// its eval tab.
+///
+/// Every load goes through `start` and lands through [`Mode::Loading`], the
+/// first one included, so the frame is drawn on the keypress that opened
+/// the tab rather than once the ledger has been read. Apart from
+/// [`run_screen`] so a test can hand in a load that answers at once, or one
+/// it answers itself: a scripted input always has a key pending, and would
+/// otherwise race the thread.
+///
+/// [`Leave::Quit`]: crate::screen::shell::Leave::Quit
+fn run_screen_with(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    args: &EvalArgs,
+    mut start: impl FnMut(&Filters) -> Pending,
+    input: &mut impl PollableRead,
+    out: &mut impl std::io::Write,
+) -> Result<crate::screen::shell::Leave> {
     use crate::screen::shell::Leave;
 
-    let mut state = ScreenState::new(args);
-    let mut loaded = match load(repo, &state.filters) {
-        Ok(loaded) => loaded,
-        // Hosted, the tab still has a strip and three neighbours to reach,
-        // so the reason is held on it rather than printed on the way out.
-        Err(err) if crate::screen::shell::hosted().is_some() => {
-            return Ok(crate::screen::shell::message_tab(
-                &format!("spoolway eval: {err:#}"),
-                input,
-                out,
-            ));
-        }
-        Err(err) => {
-            let _ = writeln!(out, "spoolway eval: {err:#}");
-            return Ok(Leave::Quit);
-        }
-    };
+    let mut state = ScreenState::new(repo, args);
+    let mut loaded: Option<Loaded> = None;
+    // The reason the visit's first load failed, once it has. Hosted, the tab
+    // still has a strip and three neighbours to reach, so the reason is held
+    // on it rather than printed on the way out.
+    let mut failed: Option<String> = None;
+    state.start_loading(&mut start, state.filters.clone(), false);
 
     loop {
-        draw(pipelines, &loaded, &state, out);
+        state.settle(&mut loaded, &mut failed);
+        match &failed {
+            Some(message) => crate::screen::shell::message_frame(message, out),
+            None => draw(pipelines, loaded.as_ref(), &state, out),
+        }
         // Not a bare `read_key`: inside bare `spoolway` a `ctrl-c` has to end
         // this wait too, and a blocking read never sees one — see
         // `crate::screen::shell::wait_key`. `spoolway eval` on its own installs
-        // no handler, so there nothing is ever caught and this only reads.
-        let Some(key) = crate::screen::shell::wait_key(input, || {}) else {
+        // no handler, so there nothing is ever caught. The idle slices are
+        // where a load running behind the popup is noticed landing.
+        let Some(key) = crate::screen::shell::wait_key(input, || {
+            if state.settle(&mut loaded, &mut failed) {
+                match &failed {
+                    Some(message) => crate::screen::shell::message_frame(message, out),
+                    None => draw(pipelines, loaded.as_ref(), &state, out),
+                }
+            }
+        }) else {
             break;
         };
-        // Browsing is the one mode with no filter panel, calendar or notice
-        // open: the only one where `←` and `→` are a hosting shell's.
-        if matches!(state.mode, Mode::Browsing)
+        if let Some(message) = failed {
+            return Ok(match crate::screen::shell::leave_on(key) {
+                Some(leave) => leave,
+                None if crate::screen::shell::hosted().is_some() => {
+                    crate::screen::shell::message_tab(&message, input, out)
+                }
+                // Standalone there is no neighbour to reach: the reason was
+                // read on the frame this key answered, and the screen ends.
+                None => Leave::Quit,
+            });
+        }
+        // Browsing and loading are the modes with no filter panel, calendar
+        // or notice open: the only ones where `←` and `→` are a hosting
+        // shell's.
+        if matches!(state.mode, Mode::Browsing | Mode::Loading { .. })
             && let Some(leave) = crate::screen::shell::leave_on(key)
         {
             return Ok(leave);
@@ -2990,8 +3149,17 @@ fn run_screen(
         if key == Key::Char('q') {
             break;
         }
+        // Past here every mode reads the table's data. Only loading can be
+        // without it, and loading reads no key but the ones above.
+        if matches!(state.mode, Mode::Loading { .. }) {
+            continue;
+        }
+        let Some(loaded) = loaded.as_ref() else {
+            continue;
+        };
 
         match &mut state.mode {
+            Mode::Loading { .. } => unreachable!("loading reads no key past `q`"),
             Mode::Notice { .. } => {
                 // Any key dismisses it — the message was already read on the
                 // draw that preceded this key, the same reasoning the queue
@@ -3007,7 +3175,7 @@ fn run_screen(
                     draft.field = (draft.field + 1).min(draft.fields().len() - 1);
                 }
                 Key::Left | Key::Right => {
-                    handle_filter_change(&loaded, draft, key == Key::Right);
+                    handle_filter_change(loaded, draft, key == Key::Right);
                 }
                 // On a date row, `enter` opens the calendar instead of
                 // applying — the one row `enter` means something else on.
@@ -3032,21 +3200,7 @@ fn run_screen(
                 }
                 Key::Enter => {
                     let candidate = draft.filters.clone();
-                    match load(repo, &candidate) {
-                        Ok(fresh) => {
-                            loaded = fresh;
-                            state.filters = candidate;
-                            state.cursor = 0;
-                            state.mode = Mode::Browsing;
-                        }
-                        Err(err) => {
-                            state.mode = Mode::Notice {
-                                title: "eval",
-                                body: format!("{err:#}"),
-                                keys: Some(NOTICE_KEYS),
-                            }
-                        }
-                    }
+                    state.start_loading(&mut start, candidate, true);
                 }
                 _ => {}
             },
@@ -3089,18 +3243,11 @@ fn run_screen(
                 Key::Char('f') => {
                     state.mode = Mode::Filter(Draft::new(state.table, state.filters.clone()));
                 }
-                Key::Char('r') => match load(repo, &state.filters) {
-                    Ok(fresh) => loaded = fresh,
-                    Err(err) => {
-                        state.mode = Mode::Notice {
-                            title: "eval",
-                            body: format!("{err:#}"),
-                            keys: Some(NOTICE_KEYS),
-                        }
-                    }
-                },
+                Key::Char('r') => {
+                    state.start_loading(&mut start, state.filters.clone(), false);
+                }
                 Key::Char('e') => {
-                    match export(repo, &loaded, &state.filters, pipelines, state.table) {
+                    match export(repo, loaded, &state.filters, pipelines, state.table) {
                         Ok((path, rows)) => {
                             state.mode = Mode::Notice {
                                 title: "exported",
@@ -4417,7 +4564,6 @@ mod screen_tests {
             skills_by_session: HashMap::new(),
             spans_by_session: HashMap::new(),
             models: BTreeMap::new(),
-            scope_label: "demo".to_string(),
         }
     }
 
@@ -4488,13 +4634,39 @@ mod screen_tests {
         );
     }
 
+    /// A load that has already landed by the time the screen looks: a
+    /// scripted input always has its next key pending, so against a real
+    /// thread every key would race the load.
+    fn load_now(repo: &Repo, filters: &Filters) -> Pending {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(load(repo, filters)).unwrap();
+        rx
+    }
+
+    /// [`run_screen_with`] over `repo`, loading through [`load_now`].
+    fn run_now(
+        repo: &Repo,
+        args: &EvalArgs,
+        input: &mut std::io::Cursor<Vec<u8>>,
+        out: &mut Vec<u8>,
+    ) -> crate::screen::shell::Leave {
+        run_screen_with(
+            repo,
+            &Pipelines::builtin(),
+            args,
+            |filters| load_now(repo, filters),
+            input,
+            out,
+        )
+        .unwrap()
+    }
+
     /// Runs the screen against `repo` with the default args, feeding it
     /// `input`, and hands back everything it drew.
     fn screen(repo: &Repo, input: &str) -> String {
-        let pipelines = Pipelines::builtin();
         let mut input = keys(input);
         let mut out = Vec::new();
-        run_screen(repo, &pipelines, &no_args(), &mut input, &mut out).unwrap();
+        run_now(repo, &no_args(), &mut input, &mut out);
         String::from_utf8(out).unwrap()
     }
 
@@ -4512,7 +4684,7 @@ mod screen_tests {
         };
         let mut input = keys("x\x1b[D");
         let mut out = Vec::new();
-        let leave = run_screen(&repo, &Pipelines::builtin(), &args, &mut input, &mut out).unwrap();
+        let leave = run_now(&repo, &args, &mut input, &mut out);
         assert_eq!(leave, Leave::Switch(Toward::Left));
         let drawn = String::from_utf8(out).unwrap();
         assert!(drawn.contains("spoolway eval: "), "{drawn}");
@@ -4530,14 +4702,7 @@ mod screen_tests {
         let run = |input: &str| {
             let mut input = keys(input);
             let mut out = Vec::new();
-            let leave = run_screen(
-                &repo,
-                &Pipelines::builtin(),
-                &no_args(),
-                &mut input,
-                &mut out,
-            )
-            .unwrap();
+            let leave = run_now(&repo, &no_args(), &mut input, &mut out);
             (leave, String::from_utf8(out).unwrap())
         };
 
@@ -4560,6 +4725,240 @@ mod screen_tests {
     /// the input ran out.
     fn last_frame(text: &str) -> &str {
         text.rsplit("\x1b[2J\x1b[H").next().unwrap_or(text)
+    }
+
+    /// Every frame the screen drew, in order.
+    fn frames(text: &str) -> Vec<&str> {
+        text.split("\x1b[2J\x1b[H").skip(1).collect()
+    }
+
+    /// The loading popup, exactly as the mockup draws it.
+    const LOADING: [&str; 3] = ["┌─ eval ─────┐", "│  Loading…  │", "└────────────┘"];
+
+    fn shows_loading(frame: &str) -> bool {
+        LOADING.iter().all(|line| frame.contains(line))
+    }
+
+    type Senders = std::rc::Rc<std::cell::RefCell<Vec<std::sync::mpsc::Sender<Result<Loaded>>>>>;
+
+    /// A load that has not landed: its sender is kept, so the receiver
+    /// reads empty rather than disconnected, until the test answers it.
+    fn held(senders: &Senders) -> Pending {
+        let (tx, rx) = std::sync::mpsc::channel();
+        senders.borrow_mut().push(tx);
+        rx
+    }
+
+    /// Hosted, switching to eval draws the strip, the eval frame and the
+    /// keyless loading popup before the load lands. While it shows, `f` and
+    /// `tab` are not read and `→` still leaves, and leaving drops the
+    /// receiver, so the thread's late result goes nowhere.
+    #[test]
+    fn the_first_frame_is_drawn_under_the_loading_popup_before_the_load_lands() {
+        use crate::screen::shell::{Hosting, Leave, Tab, Toward};
+        let repo = fixture_with_one_run("screen-loading-first");
+        let _hosting = Hosting::open(Tab::Eval);
+        let senders = Senders::default();
+        let mut input = keys("f\t\x1b[C");
+        let mut out = Vec::new();
+        let leave = run_screen_with(
+            &repo,
+            &Pipelines::builtin(),
+            &no_args(),
+            |_| held(&senders),
+            &mut input,
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(leave, Leave::Switch(Toward::Right));
+
+        let drawn = String::from_utf8(out).unwrap();
+        let all = frames(&drawn);
+        assert_eq!(all.len(), 3, "one frame, then one per ignored key");
+        for frame in &all {
+            assert!(frame.contains("dispatch"), "under the strip: {frame}");
+            assert!(frame.contains("┌─ eval · by pipeline "), "{frame}");
+            assert!(shows_loading(frame), "{frame}");
+            assert!(!frame.contains("PIPELINE"), "no table yet: {frame}");
+            assert!(!frame.contains("┌─ filters"), "`f` was not read: {frame}");
+            assert!(frame.contains("[↑↓] move   [tab] dirs"), "{frame}");
+        }
+
+        assert_eq!(senders.borrow().len(), 1, "one load, started once");
+        assert!(
+            senders.borrow()[0].send(Ok(loaded(Vec::new()))).is_err(),
+            "leaving dropped the result"
+        );
+    }
+
+    /// A scripted input that reports no key pending on its first poll, and
+    /// answers the load in flight right then — so the result lands in
+    /// `wait_key`'s idle slice, behind a frame already drawn, the way a slow
+    /// load's does.
+    struct LandsWhileIdle {
+        keys: std::io::Cursor<Vec<u8>>,
+        senders: Senders,
+        result: std::cell::RefCell<Option<Result<Loaded>>>,
+    }
+
+    impl std::io::Read for LandsWhileIdle {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.keys.read(buf)
+        }
+    }
+
+    impl PollableRead for LandsWhileIdle {
+        fn byte_pending(&self, _timeout: std::time::Duration) -> bool {
+            match self.result.borrow_mut().take() {
+                Some(result) => {
+                    let senders = self.senders.borrow();
+                    senders.last().unwrap().send(result).unwrap();
+                    false
+                }
+                None => true,
+            }
+        }
+    }
+
+    /// Standalone, the late result closes the popup by itself and the table
+    /// is drawn on the idle slice it landed in, with no key pressed.
+    #[test]
+    fn a_result_landing_while_idle_closes_the_popup_and_draws_the_table() {
+        let repo = fixture_with_one_run("screen-loading-late");
+        let senders = Senders::default();
+        let mut input = LandsWhileIdle {
+            keys: keys("q"),
+            senders: senders.clone(),
+            result: std::cell::RefCell::new(Some(load(&repo, &no_filters()))),
+        };
+        let mut out = Vec::new();
+        run_screen_with(
+            &repo,
+            &Pipelines::builtin(),
+            &no_args(),
+            |_| held(&senders),
+            &mut input,
+            &mut out,
+        )
+        .unwrap();
+
+        let drawn = String::from_utf8(out).unwrap();
+        let all = frames(&drawn);
+        assert_eq!(all.len(), 2, "the loading frame, then the landed one");
+        assert!(shows_loading(all[0]), "{}", all[0]);
+        assert!(!all[0].contains("PIPELINE"), "{}", all[0]);
+        assert!(!all[1].contains("Loading…"), "{}", all[1]);
+        assert!(all[1].contains("│ PIPELINE"), "{}", all[1]);
+        assert!(all[1].contains("│>default"), "{}", all[1]);
+    }
+
+    /// `r` and the filter panel's `enter` each reload under the same popup,
+    /// over the table already shown rather than an empty frame.
+    #[test]
+    fn a_reload_shows_the_popup_over_the_table_already_shown() {
+        let repo = fixture_with_one_run("screen-loading-reload");
+        for script in ["r", "f\r"] {
+            let senders = Senders::default();
+            let mut first = true;
+            let mut input = keys(script);
+            let mut out = Vec::new();
+            run_screen_with(
+                &repo,
+                &Pipelines::builtin(),
+                &no_args(),
+                |filters| {
+                    if std::mem::take(&mut first) {
+                        load_now(&repo, filters)
+                    } else {
+                        held(&senders)
+                    }
+                },
+                &mut input,
+                &mut out,
+            )
+            .unwrap();
+
+            let drawn = String::from_utf8(out).unwrap();
+            let last = last_frame(&drawn);
+            assert!(shows_loading(last), "{script:?}: {last}");
+            assert!(last.contains("│ PIPELINE"), "{script:?}: {last}");
+            assert!(!last.contains("┌─ filters"), "{script:?}: {last}");
+            assert_eq!(senders.borrow().len(), 1, "{script:?}: one reload");
+        }
+    }
+
+    /// A reload that fails with a table on screen reaches the person in the
+    /// same notice it always did, with its key line; the table stays.
+    #[test]
+    fn a_failed_reload_lands_as_the_eval_notice() {
+        let repo = fixture_with_one_run("screen-loading-reload-error");
+        let senders = Senders::default();
+        let mut state = ScreenState::new(&repo, &no_args());
+        let mut loaded = Some(load(&repo, &no_filters()).unwrap());
+        let mut failed = None;
+        state.start_loading(&mut |_| held(&senders), no_filters(), false);
+        senders.borrow()[0]
+            .send(Err(anyhow::anyhow!("no ledger")))
+            .unwrap();
+        assert!(state.settle(&mut loaded, &mut failed));
+        assert!(failed.is_none());
+        assert!(loaded.is_some(), "the table already shown stays");
+        match &state.mode {
+            Mode::Notice { title, body, keys } => {
+                assert_eq!(*title, "eval");
+                assert_eq!(body, "no ledger");
+                assert_eq!(*keys, Some(NOTICE_KEYS));
+            }
+            _ => panic!("expected the eval notice"),
+        }
+    }
+
+    /// When a newer load replaces one still in flight, the older one's
+    /// late result goes nowhere and only the newest lands, with the filters
+    /// it was loaded through and — from the filter panel — the cursor home.
+    #[test]
+    fn only_the_newest_of_two_overlapping_loads_is_kept() {
+        let repo = fixture_with_one_run("screen-loading-overlap");
+        let senders = Senders::default();
+        let mut state = ScreenState::new(&repo, &no_args());
+        state.cursor = 3;
+        let mut loaded = None;
+        let mut failed = None;
+        state.start_loading(&mut |_| held(&senders), no_filters(), false);
+        assert!(!state.settle(&mut loaded, &mut failed), "nothing landed");
+
+        let newer = Filters {
+            step: Some("implement".into()),
+            ..no_filters()
+        };
+        state.start_loading(&mut |_| held(&senders), newer.clone(), true);
+        assert!(
+            senders.borrow()[0].send(Ok(loaded_one("old"))).is_err(),
+            "the older load's result goes nowhere"
+        );
+        senders.borrow()[1].send(Ok(loaded_one("new"))).unwrap();
+        assert!(state.settle(&mut loaded, &mut failed));
+        assert!(matches!(state.mode, Mode::Browsing));
+        assert_eq!(loaded.unwrap().entries[0].task, "new");
+        assert_eq!(state.filters, newer);
+        assert_eq!(state.cursor, 0);
+    }
+
+    fn loaded_one(task: &str) -> Loaded {
+        loaded(vec![tests_entry(task, "implement")])
+    }
+
+    /// The thread the tab really loads on hands back what `load` itself
+    /// reads.
+    #[test]
+    fn load_in_background_lands_what_load_reads() {
+        let repo = fixture_with_one_run("screen-loading-thread");
+        let landed = load_in_background(&repo, &no_filters())
+            .recv()
+            .unwrap()
+            .unwrap();
+        assert_eq!(landed.entries.len(), 1);
+        assert_eq!(landed.entries[0].task, "a");
     }
 
     /// Regression: the note used to take a row `frame_rows` had not made
@@ -4657,7 +5056,6 @@ mod screen_tests {
     /// each filter and the window.
     #[test]
     fn filters_label_names_the_project_every_filter_and_the_window() {
-        let loaded = loaded(Vec::new());
         let filters = Filters {
             since: "2026-08-01".to_string(),
             step: Some("review".into()),
@@ -4665,11 +5063,11 @@ mod screen_tests {
             ..no_filters()
         };
         assert_eq!(
-            filters_label(&loaded, &filters, TableKind::Lanes),
+            filters_label("demo", &filters, TableKind::Lanes),
             "demo · step review · 2026-08-01 → now"
         );
         assert_eq!(
-            filters_label(&loaded, &filters, TableKind::Dirs),
+            filters_label("demo", &filters, TableKind::Dirs),
             "demo · skill /x · 2026-08-01 → now"
         );
     }

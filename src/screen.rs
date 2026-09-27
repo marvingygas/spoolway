@@ -439,7 +439,7 @@ pub(crate) fn pad_to(s: &str, width: usize) -> String {
 /// Called by the queue screen's own `footer`, the jobs screen's own
 /// `jobs_footer`, the board's own key line in `src/status/mod.rs`'s
 /// `render`, `spoolway eval`'s own `footer` in `src/eval.rs`, and
-/// [`shell`]'s own `message_tab`.
+/// [`shell`]'s own `message_frame`.
 pub(crate) fn key_hint(pairs: &[(&str, &str)]) -> String {
     hint(&keys(pairs))
 }
