@@ -344,6 +344,10 @@ flowchart LR
 - Two tasks that depend on the same task are siblings. A GitHub stack is one line, so only the
   first sibling joins it. The second passes and reports `none — <task> is a sibling of #<n>`
   on its `stack` line.
+- When the branch a task was cut from is gone and GitHub shows its pull request merged, `stack`
+  opens against the branch that pull request merged into, printing `` `<branch>` has landed —
+  against `<base>` ``. When the only pull request for that branch was closed without merging,
+  `stack` stops and names it, since there is no work in it to open against.
 
 ### `skip:` — walking past a step
 

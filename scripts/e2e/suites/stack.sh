@@ -385,4 +385,147 @@ else
   bad "and nothing was force-pushed onto \`main\`"
 fi
 
+# ----------------------------------------- follow a merged base's pull request
+# `scripts/e2e-fake-gh.sh`, not this suite's own `gh-stub.sh`: only the fuller
+# double answers `gh pr list --head <branch> --state all`, which the fallback
+# below depends on to find a pull request whose branch no longer resolves
+# anywhere. Its own bare repo is symlinked onto this suite's real `$ORIGIN` so
+# `pr create`'s branch-existence check still sees the branches this suite
+# actually pushes.
+FAKEGH="$LIVE/fakegh"
+mkdir -p "$FAKEGH/bin" "$FAKEGH/prs"
+must "the fuller gh double" install -m 755 "$SCRIPTS/e2e-fake-gh.sh" "$FAKEGH/bin/gh"
+must "its forge shares this suite's real origin" ln -s "$ORIGIN" "$FAKEGH/origin.git"
+
+run_with_fake_gh() {
+  SPOOLWAY_GH="$FAKEGH/bin/gh" SPOOLWAY_E2E_FORGE="$FAKEGH" "$SPOOLWAY" "$@"
+}
+
+# A pull request recorded for a branch this suite never creates at all — a
+# deleted `cut_from` never resolving is exactly what `gh pr list --head`
+# still has to answer about, so nothing here needs the branch to exist.
+# Numbered well past anything `pr create` will assign on its own below, so a
+# real pull request opened during this section can never collide with one of
+# these.
+record_pr() {
+  local n=$1 base=$2 head=$3 state=$4
+  {
+    echo "number=$n"
+    echo "base=$base"
+    echo "head=$head"
+    echo "title=$head"
+    echo "state=$state"
+  } > "$FAKEGH/prs/$n"
+  echo "a pull request recorded for the sandbox forge" > "$FAKEGH/prs/$n.body"
+}
+record_pr 9001 main task/gh412-checkout MERGED
+record_pr 9002 main task/gh413-checkout CLOSED
+
+# ---- merged: `stack` opens the dependent's own pull request against `main`
+must "the branch, off main" git branch task/landed main
+must "its worktree" git worktree add -q "$WORKTREES/landed" task/landed
+(
+  cd "$WORKTREES/landed" || exit 1
+  mkdir -p notes
+  echo "# landed" > notes/landed.md
+  git add -A
+  git commit -qm "wip(landed): implement"
+)
+# `base:` equal to `cut_from` — the chain's first task, which has nowhere to
+# fall back to on its own once `cut_from` is gone (acceptance criterion 2).
+queue_task landed \
+  "base: task/gh412-checkout" "cut_from: task/gh412-checkout" "branch: task/landed"
+
+landed_out=$(cd "$WORKTREES/landed" && run_with_fake_gh stack landed 2>&1)
+landed_status=$?
+if [ "$landed_status" -eq 0 ] \
+   && grep -qF '`task/gh412-checkout` has landed — against `main`' <<<"$landed_out"; then
+  ok "a merged pull request for a deleted \`cut_from\` is followed to its own base"
+else
+  bad "a merged pull request for a deleted \`cut_from\` is followed to its own base"
+  printf '        exit %s: %s\n' "$landed_status" "$landed_out"
+fi
+
+landed_pr=$(grep -l '^head=task/landed$' "$FAKEGH/prs"/[0-9]* 2>/dev/null | head -1)
+if [ -n "$landed_pr" ] && [ "$(sed -n 's/^base=//p' "$landed_pr")" = main ]; then
+  ok "and its own pull request is opened with \`--base main\`"
+else
+  bad "and its own pull request is opened with \`--base main\`"
+  [ -n "$landed_pr" ] && sed 's/^/        /' "$landed_pr"
+fi
+
+# ---- closed without merging: named rather than followed
+must "the branch, off main" git branch task/orphan main
+must "its worktree" git worktree add -q "$WORKTREES/orphan" task/orphan
+(
+  cd "$WORKTREES/orphan" || exit 1
+  mkdir -p notes
+  echo "# orphan" > notes/orphan.md
+  git add -A
+  git commit -qm "wip(orphan): implement"
+)
+queue_task orphan \
+  "base: task/gh413-checkout" "cut_from: task/gh413-checkout" "branch: task/orphan"
+
+orphan_out=$(cd "$WORKTREES/orphan" && run_with_fake_gh stack orphan 2>&1)
+orphan_status=$?
+if [ "$orphan_status" -ne 0 ] \
+   && grep -qF "its pull request #9002 was closed without merging" <<<"$orphan_out"; then
+  ok "a pull request closed without merging stops the run and names it"
+else
+  bad "a pull request closed without merging stops the run and names it"
+  printf '        exit %s: %s\n' "$orphan_status" "$orphan_out"
+fi
+
+# ---- no pull request at all: today's message, unchanged
+must "the branch, off main" git branch task/nowhere main
+must "its worktree" git worktree add -q "$WORKTREES/nowhere" task/nowhere
+(
+  cd "$WORKTREES/nowhere" || exit 1
+  mkdir -p notes
+  echo "# nowhere" > notes/nowhere.md
+  git add -A
+  git commit -qm "wip(nowhere): implement"
+)
+queue_task nowhere \
+  "base: task/gh999-nothing" "cut_from: task/gh999-nothing" "branch: task/nowhere"
+
+nowhere_out=$(cd "$WORKTREES/nowhere" && run_with_fake_gh stack nowhere 2>&1)
+nowhere_status=$?
+if [ "$nowhere_status" -ne 0 ] \
+   && grep -qF "resolves to nothing" <<<"$nowhere_out" \
+   && grep -qF "does not resolve either" <<<"$nowhere_out"; then
+  ok "no pull request found at all keeps today's message"
+else
+  bad "no pull request found at all keeps today's message"
+  printf '        exit %s: %s\n' "$nowhere_status" "$nowhere_out"
+fi
+
+# ---- a distinct `base:` that still resolves: the older fallback, unchanged.
+# No pull request is recorded for this `cut_from`, so landing on `main` here
+# can only have come from `base:` itself, never from the forge lookup above.
+must "the branch, off main" git branch task/dependent main
+must "its worktree" git worktree add -q "$WORKTREES/dependent" task/dependent
+(
+  cd "$WORKTREES/dependent" || exit 1
+  mkdir -p notes
+  echo "# dependent" > notes/dependent.md
+  git add -A
+  git commit -qm "wip(dependent): implement"
+)
+queue_task dependent \
+  "base: main" "cut_from: task/gh414-deleted" "branch: task/dependent"
+
+dependent_out=$(cd "$WORKTREES/dependent" && run_with_fake_gh stack dependent 2>&1)
+dependent_status=$?
+dependent_pr=$(grep -l '^head=task/dependent$' "$FAKEGH/prs"/[0-9]* 2>/dev/null | head -1)
+if [ "$dependent_status" -eq 0 ] \
+   && grep -qF '`task/gh414-deleted` has landed — against `main`' <<<"$dependent_out" \
+   && [ -n "$dependent_pr" ] && [ "$(sed -n 's/^base=//p' "$dependent_pr")" = main ]; then
+  ok "a deleted \`cut_from\` with its own \`base:\` still lands on that base"
+else
+  bad "a deleted \`cut_from\` with its own \`base:\` still lands on that base"
+  printf '        exit %s: %s\n' "$dependent_status" "$dependent_out"
+fi
+
 finish

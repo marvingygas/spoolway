@@ -149,11 +149,40 @@ pub fn stack(repo: &Repo, args: &StackArgs) -> Result<()> {
                     );
                     (base, cut_ref)
                 }
-                None => bail!(
-                    "task `{id}` is cut from `{cut_from}`, which resolves to nothing — no \
-                     `origin/{cut_from}` and no local branch — and its `base:` does not \
-                     resolve either, so there is nothing to diff this branch against"
-                ),
+                // `base:` names nothing this worktree can already see — either
+                // it is the same branch as `cut_from` (a chain's first task,
+                // per the acceptance criterion this exists for) or it has
+                // never resolved either. GitHub still remembers what
+                // `cut_from` was for even after the branch itself is gone, so
+                // the merged-pull-request lookup below is asked next, before
+                // giving up outright.
+                None => match head_pr(&gh_program(), &worktree, &cut_from)? {
+                    Some(HeadPr::Merged { base, number: _ }) => {
+                        let _ = crate::repo::run(&worktree, "git", &["fetch", "origin", &base]);
+                        let cut_ref = resolved_ref(&worktree, &base).ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "task `{id}` is cut from `{cut_from}`, whose pull request \
+                                 merged into `{base}` — but `{base}` itself resolves to \
+                                 nothing, so there is nothing to diff this branch against"
+                            )
+                        })?;
+                        report_line(
+                            "base",
+                            format!("`{cut_from}` has landed — against `{base}`"),
+                        );
+                        (base, cut_ref)
+                    }
+                    Some(HeadPr::ClosedUnmerged { number }) => bail!(
+                        "task `{id}` is cut from `{cut_from}`, which is gone — its pull \
+                         request #{number} was closed without merging. Open this pull \
+                         request by hand, against the branch you choose."
+                    ),
+                    None => bail!(
+                        "task `{id}` is cut from `{cut_from}`, which resolves to nothing — no \
+                         `origin/{cut_from}` and no local branch — and its `base:` does not \
+                         resolve either, so there is nothing to diff this branch against"
+                    ),
+                },
             }
         }
     };
@@ -544,6 +573,75 @@ fn parse_pr_view(stdout: &[u8]) -> Result<Option<Pr>> {
     Ok(Some(Pr { number, url, state }))
 }
 
+/// What became of the pull request that once had `branch` for a head, once
+/// `branch` itself is gone and `resolved_ref` can no longer find it — asked
+/// by name (`gh pr list --head`) rather than by ref, since a deleted branch
+/// still names the pull request GitHub opened for it.
+#[derive(Debug, PartialEq, Eq)]
+enum HeadPr {
+    /// The branch it merged into — where `stack` should open against instead.
+    Merged { base: String, number: u64 },
+    /// Closed with nothing landed. Following it would carry no work forward,
+    /// so the caller stops and names it rather than guessing a base.
+    ClosedUnmerged { number: u64 },
+}
+
+/// `gh pr list --head <branch> --state all`'s answer for a branch that no
+/// longer resolves anywhere, or `None` when that branch never had a pull
+/// request at all. A merged pull request outranks a closed one for the same
+/// head — the shape of a branch whose first attempt was closed and a later
+/// one landed.
+fn head_pr(gh: &str, worktree: &Path, branch: &str) -> Result<Option<HeadPr>> {
+    let list = Command::new(gh)
+        .args([
+            "pr",
+            "list",
+            "--head",
+            branch,
+            "--state",
+            "all",
+            "--json",
+            "number,state,baseRefName",
+        ])
+        .current_dir(worktree)
+        .output()
+        .with_context(|| format!("running `{gh} pr list --head {branch}`"))?;
+    if !list.status.success() {
+        return Ok(None);
+    }
+    parse_head_pr(&list.stdout)
+}
+
+/// The parsing half of `head_pr`, split out so it can be tested without `gh`.
+fn parse_head_pr(stdout: &[u8]) -> Result<Option<HeadPr>> {
+    let entries: Vec<serde_json::Value> =
+        serde_json::from_slice(stdout).context("parsing `gh pr list` output")?;
+    let str_field = |v: &serde_json::Value, key: &str| {
+        v.get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let number_of = |v: &serde_json::Value| {
+        v.get("number")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_default()
+    };
+
+    if let Some(merged) = entries.iter().find(|e| str_field(e, "state") == "MERGED") {
+        return Ok(Some(HeadPr::Merged {
+            base: str_field(merged, "baseRefName"),
+            number: number_of(merged),
+        }));
+    }
+    if let Some(closed) = entries.iter().find(|e| str_field(e, "state") == "CLOSED") {
+        return Ok(Some(HeadPr::ClosedUnmerged {
+            number: number_of(closed),
+        }));
+    }
+    Ok(None)
+}
+
 /// A file holding the pull request body, for `gh pr create --body-file`.
 ///
 /// Written inside the worktree's own git directory, not `temp_dir()`: on a
@@ -890,6 +988,63 @@ mod tests {
             .unwrap()
             .expect("gh answered, so there is a pull request");
         assert!(!pr.is_open());
+    }
+
+    /// A merged pull request found for a deleted `cut_from` names the branch
+    /// it went into — the base `stack` should now open the dependent's own
+    /// pull request against, in place of the `base:` fallback that needs a
+    /// still-resolving branch of its own.
+    #[test]
+    fn a_merged_pull_request_names_its_own_base() {
+        let found = parse_head_pr(br#"[{"number":412,"state":"MERGED","baseRefName":"main"}]"#)
+            .unwrap()
+            .expect("gh listed a pull request for this head");
+        assert_eq!(
+            found,
+            HeadPr::Merged {
+                base: "main".to_string(),
+                number: 412,
+            }
+        );
+    }
+
+    /// A pull request closed without merging carries nothing forward — named
+    /// so `stack` can say so rather than silently having nowhere to open
+    /// against.
+    #[test]
+    fn a_closed_unmerged_pull_request_is_named_rather_than_followed() {
+        let found = parse_head_pr(br#"[{"number":412,"state":"CLOSED","baseRefName":"main"}]"#)
+            .unwrap()
+            .expect("gh listed a pull request for this head");
+        assert_eq!(found, HeadPr::ClosedUnmerged { number: 412 });
+    }
+
+    /// A merged pull request outranks a closed one for the same head — the
+    /// real shape once a first attempt was closed and a later one landed.
+    #[test]
+    fn a_merged_pull_request_is_preferred_over_a_closed_one_for_the_same_head() {
+        let found = parse_head_pr(
+            br#"[
+                {"number":410,"state":"CLOSED","baseRefName":"main"},
+                {"number":412,"state":"MERGED","baseRefName":"main"}
+            ]"#,
+        )
+        .unwrap()
+        .expect("gh listed pull requests for this head");
+        assert_eq!(
+            found,
+            HeadPr::Merged {
+                base: "main".to_string(),
+                number: 412,
+            }
+        );
+    }
+
+    /// No pull request at all for the head reads as `None` — the caller's cue
+    /// to fall back to today's "resolves to nothing" message.
+    #[test]
+    fn no_pull_request_for_the_head_is_none() {
+        assert_eq!(parse_head_pr(b"[]").unwrap(), None);
     }
 
     #[test]

@@ -57,7 +57,7 @@ as JSON.
 | `epic`, `ticket` | the `open` hook, or you | Tracker references. A task that sets `ticket:` itself skips the hook. See [Issue tracking](configuration.md#open--a-fifth-event-run-by-queue-add-itself). |
 | `stage` | the pipeline | The step the task is on. |
 | `branch` | the dispatcher | `task/<id>`, or `task/<slug>-<id>` with `issue_tracking.key_in_names`. |
-| `cut_from` | the dispatcher | The branch the worktree was cut from: the first dependency's branch, else `base`. The pull request opens against it. A branch only `origin` has is cut from directly, with no local branch made for it. |
+| `cut_from` | the dispatcher | The branch the worktree was cut from: the first dependency's branch, else `base`. The pull request opens against it. Once that branch is gone, it opens against the branch its own pull request merged into instead. See [`spoolway stack`](pipelines.md#spoolway-stack). A branch only `origin` has is cut from directly, with no local branch made for it. |
 | `base_commit` | the dispatcher | The commit `cut_from` pointed at when the worktree was cut. |
 | `run` | the dispatcher | The run id. `spoolway eval --by task` groups ledger lines by it. |
 | `patch` | the dispatcher | Files, insertions and deletions of the branch, measured at cleanup. |
