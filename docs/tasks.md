@@ -50,14 +50,14 @@ as JSON.
 | `depends_on` | you | Task ids that must reach `done` before this one starts. |
 | `parallel` | you | `true` marks a deliberate fan: the planner judged this task and another `parallel: true` task of the same group safe to run side by side, rather than a missing `depends_on`. |
 | `gate_at` | you | A step id. The task pauses after that step reports, once, whatever it reports. See [Paused is the other one, and it is not a block](#paused-is-the-other-one-and-it-is-not-a-block). |
-| `base` | you | The branch the group lands in. Required, here or with `spoolway queue add --base`. |
+| `base` | you | The branch the group lands in. Required, here or with `spoolway queue add --base`. Must exist locally or on `origin`. |
 | `source` | you | Where the task came from: an issue URL, a plan page path, a name. Never parsed. |
 | `plan` | you | The plan page's absolute path, when `source` holds an issue. Never parsed. |
 | `group_description` | you | The group's own words for its tracker issue. See [Issue tracking](configuration.md#open--a-fifth-event-run-by-queue-add-itself). |
 | `epic`, `ticket` | the `open` hook, or you | Tracker references. A task that sets `ticket:` itself skips the hook. See [Issue tracking](configuration.md#open--a-fifth-event-run-by-queue-add-itself). |
 | `stage` | the pipeline | The step the task is on. |
 | `branch` | the dispatcher | `task/<id>`, or `task/<slug>-<id>` with `issue_tracking.key_in_names`. |
-| `cut_from` | the dispatcher | The branch the worktree was cut from: the first dependency's branch, else `base`. The pull request opens against it. |
+| `cut_from` | the dispatcher | The branch the worktree was cut from: the first dependency's branch, else `base`. The pull request opens against it. A branch only `origin` has is cut from directly, with no local branch made for it. |
 | `base_commit` | the dispatcher | The commit `cut_from` pointed at when the worktree was cut. |
 | `run` | the dispatcher | The run id. `spoolway eval --by task` groups ledger lines by it. |
 | `patch` | the dispatcher | Files, insertions and deletions of the branch, measured at cleanup. |
@@ -99,6 +99,15 @@ outgrow the multiplexer's own limit gets a short internal alias instead of a ref
 `depends_on` is checked over the whole submission. It must name a task in the queue, in the
 archive, or in the same batch. It must not name the task itself or close a cycle. A dependency
 and its dependent must share the same `base` and the same `group`.
+
+`spoolway dispatch` checks the same base rule again before it starts, since a task file can be
+edited by hand, or a base branch deleted, after the batch was sent. A dependent whose `base:` no
+longer agrees with its dependency's, or a cut task whose `base:` no longer names what `cut_from`
+recorded, refuses the whole start. A task still waiting to be cut whose base exists neither
+locally nor on `origin` refuses it too, checked locally first; a task already cut is not asked.
+See [`spoolway dispatch`](cli-reference.md#spoolway-dispatch). While a dispatcher is already
+running, the same three problems hold only the task they are found on, the way a task with no
+`base:` at all is held.
 
 When `depends_on` names more than one id, the first must be the one whose branch already
 contains the others. `queue add` reorders the list to put it first. A list with no such id is

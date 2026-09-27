@@ -153,7 +153,9 @@ spoolway queue add --from <PATH> --base <BRANCH>
 | `--dry-run` | | Validate and print what would happen. Writes nothing and opens no ticket |
 
 A task that sets neither its own `base:` nor `--base` is refused by name and nothing is
-written.
+written. A `base:` that exists only on `origin` is accepted; the worktree is cut from
+`origin/<base>` later, with no local branch made for it. A base on neither is refused, naming
+both places.
 
 With no `--from`, it prints a skeleton task to fill in, with a `pipeline:` row to fill in.
 
@@ -271,6 +273,21 @@ refusing to start: task `auth-refresh` has no `pipeline:`
 
 Nothing was dispatched.
 ```
+
+It checks every live task's `base:` the same way. A dependent whose `base:` disagrees with its
+dependency's, a cut task whose `base:` no longer names what it was cut from, or a task whose base
+exists neither locally nor on `origin`, each refuses the whole start:
+
+```
+refusing to start: task `cart-totals` is based on `task/gh-412-checkout`, which
+exists neither locally nor on `origin`
+  Set `base:` in cart-totals to a branch that exists.
+
+Nothing was dispatched.
+```
+
+See [Tasks and the queue](tasks.md#what-only-holds-across-a-set) for the other two shapes and for
+what happens to the same problems once a run is already going.
 
 If another dispatcher, or a screen opened with bare `spoolway`, already holds the project, it
 prints the same line and exits:

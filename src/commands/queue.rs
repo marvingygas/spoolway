@@ -984,10 +984,11 @@ fn check_task_base(repo: &Repo, name: &str, base: &str) -> Result<()> {
             &format!("refs/heads/{base}"),
         ])
         .is_err()
+        && !repo.remote_branch_exists(base)
     {
         bail!(
-            "{name}: `base: {base}` names a branch this repository does not have locally — \
-             create or fetch it first, or name one it already has"
+            "{name}: `base: {base}` names a branch this repository does not have locally or on \
+             `origin` — create or fetch it first, or name one it already has"
         );
     }
     Ok(())
@@ -7434,6 +7435,48 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("does not have locally"), "{err:#}");
+    }
+
+    /// A branch that only `origin` has is a valid base — cleanup deletes a
+    /// finished task's local branch once it is pushed, so a pending pull
+    /// request's branch is usually on `origin` only, and refusing it here
+    /// would refuse the ordinary case of stacking a task on one.
+    #[test]
+    fn a_base_only_origin_has_is_accepted() {
+        let repo = fixture("remote-only-base");
+        let origin = repo
+            .root
+            .parent()
+            .unwrap()
+            .join("remote-only-base-origin.git");
+        let _ = std::fs::remove_dir_all(&origin);
+        std::fs::create_dir_all(&origin).unwrap();
+        crate::repo::run(&origin, "git", &["init", "-q", "--bare", "-b", "main"]).unwrap();
+        crate::repo::run(
+            &repo.root,
+            "git",
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        )
+        .unwrap();
+        crate::repo::run(
+            &repo.root,
+            "git",
+            &["push", "-q", "origin", "plan/demo:main"],
+        )
+        .unwrap();
+        crate::repo::run(&origin, "git", &["branch", "task/remote-only", "main"]).unwrap();
+
+        assert!(check_task_base(&repo, "t", "task/remote-only").is_ok());
+        assert!(
+            repo.git(&[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "refs/heads/task/remote-only",
+            ])
+            .is_err(),
+            "accepting it must not have created a local branch"
+        );
     }
 
     /// Unrecognised keys are a project's own metadata, not spoolway's
