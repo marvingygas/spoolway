@@ -49,7 +49,7 @@ queue_hang() {
   local id=$1
   mkdir -p "$CTL"
   [ "$id" = hang ] || echo hang > "$CTL/$id"
-  task_doc "$LIVE/$id.md" "$id" "$BODY" "group: disaster" "touches: [notes/$id.md]"
+  task_doc "$LIVE/$id.md" "$id" "$BODY" "group: disaster"
   must "$id queues" "$SPOOLWAY" queue add --from "$LIVE/$id.md"
 }
 
@@ -262,7 +262,7 @@ forget hang
 # so the orphaned lane records its own pass and the task then sits there,
 # because there is no pass to carry it on. That is a state, not a window, and
 # the assertion below is that a dispatcher coming up finds it.
-task_doc "$LIVE/orphan.md" orphan "$BODY" "group: disaster" "touches: [notes/orphan.md]"
+task_doc "$LIVE/orphan.md" orphan "$BODY" "group: disaster"
 mkdir -p "$CTL"
 echo "linger:3" > "$CTL/orphan.implement"
 dispatcher_start
@@ -358,8 +358,7 @@ forget stop-live
 # might answer for `problem-log` before the board-mode one-shot below gets to
 # it.
 sweep
-task_doc "$LIVE/problem-log.md" problem-log "$BODY" "group: disaster" \
-  "touches: [notes/problem-log.md]"
+task_doc "$LIVE/problem-log.md" problem-log "$BODY" "group: disaster"
 must "problem-log queues" "$SPOOLWAY" queue add --from "$LIVE/problem-log.md"
 # A stage no pipeline defines is the cheapest real problem to manufacture:
 # `Dispatcher::pass` hits it on the very first pass, with nothing else to set

@@ -1,6 +1,6 @@
 ---
 domain: tasks
-covers: ["src/task.rs", "src/graph.rs", "src/globs.rs"]
+covers: ["src/task.rs", "src/graph.rs"]
 ---
 
 # Tasks and the queue
@@ -26,8 +26,6 @@ outside the checkout.
 id: sessions
 title: feat(auth): add session tokens on top of login
 group: auth
-touches:
-  - src/auth/**
 depends_on:
   - login
 ---
@@ -49,9 +47,8 @@ as JSON.
 | `title` | you | One Conventional Commits line, such as `feat(queue): add a --dry-run flag`. Becomes the squashed commit subject and the pull request title. Required. |
 | `group` | you | The group of work this task belongs to. Tasks of one group run in one shared tab. Required. |
 | `pipeline` | you | The pipeline this task runs on. Required, and must name a pipeline that exists. |
-| `touches` | you | Globs of the files this task changes. Drives conflict detection and the `document` step. |
 | `depends_on` | you | Task ids that must reach `done` before this one starts. |
-| `parallel` | you | `true` marks a missing `depends_on` to another `parallel: true` task of the same group as chosen on purpose. See [Declaring a fan on purpose](#declaring-a-fan-on-purpose). |
+| `parallel` | you | `true` marks a deliberate fan: the planner judged this task and another `parallel: true` task of the same group safe to run side by side, rather than a missing `depends_on`. |
 | `gate_at` | you | A step id. The task pauses after that step reports, once, whatever it reports. See [Paused is the other one, and it is not a block](#paused-is-the-other-one-and-it-is-not-a-block). |
 | `base` | you | The branch the group lands in. Required, here or with `spoolway queue add --base`. |
 | `source` | you | Where the task came from: an issue URL, a plan page path, a name. Never parsed. |
@@ -139,7 +136,7 @@ the `WHAT YOU WRITE DOWN` block of its system prompt. See
 [What a lane is handed](prompts.md#what-a-lane-is-handed).
 
 At lane start the dispatcher also tells the lane which tasks it waited on, with a pointer to
-their `## Handoff`, the scope its `touches` globs set, and the scratch directory.
+their `## Handoff`, and the scratch directory.
 
 ## Queueing a task
 
@@ -181,7 +178,6 @@ step.
 | `spoolway queue list` | Whether a dispatcher runs, and where every task is. |
 | `spoolway queue show <task>` | Prints one task file. |
 | `spoolway queue add --from <path>` | Queues documents. |
-| `spoolway queue conflicts` | Reports overlapping `touches` with no order between them. |
 | `spoolway queue pause <task>` | Stops the task's lane and parks it on `paused`. |
 | `spoolway queue resume <task>` | Same as `r` on the board. |
 | `spoolway queue unqueue <task>` | Moves a not-started task back to the pending directory. `--all` and `--force` reach the rest. |
@@ -203,28 +199,18 @@ sessions   queued     waiting on: login
 profile    queued     waiting on: sessions
 ```
 
-## Finding the edges you are missing
+## Declaring a fan on purpose
 
-```
-spoolway queue conflicts
-```
-
-This reports pairs of tasks whose `touches` globs can name the same file and that have no
-`depends_on` path between them. Two ordered tasks that overlap are fine.
-
-### Declaring a fan on purpose
-
-Two tasks of one group may have nothing to do with each other. Mark both `parallel: true` so
-that `queue conflicts` and `queue list` know the missing edge is intended.
+Two tasks of one group may have nothing to do with each other. Whether they are safe to run
+side by side is judged from what each task changes, not from any file both happen to touch.
+Mark both `parallel: true` so that `queue list` shows the missing `depends_on` as chosen on
+purpose, not forgotten.
 
 ```
 id: left
 group: fan
-touches: [notes/left.md]
 parallel: true
 ```
-
-A `touches` overlap between two `parallel: true` tasks is still reported as a mistake.
 
 ## When a task needs a person
 

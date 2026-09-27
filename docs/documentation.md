@@ -21,9 +21,9 @@ covers: ["src/api/**", "src/routes/**"]
 ---
 ```
 
-The binary never reads a document or this header. The archivist prompt reads `docs/`, matches a
-task's `touches` against each document's `covers`, and updates the documents that match. Other
-keys in the header are ignored.
+The binary never reads a document or this header. The archivist prompt reads `docs/`, matches
+the task's changed paths against each document's `covers`, and updates the documents that
+match. Other keys in the header are ignored.
 
 ### How a document gets updated
 

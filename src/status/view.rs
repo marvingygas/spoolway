@@ -767,9 +767,10 @@ pub(super) fn group_totals(
 }
 
 /// A row's TASK column: the id, with `∥` appended for a task declared
-/// `parallel: true` — the same mark `queue conflicts` reasons from, so a
-/// reader of the board sees which tasks of a group are meant to run
-/// beside each other rather than in sequence.
+/// `parallel: true` — the planner's own judgement that it is safe beside
+/// its group's other declared-parallel tasks, so a reader of the board
+/// sees which tasks are meant to run beside each other rather than in
+/// sequence.
 fn task_label(row: &Row) -> String {
     match row.parallel {
         true => format!("{} ∥", row.id),
@@ -2100,7 +2101,7 @@ mod tests {
     }
 
     /// `queue list` marks a declared-parallel task within its group, so a
-    /// reader sees the same thing `queue conflicts` reasons an overlap from.
+    /// reader sees the same fan the planner judged safe to run side by side.
     #[test]
     fn queue_list_marks_a_declared_parallel_task() {
         let repo = fixture("parallel-marker");

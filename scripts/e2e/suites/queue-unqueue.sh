@@ -39,10 +39,10 @@ task_body "$BODY"
 # which now carries that dependent back to pending alongside it instead.
 # `--all` carries both back together, with no per-task check, exactly as `U`
 # does.
-task_doc "$LIVE/base.md" base "$BODY" "group: unq" "touches: [notes/base.md]"
+task_doc "$LIVE/base.md" base "$BODY" "group: unq"
 must "base queues" "$SPOOLWAY" queue add --from "$LIVE/base.md"
 task_doc "$LIVE/dependent.md" dependent "$BODY" "group: unq" \
-  "touches: [notes/dependent.md]" "depends_on: [base]"
+  "depends_on: [base]"
 must "a sibling that depends on it queues too" "$SPOOLWAY" queue add --from "$LIVE/dependent.md"
 
 refuses "unqueuing base alone, with dependent still queued behind it" "dependent" \
@@ -79,7 +79,7 @@ refuses "unqueuing a task the queue does not have" "no queued task" \
 # A real lane, hung mid-turn, so the checkout the refusal names is a real one
 # and the teardown `--force` runs is a real teardown, not a description of it.
 echo hang > "$CTL/solo"
-task_doc "$LIVE/solo.md" solo "$BODY" "group: unq" "touches: [notes/solo.md]"
+task_doc "$LIVE/solo.md" solo "$BODY" "group: unq"
 must "a task whose lane will hang mid-turn" "$SPOOLWAY" queue add --from "$LIVE/solo.md"
 
 if drive solo implement 120; then ok "it reaches implement and sits there"
@@ -118,8 +118,7 @@ else bad "and the lane is still running"; fi
 # the same hang, so the refusal's other route is proven too without spending
 # the one lane the forced case below still needs.
 echo hang > "$CTL/paused-route"
-task_doc "$LIVE/paused-route.md" paused-route "$BODY" "group: unq" \
-  "touches: [notes/paused-route.md]"
+task_doc "$LIVE/paused-route.md" paused-route "$BODY" "group: unq"
 must "a second task, to prove the other route" \
   "$SPOOLWAY" queue add --from "$LIVE/paused-route.md"
 if drive paused-route implement 120; then ok "it reaches implement too"
@@ -217,7 +216,7 @@ exit 1
 GHSTUB
 chmod +x "$LOWVER_BIN/gh"
 
-pending_doc gate-esc "$BODY" "group: gate-esc" "touches: [notes/gate-esc.md]"
+pending_doc gate-esc "$BODY" "group: gate-esc"
 
 GATE_ESC_OUT="$LIVE/gate-esc.out"
 printf ' \r\x1b' | env PATH="$LOWVER_BIN:$PATH" "$SPOOLWAY" queue >"$GATE_ESC_OUT" 2>&1

@@ -529,7 +529,6 @@ fn skeleton_document(repo: &Repo, pipelines: &Pipelines) -> Result<String> {
          title: a short, present-tense sentence naming what this task does\n\
          group: group-name            # required — a lane runs in the tab its group shares with its siblings\n\
          # source: where this came from — an issue URL, a plan page path, never parsed\n\
-         touches: []                  # globs this task expects to modify\n\
          depends_on: []               # sibling task ids that must finish first\n\
          # base: branch-name          # the branch to cut from and merge into — required, here or with `queue add --base`\n\
          {pipeline_row}\n\
@@ -2154,132 +2153,6 @@ fn check_dependencies_set(repo: &Repo, batch: &mut [Task]) -> Result<()> {
         }
     }
 
-    Ok(())
-}
-
-/// Two tasks that can write the same file, and whether anything orders them.
-struct Conflict<'a> {
-    a: &'a str,
-    b: &'a str,
-    /// The overlapping globs, as `theirs` or `mine ~ theirs`.
-    shared: Vec<String>,
-    ordered: bool,
-    /// Whether the two merge into the same branch. Two groups' tasks do not, and
-    /// nothing in the queue can order them.
-    same_base: bool,
-    /// Whether both tasks are `parallel: true` — an overlap declared on
-    /// purpose, not a missing edge. Only meaningful within one group: two
-    /// tasks each declared parallel *of their own* group say nothing about
-    /// each other.
-    declared_parallel: bool,
-}
-
-/// Report tasks whose `touches` globs overlap, since two lanes editing the same
-/// files will conflict at merge time.
-///
-/// This is what tells a planner where a `depends_on` is needed, so both halves
-/// of the question have to be answered properly: whether two globs can name the
-/// same file, and whether the dependency graph already keeps the two tasks
-/// apart — however many hops apart they are.
-fn conflicts<'a>(tasks: &'a [Task], graph: &Graph) -> Vec<Conflict<'a>> {
-    let mut found = Vec::new();
-
-    for (i, a) in tasks.iter().enumerate() {
-        for b in tasks.iter().skip(i + 1) {
-            // `src/**` and `src/api/**` are not the same string and do name the
-            // same files, which is exactly the case worth catching.
-            let shared: Vec<String> = a
-                .front
-                .touches
-                .iter()
-                .filter_map(|glob| {
-                    let other = b
-                        .front
-                        .touches
-                        .iter()
-                        .find(|other| crate::globs::overlaps(glob, other))?;
-                    Some(match glob == other {
-                        true => glob.clone(),
-                        false => format!("{glob} ~ {other}"),
-                    })
-                })
-                .collect();
-
-            if shared.is_empty() {
-                continue;
-            }
-
-            found.push(Conflict {
-                a: a.id(),
-                b: b.id(),
-                // A task that waits on the other, however indirectly, never
-                // runs beside it — so the overlap cannot bite.
-                ordered: graph.reaches(a.id(), b.id()) || graph.reaches(b.id(), a.id()),
-                same_base: a.front.base == b.front.base,
-                // Both sides said so, of the same group — the siblings a
-                // `parallel: true` names are the other declared-parallel
-                // tasks of that same `group:`, never a task of another one.
-                declared_parallel: a.front.parallel
-                    && b.front.parallel
-                    && a.front.group.is_some()
-                    && a.front.group == b.front.group,
-                shared,
-            });
-        }
-    }
-
-    found
-}
-
-/// The report `spoolway queue conflicts` prints: every overlapping pair the
-/// queue already holds, worded the same way `conflicts` always has. The
-/// screen no longer runs any check of its own before writing — see
-/// `begin_submission` — so this is the only place left that reads `conflicts`
-/// at all.
-fn conflicts_report(repo: &Repo) -> Result<String> {
-    let tasks = repo.tasks()?;
-    let graph = Graph::build(&tasks, &repo.archive_dir());
-    let found = conflicts(&tasks, &graph);
-
-    if found.is_empty() {
-        return Ok("No overlapping `touches` globs among queued tasks.".to_string());
-    }
-
-    let mut lines = Vec::with_capacity(found.len());
-    for conflict in &found {
-        // Two groups' tasks are on branches of their own and merge separately,
-        // so nothing here orders them and `depends_on` may not: it is refused
-        // across bases, because work only merges into the base it was cut from.
-        // The overlap is still real — it comes due when both reach main.
-        //
-        // A pair both marked `parallel: true` is read as a mistake in the
-        // group rather than a missing edge: the two tasks said, on purpose,
-        // that they mean to run beside each other — this overlap is what
-        // that choice costs, not something nobody noticed.
-        let note = match (
-            conflict.same_base,
-            conflict.ordered,
-            conflict.declared_parallel,
-        ) {
-            (false, _, _) => "on different group branches — they meet at main, not here",
-            (true, true, _) => "ordered by depends_on",
-            (true, false, true) => {
-                "both declared parallel — a mistake in the group, not a missing edge"
-            }
-            (true, false, false) => "NOT ordered — add a depends_on or merge the tasks",
-        };
-        lines.push(format!(
-            "{} and {} both touch {} ({note})",
-            conflict.a,
-            conflict.b,
-            conflict.shared.join(", ")
-        ));
-    }
-    Ok(lines.join("\n"))
-}
-
-pub fn queue_conflicts(repo: &Repo) -> Result<()> {
-    println!("{}", conflicts_report(repo)?);
     Ok(())
 }
 
@@ -4041,10 +3914,6 @@ fn task_row(marker: &str, name: &str, tail: &str, width: usize) -> String {
 /// block — its pipeline, what it depends on, any gate chosen for it, and its
 /// own one-sentence description — plus the task's own header row above them.
 ///
-/// A document's `touches` globs are not among the labels. They were the
-/// widest thing the pane drew, wrapping over several lines per task, and a
-/// person choosing what to queue is not picking by glob.
-///
 /// Read-only. Nothing here is picked: the checkbox is on the group, in the
 /// pane to the left, and this is what that group holds.
 ///
@@ -5243,7 +5112,6 @@ fn left_alone_note(left_alone: &[(TaskState, String)]) -> String {
 const AUTHORED_FIELDS: &[&str] = &[
     "id",
     "title",
-    "touches",
     "depends_on",
     "parallel",
     "pipeline",
@@ -6433,160 +6301,6 @@ mod tests {
         assert!(
             !repo.queue_dir().join("c.md").exists(),
             "a task that could never be cut cleanly should not have been written"
-        );
-    }
-
-    fn touching(repo: &Repo, id: &str, touches: &[&str], depends_on: &[&str]) {
-        touching_with(repo, id, touches, depends_on, false);
-    }
-
-    fn touching_with(repo: &Repo, id: &str, touches: &[&str], depends_on: &[&str], parallel: bool) {
-        let mut extra = format!("group: demo\ntouches: [{}]\n", touches.join(", "));
-        if !depends_on.is_empty() {
-            extra += &format!("depends_on: [{}]\n", depends_on.join(", "));
-        }
-        if parallel {
-            extra += "parallel: true\n";
-        }
-        let text = document(id, &extra, BODY);
-        let path = write_doc(repo, &format!("{id}.md"), &text);
-        queue_add(
-            repo,
-            &Pipelines::builtin(),
-            &from_args(&[&path]),
-            &repo.root,
-            false,
-        )
-        .unwrap();
-    }
-
-    fn found(repo: &Repo) -> Vec<String> {
-        let tasks = repo.tasks().unwrap();
-        let graph = Graph::build(&tasks, &repo.archive_dir());
-        conflicts(&tasks, &graph)
-            .iter()
-            .map(|c| {
-                format!(
-                    "{} {} [{}] {}",
-                    c.a,
-                    c.b,
-                    c.shared.join(", "),
-                    if c.ordered { "ordered" } else { "UNORDERED" }
-                )
-            })
-            .collect()
-    }
-
-    #[test]
-    fn globs_that_name_the_same_files_conflict_even_when_written_differently() {
-        let repo = fixture("overlap");
-        touching(&repo, "broad", &["src/**"], &[]);
-        touching(&repo, "narrow", &["src/api/**"], &[]);
-        touching(&repo, "elsewhere", &["docs/**"], &[]);
-
-        assert_eq!(
-            found(&repo),
-            ["broad narrow [src/** ~ src/api/**] UNORDERED"],
-            "a wide glob really does cover a narrow one under it"
-        );
-    }
-
-    /// Across two plans there is no edge to add: `depends_on` is refused across
-    /// bases, and the two branches never see each other until main. Advising a
-    /// `depends_on` there would send whoever queued the plan to a command that
-    /// refuses them.
-    #[test]
-    fn an_overlap_between_two_plans_is_not_one_depends_on_could_fix() {
-        let repo = fixture("overlap-cross-base");
-        touching(&repo, "mine", &["src/**"], &[]);
-        touching(&repo, "theirs", &["src/api/**"], &[]);
-
-        // As though it had been queued from another plan's worktree.
-        let mut theirs = queued(&repo, "theirs");
-        theirs.front.base = Some("plan/other".into());
-        theirs.save().unwrap();
-
-        let tasks = repo.tasks().unwrap();
-        let graph = Graph::build(&tasks, &repo.archive_dir());
-        let found = conflicts(&tasks, &graph);
-
-        assert_eq!(found.len(), 1, "the overlap is real and still reported");
-        assert!(!found[0].same_base);
-        assert!(!found[0].ordered, "and nothing in the queue orders it");
-    }
-
-    /// Two tasks of the same group, each marked `parallel: true`, that still
-    /// overlap: `queue conflicts` reads that as a mistake in the group rather
-    /// than an edge nobody added — the pair said, on purpose, that they mean
-    /// to run beside each other.
-    #[test]
-    fn a_declared_parallel_pair_is_read_as_a_mistake_not_a_missing_edge() {
-        let repo = fixture("overlap-declared-parallel");
-        touching_with(&repo, "left", &["src/**"], &[], true);
-        touching_with(&repo, "right", &["src/api/**"], &[], true);
-
-        let tasks = repo.tasks().unwrap();
-        let graph = Graph::build(&tasks, &repo.archive_dir());
-        let found = conflicts(&tasks, &graph);
-
-        assert_eq!(found.len(), 1);
-        assert!(found[0].declared_parallel);
-        assert!(!found[0].ordered);
-    }
-
-    /// Only meaningful within one group: a declared-parallel task never reads
-    /// an overlap with another group's declared-parallel task as deliberate —
-    /// the two never chose to run beside each other, they merely both did.
-    #[test]
-    fn declared_parallel_does_not_cross_groups() {
-        let repo = fixture("overlap-parallel-cross-group");
-        touching_with(&repo, "mine", &["src/**"], &[], true);
-        touching_with(&repo, "theirs", &["src/api/**"], &[], true);
-
-        // As though it had been queued from another group's worktree.
-        let mut theirs = queued(&repo, "theirs");
-        theirs.front.group = Some("other".into());
-        theirs.front.base = Some("plan/other".into());
-        theirs.save().unwrap();
-
-        let tasks = repo.tasks().unwrap();
-        let graph = Graph::build(&tasks, &repo.archive_dir());
-        let found = conflicts(&tasks, &graph);
-
-        assert_eq!(found.len(), 1);
-        assert!(!found[0].declared_parallel);
-    }
-
-    #[test]
-    fn tasks_the_graph_already_keeps_apart_are_not_flagged() {
-        let repo = fixture("overlap-ordered");
-        // `ui` waits on `api` waits on `schema`, so `ui` and `schema` never run
-        // at once — even though neither names the other.
-        touching(&repo, "schema", &["src/db/**"], &[]);
-        touching(&repo, "api", &["src/api/**"], &["schema"]);
-        touching(&repo, "ui", &["src/db/schema.rs"], &["api"]);
-
-        assert_eq!(
-            found(&repo),
-            ["schema ui [src/db/** ~ src/db/schema.rs] ordered"],
-            "two hops of depends_on order a pair just as well as one"
-        );
-    }
-
-    /// `spoolway queue conflicts` reads the queue alone — no pending batch
-    /// involved — and reports an unordered overlap the same way it always
-    /// has, whether or not anything is ever typed at the screen.
-    #[test]
-    fn queue_conflicts_reports_an_unordered_overlap_with_no_screen_involved() {
-        let repo = fixture("conflicts-report");
-        touching(&repo, "broad", &["src/**"], &[]);
-        touching(&repo, "narrow", &["src/api/**"], &[]);
-
-        let report = conflicts_report(&repo).unwrap();
-        assert_eq!(
-            report,
-            "broad and narrow both touch src/** ~ src/api/** \
-             (NOT ordered — add a depends_on or merge the tasks)"
         );
     }
 
@@ -9174,25 +8888,17 @@ mod tests {
         );
     }
 
-    /// Two tasks in different groups whose `touches` globs overlap: an edge
+    /// Two tasks in different groups that both change the same file: an edge
     /// across group branches would stack one plan's pull request under
     /// another's — see the plan `chains-not-fans` — so `enter` writes both
-    /// straight through with no `depends_on` added. The walk that used to
-    /// pause over a collision like this is gone; `spoolway queue conflicts`
-    /// is the only place the overlap is reported now.
+    /// straight through with no `depends_on` added, whatever files each
+    /// changes. Whether that pair may safely run side by side is now judged
+    /// from what each task changes, not from any glob spoolway reads.
     #[test]
-    fn overlapping_touches_across_two_groups_writes_with_no_edge_added() {
+    fn two_groups_write_with_no_edge_added() {
         let repo = fixture("overlap-across-groups");
-        write_pending(
-            &repo,
-            "left",
-            &document("left", "group: one\ntouches: [src/dispatch.rs]\n", BODY),
-        );
-        write_pending(
-            &repo,
-            "right",
-            &document("right", "group: two\ntouches: [src/dispatch.rs]\n", BODY),
-        );
+        write_pending(&repo, "left", &document("left", "group: one\n", BODY));
+        write_pending(&repo, "right", &document("right", "group: two\n", BODY));
         let groups = listed(&repo);
 
         // Space selects the highlighted group, `j` moves onto the other,

@@ -477,9 +477,6 @@ fn in_reading_order(mut tasks: Vec<PendingTask>) -> Vec<PendingTask> {
 /// tasks pane's `waits on` line draws, and what [`in_reading_order`] sorts
 /// by. The screen only has to show what a document claims;
 /// `parse_submission` is what checks the claim.
-///
-/// A document's `touches` is deliberately not read back: the globs are the
-/// widest thing it carries and no pane shows them.
 pub(crate) fn depends_on(doc: &str) -> Vec<String> {
     let Ok((yaml, _)) = crate::task::split_fence(doc) else {
         return Vec::new();

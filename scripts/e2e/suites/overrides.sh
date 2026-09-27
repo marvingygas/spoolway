@@ -109,7 +109,7 @@ says "and it is exactly the one line the patch named — nothing else moved" \
 # this at all.
 BODY="$LIVE/body.md"
 task_body "$BODY"
-task_doc "$LIVE/gate.md" gate "$BODY" "group: live" "touches: [notes/gate.md]"
+task_doc "$LIVE/gate.md" gate "$BODY" "group: live"
 must "a task to dispatch against" "$SPOOLWAY" queue add --from "$LIVE/gate.md"
 
 # How each case below runs its dispatch, and why it is no longer a one-liner.

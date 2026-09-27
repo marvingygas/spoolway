@@ -492,7 +492,6 @@ mod tests {
                 id: id.into(),
                 title: String::new(),
                 stage: stage.into(),
-                touches: vec![],
                 depends_on: depends_on.iter().map(|d| d.to_string()).collect(),
                 parallel: false,
                 borrowed: false,

@@ -114,10 +114,6 @@ spoolway queue list --json
 
 Print one task file.
 
-### `spoolway queue conflicts`
-
-Report queued tasks whose `touches` globs overlap with no `depends_on` between them.
-
 ### `spoolway queue pause <task>`
 
 Interrupt the task's live lane and park it on `paused`.

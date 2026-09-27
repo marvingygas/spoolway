@@ -40,10 +40,10 @@ BODY="$LIVE/body.md"
 task_body "$BODY"
 
 # ------------------------------------------------------- queued to archived
-# `--touches` is what the task writes, and the body asks for a file of the
-# task's own: the two parallel tasks below run at once, and this suite is about
-# the pipeline rather than about what happens when two lanes want one file.
-task_doc "$LIVE/land.md" land "$BODY" "group: live" "touches: [notes/land.md]"
+# The body asks for a file of the task's own: the two parallel tasks below
+# run at once, and this suite is about the pipeline rather than about what
+# happens when two lanes want one file.
+task_doc "$LIVE/land.md" land "$BODY" "group: live"
 must "the task queues" "$SPOOLWAY" queue add --from "$LIVE/land.md"
 
 if drive land gone; then ok "a task runs queued -> ... -> done and is archived"
@@ -183,9 +183,9 @@ must "one slot" "$SPOOLWAY" config set agents.pi.concurrency 1
 # and out of the way before the second existed — and a slot nothing is
 # contending for is not a slot counter under test.
 dispatcher_stop
-task_doc "$LIVE/par-one.md" par-one "$BODY" "group: live" "touches: [notes/par-one.md]"
+task_doc "$LIVE/par-one.md" par-one "$BODY" "group: live"
 must "a first parallel task"  "$SPOOLWAY" queue add --from "$LIVE/par-one.md"
-task_doc "$LIVE/par-two.md" par-two "$BODY" "group: live" "touches: [notes/par-two.md]"
+task_doc "$LIVE/par-two.md" par-two "$BODY" "group: live"
 must "a second parallel task" "$SPOOLWAY" queue add --from "$LIVE/par-two.md"
 dispatcher_start
 if wait_for_text 30 "$E2E_DISPATCH_LOG" "waiting for a \`pi\` slot"; then
@@ -232,9 +232,9 @@ fi
 # the durable record of the same fact each check here is actually about.
 must "three slots" "$SPOOLWAY" config set agents.pi.concurrency 3
 dispatcher_stop
-task_doc "$LIVE/chain-a.md" chain-a "$BODY" "group: gate-chain" "touches: [notes/chain-a.md]"
+task_doc "$LIVE/chain-a.md" chain-a "$BODY" "group: gate-chain"
 task_doc "$LIVE/chain-b.md" chain-b "$BODY" "group: gate-chain" \
-  "depends_on: [chain-a]" "touches: [notes/chain-b.md]"
+  "depends_on: [chain-a]"
 must "the chain's first task" "$SPOOLWAY" queue add --from "$LIVE/chain-a.md"
 must "the chain's second task, not yet ready" "$SPOOLWAY" queue add --from "$LIVE/chain-b.md"
 dispatcher_start
@@ -249,10 +249,10 @@ fi
 # Queued only now, against the dispatcher that already has `gate-chain` open
 # and nothing else of it ready — `chain-b` is still waiting on `chain-a`.
 task_doc "$LIVE/gate-untouched-a.md" gate-untouched-a "$BODY" \
-  "group: gate-untouched-a" "touches: [notes/gate-untouched-a.md]"
+  "group: gate-untouched-a"
 must "a never-run group of its own" "$SPOOLWAY" queue add --from "$LIVE/gate-untouched-a.md"
 task_doc "$LIVE/gate-untouched-b.md" gate-untouched-b "$BODY" \
-  "group: gate-untouched-b" "touches: [notes/gate-untouched-b.md]"
+  "group: gate-untouched-b"
 must "a second never-run group" "$SPOOLWAY" queue add --from "$LIVE/gate-untouched-b.md"
 
 if wait_for_text 30 "$E2E_DISPATCH_LOG" "started gate-untouched-a · implement" \
@@ -297,7 +297,7 @@ for outcome in pause block; do
     echo "stage: blocked"
     echo "blocked_from: implement"
     echo "pipeline: default"
-    echo "touches: [notes/$task.md]"
+    echo
     echo "---"
     printf '## Goal\n\nAdd `notes/%s.md`.\n\n## Non-goals\n\nOut of scope.\n\n## Acceptance criteria\n\n- `notes/%s.md` exists.\n' \
       "$task" "$task"

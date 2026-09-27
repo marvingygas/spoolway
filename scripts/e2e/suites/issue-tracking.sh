@@ -131,9 +131,9 @@ dispatcher_restart
 # deterministic below — the two can never reach `done` in the same pass, so
 # `tracked-a`'s own hook always sees `tracked-b` still open.
 task_doc "$LIVE/tracked-a.md" tracked-a "$BODY" "group: tracked-pair" \
-  "touches: [notes/tracked-a.md]" "group_description: a dependent pair, tracked end to end"
+  "group_description: a dependent pair, tracked end to end"
 task_doc "$LIVE/tracked-b.md" tracked-b "$BODY" "group: tracked-pair" \
-  "touches: [notes/tracked-b.md]" "depends_on: [tracked-a]"
+  "depends_on: [tracked-a]"
 must "the first of a dependent pair queues" "$SPOOLWAY" queue add --from "$LIVE/tracked-a.md"
 must "the second, depending on it, queues too" "$SPOOLWAY" queue add --from "$LIVE/tracked-b.md"
 
@@ -210,8 +210,7 @@ must "the hook is switched to one that opens tickets" \
 # A group with a hook configured and no `group_description:` on any of its
 # documents is refused outright, naming the group — before the hook is ever
 # run, and before anything is queued.
-task_doc "$LIVE/undescribed.md" undescribed "$BODY" "group: undescribed-group" \
-  "touches: [notes/undescribed.md]"
+task_doc "$LIVE/undescribed.md" undescribed "$BODY" "group: undescribed-group"
 refuses "a group with no group_description is refused once a hook is configured" \
   "group \`undescribed-group\` sets no \`group_description:\`" \
   "$SPOOLWAY" queue add --from "$LIVE/undescribed.md"
@@ -219,9 +218,9 @@ works "nothing was queued for the refused group" \
   test ! -e "$SPOOLWAY_PROJECT_HOME/queue/undescribed.md"
 
 task_doc "$LIVE/opened-a.md" opened-a "$BODY" "group: opened-pair" \
-  "touches: [notes/opened-a.md]" "group_description: a mirrored pair of tasks"
+  "group_description: a mirrored pair of tasks"
 task_doc "$LIVE/opened-b.md" opened-b "$BODY" "group: opened-pair" \
-  "touches: [notes/opened-b.md]" "depends_on: [opened-a]"
+  "depends_on: [opened-a]"
 must "a dependent pair queues in one call, opening a ticket for each" \
   "$SPOOLWAY" queue add --from "$LIVE/opened-a.md" --from "$LIVE/opened-b.md"
 
@@ -247,9 +246,8 @@ has "and on the dependent, which set no group_description of its own" \
 # into it in place, in `$LIVE` — not the queue — so a second `queue add` over
 # the same two documents resumes rather than opening a second set.
 task_doc "$LIVE/opened-ok.md" opened-ok "$BODY" "group: opened-fail-batch" \
-  "touches: [notes/opened-ok.md]" "group_description: a batch that fails partway through"
-task_doc "$LIVE/opened-fails.md" opened-fails "$BODY" "group: opened-fail-batch" \
-  "touches: [notes/opened-fails.md]"
+  "group_description: a batch that fails partway through"
+task_doc "$LIVE/opened-fails.md" opened-fails "$BODY" "group: opened-fail-batch"
 refuses "a mid-batch hook failure queues nothing" "opened-fails" \
   "$SPOOLWAY" queue add --from "$LIVE/opened-ok.md" --from "$LIVE/opened-fails.md"
 if [ ! -e "$SPOOLWAY_PROJECT_HOME/queue/opened-ok.md" ] \
@@ -307,9 +305,9 @@ must "key_in_names is turned on" \
   "$SPOOLWAY" config set issue_tracking.key_in_names true
 
 task_doc "$LIVE/keyed-a.md" keyed-a "$BODY" "group: keyed-rework" \
-  "touches: [notes/keyed-a.md]" "group_description: reworking the keyed pair"
+  "group_description: reworking the keyed pair"
 task_doc "$LIVE/keyed-b.md" keyed-b "$BODY" "group: keyed-rework" \
-  "touches: [notes/keyed-b.md]" "depends_on: [keyed-a]"
+  "depends_on: [keyed-a]"
 says "queue add names the prefix it applied" \
   "names prefixed" \
   "$SPOOLWAY" queue add --from "$LIVE/keyed-a.md" --from "$LIVE/keyed-b.md"
@@ -352,7 +350,7 @@ must "the hook now always fails" "$SPOOLWAY" config set issue_tracking.hook fail
 must "and on_fail pauses the task" "$SPOOLWAY" config set issue_tracking.on_fail pause
 
 task_doc "$LIVE/hook-queued.md" hook-queued "$BODY" "group: live" \
-  "touches: [notes/hook-queued.md]" "group_description: a task under an always-failing hook"
+  "group_description: a task under an always-failing hook"
 must "a task queues under an always-failing hook" \
   "$SPOOLWAY" queue add --from "$LIVE/hook-queued.md"
 
@@ -371,19 +369,19 @@ fi
   echo "---"; echo "id: hook-blocked"; echo "title: hook-blocked, done"
   echo "stage: blocked"; echo "blocked_from: implement"; echo "group: live"
   echo "base: plan/live"; echo "pipeline: default"
-  echo "touches: [notes/hook-blocked.md]"; echo "---"; cat "$BODY"
+  echo "---"; cat "$BODY"
 } > "$SPOOLWAY_PROJECT_HOME/queue/hook-blocked.md"
 {
   echo "---"; echo "id: hook-paused"; echo "title: hook-paused, done"
   echo "stage: paused"; echo "paused_at: implement"; echo "group: live"
   echo "base: plan/live"; echo "pipeline: default"
-  echo "touches: [notes/hook-paused.md]"; echo "---"; cat "$BODY"
+  echo "---"; cat "$BODY"
 } > "$SPOOLWAY_PROJECT_HOME/queue/hook-paused.md"
 {
   echo "---"; echo "id: hook-done"; echo "title: hook-done, done"
   echo "stage: done"; echo "group: live"
   echo "base: plan/live"; echo "pipeline: default"
-  echo "touches: [notes/hook-done.md]"; echo "---"; cat "$BODY"
+  echo "---"; cat "$BODY"
 } > "$SPOOLWAY_PROJECT_HOME/queue/hook-done.md"
 
 dispatcher_start
@@ -450,7 +448,7 @@ dispatcher_restart   # a new hook name only takes effect on the next start
   echo "---"; echo "id: ladder-demo"; echo "title: ladder-demo, done"
   echo "stage: done"; echo "group: live"
   echo "base: plan/live"; echo "pipeline: default"
-  echo "touches: [notes/ladder-demo.md]"; echo "---"; cat "$BODY"
+  echo "---"; cat "$BODY"
 } > "$SPOOLWAY_PROJECT_HOME/queue/ladder-demo.md"
 
 for _ in $(seq 1 100); do
@@ -550,7 +548,7 @@ GHSTUB
 chmod +x "$LOWVER_BIN/gh"
 
 task_doc "$LIVE/github-gate.md" github-gate "$BODY" \
-  "group: github-gate" "touches: [notes/github-gate.md]" \
+  "group: github-gate" \
   "group_description: proving the gh version gate"
 GATE_OUT="$LIVE/github-gate.out"
 env PATH="$LOWVER_BIN:$PATH" "$SPOOLWAY" queue add --from "$LIVE/github-gate.md" \
@@ -583,7 +581,7 @@ dispatcher_restart
 # this proves the ticket half *and* the epic half together, both linked by
 # `--parent` rather than the old design's separate `sub_issues` REST call.
 task_doc "$LIVE/github-open-check.md" github-open-check "$BODY" \
-  "group: github-single" "touches: [notes/github-open-check.md]" \
+  "group: github-single" \
   "group_description: proving the real open branch"
 must "queuing it calls the real hook's open branch" \
   "$SPOOLWAY" queue add --from "$LIVE/github-open-check.md"
@@ -613,12 +611,12 @@ has "and the ticket is parented under the epic, by native --parent" \
 # than one line: the epic's title must be the group slug itself, and the
 # full multiline text — not just its first line — must lead the issue body.
 task_doc "$LIVE/github-pair-a.md" github-pair-a "$BODY" \
-  "group: github-pair" "touches: [notes/github-pair-a.md]" \
+  "group: github-pair" \
   "group_description: |" \
   "  Proving a shared epic and native parent/blocked-by links." \
   "  A second line the title must never swallow."
 task_doc "$LIVE/github-pair-b.md" github-pair-b "$BODY" \
-  "group: github-pair" "touches: [notes/github-pair-b.md]" \
+  "group: github-pair" \
   "depends_on: [github-pair-a]"
 must "queuing a group of two calls the hook's epic branch too" \
   "$SPOOLWAY" queue add --from "$LIVE/github-pair-a.md" --from "$LIVE/github-pair-b.md"
@@ -683,7 +681,7 @@ has "the second ticket names the first as blocking it" \
   echo "group: github-single"
   echo "base: plan/live"; echo "pipeline: default"
   echo "ticket: $TICKET"
-  echo "touches: [notes/github-blocked.md]"; echo "---"; cat "$BODY"
+  echo "---"; cat "$BODY"
   echo; echo "## Status Log"
   echo "- blocked on implement, waiting on a dependency"
 } > "$SPOOLWAY_PROJECT_HOME/queue/github-blocked.md"
@@ -734,7 +732,7 @@ fi
 # `source:` (every other task in this suite) exactly alone, since none of
 # those match `same_repo_issue`'s own `.../issues/<n>` pattern.
 task_doc "$LIVE/github-hang-under.md" github-hang-under "$BODY" \
-  "group: github-hang-single" "touches: [notes/github-hang-under.md]" \
+  "group: github-hang-single" \
   "group_description: proving same_repo_issue parents the epic natively" \
   "source: $GH_STUB_URL/acme/app/issues/$FETCH_NUM"
 must "queuing a task whose source names a filed issue calls the open branch" \

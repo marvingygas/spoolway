@@ -132,10 +132,10 @@ ORIGIN="$FORGE/origin.git"
 # A chain, which is what the plan skill emits now: ordered always, every task
 # depending on the one before it. Two links is the smallest thing that can be a
 # stack at all.
-task_doc "$LIVE/base.md" base "$BODY" "group: live" "touches: [notes/base.md]"
+task_doc "$LIVE/base.md" base "$BODY" "group: live"
 must "the bottom of the stack" "$SPOOLWAY" queue add --from "$LIVE/base.md"
 task_doc "$LIVE/top.md" top "$BODY" "group: live" \
-  "touches: [notes/top.md]" "depends_on: [base]"
+  "depends_on: [base]"
 must "the task above it" "$SPOOLWAY" queue add --from "$LIVE/top.md"
 
 says "the task above says what it is waiting on" "waiting on: base" \
@@ -381,7 +381,7 @@ has "and the pass says why it walked past" \
 # `base` before `top` — is exactly what `check_dependencies_set` has to
 # reorder for this to mean anything.
 task_doc "$LIVE/apex.md" apex "$BODY" "group: live" \
-  "touches: [notes/apex.md]" "depends_on: [base, top]"
+  "depends_on: [base, top]"
 must "a third task naming both parents, in either order" \
   "$SPOOLWAY" queue add --from "$LIVE/apex.md"
 says "check_dependencies_set puts the parent that reaches the other one first" \
@@ -521,7 +521,7 @@ must "dep's worktree" git worktree add -q "$WORKTREES_SIB/dep" task/dep
   git add -A
   git commit -qm "wip(dep): implement"
 )
-sib_task dep "touches: [notes/dep.md]" "base: main" "branch: task/dep"
+sib_task dep "base: main" "branch: task/dep"
 dep_out=$(cd "$WORKTREES_SIB/dep" && "$SPOOLWAY" stack dep 2>&1)
 if [ $? -eq 0 ]; then ok "the shared dependency hands over"
 else bad "the shared dependency hands over"; sed 's/^/        /' <<<"$dep_out"; fi
@@ -535,7 +535,7 @@ must "its worktree" git worktree add -q "$WORKTREES_SIB/siba" task/siba
   git add -A
   git commit -qm "wip(siba): implement"
 )
-sib_task siba "touches: [notes/siba.md]" "depends_on: [dep]" \
+sib_task siba "depends_on: [dep]" \
   "base: main" "cut_from: task/dep" "branch: task/siba"
 siba_out=$(cd "$WORKTREES_SIB/siba" && "$SPOOLWAY" stack siba 2>&1)
 if [ $? -eq 0 ]; then ok "the first sibling takes the slot above it, in a stack of its own"
@@ -555,7 +555,7 @@ must "its worktree" git worktree add -q "$WORKTREES_SIB/sibb" task/sibb
   git add -A
   git commit -qm "wip(sibb): implement"
 )
-sib_task sibb "touches: [notes/sibb.md]" "depends_on: [dep]" \
+sib_task sibb "depends_on: [dep]" \
   "base: main" "cut_from: task/dep" "branch: task/sibb"
 sibb_out=$(cd "$WORKTREES_SIB/sibb" && "$SPOOLWAY" stack sibb 2>&1)
 sibb_status=$?

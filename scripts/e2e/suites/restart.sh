@@ -141,7 +141,7 @@ printf 'w-self:t2\tw-self\tdispatch\n' >>"$HSTATE/tabs"
 SELFSWEEP_BODY="$WORK/selfsweep-body.md"
 task_body "$SELFSWEEP_BODY"
 task_doc selfsweep.md selfsweep "$SELFSWEEP_BODY" "group: demo" \
-  "pipeline: selfsweep" "touches: [notes/selfsweep.md]"
+  "pipeline: selfsweep"
 must "a task queues behind the planted workspace" "$SPOOLWAY" queue add --from selfsweep.md
 
 exit_code "the run settles once its one step passes, with a workspace on the checkout already present" 0 \
@@ -191,8 +191,7 @@ Add `src/notes.md`: one sentence saying what this repository is.
 
 - `docs/cli.md` — what this repository is
 BODY
-task_doc identity.md identity identity-body.md "group: demo" \
-  "touches: [src/notes.md]"
+task_doc identity.md identity identity-body.md "group: demo"
 must "a task queues" "$SPOOLWAY" queue add --from identity.md
 
 exit_code "no git identity refuses outright, not an empty queue" 1 \

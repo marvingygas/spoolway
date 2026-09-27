@@ -86,7 +86,7 @@ must "the worktree" git worktree add -q "$WORKTREES/base" task/base
   git add -A
   git commit -qm "wip(base): implement"
 )
-queue_task base "touches: [notes/base.md]" "base: main" "branch: task/base"
+queue_task base "base: main" "branch: task/base"
 
 out_base=$(cd "$WORKTREES/base" && "$SPOOLWAY" stack base 2>&1)
 if [ $? -eq 0 ]; then ok "\`spoolway stack\` exits 0 for the foot of the stack"
@@ -138,7 +138,7 @@ must "the worktree" git worktree add -q "$WORKTREES/top" task/top
   git add -A
   git commit -qm "wip(top): implement"
 )
-queue_task top "touches: [notes/top.md]" "depends_on: [base]" \
+queue_task top "depends_on: [base]" \
   "base: main" "cut_from: task/base" "branch: task/top"
 
 out_top=$(cd "$WORKTREES/top" && "$SPOOLWAY" stack top 2>&1)
@@ -153,20 +153,20 @@ else
   [ -n "$top_pr" ] && sed 's/^/        /' "$top_pr"
 fi
 
-# ------------------------------------------- the two facts stack reports itself
-# `edge` changes a file its `touches` never names, and `rival` — a sibling
-# `parallel: true` task nothing here ever runs `stack` for — sits on a branch
-# that touches the very same file differently, off the same base. Neither is
-# a reason to refuse the pull request, so what is checked is that both are
-# *reported* rather than that anything stops.
+# ------------------------------------------- the fact stack reports itself
+# `rival` — a sibling `parallel: true` task nothing here ever runs `stack`
+# for — sits on a branch that changes the same file `edge` does, differently,
+# off the same base. That is not a reason to refuse the pull request, so what
+# is checked is that the predicted conflict is *reported* rather than that
+# anything stops.
 #
 # Reported on the console, and nowhere else. e761a22 cut the pull request
-# trailer down to the co-author tag: the undeclared-file list and the predicted
-# sibling conflict are for whoever is watching the lane run, and repeating them
-# under the task only crowded the body a reviewer opens. So this asserts both
-# halves — that `stack` says them on its own output, and that the body stays
-# clear of them — because a check that only watched the console would let the
-# lines drift back into the pull request unnoticed.
+# trailer down to the co-author tag: the predicted sibling conflict is for
+# whoever is watching the lane run, and repeating it under the task only
+# crowded the body a reviewer opens. So this asserts both halves — that
+# `stack` says it on its own output, and that the body stays clear of it —
+# because a check that only watched the console would let the line drift
+# back into the pull request unnoticed.
 must "rival's branch, off main" git branch task/rival main
 must "its worktree" git worktree add -q "$WORKTREES/rival" task/rival
 (
@@ -176,8 +176,7 @@ must "its worktree" git worktree add -q "$WORKTREES/rival" task/rival
   git add -A
   git commit -qm "wip(rival): implement"
 )
-queue_task rival "touches: [notes/edge.md]" "parallel: true" \
-  "base: main" "branch: task/rival"
+queue_task rival "parallel: true" "base: main" "branch: task/rival"
 
 must "edge's branch, off main" git branch task/edge main
 must "its worktree" git worktree add -q "$WORKTREES/edge" task/edge
@@ -185,35 +184,26 @@ must "its worktree" git worktree add -q "$WORKTREES/edge" task/edge
   cd "$WORKTREES/edge" || exit 1
   mkdir -p notes
   echo "# edge" > notes/edge.md
-  echo "not in touches" > notes/undeclared.md
   git add -A
   git commit -qm "wip(edge): implement"
 )
-queue_task edge "touches: [notes/edge.md]" "base: main" "branch: task/edge"
+queue_task edge "base: main" "branch: task/edge"
 
 edge_out=$(cd "$WORKTREES/edge" && "$SPOOLWAY" stack edge 2>&1)
-if [ $? -eq 0 ]; then ok "and for a task with an undeclared file and a conflicting sibling"
-else bad "and for a task with an undeclared file and a conflicting sibling"; sed 's/^/        /' <<<"$edge_out"; fi
+if [ $? -eq 0 ]; then ok "and for a task with a conflicting sibling"
+else bad "and for a task with a conflicting sibling"; sed 's/^/        /' <<<"$edge_out"; fi
 
 edge_pr=$(grep -l '^head=task/edge$' "$LIVE/prs"/[0-9]* 2>/dev/null | head -1)
-if grep -qF "1 file(s) not declared: notes/undeclared.md" <<<"$edge_out"; then
-  ok "its \`touches\` line names the file it changed outside \`touches\`"
-else
-  bad "its \`touches\` line names the file it changed outside \`touches\`"
-  sed 's/^/        /' <<<"$edge_out"
-fi
 if grep -qF "conflicts with rival" <<<"$edge_out"; then
   ok "and its \`siblings\` line names the parallel task it will conflict with"
 else
   bad "and its \`siblings\` line names the parallel task it will conflict with"
   sed 's/^/        /' <<<"$edge_out"
 fi
-if [ -n "$edge_pr" ] \
-   && ! grep -qF "notes/undeclared.md" "${edge_pr}.body" 2>/dev/null \
-   && ! grep -qiF "will conflict with" "${edge_pr}.body" 2>/dev/null; then
-  ok "and neither is repeated in the pull request body"
+if [ -n "$edge_pr" ] && ! grep -qiF "will conflict with" "${edge_pr}.body" 2>/dev/null; then
+  ok "and the prediction is not repeated in the pull request body"
 else
-  bad "and neither is repeated in the pull request body"
+  bad "and the prediction is not repeated in the pull request body"
   [ -n "$edge_pr" ] && sed 's/^/        /' "${edge_pr}.body"
 fi
 
@@ -221,7 +211,7 @@ fi
 must "a third branch, sitting exactly on top's tip" \
   git branch task/same task/top
 must "its worktree" git worktree add -q "$WORKTREES/same" task/same
-queue_task same "touches: [notes/top.md]" "depends_on: [top]" \
+queue_task same "depends_on: [top]" \
   "base: main" "cut_from: task/top" "branch: task/same"
 
 same_out=$(cd "$WORKTREES/same" && "$SPOOLWAY" stack same 2>&1)
@@ -286,7 +276,7 @@ must "the worktree" git worktree add -q "$WORKTREES/hooked" task/hooked
   git add -A
   git commit -qm "wip(hooked): fix"
 )
-queue_task hooked "touches: [notes/hooked.md, notes/hooked-two.md]" \
+queue_task hooked \
   "base: main" "branch: task/hooked"
 
 HOOKDIR=$(cd "$WORKTREES/hooked" && git rev-parse --git-path hooks)
@@ -348,7 +338,7 @@ must "its worktree" git worktree add -q "$WORKTREES/leaf" task/leaf
 # `depends_on` here, since this case is about `cut_from` resolving a base to
 # publish, not about the stacking that a real dependency chain exercises
 # elsewhere in this suite.
-queue_task leaf "touches: [notes/leaf.md]" \
+queue_task leaf \
   "base: main" "cut_from: task/untracked" "branch: task/leaf"
 
 leaf_out=$(cd "$WORKTREES/leaf" && "$SPOOLWAY" stack leaf 2>&1)
@@ -379,7 +369,7 @@ fi
 # (findings 11, 12). `branch: main` here is neither shape.
 main_local_before=$(git rev-parse main)
 main_remote_before=$(git rev-parse origin/main)
-queue_task claimed "touches: [notes/claimed.md]" "base: main" "branch: main"
+queue_task claimed "base: main" "branch: main"
 claimed_out=$(cd "$WORKTREES/base" && "$SPOOLWAY" stack claimed 2>&1)
 claimed_status=$?
 if [ "$claimed_status" -ne 0 ] && grep -qF "spoolway owns that field" <<<"$claimed_out"; then

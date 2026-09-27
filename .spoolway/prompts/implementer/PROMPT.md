@@ -108,7 +108,7 @@ your changes.
   and a page you correct here is one it has to check again. A change of yours that leaves a
   document wrong stays out of your diff.
 
-  The exception is a task whose own `touches:` are documents and nothing else. There the prose
+  The exception is a task whose whole scope is documents and nothing else. There the prose
   *is* the change, and it is yours: the archivist works from a diff, so on a task with no code
   there is nothing for it to read and deferring leaves the task with no owner at all. Write the
   documents the task names, and no others.

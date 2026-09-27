@@ -6430,7 +6430,6 @@ mod tests {
             f.branch = Some("task/earlier".into());
         });
         let path = add_task_with(&repo, "login", "implement", |front| {
-            front.touches = vec!["src/api/**".into(), "src/routes/**".into()];
             front.depends_on = vec!["earlier".into()];
         });
         let task = Task::load(&path).unwrap();
@@ -6467,7 +6466,6 @@ mod tests {
             f.branch = Some("task/earlier-task".into());
         });
         let path = add_task_with(&repo, "login", "implement", |front| {
-            front.touches = vec!["src/api/routes.rs".into()];
             front.depends_on = vec!["earlier-task".into()];
             front.group = Some("auth".into());
         });
@@ -6753,7 +6751,6 @@ mod tests {
             id: id.to_string(),
             title: String::new(),
             stage: stage.to_string(),
-            touches: Vec::new(),
             depends_on: Vec::new(),
             parallel: false,
             borrowed: false,

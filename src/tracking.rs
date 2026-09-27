@@ -1016,7 +1016,6 @@ mod tests {
             id: id.to_string(),
             title: String::new(),
             stage: crate::pipeline::QUEUED.to_string(),
-            touches: Vec::new(),
             depends_on: Vec::new(),
             parallel: false,
             borrowed: false,

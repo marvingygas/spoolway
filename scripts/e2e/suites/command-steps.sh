@@ -98,7 +98,7 @@ says "and show reports it as a step that waits" "build      command   waits" \
 says "with the line it will run" 'run: echo "built $SPOOLWAY_TASK"' \
   "$SPOOLWAY" pipeline show
 
-task_doc "$LIVE/land.md" land "$BODY" "group: live" "touches: [notes/land.md]"
+task_doc "$LIVE/land.md" land "$BODY" "group: live"
 must "the task queues" "$SPOOLWAY" queue add --from "$LIVE/land.md"
 
 # `group list` reads `group:` verbatim off the queue — the same field `land`
@@ -149,7 +149,7 @@ works "a pipeline whose entry is a command step checks out" "$SPOOLWAY" pipeline
 # via its own config-stamp check) and catches the command in flight, which is
 # the stronger, real-pass version of the same claim: nothing here was fabricated
 # by a dry run.
-task_doc "$LIVE/opener.md" opener "$BODY" "group: live" "touches: [notes/opener.md]"
+task_doc "$LIVE/opener.md" opener "$BODY" "group: live"
 must "a task queued on it" "$SPOOLWAY" queue add --from "$LIVE/opener.md"
 
 # Caught in flight, ahead of the archive step that reclaims this log.
@@ -188,7 +188,7 @@ fi
 # write, real pass or not.
 dispatcher_stop
 task_doc "$SPOOLWAY_PROJECT_HOME/queue/routeless.md" routeless "$BODY" \
-  "stage: queued" "group: live" "touches: [notes/routeless.md]" "pipeline:"
+  "stage: queued" "group: live" "pipeline:"
 OUT=$("$SPOOLWAY" dispatch 2>&1)
 STATUS=$?
 if [ "$STATUS" -ne 0 ]; then ok "dispatch refuses the whole start over a routeless task"
@@ -233,7 +233,7 @@ add_command_step default build \
   "test -f '$LIVE/build.stamp' || { echo 'the build is broken' >&2; touch '$LIVE/build.stamp'; sleep 1; exit 2; }" \
   review implement
 
-task_doc "$LIVE/broken.md" broken "$BODY" "group: live" "touches: [notes/broken.md]"
+task_doc "$LIVE/broken.md" broken "$BODY" "group: live"
 must "a task whose build fails" "$SPOOLWAY" queue add --from "$LIVE/broken.md"
 
 # Its stderr, read while the task is still looping — the archive step reclaims
@@ -288,7 +288,7 @@ sed -i "0,/^    on_pass: document\$/s//    on_pass: e2e/" .spoolway/pipelines/de
 works "a pipeline whose gate loops back to the agent step before it checks out" \
   "$SPOOLWAY" pipeline check
 
-task_doc "$LIVE/gated.md" gated "$BODY" "group: live" "touches: [notes/gated.md]"
+task_doc "$LIVE/gated.md" gated "$BODY" "group: live"
 must "a task whose gate never turns green" "$SPOOLWAY" queue add --from "$LIVE/gated.md"
 if drive gated blocked 150; then
   ok "a gate that never passes stops the task rather than circling forever"
@@ -329,7 +329,7 @@ sed -i "0,/^    on_pass: document\$/s//    on_pass: e2e/" .spoolway/pipelines/de
 works "a pipeline whose gate loops back to the agent step, bounded at 2" \
   "$SPOOLWAY" pipeline check
 
-task_doc "$LIVE/gated-twice.md" gated-twice "$BODY" "group: live" "touches: [notes/gated-twice.md]"
+task_doc "$LIVE/gated-twice.md" gated-twice "$BODY" "group: live"
 must "a task whose gate never turns green, on a loop of 2" \
   "$SPOOLWAY" queue add --from "$LIVE/gated-twice.md"
 if drive gated-twice blocked 150; then
@@ -384,8 +384,7 @@ mkdir -p "$SPOOLWAY_PROJECT_HOME/commands/$KEY.log"
 mkdir -p "$SPOOLWAY_PROJECT_HOME/commands/$KEY.prev.log"
 touch "$SPOOLWAY_PROJECT_HOME/commands/$KEY.prev.log/keep-this-slot-occupied"
 
-task_doc "$LIVE/cant-launch.md" cant-launch "$BODY" "group: live" \
-  "touches: [notes/cant-launch.md]"
+task_doc "$LIVE/cant-launch.md" cant-launch "$BODY" "group: live"
 must "a task whose command step can never even start" \
   "$SPOOLWAY" queue add --from "$LIVE/cant-launch.md"
 
@@ -451,8 +450,7 @@ add_command_step default failstep "exit 1" review ""
 works "a pipeline with a command step that blocks on failure checks out" \
   "$SPOOLWAY" pipeline check
 
-task_doc "$LIVE/stage-flag.md" stage-flag "$BODY" "group: live" \
-  "touches: [notes/stage-flag.md]"
+task_doc "$LIVE/stage-flag.md" stage-flag "$BODY" "group: live"
 must "a task that will run implement, then block on a failing command step" \
   "$SPOOLWAY" queue add --from "$LIVE/stage-flag.md"
 if drive stage-flag blocked 60; then
@@ -526,7 +524,7 @@ says "and show says it does not wait" "bench      command   background" \
   "$SPOOLWAY" pipeline show
 
 dispatcher_restart   # the pipeline it is holding has no `bench` step in it
-task_doc "$LIVE/quick.md" quick "$BODY" "group: live" "touches: [notes/quick.md]"
+task_doc "$LIVE/quick.md" quick "$BODY" "group: live"
 must "a task with a background step" "$SPOOLWAY" queue add --from "$LIVE/quick.md"
 
 # Read while `hold` keeps the task in the queue, so `commands/` is still
@@ -601,8 +599,7 @@ sed -i "0,/^    on_pass: review\$/s//    on_pass: scratch/" .spoolway/pipelines/
 works "a background step that also declares on_fail checks out" "$SPOOLWAY" pipeline check
 
 dispatcher_restart   # the pipeline it is holding has neither new step in it
-task_doc "$LIVE/scratch-fail.md" scratch-fail "$BODY" "group: live" \
-  "touches: [notes/scratch-fail.md]"
+task_doc "$LIVE/scratch-fail.md" scratch-fail "$BODY" "group: live"
 must "a task behind a background step that will later fail" \
   "$SPOOLWAY" queue add --from "$LIVE/scratch-fail.md"
 
@@ -697,8 +694,7 @@ works "a headless background command step checks out" "$SPOOLWAY" pipeline check
 REAL_SPOOLWAY="$SPOOLWAY"
 SPOOLWAY="$NO_SETSID_SPOOLWAY"
 dispatcher_restart   # both the new step and the setsid-less binary are new
-task_doc "$LIVE/nosetsid.md" nosetsid "$BODY" "group: live" \
-  "touches: [notes/nosetsid.md]"
+task_doc "$LIVE/nosetsid.md" nosetsid "$BODY" "group: live"
 must "a task with a headless step, dispatched with no setsid on PATH" \
   "$SPOOLWAY" queue add --from "$LIVE/nosetsid.md"
 
@@ -758,7 +754,7 @@ must "a timeout short enough for a suite to reach" \
 works "a step may name its own timeout" "$SPOOLWAY" pipeline check
 says "and show resolves it" "timeout=3s" "$SPOOLWAY" pipeline show
 
-task_doc "$LIVE/hung.md" hung "$BODY" "group: live" "touches: [notes/hung.md]"
+task_doc "$LIVE/hung.md" hung "$BODY" "group: live"
 must "a task whose command hangs" "$SPOOLWAY" queue add --from "$LIVE/hung.md"
 if drive hung gone 200; then ok "a hung command does not park its task forever"
 else bad "a hung command does not park its task forever (at \`$(stage_of hung)\`)"; fi
@@ -787,8 +783,7 @@ cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
 OUTSIDE="$LIVE/outside-every-worktree.txt"
 add_command_step default build "echo reached > '$OUTSIDE'" review implement
 
-task_doc "$LIVE/unconfined.md" unconfined "$BODY" "group: live" \
-  "touches: [notes/unconfined.md]"
+task_doc "$LIVE/unconfined.md" unconfined "$BODY" "group: live"
 must "a task whose command writes outside its worktree" \
   "$SPOOLWAY" queue add --from "$LIVE/unconfined.md"
 if drive unconfined gone 180; then ok "a command step is not confined to its worktree"
@@ -827,7 +822,7 @@ must "herdr gives each task a workspace" "$SPOOLWAY" config set dispatch.herdr_m
 # this suite runs without it, and the double answers "there is a pane" by
 # default for exactly that reason.
 dispatcher_stop
-task_doc "$LIVE/paneless.md" paneless "$BODY" "group: live" "touches: [notes/paneless.md]"
+task_doc "$LIVE/paneless.md" paneless "$BODY" "group: live"
 must "a task queued ahead of the pane gate" "$SPOOLWAY" queue add --from "$LIVE/paneless.md"
 # The rest of what the refusal promises — no repo lock taken, nothing written
 # to the task file — read as "these two files are byte for byte what they
@@ -942,7 +937,7 @@ works "a pipeline with a paned command step checks out" "$SPOOLWAY" pipeline che
 # that ordering matters.
 dispatcher_restart
 task_doc "$LIVE/paned.md" paned "$BODY" "group: live" \
-  "pipeline: panevisible" "touches: [notes/paned.md]"
+  "pipeline: panevisible"
 must "a task through a paned command step" \
   "$SPOOLWAY" queue add --from "$LIVE/paned.md"
 
@@ -1087,7 +1082,7 @@ says "and show marks it" "hidden     command   waits headless timeout=30m" \
 
 dispatcher_restart
 task_doc "$LIVE/hiddenc.md" hiddenc "$BODY" "group: live" \
-  "pipeline: panehidden" "touches: [notes/hiddenc.md]"
+  "pipeline: panehidden"
 must "a task through a headless command step" \
   "$SPOOLWAY" queue add --from "$LIVE/hiddenc.md"
 # Read while the step is still held, ahead of the archive that reclaims
@@ -1120,7 +1115,7 @@ works "a pipeline with a failing paned step checks out" "$SPOOLWAY" pipeline che
 
 dispatcher_restart
 task_doc "$LIVE/panedfail.md" panedfail "$BODY" "group: live" \
-  "pipeline: paneflaky" "touches: [notes/panedfail.md]"
+  "pipeline: paneflaky"
 must "a task whose paned step fails" \
   "$SPOOLWAY" queue add --from "$LIVE/panedfail.md"
 if drive panedfail blocked 120; then ok "a failing paned command still routes on its exit code"
@@ -1171,7 +1166,7 @@ works "a pipeline for the grouped case checks out" "$SPOOLWAY" pipeline check
 
 dispatcher_restart
 task_doc "$LIVE/groupedpane.md" groupedpane "$BODY" "group: live" \
-  "pipeline: panegrouped" "touches: [notes/groupedpane.md]"
+  "pipeline: panegrouped"
 must "a task through a grouped paned command step" \
   "$SPOOLWAY" queue add --from "$LIVE/groupedpane.md"
 
@@ -1286,7 +1281,7 @@ works "a one-step paned pipeline checks out" "$SPOOLWAY" pipeline check
 
 dispatcher_restart
 task_doc "$LIVE/carried.md" carried "$BODY" "group: live" \
-  "pipeline: herdrpane" "touches: [notes/carried.md]"
+  "pipeline: herdrpane"
 must "a task through a paned command step on herdr" \
   "$SPOOLWAY" queue add --from "$LIVE/carried.md"
 
@@ -1384,8 +1379,7 @@ cp "$LIVE/default.yml.bak" .spoolway/pipelines/default.yml
 sed -i "0,/^    on_pass: review\$/s//    on_pass: tick-check/" .spoolway/pipelines/default.yml
 works "a background step for the tick check checks out" "$SPOOLWAY" pipeline check
 
-task_doc "$LIVE/tick-check.md" tick-check "$BODY" "group: live" \
-  "touches: [notes/tick-check.md]"
+task_doc "$LIVE/tick-check.md" tick-check "$BODY" "group: live"
 START_TS=$(date +%s)
 must "a task behind the tick-check step queues" \
   "$SPOOLWAY" queue add --from "$LIVE/tick-check.md"

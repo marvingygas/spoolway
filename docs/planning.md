@@ -25,12 +25,12 @@ Several plans can be queued from one checkout. They all share one queue and one 
 
 ## Two skills, cut at approval
 
-`/spoolway-plan` talks the goal through with you and writes a plan page. It names no task, no
-pipeline and no glob. When you approve the shape, it calls `/spoolway-tasks`.
+`/spoolway-plan` talks the goal through with you and writes a plan page. It names no task and
+no pipeline. When you approve the shape, it calls `/spoolway-tasks`.
 
 `/spoolway-tasks` cuts the shape into task documents. It picks a pipeline per task, sizes each
-task, chooses ids and globs, and writes the dependency order. You can also run it directly when
-the shape is already agreed.
+task, chooses ids, and writes the dependency order. You can also run it directly when the shape
+is already agreed.
 
 When the goal names an issue, both skills read it with `spoolway issue show <ref>`. The issue's
 URL goes into each task's `source:`.
@@ -64,9 +64,8 @@ that block; `/spoolway-tasks` reads it instead of the page around it.
 | Non-goals | Name the tempting wrong thing next door: the refactor, the extra endpoint, the framework swap. |
 | Reference paths | Point at files and examples. Do not paste prose that will go stale. |
 | Mockups from real output | Draw a panel from a real screenshot or real command output. A panel for something that does not exist yet names the bound it was drawn to. |
-| Exact globs | The `document` step resolves `touches` against every document's `covers`. Vague globs produce stale documentation. |
 | Pipeline per task | A bug wants `bugfix`, a feature wants `default`. `spoolway pipeline show` prints each pipeline's description. |
-| Disjoint, or ordered | Two tasks with overlapping globs need a `depends_on` between them. Two tasks that run side by side are both marked `parallel: true`. |
+| Independent, or ordered | Judge from what each task changes whether two tasks may run side by side. A shared file alone is no reason to chain them. Tasks that do run side by side are both marked `parallel: true`. |
 
 ## Queueing a plan
 
@@ -101,10 +100,9 @@ the queue, that dispatcher picks the tasks up on its next pass.
 document under this project's own pending directory is deleted once the batch is written. A
 document anywhere else is left alone.
 
-Two more commands:
+One more command:
 
 ```
-spoolway queue conflicts    # tasks with overlapping globs and no order between them
 spoolway group list         # every group with open tasks, and which tasks are open
 ```
 
@@ -170,6 +168,4 @@ pull requests possible.
 | Join: one task depends on two | Broken. The task is based on one parent only and ships without the other's work. |
 
 `/spoolway-tasks` checks the chain when it writes the documents. The binary does not check it
-again, so a task file edited afterwards can break the shape. `spoolway queue conflicts` reports
-a `touches` overlap between two tasks with no order between them, including two marked
-`parallel: true`.
+again, so a task file edited afterwards can break the shape.

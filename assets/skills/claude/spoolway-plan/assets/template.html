@@ -228,8 +228,8 @@ figcaption { font-size: 0.875rem; color: var(--ink-faint); max-width: var(--meas
   color: var(--ink-soft); font-size: 0.94rem;
   border-left: 2px solid var(--rule); padding-left: 0.9rem;
 }
-.dec .cost { color: var(--ink-soft); }
-.dec .cost::before { content: "Costs: "; color: var(--ink-faint); }
+.dec .risks { color: var(--ink-soft); }
+.dec .risks::before { content: "Risks: "; color: var(--ink-faint); }
 .dec .change {
   max-width: var(--measure); margin: 0; padding: 0.7rem 1rem;
   border-left: 3px solid var(--accent); border-radius: 0 4px 4px 0;
@@ -367,7 +367,7 @@ td code { font-family: var(--mono); font-size: 0.85em; color: var(--accent); }
         <li><code>[[path]]</code> — [[what it already explains]]</li>
       </ul>
 
-      <p class="cost">[[What this decision costs, in one sentence.]]</p>
+      <p class="risks">[[Each risk this decision carries and how it is mitigated, one sentence per pair.]]</p>
       <p class="change">[[The change that will now happen, in one sentence.]]</p>
     </section>
     <!-- /dec -->
@@ -392,7 +392,7 @@ td code { font-family: var(--mono); font-size: 0.85em; color: var(--accent); }
         to type themselves.]]</figcaption>
       </figure>
 
-      <p class="cost">[[What this decision costs, in one sentence.]]</p>
+      <p class="risks">[[Each risk this decision carries and how it is mitigated, one sentence per pair.]]</p>
       <p class="change">[[The change that will now happen, in one sentence.]]</p>
     </section>
     <!-- /dec -->

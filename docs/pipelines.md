@@ -333,8 +333,8 @@ flowchart LR
 ```
 
 - The pull request's title is the task's `title:`. Its body is the task file's body plus a
-  trailer that lists files outside `touches` and predicted conflicts with open `parallel: true`
-  tasks.
+  co-authorship tag. Which open `parallel: true` task this branch is predicted to conflict with
+  is printed to the console as `spoolway stack` runs, not repeated in the pull request.
 - A base branch that exists locally but not on `origin` is pushed to `origin` before the pull
   request is opened. A base that cannot be published refuses before the task's own branch is
   force-pushed, so a failed run leaves nothing published.

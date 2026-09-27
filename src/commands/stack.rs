@@ -275,15 +275,7 @@ pub fn stack(repo: &Repo, args: &StackArgs) -> Result<()> {
     }
     report_line("push", format!("{branch} → origin      --force-with-lease"));
 
-    let gaps = touches_gap(&task.front.touches, &changed_files);
     let conflicts = parallel_conflicts(repo, &worktree, &id);
-    report_line(
-        "touches",
-        match gaps.is_empty() {
-            true => format!("ok, {} file(s), all declared", changed_files.len()),
-            false => format!("{} file(s) not declared: {}", gaps.len(), gaps.join(", ")),
-        },
-    );
     report_line(
         "siblings",
         match conflicts.is_empty() {
@@ -347,21 +339,6 @@ fn remote_ref(worktree: &Path, branch: &str) -> String {
         Ok(_) => remote,
         Err(_) => branch.to_string(),
     }
-}
-
-/// Files this branch changed that no glob in `touches` reaches — informational
-/// only, named in the trailer, never a reason to refuse. See
-/// [`crate::globs::overlaps`] for what "reaches" means.
-fn touches_gap(touches: &[String], changed: &[String]) -> Vec<String> {
-    changed
-        .iter()
-        .filter(|file| {
-            !touches
-                .iter()
-                .any(|glob| crate::globs::overlaps(glob, file))
-        })
-        .cloned()
-        .collect()
 }
 
 /// Every open task, marked `parallel: true`, whose branch `git merge-tree
@@ -428,10 +405,10 @@ fn parallel_conflicts(repo: &Repo, worktree: &Path, id: &str) -> Vec<String> {
 /// — the only mode `spoolway stack` has now that its optional model summary
 /// turn is gone.
 ///
-/// Nothing rides under it but the tag. What the branch touched outside
-/// `touches`, and which open `parallel: true` task it is predicted to
-/// conflict with, are both reported on the console by `spoolway stack` as it
-/// runs; neither is repeated in the pull request a reviewer opens.
+/// Nothing rides under it but the tag. Which open `parallel: true` task this
+/// branch is predicted to conflict with is reported on the console by
+/// `spoolway stack` as it runs; it is not repeated in the pull request a
+/// reviewer opens.
 fn compose_body(task_body: &str) -> String {
     let mut body = String::new();
     body.push_str(task_body.trim_end());
@@ -963,20 +940,6 @@ mod tests {
         assert!(
             conflicts.is_empty(),
             "an unresolvable branch must not be reported as a conflict: {conflicts:?}"
-        );
-    }
-
-    #[test]
-    fn touches_gap_names_only_what_no_glob_reaches() {
-        let touches = vec!["src/commands/stack.rs".to_string(), "docs/**".to_string()];
-        let changed = vec![
-            "src/commands/stack.rs".to_string(),
-            "docs/pipelines.md".to_string(),
-            "src/cli.rs".to_string(),
-        ];
-        assert_eq!(
-            touches_gap(&touches, &changed),
-            vec!["src/cli.rs".to_string()]
         );
     }
 

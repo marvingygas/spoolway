@@ -20,7 +20,7 @@ SCRIPTS=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # new_repo <dir> <plan-branch>
 #
 # The trivial seed: one source file and a domain doc, which between them are
-# enough for `queue add --touches`, the dependency graph and a closeout.
+# enough for `queue add --from`, the dependency graph and a closeout.
 new_repo() {
   local dir=$1 branch=${2:-plan/demo}
 
@@ -478,8 +478,8 @@ TASKBODY
 # Writes a whole task document to <path>: `id: <id>`, whatever extra
 # frontmatter lines a suite names, and the given body underneath — the shape
 # `queue add --from` reads, since the per-task flags it used to take
-# (`--body-file`, `--touches`, `--depends-on`, `--plan`, `--pipeline`,
-# `--parallel`) are gone.
+# (`--body-file`, `--depends-on`, `--plan`, `--pipeline`, `--parallel`) are
+# gone.
 #
 # `base:` is filled in here, off the branch checked out where this runs,
 # unless a suite already named its own — a base is chosen now, never
