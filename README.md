@@ -69,8 +69,8 @@ A gate can pause a task for a person after a step reports.
   the arms in eval.
 - **Routines.** Keep the tasks you run more than once in `.spoolway/routines/`.
 - **Jobs.** Run a routine on a cron schedule. A running dispatcher fires it.
-- **Eval built in.** Every lane's spend and outcome go into a ledger. You see what your
-  last pipeline edit did to pass rate and price.
+- **Eval built in.** Every lane's spend and outcome go into a ledger. Raise a pipeline's
+  `version:` when you change it, and compare pass rate and price across versions.
 
 ## Install
 
@@ -79,8 +79,9 @@ npm install -g spoolway
 ```
 
 The package is a small wrapper around a prebuilt binary. It runs on Linux (x64, arm64,
-musl) and macOS (Apple Silicon, Intel). `spoolway sync` shows
-what changed, and `spoolway whats-new` prints the release notes offline.
+musl) and macOS (Apple Silicon, Intel). `spoolway update` installs a newer release. The next
+time you open spoolway in a project, it lists the files the new release rewrites and applies
+them when you confirm. `spoolway whats-new` prints the release notes offline.
 
 From source instead, in a clone of this repository:
 
@@ -105,13 +106,15 @@ Platform notes and requirements in full: **[Installation and setup](docs/install
 spoolway init
 ```
 
-`spoolway doctor` checks that everything the configured pipeline needs is present.
+`init` leaves `model: ""` on every agent step. Set a model on each one before you dispatch.
+`spoolway pipeline check` names every step still missing one, and `spoolway doctor` checks
+that everything the configured pipeline needs is present.
 
 ### 2. Create queueable tasks
 
 Use `/spoolway-tasks` to cut an agreed plan or any other defined scope into Markdown task
 documents. It assigns each task to a suitable pipeline and writes the documents to
-`~/.spoolway/<project>/pending/`. You can create specialized pipelines for different kinds
+`~/.spoolway/<label>-<id>/pending/`. You can create specialized pipelines for different kinds
 of work. If you want help shaping the work first, use `/spoolway-plan`.
 
 You can also create tasks with your own skills or scripts. This command prints the frontmatter
@@ -145,6 +148,7 @@ Every task on the board is in one of a few states:
 | State | Meaning |
 |---|---|
 | `queued` | Waiting for its dependencies and a free slot. |
+| `waiting` | Held at a `serial:` step while another task's run of it finishes. |
 | `running` | An agent is working the task's current step, or it has just moved there and a lane is starting. |
 | `prompt` | A lane's pane is holding a permission prompt. Press a key in the pane. |
 | `paused` | Waiting for you on purpose: a gated step, or an unresolvable issue. |
@@ -162,8 +166,10 @@ them. The comparison explains review failures, blocked sessions and wasted loops
 ```markdown
 ---
 id: sessions
-title: feat(auth): add session tokens on top of login
+title: "feat(auth): add session tokens on top of login"
 group: auth
+pipeline: default
+base: main
 touches:
   - src/auth/**
 depends_on:
@@ -184,6 +190,10 @@ agent works from it, and you own the skeleton it is written from.
 - Mix agents and commands
 - Set model and effort levels per step
 - Reuse previous sessions until the context threshold is met
+- Give the pipeline a `version:` and raise it when you change the pipeline, so eval can compare
+  versions
+- Run a command step only on a chain's root task with `first:`, or one task at a time with
+  `serial:`
 
 ```yaml
 # .spoolway/pipelines/default.yml
@@ -243,7 +253,7 @@ spoolway jobs run <name>   # fire one now, ignoring its schedule
 pipeline. A job fires once per matching minute. It skips a window while its previous run is
 still in the queue. A window that passes while no dispatcher runs is not caught up later.*
 
-A job is a few lines of TOML in `~/.spoolway/<project>/jobs.toml`. Put one in
+A job is a few lines of TOML in `~/.spoolway/<label>-<id>/jobs.toml`. Put one in
 `.spoolway/jobs.toml` inside the checkout to share it with the team.
 
 ```toml
@@ -298,12 +308,11 @@ See **[Issue Tracking](docs/configuration.md#issue_tracking--a-hook-fired-on-fou
 
 - Unattended mode hands **`blocked`** tasks to a prompt you define, so the pipeline keeps
   running while nobody is watching.
-- Set a model for generating pipelines.
 
 ```toml
 [dispatch]
 herdr_mode = "split"         # "split": a workspace per task; "grouped": one shared tab, a pane per task
-worktree_root = ""           # where a task's worktree is cut; blank is ~/.spoolway/<project>/worktrees
+worktree_root = ""           # where a task's worktree is cut; blank is ~/.spoolway/<label>-<id>/worktrees
 lane_quiet = "15m"           # silence before a lane is reminded to report
 auto_commit = true           # commit a lane's leftover work when its step settles
 
@@ -367,10 +376,9 @@ pass rate and price.
 spoolway eval
 ```
 
-<img src="docs/screenshots/eval.png" alt="the eval screen">
-
-*The eval screen's lanes table, grouped by pipeline. `tab` switches to the directory table. `f`
-filters, `e` exports CSV.*
+The eval screen opens on the lanes table, grouped by pipeline. `tab` switches to the directory
+table, `f` filters, and `e` exports CSV. `spoolway eval --by version` compares a pipeline's
+versions.
 
 ## Documentation
 

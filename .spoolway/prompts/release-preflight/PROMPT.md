@@ -48,7 +48,7 @@ reinterpret that choice or publish anything.
    now. Reaching the candidate step before it is found costs a full lap and another pull request; three of the
    four releases before this one paid it. Report the commands, the exit codes and the version you
    ran them at. Never leave the bump behind in the real checkout.
-8. Check that the release workflow still describes six platform binaries, seven npm packages, the
+8. Check that the release workflow still describes five platform binaries, six npm packages, the
    dry-run rehearsal, tag/version agreement, provenance, and creation of the GitHub release. Confirm
    its `notes` job still extracts the tagged changelog section and that the release is still created
    with `--notes-file` rather than generated prose. Rehearsal must extract the section too.

@@ -146,7 +146,7 @@ These keys apply only when nobody is watching. See [Unattended runs](pipelines.m
 | `max_output_tokens` | `0` | Output tokens one unattended run may spend before the dispatcher stops starting lanes. `0` is no limit. Live lanes finish. |
 | `max_cost_usd` | `0.0` | Dollars one unattended run may spend before the dispatcher stops starting lanes. `0.0` is no limit. Whichever limit is hit first stops the run. See [Cost accounting](cost.md). |
 | `blocked_agent` | `claude` | The `[agents.*]` profile that runs the `blocked` step. A pipeline may override these five keys in its own `blocked` step. |
-| `blocked_model` | `claude-opus-5` | The model for the `blocked` step. Blank refuses an unattended run. |
+| `blocked_model` | `claude-opus-5` | The model for the `blocked` step. Blank refuses an unattended run. `spoolway init` writes it blank, so set it before the first unattended run. |
 | `blocked_effort` | blank | The effort for the `blocked` step. |
 | `blocked_session` | `true` | Whether the `blocked` lane carries its earlier session forward. |
 | `blocked_prompt` | `unblocker` | The prompt the `blocked` lane runs. |
