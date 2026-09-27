@@ -248,6 +248,15 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // one unbroken streak, never the run's total.
     let mut consecutive_working: u32 = 0;
 
+    // Whatever the last stop interrupted — the dispatch tab's stop popup,
+    // `i` — goes back to work before the first pass, so that pass launches
+    // it. Here rather than in the tab, so a start typed at a terminal
+    // resumes the same tasks. See `crate::status::resume_stop_parked`.
+    for problem in crate::status::resume_stop_parked(repo, pipelines)? {
+        crate::problem_log::append(repo, &problem);
+        println!("  ! {problem}");
+    }
+
     // Wakes the wait below the moment a lane's own `spoolway report` or a
     // finished background command lands, instead of it being found up to
     // `interval` later — see `crate::screen::DirWatch`. `None` on a target

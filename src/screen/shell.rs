@@ -5,9 +5,10 @@
 //! already draws with — `commands::queue_tab`, `commands::jobs_tab`,
 //! `eval::tab` and the board's own [`crate::status::Board`] — and this module
 //! adds only the strip on the top row and the keys that move between tabs.
-//! The one exception is the dispatch tab's `enter`, which starts and stops a
+//! The one exception is the dispatch tab's `enter`, which starts a
 //! `spoolway dispatch` child ([`super::dispatcher`]) behind the gates that
-//! command asks, drawn here as popups over the board.
+//! command asks, and stops it behind a popup asking whether running steps
+//! finish or are interrupted — each drawn here as a popup over the board.
 //!
 //! A tab's screen keeps its own loop. When it reads `←`, `→` or `q` with no
 //! popup or sub-mode of its own open — [`leave_on`] — it hands a [`Leave`]
@@ -358,13 +359,15 @@ enum Popup {
     Warnings(crate::commands::GatePopup),
     /// Why the dispatcher ended, or never started. `enter` closes it.
     Ended(Vec<String>),
+    /// How to stop the running dispatcher — [`super::dispatcher::stop_panel`].
+    Stop(Vec<String>),
 }
 
 impl Popup {
     fn panel(&self) -> &[String] {
         match self {
             Popup::Overrides(gate) | Popup::Warnings(gate) => &gate.panel,
-            Popup::Ended(panel) => panel,
+            Popup::Ended(panel) | Popup::Stop(panel) => panel,
         }
     }
 }
@@ -392,14 +395,25 @@ impl DispatchTab {
         }
     }
 
-    /// `enter` with no popup open: stop the child straight away, with no
-    /// question, or — with none running — ask the start gates, each only
-    /// when it has something to say, and start one. A child already asked
-    /// to stop is left to finish going: `stop` asks once.
+    /// `enter` with no popup open: over a running child, ask how to stop it
+    /// — every time, even with nothing running; with none running, ask the
+    /// start gates, each only when it has something to say, and start one.
+    /// A child already asked to stop is left to finish going, and `enter`
+    /// over it does nothing: there is nothing left to ask.
     fn enter(&mut self, repo: &Repo, pipelines: &Pipelines, cwd: &Path) {
-        match self.child.as_mut() {
-            Some(child) => child.stop(),
+        match self.child.as_ref() {
+            Some(child) if child.stopping() => {}
+            Some(_) => self.popup = Some(Popup::Stop(super::dispatcher::stop_panel())),
             None => self.overrides_then_start(repo, pipelines, cwd),
+        }
+    }
+
+    /// Stop the child, if one is still up — the stop popup's answer either
+    /// way. A child that exited while the popup was open has already been
+    /// reaped, and its own popup replaced this one.
+    fn stop(&mut self) {
+        if let Some(child) = self.child.as_mut() {
+            child.stop();
         }
     }
 
@@ -438,7 +452,9 @@ impl DispatchTab {
     /// A key read while a popup is open. `enter` on a gate goes on to the
     /// next one, or starts; `x` hides the gate until what it names changes
     /// and then goes on the same way; `esc` backs out having started
-    /// nothing. Every other key is ignored.
+    /// nothing. On the stop popup, `enter` stops the child and leaves every
+    /// running step to finish, `i` interrupts them first, and `esc` leaves
+    /// the dispatcher running. Every other key is ignored.
     fn answer(&mut self, repo: &Repo, pipelines: &Pipelines, cwd: &Path, key: Key) {
         let Some(popup) = self.popup.take() else {
             return;
@@ -456,7 +472,22 @@ impl DispatchTab {
                 self.start(cwd);
             }
             (Popup::Warnings(_), Key::Enter) => self.start(cwd),
-            (Popup::Overrides(_) | Popup::Warnings(_), Key::Esc)
+            (Popup::Stop(_), Key::Enter) => self.stop(),
+            (Popup::Stop(_), Key::Char('i' | 'I')) => {
+                // Stopped whatever came of the interrupt: stopping is what
+                // the person asked for. A failure is said once it is.
+                let interrupted = crate::status::interrupt_for_stop(repo, pipelines);
+                self.stop();
+                if let Err(err) = interrupted {
+                    self.popup = Some(Popup::Ended(super::notice(
+                        "stop dispatching",
+                        &format!("Not every running step could be interrupted: {err:#}"),
+                        "[enter] close",
+                        super::NOTICE_WRAP,
+                    )));
+                }
+            }
+            (Popup::Overrides(_) | Popup::Warnings(_) | Popup::Stop(_), Key::Esc)
             | (Popup::Ended(_), Key::Enter) => {}
             (popup, _) => self.popup = Some(popup),
         }
@@ -466,7 +497,7 @@ impl DispatchTab {
 /// The dispatch tab: the board, drawn from the task files, the lane list and
 /// the ledger exactly as `spoolway dispatch` draws it, with the board's own
 /// keys. `enter` starts dispatching — a `spoolway dispatch` child, see
-/// [`super::dispatcher`] — and `enter` again stops it. The board is drawn
+/// [`super::dispatcher`] — and `enter` again asks how to stop it. The board is drawn
 /// from what that child writes; this tab runs no pass itself. Redrawn every
 /// [`crate::status::POLL`] while no key is typed, the same wait the board
 /// keeps under a dispatcher, and that redraw is also where a child that has
@@ -722,7 +753,7 @@ mod tests {
         assert!(
             last.contains(
                 "[enter] start dispatching   [o] open task   [r/R] resume / all   \
-                 [p/P] pause / all   [u/U] unqueue / all   [q] quit"
+                 [p] pause   [u/U] unqueue / all   [q] quit"
             ),
             "{last}"
         );
@@ -825,6 +856,107 @@ mod tests {
         tab.answer(&repo, &pipelines, &repo.root, Key::Enter);
         assert!(tab.popup.is_none());
         assert!(!tab.dispatching());
+    }
+
+    /// A dispatch tab with a stand-in child running, as `enter` would have
+    /// left it — see [`super::super::dispatcher::Dispatcher::stand_in`].
+    fn running_tab() -> DispatchTab {
+        DispatchTab {
+            child: Some(super::super::dispatcher::Dispatcher::stand_in(
+                "exec sleep 30",
+            )),
+            popup: None,
+        }
+    }
+
+    fn stopping(tab: &DispatchTab) -> bool {
+        tab.child.as_ref().is_some_and(|child| child.stopping())
+    }
+
+    // `enter` over a running dispatcher asks how to stop it — even with
+    // nothing running — and `esc` leaves it running.
+    #[cfg(unix)]
+    #[test]
+    fn enter_over_a_running_dispatcher_asks_and_esc_leaves_it_running() {
+        let repo = crate::status::testutil::fixture("shell-stop-esc");
+        let pipelines = Pipelines::builtin();
+        let mut tab = running_tab();
+        tab.enter(&repo, &pipelines, &repo.root);
+        assert!(matches!(tab.popup, Some(Popup::Stop(_))));
+        assert!(tab.popup.as_ref().unwrap().panel()[0].starts_with("┌─ stop dispatching "));
+        assert!(!stopping(&tab), "nothing is stopped before it is answered");
+
+        // A key the popup does not read leaves it up.
+        tab.answer(&repo, &pipelines, &repo.root, Key::Char('q'));
+        assert!(matches!(tab.popup, Some(Popup::Stop(_))));
+
+        tab.answer(&repo, &pipelines, &repo.root, Key::Esc);
+        assert!(tab.popup.is_none());
+        assert!(!stopping(&tab));
+        assert!(tab.dispatching());
+    }
+
+    // `enter` on the popup stops the child and touches no task; a second
+    // `enter` while that stop is under way does nothing.
+    #[cfg(unix)]
+    #[test]
+    fn enter_on_the_stop_popup_stops_the_child_and_changes_no_task() {
+        let repo = crate::status::testutil::fixture("shell-stop-enter");
+        crate::status::testutil::add(&repo, "login", &[], Some("handover"));
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("handover", "login");
+        runs.start(
+            &key,
+            "sleep 30",
+            &repo.root,
+            &std::collections::BTreeMap::new(),
+        )
+        .unwrap();
+        let pipelines = Pipelines::builtin();
+        let mut tab = running_tab();
+        tab.enter(&repo, &pipelines, &repo.root);
+        tab.answer(&repo, &pipelines, &repo.root, Key::Enter);
+        assert!(tab.popup.is_none());
+        assert!(stopping(&tab));
+        assert_eq!(runs.state(&key), crate::command_step::RunState::Running);
+        assert_eq!(repo.task("login").unwrap().stage(), "handover");
+
+        tab.enter(&repo, &pipelines, &repo.root);
+        assert!(tab.popup.is_none(), "a stop under way asks nothing again");
+        runs.stop(&key);
+    }
+
+    // `i` interrupts what is running, parks it with the stop's mark, then
+    // stops the child.
+    #[cfg(unix)]
+    #[test]
+    fn i_on_the_stop_popup_interrupts_parks_and_stops() {
+        let repo = crate::status::testutil::fixture("shell-stop-i");
+        crate::status::testutil::add(&repo, "login", &[], Some("handover"));
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("handover", "login");
+        runs.start(
+            &key,
+            "sleep 30",
+            &repo.root,
+            &std::collections::BTreeMap::new(),
+        )
+        .unwrap();
+        let pipelines = Pipelines::builtin();
+        let mut tab = running_tab();
+        tab.enter(&repo, &pipelines, &repo.root);
+        tab.answer(&repo, &pipelines, &repo.root, Key::Char('i'));
+        assert!(
+            tab.popup.is_none(),
+            "{:?}",
+            tab.popup.as_ref().map(Popup::panel)
+        );
+        assert!(stopping(&tab));
+        assert_ne!(runs.state(&key), crate::command_step::RunState::Running);
+        let task = repo.task("login").unwrap();
+        assert_eq!(task.stage(), crate::pipeline::PAUSED);
+        assert!(task.front.parked_by_stop);
+        runs.stop(&key);
     }
 
     // While a board confirm panel is open it reads every key: `→` there is

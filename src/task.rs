@@ -207,6 +207,21 @@ pub struct Frontmatter {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub escalated: bool,
 
+    /// Whether this task was parked by the dispatch tab's stop popup — its
+    /// `i`, which interrupts every running step as dispatching stops — rather
+    /// than by a person's own `p`, Escape in the pane, or an escalation.
+    ///
+    /// The one thing that sets a stop's parks apart from every other park:
+    /// all of them write the same `parked_from`, and a restarted dispatcher
+    /// reads an interrupted turn exactly as a person's own Escape. Read once,
+    /// by `spoolway dispatch` as it starts — see
+    /// `crate::status::resume_stop_parked` — which resumes every task still
+    /// carrying it. Cleared by every road back out of `paused`
+    /// (`back_onto_its_step` in `src/commands/report.rs`), and by any later
+    /// park, so a mark can never outlive the stop that wrote it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub parked_by_stop: bool,
+
     /// The step whose lane is to be *continued* rather than started fresh, for
     /// exactly one launch.
     ///

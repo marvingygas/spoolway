@@ -836,11 +836,11 @@ impl Mux for Headless {
     ///
     /// The one thing this does that [`Mux::stop_lane`] does not: bank the
     /// interrupted turn first. The dispatcher banks a lane through
-    /// `record_usage` before it tears one down, but `queue pause` and the
-    /// board's `p`/`P` interrupt straight through the backend with no
-    /// dispatcher in the call — so without this the killed turn's tokens are
-    /// lost, the record gone before anything accounted for it (review finding
-    /// 36). Best-effort: a project that will not open, or a lane whose session
+    /// `record_usage` before it tears one down, but `queue pause`, the
+    /// board's `p` and the dispatch tab's stop interrupt straight through the
+    /// backend with no dispatcher in the call — so without this the killed
+    /// turn's tokens are lost, the record gone before anything accounted for
+    /// it (review finding 36). Best-effort: a project that will not open, or a lane whose session
     /// is not on record, is stopped anyway rather than kept alive.
     fn interrupt_lane(&self, name: &str) -> Result<()> {
         if let Ok(repo) = crate::repo::Repo::discover(&self.root)

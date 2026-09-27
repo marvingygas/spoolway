@@ -78,10 +78,21 @@ jobs and eval screens described below. Typed bare, `spoolway queue`, `spoolway j
 
 The dispatch tab runs no pass itself. `enter` starts dispatching the way `unattended.enabled`
 says, asking the overrides and warnings gates as popups first, each only when it has something
-to say, then spawns a `spoolway dispatch` child. `enter` again stops that child straight away,
-with no question: nothing is torn down, and every lane keeps running. The header reads
-`dispatcher running` and the child's pid, or `dispatcher stopped` with no pid once it has
-stopped. `r`/`R`, `p`/`P` and `u`/`U` work whether or not a child is running. `q` or `ctrl-c`
+to say, then spawns a `spoolway dispatch` child. `enter` again, over a running child, opens a
+popup asking how to stop it:
+
+```
+[enter] let running steps finish
+[i] interrupt them now   [esc] back
+```
+
+`enter` there stops the child the way `ctrl-c` does: nothing is torn down, and every lane keeps
+running. `i` interrupts every live agent turn and kills every running command step first, parks
+each of those tasks on `paused`, then stops the child. `esc` leaves the dispatcher running, and
+a second `enter` while a stop is already going does nothing. Starting dispatching again resumes
+every task that stop parked. See [Reading the state](dispatcher.md#reading-the-state). The
+header reads `dispatcher running` and the child's pid, or `dispatcher stopped` with no pid once
+it has stopped. `r`/`R`, `p` and `u`/`U` work whether or not a child is running. `q` or `ctrl-c`
 quits the whole screen and stops dispatching too.
 
 A child the tab started stays up on an empty queue and the board reads `nothing queued`; only
